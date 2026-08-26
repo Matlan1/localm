@@ -255,6 +255,21 @@ def _get_collection(name: str):
     return coll
 
 
+def _require_rag_confinement(name: str, request: Request) -> None:
+    """Raise 403 when the caller's key carries a per-key rag_roots allowlist
+    and collection *name* holds any host-filesystem document indexed from
+    outside those roots (``Collection.confined_to``). A no-op for a caller
+    with no rag_roots allowlist (the owner, open mode, or a key that never
+    had one set)."""
+    from localm.rag import Collection
+    from localm.inference.http_server import effective_rag_roots
+    key_roots = effective_rag_roots(request)
+    if key_roots and not Collection.confined_to(name, key_roots):
+        raise HTTPException(
+            403, "This key's RAG access is confined to specific folders, "
+            "and this collection includes documents from outside them.")
+
+
 def _dim_mismatch(stats: dict, active_dim) -> "bool | None":
     """Best-effort: does *stats* (a ``stats()``-shaped dict) disagree with
     *active_dim* (the currently RESIDENT embedder's dimension, from
@@ -524,7 +539,7 @@ async def rag_create(req: RagCreateRequest):
 
 
 @_router.get("/api/rag/collections/{name}")
-async def rag_detail(name: str):
+async def rag_detail(name: str, request: Request):
     """Same shape as rag_collections (``stats()`` fields plus ``docs``), with the
     same cheap-versus-fallback split and the same
     ``load_and_maybe_backfill()`` cold path - see its docstring. ``docs()`` is
@@ -544,6 +559,7 @@ async def rag_detail(name: str):
                 raise HTTPException(404, f"No such collection: {name}")
             return {**coll.stats(), "docs": coll.docs()}
         peeked = await loop.run_in_executor(get_plugin_executor(), load)
+    _require_rag_confinement(name, request)
     # Best-effort, never a load.
     active_dim = await loop.run_in_executor(get_plugin_executor(), loaded_dim)
     peeked["dim_mismatch"] = _dim_mismatch(peeked, active_dim)
@@ -551,8 +567,10 @@ async def rag_detail(name: str):
 
 
 @_router.delete("/api/rag/collections/{name}")
-async def rag_delete(name: str):
+async def rag_delete(name: str, request: Request):
     from localm.rag import delete_collection
+    _get_collection(name)
+    _require_rag_confinement(name, request)
     try:
         if not await _write_off_loop(lambda: delete_collection(name)):
             raise HTTPException(404, f"No such collection: {name}")
@@ -761,13 +779,7 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
 @_router.post("/api/rag/collections/{name}/query")
 async def rag_query(name: str, req: RagQueryRequest, request: Request):
     coll = _get_collection(name)
-    from localm.rag import Collection
-    from localm.inference.http_server import effective_rag_roots
-    key_roots = effective_rag_roots(request)
-    if key_roots and not Collection.confined_to(name, key_roots):
-        raise HTTPException(
-            403, "This key's RAG access is confined to specific folders, "
-            "and this collection includes documents from outside them.")
+    _require_rag_confinement(name, request)
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     k = max(1, min(req.k, 20))
@@ -796,6 +808,7 @@ async def rag_reembed(name: str, request: Request):
     model work, so it streams progress rather than blocking the request.
     """
     coll = _get_collection(name)
+    _require_rag_confinement(name, request)
     jobs = _require_jobs(request)
     self_embed, _, _ = _self_services(request)
     if self_embed is None:
@@ -861,6 +874,7 @@ async def rag_repair(name: str, req: RagRepairRequest, request: Request):
     left untouched.
     """
     coll = _get_collection(name)
+    _require_rag_confinement(name, request)
     docs = coll.documents()
     if not docs:
         detail = (f"'{name}' index is corrupt and has no indexed documents to "
@@ -1253,8 +1267,9 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
 
 
 @_router.post("/api/rag/collections/{name}/remove-doc")
-async def rag_remove_doc(name: str, req: RagRemoveDocRequest):
+async def rag_remove_doc(name: str, req: RagRemoveDocRequest, request: Request):
     coll = _get_collection(name)
+    _require_rag_confinement(name, request)
     if not await _write_off_loop(lambda: coll.remove_doc(req.path)):
         raise HTTPException(404, f"Not in this collection: {req.path}")
     return {"status": "removed", "path": req.path}

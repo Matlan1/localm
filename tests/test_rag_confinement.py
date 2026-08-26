@@ -1382,3 +1382,176 @@ class TestRagListRouteKeyScopedRoots:
             assert r_owner.status_code == 200, r_owner.text
             owner_names = {c["name"] for c in r_owner.json()["collections"]}
             assert owner_names == {"allowed", "forbidden"}
+
+
+# --------------------------------------------------------------------------- #
+#  HTTP routes GET /api/rag/collections/{name} (detail), DELETE .../{name},   #
+#  .../remove-doc, .../repair and .../reembed under a per-key rag_roots       #
+#  allowlist: each is refused (403) for a collection holding any document     #
+#  indexed from outside the key's granted roots, and unaffected for one       #
+#  built entirely from within them.                                          #
+# --------------------------------------------------------------------------- #
+
+def _index_via(client, app, headers, coll_name, folder, filename="doc.md",
+               text="rocm gfx1030 dll"):
+    """Create *coll_name* and index one file from *folder* into it using
+    *headers*, waiting for the add job to finish. Returns the resolved doc
+    path recorded in the collection."""
+    doc = folder / filename
+    doc.write_text(text, encoding="utf-8")
+    client.post("/api/rag/collections", json={"name": coll_name}, headers=headers)
+    r_add = client.post(f"/api/rag/collections/{coll_name}/add",
+                        json={"paths": [str(doc)], "embed": False},
+                        headers=headers)
+    assert r_add.status_code == 200, r_add.text
+    _await_job(app, r_add.json()["job_id"])
+    return str(doc.resolve())
+
+
+class TestRagDetailRouteKeyScopedRoots:
+    def test_refused_for_collection_with_content_outside_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        with TestClient(app) as client:
+            _index_via(client, app, owner_hdr, "kb", outside_dir)
+            r = client.get("/api/rag/collections/kb", headers=hdr)
+            assert r.status_code == 403, r.text
+
+    def test_allowed_for_collection_within_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            _index_via(client, app, hdr, "kb", granted)
+            r = client.get("/api/rag/collections/kb", headers=hdr)
+            assert r.status_code == 200, r.text
+            assert r.json()["name"] == "kb"
+
+
+class TestRagDeleteRouteKeyScopedRoots:
+    def test_refused_for_collection_with_content_outside_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        with TestClient(app) as client:
+            _index_via(client, app, owner_hdr, "kb", outside_dir)
+            r = client.delete("/api/rag/collections/kb", headers=hdr)
+            assert r.status_code == 403, r.text
+            # never deleted: still visible to the owner afterward
+            still_there = client.get("/api/rag/collections/kb", headers=owner_hdr)
+            assert still_there.status_code == 200, still_there.text
+
+    def test_allowed_for_collection_within_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            _index_via(client, app, hdr, "kb", granted)
+            r = client.delete("/api/rag/collections/kb", headers=hdr)
+            assert r.status_code == 200, r.text
+
+
+class TestRagRemoveDocRouteKeyScopedRoots:
+    def test_refused_for_collection_with_content_outside_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        with TestClient(app) as client:
+            doc_path = _index_via(client, app, owner_hdr, "kb", outside_dir)
+            r = client.post("/api/rag/collections/kb/remove-doc",
+                            json={"path": doc_path}, headers=hdr)
+            assert r.status_code == 403, r.text
+            # never removed: still present per the owner
+            detail = client.get("/api/rag/collections/kb", headers=owner_hdr).json()
+            assert any(d["path"] == doc_path for d in detail["docs"])
+
+    def test_allowed_for_collection_within_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            doc_path = _index_via(client, app, hdr, "kb", granted)
+            r = client.post("/api/rag/collections/kb/remove-doc",
+                            json={"path": doc_path}, headers=hdr)
+            assert r.status_code == 200, r.text
+
+
+class TestRagRepairRouteKeyScopedRoots:
+    def test_refused_for_collection_with_content_outside_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        with TestClient(app) as client:
+            _index_via(client, app, owner_hdr, "kb", outside_dir)
+            r = client.post("/api/rag/collections/kb/repair", json={}, headers=hdr)
+            assert r.status_code == 403, r.text
+
+    def test_allowed_for_collection_within_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            _index_via(client, app, hdr, "kb", granted)
+            r = client.post("/api/rag/collections/kb/repair", json={}, headers=hdr)
+            assert r.status_code == 200, r.text
+            job = _await_job(app, r.json()["job_id"])
+            assert job.status == "done", f"job ended {job.status}"
+
+
+class TestRagReembedRouteKeyScopedRoots:
+    def test_refused_for_collection_with_content_outside_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        with TestClient(app) as client:
+            _index_via(client, app, owner_hdr, "kb", outside_dir)
+            r = client.post("/api/rag/collections/kb/reembed", headers=hdr)
+            assert r.status_code == 403, r.text
+
+    def test_not_blocked_by_confinement_for_collection_within_granted_root(
+            self, tmp_path, monkeypatch):
+        # Confinement is not the blocker for an in-scope collection; whether
+        # the job itself succeeds depends on an embedder actually being
+        # reachable, which is unrelated to rag_roots and not what this checks.
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            _index_via(client, app, hdr, "kb", granted)
+            r = client.post("/api/rag/collections/kb/reembed", headers=hdr)
+            assert r.status_code != 403, r.text
