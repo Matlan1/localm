@@ -107,6 +107,39 @@ class TestMCPServer:
         with pytest.raises(MCPError, match="command not found"):
             s.start()
 
+    def test_rejected_initialize_carries_the_servers_stderr(self, tmp_path):
+        """NEW-CODER-MCP-SERVER-STDERR: whatever the server printed explaining
+        WHY it rejected the handshake must reach the raised MCPError, not be
+        silently discarded with DEVNULL."""
+        script = tmp_path / "rejecting_mcp_server.py"
+        script.write_text(textwrap.dedent("""\
+            import json, sys, time
+            sys.stderr.write("missing required env var LICENSE_KEY\\n")
+            sys.stderr.flush()
+            # Give the parent's stderr-drain thread a wide, deterministic
+            # window to read this line before the JSON-RPC reply arrives -
+            # the two run on independent threads/processes with no other
+            # synchronization between them.
+            time.sleep(0.3)
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                m = json.loads(line)
+                if m.get("method") == "initialize":
+                    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": m["id"],
+                        "error": {"code": -1, "message": "not licensed"}}) + "\\n")
+                    sys.stdout.flush()
+        """), encoding="utf-8")
+        s = MCPServer("bad", sys.executable, [str(script)])
+        try:
+            with pytest.raises(MCPError) as exc:
+                s.start()
+        finally:
+            s.stop()
+        assert "rejected initialize" in str(exc.value)
+        assert "missing required env var LICENSE_KEY" in str(exc.value)
+
 
 class TestSchemaMapping:
     def test_types_and_required(self):

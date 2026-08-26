@@ -180,8 +180,11 @@ def print_server_ready(port: int) -> None:
     console.print(f"[green]✓[/green] [dim]Model server ready on port {port}[/dim]")
 
 
-def print_server_timeout() -> None:
-    console.print("[red]Server did not start in time. Is localm installed?[/red]")
+def print_server_timeout(stderr_tail: str = "") -> None:
+    msg = "Server did not start in time. Is localm installed?"
+    if stderr_tail:
+        msg += f"\n{stderr_tail}"
+    console.print(f"[red]{msg}[/red]")
 
 
 # ---------------------------------------------------------------------------

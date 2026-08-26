@@ -30,6 +30,7 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from .proc_tail import StderrTail
 from .provenance import neutralise
 from .tool_registration import register_foreign_tool
 from .tools import ToolResult
@@ -56,6 +57,7 @@ class MCPServer:
         self.trusted = trusted
         self.tools: List[dict] = []
         self._proc: Optional[subprocess.Popen] = None
+        self._stderr: Optional[StderrTail] = None
         self._responses: "queue.Queue[dict]" = queue.Queue()
         self._next_id = 0
         self._lock = threading.Lock()
@@ -75,13 +77,14 @@ class MCPServer:
                 [self.command, *self.args],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,   # never block on unread stderr
+                stderr=subprocess.PIPE,   # drained by StderrTail, never DEVNULL
                 text=True,
                 encoding="utf-8",
                 env=full_env,
             )
         except FileNotFoundError:
             raise MCPError(f"MCP server '{self.name}': command not found: {self.command}")
+        self._stderr = StderrTail(self._proc)
 
         reader = threading.Thread(target=self._read_loop, daemon=True)
         reader.start()
@@ -92,14 +95,21 @@ class MCPServer:
             "clientInfo": {"name": "localcoder", "version": "0.1.5rc3"},
         }, timeout=_INIT_TIMEOUT)
         if "error" in init:
-            raise MCPError(f"MCP server '{self.name}' rejected initialize: {init['error']}")
+            raise MCPError(self._with_tail(
+                f"MCP server '{self.name}' rejected initialize: {init['error']}"))
 
         self._notify("notifications/initialized")
 
         listed = self._request("tools/list", {}, timeout=_INIT_TIMEOUT)
         if "error" in listed:
-            raise MCPError(f"MCP server '{self.name}' tools/list failed: {listed['error']}")
+            raise MCPError(self._with_tail(
+                f"MCP server '{self.name}' tools/list failed: {listed['error']}"))
         self.tools = listed.get("result", {}).get("tools", [])
+
+    def _with_tail(self, msg: str) -> str:
+        """*msg* plus the server's captured stderr tail, if it wrote anything."""
+        tail = self._stderr.tail() if self._stderr else ""
+        return f"{msg}:\n{tail}" if tail else msg
 
     def stop(self) -> None:
         if self._proc and self._proc.poll() is None:
@@ -151,9 +161,9 @@ class MCPServer:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise MCPError(
+                    raise MCPError(self._with_tail(
                         f"MCP server '{self.name}': no response to {method} "
-                        f"within {timeout:.0f}s")
+                        f"within {timeout:.0f}s"))
                 try:
                     msg = self._responses.get(timeout=remaining)
                 except queue.Empty:
