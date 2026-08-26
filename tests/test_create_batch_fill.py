@@ -13,13 +13,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from localm.inference.backends.llamacpp.llama import LlamaCpp, api
+from localm.inference.backends.llamacpp.llama import api
+from tests._bare_llama import make_bare_llama
 from tests._fake_batch import fake_batch_init, batch_backing
 from tests.test_kv_cache import _bare_llama
 
 
 def _bare():
-    return LlamaCpp.__new__(LlamaCpp)
+    return make_bare_llama()
 
 
 def test_fill_positions_tokens_logits_seqids():

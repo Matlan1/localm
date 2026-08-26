@@ -837,6 +837,19 @@ def _clear_keep_diagnostics_env():
 
 
 @pytest.fixture(autouse=True)
+def _neutralise_bare_llama_pointers():
+    """tests/_bare_llama.py's make_bare_llama() registers every instance it
+    builds in a module-level list; a caller that overrides a pointer to a
+    fake truthy value must have it nulled before that instance is garbage
+    collected, or __del__ -> close() passes the fake address to the real
+    native free. Runs after every test so no test file needs its own copy of
+    this teardown."""
+    yield
+    from tests._bare_llama import neutralise_fake_pointers
+    neutralise_fake_pointers()
+
+
+@pytest.fixture(autouse=True)
 def _reset_gpu_probe_cache():
     """discover.list_gpus() keeps a module-level last-known-good reading (served
     only when a probe overruns its deadline - there is deliberately NO TTL cache;

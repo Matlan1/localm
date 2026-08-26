@@ -25,6 +25,7 @@ import pytest
 
 from localm.inference.backends.llamacpp import _api
 from localm.inference.backends.llamacpp.llama import LlamaCpp
+from tests._bare_llama import make_bare_llama
 
 _LOAD_LIB = "localm.inference.backends.llamacpp._api.load_lib"
 _API = "localm.inference.backends.llamacpp.llama.api"
@@ -76,10 +77,11 @@ class TestKvHeadBindings:
 # --------------------------------------------------------------------------- #
 
 def _bare_model(n_layers=32, model_ptr=111) -> LlamaCpp:
-    llm = LlamaCpp.__new__(LlamaCpp)
-    llm._model_ptr = model_ptr
-    llm.n_layers = n_layers
-    return llm
+    return make_bare_llama(_model_ptr=model_ptr, n_layers=n_layers)
+
+
+# Fake-pointer teardown is handled globally by tests/conftest.py's autouse
+# _neutralise_bare_llama_pointers fixture.
 
 
 def _fake_api(*, has=True, n_embd=4096, n_head=32, n_head_kv=8,

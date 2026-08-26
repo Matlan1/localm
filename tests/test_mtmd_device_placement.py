@@ -322,7 +322,7 @@ class TestLlamaCppPassesTheResolvedDevice:
         """The wiring. mp.main_gpu is read AFTER apply_gpu_split, which forces it
         inside the configured split set - so this is the index the projector must
         follow, and it has to actually arrive at MtmdContext."""
-        from localm.inference.backends.llamacpp import llama as llama_mod
+        from tests._bare_llama import make_bare_llama
         seen = {}
 
         class _Recorder:
@@ -331,9 +331,7 @@ class TestLlamaCppPassesTheResolvedDevice:
                 self.supports_vision = True
 
         monkeypatch.setattr(mtmd_mod, "MtmdContext", _Recorder)
-        inst = llama_mod.LlamaCpp.__new__(llama_mod.LlamaCpp)
-        inst._model_ptr = 0xBEEF
-        inst._main_gpu_index = 2
+        inst = make_bare_llama(_model_ptr=0xBEEF, _main_gpu_index=2)
         inst._load_mmproj("/fake/mmproj.gguf", verbose=True)
         assert seen["gpu_index"] == 2
         assert inst._mtmd is not None

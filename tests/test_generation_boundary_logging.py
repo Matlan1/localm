@@ -31,6 +31,7 @@ import localm.inference.backends.llamacpp.llama as llama_mod
 import localm.inference.backends.llamacpp._runner as runner_mod
 from localm.inference.backends.llamacpp.llama import LlamaCpp
 from localm.inference.backends.llamacpp._runner import ModelRunner
+from tests._bare_llama import make_bare_llama
 from tests._fake_batch import fake_batch_init
 
 
@@ -38,45 +39,14 @@ from tests._fake_batch import fake_batch_init
 #  llama.py: LlamaCpp._generate (child-side)
 # ---------------------------------------------------------------------------
 
-_LIVE_FAKES: list = []
-
-
 def _bare_llama() -> LlamaCpp:
     """Construct a LlamaCpp without running __init__ (no DLL access) - same
-    shape as test_kv_cache.py's helper of the same name."""
-    llm = LlamaCpp.__new__(LlamaCpp)
-    llm._n_ctx = 4096
-    llm._n_ctx_max = None
-    llm._n_ctx_grow = 4096
-    llm._seed = 1234
-    llm._verbose = False
-    llm._model_ptr = 111
-    llm._ctx_ptr = 222
-    llm._tokenizer = MagicMock()
-    llm._cached_tokens = []
-    llm._ctx_capacity = 4096
-    llm._kv_supported = None
-    llm._vram_check = None
-    # __init__ always sets this; a hand-built instance that omits it is
-    # not a LlamaCpp, and the generate path reads it directly.
-    llm._mtp_ctx_ptr = None
-    llm._gen_lock = threading.RLock()
-    llm._stop = threading.Event()
-    llm._inference_lock = threading.Lock()
-    _LIVE_FAKES.append(llm)
-    return llm
+    shared builder as test_kv_cache.py's helper of the same name."""
+    return make_bare_llama(_model_ptr=111, _ctx_ptr=222)
 
 
-@pytest.fixture(autouse=True)
-def _neutralise_fake_pointers():
-    """Null out the fake model/ctx pointers before GC - otherwise __del__ ->
-    close() passes them to the REAL llama_free (api is unpatched by then)
-    and crashes the interpreter with an access violation."""
-    yield
-    for llm in _LIVE_FAKES:
-        llm._model_ptr = None
-        llm._ctx_ptr = None
-    _LIVE_FAKES.clear()
+# Fake-pointer teardown is handled globally by tests/conftest.py's autouse
+# _neutralise_bare_llama_pointers fixture.
 
 
 def _mock_native_api() -> MagicMock:

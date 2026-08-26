@@ -5,7 +5,6 @@ Tests for persistent KV cache prefix reuse in the native llama.cpp wrapper.
 The native DLL is never loaded - the api module is mocked throughout.
 """
 
-import threading
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -15,6 +14,7 @@ from localm.inference.backends.llamacpp.llama import (
     _build_sampler,
     _common_prefix_len,
 )
+from tests._bare_llama import make_bare_llama
 from tests._fake_batch import fake_batch_init
 
 
@@ -40,34 +40,15 @@ def test_common_prefix_len(a, b, expected):
 #  Wrapper-level KV behaviour (api module fully mocked)
 # ---------------------------------------------------------------------------
 
-_LIVE_FAKES: list = []
-
-
 def _bare_llama() -> LlamaCpp:
-    """Construct a LlamaCpp without running __init__ (no DLL access)."""
-    llm = LlamaCpp.__new__(LlamaCpp)
-    llm._n_ctx = 4096
-    llm._n_ctx_max = None     # unlimited - preserves the original test scenarios
-    llm._n_ctx_grow = 4096
-    llm._seed = 1234
-    llm._verbose = False
-    llm._model_ptr = 111
-    llm._ctx_ptr = 222
-    llm._tokenizer = MagicMock()
-    llm._cached_tokens = []
-    llm._ctx_capacity = 4096
-    llm._kv_supported = None
-    llm._vram_check = None
-    # __init__ always sets this (None when the model has no MTP heads), and
-    # twelve call sites read it directly. A hand-built instance that omits it
-    # is not a LlamaCpp.
-    llm._mtp_ctx_ptr = None
-    # Native-call serialization primitives normally set up in __init__.
-    llm._gen_lock = threading.RLock()
-    llm._stop = threading.Event()
-    llm._inference_lock = threading.Lock()
-    _LIVE_FAKES.append(llm)
-    return llm
+    """Construct a LlamaCpp without running __init__ (no DLL access).
+
+    Delegates to the shared builder (tests/_bare_llama.py) so every
+    __init__ invariant is set, not just the ones this file happens to
+    read - see that module's docstring for why fourteen hand-maintained
+    copies of this object were the actual defect.
+    """
+    return make_bare_llama(_model_ptr=111, _ctx_ptr=222)
 
 
 @pytest.fixture(autouse=True)
@@ -84,18 +65,8 @@ def _no_native_mrope_probe():
         yield
 
 
-@pytest.fixture(autouse=True)
-def _neutralise_fake_pointers():
-    """
-    Null out the fake model/ctx pointers before each object is garbage
-    collected - otherwise __del__ → close() passes them to the real
-    llama_free and crashes the interpreter with an access violation.
-    """
-    yield
-    for llm in _LIVE_FAKES:
-        llm._model_ptr = None
-        llm._ctx_ptr = None
-    _LIVE_FAKES.clear()
+# Fake-pointer teardown is now handled globally by tests/conftest.py's
+# autouse _neutralise_bare_llama_pointers fixture.
 
 
 class TestCanReuseKv:
