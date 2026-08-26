@@ -47,9 +47,9 @@ keep_diagnostics) is on and the session is not privacy mode - that is what makes
 local debugging with --debug possible at all. What must never happen is that
 content reaching a REPORT: the digest builder (localm/_log_digest.py) drops every
 record from a known debug_content_enabled()-gated write site (the raw model
-reply, a memory-embed content snippet, a web-tool query) before it is ever
-collapsed or classified, so none of them can appear in ``_recent_log_tail``
-regardless of what the content itself says (#961).
+reply, a memory-embed content snippet, a web-tool query, the assembled chat
+prompt) before it is ever collapsed or classified, so none of them can appear
+in ``_recent_log_tail`` regardless of what the content itself says (#961).
 """
 
 from __future__ import annotations
