@@ -141,7 +141,7 @@ def plugin_install_engine(target, force, with_deps):
                 f"install per its own instructions.[/dim]")
         return
     run_or_die(mgr.set_installed_state, target, True,
-              missing_msg=f"No such plugin: {escape(target)}")
+              missing_msg=f"No such plugin: {target}")
     console.print(f"[green]Installed[/green] plugin [bold]{escape(target)}[/bold]")
     _warn_missing_requires(mgr, target)
     if _resolve_with_deps(with_deps):
@@ -390,7 +390,7 @@ def plugin_uninstall_engine(name, delete_data):
     from localm import cli as _cli
     mgr = _cli._engine_manager()
     was = run_or_die(mgr.uninstall, name, delete_data=delete_data,
-                     missing_msg=f"No such plugin: {escape(name)}")
+                     missing_msg=f"No such plugin: {name}")
     if was:
         console.print(f"[yellow]Uninstalled[/yellow] plugin [bold]{escape(name)}[/bold]")
     else:
@@ -411,7 +411,7 @@ def plugin_enable(name, with_deps):
     from localm import cli as _cli
     mgr = _cli._engine_manager()
     run_or_die(mgr.set_enabled_state, name, True,
-              missing_msg=f"No such plugin: {escape(name)}")
+              missing_msg=f"No such plugin: {name}")
     console.print(f"[green]Enabled[/green] plugin [bold]{escape(name)}[/bold]")
     _warn_missing_requires(mgr, name)
     if _resolve_with_deps(with_deps):
@@ -432,7 +432,7 @@ def plugin_disable(name):
     from localm import cli as _cli
     mgr = _cli._engine_manager()
     run_or_die(mgr.set_enabled_state, name, False,
-              missing_msg=f"No such plugin: {escape(name)}")
+              missing_msg=f"No such plugin: {name}")
     console.print(f"[yellow]Disabled[/yellow] plugin [bold]{escape(name)}[/bold]")
 
 

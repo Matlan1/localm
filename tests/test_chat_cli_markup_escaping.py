@@ -224,7 +224,7 @@ class TestStreamingErrorMarkupEscaping:
         from localm.cli.chat import run
         result = cli_runner.invoke(run, [str(model_f), "--no-server", "-p", "hi"])
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         assert bad_message in result.output, (
             f"a streamed RuntimeError containing '[...]' must survive "
             f"verbatim, not be parsed as markup: {result.output!r}")

@@ -385,7 +385,7 @@ CORE_FIELDS: list = [
                  group="Chat", owner="chat", applies=Applies.LIVE),
     SettingField("model_avatar_overrides", Widget.HIDDEN, "Per-model icons",
                  "Override the model icon for one specific model. Falls back "
-                 "to the default above, then the monogram, when unset.",
+                 "to the Model icon default, then the monogram, when unset.",
                  group="Chat", owner="chat", applies=Applies.LIVE),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
@@ -1013,10 +1013,9 @@ CORE_FIELDS: list = [
                  group="Network", owner="web", admin_only=True),
     SettingField("net_allow_model_downloads", Widget.TOGGLE,
                  "Allow model downloads while network access is off",
-                 "A model pull, HuggingFace search, or a vision-projector, voice, "
-                 "or embedding-model fetch proceeds even when Network access "
-                 "(net_mode) is off. net_mode=off still blocks everything a "
-                 "model itself could trigger.",
+                 "Lets a model pull, HuggingFace search, or vision-projector/voice/"
+                 "embedding fetch proceed while net_mode is off. Model-initiated "
+                 "network access is still blocked.",
                  # admin_only: same reasoning as net_allow_private - this loosens a
                  # network-policy floor, so a non-owner config:write key must not be
                  # able to set it.
