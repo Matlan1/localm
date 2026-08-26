@@ -4,8 +4,8 @@
 Fourteen test files used to hand-build this object, each re-establishing
 __init__'s invariants by copy-pasting a subset of them. That is what let
 _mtp_ctx_ptr go missing from ten of the fourteen copies when __init__ grew
-it (see dev-notes/KV-CACHE-RED-SUITE-FIX-2026-08-25.md, S2a): a fixture
-duplicated fourteen times rots at whichever copy nobody is looking at.
+it: a fixture duplicated fourteen times rots at whichever copy nobody is
+looking at.
 
 make_bare_llama() sets every attribute LlamaCpp.__init__ establishes, so a
 caller overriding only what it needs cannot end up missing an invariant a
