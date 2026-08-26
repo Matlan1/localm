@@ -2,8 +2,7 @@ name: CI
 
 on:
   # THIS WORKFLOW RUNS ONLY WHEN A HUMAN ASKS FOR IT, WITH ONE NARROW,
-  # DELIBERATE EXCEPTION (the `push:` block below, added 2026-08-19 - see
-  # dev-notes/GRILL-DECISIONS-2026-08-19-maintainer-audit.md item 7). No
+  # DELIBERATE EXCEPTION (the `push:` block below, added 2026-08-19). No
   # general push trigger, no pull_request trigger. Maintainer's directive,
   # 2026-07-29, stated as: no 7-minute runs on PRs, and that means no runs on
   # merge either.
@@ -112,11 +111,9 @@ on:
   # silently skips the coverage floors, the jsdom GUI tests and ruff.
   push:
     # NARROW, DELIBERATE EXCEPTION to the no-automatic-CI policy above,
-    # decided 2026-08-19 (dev-notes/GRILL-DECISIONS-2026-08-19-maintainer-
-    # audit.md item 7), tracing back to the original design in dev-notes/
-    # abi-verification-design-2026-06-20.md: "Triggers: schedule (weekly) +
-    # paths filter on localm/inference/backends/llamacpp/** and
-    # localm/setup_llama.py + workflow_dispatch. NOT on every push."
+    # decided 2026-08-19: schedule (weekly) + a paths filter on
+    # localm/inference/backends/llamacpp/** and localm/setup_llama.py +
+    # workflow_dispatch. NOT on every push.
     #
     # The weekly cron below is otherwise the only automatic path to the
     # ABI-drift check, and it is measured to actually fire on its target
