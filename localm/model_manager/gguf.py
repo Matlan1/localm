@@ -1177,9 +1177,11 @@ def _gguf_declared_min_size(path: Path) -> Optional[int]:
 
     Returns None - never raises - whenever the header cannot be parsed this
     way (a GGUF v1 file, an implausible tensor/kv count, a truncation inside
-    the KV or tensor-info section itself, or any other parse failure): the
-    caller must treat that as no signal, never as proof of truncation - the
-    same defensive stance ``_has_gguf_magic``'s other checks already take."""
+    the KV or tensor-info section itself, a corrupt/hostile KV array whose
+    declared element count seeks past what Python's file API can address, or
+    any other parse failure): the caller must treat that as no signal, never
+    as proof of truncation - the same defensive stance ``_has_gguf_magic``'s
+    other checks already take."""
     try:
         with open(path, "rb") as f:
             if f.read(4) != b"GGUF":
@@ -1206,7 +1208,9 @@ def _gguf_declared_min_size(path: Path) -> Optional[int]:
                 if offset > max_offset:
                     max_offset = offset
             data_start = f.tell()
-    except (OSError, struct.error, IndexError, UnicodeDecodeError):
+    # ValueError: an out-of-range seek from a hostile KV array count. See
+    # test_hostile_kv_array_count_does_not_crash_sync.
+    except (OSError, struct.error, IndexError, UnicodeDecodeError, ValueError):
         return None
 
     remainder = data_start % _GGUF_DEFAULT_ALIGNMENT

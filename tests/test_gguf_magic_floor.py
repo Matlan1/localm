@@ -155,3 +155,21 @@ class TestDeclaredSizeCheck:
         f.write_bytes(b"GGUF".ljust(_GGUF_MIN_BYTES, b"\x00"))
         assert _gguf_declared_min_size(f) is None
         assert _has_gguf_magic(f) is True
+
+    def test_hostile_kv_array_count_does_not_crash(self, tmp_path):
+        # A KV value of type ARRAY carries its own element count, unbounded
+        # by anything else in the format. An enormous one makes
+        # _gguf_skip_value_stream ask to seek past what Python's file API can
+        # address at all (f.seek raises ValueError, not OSError, for an
+        # offset outside a Py_ssize_t) - this must read as an ordinary parse
+        # failure (None), not escape and crash the caller.
+        f = tmp_path / "hostile.gguf"
+        header = b"".join([
+            b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, 1),
+            _s("evil"), struct.pack("<I", 9),        # ARRAY
+            struct.pack("<I", 4),                     # element type: uint32
+            struct.pack("<Q", 2 ** 62),                # declared count
+        ])
+        f.write_bytes(header.ljust(_GGUF_MIN_BYTES, b"\0"))
+        assert _gguf_declared_min_size(f) is None
+        assert _has_gguf_magic(f) is True

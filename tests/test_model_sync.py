@@ -186,6 +186,33 @@ class TestTruncatedFileDetection:
         assert result.added == 1
         assert any(e["path"].endswith("complete.gguf") for e in store.values())
 
+    def test_hostile_kv_array_count_does_not_crash_sync(self, fake_registry):
+        # A corrupt or hand-crafted file can declare a KV array with an
+        # enormous element count - unbounded by anything else in the format.
+        # The declared-size walk must treat that as an ordinary parse
+        # failure (no signal), never let it escape and crash the whole
+        # directory scan for every other model.
+        store, models_dir, _ = fake_registry
+        f = models_dir / "hostile.gguf"
+
+        def s(text):
+            raw = text.encode("utf-8")
+            return struct.pack("<Q", len(raw)) + raw
+
+        header = b"".join([
+            b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, 1),
+            s("evil"), struct.pack("<I", 9),         # ARRAY
+            struct.pack("<I", 4),                     # element type: uint32
+            struct.pack("<Q", 2 ** 62),                # declared count
+        ])
+        f.write_bytes(header.ljust(_GGUF_MIN_BYTES, b"\0"))
+        _backdate(f, seconds=60)
+
+        result = mm.sync_models_dir(prune=False)   # must not raise
+
+        assert result.added == 1
+        assert any(e["path"].endswith("hostile.gguf") for e in store.values())
+
 
 class TestMissingFlagging:
     def test_missing_managed_is_flagged_not_deleted(self, fake_registry):
