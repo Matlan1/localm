@@ -1639,10 +1639,15 @@ def _pull_url(
     derivation stays here so the lock is keyed on exactly the name the download
     will write, rather than on a second derivation that could disagree with it.
     """
+    # escape(): url is the raw caller-supplied spec (CLI/GUI/MCP), and
+    # filename/e are derived from it - _safe_models_filename rejects path
+    # traversal and Windows-reserved characters, not '['/']', so a URL like
+    # "https://host/x][red]FAKE[/red]y.gguf" survives with brackets intact.
+    from rich.markup import escape
     stem = _stem_from_url(url)
     if not stem:
         console.print(
-            f"[red]Invalid URL - no file name in the path:[/red] {url}\n"
+            f"[red]Invalid URL - no file name in the path:[/red] {escape(url)}\n"
             "A direct URL must point at a file, e.g. https://host/model.gguf"
         )
         return False
@@ -1651,10 +1656,13 @@ def _pull_url(
 
     # Traversal guard (GAP-CLI-2): the filename is derived from an untrusted URL
     # path segment, so confine it to MODELS_DIR before using it as a dest.
+    # escape(filename): another "genuinely ironic" site - a filename that just
+    # FAILED this safety check must not weaponize the warning about it.
     safe = _safe_models_filename(filename)
     if safe is None:
         console.print(
-            f"[red]Unsafe model filename derived from URL:[/red] {filename}\n"
+            f"[red]Unsafe model filename derived from URL:[/red] "
+            f"{escape(filename)}\n"
             "The download destination must be a single name inside the models "
             "folder (no '/', '\\', or '..')."
         )
@@ -1666,7 +1674,7 @@ def _pull_url(
             return _pull_url_locked(url, name, filename, expected_sha256,
                                     redownload, model_type)
     except PullInFlight as e:
-        console.print(f"[red]Download already in progress:[/red] {e}")
+        console.print(f"[red]Download already in progress:[/red] {escape(str(e))}")
         return False
 
 
@@ -1685,6 +1693,13 @@ def _pull_url_locked(
     """
     import requests
     from localm.netpolicy import NetworkPolicyError
+    # escape(): url is the raw caller-supplied spec, filename/dl_url/e are all
+    # derived from it or remote-sourced, and expected_sha256 is the raw
+    # --sha256 value (not format-validated before this point). `url` sits
+    # directly inside OPEN [bold cyan]/[red] tags at several sites below -
+    # genuine markup-TAG-INJECTION on a value that is FULLY attacker-
+    # controlled (the raw spec string).
+    from rich.markup import escape
 
     dest      = _mm.MODELS_DIR / filename
     part_file = _mm.MODELS_DIR / (filename + ".part")
@@ -1699,18 +1714,19 @@ def _pull_url_locked(
             if on_disk.lower() != expected_sha256.lower():
                 console.print(
                     f"[red]SHA256 mismatch![/red] A different file already "
-                    f"occupies {filename} ({on_disk[:16]}…); it does not match "
-                    f"--sha256 ({expected_sha256.lower()[:16]}…). Refusing to "
+                    f"occupies {escape(filename)} ({escape(on_disk[:16])}…); "
+                    f"it does not match --sha256 "
+                    f"({escape(expected_sha256.lower()[:16])}…). Refusing to "
                     "alias onto unrelated bytes - use --redownload or a "
                     "different -n name."
                 )
                 return False
             console.print(
-                f"[yellow]Already downloaded:[/yellow] {filename} "
+                f"[yellow]Already downloaded:[/yellow] {escape(filename)} "
                 f"[dim](sha256 verified)[/dim]"
             )
         else:
-            console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
+            console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         _mm._register_with_dedup(name, dest, url, model_type=model_type)
         return True
 
@@ -1737,7 +1753,7 @@ def _pull_url_locked(
     try:
         dl_url = _ssrf_resolve_final_url(url)
     except NetworkPolicyError as e:
-        console.print(f"[red]Refused by network policy:[/red] {e}")
+        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
         return False
 
     # HEAD the final URL to get total file size for the disk space check. Pinned to
@@ -1750,7 +1766,7 @@ def _pull_url_locked(
         # A policy refusal is NOT the benign case: surface it and fail closed
         # (like the GET below), rather than collapsing it into total=0 - do not
         # let a rebind/deny slip through the size probe (AGENTS.md rule 5).
-        console.print(f"[red]Refused by network policy:[/red] {e}")
+        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
         return False
     except Exception as e:
         # Benign: a HEAD connect error only costs us the disk-space pre-check; the
@@ -1766,30 +1782,36 @@ def _pull_url_locked(
     headers: dict = {}
     if already_have:
         headers["Range"] = f"bytes={already_have}-"
+        # TAG-INJECTION site: url is FULLY attacker-controlled (the raw spec
+        # string) and sits directly inside an OPEN [bold cyan]...[/bold cyan]
+        # tag.
         console.print(
-            f"Resuming [bold cyan]{url}[/bold cyan] "
+            f"Resuming [bold cyan]{escape(url)}[/bold cyan] "
             f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
         )
     else:
-        console.print(f"Downloading [bold cyan]{url}[/bold cyan]")
+        console.print(f"Downloading [bold cyan]{escape(url)}[/bold cyan]")
 
     try:
         netpolicy.check_url(dl_url)     # revalidate immediately before the connect
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
                                      timeout=30, allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308):
-            console.print(f"[red]Refused:[/red] unexpected redirect from {dl_url}")
+            console.print(f"[red]Refused:[/red] unexpected redirect from "
+                          f"{escape(dl_url)}")
             return False
         r.raise_for_status()
     except NetworkPolicyError as e:
-        console.print(f"[red]Refused by network policy:[/red] {e}")
+        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
         return False
     except requests.HTTPError as e:
+        # code is always an int (a real HTTP status_code) or the literal "?"
+        # fallback - never markup.
         code = getattr(e.response, "status_code", "?")
-        console.print(f"[red]Download failed[/red] (HTTP {code}): {url}")
+        console.print(f"[red]Download failed[/red] (HTTP {code}): {escape(url)}")
         return False
     except requests.RequestException as e:
-        console.print(f"[red]Could not reach[/red] {url}: {e}")
+        console.print(f"[red]Could not reach[/red] {escape(url)}: {escape(str(e))}")
         return False
 
     # Server may ignore the Range header - detect and reset if needed
@@ -1846,28 +1868,35 @@ def _pull_url_locked(
     # Atomically rename on successful completion
     part_file.rename(dest)
 
-    # SHA256 verification
+    # SHA256 verification. `actual` is a real hashlib hexdigest (cannot carry
+    # markup); expected_sha256 is the raw --sha256 value and is not
+    # charset-validated before this point - escaped anyway, both defense-in-
+    # depth on `actual` and a real fix on `expected_sha256`.
     actual = _verify_digest(dest)
     if expected_sha256:
         if actual.lower() == expected_sha256.lower():
-            _report_success(f"[green]✓[/green] SHA256 verified: {actual[:16]}…",
-                            f"[green]OK[/green] SHA256 verified: {actual[:16]}…")
+            _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
+                            f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
         else:
             console.print(
-                f"[red]SHA256 mismatch![/red] Expected {expected_sha256[:16]}…, "
-                f"got {actual[:16]}… - deleting corrupted file"
+                f"[red]SHA256 mismatch![/red] Expected "
+                f"{escape(expected_sha256[:16])}…, got {escape(actual[:16])}… "
+                "- deleting corrupted file"
             )
             dest.unlink()
             return False
     else:
-        console.print(f"[dim]SHA256: {actual}[/dim]")
+        console.print(f"[dim]SHA256: {escape(actual)}[/dim]")
 
     # Post-download identity check: did we just download a byte-identical
     # copy of something already registered? (URL downloads can't know the
     # hash up front, so this is the earliest possible detection point.)
     dups = [n for n in _mm.find_by_sha256(actual) if n != name]
     if dups and not redownload:
-        names = ", ".join(f"'{n}'" for n in dups)
+        # dups are registry keys (_sanitize_name-derived, safe charset) -
+        # escaped anyway as defense-in-depth, same TAG-INJECTION position as
+        # the same-source/foreign-name lists in _pull_hf_snapshot above.
+        names = ", ".join(f"'{escape(n)}'" for n in dups)
         console.print(
             f"[yellow]Downloaded file is byte-identical to {names}[/yellow]"
         )
@@ -1890,11 +1919,13 @@ def _pull_url_locked(
                 if epath is None:
                     # Say so rather than silently keeping both: an unreadable
                     # sibling entry is a real registry problem the user should
-                    # see, and it must never license deleting a file.
+                    # see, and it must never license deleting a file. Quoted by
+                    # hand rather than via !r (see the doctor.py note on
+                    # escape()/repr() ordering).
                     console.print(
-                        f"[yellow]Registry entry for {dups[0]!r} is malformed - "
-                        "keeping both copies rather than deleting a file on the "
-                        "strength of an unreadable path.[/yellow]"
+                        f"[yellow]Registry entry for '{escape(dups[0])}' is "
+                        "malformed - keeping both copies rather than deleting "
+                        "a file on the strength of an unreadable path.[/yellow]"
                     )
                 else:
                     existing_path = Path(epath)
@@ -1904,8 +1935,11 @@ def _pull_url_locked(
                     return True
 
     _mm._register(name, dest, url, sha256=actual, model_type=model_type)
-    _report_success(f"[green]✓[/green] [bold]{name}[/bold] is ready",
-                    f"[green]OK[/green] [bold]{name}[/bold] is ready")
+    # name is always _sanitize_name()-derived by pull_model() before reaching
+    # here (the only production caller), but escaped anyway - defense-in-
+    # depth, same TAG-INJECTION position as model_name elsewhere in this file.
+    _report_success(f"[green]✓[/green] [bold]{escape(name)}[/bold] is ready",
+                    f"[green]OK[/green] [bold]{escape(name)}[/bold] is ready")
     return True
 
 
