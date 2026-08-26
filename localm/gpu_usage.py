@@ -573,8 +573,8 @@ def _known_blind_without_torch(reason: str) -> bool:
         logger.debug(
             "gpu_usage: raw VRAM readings in this process are process-scoped: "
             "torch is not consultable (%s) but the bundled HIP llama.cpp "
-            "runtime is resident, which is itself the measured-blind source "
-            "(dev-notes/vram-cross-process-blindness.md)", reason)
+            "runtime is resident, which is itself the measured-blind source",
+            reason)
     return resident
 
 

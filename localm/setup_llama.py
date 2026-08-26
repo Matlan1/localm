@@ -1225,7 +1225,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
         # than one against upstream itself.
         raise click.ClickException(
             f"no Linux CUDA build found for llama.cpp tag {tag!r} on "
-            f"{_CUDA_LINUX_REPO} (dev-notes/ADR-0010) - falling back to vulkan.")
+            f"{_CUDA_LINUX_REPO} - falling back to vulkan.")
 
     plat = _platform_key()
     entry = _ASSET_MATCH.get(plat, {}).get(backend)

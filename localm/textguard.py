@@ -65,8 +65,8 @@ _FRAME_RE = re.compile(
 # forge a system/assistant turn. We defang the leading delimiter so the byte
 # sequence no longer matches the tokenizer's special-token trie, keeping the text
 # legible. Best-effort and family-aware, covering ChatML, Llama-2/3, Mistral,
-# Gemma, Qwen, Phi, and GPT-style markers; the general fix is tokenising untrusted
-# spans with special parsing off (a backend-level change).
+# Gemma, Qwen, Phi, GPT-style, EXAONE and GLM markers; the general fix is
+# tokenising untrusted spans with special parsing off (a backend-level change).
 # The pipe delimiter is matched as a CLASS of the ASCII bar (U+007C) and the
 # FULLWIDTH bar (U+FF5C) that DeepSeek-R1 uses (the fullwidth <|Assistant|>).
 # Requiring a pipe right after "<" and right before ">" precisely targets the
@@ -80,11 +80,16 @@ _SPECIAL_RE = re.compile(
     r"|<</?SYS>>"                            # <<SYS>>  <</SYS>>  (Llama-2 / Mistral)
     r"|</?s>"                                # <s>  </s>          (Llama-2 / Mistral BOS/EOS)
     r"|<(?:start|end)_of_turn>"              # Gemma turn markers
+    r"|<(?:sop|eop)>"                        # GLM / ChatGLM turn-prefix markers
     r"|<(?:bos|eos|pad|unk|mask|cls|sep)>"   # sentinel tokens
-    # Mistral bracket control tokens (a forged [TOOL_CALLS] / [AVAILABLE_TOOLS]
-    # can fake a tool call); kept to a specific allowlist so ordinary [INFO]-style
-    # log lines are left alone.
-    r"|\[/?(?:INST|SYSTEM_PROMPT|AVAILABLE_TOOLS|TOOL_CALLS|TOOL_RESULTS?)\]",
+    # Bracket control tokens. Each is an allowlist of literal role/tool names, so
+    # ordinary [INFO]-style log lines and OCaml [|array|] literals are left alone.
+    # Mistral: a forged [TOOL_CALLS] / [AVAILABLE_TOOLS] can fake a tool call.
+    r"|\[/?(?:INST|SYSTEM_PROMPT|AVAILABLE_TOOLS|TOOL_CALLS|TOOL_RESULTS?)\]"
+    # EXAONE role delimiters, the bracket-pipe counterpart of the <|...|> family.
+    r"|\[\|(?:system|user|assistant|tool|endofturn)\|\]"
+    # GLM / ChatGLM mask tokens, which open a templated conversation.
+    r"|\[[gs]?MASK\]",
     re.IGNORECASE,
 )
 

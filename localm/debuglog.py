@@ -56,7 +56,7 @@ def debug_content_enabled() -> bool:
     if not debug_enabled():
         return False
     try:
-        from localm.audit import SessionMode, effective_mode
+        from localm.audit import SessionMode, any_coder_session_is_privacy, effective_mode
         # Suppress content if ANY of these surfaces is privacy: the backend that
         # produces the content (llamacpp/llama.py) is surface-agnostic and serves
         # coder sessions through the same generation path as chat/server, so a
@@ -66,6 +66,11 @@ def debug_content_enabled() -> bool:
         for surface in ("server", "chat", "coder"):
             if effective_mode(surface) == SessionMode.PRIVACY:
                 return False
+        # effective_mode("coder") above is called with no cwd, so it can never
+        # see a project's own .localcoder/config.toml privacy pin. A coder
+        # session that resolved privacy that way publishes it here instead.
+        if any_coder_session_is_privacy():
+            return False
         return True
     except Exception:
         return False   # fail-safe: no chat content on disk

@@ -623,7 +623,7 @@ def main() -> int:
         print(f"ABI CHECK FAILED: {total} mismatch(es). A mid-struct reorder/insert "
               "corrupts memory, and a changed enum value silently redefines what a "
               "field means - update _structs.py (and _abi anchors) to match, then "
-              "re-probe a real build. See issues/abi-verification-design-2026-06-20.md.")
+              "re-probe a real build.")
         return 1
     print(f"ABI check passed: localm's named fields match upstream offsets "
           f"for layout(s) {sorted(seen_layouts)}, and every enum member localm "

@@ -469,6 +469,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Your sampling settings now apply to every token on a multi-token-prediction
+  model.** These models predict a token ahead and check the guess against the
+  main model. That check ignored the temperature, top-k, top-p and repetition
+  penalty on your request, so a large share of the reply came out as if you had
+  asked for greedy decoding, and the repetition penalty that exists to stop a
+  reply looping was not consulted for those tokens. When the guess turns out to
+  be wrong, the model's own token is now used instead of being thrown away.
+- **A stray turn marker no longer opens a reply.** Some models emit their own
+  training-format turn markers as ordinary text. Several dialects were already
+  removed before the reply reached you, but the ChatML, Llama 3 and Gemma ones
+  were not, so a reply could begin with a stray marker or a bare role word such
+  as "model". A role word the model writes in ordinary prose is untouched.
 - **Chat comes back on the model you were actually using after generating
   media.** Making an image, music, or video unloads the chat model to free up
   VRAM and reloads it when the job finishes. That reload asked for the model
@@ -797,8 +809,28 @@ permanent public record of what shipped and are never rewritten; the in-progress
   exceeded context window" message, and stopping the server while a reply
   was still streaming could itself crash instead of ending the reply
   cleanly.
+- **The Linux CUDA fallback error no longer points at a file you can't
+  open.** When no CUDA build is available for your llama.cpp tag on Linux
+  and localm falls back to Vulkan, the error referenced an internal
+  maintainer file that isn't part of the published repository. It now
+  states the same condition without the dead reference.
+- **`setup.sh` could quit partway through with a confusing error on a rare,
+  filesystem-specific install hiccup.** Occasionally, mostly on a WSL clone
+  under a Windows-drive mount, `uv pip install` reports success while the
+  `localm` command itself does not get written; setup already retried once
+  and warned loudly when it was still missing, but then went on to run that
+  missing command anyway for the native runtime, which quit setup early with
+  an unrelated-looking "failed" message instead of the real cause. Setup now
+  skips the steps that need the command and finishes normally, and its
+  closing summary says plainly which commands will not work until it is
+  fixed (the graphical launcher is unaffected).
 
 ### Security
+- **Two more model families' role markers are now defanged in untrusted text.**
+  A fetched page, a tool result or a stored memory is escaped so it cannot forge
+  a system or assistant turn using the model's own delimiters. EXAONE and GLM
+  models use delimiters that were not in that list, so text aimed at them passed
+  through unescaped.
 - **Turning network access off no longer left the voice model able to
   download anyway.** The neural text-to-speech voice is fetched by your
   browser directly, so localm's network switch, which every other
