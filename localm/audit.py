@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from enum import Enum
 from pathlib import Path
@@ -83,6 +84,45 @@ _MODE_RANK = {SessionMode.PRIVACY: 0, SessionMode.LOG: 1, SessionMode.FULL: 2}
 def mode_at_least_as_private(candidate: SessionMode, floor: SessionMode) -> bool:
     """True if *candidate* writes no more than *floor* would."""
     return _MODE_RANK[candidate] <= _MODE_RANK[floor]
+
+
+# ---------------------------------------------------------------------------
+#  Active coder session mode registry
+# ---------------------------------------------------------------------------
+#
+# debug_content_enabled() (localm.debuglog) gates raw chat content on
+# effective_mode(surface) for each surface, called with NO cwd. The coder
+# generation path it guards is surface-agnostic (shared with chat/server) and
+# has no project directory to pass through, so a project's own
+# .localcoder/config.toml privacy pin - visible only when cwd is given - is
+# invisible to that gate. A coder session already resolves its own mode WITH
+# cwd (plug.py's create_session; the CLI reads the same file itself), so it
+# publishes that result here instead of the gate re-deriving it blind.
+
+_active_coder_privacy_lock = threading.Lock()
+_active_coder_privacy_count = 0
+
+
+def register_coder_session_mode(mode: SessionMode) -> None:
+    """Record that a coder session with this cwd-resolved *mode* has started."""
+    global _active_coder_privacy_count
+    if mode == SessionMode.PRIVACY:
+        with _active_coder_privacy_lock:
+            _active_coder_privacy_count += 1
+
+
+def unregister_coder_session_mode(mode: SessionMode) -> None:
+    """Undo register_coder_session_mode for a session that is closing."""
+    global _active_coder_privacy_count
+    if mode == SessionMode.PRIVACY:
+        with _active_coder_privacy_lock:
+            _active_coder_privacy_count = max(0, _active_coder_privacy_count - 1)
+
+
+def any_coder_session_is_privacy() -> bool:
+    """True while at least one coder session is running in PRIVACY mode,
+    including one pinned there only by its project's .localcoder/config.toml."""
+    return _active_coder_privacy_count > 0
 
 
 def effective_mode(surface: str, cwd=None) -> SessionMode:
