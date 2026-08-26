@@ -3,9 +3,10 @@
 
 import json
 import pytest
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+
+torch = pytest.importorskip("torch")
+import torch.nn as nn  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 
 from localm.inference.backends.awq import (
     NativeAWQLinear,
