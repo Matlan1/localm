@@ -75,6 +75,16 @@ def parse_mode(value: str) -> SessionMode:
     return SessionMode(v)
 
 
+# Ordinal by how much a mode writes: PRIVACY writes nothing, FULL writes the
+# most. Lower rank = more private.
+_MODE_RANK = {SessionMode.PRIVACY: 0, SessionMode.LOG: 1, SessionMode.FULL: 2}
+
+
+def mode_at_least_as_private(candidate: SessionMode, floor: SessionMode) -> bool:
+    """True if *candidate* writes no more than *floor* would."""
+    return _MODE_RANK[candidate] <= _MODE_RANK[floor]
+
+
 def effective_mode(surface: str, cwd=None) -> SessionMode:
     """
     Resolve the active session mode for *surface* ("chat" | "coder" | "server").
