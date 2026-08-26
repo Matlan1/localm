@@ -143,7 +143,8 @@ _QUERY_SECRET_RE = re.compile(
     r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&\s#\"'\)\]\}]*)"
 )
 _HEADER_SECRET_RE = re.compile(
-    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"
+    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
+    r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
 )
 
 

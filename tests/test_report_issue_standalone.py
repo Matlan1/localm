@@ -99,6 +99,23 @@ def test_scrub_strips_query_string_and_header_credentials():
     assert "q=hello" in out  # non-credential param left intact
 
 
+def test_scrub_redacts_authorization_header_regardless_of_scheme():
+    """Mirrors localm/bugreport.py's _HEADER_SECRET_RE fix: an "Authorization"
+    header is redacted by NAME, not only when its value happens to start with
+    "Bearer". A raw token and a Basic-auth (base64 user:pass) value are
+    asserted in one block so a regression in either shape is caught. The
+    Bearer canary is 8+ chars so it also satisfies _BEARER_RE's own minimum
+    length, keeping this test a pure signal for the header-name match."""
+    out = ri.scrub(
+        "Authorization: Bearer CANARY6BEARER\n"
+        "Authorization: CANARY7RAWTOKEN\n"
+        "Authorization: Basic Q0FOQVJZOFVTRVI6Q0FOQVJZOFBBU1M=\n")
+    assert "CANARY6BEARER" not in out
+    assert "CANARY7RAWTOKEN" not in out
+    assert "Q0FOQVJZOFVTRVI6Q0FOQVJZOFBBU1M=" not in out
+    assert out.count("Authorization: <redacted>") == 3
+
+
 def test_scrub_strips_bare_and_prefixed_credential_assignments():
     """ri.scrub redacts a credential written as a plain name=value line (a .env
     fragment, a shell line) or behind a prefix (OPENAI_API_KEY=, pull_token=),
@@ -179,6 +196,44 @@ def test_powershell_scrub_behaves_when_actually_executed(tmp_path):
     # And the other direction: a non-credential value survives.
     assert "require_auth=true" in out, f"the PowerShell scrub ate a flag: {out}"
     assert "n_gpu_layers=35" in out, f"the PowerShell scrub ate a setting: {out}"
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="the PowerShell fallback reporter only runs on Windows")
+def test_powershell_scrub_redacts_authorization_header_when_actually_executed(tmp_path):
+    """Same real-execution shape as test_powershell_scrub_behaves_when_actually_executed
+    above, for the Authorization-header fix specifically: an Authorization value
+    must be redacted whole whether it is a raw token or carries a Basic/Bearer
+    scheme word, not only when it happens to start with "Bearer"."""
+    pwsh = shutil.which("powershell") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("no PowerShell interpreter on PATH")
+    ps1 = _MOD_PATH.parent / "report_issue.ps1"
+    driver = tmp_path / "drive_scrub_auth.ps1"
+    driver.write_text(
+        "param([string]$Target)\n"
+        "$ast = [System.Management.Automation.Language.Parser]::ParseFile("
+        "$Target, [ref]$null, [ref]$null)\n"
+        "$fn = $ast.FindAll({ param($n) $n -is "
+        "[System.Management.Automation.Language.FunctionDefinitionAst] -and "
+        "$n.Name -eq 'Scrub' }, $true)\n"
+        "if ($fn.Count -ne 1) { Write-Output 'SCRUB-NOT-FOUND'; exit 1 }\n"
+        "Invoke-Expression $fn[0].Extent.Text\n"
+        "Write-Output (Scrub 'Authorization: Bearer PSCANARY8BEARER "
+        "Authorization: PSCANARY9RAWTOKEN "
+        "Authorization: Basic UFNDQU5BUlkwQkFTSUM=')\n",
+        encoding="utf-8")
+    proc = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(driver), "-Target", str(ps1)],
+        capture_output=True, text=True, timeout=120)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert "SCRUB-NOT-FOUND" not in out, out
+    assert proc.returncode == 0, f"driver failed ({proc.returncode}): {out}"
+    assert "PSCANARY8BEARER" not in out, f"the PowerShell scrub shipped a secret: {out}"
+    assert "PSCANARY9RAWTOKEN" not in out, f"the PowerShell scrub shipped a secret: {out}"
+    assert "UFNDQU5BUlkwQkFTSUM=" not in out, f"the PowerShell scrub shipped a secret: {out}"
+    assert out.count("Authorization: <redacted>") == 3, out
 
 
 def test_scrub_strips_a_quoted_credential_value():
@@ -503,8 +558,10 @@ def test_powershell_reporter_scrubs_credential_named_assignments():
     alone. Static guard - the .ps1 is not exercised by this Python suite."""
     ps1 = _MOD_PATH.parent / "report_issue.ps1"
     text = ps1.read_text(encoding="utf-8")
-    # The header-line port.
-    assert r"(?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)" in text
+    # The header-line port, including the Authorization header name and its
+    # optional leading scheme word.
+    assert r"(?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)" in text
+    assert r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+" in text
     # All three branches of the query port.
     assert r"(?<=[?&])" in text
     assert r"(?<![A-Za-z0-9])" in text
