@@ -10,11 +10,57 @@
  * The model (~86 MB) is fetched from Hugging Face on first use and cached by the
  * browser, so synthesis is fully local thereafter. No text ever leaves the
  * machine and nothing is written to the server, so privacy mode stays intact.
+ * The fetch itself is gated on the resolved net_mode (net_mode=off refuses it;
+ * net_mode=ask requires a one-time confirmation) before it is ever made.
  */
 
-import { classifyLoadError, loadToast, pickDevice, pickDtype, repairAudioTransient } from "./tts-util.js";
+import { NetGateError, classifyLoadError, loadToast, planModelFetch, pickDevice, pickDtype, repairAudioTransient } from "./tts-util.js";
 
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
+
+// R-NET: net_mode=ask gate. Reaches the GUI shell's shared in-page modal via
+// window (app/main.js exposes every app/helpers.js export as window.<name>,
+// the same bridge the jobs plugin's own confirmDangerous() uses, including
+// its native confirm() fallback for a document with no shell - this module's
+// own isolated unit test). No closure dependency on register()'s cfg/ctx, so
+// it is a plain module-level export rather than nested like the rest of this
+// file's helpers.
+export function requestDownloadConsent() {
+  if (typeof window === "undefined" || typeof window.openModal !== "function" ||
+      typeof window.$ !== "function" || typeof window.el !== "function") {
+    return Promise.resolve(typeof confirm === "function" && confirm(
+      "Download the Kokoro voice model (~86 MB) from huggingface.co now?"));
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(watch);
+      window.$("modal").style.display = "none";
+      resolve(v);
+    };
+    window.openModal("Download voice model?", (body) => {
+      body.appendChild(window.el("p", "",
+        "Kokoro (~86 MB) will be downloaded from huggingface.co once, then " +
+        "cached in the browser. Network access is set to \"ask first\"."));
+      const row = window.el("div", "actions");
+      const skip = window.el("button", "btn-secondary", "Not now");
+      skip.onclick = () => finish(false);
+      const dl = window.el("button", "btn-secondary", "Download");
+      dl.onclick = () => finish(true);
+      row.appendChild(skip);
+      row.appendChild(dl);
+      body.appendChild(row);
+    });
+    // Dismissing via the shared modal chrome (x / backdrop) sets display:none
+    // without calling either handler above; poll for it and treat as "not
+    // now" - same idiom promptText / _offerModelDownload use in helpers.js.
+    const watch = setInterval(() => {
+      if (window.$("modal").style.display === "none") finish(false);
+    }, 200);
+  });
+}
 
 export async function register(ctx) {
   let cfg;
@@ -77,7 +123,35 @@ export async function register(ctx) {
     }
   }
 
+  // R-NET: a fresh read, not the page-load `cfg` snapshot - net_mode is a
+  // real kill switch and a stale value would let a mid-session net_mode=off
+  // change go unhonoured until the tab reloads. Same-origin call to localm's
+  // own local API, never to huggingface.co, so it is not itself net_mode-gated.
+  async function currentNetMode() {
+    try {
+      const r = await fetch("/api/tts/config", { headers: ctx.authHeaders() });
+      if (r.ok) {
+        const fresh = await r.json();
+        if (typeof fresh.net_mode === "string") return fresh.net_mode;
+      }
+    } catch { /* fall through to the page-load value */ }
+    return cfg.net_mode;
+  }
+
   async function load() {
+    const cached = await modelCached();
+    const decision = planModelFetch(await currentNetMode(), cached);
+    if (decision === "refuse") {
+      throw new NetGateError(
+        "Voice model download is blocked (net_mode=off). Enable it with:  " +
+        "localm config net_mode ask");
+    }
+    if (decision === "confirm" && !(await requestDownloadConsent())) {
+      throw new NetGateError(
+        "Voice model download needs a one-time confirmation (net_mode=ask) " +
+        "and was not granted.");
+    }
+
     const mod = await import(libraryURL);
     Splitter = mod.TextSplitterStream || null;
     const onnx = mod.env && mod.env.backends && mod.env.backends.onnx;
@@ -112,7 +186,7 @@ export async function register(ctx) {
         if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
       } catch { /* storage manager unavailable: best effort */ }
       ctx.toast(loadToast({
-        cached: await modelCached(),
+        cached,
         secureContext: typeof caches !== "undefined",
       }));
     }
@@ -166,10 +240,15 @@ export async function register(ctx) {
           // for load failures; the speak() catch below stays quiet because the
           // cause is already logged + toasted here.
           console.error("[tts] Kokoro voice model failed to load:", e);
-          let cached = false;
-          try { cached = await modelCached(); } catch { /* probe best effort */ }
-          const online = (typeof navigator === "undefined") || navigator.onLine !== false;
-          const { message } = classifyLoadError(e, { cached, online });
+          let message;
+          if (e instanceof NetGateError) {
+            message = e.message;               // already the real, actionable reason
+          } else {
+            let cached = false;
+            try { cached = await modelCached(); } catch { /* probe best effort */ }
+            const online = (typeof navigator === "undefined") || navigator.onLine !== false;
+            message = classifyLoadError(e, { cached, online }).message;
+          }
           ctx.toast(message + "; using the browser voice (see console for details)", true);
           ctx.registerTTS(null);                 // revert to the built-in fallback
           throw e;

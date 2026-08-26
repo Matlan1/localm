@@ -69,6 +69,90 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None,
         return "http", r.status_code
 
 
+def read_model_file_hold(scheme: str, port, model: str,
+                         instance_token: Optional[str] = None,
+                         bind_host: Optional[str] = None) -> tuple:
+    """Ask a running localm server whether one of ITS loaded engines is holding
+    the file that removing *model* would delete. Returns ``(state, payload)``.
+
+    *state* is one of:
+      ``"ok"``           - payload is the parsed body: ``{"held": bool, ...}``
+      ``"absent"``       - that server does not have *model* registered at all
+      ``"unauthorized"`` - the server wants a key this client does not have
+      ``"unsupported"``  - the server has no hold route (an older localm)
+      ``"http"``         - some other HTTP status; payload is the code
+      ``"unreachable"``  - could not connect; payload is a short reason
+
+    THE STATES ARE KEPT APART BECAUSE ONLY ONE OF THEM IS AN ANSWER. A caller
+    about to delete a model file needs "that server says nothing holds it" and
+    "I could not ask that server" to reach it as different facts, because they
+    lead to opposite actions: proceed, or refuse. Folding any non-ok state into
+    ``held: False`` would delete a live model's file on the evidence of never
+    having found out - the same collapse :func:`read_activity` exists to
+    prevent for the activity question, and the consequence here is a destroyed
+    download rather than a wrong status line.
+
+    ``"absent"`` (404) is deliberately NOT folded into ``"ok"/held: False``
+    either. It means this instance serves a different data home, so it is
+    genuinely not a holder of THIS file - but that is a conclusion about scope,
+    not about residency, and a caller that wants to report accurately why it
+    refused (or did not) has to be able to tell them apart.
+
+    Deliberately mirrors :func:`read_activity`'s signature and state machine
+    rather than inventing a second shape: both are "ask each discovered
+    instance one question over the loopback", and the parameters that make that
+    work (the per-instance attach token for a keyless server, the bound host so
+    an IPv6-bound instance is dialled where it actually listens) are the same
+    in both cases and wrong to re-derive.
+    """
+    from urllib.parse import quote
+
+    from localm import tls as _tls
+    from localm.auth import resolve_bearer_headers
+
+    host = url_host(self_connect_host(bind_host))
+    # quote with no safe characters: a registry name reaches here from a tool
+    # argument, and a "/" in it would otherwise re-point the request at a
+    # different route.
+    url = (f"{scheme}://{host}:{port}"
+           f"/v1/models/{quote(model, safe='')}/hold")
+    headers = resolve_bearer_headers(instance_token)
+    try:
+        r = requests.get(url, headers=headers, timeout=5,
+                         verify=_tls.requests_verify(url))
+    except requests.exceptions.RequestException as e:
+        return "unreachable", type(e).__name__
+    if r.status_code in (401, 403):
+        return "unauthorized", r.status_code
+    if r.status_code == 404:
+        # Ambiguous by status alone: an older server has no such ROUTE, a
+        # current one answers 404 for a model IT does not carry. FastAPI's
+        # unmatched-route body is {"detail": "Not Found"}; the route's own is
+        # "Model not registered: <name>". Read the body rather than guessing,
+        # and when it cannot be read, take the CAUTIOUS branch (unsupported,
+        # which refuses) rather than the permissive one.
+        try:
+            detail = str((r.json() or {}).get("detail", ""))
+        except ValueError:
+            detail = ""
+        if detail.startswith("Model not registered"):
+            return "absent", r.status_code
+        return "unsupported", r.status_code
+    if not r.ok:
+        return "http", r.status_code
+    try:
+        body = r.json()
+    except ValueError:
+        # A 200 whose body is not JSON is not a "nothing holds it"; it means
+        # something other than localm answered, or answered wrongly.
+        return "http", r.status_code
+    if not isinstance(body, dict) or not isinstance(body.get("held"), bool):
+        # Same rule one level in: a well-formed HTTP 200 carrying a shape this
+        # client cannot read is not evidence that the file is free.
+        return "http", r.status_code
+    return "ok", body
+
+
 def resolve_self_url(app) -> Optional[str]:
     """This server's own ``/v1`` base URL, or None if it cannot be determined.
 

@@ -12,14 +12,22 @@ def run_or_die(fn, *args, missing_msg=None, **kwargs):
     """Call ``fn(*args, **kwargs)``; on ``KeyError`` (unknown name) print
     *missing_msg* (or a generic fallback) in red and exit(1); on ``ValueError``
     (a domain-rule violation) print the exception in red and exit(1). Returns
-    ``fn``'s result on success."""
+    ``fn``'s result on success.
+
+    *missing_msg* and the ``ValueError`` text are both caller/exception-
+    supplied and not restricted to a safe character class here (e.g.
+    plugins.py builds ``missing_msg`` from a user-typed plugin name) - escape
+    both, the same defense-in-depth this shared helper's other reporting
+    functions use."""
+    from rich.markup import escape
+
     try:
         return fn(*args, **kwargs)
     except KeyError:
-        console.print(f"[red]{missing_msg or 'Not found'}[/red]")
+        console.print(f"[red]{escape(missing_msg or 'Not found')}[/red]")
         sys.exit(1)
     except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
 
 

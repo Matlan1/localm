@@ -35,6 +35,9 @@ def _bare_llama() -> LlamaCpp:
     llm._cached_tokens = []
     llm._ctx_capacity = 4096
     llm._kv_supported = None
+    # __init__ always sets this; a hand-built instance that omits it is
+    # not a LlamaCpp, and the generate path reads it directly.
+    llm._mtp_ctx_ptr = None
     llm._gen_lock = threading.RLock()
     llm._inference_lock = threading.Lock()
     llm._stop = threading.Event()

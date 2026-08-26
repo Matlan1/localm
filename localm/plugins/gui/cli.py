@@ -529,13 +529,13 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 else "the API key is too short to be safe")
         bind_fallback = (
             f"The configured bind address ({host}) was not applied: {_why}. "
-            f"The server is on 127.0.0.1 (this computer only). Set a strong "
-            f"API key (Settings > Security > Owner key, or run: localm key "
-            f"generate), then restart the server.")
+            f"The server is on 127.0.0.1 (this computer only). Set a long, "
+            f"random API key (Settings > Security > Owner key, or run: localm "
+            f"key generate), then restart the server.")
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
         console.print(
             "[bold yellow]  Ignoring the configured bind address and binding "
-            "127.0.0.1 (this computer only). Set a strong API key, then "
+            "127.0.0.1 (this computer only). Set a long, random API key, then "
             "restart.[/bold yellow]")
         from localm.debuglog import logger as _blog
         _blog.warning("config bind_host=%s not applied: %s", host, _why)

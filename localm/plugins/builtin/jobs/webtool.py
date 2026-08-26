@@ -377,8 +377,33 @@ def run_web_call(call: dict) -> str:
                 "access did not work.")
 
 
-def _complete(engine, messages: list) -> str:
-    return "".join(engine.chat_stream(messages)).strip()
+def _tool_call_grammar(engine):
+    """(grammar, trigger_patterns) for lazy web-tool-call enforcement, or None.
+
+    Mirrors coder/agent/context.py's lazy branch: once the model starts a
+    <tool_call>, force it to be valid tool-call JSON; free text and thinking
+    stay unconstrained. Chat's web loop never forces a first-token call (it
+    always has the option to just answer), so there is no forced-grammar rung
+    here the way coder has one."""
+    if not getattr(engine, "supports_grammar", False):
+        return None
+    try:
+        from localm.config import load_config
+        if not load_config().get("chat_tool_grammar", True):
+            return None
+    except Exception:
+        return None
+    from localm.inference.gbnf import TOOL_CALL_TRIGGER, TOOL_CALLS_ONLY
+    return TOOL_CALLS_ONLY, [TOOL_CALL_TRIGGER]
+
+
+def _complete(engine, messages: list, *, grammar_pair=None) -> str:
+    kwargs = {}
+    if grammar_pair:
+        grammar, triggers = grammar_pair
+        engine.validate_grammar(grammar, lazy=True)
+        kwargs = {"grammar": grammar, "grammar_triggers": triggers, "grammar_lazy": True}
+    return "".join(engine.chat_stream(messages, **kwargs)).strip()
 
 
 def _final_answer(reply: str) -> str:
@@ -410,8 +435,32 @@ def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> 
 
     messages = [{"role": "system", "content": WEB_TOOL_SYSTEM},
                 {"role": "user", "content": prompt}]
+    from localm.inference.backends.base import GrammarUnsupportedError
+
+    grammar_unsupported = False
+
+    def _turn() -> str:
+        """One completion, grammar-constrained while the backend allows it.
+
+        Falls back to unconstrained the first time the backend refuses (rule 5:
+        noticed via a warning, not silently repeated) and stays off for the rest
+        of this run - a doomed grammar re-offered every round would just refuse
+        again on identical evidence."""
+        nonlocal grammar_unsupported
+        pair = None if grammar_unsupported else _tool_call_grammar(engine)
+        if pair is None:
+            return _complete(engine, messages)
+        try:
+            return _complete(engine, messages, grammar_pair=pair)
+        except GrammarUnsupportedError as e:
+            logger.warning(
+                "chat web-tool grammar rejected by the backend (%s); continuing "
+                "this job without constrained tool-call sampling", e)
+            grammar_unsupported = True
+            return _complete(engine, messages)
+
     for _ in range(max_rounds):
-        reply = _complete(engine, messages)
+        reply = _turn()
         # Limit 2: we run the first call and only need to know whether ANY further
         # call was present, so it never pays to enumerate the rest.
         calls = parse_web_calls(reply, limit=2)
@@ -436,7 +485,7 @@ def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> 
     messages.append({"role": "user", "content":
                      "Use the information already gathered to answer now. "
                      "Do not search again."})
-    final = _complete(engine, messages)
+    final = _turn()
     if parse_web_call(final) is not None:
         # The model kept trying to call a tool instead of answering - don't return a
         # raw tool-call block as the job's "answer".

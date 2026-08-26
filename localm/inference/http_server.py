@@ -60,35 +60,46 @@ from localm.inference.protocol import (
 _engines: dict[str, Engine] = {}
 # Order of model usage (display names, MRU at the end)
 _engines_lru: list[str] = []
-# Display names currently mid-eviction: already detached from _engines and
-# _engines_lru, so a fast-path lookup sees them as gone, but the native free
-# (evict_engine.unload(), an executor call the eviction loop awaits) has not
-# completed. A concurrent switch_engine or get_engine call for THIS SAME name has
-# no other way to see that a free is in flight for it, and would otherwise
-# construct and load a brand-new engine for the name while the stale eviction is
-# still running, then end up pinning an engine that gets freed out from under it.
-# switch_engine consults this before constructing or loading *name* and refuses
-# with a 503 rather than racing it.
+# Display names currently mid-eviction: detached from _engines/_engines_lru
+# already (BUG-9b's fix, so a fast-path lookup correctly sees them as gone),
+# but the native free (evict_engine.unload(), an executor call the eviction
+# loop awaits) has not completed yet. A concurrent switch_engine/get_engine
+# call for THIS SAME name has no other way to see that a free is in flight
+# for it: it would otherwise construct-and-load a brand-new engine for the
+# name while the stale eviction is still running, race it, and (once the
+# stale unload() finally completes) that caller can end up pinning an engine
+# that gets freed out from under it - the exact pin-arrives-during-the-
+# unload-await hazard BUG-9b closed for the FAST path, reopened for this one
+# by #753's fall-through-to-a-real-load-attempt change (confirmed by bisection:
+# test_eviction_victim_race.py::test_eviction_victim_not_pinnable_during_native_free
+# passes at #752, fails at #753). switch_engine consults this before
+# constructing/loading *name* and refuses (503, honest backpressure - the
+# test's own documented acceptable outcome) rather than racing it.
 _evicting_names: set[str] = set()
 # Default/startup model name
 _default_model_name: str | None = None
 # Active model name (most recently used/loaded)
 _active_model_name: str | None = None
 # The name _active_model_name held immediately before a full eviction
-# (unload_all_models) cleared it. That eviction KEEPS the Engine in _engines so it
-# reloads lazily, and without this the only thing that could still NAME it was
-# _default_model_name, which is write-once at startup and never updated by a model
-# switch, so an unnamed request would resolve to the startup model rather than the
-# one actually in use. Only ever consulted via _resolve_unnamed_model_name, AFTER
-# _active_model_name, and cleared by switch_engine on every successful activation,
-# so a later eviction on a different path cannot resolve it to a stale name from an
-# unrelated eviction.
+# (unload_all_models) cleared it. That eviction deliberately KEEPS the Engine
+# in _engines "so it reloads lazily" - but without this, the only thing that
+# could still NAME it was _default_model_name, which is write-once at startup
+# (create_app) and never updated by a model switch. So after start-A,
+# switch-to-B, evict, an unnamed request silently resolved to A (the startup
+# model) instead of B (the one actually in use) - the same defect masquerading
+# as two different symptoms depending on whether a switch ever happened. Only
+# ever consulted via _resolve_unnamed_model_name, AFTER _active_model_name;
+# cleared by switch_engine on every successful activation (not just left to
+# rot) so a later eviction on a DIFFERENT path (idle-unload, a single-model
+# unload) can never resolve it to a stale name from an unrelated, long-past
+# eviction - see those functions for why they do not set it themselves.
 _last_active_model_name: str | None = None
 
 # The server's audit log, published by create_app() (see the `global _audit`
-# there). Defaults to None here so _do_restart's `global _audit` always resolves to
-# a real, possibly None, value even in a process where create_app() never ran:
-# reading an unassigned global raises NameError rather than giving a clean None.
+# there). Must default to None here so _do_restart's `global _audit` guard
+# always resolves to a real (possibly None) value even if it runs in a
+# process/interpreter where create_app() was never called first - reading an
+# unassigned global raises NameError, not a clean "None" check.
 _audit = None
 
 # Inference serialisation - per-model semaphores mapping display name -> Semaphore
@@ -99,21 +110,21 @@ _engine: Engine | None = None
 _inference_sem: asyncio.Semaphore | None = None
 
 # The server's running event loop, captured once at lifespan startup so an OFF-loop
-# worker thread, notably the jobs runner on a run_in_executor thread, can submit a
-# coroutine back ONTO it via asyncio.run_coroutine_threadsafe. Used to route a
-# shared-engine unload through the guarded unload_one_model ON the loop, where
-# get_engine and the synchronous request _pin also run: the event loop is the
-# serialization point that makes eviction safe, and a bare off-loop
-# engine.unload() races get_engine's fast path and ignores the in-flight pin. None
-# until a real server lifespan runs, so an off-loop caller detects no-loop and
-# degrades safely instead of racing the registry.
+# worker thread (notably the jobs runner, which runs on a run_in_executor thread) can
+# submit a coroutine back ONTO it via asyncio.run_coroutine_threadsafe. Used to route
+# a shared-engine unload through the guarded unload_one_model ON the loop, where
+# get_engine and the synchronous request _pin also run - the event loop is the
+# serialization point that makes eviction safe (a bare off-loop engine.unload() races
+# get_engine's fast path and ignores the in-flight pin). None until a real server
+# lifespan runs (a bare create_app() test app / headless import never sets it), so an
+# off-loop caller detects "no loop" and degrades safely instead of racing the registry.
 _server_loop: "asyncio.AbstractEventLoop | None" = None
 
-# Preemptive model switching (see switch_engine). _switch_desired is the most
-# recent switch request, _switch_loading the model whose load is in flight, and
-# _switch_cancel aborts it. Touched only on the event-loop thread inside
-# switch_engine, except the cancel event, which the loader thread's load-progress
-# callback reads; threading.Event is thread-safe.
+# Preemptive model switching (see switch_engine). _switch_desired = most-recent
+# switch request; _switch_loading = model whose load is in flight; _switch_cancel
+# aborts it. Touched only on the event-loop thread inside switch_engine, except the
+# cancel event, which the loader-thread load-progress callback reads
+# (threading.Event is thread-safe).
 _switch_desired: Optional[str] = None
 _switch_loading: Optional[str] = None
 _switch_cancel: Optional["threading.Event"] = None
@@ -122,39 +133,62 @@ _switch_cancel: Optional["threading.Event"] = None
 # None until lifespan startup populates it, and ONLY for a real, non-isolated,
 # instances.advertise()'d server (app.state.instance_id set, instance_isolated
 # falsy). A plain create_app() test app or an --isolated run never sets it, so it
-# never touches the shared machine-wide registry. Shape: instance_id, port, host,
-# scheme, token.
+# never touches the shared machine-wide registry (zero-daemon). Shape:
+# {"instance_id", "port", "host", "scheme", "token"}.
 _gpu_coord: Optional[dict] = None
 
 # Hang watchdog: a monotonic heartbeat bumped every _HEARTBEAT_INTERVAL_S by
-# _hang_heartbeat_loop, an async task ON the loop, and read by the off-loop
-# watchdog thread, the debug request log and GET /debug/stacks. A growing
-# (now - _hb_monotonic) means the single event loop has stopped making progress.
-# The off-loop watchdog thread compares this raw gap against its own multi-second
-# threshold (hang_watchdog_threshold(), 10s by default) and is unaffected by the
-# note below.
+# _hang_heartbeat_loop (an async task ON the loop) and read by the off-loop
+# watchdog thread + the debug request log + GET /debug/stacks. A growing (now
+# - _hb_monotonic) means the single event loop has stopped making progress,
+# i.e. something is blocking it (the diagnosed hang) - the off-loop watchdog
+# thread compares this raw gap against its own multi-second threshold
+# (hang_watchdog_threshold(), 10s by default) and is unaffected by the note
+# below.
 #
-# The heartbeat TASK's own startup, in lifespan below, is gated only on pytest not
-# being loaded, NOT on the watchdog thread's privacy or env gate: it is pure
-# in-memory bookkeeping with no I/O and nothing observable outside this process, so
-# it carries none of the privacy considerations that gate the stack-dump-to-disk
-# thread, and every reader below needs it regardless of which of them is active.
+# The heartbeat TASK's own startup (lifespan, below) is gated only on
+# "pytest" not in sys.modules - NOT on the watchdog thread's privacy/env gate.
+# It is pure in-memory bookkeeping (no I/O, nothing persisted or observable
+# outside this process), so it carries none of the privacy considerations
+# that gate the stack-dump-to-disk thread, and every reader below needs it
+# regardless of which of them is actually active. The two used to share one
+# combined gate, which left _hb_monotonic permanently None (and every reader
+# permanently, indistinguishably "healthy") whenever the log/stacks readers
+# were reachable but the watchdog-thread gate was not (LOCALM_HANG_WATCHDOG=0,
+# or privacy mode on default config) - verified live: a genuine 2.0s
+# event-loop stall still read loop_lag=0.00 in both configs.
 #
-# _loop_lag_seconds() below answers a DIFFERENT question and is what must be used
-# for anything reported to a human. Raw (now - _hb_monotonic) saws between 0 and
-# about _HEARTBEAT_INTERVAL_S on a perfectly healthy loop, which is just how far
-# into the current tick cycle now happens to land. Subtracting the interval turns
-# it into a real scheduling-delay figure: about 0 when healthy, positive only when
-# a tick itself was late.
+# _loop_lag_seconds() (below) answers a DIFFERENT question and must be used
+# for anything reported to a human. Raw (now - _hb_monotonic) saws between 0
+# and ~_HEARTBEAT_INTERVAL_S on a perfectly healthy loop - that is just how
+# far into the current tick cycle "now" happens to land, not evidence of lag
+# (GitHub #955/#950: this raw value was logged as "loop_lag" on every debug
+# request, so a healthy server reported up to a full second of fake "lag" on
+# a sawtooth, sending the maintainer chasing ghosts). Subtracting the
+# interval turns it into a real scheduling-delay figure: ~0 when healthy,
+# and positive only when a tick itself was late, i.e. something actually
+# blocked the loop.
 #
-# None, rather than a real monotonic value, UNTIL THE HEARTBEAT TASK'S OWN FIRST
-# TICK, and never seeded at import time. _hang_heartbeat_loop() is only
-# created once lifespan() starts and only updates this on its first turn on the
-# loop; an import-time seed leaves a cold-start window, from import to first tick,
-# where (now - _hb_monotonic) measures elapsed-since-import rather than scheduling
-# delay - a number that grows with wall-clock time regardless of what the loop is
-# doing. Both readers below treat None as no-reading-yet and report None or skip
-# the check rather than inventing a number.
+# None (not a real.monotonic() value) UNTIL THE HEARTBEAT TASK'S OWN FIRST
+# TICK - deliberately NOT seeded at import time. _hang_heartbeat_loop() is
+# only created once lifespan() starts, and only updates this on its first
+# actual turn on the loop; a module-import-time seed left a COLD-START WINDOW
+# (import -> first tick, which a slow startup/model-load can stretch to a
+# minute-plus) where "now - _hb_monotonic" measures elapsed-since-import, not
+# scheduling delay - a NUMBER THAT GROWS WITH WALL-CLOCK TIME REGARDLESS OF
+# WHAT THE LOOP IS DOING, exactly the #955/#950 defect this module already
+# fixed once, surviving in the one window that fix's own tests never sampled
+# (a fresh module import, not a running heartbeat). Measured live: a /health
+# check during model load read loop_lag=13.50s, and a later request in that
+# same still-cold-started run read 71.11s - growing with elapsed time, not
+# with what either request was doing (see dev-notes/restart-loop-lag-
+# investigation-2026-08-04.md for the full trace that found this). Both
+# readers below (_loop_lag_seconds, the watchdog thread) treat None as "no
+# reading yet" - report None / skip the check (ADR-0008 U6: _loop_lag_seconds
+# used to return 0.0 here, the same reading as healthy; every caller now
+# renders its None explicitly instead) - rather than inventing a number from
+# a timestamp that was never real. Do not "simplify" this back to a
+# time.monotonic() seed; that is the bug, not a redundancy.
 _HEARTBEAT_INTERVAL_S = 1.0
 _hb_monotonic: Optional[float] = None
 
@@ -172,15 +206,20 @@ def _loop_lag_seconds() -> Optional[float]:
     a perfectly healthy loop - a 1Hz heartbeat cannot see a sub-interval
     block. "loop_lag=0.0" therefore means "no stall LONGER than the
     heartbeat interval was detected", not "the loop was never blocked at
-    all". The hang watchdog (large-threshold, above) owns detecting a real
-    freeze; this value is for correlating a slow request with a preceding
-    stall, not for catching sub-second ones.
+    all". A finer-grained sampler would close this gap at the cost of a
+    second background task and more wakeups purely for a diagnostic counter,
+    which is not worth it: the hang watchdog (large-threshold, above) already
+    owns detecting a real freeze; this value is for correlating a slow
+    request with a preceding stall, not for catching sub-second ones.
 
     COLD START, before the heartbeat task's first tick (_hb_monotonic is
-    still None): returns None, never 0.0, which is the same reading as
-    "healthy". Every caller must render None as explicitly unavailable and
-    never reuse the "0.0 = no stall longer than the interval" reading for a
-    state that has no reading at all - see the debug request log and
+    still None): returns None (ADR-0008 U6). It used to return 0.0 here -
+    the SAME reading as "healthy" - which is exactly the #955/#950 shape
+    this module fixed once already, just moved from the producer that grows
+    with wall-clock time to the producer that reports a fixed false-healthy
+    number. Every caller must render None as explicitly unavailable, never
+    silently reuse the "0.0 = no stall longer than the interval" reading for
+    a state that has no reading at all - see the debug request log and
     /debug/stacks call sites."""
     if _hb_monotonic is None:
         return None
@@ -209,7 +248,7 @@ def _model_file_size(name: str) -> Optional[int]:
     own file_size computation (residency.model_footprint_bytes) for the
     single-file-vs-directory STAT LOGIC, so the VRAM estimate written to the
     coordination registry is consistent with the number switch_engine itself
-    uses to decide whether eviction was needed - but NOT for the
+    used to decide whether eviction was needed - but deliberately NOT for the
     empty-directory return value: model_footprint_bytes returns int (never
     None) because its caller always needs a numeric eviction-admission input,
     even a 0 one; this function feeds a registry field other instances treat
@@ -217,8 +256,10 @@ def _model_file_size(name: str) -> Optional[int]:
     measurement (see gpu_registry.py's vram_estimate_bytes and its one
     consumer's `isinstance(e, int) and e > 0` guard). rglob() matching no
     files - an empty directory, or one whose real weights sit somewhere
-    rglob does not look - means the size was not measured, so it reports
-    None; a 0 there would read as a measured zero."""
+    rglob does not look - means the size genuinely was not measured, and
+    reporting a suspiciously-precise 0 for "unknown" is exactly the
+    collapsed-two-outcomes failure AGENTS.md rule 5 warns about, even though
+    today's one consumer happens to treat 0 the same as None already."""
     try:
         from pathlib import Path as _Path
         from localm.model_manager import get_model_info
@@ -259,7 +300,7 @@ def _gpu_registry_sync() -> None:
     ``--isolated`` run never reaches the shared registry directory at all).
 
     Never raises into the caller: a registry write failure must not break the
-    model load/unload it is piggybacking on. Logged, never silenced."""
+    model load/unload it is piggybacking on (RULE 5 - logged, not silenced)."""
     global _gpu_coord
     if not _gpu_coord:
         return
@@ -298,16 +339,18 @@ def _load_gpu_indices() -> set:
     is primary"), and resolve_main_gpu_index(None) returns 0 for an unconfigured
     main_gpu_index even on a box whose split spans 0 AND 1. Weighing peers
     against that single index while weighing VRAM against vram_capacity()'s
-    COMBINED split total contradicts itself and drops a sibling holding VRAM
-    on this instance's own second split device, turning a cooperative unload
-    into a 503. That capacity-vs-identity distinction is what the raw-accessor
-    guard in scripts/check_hygiene.py enforces.
+    COMBINED split total contradicts itself, and dropped a sibling holding VRAM
+    on this instance's own second split device - turning a cooperative unload
+    that used to succeed into a 503 (the capacity-vs-identity distinction the
+    raw-accessor guard in scripts/check_hygiene.py exists to enforce).
 
-    Known limitation: a registry entry advertises ONE ``gpu_index`` per instance
-    (see _gpu_registry_sync), so a SPLIT peer is represented only by its main
-    device. A split peer whose main device is outside our set is therefore
-    skipped even though it may hold VRAM on a device we do use. The effect is a
-    missed cooperation opportunity (a 503), never a wrong yank."""
+    Known limitation, stated rather than hidden (rule 5): a registry entry
+    advertises ONE ``gpu_index`` per instance (see _gpu_registry_sync), so a
+    SPLIT peer is represented only by its main device. A split peer whose main
+    device is outside our set is therefore still skipped even though it may hold
+    VRAM on a device we do use. Widening the entry to a device LIST is a registry
+    schema change, out of scope here; the effect is a missed cooperation
+    opportunity (the pre-existing 503), never a wrong yank."""
     try:
         from localm.config import load_config
         from localm.discover import resolve_gpu_split
@@ -334,8 +377,8 @@ def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
     freed its model.
 
     Cooperating COSTS the sibling every model it has loaded (the peer runs its
-    own ``unload_all_models``), so it is conservative about when it is worth
-    it:
+    own ``unload_all_models``), so this is deliberately conservative about when
+    it is worth it (REG-454):
 
     - *asked* (a set of instance_ids, per load attempt) makes each peer
       answerable at most ONCE. The caller re-probes VRAM and calls back on
@@ -363,9 +406,9 @@ def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
     so tests and isolated runs never touch the shared machine-wide registry
     directory or make an outbound loopback call). Fully advisory: ANY failure
     (no registry dir, no live peer, request timeout/refusal) is logged and
-    returns False, so the caller's 503 remains the fallback. A failed
-    cooperation attempt is never silenced and never a harder failure than that
-    503."""
+    returns False - the caller's pre-existing 503 remains the unchanged
+    fallback (RULE 5: a failed cooperation attempt must never become a HARDER
+    failure than today's baseline, and must never be silenced)."""
     global _gpu_coord
     from localm.debuglog import logger as _dbg
     if not _gpu_coord:
@@ -426,8 +469,8 @@ def _gpu_placement_fields(engine) -> dict:
     current load, or {} when the backend cannot report placement (no load
     yet, or a backend without a layer-count knob - see Engine.gpu_placement).
     Merged into every switch_engine()/load-route success payload so a caller
-    can tell a full GPU load from a silent CPU fallback instead of reading a
-    bare "loaded"/"already_active"."""
+    can tell a full GPU load from a silent CPU fallback (AGENTS.md rule 5)
+    instead of a bare "loaded"/"already_active" that hides it."""
     placement = getattr(engine, "gpu_placement", None)
     return dict(placement) if placement else {}
 
@@ -437,10 +480,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
 
     # Preemption (a newer selection aborts an in-flight load) is SINGLE-slot and
-    # belongs to an explicit user switch, not API-routed loads: with preempt=True,
-    # two concurrent DIFFERENT-model requests cancel each other and the earlier one
-    # 503s as superseded. get_engine therefore loads with preempt=False, so loads
-    # coexist and queue; only the GUI/CLI switch_model path preempts.
+    # belongs to an explicit user switch, not API-routed loads: with preempt=True
+    # two concurrent DIFFERENT-model requests cancel each other and the earlier
+    # 503s "superseded" (AUDIT-HIGH-3). So get_engine loads preempt=False (loads
+    # coexist/queue); only the GUI/CLI switch_model path preempts.
     if preempt:
         _switch_desired = name
         if _switch_cancel is not None and _switch_loading != name:
@@ -461,8 +504,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 _engines_lru.remove(name)
             _engines_lru.append(name)
             _active_model_name = name
-            # A real active model again, so any name remembered from a past
-            # eviction is no longer needed (see _last_active_model_name).
+            # A real active model again: any name remembered from a past
+            # eviction is no longer needed and must not outlive its purpose
+            # (see _last_active_model_name's own docstring).
             _last_active_model_name = None
             _engine = _engines[name]
             _inference_sem = sem
@@ -473,10 +517,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
         # Perform VRAM check and eviction
         from localm import discover
-        # By-symbol AND by-module: the by-symbol names are re-read from
-        # the module on every call, since this import is function-scoped, which is
-        # what lets tests patch localm.discover.vram_capacity; the module handle is
-        # for the constants, which no test patches.
+        # By-symbol AND by-module deliberately: the by-symbol names are re-read from
+        # the module on every call (this import is function-scoped), which is what
+        # lets tests patch localm.discover.vram_capacity; the module handle is for the
+        # constants, which no test patches.
         from localm.discover import gpu_split_shortfall, vram_capacity
         from localm.model_manager import get_model_info
         from localm.config import load_registry
@@ -484,18 +528,20 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         registry = load_registry()
         info = get_model_info(name)
         # file_size feeds the VRAM-eviction estimate below, which is gated on a
-        # non-empty registry, so it is only needed for a registered model.
+        # non-empty registry. So it is only needed for a registered model.
         file_size = 0
         if info is not None:
             m_path, _ = info
             file_size = residency.model_footprint_bytes(m_path)
         elif registry:
-            # Registered against a real registry but the files are not on disk: the
-            # shipped 404 contract, rather than a fabricated path and size that
-            # would run the eviction math on fiction.
+            # Registered against a real registry but the files are not on disk:
+            # the shipped 404 contract. (Previously papered over with a fabricated
+            # path + 4 GB size when pytest was importable, making the 404 path
+            # untestable and running eviction math on fiction - AUDIT rule 5 / no
+            # facade.)
             raise HTTPException(404, f"Model files not found: {name}")
-        # else: empty registry (single-model or direct-path startup), so there is no
-        # size to compute and the eviction block below is skipped.
+        # else: empty registry (single-model / direct-path startup) - no size to
+        # compute; the eviction block below is skipped for an empty registry.
 
         # Only perform eviction check if there are registered models
         if registry:
@@ -511,112 +557,152 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             _cfg = _load_config()
             resident_cap = residency.resident_cap(_cfg)
             pinned = residency.pinned_model_names(_cfg)
-            # vram_capacity() alone proves only that the AGGREGATE combined split
-            # free is enough, while the GGUF/llama.cpp backend divides a model by a
-            # STATIC per-config ratio with no live per-device capacity check of its
-            # own, unlike the HF backend's device_map=auto, which self-corrects from
-            # live per-device free VRAM. So an asymmetric split can pass the
-            # aggregate check while one device's actual share is short. Applies only
-            # to a GGUF-backend load. See discover.gpu_split_shortfall.
+            # discover.gpu_split_shortfall's docstring has the full rationale:
+            # vram_capacity() alone proves the AGGREGATE combined split free is
+            # enough, but the GGUF/llama.cpp backend divides a model by a
+            # STATIC per-config ratio with no live per-device capacity check of
+            # its own (unlike the HF backend's device_map="auto", which already
+            # self-corrects from live per-device free VRAM) - so an asymmetric
+            # split (e.g. another already-loaded model sits on one device more
+            # than another) can pass the aggregate check while one device's
+            # actual share is short, reaching the native loader with too
+            # little room on that device. Only applies to a GGUF-backend load.
             check_split_fit = _is_gguf(m_path)
             # Peers already asked to cooperate during THIS load attempt: each is
-            # answerable once, so the loop below always makes progress.
+            # answerable once, so the loop below always makes progress (REG-454).
             asked_peers: set = set()
-            # The shared embedder is attempted as an eviction candidate at most once
-            # per load attempt, mirroring asked_peers above: without the bound, a
-            # concurrent get_embedder() reload from an unrelated request between two
-            # iterations could repopulate embedder._EMBEDDER and make this branch
-            # fire again instead of converging to a load or the final 503.
+            # The shared embedder is attempted as an eviction candidate at most
+            # once per load attempt, mirroring asked_peers just above: without
+            # this bound, a concurrent get_embedder() reload from an unrelated
+            # RAG/memory/coder-episode request between two iterations of this
+            # loop could repopulate localm.inference.embedder._EMBEDDER between
+            # attempts, making this branch fire again instead of the loop
+            # converging to either a successful load or the final 503.
             embedder_evict_attempted = False
 
             while True:
-                # Off the event loop: vram_capacity() and gpu_split_shortfall()
-                # route through discover.list_gpus(), which is deadline-bounded but
-                # still a REAL hardware probe that can take up to that deadline, so
-                # calling it on the loop would stall every other concurrent request
-                # for that long. This loop can re-probe several times per eviction.
+                # Off the event loop: vram_capacity()/gpu_split_shortfall() route
+                # through discover.list_gpus(), which is deadline-bounded (PR #541)
+                # but still a REAL hardware probe that can take up to that deadline
+                # - calling it directly on the loop would stall every other
+                # concurrent request on this single-threaded server for that long,
+                # the exact class of hang #541 fixed for the GUI routes and the
+                # GPU-registry heartbeat. This loop can iterate (and re-probe)
+                # multiple times per eviction, so it is just as exposed.
+                # _GPU_PROBE_CLI_DEADLINE (now an alias of the module default, which
+                # became cold-init-tolerant when the old 4.0s cap was retired): kept
+                # explicit because THIS caller's correctness DEPENDS on waiting out a
+                # cold driver init, and an explicit deadline documents that and pins
+                # it against any future default change. History: this probe once
+                # inherited that 4.0s cap while executor-offloaded (the cap existed
+                # to guard the event loop, which this call was never on), and a COLD
+                # ROCm/CUDA init (4.63s measured on this box, ~6.5s historically)
+                # reliably overran it - so the first load after every server start
+                # timed out, a fresh process had no last-known-good to serve,
+                # free_vram was None -> "unmeasurable" -> the gate SKIPPED ENTIRELY
+                # (see the state split below). Waiting out the cold init turns the
+                # most common load there is - the first one - from unguarded into
+                # properly checked. Retrying at a longer deadline AFTER a timeout
+                # cannot do this: an overrun probe is abandoned, not cancelled, so
+                # _gpu_probe_inflight stays True and every retry short-circuits to
+                # (last-known-good, GPU_PROBE_BUSY) in 0.0s without probing at all -
+                # measured. The budget must be spent on the FIRST call or not at all.
                 #
-                # _GPU_PROBE_CLI_DEADLINE, an alias of the module default, is passed
-                # explicitly because THIS caller's correctness depends on waiting out
-                # a cold driver init, and an explicit deadline pins that against a
-                # future default change. Retrying at a longer deadline after a
-                # timeout cannot substitute: an overrun probe is abandoned rather
-                # than cancelled, so _gpu_probe_inflight stays True and every retry
-                # short-circuits to (last-known-good, GPU_PROBE_BUSY) without
-                # probing. The budget must be spent on the FIRST call or not at all.
-                #
-                # wait_for_inflight=True closes the remaining window: when a
+                # wait_for_inflight=True (#701) closes the remaining window: when a
                 # CONCURRENT probe already holds the slot - the GUI polls /api/stats
-                # every 2500ms, and its probe holds _gpu_probe_inflight through the
-                # cold init - this call would otherwise take an instant BUSY plus a
-                # stale reading and, with nothing to evict on a fresh server, refuse
-                # spuriously. Instead it JOINS that in-flight probe and waits on its
-                # result, up to this deadline. Safe only because this call is
-                # executor-offloaded.
+                # every 2500ms, whose probe holds _gpu_probe_inflight through the cold
+                # init - this call would otherwise get an instant BUSY + stale reading
+                # and (nothing to evict on a fresh server) refuse spuriously. Instead
+                # it JOINS that in-flight probe and waits on ITS result, up to our
+                # deadline. Safe only because we are executor-offloaded here. So "open
+                # GUI, click a model" on a cold box now gets a real reading, not a
+                # spurious 503.
                 v_info, probe_status = await loop.run_in_executor(
                     None, functools.partial(
                         vram_capacity, return_status=True,
                         deadline=discover._GPU_PROBE_CLI_DEADLINE,
                         wait_for_inflight=True))
                 free_vram = v_info.get("free")
-                # v_info also carries a free_scope tag (FREE_SCOPE_DEVICE vs
-                # FREE_SCOPE_PROCESS): whether `free` counts all processes or only
-                # this one. It is threaded into the PERMIT decision via
-                # residency.fits_alongside_residents's is_process_scoped, because
-                # every resident model lives in its OWN isolated worker subprocess,
-                # so a PROCESS-scoped reading is structurally blind to exactly the
-                # VRAM this check accounts for and can only ever OVER-report free
-                # space. Hence PERMIT-only, never a REFUSE gate:
-                #  - REFUSE direction: ignoring scope is unconditionally safe, since
-                #    a number wrong in the LOW direction only costs a spurious
-                #    refusal.
-                #  - PERMIT direction: a PROCESS-scoped free that over-reports
-                #    headroom is the direction that OOMs, so it is gated exactly
-                #    like an unmeasurable reading.
+                # v_info also carries a "free_scope" tag (FREE_SCOPE_DEVICE vs
+                # FREE_SCOPE_PROCESS, PR #697/#700): whether `free` counts all
+                # processes or only this one. Threaded into the PERMIT decision as
+                # of 2026-08-05 (this is the model-LOAD admission gate, not a
+                # context-grow gate - that is a separate, already-fixed mechanism in
+                # llamacpp/_sizing.py; see
+                # dev-notes/FINDING-vram-load-gate-process-scope-2026-08-05.md) via
+                # residency.fits_alongside_residents's is_process_scoped: every
+                # resident model lives in its OWN isolated worker subprocess
+                # (backends/gguf.py), so a PROCESS-scoped reading is structurally
+                # blind to exactly the VRAM this check exists to account for - it
+                # can only ever OVER-report free space, never under. The asymmetry
+                # that made ignoring scope safe to defer is still why this is
+                # PERMIT-only, never a REFUSE gate:
+                #  - REFUSE direction: ignoring scope was, and remains,
+                #    unconditionally safe (a wrong-in-the-LOW-direction number only
+                #    costs a spurious refusal, not an OOM).
+                #  - PERMIT direction: a PROCESS-scoped `free` over-reporting
+                #    headroom is the direction that OOMs, which is why it is now
+                #    gated exactly like an unmeasurable reading (see
+                #    fits_alongside_residents's docstring). See
+                #    dev-notes/pr697-followup-review.md.
                 free_scope = v_info.get("free_scope")
-                # The scope check above closes every avenue into a PROCESS-scoped
-                # permit regardless of cause, so nothing below gates on the specific
-                # one: joining a concurrent probe could once inherit a thinner
-                # cold-start budget, cold-skipping discover.py's device-global
-                # correction (_apply_device_global_free) so the joined reading came
-                # back PROCESS-scoped. Every deadline is now unified at 15.0s, and
-                # the cold-skip guard in discover.py still exists for a future
-                # short-deadline caller, which this check would catch anyway by
-                # reading the resulting free_scope tag directly.
-                # Two states that want OPPOSITE handling and must not be collapsed
-                # into one measurable flag:
+                # Historical note on ONE specific avenue into a PROCESS-scoped
+                # permit, kept for the forensic trail - the direct scope-check
+                # above now closes every avenue regardless of cause, so this no
+                # longer gates anything by itself. Joining a concurrent probe (the
+                # 2500ms /api/stats heartbeat, wait_for_inflight below) used to be
+                # able to inherit a thinner cold-start budget, causing discover.py's
+                # device-global correction to be cold-skipped
+                # (_apply_device_global_free) and the joined reading to come back
+                # PROCESS-scoped. That was accurate when #697/#700/#701 wrote it
+                # (2026-07-16); #725 (2026-07-17) later unified every deadline to
+                # 15.0s, closing that thin-budget window specifically (pinned by
+                # tests/test_discover.py::
+                # test_no_production_caller_passes_a_short_gpu_probe_deadline, added
+                # 2026-08-05). The underlying discover.py cold-skip guard is
+                # untouched and still exists for a future short-deadline caller -
+                # which would now be caught here regardless, since the check above
+                # reads the resulting free_scope tag directly rather than relying on
+                # no cause ever producing one.
+                # Two states that master conflated under one `measurable` flag, and
+                # they want OPPOSITE handling (AGENTS.md rule 5 - do not collapse a
+                # benign case into an unknown one):
                 #   probe_ok and free is None -> this BOX cannot report free VRAM at
                 #       all (CPU-only, GGUF-only without nvidia-smi, the Windows
-                #       registry tier). PERMANENT, so a best-effort single-resident
-                #       load is correct; refusing would brick it.
-                #   not probe_ok            -> THIS PROBE was inconclusive and the
-                #       box may well be measurable. TRANSIENT, and not a licence to
-                #       skip the gate.
+                #       registry tier). PERMANENT. Best-effort single-resident load is
+                #       correct and is the shipped behaviour - refusing would brick it.
+                #   not probe_ok            -> THIS PROBE was inconclusive; the box may
+                #       well be measurable. TRANSIENT. NOT a licence to skip the gate.
                 probe_ok = probe_status == discover.GPU_PROBE_OK
                 measurable = free_vram is not None
                 cannot_measure = probe_ok and not measurable
                 inconclusive = not probe_ok
-                # Plus headroom, for consistency with the aggregate check just below,
-                # which also demands vram_required + headroom rather than bare
-                # vram_required: a per-device share is not held to a thinner margin
-                # than the aggregate ceiling it composes with. gpu_split_shortfall
-                # does not bake in headroom itself; that is the caller's decision.
-                # No return_status opt-in, which is safe because gpu_split_shortfall
-                # is status-aware and admits on non-OK: a stale or timed-out
-                # per-device probe yields an EMPTY shortfall rather than a fabricated
-                # one, and a device whose reading is blind or stale is omitted rather
-                # than quoted. It also runs WARM here, since the vram_capacity probe
-                # above already paid the cold-init cost. It does not get the
-                # in-flight JOIN (wait_for_inflight), which is moot given that warm
-                # ordering.
+                # + headroom for consistency with the aggregate check just
+                # below, which also demands vram_required + headroom, not
+                # bare vram_required - a per-device share should not be held
+                # to a thinner margin than the aggregate ceiling it composes
+                # with (see gpu_split_shortfall's own docstring: it does not
+                # bake in headroom itself, that is the caller's decision).
+                # No return_status opt-in, and that is SAFE as of #699:
+                # gpu_split_shortfall is status-aware and admits-on-non-OK (a
+                # stale/timed-out per-device probe yields an EMPTY shortfall, never a
+                # fabricated one), and it omits a device whose reading is blind/stale
+                # rather than quoting it. So this call can no longer turn a stale
+                # reading into a spurious refusal or a quoted figure. It also runs
+                # WARM here: the vram_capacity probe above already paid the cold-init
+                # cost, so gpu_split_shortfall's own probe completes fast. The one
+                # thing it does NOT get is #701's in-flight JOIN (wait_for_inflight)
+                # - a tiny follow-up owned by the gpu_split_shortfall session, and
+                # moot in practice given the warm-driver ordering. Passing the
+                # deadline/status through is therefore unnecessary.
                 #
                 # return_shares_adaptive: the refuse-vs-defer branch below MUST know
-                # whether the shares were the live auto free-VRAM-proportional ones,
-                # whose all-short can only mean combined-short and so defers, or
-                # static pinned or equal-fallback shares, which take the hard 503.
-                # Config shape alone cannot answer that: auto can DECLINE on a stale
-                # index or an unmeasurable device and fall back to equal shares with
-                # ratios still unset.
+                # whether the shares were the live auto free-VRAM-proportional ones
+                # (their all-short can only mean combined-short -> defer) or static
+                # pinned/equal-fallback shares (the pre-feature per-device hazard ->
+                # hard 503). Config shape alone cannot answer that: auto can DECLINE
+                # (stale index, unmeasurable device) and fall back to equal shares
+                # with ratios still unset - see gpu_split_shortfall's docstring.
                 shortfall, shares_adaptive = (
                     await loop.run_in_executor(
                         None, functools.partial(
@@ -624,13 +710,13 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                             return_shares_adaptive=True))
                     if check_split_fit else ([], False))
                 # PERMIT only on a reading that was actually taken. A frozen
-                # last-known-good that happens to read HIGH would otherwise pass and
-                # admit a load with zero eviction on top of resident peers: the same
-                # stale int that produces a dishonest 503 in the LOW direction
-                # produces a native OOM or driver TDR in the HIGH one. `measurable`
-                # is folded into the shared predicate and stays a local because the
-                # refuse-vs-defer branch below distinguishes cannot-measure from
-                # inconclusive.
+                # last-known-good that happens to read HIGH would otherwise pass here
+                # and admit a load with ZERO eviction on top of resident peers - the
+                # same stale int that produces a dishonest 503 in the LOW direction
+                # produces a native OOM / driver TDR in the HIGH one.
+                # `measurable` is folded into the shared predicate (free_vram is
+                # not None); it stays a local because the refuse-vs-defer branch
+                # below still distinguishes cannot-measure from inconclusive.
                 over_cap = residency.exceeds_resident_cap(
                     _engines_lru, name, resident_cap)
                 vram_ok = residency.fits_alongside_residents(
@@ -640,30 +726,34 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 if vram_ok and not over_cap:
                     break
 
-                # Make room. With measurable VRAM, evict idle models until the new
-                # one fits, also satisfying any configured split device's own share.
-                # When the box cannot measure, or this probe was inconclusive, it
-                # cannot be proven to fit alongside others, so this falls back to
-                # single-resident and evicts every idle model rather than stacking
-                # until the driver OOMs. The two diverge only once eviction is
-                # exhausted below: cannot-measure loads best-effort, inconclusive
-                # refuses.
-                #
-                # Victim safety - never the requested model, never one that is
+                # Make room. Measurable VRAM: evict idle models until the new one
+                # fits (also satisfying any configured split device's own share
+                # - see check_split_fit above). Cannot measure (default GGUF-only
+                # / non-NVIDIA, no "free" from discover.vram_info) or inconclusive:
+                # cannot prove it fits alongside others, so fall back to
+                # single-resident (evict every idle model first) rather than stacking
+                # until the driver OOMs (AUDIT-CRIT-2). The two diverge only once
+                # eviction is exhausted, below: cannot-measure loads best-effort,
+                # inconclusive refuses.
+                # Victim safety (never the requested model, never one that is
                 # serving, never one another path is already mid-freeing, never a
-                # pinned one - lives in residency.pick_eviction_victim, shared with
-                # the MCP server's cache.
+                # pinned one) lives in residency.pick_eviction_victim, shared with
+                # the MCP server's cache. Its docstring carries the full rationale
+                # for each skip, in particular why active_requests==0 alone is not
+                # enough to rule out a concurrent double free.
                 evict_name = residency.pick_eviction_victim(
                     _engines_lru, _engines, requested=name, pinned=pinned)
 
                 if evict_name is None and vram_ok:
-                    # ONLY the resident cap wanted room, and nothing could be freed
-                    # because every peer is pinned or serving. VRAM already fits, so
-                    # this is a user PREFERENCE going unmet rather than a safety
-                    # constraint: the model loads and the missed cap is logged.
-                    # Falling through to the exhaustion path below would answer a
-                    # preference with a 503, and would first ask a SIBLING localm
-                    # instance to dump its models to free VRAM that was never short.
+                    # ONLY the resident cap wanted room, and nothing could be
+                    # freed (every peer is pinned or serving). VRAM already
+                    # fits, so this is a user PREFERENCE going unmet, not a
+                    # safety constraint. Load, and say the cap was missed.
+                    # Falling through to the exhaustion path below would answer
+                    # a preference with a 503 - and, worse, would first ask a
+                    # SIBLING localm instance to dump its models to free VRAM
+                    # that was never short. Being one model over a soft cap is
+                    # strictly better than either.
                     from localm.debuglog import logger as _dbg
                     _dbg.warning(
                         "max_resident_models=%s wanted room for %s but no "
@@ -674,29 +764,35 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     break
 
                 if evict_name is None:
-                    # Nothing idle among the chat engines. The shared embedder has
-                    # a separate lifecycle from _engines: it is loaded
-                    # independently by RAG, memory and coder-episode callers via
-                    # get_embedder(), never through switch_engine, so the LRU scan
-                    # above can never see it even though it can hold real,
-                    # evictable VRAM.
-                    #
-                    # Honor the in-flight-request pin exactly like
-                    # unload_all_models's own embedder release: a request
-                    # mid-embed() must not have its embedder, and the isolated
-                    # worker process it is waiting on, freed out from under it.
+                    # Nothing idle among the chat engines. The shared embedder is a
+                    # separate lifecycle from _engines (see localm.inference.embedder's
+                    # module docstring): it is loaded independently by RAG/memory/
+                    # coder-episode callers via get_embedder(), never through
+                    # switch_engine, so the LRU scan above can never see it even
+                    # though it can hold real, evictable VRAM. Without this, a chat
+                    # load that only needed to reclaim the embedder's VRAM fell
+                    # straight through to the cooperative-unload / final-503 handling
+                    # below having never tried the cheapest, purely-local option
+                    # first - a resident-but-idle embedder left over from a RAG/
+                    # memory run made every next chat load 503 with "not enough
+                    # VRAM" even though the embedder alone was the entire shortfall.
+                    # Honor the in-flight-request pin (AUDIT-CRIT-1) exactly like
+                    # unload_all_models's own embedder release does: a request
+                    # mid-embed() must not have its embedder (and the isolated
+                    # worker process it is waiting on) freed out from under it.
                     # reset_embedder(force=False) checks active_requests()==0 and
-                    # clears the embedder in ONE locked step, closing the TOCTOU
-                    # window a separate active_requests() call would leave, since
+                    # clears the embedder in ONE locked step, not a separate
+                    # active_requests() call followed by an unconditional
+                    # reset_embedder() - that used to leave a TOCTOU window, since
                     # IsolatedEmbedder.embed() pins active_requests without taking
                     # embedder._LOCK.
                     #
-                    # embedder_evict_attempted, set above the while loop, bounds
-                    # this to once per load, for the same reason as asked_peers
-                    # below: loaded_dim() answers None again once this attempt
-                    # clears it, but a concurrent get_embedder() could repopulate
-                    # it before the next pass, so self-clearing is not a progress
-                    # guarantee.
+                    # embedder_evict_attempted (set above the while loop) bounds
+                    # this to once per load, same rationale as asked_peers just
+                    # below: loaded_dim() answers None again once THIS attempt
+                    # clears it, but a concurrent get_embedder() from an unrelated
+                    # request could repopulate it before this loop's next pass, so
+                    # "it clears itself" alone is not a progress guarantee.
                     if not embedder_evict_attempted:
                         embedder_dim = await loop.run_in_executor(
                             None, _embedder_mod.loaded_dim)
@@ -716,31 +812,38 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
                     # Nothing idle left to evict.
                     if cannot_measure:
-                        # This BOX cannot report free VRAM at all and every
-                        # remaining model is busy, or none is loaded: free what can
-                        # safely be freed and load best-effort. Refusing here would
-                        # brick every CPU-only, GGUF-only or registry-tier box,
-                        # which can never measure.
+                        # This BOX cannot report free VRAM at all, and every remaining
+                        # model is busy (or none loaded): freed what we safely can,
+                        # load best-effort (the pre-multi-model behaviour). Correct and
+                        # unchanged - refusing here would brick every CPU-only /
+                        # GGUF-only / registry-tier box, which can NEVER measure.
                         break
                     if inconclusive:
-                        # The probe did not complete, so free VRAM is unknown.
-                        # Refuse rather than load with no VRAM check: the failure
-                        # modes are not symmetric. A wrong permit hands a too-big
-                        # model to the native loader, which can hard-abort the
-                        # process rather than return NULL, and is unrecoverable; a
-                        # wrong refusal is a 503 the caller can retry, by which
-                        # time the abandoned probe has usually landed and the
-                        # driver is warm. No figure is quoted, because none was
-                        # measured.
+                        # The probe did not complete, so we do not know. Master reached
+                        # this line with free_vram None and took the break above,
+                        # loading with NO VRAM CHECK AT ALL - and because a cold driver
+                        # init reliably overruns the old 4s cap, that was the FIRST
+                        # load after every server start on such a box, silent but for a
+                        # logger.debug. Refuse instead: the failure modes are not
+                        # symmetric. A wrong permit hands a too-big model to the native
+                        # loader, which "can hard-abort the process rather than return
+                        # NULL" (gpu_split_shortfall's docstring) - unrecoverable. A
+                        # wrong refusal is a 503 the user can retry, and by then the
+                        # abandoned probe has usually landed and the driver is warm.
+                        # Quotes no figure: we have none we measured (rule 5).
                         #
-                        # Two ways the probe fails to complete, and both the long
-                        # deadline and wait_for_inflight=True above target them:
-                        # a cold init on a fresh process, which the deadline waits
-                        # out, and a CONCURRENT probe holding the slot, which the
-                        # join waits on instead of taking an instant BUSY. So
-                        # reaching here needs the probe to blow the FULL deadline
-                        # even after joining, which is a stuck driver rather than
-                        # an ordinary cold init or heartbeat collision.
+                        # RARE now. Two ways the probe fails to complete, and both the
+                        # long deadline and wait_for_inflight=True above are aimed at
+                        # them: (1) a cold init on a fresh process - the deadline waits
+                        # it out; (2) a CONCURRENT probe holding the slot (the GUI's
+                        # 2500ms /api/stats heartbeat through a cold init) - the join
+                        # waits on ITS result instead of taking an instant BUSY. So
+                        # reaching here needs the probe to blow the FULL deadline even
+                        # after joining - a genuinely stuck/wedged driver, not the
+                        # ordinary cold-init or heartbeat-collision cases. Refusing
+                        # there is correct: we truly cannot measure, and loading blind
+                        # onto a possibly-wedged GPU is the OOM/TDR risk this gate
+                        # exists to prevent.
                         raise HTTPException(
                             503, f"Cannot load '{name}': free VRAM could not be "
                             f"measured (the GPU probe did not complete within "
@@ -751,19 +854,23 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                             f"GPU app holding the driver, or unload another model.")
                     # Local eviction exhausted: before giving up, best-effort ask a
                     # sibling localm instance to release ITS VRAM (multi-instance
-                    # coordination, see localm.gpu_registry). Off the event loop,
-                    # since it may make a blocking loopback call. Advisory: any
-                    # failure falls through to the 503 below. Bounded and
-                    # fit-checked (see _attempt_cooperative_unload): each peer is
-                    # asked at most once per load attempt, so this loop always
-                    # progresses, and a yank that could not free enough is skipped.
-                    #
+                    # coordination, see localm.gpu_registry). Off the event loop (it
+                    # may make a blocking loopback call). Advisory: any failure falls
+                    # through to the 503 below, never a harder failure than baseline.
+                    # Bounded and fit-checked (see _attempt_cooperative_unload): each
+                    # peer is asked at most once per load attempt, so this loop always
+                    # progresses, and a yank that provably could not free enough is
+                    # not worth destroying a sibling's models for.
                     # A PIN is a local preference, exactly like the cap above, so
-                    # it must not cost a SIBLING instance its models. If an
-                    # unpinned peer would have been evictable, the pin is the only
-                    # reason local eviction came up empty, so no peer is asked and
-                    # this falls through to the backend's own split-aware sizing,
-                    # which honors the pin at this instance's own expense.
+                    # it must not cost a SIBLING instance its models either. If an
+                    # unpinned peer WOULD have been evictable, the pin is the only
+                    # reason local eviction came up empty - so do not escalate.
+                    # Fall through to the backend's own split-aware sizing
+                    # (partial offload) instead, which honors the pin locally at
+                    # this instance's own expense rather than another's. Unlike
+                    # the cap case, VRAM here is genuinely short, so this is a
+                    # slower load rather than a free one - still the right trade
+                    # against destroying another instance's work.
                     pin_blocked = bool(pinned) and residency.pick_eviction_victim(
                         _engines_lru, _engines, requested=name) is not None
                     if pin_blocked:
@@ -781,26 +888,37 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     if cooperated:
                         continue
                     if shortfall and not shares_adaptive:
-                        # The aggregate may well be enough: it is specifically the
-                        # configured split's per-device share that is short, so the
-                        # message names the device(s) rather than the aggregate.
-                        # shortfall is always empty when free is unmeasurable,
-                        # because list_gpus() DROPS a device that fails to report
-                        # rather than emitting free=None.
+                        # Aggregate may well be enough - it is specifically the
+                        # configured split's per-device share that is short, so name
+                        # the device(s), not a generic aggregate message. (Said "or
+                        # unmeasurable" until it was shown unreachable: shortfall is
+                        # always [] when free is unmeasurable, because list_gpus()
+                        # DROPS a device that fails to report rather than emitting
+                        # free=None, so the per-device `free is None` skip above and an
+                        # unmeasurable aggregate cannot coexist. Also unreachable now
+                        # via the inconclusive branch, which empties shortfall.)
+                        #
                         # STATIC shares only (pinned ratios, or auto declined into
-                        # the equal fallback after a stale configured index or a
-                        # device without a free reading): a hard refusal, even
-                        # though everything below defers to the backend, because
+                        # the equal fallback - a stale configured index, a device
+                        # without a free reading): this stays a hard refusal even
+                        # though everything below it defers to the backend, because
                         # with static shares apply_gpu_split() divides the model by
-                        # a ratio that ignores live per-device free VRAM, and the
-                        # backend's own sizing budgets the split's COMBINED
-                        # capacity (_split_free_total_bytes) rather than any one
-                        # device's static share. So this per-device check is the
-                        # only gate that catches one split device being
-                        # individually short while the aggregate fits. Keyed on
-                        # shares_adaptive, NOT on whether ratios are set in config:
-                        # with ratios unset but auto declined, the loader applies
-                        # the same equal fallback this gate just checked.
+                        # a ratio that ignores live per-device free VRAM
+                        # (discover.gpu_split_shortfall's own docstring), and the
+                        # backend's own sizing (_auto_gpu_layers / _check_vram,
+                        # llamacpp/_sizing.py) budgets the split's COMBINED capacity
+                        # (_split_free_total_bytes), never any one device's static
+                        # share - so this per-device check is still the only gate
+                        # that can catch one split device being individually short
+                        # while the aggregate fits. Letting a real per-device
+                        # shortfall through would trade today's precise, actionable
+                        # message for a native worker abort with no such visibility.
+                        # Keyed on shares_adaptive, NOT on whether ratios are set in
+                        # config: with ratios unset but auto DECLINED, the loader
+                        # will apply the same equal fallback the gate just checked,
+                        # so this hazard is fully live there (review finding on
+                        # this feature's first cut - the config shape alone admitted
+                        # exactly that case).
                         detail = "; ".join(
                             f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
                             f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
@@ -809,28 +927,36 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                             f"device(s) to load '{name}' ({detail}).")
                     # ADAPTIVE shares (live auto free-VRAM-proportional split): a
                     # non-empty shortfall can only mean the COMBINED estimate is
-                    # short, since each device's auto share fits its free whenever
-                    # the aggregate fits, gpu_split_shortfall having been computed
-                    # with the same auto ratios the loader will pin. It therefore
-                    # falls through to the same defer-to-backend path as the
-                    # aggregate-only miss below, where the backend's split-aware
-                    # sizing judges and partial offload is available.
-                    # Local and cooperative eviction exhausted, with no
-                    # hard-refusable pinned-share shortfall. What remains is this
-                    # loop's coarse whole-model estimate (file_size * 1.2) not
-                    # being met, combined across an auto split or on a single GPU.
-                    # That estimate assumes the WHOLE model lands in VRAM, while
-                    # the backend's own load() can already make a too-big model
-                    # fit: GgufBackend's n_gpu_layers_auto, on by default, sizes
-                    # how many layers fit free VRAM and puts the rest on system
-                    # RAM, and HFBackend's device_map=auto does the unconditional
-                    # equivalent.
+                    # short (each device's auto share fits its free whenever the
+                    # aggregate fits - gpu_split_shortfall computed with the same
+                    # auto ratios the loader will pin), so it falls through to
+                    # the same defer-to-backend path as the aggregate-only miss
+                    # below: the backend's split-aware sizing (#770) is the
+                    # accurate judge there, with partial offload available -
+                    # exactly the #753 posture the single-GPU path already ships.
+                    #
+                    # Local + cooperative eviction exhausted, no hard-refusable
+                    # (pinned-share) shortfall - what remains is this loop's own
+                    # coarse "vram_required = file_size * 1.2" estimate not
+                    # being met (combined across an auto split, or single-GPU). That
+                    # estimate assumes the WHOLE model lands in VRAM; it has no idea
+                    # the backend's own load() already knows how to make a too-big
+                    # model fit anyway: GgufBackend's n_gpu_layers_auto (default ON -
+                    # _effective_gpu_layers/_auto_gpu_layers/_check_vram in
+                    # llamacpp/_sizing.py) sizes how many layers actually fit free
+                    # VRAM and puts the rest on system RAM, and HFBackend's
+                    # device_map="auto" (hf.py) does the unconditional equivalent -
+                    # both already documented as the promise behind a "too-big"
+                    # discover.fit_label() badge in the GUI's model browser. Refusing
+                    # here, before an engine is ever constructed, broke that promise
+                    # for exactly this case (a model that would fit via partial
+                    # offload, but not by this loop's whole-model estimate).
                     #
                     # Fall through to a real load attempt instead: _check_vram() is
-                    # the accurate, backend-owned final gate, raising only when the
-                    # model genuinely cannot fit even at 0 GPU layers, which the
+                    # the accurate, backend-owned final gate - it raises only when
+                    # the model genuinely cannot fit even at 0 GPU layers, which the
                     # except handler around new_engine.load() below turns into the
-                    # same clean 503 shape for every caller.
+                    # same clean 503 shape this refusal used to be, for every caller.
                     from localm.debuglog import logger as _dbg
                     _dbg.info(
                         "switch_engine: '%s' exceeds the whole-model VRAM estimate "
@@ -841,62 +967,66 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
                 evict_engine = _engines[evict_name]
                 free_before = free_vram
-                # Defensive re-check right before committing, without the victim's
-                # own semaphore, which would reintroduce the two-switch
-                # lock-ordering deadlock below. The LRU scan above already required
-                # active_requests==0 and there is no await between it and here, so
-                # this cannot currently fire; it guards against a future await in
-                # the scan reopening the window. If the candidate became pinned, it
-                # is abandoned and the scan runs again.
+                # Defensive re-check right before we commit (approach (a) of the
+                # pin-during-unload fix, WITHOUT its victim-semaphore - that would
+                # reintroduce the two-switch lock-ordering deadlock below). The LRU
+                # scan above already required active_requests==0 and there is no
+                # await between it and here, so this cannot currently fire; it is a
+                # guard so a future await in the scan cannot silently reopen the
+                # window. If it became pinned, abandon this candidate and re-scan.
                 if getattr(evict_engine, "active_requests", 0) != 0:
                     continue
 
                 # Detach the victim from the live registry BEFORE the native free,
-                # not after. Unloading without the victim's own semaphore is safe:
-                # active_requests == 0 means no request is pinned on it, since a
-                # request pins its engine for its whole lifetime, so no decode races
-                # the free, and taking the victim sem while holding the target sem
-                # would risk a two-switch lock-ordering deadlock. active_requests
-                # alone does NOT stop a QUEUED request pinning the victim DURING the
-                # unload await, because it pins lock-free after the check passed:
-                # while await unload() yields the loop, get_engine's fast path would
-                # still see the victim loaded and registered and pin a doomed
-                # engine. Removing it from _engines first closes that window, so a
-                # queued request misses the fast path and gets a fresh,
-                # VRAM-checked reload, and a concurrent switch_engine(evict_name)
-                # rebuilds a fresh engine rather than racing load() against this
-                # backend object mid-free. The flag covers any stale reference
-                # already resolved. Removal stays pop-and-guarded: even pre-await, a
-                # concurrent idle or explicit unload could have popped the victim.
+                # not after (the pin-arrives-during-the-unload-await fix, BUG-9b).
+                # Safe to unload without the victim's own semaphore: active_requests
+                # == 0 means no request is pinned on it (a request pins its engine
+                # for its whole lifetime - AUDIT-CRIT-1), so no decode races the
+                # free; taking the victim sem while holding the target sem would risk
+                # a two-switch lock-ordering deadlock. But active_requests alone does
+                # NOT stop a QUEUED request pinning the victim DURING the unload await
+                # (it pins lock-free, after the check passed): while await unload()
+                # yields the loop, get_engine's fast path would still see the victim
+                # loaded+registered and pin a doomed engine, which then gets freed out
+                # from under it and silently auto-reloaded (VRAM over-subscription /
+                # a tight-box 500). Removing it from _engines first closes that window
+                # - a queued request now misses the fast path and gets a fresh,
+                # VRAM-checked reload via switch_engine - and means a concurrent
+                # switch_engine(evict_name) rebuilds a fresh engine instead of reusing
+                # (and racing load() against) this backend object mid-free. The flag
+                # is belt-and-suspenders for any stale reference already resolved.
+                # Removal stays pop/guarded (BUG-9a): even pre-await, a concurrent
+                # idle/explicit unload could have popped the victim already.
                 evict_engine.unloading = True
                 _engines.pop(evict_name, None)
                 if evict_name in _engines_lru:
                     _engines_lru.remove(evict_name)
                 _inference_sems.pop(evict_name, None)
-                # If the victim was the active or compat engine, those pointers are
-                # dropped too, so a concurrent get_engine back-compat re-import
-                # cannot resurrect the just-detached victim mid-free and nothing
-                # keeps serving a being-freed engine as active. switch_engine sets
-                # them to the newly-loaded model at the end, or leaves them cleared
-                # if the load fails. The other unload paths do the same.
+                # If the victim was the active/compat engine, drop those pointers too,
+                # so a concurrent get_engine back-compat re-import cannot resurrect the
+                # just-detached victim mid-free and nothing keeps serving a being-freed
+                # engine as active. switch_engine sets them to the newly-loaded model
+                # at the end (or leaves them cleared if the load fails - correct, the
+                # old active model is gone). The other unload paths already do this.
                 if _active_model_name == evict_name:
                     _active_model_name = None
                 if _engine is evict_engine:
                     _engine = None
                     _inference_sem = None
-                # See _evicting_names: this marks THIS name as mid-free, so a
-                # concurrent switch_engine or get_engine call for it - a queued
-                # reload of the very model being evicted - refuses instead of racing
-                # a fresh load against this still-running native free. try/finally,
-                # because every path out of the free below must clear it or the name
-                # would be permanently unloadable.
+                # See _evicting_names' own docstring: mark THIS name as mid-free so a
+                # concurrent switch_engine/get_engine call for it (a queued reload of
+                # the very model being evicted) refuses instead of racing a fresh
+                # load against this still-running native free. try/finally: every
+                # path out of the free below (success or an unexpected exception from
+                # evict_engine.unload itself) must clear it, or the name would be
+                # permanently unloadable.
                 _evicting_names.add(evict_name)
                 try:
                     await loop.run_in_executor(None, evict_engine.unload)
 
-                    # Wait for the native VRAM free to land before re-checking, so
-                    # the next iteration does not see a stale-low reading and
-                    # over-evict. Only meaningful when measurable.
+                    # Wait for the native VRAM free to land before re-checking, so the
+                    # next iteration does not see a stale-low reading and over-evict
+                    # (driver-hang guard, AUDIT-MED-11). Only meaningful when measurable.
                     if measurable and free_before is not None:
                         await loop.run_in_executor(
                             None,
@@ -905,11 +1035,12 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 finally:
                     _evicting_names.discard(evict_name)
 
-        # See _evicting_names: *name* itself may be the victim another concurrent
-        # switch_engine call just detached and is still natively freeing, with a
-        # queued reload landing in exactly that window. Refuse rather than
-        # construct and load a fresh engine that races the still-running free; the
-        # caller may retry once the in-flight eviction finishes.
+        # See _evicting_names' own docstring: *name* itself may be the victim
+        # another concurrent switch_engine call just detached and is still
+        # natively freeing - a queued reload landing in exactly that window.
+        # Refuse rather than construct-and-load a fresh engine that races the
+        # still-running free (honest backpressure; the caller may simply
+        # retry once the in-flight eviction finishes).
         if name in _evicting_names:
             raise HTTPException(
                 503, f"'{name}' is currently being freed by another request; "
@@ -922,19 +1053,20 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
         cancel = threading.Event()
         # Install the fresh event for EVERY load, preempt or not. An engine object
-        # outlives a load, since idle-unload keeps it in _engines for lazy reload,
-        # so a preempt=True switch that gets superseded leaves its FIRED event on
-        # the engine and nothing else clears it; the next preempt=False load would
-        # then reuse that stale SET event and the backend would abort the load at
-        # once. Loads of one model are serialized by its own semaphore above, so
-        # this cannot clobber a concurrent load's event.
+        # outlives a load (idle-unload keeps it in _engines for lazy reload), so a
+        # preempt=True switch that gets superseded leaves its FIRED event on the
+        # engine, and nothing else ever clears it. Installing only under preempt
+        # meant the next API-routed (preempt=False) load reused that stale SET
+        # event, and the backend honours it by aborting the load at once - a
+        # permanent spurious 503 "superseded" on every later request for that
+        # model (REG-461). Loads of one model are serialized by its own semaphore
+        # above, so this cannot clobber a concurrent load's event.
         if hasattr(new_engine, "set_load_cancel"):
             new_engine.set_load_cancel(cancel)
         if preempt:
             # Only an explicit switch REGISTERS the hook globally, so only a newer
             # explicit switch can abort this load; API-routed loads (preempt=False)
-            # run to completion and are never cancelled by a concurrent load of a
-            # different model.
+            # run to completion, never cancelled by a concurrent different-model load.
             _switch_cancel = cancel
             _switch_loading = name
         try:
@@ -942,14 +1074,20 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         except ModelLoadCancelled:
             return {"status": "superseded", "model": name, "by": _switch_desired}
         except RuntimeError as exc:
-            # The backend's own sizing found the model cannot fit even with 0 GPU
-            # layers (GgufBackend._check_vram), or its native worker failed
-            # outright (GgufBackend._load_native): both raise a plain,
-            # already-informative RuntimeError. Only the GUI load-model button and
-            # the coder plugin's model switch wrap switch_engine in their own
-            # try/except; the OpenAI-compatible routes do not, so converting it to
-            # an HTTPException here, once, gives every caller the same clean
-            # message the VRAM-refusal 503s above already get.
+            # The backend's own sizing found the model genuinely cannot fit even
+            # with 0 GPU layers (GgufBackend._check_vram - llamacpp/_sizing.py) or
+            # its native worker failed outright (GgufBackend._load_native's own
+            # wrapper, gguf.py) - both raise a plain, already-informative
+            # RuntimeError. Only 2 of the 6 routes that reach switch_engine
+            # currently wrap it in their own try/except to get a clean message
+            # (the GUI's "load model" button, the coder plugin's model switch);
+            # the OpenAI-compatible routes (/v1/chat/completions, /v1/completions,
+            # /v1/embeddings, /v1/models/load) do not, so this exact failure used
+            # to fall through to the generic "Internal server error" 500 there,
+            # discarding the real reason (AGENTS.md rule 5). Converting it to an
+            # HTTPException here, once, gives every caller the same clean message
+            # the existing VRAM-refusal 503s above already get from Starlette's
+            # default HTTPException handling.
             raise HTTPException(503, f"Failed to load '{name}': {exc}") from exc
         finally:
             if preempt and _switch_cancel is cancel:
@@ -958,25 +1096,27 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 
         _engines[name] = new_engine
         # Seed the per-model activity clock the INSTANT this engine becomes
-        # resident, not when it first answers a request. Otherwise
+        # resident - not when it first answers a request. Without this,
         # _idle_unload_once's _last_activity_per_model.get(name, _last_activity)
-        # falls back to the GLOBAL _last_activity, which holds whatever OTHER model
-        # was last used, so a model switched to while the previous one was already
-        # idle past the TTL looks instantly overdue for eviction.
+        # fell back to the GLOBAL _last_activity, which holds whatever OTHER
+        # model was last used - so a model switched to while the PREVIOUS model
+        # was already idle past the TTL looked instantly overdue for eviction,
+        # and could be unloaded before it ever served its first response.
         _last_activity_per_model[name] = time.monotonic()
         _engines_lru.append(name)
         _active_model_name = name
-        # See the already-active fast path above: there is a real active model
-        # again, so any name remembered from a past eviction is stale.
+        # See the already-active fast path above: a real active model again,
+        # so any name remembered from a past eviction is stale now.
         _last_active_model_name = None
         _engine = new_engine
         _inference_sem = sem
         if on_active is not None:
             on_active(name)
         # Cross-install GPU coordination: reflect the newly-active model so a
-        # sibling's next VRAM or eviction check sees fresh state. A no-op when not
-        # registered (see _gpu_registry_sync). Offloaded because it does registry
-        # file I/O plus, with a non-zero main_gpu_index, a real GPU driver probe.
+        # sibling's next VRAM/eviction check sees fresh state. No-op when not
+        # registered (see _gpu_registry_sync). Offloaded for the same reason as
+        # the heartbeat below: registry file I/O plus, with a non-zero
+        # main_gpu_index, a real GPU driver probe - keep it OFF the event loop.
         await loop.run_in_executor(None, _gpu_registry_sync)
         return {"status": "loaded", "model": name,
                 **_gpu_placement_fields(new_engine)}
@@ -993,9 +1133,9 @@ def _resolve_unnamed_model_name() -> str | None:
     ``_last_active_model_name`` covers the gap ``_default_model_name`` alone
     cannot: that one is write-once at startup (create_app) and never updated
     by a model switch, so a model switched to after boot and then evicted
-    (unload_all_models keeps its Engine in _engines for lazy reload) would
-    otherwise resolve back to the STARTUP model instead of the one actually in
-    use."""
+    (unload_all_models keeps its Engine in _engines for lazy reload, but used
+    to lose its name) would otherwise silently resolve back to the STARTUP
+    model instead of the one actually in use."""
     return _active_model_name or _last_active_model_name or _default_model_name
 
 
@@ -1004,8 +1144,9 @@ async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
 
     With ``load=False`` the resolved engine is returned WITHOUT forcing a load -
     for callers like /v1/embeddings whose backend may not need the model resident
-    at all (a GGUF backend embeds via the dedicated embedder). The caller decides
-    whether to load. Registration/resolution (and its 404) still apply.
+    at all (a GGUF backend embeds via the dedicated embedder; AUDIT-MED-13). The
+    caller decides whether to load. Registration/resolution (and its 404) still
+    apply.
     """
     global _engines, _engines_lru, _active_model_name, _default_model_name, _last_active_model_name, _inference_sems, _engine, _inference_sem
 
@@ -1045,18 +1186,20 @@ async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
                 msg += f" Registered models in your library: {', '.join(registered)}. Use 'localm pull' to add a new model."
             raise HTTPException(404, msg)
 
-    # A name that resolved to nothing (an empty or localm-named request with no
-    # active model, no remembered last-active and no default) is answered with a
-    # 503 rather than falling through to switch_engine(None) and a TypeError 500.
+    # A name that resolved to nothing (an empty/"localm" request with no active,
+    # no remembered last-active, AND no default model - e.g. `gui --no-model`
+    # with a populated registry and nothing ever loaded) must be an honest
+    # 503, not fall through to switch_engine(None) -> get_model_info(None) ->
+    # Path(None) TypeError -> HTTP 500.
     if not name:
         raise HTTPException(503, "No model is loaded and none was specified. "
                             "Load a model first or name one explicitly.")
 
-    # `not unloading`: never hand back, and let the caller pin, an engine an
-    # eviction or unload path is mid-freeing. An engine flagged unloading falls
-    # through to switch_engine below, which reloads it cleanly under its per-model
-    # semaphore; the unloader holds that semaphore for the native free, so the
-    # reload serializes after it.
+    # `not unloading`: never hand back (and let the caller pin) an engine that an
+    # eviction/unload path is mid-freeing - that is the pin-arrives-during-the-
+    # unload-await race. An engine flagged unloading falls through to switch_engine
+    # below, which reloads it cleanly under its per-model semaphore (the unloader
+    # holds that semaphore for the native free, so the reload serializes AFTER it).
     if name in _engines and _engines[name].loaded and getattr(_engines[name], "unloading", False) is not True:
         if name in _engines_lru:
             _engines_lru.remove(name)
@@ -1067,8 +1210,8 @@ async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
         return _engines[name]
 
     if not load:
-        # Return the engine object WITHOUT loading it: reuse a tracked, possibly
-        # unloaded, engine, else build a fresh one via the factory. Does not go
+        # Return the engine object WITHOUT loading it: reuse a tracked (possibly
+        # unloaded) engine, else build a fresh one via the factory. Does NOT go
         # through switch_engine, so no model is loaded and nothing is evicted.
         return _engines.get(name) or _engine_factory(name)
 
@@ -1082,8 +1225,9 @@ async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
 def _add_vram_fields(result: dict, *, before, released, after, before_fresh: bool,
                      before_scope=None) -> None:
     """Add vram_freed/vram_before_bytes/vram_after_bytes to *result* when
-    measurable, plus an honest flag when the reading cannot be presented as
-    current fact, so a wrong number is never asserted.
+    measurable (unchanged from before), plus an honest flag when the reading
+    cannot be presented as current fact - rather than asserting a wrong number
+    (AGENTS.md rule 5).
 
     ``before is None`` returns early and adds NOTHING - the benign case (a
     CPU-only box, or the Windows registry tier, which reports total but never
@@ -1094,17 +1238,19 @@ def _add_vram_fields(result: dict, *, before, released, after, before_fresh: boo
     THREE independent ways this reading can be wrong, and they are not the same bug:
 
     - NOT FRESH (``before_fresh`` false): the probe timed out or was busy, so the
-      'before' value is a stale cached one (see _vram_free_reading).
+      'before' value is a stale cached one (PR #693's case; see _vram_free_reading).
     - AFTER UNVERIFIABLE (``released is None``): wait_for_vram_release() could not
       verify the outcome (the 'after' reading went unmeasurable), so ``vram_freed``
-      is null rather than a false "VRAM did not drop", which a reading that never
-      refreshed cannot support.
+      is null rather than a false "VRAM did not drop" - a claim a reading that never
+      refreshed cannot support (PR #694's case).
     - NOT DEVICE-SCOPED (``before_scope`` is FREE_SCOPE_PROCESS): the probe was
       perfectly fresh, but on this platform the driver reports only the CALLING
       process's own allocations. Since every GGUF load runs in an isolated worker
-      subprocess (backends/gguf.py), the model's VRAM is in another process and
-      absent from the number, so before/after come back byte-identical and
-      vram_freed false across a load/unload cycle that really worked.
+      subprocess (backends/gguf.py, #606), the model's VRAM is in another process
+      and simply absent from the number - which is why before/after came back
+      byte-identical, and vram_freed false, across a load/unload cycle that an OS
+      counter showed working perfectly. Measured, see
+      dev-notes/vram-cross-process-blindness.md.
 
     All three are reported through the same flag because they mean the same thing to
     a caller (do not trust this number), but the note says which, so a bug report
@@ -1140,11 +1286,13 @@ async def unload_all_models() -> dict:
     driver-hang guard: otherwise a media model can load on top of a
     not-yet-freed LLM and exceed total VRAM).
 
-    ONE implementation, shared by two callers with two different auth models:
-    the owner-scoped ``/v1/models/unload`` route (``MODELS_WRITE``), and the
-    coordination-token-gated ``POST /v1/instances/cooperate-unload`` (a sibling
-    localm instance asking THIS one to free VRAM - multi-instance GPU
-    coordination, see ``localm.gpu_registry``)."""
+    Extracted from the ``POST /v1/models/unload`` route so it has exactly ONE
+    implementation, reused by two callers with two different auth models: the
+    owner-scoped ``/v1/models/unload`` route (``MODELS_WRITE``), and the
+    coordination-token-gated ``POST /v1/instances/cooperate-unload`` (a
+    sibling localm instance asking THIS one to free VRAM - multi-instance GPU
+    coordination, see ``localm.gpu_registry``). Behavior is unchanged from the
+    original inline implementation."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -1161,22 +1309,22 @@ async def unload_all_models() -> dict:
         engine = _engines[name]
         if not engine.loaded:
             continue
-        # Honor the in-flight-request pin, like the VRAM-eviction and idle-unload
-        # paths: a pinned engine has a request generating against it, so unloading
-        # it would free VRAM the request immediately reloads and race a
-        # use-after-unload. It is skipped and reported as still in use. Gated on
-        # isinstance(int) exactly like _pin/_unpin, so a non-int active_requests
-        # from a bare test double counts as not pinned.
+        # Honor the in-flight-request pin (AUDIT-CRIT-1), like the VRAM-eviction and
+        # idle-unload paths: a pinned engine has a request generating (or about to)
+        # against it. Unloading it would free VRAM the request immediately reloads
+        # (so the reported "freed" total is a lie) and race a use-after-unload; skip
+        # it and report it as still in use. Gate on isinstance(int) exactly like
+        # _pin/_unpin: a non-int active_requests (a bare test double) is "not pinned".
         active = getattr(engine, "active_requests", 0)
         if isinstance(active, int) and active > 0:
             skipped_in_use.append(name)
             continue
         sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
-        # Flag BEFORE acquiring the semaphore, so a request arriving after the pin
-        # check above cannot take get_engine's fast path and pin this engine while
-        # it is being freed; such a request blocks on the same semaphore and
-        # reloads cleanly afterwards. Cleared in finally, so the engine kept in
-        # _engines reloads lazily.
+        # Flag BEFORE acquiring the semaphore so no request that arrives after the
+        # pin check above can take get_engine's fast path and pin this engine while
+        # we free it (the pin-arrives-during-the-unload-await window, BUG-9b); such
+        # a request now blocks on the same semaphore and reloads cleanly afterwards.
+        # Cleared in finally so the kept-in-_engines engine reloads lazily.
         engine.unloading = True
         try:
             async with sem:
@@ -1187,29 +1335,35 @@ async def unload_all_models() -> dict:
         finally:
             engine.unloading = False
 
-    # Release the shared embedder too: it has a separate lifecycle from _engines
-    # and is loaded independently by RAG, memory and coder-episode callers via
-    # get_embedder(), never through switch_engine.
+    # Release the shared embedder too - a separate lifecycle from _engines (see
+    # localm.inference.embedder's module docstring): it is loaded independently
+    # by RAG/memory/coder-episode callers via get_embedder(), never through
+    # switch_engine, so it was previously NEVER freed by "Unload all" even
+    # though the GUI reported everything released (only the chat engines'
+    # VRAM actually dropped - the embedder's stayed resident).
     #
-    # loaded_dim() and active_requests() MUST run in the executor rather than
-    # directly on this coroutine: get_embedder() can hold embedder._LOCK for the
-    # full duration of an IsolatedEmbedder native or subprocess load, up to its
-    # load timeout, and both accessors block on that same lock, so a synchronous
-    # call would freeze the whole event loop for that window. Offloading keeps the
-    # wait local to this coroutine.
+    # loaded_dim()/active_requests() MUST run in the executor, not directly on
+    # this coroutine: get_embedder() can hold embedder._LOCK for the full
+    # duration of an IsolatedEmbedder native/subprocess load (up to its load
+    # timeout), and both of those accessors block on that same lock. A
+    # synchronous call here would freeze the WHOLE event loop - every other
+    # request this server is serving - for that entire window, not just this
+    # coroutine (confirmed via live reproduction during review, 2026-07-14).
+    # Executor-offloading them, like every other blocking call in this
+    # function, keeps the wait local to this one coroutine instead.
     embedder_was_loaded = False
     embedder_dim = await loop.run_in_executor(None, _embedder_mod.loaded_dim)
     if embedder_dim is not None:
-        # Honor the in-flight-request pin for the embedder too, exactly like the
-        # chat-engine loop above: a request mid-embed() must not have its embedder,
-        # and the isolated worker process it is waiting on, freed out from under
-        # it. reset_embedder(force=False) checks active_requests()==0 and clears
-        # the embedder in ONE locked step rather than two separate executor calls,
-        # closing the TOCTOU window that a standalone active_requests() check plus
-        # an unconditional reset_embedder() would leave, since
-        # IsolatedEmbedder.embed() pins active_requests without taking
-        # embedder._LOCK. Otherwise it is skipped and reported alongside the pinned
-        # chat engines rather than reported as unloaded.
+        # Honor the in-flight-request pin (AUDIT-CRIT-1) for the embedder too,
+        # exactly like the chat-engine loop above: a request mid-embed() must
+        # not have its embedder (and the isolated worker process it is
+        # waiting on) freed out from under it. reset_embedder(force=False)
+        # checks active_requests()==0 and clears the embedder in ONE locked
+        # step (not two separate executor calls) - a real TOCTOU window used
+        # to sit between a standalone active_requests() check and an
+        # unconditional reset_embedder(), since IsolatedEmbedder.embed() pins
+        # active_requests without taking embedder._LOCK. Skip it and report
+        # it alongside the pinned chat engines instead of a lying "unloaded".
         cleared = await loop.run_in_executor(
             None, functools.partial(_embedder_mod.reset_embedder, force=False))
         if cleared:
@@ -1217,15 +1371,15 @@ async def unload_all_models() -> dict:
         else:
             skipped_in_use.append("embedding model")
 
-    # Update compatibility pointers, but NOT when the active engine was a pinned
-    # one left loaded: clearing it would strand the in-flight request's active
-    # model.
+    # Update compatibility pointers - but NOT if the active engine was a pinned one
+    # we deliberately left loaded (clearing it would strand the in-flight request's
+    # active model).
     if _active_model_name not in skipped_in_use:
         if _active_model_name:
-            # The Engine stays in _engines above for a lazy reload on the next
-            # request. Its NAME is kept alive too, or nothing can resolve an
-            # unnamed request back to it (see _last_active_model_name and
-            # _resolve_unnamed_model_name).
+            # The Engine stays in _engines above for exactly this: a lazy
+            # reload on the next request. Keep its NAME alive too, or nothing
+            # can resolve an unnamed request back to it (see
+            # _last_active_model_name / _resolve_unnamed_model_name).
             _last_active_model_name = _active_model_name
         _active_model_name = None
         _engine = None
@@ -1254,9 +1408,9 @@ async def unload_all_models() -> dict:
         result["skipped_in_use"] = skipped_in_use
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
-    # Cross-install GPU coordination: reflect the changed state for a sibling's
-    # next eviction decision. A no-op when not registered. Offloaded because it
-    # does registry file I/O plus, with a non-zero main_gpu_index, a GPU probe.
+    # Cross-install GPU coordination: reflect the now-empty/changed state for a
+    # sibling's next eviction decision. No-op when not registered. Offloaded:
+    # registry file I/O plus, with a non-zero main_gpu_index, a GPU driver probe.
     await loop.run_in_executor(None, _gpu_registry_sync)
     return result
 
@@ -1270,19 +1424,20 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     ``localm.inference.embedder``'s module docstring): ``unload_one_model``'s
     own ``_engines.get(name)`` lookup can never find it, so without this a
     resident embedding model registered under its own name (the common case:
-    a `localm pull`-ed GGUF selected as the embedding model) shows as
-    "loaded" on the Models page while its per-row Unload button does nothing.
-    Matched by resolved PATH, not by name/config, so it is correct
+    a `localm pull`-ed GGUF selected as the embedding model) showed as
+    "loaded" on the Models page yet its per-row Unload button was a silent
+    no-op. Matched by resolved PATH, not by name/config, so it is correct
     regardless of how ``embedding_model`` was originally resolved (an explicit
     path, a registered name, or a known key) - what matters is which file is
     actually resident. Returns None when *name* is not the embedder, so the
     caller falls back to its normal "already_unloaded" outcome for a genuinely
     untracked/never-loaded chat model."""
     from localm.inference import embedder as _embedder_mod
-    # Executor-offloaded rather than called directly: get_embedder() can hold
-    # embedder._LOCK for the full duration of an IsolatedEmbedder native or
-    # subprocess load, and loaded_path() blocks on that same lock, so a
-    # synchronous call here would freeze the whole event loop for that window.
+    # Executor-offloaded, not a direct call: get_embedder() can hold
+    # embedder._LOCK for the full duration of an IsolatedEmbedder
+    # native/subprocess load, and loaded_path() blocks on that same lock. A
+    # synchronous call here would freeze the WHOLE event loop for that window
+    # (same hazard as unload_all_models's loaded_dim() call - see its comment).
     emb_path = await loop.run_in_executor(None, _embedder_mod.loaded_path)
     if emb_path is None:
         return None
@@ -1298,21 +1453,35 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     except OSError:
         return None
 
-    # Honor the in-flight-request pin: a request mid-embed() must not have its
-    # embedder freed out from under it, so it is reported as still in use rather
-    # than as unloaded.
+    # Honor the in-flight-request pin (AUDIT-CRIT-1): a request mid-embed()
+    # must not have its embedder freed out from under it. Report it as still
+    # in use instead of a lying "unloaded", matching unload_one_model's own
+    # pinned-chat-engine check just below.
     #
-    # TWO layers. The cheap active_requests() precheck here avoids paying for the
-    # _vram_free_reading() hardware probe below on the common busy case; that probe
-    # is NOT executor-offloaded and can block this single-threaded event loop for
-    # up to discover._GPU_PROBE_DEADLINE seconds. reset_embedder(force=False) is
-    # what actually authorizes the close, atomically re-checking
-    # active_requests()==0 under embedder._LOCK in the SAME step as the close, so a
-    # pin arriving in the gap between this precheck and the close is still caught;
-    # an unlocked active_requests() call before an unconditional reset_embedder()
-    # would be a TOCTOU window, since IsolatedEmbedder.embed() pins
-    # active_requests without taking embedder._LOCK. Both calls are
-    # executor-offloaded for the same reason as loaded_path() above.
+    # TWO layers, deliberately, mirroring switch_engine's own chat-engine
+    # eviction (its LRU scan's active_requests==0 check, THEN a synchronous
+    # "defensive re-check right before we commit" - http_server.py's own
+    # comment on that code names it "approach (a) of the pin-during-unload
+    # fix"): a cheap active_requests() precheck here avoids paying for the
+    # _vram_free_reading() hardware probe below on the common busy case (that
+    # probe is NOT executor-offloaded and can block this whole single-
+    # threaded event loop for up to discover._GPU_PROBE_DEADLINE seconds - a
+    # regression a review caught: folding the busy check ENTIRELY into
+    # reset_embedder(force=False) after moving the probe earlier meant a busy
+    # embedder paid for the probe every time, where the pre-existing code
+    # never reached it). reset_embedder(force=False) is still what actually
+    # authorizes the close, atomically re-checking active_requests()==0 under
+    # embedder._LOCK in the SAME step as the close (no separate unlocked
+    # active_requests() call before an unconditional reset_embedder() - that
+    # TOCTOU window is what round 1 of this fix closed, since
+    # IsolatedEmbedder.embed() pins active_requests without taking
+    # embedder._LOCK) - so the rare case of a pin arriving in the gap between
+    # this precheck and the actual close is still caught correctly, just no
+    # longer the ONLY thing gating the probe cost. Both calls are executor-
+    # offloaded for the same reason as loaded_path() above - each blocks on
+    # embedder._LOCK, which get_embedder() can hold for the length of an
+    # IsolatedEmbedder load; a synchronous call here would freeze the whole
+    # event loop, not just this request.
     embedder_active = await loop.run_in_executor(None, _embedder_mod.active_requests)
     if embedder_active > 0:
         return {"status": "in_use", "model": name, "vram_freed": 0}
@@ -1362,10 +1531,10 @@ async def unload_one_model(name: str) -> dict:
         if embedder_result is not None:
             return embedder_result
         return {"status": "already_unloaded", "model": name}
-    # Honor the in-flight-request pin: an engine a request is generating on must
-    # not be unloaded out from under it, since it would reload anyway and make the
-    # freed report a lie. Reported as in use instead. The isinstance(int) guard
-    # matches _pin/_unpin, so a bare test double counts as not pinned.
+    # Honor the in-flight-request pin (AUDIT-CRIT-1): an engine a request is
+    # generating on must not be unloaded out from under it (it would reload it
+    # anyway, making the "freed" report a lie). Report it as in use, not unloaded.
+    # isinstance(int) guard matches _pin/_unpin (a bare test double is not pinned).
     active = getattr(engine, "active_requests", 0)
     if isinstance(active, int) and active > 0:
         return {"status": "in_use", "model": name, "vram_freed": 0}
@@ -1374,10 +1543,11 @@ async def unload_one_model(name: str) -> dict:
 
     before, before_fresh, before_scope = _vram_free_reading()
     sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
-    # Flag BEFORE acquiring the semaphore, so a request arriving after the pin
-    # check above cannot fast-path-pin this engine while it is being freed; such a
-    # request blocks on the same semaphore and reloads cleanly afterwards. Cleared
-    # in finally, so the engine kept in _engines reloads lazily.
+    # Flag BEFORE acquiring the semaphore so no request that arrives after the pin
+    # check above can fast-path-pin this engine while we free it (the pin-arrives-
+    # during-the-unload-await window, BUG-9b); such a request blocks on the same
+    # semaphore and reloads cleanly afterwards. Cleared in finally so the
+    # kept-in-_engines engine reloads lazily.
     engine.unloading = True
     try:
         async with sem:
@@ -1390,10 +1560,10 @@ async def unload_one_model(name: str) -> dict:
     was_active = _active_model_name == name
     if was_active:
         if _active_model_name:
-            # The Engine stays in _engines above for a lazy reload on the next
-            # request. Its NAME is kept alive too, same as unload_all_models, or
-            # nothing can resolve an unnamed request back to it (see
-            # _last_active_model_name and _resolve_unnamed_model_name).
+            # The Engine stays in _engines above for exactly this: a lazy
+            # reload on the next request. Keep its NAME alive too, same as
+            # unload_all_models, or nothing can resolve an unnamed request
+            # back to it (see _last_active_model_name / _resolve_unnamed_model_name).
             _last_active_model_name = _active_model_name
         _active_model_name = None
         _engine = None
@@ -1409,14 +1579,14 @@ async def unload_one_model(name: str) -> dict:
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
     # Offloaded: registry file I/O plus, with a non-zero main_gpu_index, a GPU
-    # driver probe, kept off the event loop as in the heartbeat.
+    # driver probe - keep it OFF the event loop (same as the heartbeat).
     await loop.run_in_executor(None, _gpu_registry_sync)
     return result
 
 
 # Monotonic timestamp of the last inference request, for the optional idle-unload
-# loop (config idle_unload_seconds). Touched at the start of each inference
-# endpoint, so the idle window is measured from the last request.
+# loop (config "idle_unload_seconds"). Touched at the start of each inference
+# endpoint, like Ollama's keep_alive (measured from the last request).
 _last_activity: float = time.monotonic()
 _last_activity_per_model: dict[str, float] = {}
 
@@ -1451,14 +1621,14 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
     that was never loaded in this process needs no engine bookkeeping.
 
     The startup and last-active POINTERS are corrected either way, before
-    that early return: they are wrong the moment the registry moves,
-    regardless of what is in the engine map. On a server started with the
-    renamed model, a stale ``_default_model_name`` puts a ghost row for the
-    old name into ``GET /v1/models`` (list_models adds the startup name when
-    the registry lacks it) and makes ``switch_engine``'s registration check
-    at ``name != _default_model_name`` accept a request for a name the
-    registry no longer has instead of answering 404.
-    ``_last_active_model_name`` is the same shape one step along:
+    that early return, because they are wrong the moment the registry moves
+    regardless of what is in the engine map. Measured live, on a server
+    started with the renamed model: a stale ``_default_model_name`` puts a
+    ghost row for the old name into ``GET /v1/models`` (list_models adds the
+    startup name when the registry lacks it) and makes ``switch_engine``'s
+    registration check at ``name != _default_model_name`` accept a request
+    for a name the registry no longer has, instead of answering the honest
+    404. ``_last_active_model_name`` is the same shape one step along:
     ``_resolve_unnamed_model_name`` falls back to it after a full eviction,
     so an unnamed request would resolve to a name that no longer exists."""
     global _active_model_name, _default_model_name, _last_active_model_name
@@ -1493,8 +1663,8 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
     still keyed on the old one, and every name-keyed check downstream then asks
     about a name nothing is under. Pairing the two here means a route cannot
     perform half of it. Renaming from OUTSIDE this process cannot do the second
-    half at all, so ``localm rename`` asks a running server to call this instead
-    of moving the registry entry itself.
+    half at all, which is why ``localm rename`` asks a running server to call
+    this rather than moving the registry entry behind its back.
 
     Raises HTTPException (404 unregistered, 409 name taken, 400 rename failed)
     so both the /v1 and the GUI route answer identically. Returns the response
@@ -1510,8 +1680,10 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
     registry = load_registry()
     if model not in registry:
         raise HTTPException(404, f"Model not registered: {model}")
-    # Sanitizing happens server-side, so the collision check and the response both
-    # speak the sanitized name, not the raw text the caller sent.
+    # Sanitizing happens server-side, so the collision check and the eventual
+    # response must both speak the sanitized name, not the raw text the caller
+    # sent (REG-562: prechecking the raw name let a collision through, and
+    # answering with the raw name named an entry that does not exist).
     new_name = _sanitize_name(new_name_raw)
     if new_name != model and new_name in registry:
         raise HTTPException(409, f"Name already taken: {new_name}")
@@ -1522,14 +1694,14 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
     except Exception as e:
         raise HTTPException(400, f"Rename failed: {e}")
     if not renamed:
-        # rename_model_with_notes distinguishes vanished from name-taken in its
-        # own console output, but only the bool crosses the executor boundary, so
-        # the losing race is re-derived here.
+        # rename_model_with_notes distinguishes "vanished" from "name taken" in
+        # its own console output, but only the bool crosses the executor
+        # boundary - re-derive which race it lost.
         if model not in load_registry():
             raise HTTPException(404, f"Model not registered: {model}")
         raise HTTPException(409, f"Name already taken: {new_name}")
-    # Synchronous and in-memory only, with no await, so it is safe to call
-    # directly on the event loop once the executor call above returns.
+    # Synchronous, in-memory only (no await) - safe to call directly on the
+    # event loop right after the executor call above returns.
     rekey_loaded_model(model, new_name)
     return {"status": "renamed", "model": model, "new_name": new_name,
             "notes": notes}
@@ -1556,29 +1728,45 @@ def loaded_engine_holding_model_file(
     engine is holding. Returns None only when that is POSITIVELY RULED OUT;
     otherwise a :class:`ModelFileHold` naming the engine responsible.
 
-    IDENTITY BY FILE PATH, NOT BY NAME. A guard that asks "is a loaded engine
-    keyed under THIS NAME" is the same question only while every renamer re-keys
-    the engine map. ``localm rename`` runs in a SEPARATE PROCESS and cannot
-    reach into this one's memory, so after a CLI rename the engine is still
-    keyed on the old name, a name-keyed guard misses, and the route goes on to
-    spawn ``localm rm`` and delete the GGUF out from under a live, serving
-    engine. This guard asks the question the deletion itself turns on, so a
-    caller that does not re-key is covered by construction.
+    IDENTITY BY FILE PATH, NOT BY NAME, and that is the whole point. The
+    remove route's older guards ask "is a loaded engine keyed under THIS NAME",
+    which is the same question only for as long as every renamer re-keys the
+    engine map. ``localm rename`` runs in a SEPARATE PROCESS and cannot reach
+    into this one's memory, so after a CLI rename the engine is still keyed on
+    the old name, both name-keyed guards miss, and the route goes on to spawn
+    ``localm rm`` and delete the GGUF out from under a live, serving engine.
+    That is not recoverable: the user's downloaded model file is gone.
 
-    IT FAILS CLOSED. The question is not "do these two paths compare equal" but
-    "can I establish that nothing live is using this file", and the two differ
-    on every input where the comparison cannot be made at all:
+    A guard that holds only while every caller remembers to re-key is exactly
+    how that became possible, so this one asks the question the deletion itself
+    turns on. Any future caller that forgets the re-key is covered by
+    construction rather than by review.
+
+    IT FAILS CLOSED, AND THAT IS THE LOAD-BEARING PART. The question is not
+    "do these two paths compare equal" but "can I establish that nothing live
+    is using this file". Those differ on every input where the comparison
+    cannot be made at all, and the first version of this function answered
+    every one of them with "nothing holds it, go ahead and delete":
 
     * the engine's recorded ``model_path`` is missing or empty;
     * resolving the engine's path raises (a UNC or network path whose share is
-      momentarily unreachable, a permission error, an embedded NUL);
-    * THIS model's own registry path fails to resolve.
+      momentarily unreachable, a permission error, an embedded NUL).
 
-    Each of those is "I could not tell", and each REFUSES, naming the engine and
-    the reason. A refused delete costs the user one command; a deleted model
-    file is gone.
+    Both are "I could not tell", and both were reported as "no". An unknown
+    now REFUSES, naming the engine and the reason. A refused delete costs the
+    user one command; a deleted model file is gone.
 
-    The refusal is scoped, not blanket: with nothing loaded at all,
+    A third input - THIS model's own registry path failing to resolve - is
+    handled here too, and honestly it is a smaller thing: measured against the
+    previous code, ``find_aliases_by_path`` raised on it first (it resolves the
+    path it is handed and catches only for sibling entries), so the guard blew
+    up and the route answered 500 rather than deleting anything. The collapse
+    inside ``resolve_deletion_target``, which returns None for "unresolvable"
+    exactly as for "outside the models dir" and "already gone", was therefore
+    LATENT. It is closed because a guard should answer rather than crash, and
+    because the reorder below makes it live.
+
+    The refusal is scoped rather than blanket: with nothing loaded at all,
     nothing can be holding the file, so the answer is a certain None however
     unresolvable the paths are. Only a box that actually has a model resident
     can hit an uncertain refusal.
@@ -1605,38 +1793,40 @@ def loaded_engine_holding_model_file(
     if epath is None:
         # A corrupt entry has no usable path, and remove_model's own
         # corrupt-entry branch drops the NAME without touching any file. No
-        # deletion means nothing to guard.
+        # deletion means nothing to guard - this one is certain, not unknown.
         return None
     path = Path(epath)
 
-    # Snapshot: _engines is mutated by loads and evictions on the event loop while
-    # this runs in a worker thread, so iterating it live would raise.
+    # Snapshot: _engines is mutated by loads/evictions on the event loop while
+    # this runs in a worker thread, and iterating it live would raise.
     candidates = [(k, e) for k, e in list(_engines.items())
                   if getattr(e, "loaded", False)]
     # _engine is normally the same object as _engines[active], but a startup
-    # (`localm serve <path.gguf>`) or test-injected engine can sit outside the map
-    # while still holding the file.
+    # (`localm serve <path.gguf>`) or test-injected engine can sit outside the
+    # map - and it is holding the file just as hard.
     if (_engine is not None and getattr(_engine, "loaded", False)
             and not any(e is _engine for _, e in candidates)):
         candidates.append((getattr(_engine, "display_name", "") or model, _engine))
     if not candidates:
-        # Nothing is resident, so nothing can be holding the file. Answered FIRST,
-        # before any of the filesystem work below can fail and force a cautious
-        # refusal, so a flaky network share never blocks tidying the library on a
-        # box with no model loaded.
+        # Nothing is resident, so nothing can be holding the file. Answered
+        # with certainty, and FIRST, before any of the filesystem work below
+        # can fail and force a cautious refusal - so a flaky network share
+        # never blocks tidying the library on a box with no model loaded.
         return None
 
     # This probe stands ahead of BOTH filesystem users below, and the order is
-    # load-bearing: find_aliases_by_path resolves too, and does not catch for the
-    # path it was handed, only for sibling entries, so calling it first would turn
-    # an unresolvable path into a 500 out of this guard.
+    # load-bearing: find_aliases_by_path resolves too, and it does not catch
+    # for the path it was handed (only for sibling entries), so calling it
+    # first turns an unresolvable path into a 500 out of a guard whose whole
+    # job is to answer a question calmly.
     try:
         Path(path).resolve()
     except (OSError, ValueError):
         # resolve_deletion_target answers None for THREE different situations -
-        # unresolvable, not under the models dir, already gone - and only this one
-        # is an unknown. That collapse is correct for remove_model, which does not
-        # delete in any of them, and wrong here, where None means go ahead.
+        # unresolvable, not under <data dir>/models, already gone - and only
+        # this one is an unknown. That collapse is correct for remove_model,
+        # which simply does not delete in any of them, and wrong here, where
+        # None means "go ahead". So the unknown is separated out first.
         return ModelFileHold(
             candidates[0][0],
             "this model's registered file path could not be resolved")
@@ -1644,9 +1834,9 @@ def loaded_engine_holding_model_file(
         return None
     target = resolve_deletion_target(path)
     if target is None:
-        # Reached only for the two CERTAIN cases: the file is outside the models
-        # dir, or it is already gone. Either way the removal drops the name and
-        # deletes nothing.
+        # Reached only for the two CERTAIN cases now: the file is outside
+        # <data dir>/models, or it is already gone. Either way the removal
+        # drops the name and deletes nothing.
         return None
 
     want = os.path.normcase(str(target))
@@ -1663,14 +1853,14 @@ def loaded_engine_holding_model_file(
             unknown = unknown or ModelFileHold(
                 key, "its model file path could not be resolved")
             continue
-        # normcase because the two paths reach here by different routes, one from
-        # the registry and one from whatever the engine was constructed with, and
-        # on Windows those can differ in case or separator.
+        # normcase because the two paths reach here by different routes (one
+        # from the registry, one from whatever the engine was constructed with)
+        # and on Windows those can differ in case or separator.
         if os.path.normcase(str(held)) == want:
             return ModelFileHold(key)
-    # A proven holder outranks an unknown one: both refuse, but only the first can
-    # say which engine has the file. Hence the full pass rather than returning the
-    # first unknown as soon as it is seen.
+    # A proven holder outranks an unknown one: both refuse, but only the first
+    # can say truthfully which engine has the file. Hence the full pass rather
+    # than returning the first unknown as soon as it is seen.
     return unknown
 
 
@@ -1730,13 +1920,17 @@ async def _idle_unload_once(ttl: int) -> bool:
         if engine is None or not engine.loaded:
             continue
 
-        # The _last_activity fallback is reached only for an engine assigned to
-        # _engine directly without going through switch_engine's registration (a
-        # test or script setting _engine, or a single-model direct-path startup
-        # with an empty registry). In that mode there is only ONE model, so the
-        # last activity of any request and the last activity of THIS model are the
-        # same fact. A model loaded via switch_engine always has its own entry from
-        # the instant it is registered, so the multi-model case never reaches this.
+        # The _last_activity fallback below is intentional, not a leftover: it is
+        # only ever reached for an engine that was assigned to `_engine` directly
+        # without going through switch_engine's registration (a test/script
+        # setting _engine, or a genuinely single-model/direct-path startup with
+        # an empty registry - see switch_engine's own "empty registry" comment).
+        # In that mode there is only ONE model, ever, so "the last activity of
+        # any request" and "the last activity of THIS model" are the same fact -
+        # falling back to it is correct, not a cross-model leak. A model loaded
+        # via switch_engine always has its OWN entry from the instant it is
+        # registered (seeded there), so in the multi-model case this fallback is
+        # never reached at all.
         last_act = _last_activity_per_model.get(name, _last_activity)
         if (time.monotonic() - last_act) < ttl:
             continue
@@ -1754,23 +1948,23 @@ async def _idle_unload_once(ttl: int) -> bool:
                 continue
                 
             idle_s = int(time.monotonic() - last_act)
-            # Flag for the duration of the native free, so a request that slips in
-            # after the active_requests recheck above cannot take get_engine's fast
-            # path and pin this engine while it is being freed. Cleared in finally,
-            # so the engine kept in _engines reloads lazily on the next request.
+            # Flag for the duration of the native free so no request that slips in
+            # after the active_requests recheck above can take get_engine's fast
+            # path and pin this engine while it is being freed (the pin-arrives-
+            # during-the-unload-await window, BUG-9b). Cleared in finally so the
+            # kept-in-_engines engine reloads lazily on the next request.
             engine.unloading = True
             try:
                 await loop.run_in_executor(None, engine.unload)
             finally:
                 engine.unloading = False
 
-            # Keep the now-unloaded Engine in _engines so the next request reloads
-            # it lazily with its ORIGINAL constructor settings (n_ctx,
-            # n_gpu_layers, device, mmproj), and so a direct-path served model,
-            # whose display name is not in the registry and cannot be rebuilt by
-            # the factory, is not lost. Only the LRU entry is dropped, since it
-            # holds no VRAM while unloaded; its inference semaphore is kept for a
-            # concurrent reload.
+            # Keep the (now-unloaded) Engine in _engines so the next request
+            # reloads it lazily with its ORIGINAL constructor settings (n_ctx /
+            # n_gpu_layers / device / mmproj), and so a direct-path served model
+            # (display name not in the registry, unbuildable by the factory) is
+            # not lost forever (AUDIT-HIGH-5). Only drop it from the LRU (no VRAM
+            # while unloaded); keep its inference semaphore for a concurrent reload.
             if name in _engines_lru:
                 _engines_lru.remove(name)
 
@@ -1778,13 +1972,13 @@ async def _idle_unload_once(ttl: int) -> bool:
                 _engine = None
             if _active_model_name == name:
                 if _active_model_name:
-                    # Same as unload_one_model and unload_all_models: capture the
-                    # name before it is possibly cleared below, so a still-idle
-                    # server with nothing left in _engines_lru can resolve an
-                    # unnamed request (see _last_active_model_name and
+                    # Same reasoning as unload_one_model/unload_all_models: capture
+                    # the name before it is possibly cleared below, so a still-idle
+                    # server with nothing left in _engines_lru can still resolve an
+                    # unnamed request (see _last_active_model_name /
                     # _resolve_unnamed_model_name). Harmless when the LRU fallback
-                    # below keeps a real active model, which wins over
-                    # _last_active_model_name automatically.
+                    # below keeps a real active model instead, since that value
+                    # wins over _last_active_model_name automatically.
                     _last_active_model_name = _active_model_name
                 _active_model_name = _engines_lru[-1] if _engines_lru else None
                 _engine = _engines[_active_model_name] if _active_model_name else None
@@ -1794,10 +1988,10 @@ async def _idle_unload_once(ttl: int) -> bool:
             _dbg.info("idle-unload: freed %s after %ds idle (ttl=%ds); it reloads "
                       "on the next request", engine.display_name, idle_s, ttl)
             unloaded_any = True
-            # Cross-install GPU coordination: reflect the freed model. A no-op when
-            # not registered. Offloaded because _gpu_registry_sync does filesystem
-            # I/O and, when a non-zero main_gpu_index is set, a GPU probe via
-            # _current_gpu_index.
+            # Cross-install GPU coordination: reflect the freed model. No-op when
+            # not registered. Offloaded: _gpu_registry_sync does filesystem I/O
+            # (and, when a non-zero main_gpu_index is set, a GPU probe via
+            # _current_gpu_index) - keep it OFF the event loop.
             await loop.run_in_executor(None, _gpu_registry_sync)
 
     return unloaded_any
@@ -1824,25 +2018,58 @@ async def _idle_unload_loop() -> None:
             _dbg.warning("idle-unload check failed (continuing)", exc_info=True)
 
 
-async def _gpu_registry_heartbeat_loop() -> None:
+async def _gpu_registry_heartbeat_loop(*, interval: float = 20.0) -> None:
     """Keep this instance's cross-install GPU-coordination entry fresh
     (~every 20s), matching the ``_idle_unload_loop`` pattern above. Only
     started when this instance is actually registered for coordination (see
     ``_gpu_coord`` / the lifespan startup below) - a plain test app or an
     ``--isolated`` run never starts this loop at all. A transient failure is
-    logged, not fatal: the entry ages until the next tick, and a stale entry is
-    skipped by a peer's own liveness+identity check anyway."""
+    logged, not fatal (RULE 5): the entry just ages until the next tick, and a
+    stale entry is skipped by a peer's own liveness+identity check anyway.
+
+    *interval* is the tick period; override it only in tests, same as
+    ``start_executor_saturation_watch``'s ``poll``.
+
+    THE WARNING IS LOGGED ONCE PER FAILURE RUN, then throttled to DEBUG. A
+    heartbeat failure is usually PERSISTENT (an unwritable registry path, a
+    wedged driver probe), and an unconditional warning on a 20s tick emits
+    three lines a minute WITH A FULL TRACEBACK for the life of the server -
+    which buries the one line that mattered and trains people to ignore the
+    log. This is the same log-once-then-throttle shape the VRAM-probe daemon
+    and the executor saturation watch already use.
+
+    A SUCCESS RESETS IT, so a LATER, separate failure warns again rather than
+    being silenced forever by the first one. That is the half a plain
+    "only ever warn once" flag gets wrong.
+
+    The catch stays broad ON PURPOSE - this loop must never be the thing that
+    kills the server - and that is unchanged. Only the volume is. Note that
+    ``asyncio.CancelledError`` derives from ``BaseException``, not
+    ``Exception``, so shutdown still cancels this loop rather than being
+    swallowed and logged as a heartbeat failure."""
+    warned = False
     while True:
-        await asyncio.sleep(20)
+        await asyncio.sleep(interval)
         try:
             # Offloaded off the event loop: _gpu_registry_sync does filesystem I/O
-            # for the registry write and, when a non-zero main_gpu_index is
-            # configured, a GPU driver probe, either of which could stall the
-            # single loop on this 20s tick.
+            # (registry write) and, when a non-zero main_gpu_index is configured, a
+            # GPU driver probe - either could otherwise stall the single loop and
+            # freeze the whole WebUI on this 20s tick while the box is idle.
             await asyncio.get_running_loop().run_in_executor(None, _gpu_registry_sync)
-        except Exception:
+        except Exception as e:
             from localm.debuglog import logger as _dbg
-            _dbg.warning("gpu-registry heartbeat failed (continuing)", exc_info=True)
+            if not warned:
+                _dbg.warning("gpu-registry heartbeat failed (continuing)", exc_info=True)
+                warned = True
+            else:
+                # No exc_info on the throttled line: the traceback is what makes
+                # the repeat expensive, and it is identical to the one already
+                # logged above. The type and message still identify a CHANGE of
+                # cause, which is the only new information a repeat can carry.
+                _dbg.debug("gpu-registry heartbeat still failing (%s: %s)",
+                           type(e).__name__, e)
+        else:
+            warned = False
 
 
 async def _hang_heartbeat_loop() -> None:
@@ -1879,22 +2106,31 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
         try:
             while not stop.wait(poll):
                 if _hb_monotonic is None:
-                    # Cold start: the heartbeat task has not ticked even once, so
-                    # there is no prior tick to measure a stall against and this
-                    # poll is skipped rather than dumping against a fabricated
-                    # baseline. Without the check, subtracting from None raises an
-                    # uncaught TypeError on the very first poll and kills this
-                    # daemon thread, which from outside is indistinguishable from a
-                    # healthy quiet one.
+                    # Cold start: the heartbeat task has not ticked even once
+                    # yet (see the comment above _hb_monotonic's declaration).
+                    # There is no prior tick to measure a stall AGAINST, so
+                    # skip rather than dump against a fabricated baseline -
+                    # the same "no reading yet, never a fake one" choice
+                    # _loop_lag_seconds() makes.
+                    #
+                    # NOT COSMETIC: proven by reverting this guard and running
+                    # this loop against a real cold start. Without it, `lag =
+                    # time.monotonic() - _hb_monotonic` raises an uncaught
+                    # TypeError (subtracting from None) on the very first
+                    # poll, which crashes this daemon thread outright - a dead
+                    # thread looks identical to a healthy quiet one from the
+                    # outside, so hang detection would be silently disabled
+                    # for the rest of the process with no signal to anyone.
+                    # Do not remove this check as redundant.
                     continue
                 lag = time.monotonic() - _hb_monotonic
                 if lag < threshold:
                     continue
                 now = time.monotonic()
-                # Throttle: a long freeze yields a handful of snapshots rather
-                # than one per second. Compared with `is not None` rather than a
-                # 0.0 sentinel, since time.monotonic() is boot-relative and a real
-                # 0.0 baseline would suppress the FIRST dump early in uptime.
+                # Throttle: a long freeze yields a handful of snapshots, not one/sec.
+                # `is not None` (not a 0.0 sentinel): time.monotonic() is boot-relative,
+                # so a real 0.0 baseline would wrongly suppress the FIRST dump within
+                # the first ~30s of uptime.
                 if last_dump is not None and now - last_dump < max(30.0, threshold * 3):
                     continue
                 last_dump = now
@@ -1928,13 +2164,14 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
     return stop, t
 
 
-# Human-facing hooks for the hang ALARM (localm/inference/_hang_alarm.py, the
-# detect/surface/recover pipeline, distinct from the forensic stack-dump thread
-# above). The GUI replaces these with the native status window's own error and
-# ready transitions via set_hang_surface(); headless serve keeps the console
-# default so the terminal running the server shows the state change. The alarm
-# itself already emits logger.critical before calling these, so the hooks are
-# only the human-visible half.
+# Human-facing hooks for the hang ALARM (ADR-0012; localm/inference/
+# _hang_alarm.py - the detect/surface/recover pipeline, distinct from the
+# forensic stack-dump thread above). The GUI replaces these with the native
+# status window's own red-error/ready transitions via set_hang_surface();
+# headless serve keeps the console default so the terminal running the
+# server still shows the state change. logger.critical is already emitted by
+# the alarm itself before calling these, so the hooks only need to be the
+# human-visible half.
 def _default_hang_surface(text: str) -> None:
     try:
         from localm.console import console
@@ -1966,7 +2203,7 @@ def set_hang_surface(surface, recovered) -> None:
 
 
 # The running event loop, captured at lifespan startup for _hang_dump's
-# async-task section, which a plain thread cannot resolve on its own.
+# async-task section (a plain thread cannot resolve it on its own).
 _hang_dump_loop = None
 
 
@@ -1977,8 +2214,8 @@ def _hang_dump(reason: str) -> None:
     calls this once per distinct incident; detection/surfacing themselves are
     NOT gated on this (they write nothing sensitive anywhere).
 
-    Two sections: every THREAD (faulthandler - where a wedged executor job
-    is visible), then every asyncio TASK
+    Two sections: every THREAD (faulthandler - where the 2026-08-18
+    incident's wedged executor jobs were visible), then every asyncio TASK
     with its await stack - because a purely-async wedge (a coroutine parked
     on an await that never completes) does not exist on any thread and is
     invisible to faulthandler. The task section is gathered ON the loop
@@ -2002,11 +2239,12 @@ def _hang_dump(reason: str) -> None:
         done = threading.Event()
 
         def _capture_tasks() -> None:
-            # Task.get_stack() reports only the OUTERMOST coroutine's suspension
-            # frame and never follows cr_await, which for a wedged request shows
-            # the middleware wrapper and hides the handler line. The await chain
-            # is walked by hand instead, so the record ends at the exact line the
-            # coroutine is parked on, plus the primitive it is awaiting.
+            # Task.get_stack() reports only the OUTERMOST coroutine's
+            # suspension frame (it never follows cr_await), which for a
+            # wedged request shows the middleware wrapper and hides the
+            # handler line that actually matters. Walk the await chain by
+            # hand so the record ends at the exact line the coroutine is
+            # parked on, plus the primitive it is awaiting.
             try:
                 for task in asyncio.all_tasks(loop):
                     lines.append(f"\n--- task {task.get_name()} ---\n")
@@ -2050,13 +2288,13 @@ def _hang_restart_action(app) -> None:
     """Recovery action for the hang alarm: the same in-place re-exec restart
     as the tray Restart button (_do_restart), hardened for a process that is
     currently misbehaving. The graceful path (engine unloads, embedder
-    release, VRAM-release wait) is lock-free and bounded, but "bounded" is a
-    claim about code on a box that is provably wedged, so it gets a hard
-    window, after which the re-exec happens anyway with
+    release, VRAM-release wait) is deliberately lock-free/bounded by design,
+    but "bounded" is a claim about code on a box that is provably wedged -
+    so it gets a hard window, after which the re-exec happens anyway with
     only the steps that cannot block: the lock-free embedder-worker release
-    (an orphaned worker survives execv holding VRAM), the crash-marker disarm
-    (so the next boot does not misreport this recovery as a crash), and a log
-    flush."""
+    (an orphaned worker survives execv holding VRAM - REG-650), the crash-
+    marker disarm (so the next boot does not misreport this recovery as a
+    crash), and a log flush."""
     port = getattr(app.state, "instance_port", None)
     instance_id = getattr(app.state, "instance_id", None)
 
@@ -2071,8 +2309,8 @@ def _hang_restart_action(app) -> None:
                          daemon=True)
     t.start()
     t.join(45.0)
-    # _do_restart ends in os.execv, which never returns, so reaching this line at
-    # all means the graceful path raised or wedged. Force it.
+    # _do_restart ends in os.execv, which never returns - so reaching this
+    # line at all means the graceful path raised or wedged. Force it.
     from localm.debuglog import logger as _dbg
     _dbg.critical("graceful restart did not complete in 45s; forcing re-exec")
     try:
@@ -2119,23 +2357,23 @@ def _diagnostics_allowed() -> bool:
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
-# The browser GUI authenticates with an HttpOnly session cookie whose value is an
-# OPAQUE session id (localm.sessions), NOT the API key: page JS cannot read it,
-# and rolling the key does not invalidate it. Cookie-sourced auth on a state
-# change must also carry a CSRF token in this header, an HMAC DERIVED from the
-# session (csrf_token_for / _csrf_ok) fetched via GET /api/session, so the two
-# stay in lockstep and there is NO separate CSRF cookie. The
-# Authorization-header path (CLI, SDK, coder) cannot be forged cross-site and is
-# CSRF-exempt.
+# The browser GUI authenticates with an HttpOnly session cookie whose value is
+# an OPAQUE session id (localm.sessions), NOT the API key - page JS cannot read it,
+# and rolling the key does not invalidate it. Cookie-sourced auth on a state change
+# must also carry a CSRF token in this header, an HMAC DERIVED from the session
+# (csrf_token_for / _csrf_ok) fetched via GET /api/session, so it is always in
+# lockstep with the session and cannot desync (there is NO separate CSRF cookie).
+# The Authorization-header path (CLI / SDK / coder) cannot be forged cross-site and
+# is therefore CSRF-exempt.
 SESSION_COOKIE = "localm_session"
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
-# Hard cap on any request body, rejected with 413 from Content-Length BEFORE the
-# body is buffered or parsed, so a large base64 upload cannot be materialized
-# ahead of a route's own checks. 160 MB fits the largest legitimate upload (100 MB
-# decoded, about 133 MB base64 plus the JSON wrapper). Read at request time, so a
-# test can patch it.
+# Hard cap on any request body, rejected (413) from Content-Length BEFORE the body
+# is buffered or parsed, so a large base64 upload cannot be materialized ahead of a
+# route's own checks (decode-time OOM DoS on /api/rag/upload + /extract, CWE-400).
+# 160 MB fits the largest legitimate upload (100 MB decoded ~= 133 MB base64 + JSON
+# wrapper) and rejects larger up front. Read at request time so a test can patch it.
 MAX_REQUEST_BODY_BYTES = 160_000_000
 
 
@@ -2144,10 +2382,10 @@ class _BodyStreamCapMiddleware:
     wire, not the client-supplied Content-Length header. ``Transfer-Encoding:
     chunked`` sends no Content-Length at all, so a plain header check (as a
     ``@app.middleware("http")``/BaseHTTPMiddleware handler would have to do)
-    never fires: a chunked POST to a CORS-exempt route like
-    /v1/chat/completions is otherwise fully buffered by FastAPI's own body
-    handling, ahead of any auth dependency or pydantic validation, from one
-    unauthenticated connection. A pure
+    never fires - live-verified: a chunked POST to a CORS-exempt route like
+    /v1/chat/completions was fully buffered by FastAPI's own body handling
+    (ahead of any auth dependency or pydantic validation) up to ~5.9 GB RSS
+    from one unauthenticated connection before this fix (AUD-CHUNKED). A pure
     ASGI middleware class (not the BaseHTTPMiddleware pattern used elsewhere in
     this file) so it wraps the raw ``receive`` callable BEFORE Starlette/
     FastAPI's own body-buffering step ever runs; a BaseHTTPMiddleware handler
@@ -2155,15 +2393,15 @@ class _BodyStreamCapMiddleware:
     unbounded read it is trying to bound.
 
     Once the cap is crossed this does NOT just raise and let the exception
-    unwind through FastAPI's own body-parsing: FastAPI
+    unwind through FastAPI's own body-parsing (that was tried first): FastAPI
     wraps ANY exception from body reading into a generic 400 "error parsing
     the body" - worse, raising from deep inside receive() surfaces to it as an
     ``ExceptionGroup`` (from the anyio task group `BaseHTTPMiddleware` runs the
     downstream app in), which doesn't match FastAPI's own
     ``except HTTPException: raise`` passthrough, so the 413 never reaches the
-    client at all - only a bare TCP reset, because uvicorn still has unread
-    bytes in the socket's receive buffer when it closes and the OS sends RST
-    instead of completing the response. Instead: tell the inner
+    client at all - only a bare TCP reset (confirmed live: uvicorn had unread
+    bytes still sitting in the socket's receive buffer when it closed, so the
+    OS sent RST instead of completing the response). Instead: tell the inner
     app the body simply ENDED at the cap (bounding what it can ever buffer),
     swallow whatever confused response it tries to send for that truncated
     body, drain and discard the rest of the real stream so the OS can close
@@ -2209,16 +2447,17 @@ class _BodyStreamCapMiddleware:
                 total += len(message.get("body") or b"")
                 if total > MAX_REQUEST_BODY_BYTES:
                     exceeded = True
-                    # Tell the inner app the body ends HERE, even though the real
-                    # client may still be sending, so it cannot keep accumulating
-                    # from this same wrapped receive.
+                    # Tell the inner app the body ends HERE, even though the
+                    # real client may still be sending - bounds what it can
+                    # ever accumulate instead of leaving it to keep reading a
+                    # never-ending stream via this same wrapped receive.
                     return {"type": "http.request", "body": b"", "more_body": False}
             return message
 
         async def _suppressing_send(message):
-            # The inner app believes it got a truncated body and will try to
-            # respond to it; that response never reaches the real client, because
-            # the 413 below is authoritative once exceeded.
+            # The inner app now believes it got a (truncated) body and will
+            # try to respond to it - never let that response reach the real
+            # client; the 413 below is authoritative once exceeded.
             if not exceeded:
                 await send(message)
 
@@ -2227,19 +2466,25 @@ class _BodyStreamCapMiddleware:
         except Exception:
             if not exceeded:
                 raise
-            # Suppressed: the inner app choked on a body this middleware cut short,
-            # for instance invalid JSON at the truncation point. The request is
-            # rejected as too large regardless of what it contained.
+            # Suppressed: the inner app choked on a body we deliberately cut
+            # short (e.g. invalid JSON at the truncation point) - irrelevant,
+            # the request is rejected as too large regardless of what its
+            # first MAX_REQUEST_BODY_BYTES happened to contain.
 
         if exceeded:
-            # Drain the rest of the real stream, if the client had not already
-            # finished sending it, so the OS does not RST the connection on close
-            # over unread bytes still in its receive buffer, which would discard
-            # the 413 below. Bytes are discarded immediately rather than
-            # accumulated. Both the bytes drained AND the wall-clock time spent
-            # draining are bounded, so a client that goes silent mid-stream cannot
-            # block this loop's receive() forever; past either ceiling the graceful
-            # drain is abandoned and a possible RST is accepted.
+            # Drain the rest of the real stream (if the client had not already
+            # finished sending it) so the OS does not RST the connection on
+            # close over unread bytes still in its receive buffer, which would
+            # silently discard the 413 response below. Bytes are discarded
+            # immediately, not accumulated, so this cannot reproduce the
+            # unbounded-memory bug - but a client that goes silent mid-stream
+            # (stops sending, never signals more_body=False, never disconnects)
+            # would otherwise leave this loop's `await receive()` blocked
+            # forever, trading the memory-exhaustion bug for a connection/task
+            # left open indefinitely (AUD-CHUNKED follow-up). Bound BOTH bytes
+            # drained AND wall-clock time spent draining; past either ceiling,
+            # give up on the graceful drain (a possible RST instead of a clean
+            # 413 response is an acceptable trade for not hanging a task).
             drained = 0
             drain_ceiling = MAX_REQUEST_BODY_BYTES * 4
             drain_deadline = time.monotonic() + 30.0
@@ -2264,7 +2509,7 @@ class _BodyStreamCapMiddleware:
 
 
 # Scope key under which _DisconnectSignalMiddleware publishes a non-blocking
-# has-the-client-gone poll. See the middleware and _generate_full for why an
+# "has the client gone?" poll. See the middleware and _generate_full for why an
 # endpoint cannot just call request.is_disconnected().
 _DISCONNECT_POLL_KEY = "localm.disconnect_poll"
 
@@ -2275,16 +2520,18 @@ class _DisconnectSignalMiddleware:
     The four @app.middleware("http") handlers below are BaseHTTPMiddleware, which
     runs the endpoint in a child task fed by a SYNTHETIC receive that never yields
     http.disconnect - so request.is_disconnected() is permanently False for any
-    endpoint behind them. A StreamingResponse still learns of a disconnect
-    (Starlette acloses its body generator), but a plain non-streaming coroutine
-    does not.
+    endpoint behind them (confirmed against a real uvicorn client abort). A
+    StreamingResponse still learns of a disconnect (Starlette acloses its body
+    generator), but a plain non-streaming coroutine does not.
 
     This is a PURE-ASGI middleware (a BaseHTTPMiddleware here would defeat its own
     purpose) added OUTSIDE that stack, so it keeps the raw ASGI receive - which
     does carry http.disconnect - and stashes a Starlette-style non-blocking peek at
     scope[_DISCONNECT_POLL_KEY]. It never wraps receive/send, so it is transparent
     to every other route; only the non-streaming inference path polls it (see
-    _generate_full)."""
+    _generate_full). WHY here and not fixed globally: converting the auth/origin
+    BaseHTTPMiddleware handlers to pure-ASGI is a far larger, riskier change; this
+    gives the one path that needs it a correct signal without touching them."""
 
     def __init__(self, app):
         self._app = app
@@ -2297,12 +2544,11 @@ class _DisconnectSignalMiddleware:
         gone = {"v": False}
 
         async def poll_disconnected() -> bool:
-            # Mirrors Starlette.Request.is_disconnected: peek the raw stream with
-            # an immediately-cancelled receive so it never blocks, and latch True
-            # once http.disconnect has arrived. Reading the raw receive here is
-            # safe because the body is fully read, through the wrapped chain,
-            # before the endpoint and therefore this poll runs, so only
-            # http.disconnect remains to consume.
+            # Mirrors Starlette.Request.is_disconnected: peek the raw stream with an
+            # immediately-cancelled receive so it never blocks, and latch True once
+            # http.disconnect has arrived. Reading the raw receive here is safe: the
+            # body is fully read (through the wrapped chain) before the endpoint -
+            # and thus this poll - runs, so only http.disconnect remains to consume.
             import anyio
             if gone["v"]:
                 return True
@@ -2318,9 +2564,11 @@ class _DisconnectSignalMiddleware:
         await self._app(scope, receive, send)
 
 
-# The session cookie PERSISTS, so the user stays signed in across a browser or PWA
-# restart. Browsers clamp lifetime to about 400 days, which is the ceiling asked
-# for here; the escape hatch is /api/session/logout.
+# SEAMLESS: the session cookie PERSISTS so the user stays signed in across a browser
+# or PWA restart (a drop-on-close cookie made the key gate and its "Install
+# certificate" step reappear every restart). Browsers clamp lifetime to ~400 days,
+# so we ask for that ceiling; escape hatch is /api/session/logout (Settings: blank
+# the key and Save).
 SESSION_MAX_AGE = 400 * 24 * 3600  # ~400 days (the browser cap)
 
 
@@ -2357,8 +2605,8 @@ def _session_minted_by_owner_key(rec, token=None) -> bool:
     1. the ``owner_key_minted`` stamp recorded at login (``sessions.create``);
     2. for a record written before that field existed, the recorded ``key_hash``
        still equalling the live owner key's digest. Only the owner key's own
-       digest can match that, so a keystore key's session can never satisfy it,
-       and no ABSENT-vs-False distinction on the stamp is needed.
+       digest can match that, so a keystore key's session can never satisfy it -
+       which is why this needs no way to tell an ABSENT stamp from a False one.
 
     On (2) the proof is written back (``remember_owner_key_minted``) while it
     still holds: after an owner-key roll the recorded hash matches neither the new
@@ -2366,13 +2614,16 @@ def _session_minted_by_owner_key(rec, token=None) -> bool:
     owner session would start failing the re-check below and be signed out on the
     roll - the exact behaviour the exemption exists to prevent.
 
-    NOT derived from the scope set, and NOT from a keystore read:
+    Deliberately NOT derived from the scope set, and NOT from a keystore read:
 
     - **ADMIN is not the question.** The owner may mint ADMIN-scoped KEYSTORE
-      keys, which stay revocable, so "holds ADMIN" is not "is the owner".
+      keys, which stay revocable; treating "holds ADMIN" as "is the owner" is what
+      gave such a key an exemption it was never entitled to.
     - **Nothing here reads the keystore**, so ``_load_keystore()``'s fail-OPEN
       behaviour (``[]`` on OSError/ValueError) cannot promote anything, and no
-      answer is derived from a NEGATIVE such as ``not key_hash_live``."""
+      answer is derived from a NEGATIVE such as ``not key_hash_live``. Both of
+      those shapes produced privilege escalations in the jobs plugin's equivalent
+      check (see ``builtin/jobs/plug.py``)."""
     if rec.get("owner_key_minted") is True:
         return True
     from localm.auth import _hash_key, _legacy_owner_identity, ct_equal, get_api_key
@@ -2411,10 +2662,10 @@ def _valid_session(token):
     if rec is None:
         return None
     if not _session_exempt_from_key_recheck(rec, token):
-        # A KEYSTORE key's session lives only as long as its key, so the owning
-        # key is re-validated against the live keystore every request and revoking
-        # or expiring it cuts the session off, matching the bearer path's
-        # per-request verify().
+        # A KEYSTORE key's session lives only as long as its key: re-validate the
+        # owning key against the live keystore every request, so revoking or
+        # expiring it cuts the session off (parity with the bearer path's
+        # per-request verify()).
         from localm.auth import key_hash_live
         if not key_hash_live(rec.get("key_hash")):
             return None
@@ -2424,13 +2675,16 @@ def _valid_session(token):
 def _session_exempt_from_key_recheck(rec, token=None) -> bool:
     """Whether *rec* may skip the per-request keystore liveness re-check.
 
-    The exemption is for the OWNER KEY, not for ADMIN: the owner key is not a
-    keystore entry and a session is decoupled from the key VALUE, so an owner-key
-    ROLL must not log the owner out. Keying it on the SCOPE SET alone would hand
-    the same exemption to any ADMIN-scoped KEYSTORE key, which is revocable by
-    design, and removing the exemption outright signs the owner out on a roll.
+    The exemption is for the OWNER KEY, not for ADMIN. It exists because the owner
+    key is not a keystore entry and a session is decoupled from the key VALUE, so
+    an owner-key ROLL must not log the owner out. Keying it on the SCOPE SET alone
+    handed the same exemption to any ADMIN-scoped KEYSTORE key - which is revocable
+    by design - so revoking such a key did not reliably end its cookie, and if the
+    store cleanup also failed the cookie kept working indefinitely. Removing the
+    exemption outright is not the fix either: that reintroduces the owner signing
+    themselves out, which is the whole reason it is here.
 
-    ADMIN is NECESSARY but not SUFFICIENT. It
+    ADMIN is NECESSARY but not SUFFICIENT, and that conjunction is deliberate. It
     is not a return to inferring the owner from the scope set - the owner proof
     below is what actually grants the exemption. ADMIN is required ALONGSIDE it
     because a record claiming to be owner-minted while carrying narrower scopes is
@@ -2444,8 +2698,10 @@ def _session_exempt_from_key_recheck(rec, token=None) -> bool:
         return True
     # No key identity at all. The re-check asks whether a REVOCABLE KEYSTORE
     # CREDENTIAL behind this session is still live; a session that records no key
-    # has no such credential, so key_hash_live(None) would reject it for the wrong
-    # reason.
+    # has no such credential, so the question does not apply to it and answering it
+    # with key_hash_live(None) -> False would reject the session for the wrong
+    # reason. Distinct from the defect above, where the session DOES name a live
+    # keystore entry and is exactly the thing that must stay revocable.
     return not rec.get("key_hash")
 
 
@@ -2454,10 +2710,10 @@ def _principal_from_token(token, source):
     rag_roots)`` or None.
 
     A ``header`` token is a raw API key -> ``auth.verify()``. A ``cookie`` token is
-    an OPAQUE SESSION ID -> the server-side session store (``localm.sessions``),
+    now an OPAQUE SESSION ID -> the server-side session store (``localm.sessions``),
     which returns the scope / owning-key / fs-access / rag-roots SNAPSHOT taken at
-    login, so a cookie session stays valid across an owner-key roll and the
-    durable key never lives in the cookie. ``key_hash`` is the
+    login. So a cookie session stays valid across an owner-key roll (the reported
+    bug), and the durable key never has to live in the cookie. ``key_hash`` is the
     sha256 of the key that minted the session, so ``principal_id`` over a cookie
     matches the same key presented as a bearer (job ownership parity). ``rag_roots``
     is that credential's per-key RAG-indexing folder allowlist (see
@@ -2487,10 +2743,10 @@ def caller_minted_by_owner_key(request: Request) -> bool:
     to answer: was the credential behind this session the owner key, or a minted
     (and therefore revocable) keystore key? ``sessions.create`` records that as a
     POSITIVE proof at login - a constant-time plaintext compare against
-    ``auth.get_api_key()`` - because after a roll the two are
-    indistinguishable.
+    ``auth.get_api_key()`` - because after a roll the two are indistinguishable
+    (REG-509: the owner's own scheduled jobs silently lost shell).
 
-    Narrow, and every clause matters:
+    Deliberately narrow, and every clause of that is load-bearing:
 
     - **False for a BEARER caller**, who has no session. That path already answers
       correctly by comparing the presented key's value, and ``verify()`` rejects a
@@ -2510,10 +2766,10 @@ def caller_minted_by_owner_key(request: Request) -> bool:
         return False
     rec = _valid_session(token)
     # Shares _session_minted_by_owner_key with the exemption gate rather than
-    # re-reading the raw stamp, so is-this-the-owner's-session has exactly one
-    # answer. Otherwise a pre-upgrade owner session, which has no stamp and is
-    # recognised by value, would be exempt from the keystore re-check yet not
-    # count as the owner here.
+    # re-reading the raw stamp, so "is this the owner's session" has exactly one
+    # answer. Without that, a pre-upgrade owner session (no stamp, recognised by
+    # value) would be exempt from the keystore re-check yet not count as the owner
+    # here - two notions of the same thing, disagreeing on the same record.
     return bool(rec) and _session_minted_by_owner_key(rec, token)
 
 
@@ -2618,19 +2874,20 @@ def principal_id(request: Request) -> Optional[str]:
     mode / when no token is presented. It is the same SHA-256 the keystore stores
     (never the plaintext key), so it identifies the key WITHOUT exposing it, and
     is identical whether the key arrives via the Authorization header or the
-    session cookie. Used to bind a background job to the key that created it, so
-    only that key (or an admin/owner) may stream or cancel it."""
+    session cookie. Used to bind a background job to the key that created it
+    (KEY-SCOPE-2), so only that key (or an admin/owner) may stream or cancel it."""
     from localm.auth import any_key_configured
     if not any_key_configured():
         return None
     token, source = _request_token(request)
     if not token or not token.strip():
         return None
-    # Route through _principal_from_token for BOTH sources: a cookie session for a
-    # non-ADMIN key is re-validated against the live keystore the same way a
-    # bearer token is on every request, so a revoked or expired key's still-
-    # resident session cannot keep resolving a key hash here while the same cookie
-    # is rejected everywhere else.
+    # Route through _principal_from_token for BOTH sources (AUTH-NETWORK-4):
+    # a cookie session for a non-ADMIN key must be re-validated against the
+    # live keystore the same way a bearer token is on every request, or a
+    # revoked/expired key's still-resident session can keep resolving a key
+    # hash here even though the same cookie is already rejected everywhere
+    # else auth is enforced.
     prin = _principal_from_token(token, source)
     if prin is not None:
         held, key_hash, _fs, _rag_roots = prin
@@ -2643,12 +2900,12 @@ def memory_principal(request: Request) -> Optional[str]:
     ADMIN-scoped key or the owner session) collapses to the shared "owner"
     namespace (returns None -> memory.principal_of maps None to "owner"), so the
     owner's saved memories are not stranded in a per-key-hash namespace that a
-    key rotation would orphan.
+    key rotation would orphan (AUDIT-MED-14).
 
-    This is NOT principal_id: principal_id keeps returning the key hash, so a
-    background job stays bound to the key that created it. Only the memory
-    principal collapses ADMIN/owner to "owner"; a non-owner scoped key keeps its
-    own hash namespace here too."""
+    This is deliberately NOT principal_id: principal_id must keep returning the
+    key hash so a background job stays bound to the key that created it
+    (KEY-SCOPE-2). Only the memory principal collapses ADMIN/owner to "owner"; a
+    non-owner scoped key keeps its own hash namespace here too."""
     from localm import scopes
     held = caller_scopes(request)
     if held is not None and scopes.ADMIN in held:
@@ -2671,8 +2928,9 @@ def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
 
 def require_owner(resolve):
     """FastAPI dependency factory: promote a per-route ownership check into a
-    Depends()-injectable gate, the same pattern require_scope uses for scope
-    checks, so a new per-owner route cannot omit the check by construction.
+    Depends()-injectable gate, the same pattern require_scope already uses for
+    scope checks - so a new per-owner route cannot omit the check by
+    construction (design-audit LM-DA-020, reaffirming LM-DA-SEC-06).
 
     *resolve* is itself an ordinary FastAPI dependency - its own path/query
     params (e.g. ``job_id``, ``name``) are auto-injected the same as an
@@ -2681,8 +2939,8 @@ def require_owner(resolve):
     *owner* is its recorded creator (None = unrestricted, see job_owner_ok),
     and *not_found_detail* is the 404 message to raise. The SAME 404 is raised
     whether the resource is missing or the caller does not own it - never
-    distinguished, so a foreign key cannot even confirm the resource exists.
-    On success the gate returns *resource*, so a route can
+    distinguished, so a foreign key cannot even confirm the resource exists
+    (KEY-SCOPE-2). On success the gate returns *resource*, so a route can
     declare ``thing = Depends(require_owner(resolve))`` and receive it
     directly. Use as ``dependencies=[Depends(require_owner(resolve))]`` when
     the route does not need the resource itself."""
@@ -2701,9 +2959,9 @@ def effective_fs_access(request: Request) -> str:
 
     Open mode (loopback owner) and the owner/ADMIN key always resolve to "host";
     any other valid key uses its stored fs_access level (default "none" for a
-    legacy key); no valid key -> "none". Filesystem reach is a per-credential
-    dial, INDEPENDENT of ownership, so an owner can pair one of their own
-    devices with a lower-reach key."""
+    legacy key); no valid key -> "none". Filesystem reach is a per-credential dial
+    kept deliberately INDEPENDENT of ownership, so an owner can pair one of their
+    own devices with a lower-reach key."""
     from localm.auth import any_key_configured
     if not any_key_configured():
         return "host"                       # open/dev mode = loopback owner
@@ -2755,7 +3013,7 @@ def require_fs_host(request: Request) -> None:
             detail="This key does not have host filesystem access")
 
 
-# Surface mounting: an on-demand GUI on a running instance.
+# Surface mounting (H6 phase 5: on-demand GUI on a running instance).
 
 def mount_gui_surface(app) -> bool:
     """Add the GUI surface (its /api routes + the SPA static mount) to a running
@@ -2777,8 +3035,8 @@ def mount_gui_surface(app) -> bool:
     port = getattr(app.state, "instance_port", None)
     if not port:
         # advertise() sets instance_port before uvicorn accepts connections, so a
-        # real request cannot reach here without it; this guard makes a manual app
-        # build fail loudly instead of dialling a port of None.
+        # real request can never reach here without it; guard anyway so a manual
+        # app build fails loudly instead of dialling "http://127.0.0.1:None/v1".
         raise HTTPException(500, "Instance not fully started (no bind port); "
                             "cannot mount the GUI surface yet.")
     # Follow the real bind: a server bound only on ::1, or on one specific
@@ -2798,9 +3056,10 @@ def mount_gui_surface(app) -> bool:
         if info is None:
             raise ValueError(f"Model not found: {name}")
         m_path, m_hint = info
-        # Carry the model's mmproj (registry-recorded, else a sibling projector
-        # next to the GGUF) into the new Engine, like the CLI --mmproj flag, so a
-        # GUI or registry switch does not drop image support.
+        # VIS-1: a GUI/registry switch must not drop vision. Carry the model's
+        # mmproj (registry-recorded, else a sibling projector next to the GGUF)
+        # into the new Engine like the CLI --mmproj flag, else switching silently
+        # loses image support.
         mmproj = get_model_mmproj(name)
         return Engine(
             str(m_path),
@@ -2814,8 +3073,10 @@ def mount_gui_surface(app) -> bool:
         return await switch_engine(name, _build_engine)
 
     from localm.plugins.gui.web import attach_gui
-    # Claim the mount BEFORE attaching, so a re-entrant or concurrent call cannot
-    # double-register the GUI routes; the flag rolls back if attach fails.
+    # Claim the mount BEFORE attaching so a re-entrant/concurrent call cannot
+    # double-register the GUI routes; roll the flag back if attach fails. (Today
+    # this runs fully synchronously in the request handler, so nothing interleaves;
+    # this just makes the invariant explicit.)
     app.state.gui_mounted = True
     try:
         manager = attach_gui(
@@ -2823,8 +3084,8 @@ def mount_gui_surface(app) -> bool:
     except Exception:
         app.state.gui_mounted = False
         raise
-    # attach_gui re-affirms app.state.gui_mounted; the surface change is reflected
-    # in discovery so /whoami and the registry report a full instance.
+    # attach_gui re-affirms app.state.gui_mounted; reflect the surface change in
+    # discovery so /whoami and the registry report this is now a full instance.
     app.state.coder_sessions = manager
     app.state.instance_mode = "full"
     app.openapi_schema = None   # force the schema to include the new routes
@@ -2833,8 +3094,8 @@ def mount_gui_surface(app) -> bool:
         from localm.config import home_dir
         instances.set_mode(home_dir(), getattr(app.state, "instance_id", ""), "full")
     except Exception as e:
-        # The mount already succeeded; this registry sync, which makes discovery
-        # advertise full rather than api, is best-effort but visible.
+        # The mount already succeeded; this is best-effort registry sync (so
+        # discovery advertises "full" not "api"), not fatal - but now visible.
         from localm.debuglog import logger as _dbg
         _dbg.warning("registry mode not updated to full: %s", e)
     return True
@@ -2844,8 +3105,8 @@ def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
     """Log a swallowed best-effort failure at *level* (with the current exception's
     traceback) without ever raising. The nested-guard pattern already used at the
     update-watchdog site, factored out for the shutdown/restart teardown chain: a
-    swallow stays discoverable yet can never itself break the stop/restart (the
-    logging call is guarded too)."""
+    swallow stays discoverable (rule 5) yet can never itself break the stop/restart
+    (the logging call is guarded too)."""
     try:
         from localm.debuglog import logger as _dbg
         getattr(_dbg, level, _dbg.debug)(msg, exc_info=True)
@@ -2854,7 +3115,7 @@ def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
 
 
 def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
-    """The actual stop sequence. Unload the model FIRST so the native
+    """SRV-4: the actual stop sequence. Unload the model FIRST so the native
     context is freed cleanly (a hard exit while it is loaded segfaults during
     teardown), clear the crash marker so this intentional stop is not reported as
     a crash, then exit the process so the stop is guaranteed (Ctrl+C sometimes
@@ -2868,17 +3129,20 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os._exit below bypasses atexit, the job worker
     # thread is a daemon so its finally may never run, and the Popen carries no
-    # creationflags, so without this the child is ABANDONED. A child that writes
-    # nothing to stdout survives and keeps working untracked; one that flushes
-    # output dies at its next write on the broken pipe, mid-operation and with no
-    # cleanup. See jobs.terminate_children_for_exit.
+    # creationflags - so without this the child is simply ABANDONED. MEASURED
+    # 2026-08-19: a child that writes nothing to stdout SURVIVES and keeps
+    # working untracked, while one that flushes output DIES at its next write on
+    # the broken pipe, mid-operation and with no cleanup. See
+    # jobs.terminate_children_for_exit for both arms - ADR-0008 deferred this as
+    # option E and left it unmeasured.
     #
     # FIRST in the sequence, before the engine and embedder teardown below,
-    # because a media child can itself hold VRAM and any child can keep writing to
-    # the data dir.
+    # because a media child can itself hold VRAM and any child can keep writing
+    # to the data dir - both of which the teardown below is trying to finish.
     #
-    # The registry is left saying running rather than cancelled: the next start
-    # reconciles those rows to interrupted.
+    # The registry is deliberately left saying "running" rather than cancelled:
+    # the next start reconciles those rows to "interrupted", which is the honest
+    # word for a server that stopped while work was in flight (ADR-0008 R3).
     try:
         from localm.plugins.gui.jobs import terminate_children_for_exit
         _killed = terminate_children_for_exit()
@@ -2893,8 +3157,8 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
         try:
             engine.unload()
         except Exception:
-            # Best-effort clean teardown before exit; a failed unload does not
-            # block the stop, but is logged so a segfault-on-exit has a breadcrumb.
+            # Best-effort clean teardown before exit; a failed unload must not
+            # block the stop, but log it so a segfault-on-exit has a breadcrumb.
             _dbg_swallow("engine unload during shutdown failed (non-fatal)")
     # Unload mocked _engine if it is set and wasn't in _engines
     if _engine is not None and _engine not in _engines.values():
@@ -2902,21 +3166,25 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
             _engine.unload()
         except Exception:
             _dbg_swallow("engine unload during shutdown failed (non-fatal)")
-    # Also release the shared embedder, which has a separate lifecycle from
-    # _engines, so a full stop frees ALL resident VRAM and not just the chat
-    # engines. Same swallow-but-log pattern as the engine unload above: shutdown
-    # completes regardless, and a failure stays discoverable.
+    # Also release the shared embedder - a separate lifecycle from _engines (see
+    # localm.inference.embedder's module docstring), so a full stop actually
+    # frees ALL resident VRAM, not just the chat engines. Same swallow-but-log
+    # pattern as the engine unload above: shutdown must complete regardless,
+    # but a failure stays discoverable (rule 5).
     try:
         from localm.inference import embedder as _embedder_mod
-        # One lock-free call, and NOT active_requests() or
-        # reset_embedder(): both take the embedder's load lock, which
-        # get_embedder() holds for the FULL duration of an embedding-model load,
-        # so a stop issued during a load would block here and never reach the
-        # worker teardown. release_for_exit() decides without that lock: it
-        # terminates a busy worker outright and closes an idle one politely. It
-        # must run, because os._exit below bypasses atexit and multiprocessing's
-        # daemon-child reclamation IS an atexit hook, so a skipped release leaves
-        # the worker orphaned with its model resident in VRAM.
+        # One lock-free call, deliberately NOT active_requests()/reset_embedder():
+        # both take the embedder's load lock, which get_embedder() holds for the
+        # FULL duration of an embedding-model load - so a stop issued during a
+        # load blocked on the guard itself and hung this shutdown, never reaching
+        # the worker teardown. release_for_exit() makes the whole decision without
+        # that lock: it terminates a busy worker outright (the pinned request
+        # cannot be served either way once we exit) and closes an idle one
+        # politely. It must run: os._exit below bypasses atexit, and
+        # multiprocessing's daemon-child reclamation IS an atexit hook, so a
+        # skipped release leaves the worker orphaned with its model resident in
+        # VRAM - defeating this path's whole purpose of freeing ALL of it
+        # (REG-650).
         _embedder_mod.release_for_exit()
     except Exception:
         _dbg_swallow("embedder release during shutdown failed (non-fatal)")
@@ -2924,9 +3192,9 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
     except Exception:
-        # An uncleared crash marker makes this intentional stop report as a crash
-        # on the next boot, so the failure is logged at WARNING rather than left
-        # silent.
+        # If the crash marker is NOT cleared, this intentional stop is reported as
+        # a crash on the next boot - a false "it crashed". Log it (WARNING) so that
+        # misattribution is discoverable instead of silent.
         _dbg_swallow("could not disarm crash guard on shutdown; next boot may "
                      "misreport this intentional stop as a crash", level="warning")
     import os
@@ -2962,7 +3230,7 @@ def _restart_argv(port: Optional[int] = None) -> list:
     pick_port(None), finds 8642 free again now that the other instance is gone,
     and silently moves - stranding the user's open GUI tab on a dead port, and
     making the post-update watchdog poll the old port until it times out and
-    auto-rolls back a perfectly healthy build.
+    auto-rolls back a perfectly healthy build (REG-605).
 
     Appending is safe against a user-supplied -p: click takes the LAST occurrence
     of an option, and *port* is the port that value already resolved to, so the
@@ -2979,7 +3247,7 @@ def _restart_argv(port: Optional[int] = None) -> list:
 def _do_restart(*, update_watchdog: Optional[dict] = None,
                 port: Optional[int] = None,
                 instance_id: Optional[str] = None) -> None:
-    """Restart this server IN PLACE. Unload the model FIRST (clean native
+    """R18: restart this server IN PLACE. Unload the model FIRST (clean native
     teardown, like _do_shutdown - a hard re-exec while it is loaded can segfault),
     clear the crash marker so this intentional restart is not reported as a crash,
     then re-exec the same command line so the server comes back on the same port.
@@ -2998,32 +3266,36 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     *update_watchdog*, when given (only by the post-update restart path - see
     routes/admin.py's /api/update/apply), is a
     ``{host, port, scheme, expect_version}`` dict describing this instance. A
-    DETACHED health-check watchdog is spawned right before the re-exec;
+    DETACHED health-check watchdog is spawned right before the re-exec (LM-DA-011);
     it polls the restarted instance's own /whoami and auto-rolls back if the
     expected version never comes up healthy within its timeout. The plain
     "restart the server" button (/v1/server/restart) calls this with no
     update_watchdog, so it is entirely unaffected.
 
-    Free VRAM is captured BEFORE the teardown below, so the wait after it (once
-    every native free has been issued) can confirm the releases landed before
-    re-exec spawns a fresh worker into them - see that wait's own comment
-    further down. Best-effort: an unmeasurable or wedged probe must not block a
-    restart the user asked for, and vram_capacity() is deadline-bounded."""
+    NEW-CRASH-NOTICE-USELESS item C: capture free VRAM BEFORE the teardown
+    below so the wait after it (once every native free has been issued) can
+    confirm the releases actually landed before re-exec spawns a fresh worker
+    into them - see that wait's own comment further down for the full
+    rationale. Best-effort: an unmeasurable/wedged probe must not block a
+    restart the user asked for - vram_capacity() is itself deadline-bounded."""
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os.execv below bypasses atexit, the job worker
     # thread is a daemon so its finally may never run, and the Popen carries no
-    # creationflags, so without this the child is ABANDONED. A child that writes
-    # nothing to stdout survives and keeps working untracked; one that flushes
-    # output dies at its next write on the broken pipe, mid-operation and with no
-    # cleanup. See jobs.terminate_children_for_exit.
+    # creationflags - so without this the child is simply ABANDONED. MEASURED
+    # 2026-08-19: a child that writes nothing to stdout SURVIVES and keeps
+    # working untracked, while one that flushes output DIES at its next write on
+    # the broken pipe, mid-operation and with no cleanup. See
+    # jobs.terminate_children_for_exit for both arms - ADR-0008 deferred this as
+    # option E and left it unmeasured.
     #
     # FIRST in the sequence, before the engine and embedder teardown below,
-    # because a media child can itself hold VRAM and any child can keep writing to
-    # the data dir.
+    # because a media child can itself hold VRAM and any child can keep writing
+    # to the data dir - both of which the teardown below is trying to finish.
     #
-    # The registry is left saying running rather than cancelled: the next start
-    # reconciles those rows to interrupted.
+    # The registry is deliberately left saying "running" rather than cancelled:
+    # the next start reconciles those rows to "interrupted", which is the honest
+    # word for a server that stopped while work was in flight (ADR-0008 R3).
     try:
         from localm.plugins.gui.jobs import terminate_children_for_exit
         _killed = terminate_children_for_exit()
@@ -3042,13 +3314,15 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         _dbg_swallow("free-VRAM read before restart failed (non-fatal)")
 
     # Unload all engines in the multi-model dictionary
-    # had_engines asks whether anything is ACTUALLY loaded and worth waiting on,
-    # not merely whether the dict is non-empty: unload_all_models and idle-unload
-    # both KEEP a now-unloaded engine's entry in _engines so a later request
-    # reloads it lazily, so a dict-non-emptiness check would make every restart on
-    # a server that ever idle-unloaded a model pay the wait's full timeout.
-    # getattr defaults to False, so a test double without .loaded is treated as
-    # nothing to wait for.
+    # had_engines asks "is anything ACTUALLY loaded" (worth waiting on), not
+    # merely "is the dict non-empty": unload_all_models/idle-unload both KEEP a
+    # now-unloaded engine's entry in _engines so a later request reloads it
+    # lazily (see their own docstrings), so a dict-non-emptiness check would
+    # make EVERY restart on a server that ever idle-unloaded a model pay the
+    # wait's full timeout for nothing - the exact "no delay in the common
+    # case" claim below would be false. getattr defaults to False so a test
+    # double that does not define .loaded (never holding real VRAM) is
+    # correctly treated as nothing-to-wait-for.
     had_engines = any(getattr(e, "loaded", False) for e in _engines.values())
     if not had_engines and _engine is not None and _engine not in _engines.values():
         had_engines = bool(getattr(_engine, "loaded", False))
@@ -3056,9 +3330,9 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         try:
             engine.unload()
         except Exception:
-            # Best-effort clean teardown before re-exec; a failed unload does not
-            # block the restart, but is logged, since a hard re-exec while loaded
-            # can segfault.
+            # Best-effort clean teardown before re-exec; a failed unload must not
+            # block the restart, but log it (a hard re-exec while loaded can
+            # segfault, so a breadcrumb helps if that happens).
             _dbg_swallow("engine unload during restart failed (non-fatal)")
     # Unload mocked _engine if it is set and wasn't in _engines
     if _engine is not None and _engine not in _engines.values():
@@ -3066,29 +3340,44 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
             _engine.unload()
         except Exception:
             _dbg_swallow("engine unload during restart failed (non-fatal)")
-    # Also release the shared embedder, which has a separate lifecycle from
-    # _engines, so a restart frees ALL resident VRAM before re-exec and not just
-    # the chat engines. Same swallow-but-log pattern as the engine unload above:
-    # the restart proceeds regardless, and a failure stays discoverable.
+    # Also release the shared embedder - a separate lifecycle from _engines (see
+    # localm.inference.embedder's module docstring), so a restart actually
+    # frees ALL resident VRAM before re-exec, not just the chat engines. Same
+    # swallow-but-log pattern as the engine unload above: restart must proceed
+    # regardless, but a failure stays discoverable (rule 5).
     released_embedder = False
     try:
         from localm.inference import embedder as _embedder_mod
-        # Lock-free release - see the matching comment in _do_shutdown above.
-        # os.execv replaces this process image but does NOT touch the separate
-        # worker child, and bypasses atexit, so without this the old worker
-        # survives the restart holding VRAM while the restarted server spawns a
-        # second one.
+        # Lock-free release - see the matching comment in _do_shutdown above for
+        # the full rationale. os.execv is the same case as os._exit: it replaces
+        # this process image but does NOT touch the separate worker child, and
+        # bypasses atexit, so without this the old worker survives the restart
+        # holding VRAM while the restarted server spawns a second one (REG-650).
         released_embedder = _embedder_mod.release_for_exit()
     except Exception:
         _dbg_swallow("embedder release during restart failed (non-fatal)")
 
-    # Wait for the frees above to land before re-exec. The re-exec'd process
-    # spawns a brand-new GGUF worker that constructs a fresh llama_context on
-    # startup with no idea a restart just freed anything, so if the GPU driver has
-    # not finished reclaiming the just-freed VRAM by then, that construction races
-    # the still-reclaiming driver. switch_engine's in-process model swap already
-    # waits on the identical native free. Skipped when nothing was actually
-    # unloaded (a model-less restart), so the common case pays no delay.
+    # Wait for the frees above to actually land before re-exec. The re-exec'd
+    # process spawns a brand-new GGUF worker that constructs a fresh
+    # llama_context on startup (plugins/gui/cli.py's preload thread) with no
+    # idea a restart just freed anything - unlike switch_engine's in-process
+    # model swap, which already waits here (its own wait_for_vram_release call,
+    # AUDIT-MED-11) before constructing the replacement, this path used to go
+    # straight from unload to os.execv with no wait at all. If the GPU driver
+    # has not finished reclaiming the just-freed VRAM by the time the fresh
+    # worker allocates, that construction races the still-reclaiming driver.
+    # NEW-CRASH-NOTICE-USELESS item C: a real 2026-07-26 crash matched exactly
+    # this signature (a fresh llama_context dying mid-construction right after
+    # a restart, log going dark, empty native trace). Attempts to force the
+    # SAME race live (20+ restart cycles, full-VRAM model, idle and under
+    # deliberate concurrent GPU contention) did not reproduce a failure on
+    # this box/driver - VRAM reclaim measured near-instant here, and the
+    # driver's support components were upgraded a few hours before testing, a
+    # plausible reason the window is narrower now than on 2026-07-26. It did
+    # not need to be observed to be worth closing: switch_engine already
+    # treats the identical native free as unsafe to skip this wait for.
+    # Skipped when nothing was actually unloaded (a model-less restart), so
+    # the common case pays no delay.
     if (had_engines or released_embedder) and free_before is not None:
         try:
             from localm.discover import vram_capacity
@@ -3103,7 +3392,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         bugreport.disarm_crash_guard(instance_id=instance_id)
     except Exception:
         # Same misattribution hazard as _do_shutdown: an uncleared crash marker
-        # makes this intentional restart look like a crash on the next boot.
+        # makes this intentional restart look like a crash next boot. Log it.
         _dbg_swallow("could not disarm crash guard on restart; next boot may "
                      "misreport this intentional restart as a crash", level="warning")
 
@@ -3116,39 +3405,39 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
 
     try:
         from localm.debuglog import dump_ring_buffer, flush_log_handlers, recent_activity
-        # Privacy mode opts out of ALL automatic disk traces, so the
-        # crash-recovery breadcrumb dumps (ring buffer and pre_restart.log) are
-        # skipped: they are session-derived INFO breadcrumbs written without the
-        # user asking. keep_diagnostics overrides that, and _diagnostics_allowed()
-        # folds both in and fails toward privacy when the mode or config cannot be
-        # resolved.
+        # Privacy mode opts out of ALL automatic disk traces, so skip the
+        # crash-recovery breadcrumb dumps (ring buffer + pre_restart.log): they are
+        # session-derived INFO breadcrumbs written without the user asking. The
+        # keep_diagnostics toggle overrides that (a tester who wants a report has
+        # opted in); _diagnostics_allowed() folds both in and fails toward privacy
+        # (skip) when the mode/config cannot be resolved.
         if _diagnostics_allowed():
             dump_ring_buffer()
-            # Also write a plain text log for the bug reporter to ingest directly,
+            # Also write a clear text log for the bug reporter to ingest directly,
             # in case the JSON buffer fails to load back into memory.
             from localm.config import home_dir
             pre_log = home_dir() / "logs" / "pre_restart.log"
             pre_log.parent.mkdir(parents=True, exist_ok=True)
             pre_log.write_text("\n".join(recent_activity()), encoding="utf-8")
-        # Flush all log handlers before os.execv so no buffered lines are lost.
-        # This flushes already-open handlers and creates no new trace file, so it
-        # is safe in privacy mode too.
+        # Flush all log handlers before os.execv so no buffered lines are lost
+        # (Task 1: log durability / save-bug). This flushes already-open handlers;
+        # it creates no new trace file, so it is safe in privacy mode too.
         flush_log_handlers()
     except Exception:
-        # Best-effort crash-recovery breadcrumbs (ring buffer and pre_restart.log)
-        # plus the handler flush. A failure does not block the restart, but leaves
-        # the next boot with fewer diagnostics, so it is logged.
+        # Best-effort crash-recovery breadcrumbs (ring buffer + pre_restart.log)
+        # and the handler flush; a failure here must not block the restart, but it
+        # means the next boot has fewer diagnostics, so log rather than swallow.
         _dbg_swallow("pre-restart breadcrumb dump / log flush failed (non-fatal)")
 
     import os
     import sys
 
-    # No inheritable fd (the debug-log FileHandler, the uvicorn listening socket)
-    # may survive into the re-exec'd image, where the freshly loaded ggml/llama
-    # runtime warns about failing to close child file descriptors. os.execv does
-    # NOT close fds; marking them non-inheritable drops them at exec (POSIX
-    # O_CLOEXEC, Windows handle inheritance). Best-effort per fd; stdin, stdout
-    # and stderr are left inheritable so the new process keeps the console.
+    # NEW-G: no inheritable fd (the debug-log FileHandler, the uvicorn listening
+    # socket) must survive into the re-exec'd image, where the freshly loaded
+    # ggml/llama runtime warns "Failed to close child file descriptors at 3/4".
+    # os.execv does NOT close fds; marking them non-inheritable drops them at exec
+    # (POSIX O_CLOEXEC / Windows handle inheritance). Best-effort per fd; stdin/
+    # stdout/stderr (0-2) are left inheritable so the new process keeps the console.
     try:
         max_fd = 4096
         try:
@@ -3167,9 +3456,9 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         pass  # never let fd hygiene block the restart
 
     if update_watchdog:
-        # Spawned as the LAST step before execv: the watchdog's own timeout clock
-        # starts when its process begins executing, so spawning late keeps that
-        # clock closest to the actual restart moment.
+        # Spawned as the LAST step before execv, deliberately: the watchdog's own
+        # timeout clock starts when its process begins executing, so spawning as
+        # late as possible keeps that clock closest to the actual restart moment.
         try:
             from localm import updater
             updater.spawn_health_watchdog(
@@ -3177,8 +3466,10 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
                 scheme=update_watchdog.get("scheme", "http"),
                 expect_version=update_watchdog["expect_version"])
         except Exception as e:
-            # spawn_health_watchdog() already never raises; this guard keeps a
-            # malformed dict here from blocking the restart. Logged, not silenced.
+            # spawn_health_watchdog() already never raises; this is
+            # belt-and-suspenders so even a malformed dict here can never block
+            # the restart itself (we do not hide problems - log it, but a broken
+            # watchdog must not make updates worse than having none at all).
             try:
                 from localm.debuglog import logger as _dbg
                 _dbg.warning("update watchdog not started: %s", e)
@@ -3186,11 +3477,14 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
                 pass
 
     # The re-exec'd process must NOT auto-open a new browser tab: this is a
-    # restart, not a fresh launch, and the tab the user already has shows a
-    # reconnect overlay that polls and reloads itself in place once this process
-    # is back up. plugins/gui/cli.py's browser-open step checks and consumes this
-    # flag, so it never leaks into a later, genuinely fresh launch of the same
-    # process tree.
+    # restart, not a fresh launch, and the tab the user is already looking at
+    # shows a reconnect overlay that polls and reloads itself in place once
+    # this process is back up (models.js's server-restart handler ->
+    # onServerUnreachable() in the GUI's init.js). Opening a second tab here
+    # would strand that overlay and leave the user looking at two tabs, only
+    # one of which is watching for the server's return. plugins/gui/cli.py's
+    # browser-open step checks and consumes this flag (never leaks into a
+    # later, genuinely-fresh launch of the same process tree).
     os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
     os.execv(sys.executable, _restart_argv(port))
 
@@ -3220,8 +3514,9 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     _engines_lru.clear()
     _inference_sems.clear()
     _last_activity_per_model.clear()
-    # A fresh app boot must not carry over a name remembered from a previous
-    # create_app() call in the same process (test reuse, a restart).
+    # A fresh app boot must never carry over a name remembered from a
+    # previous create_app() call in the same process (test reuse, a restart) -
+    # see _last_active_model_name's own docstring for why it exists at all.
     _last_active_model_name = None
 
     if engine is not None:
@@ -3239,12 +3534,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         _engine = None
         _inference_sem = None
 
-    # Session-persistence mode for this server (privacy means no traces). One
-    # audit log and transcript cover the server lifetime; GUI and API chat traffic
-    # both flow through /v1/chat/completions and land here. _audit is a module
-    # global, unlike _mode and _transcript which stay local and closure-shared
-    # with the nested handlers below, because _do_restart is a separate top-level
-    # function with no closure access into this frame.
+    # Session-persistence mode for this server (privacy -> no traces). One audit
+    # log / transcript covers the server lifetime; GUI + API chat traffic flows
+    # through /v1/chat/completions and lands here. _audit is published as a
+    # module global (unlike _mode/_transcript, kept local and closure-shared
+    # with the nested handlers below) because _do_restart is a separate
+    # top-level function with no closure access into this frame - without
+    # `global _audit` here, its cleanup could never reach the real object.
     from localm.audit import effective_mode, make_audit_log, make_transcript
     _mode = effective_mode("server")
     _audit = make_audit_log(_mode, label="server")
@@ -3253,57 +3549,69 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         global _inference_sem, _inference_sems, _active_model_name, _server_loop
-        # Publish the running loop so off-loop worker threads (the jobs runner)
-        # can route a shared-engine unload back onto it via
-        # run_coroutine_threadsafe - see unload_one_model.
+        # Publish the running loop so off-loop worker threads (the jobs runner) can
+        # route a shared-engine unload back onto it via run_coroutine_threadsafe -
+        # see unload_one_model and the _server_loop comment above.
         _server_loop = asyncio.get_running_loop()
         if _active_model_name:
             _inference_sem = asyncio.Semaphore(1)
             _inference_sems[_active_model_name] = _inference_sem
-        # Prune expired browser sessions once at startup, since create() prunes
-        # only opportunistically. Best-effort: a sweep failure does not block
-        # startup.
+        # Prune expired browser sessions once at startup so an install that rarely
+        # mints new sessions does not accumulate stale rows (create() only prunes
+        # opportunistically). Best-effort: a sweep failure must never block startup.
         try:
             from localm import sessions as _sessions
             _sessions.sweep()
         except Exception:
             from localm.debuglog import logger as _dbg
             _dbg.debug("session sweep at startup failed (non-fatal)", exc_info=True)
-        # Route an uncaught asyncio task exception through the bug reporter
-        # instead of a silent never-retrieved warning. Skipped under pytest so the
-        # test runner keeps its own loop handling.
+        # SRV-3: route an uncaught asyncio task exception through the bug reporter
+        # instead of a silent "Task exception was never retrieved". Skipped under
+        # pytest so the test runner keeps its own loop handling.
         if "pytest" not in sys.modules:
             try:
                 from localm import bugreport
                 bugreport.install_asyncio_handler(asyncio.get_running_loop())
             except Exception:
-                # The mechanism meant to surface silent asyncio-task failures must
-                # not itself fail silently, so its absence is logged.
+                # The very mechanism meant to surface silent asyncio-task failures
+                # must not itself fail silently; log it (mirrors the session-sweep
+                # guard just above) so its absence is discoverable.
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("asyncio exception handler not installed (non-fatal)",
                            exc_info=True)
-        # Plugins register() before the loop exists, so loop-dependent plugin
-        # work (the jobs scheduler) is queued on the manager and run now the loop
-        # is up. attach_engine runs after create_app, so the manager resolves at
-        # lifespan time.
+        # Plugins register() before this loop existed, so loop-dependent plugin
+        # work (the jobs scheduler) is queued on the manager; run it now the loop
+        # is up - without this no scheduled job fired on a stock start (memory-audit
+        # 2026-07-02, critical C2). attach_engine runs after create_app, so the
+        # manager resolves at lifespan time.
         _pm = getattr(app.state, "plugin_manager", None)
         if _pm is not None:
             _pm.run_startup_callbacks()
-        # Optional idle-unload background task (config idle_unload_seconds), a
-        # cheap no-op while disabled. Cancelled on shutdown so it never outlives
-        # the app.
+        # Optional idle-unload background task (config "idle_unload_seconds"); it
+        # is a cheap no-op while disabled. Cancelled on shutdown so it never
+        # outlives the app.
         idle_task = asyncio.create_task(_idle_unload_loop())
 
-        # The heartbeat (_hb_monotonic) and the watchdog's disk-writing stall dump
-        # are on two separate gates. The heartbeat is pure in-memory bookkeeping -
-        # _hang_heartbeat_loop writes nothing to disk, logs nothing and sends
-        # nothing - so it carries none of the privacy considerations that gate the
-        # stack-dump file below, and runs whenever pytest is not loaded,
-        # independent of mode. THREE readers depend on it: the debug request log,
-        # GET /debug/stacks, and the watchdog thread's own stall check. Without it
-        # _hb_monotonic stays None and _loop_lag_seconds() reports a permanent
-        # 0.00, indistinguishable from healthy. Best-effort: a startup failure does
-        # not block serving.
+        # Heartbeat (_hb_monotonic) vs. the watchdog's disk-writing stall dump:
+        # deliberately DECOUPLED, on two different gates. The heartbeat is pure
+        # in-memory bookkeeping (_hang_heartbeat_loop writes nothing to disk,
+        # logs nothing, sends nothing - see its docstring), so it carries none
+        # of the privacy considerations that gate the stack-dump file below and
+        # runs whenever "pytest" not in sys.modules, independent of mode. THREE
+        # independent readers depend on it: the debug request log
+        # (debug_enabled(), below), GET /debug/stacks (its own unconditional
+        # reachability gate), and the watchdog thread's own stall check.
+        #
+        # Previously this task was started INSIDE the watchdog's privacy/env
+        # gate, so whenever debug_enabled() was true but that gate was not
+        # (LOCALM_HANG_WATCHDOG=0, or privacy mode on default config -
+        # keep_diagnostics defaults False), _hb_monotonic stayed None for the
+        # ENTIRE process lifetime and _loop_lag_seconds() silently reported a
+        # permanent 0.00 indistinguishable from "healthy" - verified live: a
+        # genuine, measured 2.0s event-loop stall still read loop_lag=0.00 in
+        # both configs. A privacy-conscious user's bug report is exactly the
+        # case most likely to hit this (issue #958). Best-effort: a startup
+        # failure must never block serving.
         hb_task = None
         if "pytest" not in sys.modules:
             try:
@@ -3312,11 +3620,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("heartbeat task startup failed (continuing): %s", e)
 
-        # The stack-dump-on-stall THREAD keeps its own privacy gate: on by default
-        # in the log and full session modes, where the trace file is lazy and
-        # created only on a real stall; in PRIVACY mode it stays OFF unless the
-        # user opted into keeping diagnostics (_diagnostics_allowed) or forced it
-        # on with LOCALM_HANG_WATCHDOG=1. LOCALM_HANG_WATCHDOG=0 opts out entirely.
+        # The stack-dump-on-stall THREAD keeps its own, unchanged privacy gate:
+        # on by default in the log/full session modes (the trace file is lazy,
+        # created only on a real stall); in PRIVACY mode it stays OFF (no
+        # automatic trace written to disk) UNLESS the user opted into keeping
+        # diagnostics (_diagnostics_allowed) or explicitly forced it on
+        # (LOCALM_HANG_WATCHDOG=1). LOCALM_HANG_WATCHDOG=0 opts out entirely.
         # Skipped under pytest so no thread lingers.
         hang_stop = hang_thread = None
         from localm.debuglog import (
@@ -3330,10 +3639,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             try:
                 hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), _hw_path())
                 if _hw_verbose():
-                    # Explicit opt-in extras: asyncio debug logs any single
-                    # callback that hogs the loop past the threshold, naming the
-                    # culprit. It adds per-callback overhead, so it is not part of
-                    # the default-on path.
+                    # Explicit opt-in extras: asyncio debug logs any single callback
+                    # that hogs the loop past the threshold (names the culprit at a
+                    # lower cost than a full stall). Adds per-callback overhead, so
+                    # it is NOT part of the default-on path.
                     loop = asyncio.get_running_loop()
                     loop.set_debug(True)
                     loop.slow_callback_duration = 0.5
@@ -3341,23 +3650,28 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("hang watchdog startup failed (continuing): %s", e)
 
-        # Executor thread-pool saturation watch: a separate off-loop daemon
-        # thread, always on. Unlike the hang watchdog beside it, it logs only pool
-        # names and integer counts - no paths, no chat content - so it carries none
-        # of the privacy-mode considerations that gate the stack-trace capture
-        # above. Skipped under pytest so no thread lingers. Best-effort: a startup
-        # failure does not block serving.
+        # Executor thread-pool saturation watch (dev-notes/decisions-2026-07-30-
+        # release-gate.md, Q2, the "make exhaustion detectable, not silent" half
+        # of the thread-pool-exhaustion fix): a separate off-loop daemon thread,
+        # always on (unlike the hang watchdog it sits beside, it logs only pool
+        # names and integer counts - no paths, no chat content - so it carries
+        # none of the privacy-mode considerations that gate the stack-trace
+        # capture above). Skipped under pytest so no thread lingers, matching
+        # the hang watchdog's own guard. Best-effort: a startup failure must
+        # never block serving.
         sat_stop = sat_thread = None
         if "pytest" not in sys.modules:
             try:
                 from localm.inference._executor_health import start_executor_saturation_watch
-                # anyio's default thread pool, which
-                # fastapi.concurrency.run_in_threadpool always uses, can only be
-                # resolved from INSIDE a running event loop, so it is captured
-                # once here and handed to the plain background thread below, which
-                # cannot fetch it itself. A capture failure degrades to the anyio
-                # pool reporting as unobservable, logged rather than claimed
-                # healthy.
+                # anyio's default thread pool (what fastapi.concurrency.
+                # run_in_threadpool always uses - see _executor_health.py's
+                # module docstring for the full "third pool" rationale) can
+                # only be resolved from INSIDE a running event loop - we are
+                # one here, so capture it ONCE and hand the reference to the
+                # plain background thread below, which cannot fetch it
+                # itself. A capture failure degrades to "anyio pool
+                # unobservable" (logged, never silently claimed healthy),
+                # same as any other best-effort startup step here.
                 anyio_limiter = None
                 try:
                     import anyio.to_thread
@@ -3374,13 +3688,14 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 _dbg.debug("executor saturation watch startup failed "
                           "(continuing): %s", e)
 
-        # Hang ALARM: detect a hung server, surface it where a user looks, and by
-        # default auto-restart when the hang is provably a defect. Complements the
-        # forensic stack-dump watchdog above rather than replacing it: that one is
-        # privacy-gated because it writes stacks to disk, while this one writes
-        # nothing sensitive anywhere and runs in every mode
-        # (LOCALM_HANG_RECOVERY=off opts out). Skipped under pytest; tests drive
-        # HangAlarm directly.
+        # Hang ALARM (ADR-0012): detect a hung server, surface it where a
+        # user actually looks, and (by default) auto-restart when the hang is
+        # provably a defect. Complements - does not replace - the forensic
+        # stack-dump watchdog above: that one is privacy-gated because it
+        # writes stacks to disk; this one writes nothing sensitive anywhere,
+        # so it runs in every mode (LOCALM_HANG_RECOVERY=off opts out).
+        # Skipped under pytest like its siblings; tests drive HangAlarm
+        # directly.
         hang_alarm = None
         if "pytest" not in sys.modules:
             try:
@@ -3419,11 +3734,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
         # Cross-install GPU/VRAM coordination (see localm.gpu_registry): register
         # this instance in the machine-wide registry, but ONLY for a real,
-        # non-isolated, advertise()'d server. instance_id, port and scheme are set
-        # by advertise() before uvicorn accepts connections, so a bare
-        # create_app() test app or an --isolated run never sets instance_id and
-        # this is a no-op that never touches the shared directory. Best-effort: a
-        # failure is logged and does not block startup.
+        # non-isolated, advertise()'d server (instance_id + port/scheme are set by
+        # advertise() before uvicorn accepts connections; a bare create_app() test
+        # app or --isolated run never sets instance_id, so this is a no-op that
+        # never touches the shared directory). Best-effort: a failure must never
+        # block startup (RULE 5: logged, not silenced).
         global _gpu_coord
         gpu_task = None
         _instance_id = getattr(app.state, "instance_id", None)
@@ -3439,7 +3754,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 }
                 app.state.gpu_coordination_token = _gpu_coord["token"]
                 # Sweep entries left behind by an instance that crashed or was
-                # killed without reaching its own shutdown cleanup below.
+                # killed without reaching its own shutdown cleanup below -
+                # same reap-before-register pattern as instances.advertise().
                 from localm import gpu_registry
                 gpu_registry.reap_stale(gpu_registry.registry_dir(),
                                         self_id=_instance_id)
@@ -3484,9 +3800,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 except asyncio.CancelledError:
                     pass
             if _gpu_coord is not None:
-                # Best-effort: a crash just leaves the entry on disk. No live peer
-                # trusts it (list_gpu_peers checks pid and identity), and the next
-                # instance to start reaps it via gpu_registry.reap_stale above.
+                # Best-effort: a crash just leaves the entry on disk. No live
+                # peer ever trusts it (list_gpu_peers' pid+identity check), and
+                # the next instance to start reaps it via gpu_registry.reap_stale
+                # above (same philosophy as instances.py's own registry cleanup).
                 try:
                     from localm import gpu_registry
                     gpu_registry.remove_entry(
@@ -3496,8 +3813,9 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                     from localm.debuglog import logger as _dbg
                     _dbg.debug("gpu-registry cleanup on shutdown failed: %s", e)
                 _gpu_coord = None
-            # The loop is stopping, so stop advertising it: a late off-loop caller
-            # then takes the safe no-loop path instead of a dead loop reference.
+            # The loop is stopping - stop advertising it so a late off-loop caller
+            # falls back to the safe "no loop" path instead of a dead loop reference
+            # (_server_loop is already declared global at the top of lifespan).
             _server_loop = None
             _audit.close()
 
@@ -3507,10 +3825,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         lifespan=lifespan,
     )
 
-    # One backstop so an unexpected error in ANY route returns a consistent JSON
-    # 500 and is logged, instead of leaking a traceback or a bare body. A native
-    # fault, such as a C-extension segfault, cannot be caught in-process; those
-    # are prevented at the source and surfaced via the crash marker.
+    # SRV-2: one backstop so an unexpected error in ANY route returns a consistent
+    # JSON 500 and is logged, instead of leaking a traceback or bare body. This
+    # standardises the response shape and logging so a failing request is a clean
+    # 500, never a crash or info leak. (A native fault - a C-extension segfault -
+    # cannot be caught in-process; those are prevented at the source, e.g. voice
+    # audio is validated before the native path, and surfaced via the crash marker.)
     @app.exception_handler(Exception)
     async def _unhandled_error(request, exc):  # noqa: ANN001 - framework signature
         from localm.debuglog import logger as _dbg
@@ -3518,18 +3838,26 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         return JSONResponse(status_code=500,
                             content={"detail": "Internal server error"})
 
-    # Logs an HTTPException's detail next to its status, so a refusal is
-    # diagnosable from the debug log rather than only from the client's response.
+    # A refusal carries its REASON in the HTTPException detail, and that detail
+    # used to reach only the client: the debug log recorded the status and the
+    # timing and NOTHING else. A real 0.1.4 report ("POST /v1/chat/completions ->
+    # 400 (9 ms)") therefore left no way for anyone - including the maintainer
+    # holding the full DEBUG log - to learn why it was refused, and two separate
+    # diagnoses of that one line reached opposite wrong answers. A user-facing
+    # failure whose cause is unrecoverable from a debug log is exactly what
+    # AGENTS.md rule 5 forbids, so log the detail next to the status and every
+    # future refusal is self-diagnosing from the log alone.
     #
-    # Gated on debug_enabled() like the request and timing lines it sits beside,
-    # NOT on debug_content_enabled(): an HTTPException detail is server-authored
-    # operational text, never chat content, and nothing here reads the request
-    # body.
+    # Gated on debug_enabled() like the request/timing lines it sits beside, NOT
+    # on debug_content_enabled(): an HTTPException detail is server-authored
+    # operational text (which validation refused, which capability is missing),
+    # never chat content. Nothing here reads the request body. See
+    # docs/privacy.md and the debuglog gating note in the middleware below.
     #
-    # Registered for starlette's HTTPException (fastapi subclasses it and
-    # registers the starlette class as its own key), then DELEGATED to fastapi's
-    # own handler, so the response - status, body shape, and any
-    # WWW-Authenticate or Retry-After headers - stays byte-identical. This is a
+    # Registered for starlette's HTTPException (fastapi's subclasses it, and
+    # fastapi registers the starlette class as its own key), then DELEGATED to
+    # fastapi's own handler so the response - status, body shape, and any
+    # WWW-Authenticate / Retry-After headers - stays byte-identical. This is a
     # logging seam, not a response change.
     from starlette.exceptions import HTTPException as _StarletteHTTPException
 
@@ -3538,8 +3866,9 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         from fastapi.exception_handlers import http_exception_handler
         from localm.debuglog import debug_enabled, logger as _dbg
         if debug_enabled():
-            # Truncated: a detail can be long by design, and this names the cause
-            # rather than mirroring the whole body into the log.
+            # Truncated: a detail can be long by design (the VRAM-overflow 503
+            # carries a multi-line "Options:" list), and the point here is to
+            # name the cause, not to mirror the whole body into the log.
             detail = str(getattr(exc, "detail", "") or "")
             if len(detail) > 500:
                 detail = detail[:500] + " ...[truncated]"
@@ -3552,15 +3881,23 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request, exc):  # noqa: ANN001 - framework signature
         # A 422 body must stay serializable. pydantic records the offending value
-        # under `input`, and when a client sends a NON-FINITE number (NaN,
-        # Infinity) Starlette's JSONResponse serializes with allow_nan=False and
-        # raises, turning a clean 422 into a 500. Non-finite floats are replaced
-        # in the error detail so the 422 always renders.
-        #
-        # The 422 body must also stay BOUNDED. That same verbatim `input` puts a
-        # deeply nested request body into the error object, and jsonable_encoder
-        # walks it recursively, so a nested body raises RecursionError inside this
-        # handler and the 422 becomes an opaque 500.
+        # under `input`; when a client sends a NON-FINITE number (NaN / Infinity),
+        # Starlette's JSONResponse serializes the error with allow_nan=False and
+        # CRASHES into a 500 - so a bad numeric param turned a clean 422 into an
+        # unhandled 500 (live-confirmed: `top_k: NaN`, `seed: NaN`, and any float
+        # field once allow_inf_nan=False rejects it). Replace non-finite floats in
+        # the error detail so the 422 always renders. Same shape as FastAPI's
+        # default handler for every other (finite) validation error.
+        # The 422 body must also stay BOUNDED. pydantic records the offending
+        # value under `input` verbatim, so a deeply-nested body puts that nesting
+        # in the error object - and `jsonable_encoder` walks it recursively. A
+        # ~2 KB body of `[[[[...]]]]` therefore raised RecursionError INSIDE this
+        # handler, so FastAPI could not build a response at all and the documented
+        # 422 became an opaque 500. Measured: a window around 961 to ~2900 levels
+        # (shallower parses and validates cleanly; deeper is refused by the JSON
+        # parser's own depth limit first), ~0.25 s of event-loop CPU per request,
+        # and a 147x latency rise on unrelated requests under four connections.
+        # Same failure the NaN note above describes, by a different route.
         import math
 
         from fastapi.encoders import jsonable_encoder
@@ -3593,18 +3930,21 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 return [_finite_safe(x, depth + 1) for x in v]
             return v
 
-        # _finite_safe still runs AFTER the encoder: the encoder itself can
-        # PRODUCE a non-finite float (a Decimal NaN becomes float nan), so moving
-        # it before would reopen the NaN 500. Only the DEPTH prune runs first.
+        # _finite_safe deliberately still runs AFTER the encoder, unchanged: the
+        # encoder itself can PRODUCE a non-finite float (a Decimal("NaN") becomes
+        # float("nan")), so moving it before would quietly reopen the NaN 500 this
+        # handler was originally written to close. Only the DEPTH prune moves.
         try:
             safe = _finite_safe(jsonable_encoder(_depth_capped(exc.errors())))
         except RecursionError:
             # SAFETY NET, not the fix: it catches a shape the prune above cannot
-            # reach (a deeply nested object that is not a dict, list or tuple,
-            # which passes through untouched and the encoder then recurses into).
-            # It does not remove the CPU cost, so it is not a substitute for the
-            # prune. Logged rather than silent: firing means a shape got past the
-            # prune.
+            # reach (a deeply nested object that is not a dict/list/tuple, which
+            # passes through untouched and the encoder then recurses into). It is
+            # NOT sufficient on its own - it would leave the CPU cost in place,
+            # and that cost, not the 500, is the finding. Do not delete the prune
+            # on the grounds that this catch exists. Surfaced, never silent: if
+            # this ever fires it means a shape got past the prune and is worth
+            # knowing about (AGENTS.md rule 5).
             from localm.debuglog import logger as _dbg
             _dbg.warning("validation error for %s was too deeply nested to "
                          "encode even after depth-capping; returned a 422 "
@@ -3612,8 +3952,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             safe = []
 
         def _field(err) -> str:
-            # Drop the body/query container so the user sees the name they
-            # actually typed, not pydantic's full path.
+            # Drop the "body"/"query" container so the user sees the name they
+            # actually typed ("max_tokens"), not pydantic's full path.
             parts = [str(p) for p in (err.get("loc") or ())
                      if p not in ("body", "query", "path", "header")]
             return ".".join(parts) or "request"
@@ -3621,28 +3961,34 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         def _one(err) -> str:
             name = _field(err)
             msg = (err.get("msg") or "is invalid").strip()
-            # pydantic phrases these as Input should be X, which reads badly once
-            # the field name is prepended, so it is rewritten to must be X.
+            # pydantic phrases these as "Input should be X", which reads as
+            # "max_tokens input should be X" once the field name is prepended.
+            # "max_tokens must be X" is the same information, in English.
             if msg.lower().startswith("input should be "):
                 msg = "must be " + msg[len("input should be "):]
             elif msg[:1].isupper():
                 msg = msg[0].lower() + msg[1:]
             # On a MISSING field pydantic reports the whole request body as
-            # `input`, so it is not echoed back.
+            # `input`, so echoing it back is noise, not evidence.
             got = ("" if err.get("type") == "missing" or "input" not in err
                    else f" (got {err.get('input')!r})")
-            # max_tokens=0 gets its own sentence: it looks like a legitimate no
-            # limit, and 0 collides with the engine's internal unlimited sentinel,
-            # which is not guessable from a greater-than-or-equal-to-1 message.
+            # max_tokens=0 is the one worth explaining rather than just reporting:
+            # it looks like a legitimate "no limit", and the reason it is refused
+            # (0 collides with the engine's internal unlimited sentinel, so it
+            # would silently become an unbounded generation) is not guessable from
+            # "greater than or equal to 1". Reported live by the maintainer as a
+            # raw pydantic dump with no idea what to do about it.
             if name == "max_tokens" and err.get("input") in (0, "0"):
                 return ("max_tokens must be 1 or more - 0 is not 'no limit'. "
                         "Omit max_tokens entirely to use the model's default")
             return f"{name} {msg}{got}"
 
-        # `detail` is the human sentence, because clients render
-        # data.detail or the status text, and stringifying pydantic's error LIST
-        # there produces an unreadable dump. The structured form is preserved
-        # verbatim under `errors` for anything that parses it.
+        # `detail` is the human sentence, because every client in this repo does
+        # `data.detail || r.statusText` and stringifying pydantic's error LIST
+        # there is what produced the unreadable dump users were shown. The
+        # structured form is preserved verbatim under `errors` for anything that
+        # wants to parse it - nothing is lost, it just stops being the thing a
+        # person reads.
         try:
             summary = "; ".join(_one(e) for e in (safe or []))
         except Exception:   # never let error FORMATTING turn a 422 into a 500
@@ -3658,22 +4004,23 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # request.app.state.chat_pipeline. A pipeline with no hooks is a no-op.
     app.state.chat_pipeline = ChatPipeline()
 
-    # Per-process shell token: in open mode the management routes require this
-    # token, which the loopback GUI shell injects into the SPA (web.py
-    # _gui_index). It gates the no-Origin local-client path that bearer auth and
-    # the Origin guard do not cover. Per-process, so it dies on restart, and never
-    # persisted.
+    # Per-process "shell token": in open mode the management routes require
+    # this token, which the loopback GUI shell injects into the SPA (web.py
+    # _gui_index). It gates the no-Origin local-client path that bearer auth /
+    # the Origin guard alone do not cover. Per-process so it dies on restart;
+    # never persisted.
     app.state.shell_token = secrets.token_urlsafe(32)
 
-    # Per-process CSRF secret. The CSRF token is a deterministic HMAC of the
-    # session id below, so it is present exactly when the session is and cannot
-    # desync from it. Per-process, so it dies on restart and the client re-fetches
-    # from /api/session; never persisted.
+    # Per-process CSRF secret. The CSRF token is a deterministic HMAC of the session
+    # id (below), so it is present exactly when the session is and CANNOT desync
+    # (the old design used a SEPARATE readable cookie a client reset could clear
+    # while the HttpOnly session survived, 403-ing every write). Per-process so it
+    # dies on restart (client re-fetches from /api/session); never persisted.
     app.state.csrf_secret = secrets.token_urlsafe(32)
 
     # api-mode landing: a bare `localm serve` has no GUI shell, so GET / would
-    # 404. It is redirected to the auto-generated API docs. Only on the api path,
-    # so it never collides with the GUI's own / handler and StaticFiles catch-all.
+    # 404. Redirect it to the auto-generated API docs. Only on the api path so
+    # it never collides with the GUI's own "/" handler + StaticFiles catch-all.
     if api_landing:
         @app.get("/", include_in_schema=False)
         async def _api_root() -> RedirectResponse:
@@ -3686,13 +4033,18 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         async def _log_requests(request, call_next):
             start = time.perf_counter()
             response = await call_next(request)
-            # loop_lag is the real scheduling delay (_loop_lag_seconds), about 0
-            # on a healthy server and positive only when a preceding event-loop
-            # stall pushed the last heartbeat tick late. It is NOT
-            # time-since-last-tick. A stall shorter than _HEARTBEAT_INTERVAL_S
-            # also reads 0.0, which means no stall LONGER than the interval, not
-            # no stall at all. None, before the heartbeat's first tick, renders as
-            # n/a rather than 0.0.
+            # loop_lag = real scheduling delay (_loop_lag_seconds, see the
+            # comment above _hb_monotonic) - ~0 on a healthy server, and only
+            # positive when a preceding event-loop stall pushed the last
+            # heartbeat tick late. This is NOT time-since-last-tick, which
+            # saws 0..1s even when nothing is wrong (#955/#950). Resolution
+            # limit: a stall shorter than _HEARTBEAT_INTERVAL_S also reads 0.0
+            # (see _loop_lag_seconds' docstring) - 0.0 means "no stall LONGER
+            # than the interval", not "no stall at all". None (cold start,
+            # before the heartbeat's first tick) renders as "n/a", never as
+            # 0.0 - ADR-0008 U6: those used to be the same reading, so a
+            # request served during startup looked identically healthy to
+            # one served with a real lag measurement behind it.
             lag = _loop_lag_seconds()
             lag_str = f"{lag:.2f}s" if lag is not None else "n/a"
             _dbg.debug(
@@ -3704,22 +4056,26 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             )
             return response
 
-    # Loopback-only debug endpoint: every thread's stack plus the asyncio task
-    # list. 404s off loopback. Served ON the event loop, so it answers only while
-    # the loop is alive (a partial stall, a task backlog); a fully wedged loop is
-    # captured by the off-loop watchdog file (LOCALM_HANG_WATCHDOG) instead.
+    # Loopback-only debug endpoint: every thread's stack + the asyncio task list,
+    # for diagnosing a hang/slowdown from the SAME machine on demand. 404'd off
+    # loopback. NOTE: served ON the event loop, so it answers only while the loop
+    # is alive (a partial stall, a task backlog). A FULLY wedged loop cannot
+    # respond here at all - that case is captured by the off-loop watchdog file
+    # (LOCALM_HANG_WATCHDOG); this endpoint complements it.
     #
-    # THREE gates:
+    # THREE gates, because the obvious one is not enough (CodeQL 97):
     #   1. Depends(require_fs_host) - meaningful in PROTECTED mode (a key's
-    #      fs_access dial); in DEFAULT KEYLESS mode effective_fs_access returns
-    #      host for EVERY caller, so on its own it is a tautology.
-    #   2. the open-mode shell-token gate, via _SHELL_TOKEN_GETS below, which is
+    #      fs_access dial), but in DEFAULT KEYLESS mode effective_fs_access
+    #      returns "host" for EVERY caller, so on its own it was a tautology and
+    #      this was one of only two fully unauthenticated reads on the server.
+    #   2. the open-mode shell-token gate, via _SHELL_TOKEN_GETS below - that is
     #      what makes gate 1 non-vacuous in keyless mode.
-    #   3. the bind_host loopback check below, on app.state.bind_host (what the
-    #      server actually BOUND to) and never request.client.host: behind portmux
-    #      the request peer is always 127.0.0.1, so the peer address cannot
-    #      distinguish a loopback client from a LAN one.
-    # Frame text is path-scrubbed on the way out.
+    #   3. the bind_host loopback check below. Deliberately on app.state.bind_host
+    #      (what the server actually BOUND to) and never request.client.host:
+    #      behind portmux the request peer is always 127.0.0.1, so the peer
+    #      address cannot distinguish a loopback client from a LAN one.
+    # Frame text is path-scrubbed on the way out (see below) - gating it is not a
+    # licence to keep emitting the install layout to whoever holds the token.
     @app.get("/debug/stacks", include_in_schema=False,
              dependencies=[Depends(require_fs_host)])
     async def _debug_stacks(request: Request):
@@ -3729,11 +4085,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         import traceback
 
         from localm.pathscrub import path_scrubber
-        # traceback.format_stack emits absolute paths, which name the install dir
-        # and, on a per-user install, the OS account. Only the DIRECTORY is
-        # redacted: the file name, line number, function and source line all
-        # survive. The scrubber is bound once rather than per string, since a dump
-        # is hundreds of frames and each prefix resolve is a filesystem call.
+        # traceback.format_stack emits absolute paths ('File "<install>/localm/
+        # inference/http_server.py", line N') which name the install dir and, on
+        # a per-user install, the OS account. Redact the DIRECTORY only: the file
+        # name, line number, function and source line all survive, so this stays
+        # a usable hang diagnosis (rule 5 - scrub, do not mute). Bound once
+        # rather than per string: a dump is hundreds of frames and each prefix
+        # resolve is a filesystem call.
         scrub = path_scrubber()
         threads = {str(tid): [scrub(line) for line in traceback.format_stack(frame)]
                    for tid, frame in sys._current_frames().items()}
@@ -3747,10 +4105,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 })
         except RuntimeError:
             pass   # no running loop (should not happen inside an async handler)
-        # Thread-pool saturation numbers, served here as well as in the periodic
-        # warning log, so a diagnosis in progress does not have to wait for the
-        # threshold to trip a line. This handler is async with a running loop, so
-        # it fetches anyio's default thread limiter fresh on every call.
+        # Thread-pool saturation numbers (dev-notes/decisions-2026-07-30-
+        # release-gate.md, Q2's "make exhaustion detectable" half) - live
+        # here too, not just in the periodic warning log, so a diagnosis in
+        # progress does not have to wait for the threshold to trip a line.
+        # This handler IS async with a running loop, so unlike the background
+        # saturation watch it can fetch anyio's default thread limiter fresh
+        # on every call - no captured reference needed for THIS consumer.
         try:
             from localm.inference._executor_health import executors_snapshot
             import anyio.to_thread
@@ -3759,16 +4120,19 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 anyio_limiter=anyio.to_thread.current_default_thread_limiter())
         except Exception:
             executors = {}
-        # None, before the heartbeat's first tick, renders as JSON null rather
-        # than 0.0.
+        # None (cold start, before the heartbeat's first tick) renders as
+        # JSON null, never as 0.0 - ADR-0008 U6: those used to be the same
+        # reading, so a stack dump taken during startup looked identically
+        # healthy to one taken with a real lag measurement behind it.
         lag = _loop_lag_seconds()
         return {"pid": os.getpid(),
                 "loop_lag_s": round(lag, 2) if lag is not None else None,
                 "threads": threads, "tasks": tasks, "executors": executors}
 
-    # CORS: localhost-only by default. A wildcard would let any website the user
-    # visits call this API from browser JS and read the responses. Override with
-    # config cors_origins, either a list of origins or a wildcard.
+    # CORS: localhost-only by default. A wildcard here would let ANY website
+    # the user visits call this API from browser JS and read the responses
+    # (drive-by GPU use, response exfiltration, /v1/models/unload abuse).
+    # Override with config "cors_origins": ["https://app.example"] or "*".
     from localm.config import load_config
     cors_cfg = load_config().get("cors_origins")
     cors_kwargs: dict
@@ -3788,75 +4152,93 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     )
 
     # CSRF / drive-by guard. The default CORS policy admits ANY localhost:PORT
-    # origin, so every unsafe-method request must be same-origin (or a configured
-    # CORS origin), EXCEPT the OpenAI-compatible inference API, which stays
-    # cross-origin callable for local apps. Allowlist-by-default, so a new plugin
-    # route is protected the moment it is added. Non-browser clients (CLI, SDK)
-    # send no Origin; cors_origins set to a wildcard opts out entirely.
+    # origin, so without this a malicious local web page (a dev server, an npm
+    # postinstall server) could drive state-changing endpoints from the user's
+    # browser - mint a key, flip require_auth, install a plugin, load/unload the
+    # model, browse the filesystem, read files via a plugin route like /api/rag,
+    # or drive the coder via /api/coder - even keyless (open-mode scope collapse).
+    # So every unsafe-method request must be same-origin (or a configured CORS
+    # origin), EXCEPT the OpenAI-compatible inference API, left cross-origin
+    # callable for local apps. Allowlist-by-default means a new plugin route is
+    # protected the moment it is added. Non-browser clients (CLI / SDK) send no
+    # Origin; "cors_origins": "*" opts out entirely.
     _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-    # Every entry below is a full route path, not a directory prefix, and is
-    # matched with str.startswith(), so a prefix entry would also exempt every
-    # FUTURE route added under it. Keep in sync with _BESPOKE_GATED_ROUTES in the
-    # kernel route scope contract.
+    # Every entry below is a full route path, not a directory prefix - matched
+    # with str.startswith(), so a prefix entry would silently exempt every
+    # FUTURE route added under it too. Exempting a new sibling route must be a
+    # deliberate addition here, not an inheritance. Keep in sync with
+    # _BESPOKE_GATED_ROUTES in tests/test_kernel_routes_scope_contract.py.
     _CROSS_ORIGIN_OK = (
         "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
-        # Surface management (on-demand GUI mount) is driven by a local process,
-        # the attaching `localm gui`, not the browser shell: no Origin, no
-        # shell_token. The route does its OWN strict auth (this instance's attach
-        # token, or an owner API key), which is the real credential, so it is
-        # exempt. A cross-origin page cannot set Authorization without a secret it
-        # cannot read. Also listed in _BESPOKE_GATED_ROUTES; keep both in sync.
+        # Surface management (phase 5 on-demand GUI mount) is driven by a local
+        # process (the attaching `localm gui`), not the browser shell: no Origin,
+        # no shell_token. The route does its OWN strict auth (this instance's
+        # attach token, or an owner API key) - that, not the same-origin gate, is
+        # the real credential, so it is exempt. A cross-origin page still cannot
+        # set Authorization without a secret it cannot read, so no CSRF surface.
+        # Also listed in _BESPOKE_GATED_ROUTES,
+        # tests/test_kernel_routes_scope_contract.py - keep both in sync.
         "/v1/surfaces/gui",
         # Multi-instance GPU coordination (localm.gpu_registry): a SIBLING localm
-        # instance calls this loopback-only, like surface management above - no
-        # Origin, no shell_token, since it is a different process. Its own
-        # coordination_token, never the API key or shell token, is the real
-        # credential and is checked in the route. Also listed in
-        # _BESPOKE_GATED_ROUTES; keep both in sync.
+        # instance calls this loopback-only, like surface-management above - no
+        # Origin, no shell_token (different process). Its own coordination_token
+        # (never the API key/shell token) is the real credential, checked in the
+        # route, so the same-origin gate is exempt for the same reason.
+        # Also listed in _BESPOKE_GATED_ROUTES,
+        # tests/test_kernel_routes_scope_contract.py - keep both in sync.
         "/v1/instances/cooperate-unload",
     )
     _cors_allowlist = frozenset(cors_cfg) if isinstance(cors_cfg, list) else frozenset()
     _cors_wildcard = cors_cfg == "*"
 
-    # A short list of UNAUTHENTICATED GETs that disclose host detail and, unlike
-    # the /api and /v1 metadata reads below, have NO route-level auth to fall back
-    # on. The default CORS policy hands an ACAO to any http(s)://localhost:PORT
-    # origin: /whoami discloses root_dir, an absolute path, on a loopback bind,
-    # and /debug/stacks discloses thread stacks. They sit OUTSIDE the /api and /v1
-    # metadata-GET gate, so they are refused here instead, cross-origin, in EVERY
-    # mode.
+    # LM-PT-002 (CWE-200): a short list of UNAUTHENTICATED GETs that disclose host
+    # detail and, unlike the /api,/v1 metadata reads below, have NO route-level
+    # auth to fall back on. The default CORS policy hands an ACAO to any
+    # http(s)://localhost:PORT origin, so without an explicit refusal a drive-by
+    # local page could read them cross-origin: /whoami leaks root_dir (an absolute
+    # path -> the OS username) on a loopback bind, and /debug/stacks leaks thread
+    # stacks. They sit OUTSIDE the /api,/v1 metadata-GET gate, so they are refused
+    # here instead - cross-origin, in EVERY mode (they are unauthenticated in
+    # protected mode too, so an open-mode-only refusal would miss them).
     _CROSS_ORIGIN_GET_REFUSED = ("/whoami", "/debug/stacks")
 
     # Same refusal, matched by PREFIX rather than exact path. /api/fs/* is the
-    # host filesystem browser: it enumerates the user's disk, and it is a GET, so
-    # it is exempt from both the CSRF gate (unsafe methods only) and the open-mode
-    # shell-token gate. The generic /api and /v1 metadata-GET gate below covers it
-    # only inside the not-any_key_configured branch, so in PROTECTED mode a
+    # host filesystem browser: it enumerates the user's disk, which is host
+    # detail of exactly the kind above, and it is a GET, so it is exempt from
+    # both the CSRF gate (unsafe methods only) and the open-mode shell-token
+    # gate. The generic /api,/v1 metadata-GET gate below does cover it, but only
+    # inside the `not any_key_configured()` branch - so in PROTECTED mode a
     # cookie-authenticated cross-origin GET would execute. SameSite=strict does
-    # not close it either: site ignores port, so any other page on a loopback port
-    # is same-site. Refused in EVERY mode instead.
+    # not close it either: "site" ignores port, so any other page on a loopback
+    # port is same-site, which is the precise actor the comment above at the
+    # _cross_origin_refused definition names. Refused in EVERY mode instead.
     _CROSS_ORIGIN_GET_REFUSED_PREFIXES = ("/api/fs/",)
-    # Sensitive GETs that sit OUTSIDE the /api and /v1 prefixes the open-mode
-    # shell-token gate below keys on. /debug/stacks' own Depends(require_fs_host)
-    # is a TAUTOLOGY in keyless mode, since effective_fs_access returns host for
-    # everyone when no key is configured, so listing it here routes it through the
-    # same shell-token and cross-origin check as a management read. /whoami is
-    # NOT here: the GUI shell calls it to discover whether it needs a
-    # key at all, so requiring the token to read it would be circular; its
-    # disclosure is handled by the cross-origin refusal above. Enforced only on a
-    # LOOPBACK bind - see the comment at token_gated_get below.
+    # Sensitive GETs that sit OUTSIDE the /api,/v1 prefixes the open-mode
+    # shell-token gate below keys on, and so were never covered by it (CodeQL
+    # 97). /debug/stacks' own Depends(require_fs_host) is a TAUTOLOGY in keyless
+    # mode - effective_fs_access returns "host" for everyone when no key is
+    # configured - so without this list it was reachable with no credential at
+    # all. Listing it here routes it through the same shell-token + cross-origin
+    # check as a management read, which is what makes its fs-host gate mean
+    # something. /whoami is deliberately NOT here: it is the endpoint the GUI
+    # shell calls to discover whether it needs a key at all, so requiring the
+    # token to read it would be circular. Its disclosure is handled by the
+    # cross-origin refusal above and is a separate, narrower surface.
+    # NOTE: enforced only on a LOOPBACK bind - see the comment at token_gated_get
+    # below for why answering 403 off loopback would open a new oracle.
     _SHELL_TOKEN_GETS = ("/debug/stacks",)
 
     def _cross_origin_refused(request) -> bool:
         """True when this request carries an Origin header that is neither
         same-origin nor CORS-allow-listed. Shared by the CSRF check (unsafe
-        methods) and the open-mode shell-token gate: the default
+        methods) and the open-mode shell-token gate (AUD-CORSTOKEN): the default
         CORS policy lets any http(s)://localhost:PORT / 127.0.0.1:PORT origin
         READ a matching response, so a hostile local page can steal the shell
         token from a plain cross-origin ``GET /`` and replay it - token
         possession alone does not prove the caller IS the loopback GUI shell.
-        "cors_origins": "*" opts OUT of this specific check, the same as for the
-        CSRF check; it does not waive the shell-token requirement itself."""
+        "cors_origins": "*" opts OUT of this specific check (AUD-CORSWILD), same
+        as it already did for the CSRF check; it does not waive the shell-token
+        requirement itself."""
         if _cors_wildcard:
             return False
         origin = request.headers.get("origin")
@@ -3870,10 +4252,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     @app.middleware("http")
     async def _origin_guard(request, call_next):
         _path = request.url.path
-        # Cross-origin refusal (every mode): every state-changing method, plus the
-        # sensitive GETs in _CROSS_ORIGIN_GET_REFUSED (exact) and
-        # _CROSS_ORIGIN_GET_REFUSED_PREFIXES (prefix). All are subject to the same
-        # same-origin / CORS-allowlist check.
+        # Cross-origin refusal (every mode): every state-changing method (CSRF),
+        # plus the sensitive GETs in _CROSS_ORIGIN_GET_REFUSED (exact) and
+        # _CROSS_ORIGIN_GET_REFUSED_PREFIXES (prefix) - host-detail disclosure,
+        # LM-PT-002. All are subject to the same same-origin / CORS-allowlist
+        # check.
         if ((request.method in _UNSAFE_METHODS
              or (request.method == "GET"
                  and (_path in _CROSS_ORIGIN_GET_REFUSED
@@ -3886,21 +4269,24 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                              "(only same-origin requests or a configured "
                              "'cors_origins' may use this endpoint)."},
                 )
-            # Open-mode management gate. With no key configured, management routes
-            # still require the per-process shell token, injected into the loopback
-            # GUI shell, so a no-Origin local client (curl, a script) cannot mint a
-            # key, flip config, install a plugin, load a model or browse the
-            # filesystem unauthenticated. Protected mode (a key exists) is
-            # bearer-auth'd on the route. The token is required even for an
-            # allowlisted CORS origin, since an Origin header is forgeable and is
-            # therefore not a management credential.
+            # Open-mode management gate. With no key configured, management
+            # routes still require the per-process shell token (injected into the
+            # loopback GUI shell), so a no-Origin local client (curl, a script)
+            # can no longer mint a key, flip config, install a plugin, load a
+            # model, or browse the filesystem unauthenticated. Protected mode (a
+            # key exists) is bearer-auth'd on the route. The token is required even
+            # for an allowlisted CORS origin: an Origin header is forgeable, so
+            # it is not a management credential - a configured external origin must
+            # use an API key for state changes.
         is_unsafe = request.method in _UNSAFE_METHODS
         # A _SHELL_TOKEN_GETS path is token-gated only where it is actually
-        # SERVED. /debug/stacks 404s off a loopback bind, and returning 403 there
-        # instead would tell an unauthenticated NETWORK caller that the endpoint
-        # exists, since an unknown path under /debug/ 404s. Off loopback this
-        # falls through to the handler's own 404, and the handler does its loopback
-        # check before computing anything.
+        # SERVED. /debug/stacks 404s off a loopback bind (deliberately hidden),
+        # and returning 403 there instead would tell an unauthenticated NETWORK
+        # caller that the endpoint exists - a brand new existence oracle opened
+        # in the middle of closing a disclosure, since an unknown path under
+        # /debug/ 404s. So off loopback, fall through to the handler's own 404.
+        # The handler does the loopback check before computing anything, so
+        # nothing is spent serving it.
         token_gated_get = (
             request.method == "GET"
             and request.url.path in _SHELL_TOKEN_GETS
@@ -3918,30 +4304,49 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                                      require_auth_enabled)
             if not any_key_configured() and not require_auth_enabled():
                 token = getattr(request.app.state, "shell_token", None)
-                # A keyless LOCAL process (localm status, the MCP
-                # server_activity tool) has no way to obtain shell_token, which
-                # is per-process, never persisted, and only injected into the
-                # browser-served SPA. It does have this instance's own attach
-                # token from the per-instance registry file (0600, owner-only,
-                # read via instances.attach_target/snapshot), so that is accepted
-                # here too. A browser has no filesystem access to that file and
-                # can never present it, unlike shell_token, which the
-                # cross-origin check below guards.
+                # #953: a keyless LOCAL process (`localm status`, the MCP
+                # server_activity tool) has no way to obtain shell_token - it is
+                # per-process, never persisted, and only ever injected into the
+                # browser-served SPA. It DOES already have this instance's own
+                # attach token (instances.py's per-instance registry file,
+                # 0600/owner-only, read via instances.attach_target/snapshot) -
+                # the exact credential /v1/surfaces/gui's mount_gui route
+                # already accepts for the same "local process, not a browser"
+                # distinction. Accepting it here too turns keyless CLI/MCP
+                # activity reads on, without touching what a browser can do:
+                # a browser has no filesystem access to the registry file and
+                # so can never present this token, unlike shell_token (which
+                # DOES reach the browser and needs the cross-origin check
+                # below as its own defence).
                 #
                 # This gate covers every open-mode management route (minting a
-                # key, changing config, unloading a model), so either token
-                # authorizes all of them, not just activity reads.
+                # key, changing config, unloading a model), not just activity -
+                # so accepting inst_token here is NOT scoped to /api/activity,
+                # it authorizes all of them. That is not an escalation: the
+                # PRINCIPAL, not the credential, is what decides this. Anything
+                # that can read a 0600 file under the user's own home IS that
+                # OS user, and that user can already read the keystore, the
+                # config file, and the models directory directly on disk - the
+                # token grants a local process nothing it did not already have
+                # by other means. If a future reader finds inst_token
+                # authorizing key-minting and reaches for a revert, this is the
+                # premise to check first, not the fix.
                 inst_token = getattr(request.app.state, "instance_token", None)
                 presented = _bearer_token(request)
                 token_ok = ct_equal(presented, token) or (
                     bool(inst_token) and ct_equal(presented, inst_token))
-                # An unsafe-method request already passed the same-origin check
-                # above (or is exempt as _CROSS_ORIGIN_OK, which never reaches
-                # here); a metadata GET never went through that block, so it must
-                # pass the identical check here, or a token stolen via CORS is
-                # replayable cross-origin against every /api/* and /v1/* read.
-                # Applies to both token kinds: a real CLI/MCP client sends no
-                # Origin header at all, so it costs the legitimate case nothing.
+                # AUD-CORSTOKEN: an unsafe-method request already passed the
+                # same-origin check above (or is exempt as _CROSS_ORIGIN_OK,
+                # which never reaches here); a metadata GET never went through
+                # that block at all, so it must pass the identical check here -
+                # otherwise a token stolen via CORS (the default policy trusts
+                # every localhost:PORT origin to READ a response) is directly
+                # replayable cross-origin against every /api/*, /v1/* read.
+                # Applies uniformly to both token kinds: a real CLI/MCP client
+                # never sends an Origin header at all (that is a browser-only
+                # header), so this costs the legitimate case nothing, and it is
+                # defence-in-depth against a caller that somehow obtained the
+                # (never-served) instance token some other way.
                 cross_origin = is_metadata_get and _cross_origin_refused(request)
                 if not token_ok or cross_origin:
                     return JSONResponse(
@@ -3952,58 +4357,91 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                     )
         return await call_next(request)
 
-    # Security response headers. nosniff is enforced everywhere and blocks a
-    # MIME-sniff into executable HTML. The CSP enforces rather than reports, so
-    # DOMPurify is not the only XSS barrier on the shell.
+    # Security response headers (R41 defense-in-depth). The user-content render
+    # path is already XSS-safe via DOMPurify (see dev-notes/SECURITY-xss-render-
+    # review-2026-06-23.md); the gap it found was no Content-Security-Policy
+    # backstop on the GUI shell. nosniff is enforced everywhere (blocks MIME-sniff
+    # into executable HTML). The CSP now ENFORCES (R41 D1): until it did,
+    # DOMPurify was the SOLE enforcing XSS barrier on the shell, so a sanitizer
+    # bypass had nothing behind it.
     #
-    # script-src carries a PER-REQUEST nonce rather than unsafe-inline, so the
+    # script-src carries a PER-REQUEST nonce rather than 'unsafe-inline', so the
     # shell's own inline scripts run and an injected one cannot. Adding
-    # unsafe-inline alongside would do nothing: a policy containing a nonce makes
-    # browsers IGNORE unsafe-inline entirely.
+    # 'unsafe-inline' alongside would be pointless as well as wrong: a policy
+    # containing a nonce makes browsers IGNORE 'unsafe-inline' entirely.
+    # style-src DELIBERATELY keeps 'unsafe-inline', and the NONCE CANNOT REPLACE
+    # IT - that is a spec-level fact, not a matter of effort, so do not "finish
+    # the job" by moving style-src onto the nonce. CSP3's "is element nonceable"
+    # algorithm covers <script>, <style> and <link> ELEMENTS only; an inline
+    # style ATTRIBUTE is reachable only by 'unsafe-inline' or by 'unsafe-hashes'
+    # plus a hash per distinct attribute value. index.html carries 52 such
+    # attributes (41 of them display:none), which is what would have to go.
+    # MEASURED 2026-08-18 against a live GUI, serving style-src 'self' and
+    # reloading: 32 elements that must start hidden became VISIBLE (file inputs,
+    # the coder composer, pull progress, the pairing and install modals all
+    # painted at once), and a probe attribute stopped applying - so this is
+    # load-bearing, not habit. Two things that are NOT blockers, recorded so the
+    # next reader does not re-derive them: KaTeX keeps working under the strict
+    # policy (it styles via CSSOM, which CSP does not govern - verified, a
+    # rendered fraction still computed to its 20.875px height), and the app's own
+    # el.style.x = y writes are equally unaffected. What it costs is bounded and
+    # named: DOMPurify passes a model-authored style ATTRIBUTE through, so a
+    # reply can restyle its own subtree. That is presentation, not execution, and
+    # img-src/connect-src still deny the CSS url() exfiltration path.
     #
-    # style-src keeps unsafe-inline, and the nonce CANNOT replace it. CSP3's
-    # is-element-nonceable algorithm covers script, style and link ELEMENTS only;
-    # an inline style ATTRIBUTE is reachable only by unsafe-inline, or by
-    # unsafe-hashes plus a hash per distinct attribute value, and index.html
-    # carries 52 such attributes. Under a strict style-src, 32 elements that must
-    # start hidden render visible. KaTeX is unaffected, styling via CSSOM, which
-    # CSP does not govern, and so are the app's own el.style writes. The cost is
-    # that DOMPurify passes a model-authored style ATTRIBUTE through, so a reply
-    # can restyle its own subtree; img-src and connect-src still deny the CSS
-    # url() exfiltration path.
-    #
-    # form-action none because nothing in this GUI submits a form: there is no
-    # form element in static/, and every mutation goes through fetch().
-    # form-action is a NAVIGATION directive with no default-src fallback, so
-    # omitting it allows submission ANYWHERE, and DOMPurify's default
-    # ALLOWED_TAGS includes form, so a model reply rendering one survives
-    # sanitisation with its remote action intact and no CSP violation raised.
-    # none rather than self, since there is no legitimate same-origin submission
-    # either, which also closes the same-origin CSRF shape against localm's own
-    # /api.
+    # form-action 'none' because NOTHING in this GUI submits a form - there is
+    # not one <form> element in static/, and every mutation goes through fetch().
+    # It is not covered by default-src: form-action is a NAVIGATION directive
+    # with no fallback, so omitting it allows submission ANYWHERE. That mattered:
+    # DOMPurify's default ALLOWED_TAGS includes <form>, so a model reply
+    # rendering <form action="https://elsewhere/" method="post"><input ...> came
+    # through sanitisation intact, and MEASURED 2026-08-18 in a real browser its
+    # action resolved to that remote origin with NO CSP violation raised. No
+    # script is involved, so neither DOMPurify nor the script-src nonce is in
+    # that path - for an offline-first product this was a way for a rendered
+    # reply to post what the user typed into it off the machine. 'none' rather
+    # than 'self' since there is no legitimate same-origin submission either, and
+    # that also closes the same-origin CSRF shape against localm's own /api.
+    # The remaining directives are unchanged
+    # from the report-only policy and were each confirmed against a live GUI.
     #
     # NO CDN ORIGIN IS LISTED, AND NOTHING NEEDS ONE. The tts plugin's Kokoro
-    # bundle pulls the onnxruntime-web backend with a dynamic import(), which is
-    # a MODULE SCRIPT and so governed by script-src rather than connect-src. That
-    # runtime is vendored and served from this origin
+    # bundle pulls the onnxruntime-web backend with a dynamic import()
+    # (ort-wasm-simd-threaded.jsep.mjs), and a dynamic import is a MODULE SCRIPT,
+    # so it is governed by script-src rather than connect-src. That runtime used
+    # to come from cdn.jsdelivr.net, which forced the origin into BOTH directives
+    # and meant neural TTS never worked offline or behind a filtering proxy.
+    # It is now vendored and served from 'self'
     # (localm/plugins/builtin/tts/static/vendor/onnxruntime/, pointed at by the
-    # plugin's own wasm_paths default). Do not add a CDN origin back to make a
-    # TTS load error go away: that error means the vendored runtime did not
-    # resolve.
+    # plugin's own wasm_paths default), so the grant was removed on both sides.
+    # Do not add a CDN origin back to make a TTS load error go away: that error
+    # means the vendored runtime did not resolve, and widening the policy hides
+    # the real fault instead of fixing it.
     #
-    # The wasm-unsafe-eval token is REQUIRED: compiling any WebAssembly needs an
-    # explicit grant, and onnxruntime-web is WebAssembly on both its wasm and
-    # webgpu paths, so without it no backend can start at all. It permits
-    # WebAssembly compilation only and NOT dynamic evaluation of JavaScript, so it
-    # is tighter than the broader token the browser error text names. Do not
-    # widen it.
-    #
-    # blob: in script-src is REQUIRED once the page is cross-origin isolated:
-    # isolation gives onnxruntime-web SharedArrayBuffer, so it switches to its
-    # THREADED build and loads its worker as a blob: module. worker-src with
-    # blob: is NOT sufficient, because the dynamic import of that blob module is
-    # governed by script-src. A blob: URL can only be minted by same-origin script
-    # that is already executing, and the nonce still gates what may execute.
+    # The 'wasm-unsafe-eval' token is REQUIRED and is a SECOND, INDEPENDENT block.
+    # Allowing the origin above only gets the backend DOWNLOADED; instantiating it
+    # then failed on its own, measured live:
+    #     CompileError: WebAssembly.instantiate() violates the following Content
+    #     Security policy directive ... is not an allowed source of script
+    # Compiling ANY WebAssembly needs an explicit grant, and onnxruntime-web is
+    # WebAssembly on BOTH its wasm and webgpu paths, so without this no backend
+    # can start at all. That token is the narrow CSP3 source for exactly this
+    # case: it permits WebAssembly compilation only, and does NOT permit dynamic
+    # evaluation of JavaScript, so it is strictly tighter than the broader token
+    # the browser error text names. Do not widen it to that broader one.
+    # `blob:` in script-src is REQUIRED once the page is cross-origin isolated,
+    # and it only became necessary then. Isolation gives onnxruntime-web
+    # SharedArrayBuffer, so it switches to its THREADED build, which loads its
+    # worker as a blob: module. Without this the load dies with
+    #     no available backend found. ERR: [wasm] TypeError: Failed to fetch
+    #     dynamically imported module: blob:http://.../<uuid>
+    # i.e. adding the isolation headers alone breaks TTS in a NEW way, while
+    # every unit test stays green - measured live 2026-08-13. `worker-src 'self'
+    # blob:` was already present and is NOT sufficient: the dynamic import of the
+    # blob module is governed by script-src.
+    # On the security trade: a blob: URL can only be minted by same-origin script
+    # that is already executing, so this does not give an INJECTED script a new
+    # way in - the nonce still gates what may execute in the first place.
     _CSP_PREFIX = ("default-src 'self'; "
                    "script-src 'self' blob: 'wasm-unsafe-eval' 'nonce-")
     _CSP_SUFFIX = (
@@ -4011,38 +4449,42 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; "
         "font-src 'self' data:; "
-        # blob: here for the same reason it is in img-src, script-src and
-        # worker-src: the GUI mints these with its OWN URL.createObjectURL and
-        # reads them back (fetch for send-to-chat and copy-image, and the video
-        # and audio players). A blob: URL is same-origin-scoped and cannot be
-        # pointed at a remote origin, so it grants no exfiltration path.
+        # blob: here for the same reason it is in img-src/script-src/worker-src:
+        # the GUI mints these with its OWN URL.createObjectURL and then reads
+        # them back (fetch for "send to chat" / "copy image", and the <video>
+        # and <audio> players). A blob: URL is same-origin-scoped and cannot be
+        # pointed at a remote origin, so this grants no exfiltration path -
+        # connect-src still names every third-party origin explicitly.
         #
-        # media-src MUST be spelled out. Without it media falls back to
-        # default-src, which has no blob:, and the failure is SILENT: assigning a
-        # blocked src fires an error EVENT on the element rather than throwing, so
-        # a try/except around it cannot see it and the player sits dead.
-        # huggingface.co and the hf.co subdomains are the MODEL weights: chat
-        # models are server-side, but the tts plugin fetches Kokoro's ONNX in the
-        # browser and caches it there. The onnxruntime runtime is vendored and
-        # same-origin.
+        # media-src MUST be spelled out. Without it, media falls back to
+        # default-src 'self', which has no blob:, and the failure is SILENT:
+        # assigning a blocked src fires an error EVENT on the element rather
+        # than throwing, so a try/catch around it cannot see it and the player
+        # just sits there dead. That is how this survived unnoticed.
+        # huggingface.co / *.hf.co are the MODEL weights (chat models are
+        # server-side, but the tts plugin fetches Kokoro's ~86 MB ONNX in the
+        # browser and caches it there). The onnxruntime RUNTIME is vendored and
+        # same-origin, so no CDN origin belongs here either.
         "connect-src 'self' blob: https://huggingface.co https://*.hf.co; "
         "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
         "frame-src 'self'; "
         "object-src 'none'; "
         "base-uri 'none'; "
-        # See the form-action note above: a NAVIGATION directive with no
-        # default-src fallback. Nothing in the GUI submits a form.
+        # See the form-action note above: a NAVIGATION directive, no default-src
+        # fallback, so leaving it out allowed a sanitiser-surviving model-authored
+        # <form> to post off-box. Nothing in the GUI submits a form.
         "form-action 'none'; "
         "frame-ancestors 'none'"
     )
 
     @app.middleware("http")
     async def _security_headers(request, call_next):
-        # The nonce is minted BEFORE call_next, because the shell route stamps
-        # this exact value onto its inline script tags while it builds the body,
-        # so the value must already exist when the handler runs. A header set
-        # afterwards from a value the handler never saw would match nothing.
+        # The nonce is minted BEFORE call_next, not after, because the shell
+        # route has to stamp this exact value onto its inline <script> tags while
+        # it builds the body - so the value must already exist when the handler
+        # runs. Setting the header afterwards from a value the handler never saw
+        # would ship a nonce matching nothing and white-screen the GUI.
         nonce = secrets.token_urlsafe(16)
         request.state.csp_nonce = nonce
         resp = await call_next(request)
@@ -4051,24 +4493,32 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             "Content-Security-Policy", _CSP_PREFIX + nonce + _CSP_SUFFIX)
         # CROSS-ORIGIN ISOLATION, so onnxruntime-web can use more than one thread.
         # Without both of these the document is not isolated, SharedArrayBuffer is
-        # unavailable, and onnxruntime falls back to numThreads=1, at which
-        # synthesis runs slower than playback and a long reply stutters.
+        # unavailable, and onnxruntime falls back to numThreads=1 - measured on a
+        # 12-core box, which is why neural TTS was ~10x slower than it needed to
+        # be. Same sentence (6.3 s of audio), both warm, median of 3 runs:
+        #     isolated  threads   median     realtime
+        #     true      multi     4762 ms    0.76x     streaming keeps ahead
+        #     false     1        12883 ms    2.04x     stalls every sentence
+        # Above 1.0x, synthesis is slower than playback, so a long reply stutters.
         #
-        # credentialless rather than require-corp: require-corp demands a CORP
-        # header on EVERY cross-origin subresource, which localm does not control
-        # for huggingface.co. credentialless sends those requests WITHOUT
-        # credentials, which is sufficient for isolation and correct here, since
-        # none of localm's cross-origin fetches are authenticated.
+        # 'credentialless' rather than 'require-corp': require-corp demands a CORP
+        # header on EVERY cross-origin subresource, which we do not control for
+        # huggingface.co or the onnx CDN. credentialless instead sends those
+        # requests WITHOUT credentials, which is both sufficient for isolation and
+        # correct here - none of localm's cross-origin fetches are authenticated,
+        # they are public model and library downloads.
         resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
         resp.headers.setdefault("Cross-Origin-Embedder-Policy", "credentialless")
         return resp
 
     # API-surface disclosure guard. FastAPI's built-in docs (/docs, /redoc,
-    # /openapi.json) enumerate every route and schema, so they are served only on
-    # a loopback bind, keyed on the CONFIGURED bind host and never the peer, since
-    # portmux makes the peer always look loopback. 404 rather than 403, so they
-    # simply do not exist off-loopback. bind_host unset (tests, standalone mount)
-    # defaults to loopback, so docs stay available.
+    # /openapi.json) enumerate every route + schema. Fine on a loopback bind, but
+    # on a NETWORK bind it hands an unauthenticated remote a full attack-surface
+    # map (every endpoint stays scope-gated, so no access is granted, but it is
+    # needless disclosure). Serve docs only on a loopback bind, keyed on the
+    # CONFIGURED bind host (never the peer - portmux makes the peer always look
+    # loopback). 404 not 403, so they simply do not exist off-loopback. bind_host
+    # unset in tests / standalone mount -> default loopback -> docs stay available.
     _DOCS_PATHS = frozenset(
         {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"})
 
@@ -4089,9 +4539,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # OUTSIDE the BaseHTTPMiddleware handlers that otherwise mask http.disconnect
     # from the non-streaming inference path (see the class + _generate_full).
     app.add_middleware(_DisconnectSignalMiddleware)
-    # Outermost of all: in-flight and progress bookkeeping for the hang alarm's
-    # starvation detector. Pure ASGI and content-free (counts and clocks only),
-    # so a request wedged in ANY inner layer still shows as in flight.
+    # Outermost of all: in-flight/progress bookkeeping for the hang alarm's
+    # starvation detector (ADR-0012). Pure ASGI and content-free (counts and
+    # clocks only); sits outside everything so a request wedged in ANY inner
+    # layer still shows as in flight.
     from localm.inference._hang_alarm import RequestProgressMiddleware
     app.add_middleware(RequestProgressMiddleware)
 
@@ -4153,29 +4604,37 @@ def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[floa
 
 def _decode_elapsed(first_token_at: Optional[float], gen_end: float) -> Optional[float]:
     """Wall time spent DECODING: first token -> end of generation. None if nothing
-    was generated. EXCLUDES model load + prompt prefill (the span before the
-    first token), which is reported on its own as ttft_ms, so a cold start's
-    multi-second load is never charged against the generation rate."""
+    was generated. This deliberately EXCLUDES model load + prompt prefill (the span
+    before the first token), which is reported on its own as ttft_ms - so a cold
+    start's multi-second load is never charged against the generation rate."""
     if first_token_at is None:
         return None
     return gen_end - first_token_at
 
 
-# Floor on plausible per-token decode time, used by _tokens_per_sec to reject an
-# implausible decode window rather than report a nonsensical rate.
-# first_token_at is a SINGLE sample, so a GPU scheduler that delays token 1 and
-# then delivers the rest in an uncontended burst collapses the measured window
-# toward zero even though every timestamp is real. 1ms per token, a 1000 tok/s
-# ceiling, is above what single-stream memory-bandwidth-bound decode plus this
-# architecture's per-token IPC marshaling can sustain for one request.
+# A floor on plausible per-token decode time, used to reject an implausible decode
+# window rather than report a nonsensical rate (see _tokens_per_sec). Verified live
+# on real hardware (RX 6900 XT, qwen2.5-0.5b-instruct-q4_k_m) that this floor is
+# necessary, not theoretical: under concurrent GPU load from unrelated processes,
+# a real HTTP request measured decode_elapsed as low as ~0.2ms for 19-29 tokens,
+# reporting 54,786 and 137,701 tok/s. first_token_at is a SINGLE sample - if the
+# GPU scheduler delays token 1 (contended) then delivers the rest in an
+# uncontended burst once its turn comes, the measured decode window collapses
+# toward zero even though every individual timestamp is real. 1ms/token (a 1000
+# tok/s ceiling) is deliberately generous: single-stream autoregressive decode is
+# memory-bandwidth-bound (reading the quantized weights at least once per token),
+# so even a future GPU at multi-TB/s bandwidth plus this architecture's per-token
+# IPC marshaling (the GGUF backend relays each token through a subprocess queue)
+# is not expected to sustain a single request past this ceiling. Below it, no
+# number is more honest than a number that cannot physically be true.
 _MIN_SEC_PER_TOKEN = 0.001
 
 
 def _tokens_per_sec(completion_tokens: int, decode_elapsed: Optional[float]) -> Optional[float]:
     """Decode throughput = generated tokens over the DECODE window only (see
-    _decode_elapsed), NOT over total wall time: folding the model-load/prefill
-    span into this rate makes the first call after a load report a value orders
-    of magnitude too low, which reads as a silent CPU fallback.
+    _decode_elapsed), NOT over total wall time. Folding the model-load/prefill time
+    into this rate made the first call after a load report a value ~100x too low
+    (e.g. 0.6 tok/s on a warm-64 tok/s GPU), which read as a silent CPU fallback.
     Matches the `localm bench` convention (cli/models.py): "tok/s measures pure
     generation after the first token". None when unmeasurable: a non-positive
     window, fewer than two tokens (one token has no decode interval to time), or a
@@ -4222,8 +4681,8 @@ def _audit_exchange(audit, transcript, messages: list, reply: str) -> None:
         if transcript is not None:
             transcript.exchange(user_text, reply)
     except Exception as e:
-        # In log/full mode a failed write drops the record, so it is logged
-        # rather than left invisible.
+        # In log/full mode a failed write silently drops the record; surface it
+        # so the gap is discoverable instead of invisible.
         from localm.debuglog import logger as _dbg
         _dbg.warning("audit/transcript write failed: %s; this exchange was not recorded", e)
         pass  # auditing must never break serving
@@ -4253,7 +4712,7 @@ def _pin(engine) -> None:
     no await in between, so the event loop cannot interleave an eviction before
     the pin lands. A pinned engine (active_requests > 0) is skipped by VRAM
     eviction, closing the window where a concurrent model load would unload an
-    engine out from under an in-flight request."""
+    engine out from under an in-flight request (AUDIT-CRIT-1)."""
     if isinstance(getattr(engine, "active_requests", None), int):
         engine.active_requests += 1
 
@@ -4273,9 +4732,9 @@ def driving_engine(engine):
     resolving or inspecting the engine (checking .loaded, reading a name) - a
     bare property read must not count as activity, or a model nobody is really
     using again stays pinned resident forever. Plugins reach the live engine via
-    PluginManager.inference_engine, which is resolved fresh at every use site
-    across several plugins, so inspection-only reads are common; only the call
-    that actually drives the model registers as "in use".
+    PluginManager.inference_engine, which is now resolved fresh at every use site
+    across several plugins (#959), so inspection-only reads are common; only the
+    call that actually drives the model should register as "in use".
 
     active_requests is NOT optional here even though a timestamp is also touched:
     _idle_unload_once checks the per-model timestamp FIRST and only consults
@@ -4305,11 +4764,11 @@ async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[
         async for chunk in gen:
             yield chunk
     finally:
-        # Starlette acloses THIS wrapper on a client disconnect, which is how the
-        # pin below is released. The inner stream is aclosed explicitly too, so
-        # its own cancel/finally runs now and releases the per-model
-        # _inference_lock the producer thread holds, rather than one
-        # async-generator GC tick later. A no-op on a clean finish.
+        # Starlette acloses THIS wrapper on a client disconnect (that is how the
+        # pin below gets released). Explicitly aclose the inner stream too so its
+        # own cancel/finally runs NOW - releasing the per-model _inference_lock the
+        # producer thread holds - instead of one async-generator GC tick later.
+        # No-op on a clean finish (the inner generator is already exhausted).
         try:
             await gen.aclose()
         except Exception:
@@ -4335,13 +4794,13 @@ async def _stream_sse(
 
     chunk_id = make_chunk_id()
     ts = int(time.time())
-    think = ThinkSplitter()   # routes <think> reasoning into delta.reasoning_content
+    think = ThinkSplitter()   # route <think> reasoning into delta.reasoning_content (H4)
 
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
-        # Context-limit handling: compact_messages when close to the limit,
-        # reserving a 2048-token buffer for compaction and response generation.
+        # Context-limit handling: compact_messages when close to the limit; reserve a
+        # 2048-token buffer for compaction overhead + response generation.
         capacity = engine.context_capacity()
         if isinstance(capacity, int) and capacity > 0 and len(messages) > 3:
             buffer = max(2048, int(capacity * 0.10))
@@ -4350,10 +4809,11 @@ async def _stream_sse(
                 def _gen_for_compact(ms: list[dict], max_t: int) -> str:
                     return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
                 # Off the event loop: compact_messages runs a FULL summarization
-                # generation and engine.chat_stream holds the per-model inference
-                # lock for up to about 1024 tokens, which on the single-threaded
-                # loop would freeze every other request, the heartbeat and the
-                # disconnect watchers for its whole duration.
+                # generation (engine.chat_stream holds the per-model inference lock for
+                # up to ~1024 tokens). Run directly on the single-threaded loop it would
+                # freeze every other request, the heartbeat, and the disconnect watchers
+                # for its whole duration - the same event-loop-block class #541 fixed for
+                # the GPU probes. So offload it, exactly as the real generation below is.
                 _loop = asyncio.get_running_loop()
                 new_messages, changed = await _loop.run_in_executor(
                     None, compact_messages, messages, _gen_for_compact)
@@ -4378,19 +4838,21 @@ async def _stream_sse(
     import threading
 
     # A mid-stream client disconnect makes Starlette throw GeneratorExit into this
-    # async generator. cancel_event lets that unwind stop the producer thread
-    # below, which would otherwise drive engine.chat_stream() to end-of-generation
-    # holding llama.py's per-model _inference_lock and blocking the next request
-    # to THIS model.
+    # async generator. Without a cancel path the producer thread below would keep
+    # driving engine.chat_stream() all the way to end-of-generation, holding
+    # llama.py's per-model _inference_lock the whole time and blocking the next
+    # request to THIS model. cancel_event lets the disconnect unwind stop it.
     cancel_event = threading.Event()
 
     def _generate():
-        # engine.chat_stream is called INSIDE the try: it is not a generator, and
-        # eagerly runs the auto-reload (backend.load()) and load_config() before
-        # returning the token generator, so it can RAISE here (a reload OOM, a
-        # since-removed GGUF). A raise escaping the try would kill the thread
-        # before the finally enqueued the sentinel, leaving the consumer blocked
-        # forever at token_queue.get() while holding the per-model semaphore.
+        # engine.chat_stream is called INSIDE the try: Engine.chat_stream is not a
+        # generator - it eagerly runs the auto-reload (backend.load()) and
+        # load_config() before returning the token generator, so it can RAISE here
+        # (a reload OOM, a since-removed GGUF). If that raise escaped the try, the
+        # thread would die before the finally enqueued the sentinel and the consumer
+        # would block forever at `await token_queue.get()` holding the per-model
+        # semaphore - a permanent per-model deadlock. Inside the try, the except
+        # surfaces it and the finally still enqueues _DONE.
         gen = None
         try:
             gen = engine.chat_stream(messages, **gen_kwargs)
@@ -4399,32 +4861,34 @@ async def _stream_sse(
                     break
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
-            # Logged with a full traceback to the debug log and surfaced to the
-            # client: a silent thread death looks like an empty reply. NOT
-            # traceback.print_exc(): _dbg.exception already records the trace, and
-            # an expected condition such as outgrowing n_ctx_max reaches the user
-            # as a clean message.
+            # Log (full traceback to the debug log) and surface to the client - a
+            # silent thread death looks like an empty reply. Deliberately NOT
+            # traceback.print_exc(): _dbg.exception already records the trace, an
+            # expected condition (e.g. outgrew n_ctx_max) should reach the user as a
+            # clean message, and printing it was the historical WinError-6 crash on
+            # Windows.
             from localm.debuglog import logger as _dbg
             _dbg.exception("generation thread failed")
             loop.call_soon_threadsafe(
                 token_queue.put_nowait, RuntimeError(str(e)))
         finally:
-            # Close the generator chain from THIS thread, which is suspended at
-            # its yield right now; closing it from the event-loop thread would
-            # race the in-flight next() and raise generator-already-executing.
-            # close() propagates GeneratorExit down through the backend wrappers
-            # into llama.py _generate, whose `with self._inference_lock` then
-            # exits and frees the lock deterministically. gen is None when
-            # chat_stream raised eagerly.
+            # Close the generator chain from THIS thread (it is suspended at its
+            # yield right now, so close() is safe here - closing it from the
+            # event-loop thread would race the in-flight next() and raise
+            # "generator already executing"). close() propagates GeneratorExit down
+            # through the backend wrappers into llama.py _generate, whose
+            # `with self._inference_lock` then exits and frees the lock
+            # deterministically - the whole point of the cancel path. gen is None
+            # if chat_stream raised eagerly (nothing to close then).
             try:
                 if gen is not None:
                     gen.close()
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing generation stream failed")
-            # Wake the consumer. If the loop is already gone (server shutdown, or
-            # a disconnect whose request-loop has since closed) the consumer is
-            # gone too, so the sentinel is dropped rather than surfacing as an
+            # Wake the consumer. If the loop is already gone (server shutdown, or a
+            # disconnect whose request-loop has since closed) the consumer is gone
+            # too, so dropping the sentinel is correct - don't let it surface as an
             # unhandled daemon-thread exception.
             try:
                 loop.call_soon_threadsafe(token_queue.put_nowait, _DONE)
@@ -4458,13 +4922,13 @@ async def _stream_sse(
                 for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
                     yield data
         finally:
-            # Signal the producer to stop. A no-op on a clean finish: the thread
-            # already exited after _DONE, so t.join() below returns at once. On a
-            # disconnect (GeneratorExit raised at the yield above) it makes the
-            # thread break its loop, close the generator chain and release
-            # _inference_lock. GeneratorExit then keeps propagating, so t.join()
-            # is skipped and the daemon thread self-terminates within about one
-            # token.
+            # Signal the producer to stop. On a clean finish this is a no-op: the
+            # thread already exited after _DONE, so t.join() below returns at once.
+            # On a disconnect (GeneratorExit raised at the yield above) it makes the
+            # thread break its loop, close the generator chain, and release
+            # _inference_lock instead of running to end-of-generation. GeneratorExit
+            # then keeps propagating, so t.join() below is skipped - the daemon
+            # thread self-terminates within ~one token of the cancel.
             cancel_event.set()
 
         t.join()
@@ -4500,9 +4964,9 @@ async def _stream_sse(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         context_capacity=engine.context_capacity(),
     )
-    # A mid-stream error reports finish_reason error rather than a clean stop,
-    # so a programmatic client can detect the failure; the error text itself was
-    # already streamed.
+    # Honesty: a mid-stream error must not report a clean "stop" on the terminal
+    # frame. The error text was already streamed, but a PROGRAMMATIC client keys
+    # off finish_reason, so mark it "error" to make the failure machine-detectable.
     finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
                           finish_reason=finish_reason)
@@ -4543,7 +5007,7 @@ async def _stream_sse_completion(
     def _generate():
         # chat_stream INSIDE the try: it eagerly runs the auto-reload before
         # returning the generator, so an eager raise must not escape the try and
-        # orphan the consumer.
+        # orphan the consumer (see the fuller note in _stream_sse).
         gen = None
         try:
             gen = engine.chat_stream(messages, **gen_kwargs)
@@ -4553,15 +5017,17 @@ async def _stream_sse_completion(
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
             # Surface an inference failure to the client instead of letting this
-            # daemon thread die: an uncaught death fires a crash report and looks
-            # like an empty reply. _dbg.exception logs the full trace.
+            # daemon thread die (an uncaught death fires a crash report and looks
+            # like an empty reply). _dbg.exception logs the full trace (same
+            # contract as the chat-completions path).
             from localm.debuglog import logger as _dbg
             _dbg.exception("completion generation thread failed")
             loop.call_soon_threadsafe(token_queue.put_nowait, RuntimeError(str(e)))
         finally:
             # Close the generator chain from this (suspended) thread so a cancel
             # propagates GeneratorExit into llama.py _generate and frees
-            # _inference_lock. gen is None when chat_stream raised eagerly.
+            # _inference_lock (see the fuller note in _stream_sse). gen is None if
+            # chat_stream raised eagerly (nothing to close then).
             try:
                 if gen is not None:
                     gen.close()
@@ -4629,9 +5095,9 @@ async def _stream_sse_completion(
     _audit_exchange(audit, transcript, messages, reply)
 
     completion_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_tokens, streamed)
-    # A mid-stream error is reported as error, not stop, so a client keying off
-    # finish_reason detects the failure even though the error text was already
-    # streamed as a visible chunk.
+    # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
+    # not "stop", so a client keying off finish_reason detects the failure even
+    # though the error text was already streamed as a visible chunk.
     done = {
         "id": chunk_id, "object": "text_completion.chunk",
         "created": ts, "model": model_id,
@@ -4668,7 +5134,7 @@ async def _generate_full(engine, messages: list, request=None, *,
     driving engine.chat_stream() to end-of-generation while holding llama.py's
     per-model _inference_lock, blocking the NEXT request to this model (and this
     coroutine keeps the per-model semaphore too). This is the non-streaming twin of
-    the _stream_sse cancel path.
+    the _stream_sse cancel path (PR #540).
 
     We poll a disconnect signal on the loop (resolved just below - NOT plain
     request.is_disconnected(), which the app's BaseHTTPMiddleware stack defeats)
@@ -4707,11 +5173,11 @@ async def _generate_full(engine, messages: list, request=None, *,
                     timing["first_token_at"] = time.perf_counter()
                 parts.append(token)
         finally:
-            # Close from THIS (suspended) worker thread so GeneratorExit
-            # propagates through the backend wrappers into llama.py _generate,
-            # whose `with self._inference_lock` then exits and frees the lock
-            # deterministically. Closing it from the event-loop thread would race
-            # the in-flight next().
+            # Close from THIS (suspended) worker thread so GeneratorExit propagates
+            # through the backend wrappers into llama.py _generate, whose
+            # `with self._inference_lock` then exits - freeing the lock
+            # deterministically (see _stream_sse for the fuller rationale). Closing
+            # it from the event-loop thread would race the in-flight next().
             try:
                 gen.close()
             except Exception:
@@ -4735,8 +5201,9 @@ async def _generate_full(engine, messages: list, request=None, *,
         except asyncio.CancelledError:
             raise
         except Exception:
-            # A watcher failure must NEVER cancel a live generation: the
-            # generation runs to completion and the failure is logged.
+            # A watcher failure must NEVER cancel a live generation; fall back to
+            # the pre-fix behaviour (run to completion) and surface why (rule 5),
+            # rather than risk truncating a good reply on a transient poll error.
             from localm.debuglog import logger as _dbg
             _dbg.exception("non-stream disconnect watcher failed")
 
@@ -4744,10 +5211,10 @@ async def _generate_full(engine, messages: list, request=None, *,
     try:
         return await fut
     finally:
-        # Also stop the worker if the handler coroutine itself is cancelled
-        # (server shutdown, a timeout middleware). A no-op on the normal path,
-        # where the worker already returned and fut is done. Then retire the
-        # watcher.
+        # Also stop the worker if the handler coroutine itself is cancelled (server
+        # shutdown, a timeout middleware): a no-op on the normal path, where the
+        # worker already returned and fut is done, so it cannot truncate a good
+        # reply. Then retire the watcher.
         cancel_event.set()
         watcher.cancel()
         try:
@@ -4780,20 +5247,29 @@ def _memory_used_header(ctx) -> dict:
 
 
 # The backend error contract, in ONE table so the two non-streaming handlers
-# cannot drift apart. Every entry is a ValueError subclass a backend raises to
-# carry a reason the caller can act on, mapped to the status that says whose
-# problem it is.
+# cannot drift apart. Every entry is a ValueError subclass raised deliberately by
+# a backend to carry a reason the caller can act on; each maps to the status that
+# says whose problem it is.
 #
-# ORDER IS LOAD-BEARING, so this is a sequence and not a dict:
-# ImageDecodeUnavailable and VisionInputError are both UnsupportedInputError
-# subclasses, and TriggerValidatorUnavailableError is an InvalidGrammarError, so
-# each subclass must stay ABOVE its parent or the parent's status wins.
+# ORDER IS LOAD-BEARING and the table is a sequence, not a dict, for exactly that
+# reason: ImageDecodeUnavailable and VisionInputError are BOTH UnsupportedInputError
+# subclasses, so a base-class-first table would swallow them and report a missing
+# image decoder as the caller's bad input. TriggerValidatorUnavailableError sits
+# above InvalidGrammarError for the same reason: it IS one, and listed after its
+# parent it would answer 400 - blaming the caller's pattern for a validator that
+# was too busy to look at it. This is the same arm-ordering hazard documented in
+# cli/chat.py's vision handling, and it has its own test.
 #
-# 503 for TriggerValidatorUnavailableError: a saturated probe pool clears on its
-# own, so it is the one entry here that is not permanent.
+# 503 for TriggerValidatorUnavailableError, and this is the one entry in the table
+# that is not permanent: everything else here describes a request or a build that
+# will fail identically on a retry, while a saturated probe pool clears on its own
+# within seconds. "Service Unavailable" is the only status that says "try again"
+# rather than "change something".
 #
-# 501 for ImageDecodeUnavailable: the request is fine and the caller can do
-# nothing about it, and the missing decoder will not appear on a retry.
+# 501 for ImageDecodeUnavailable, not 400 and not 503: the request is fine and the
+# caller can do nothing about it, so 4xx would blame the wrong party; and the
+# missing decoder will not appear on a retry, which is what 503 would promise.
+# "Not Implemented" is exactly the permanent, server-side capability gap it is.
 _BACKEND_ERROR_STATUS: tuple = (
     (ImageDecodeUnavailable, 501),
     (VisionInputError, 400),
@@ -4805,10 +5281,10 @@ _BACKEND_ERROR_STATUS: tuple = (
     (ContextCapacityExceededError, 413),
 )
 
-# The same classes as a plain tuple, for use as an except clause. Derived from
-# the table rather than written out again, so a class in one is never missing
-# from the other; a caught class the table does not map would raise
-# HTTPException(None, ...).
+# The same classes as a plain tuple, for use as an `except` clause. Derived from
+# the table rather than written out again, so a class added to one is never
+# missing from the other - a catch listing a class the table does not map would
+# raise HTTPException(None, ...) at the moment it finally fired.
 _BACKEND_ERROR_TYPES: tuple = tuple(t for t, _ in _BACKEND_ERROR_STATUS)
 
 
@@ -4818,10 +5294,10 @@ def backend_error_status(exc: BaseException) -> Optional[int]:
 
     ``None`` is the important half: it means the exception falls through to the
     generic handler and becomes an opaque 500, which is the CORRECT outcome for a
-    genuine bug. NOT written as ``except ValueError`` at the call sites - every
-    class above IS a ValueError, so a broad catch would also swallow an
-    unrelated ValueError from a real defect and report it to the user as their
-    own bad input.
+    genuine bug. Deliberately NOT written as ``except ValueError`` at the call
+    sites - every class above IS a ValueError, so a broad catch would also
+    swallow an unrelated ValueError from a real defect and report it to the user
+    as their own bad input (AGENTS.md rule 5, in the direction people forget).
     """
     for exc_type, status in _BACKEND_ERROR_STATUS:
         if isinstance(exc, exc_type):
@@ -4833,9 +5309,12 @@ def inference_error_text(exc: BaseException) -> str:
     """The `[inference error: ...]` body a FAILED generation is rendered as, on
     every one of the four generation paths.
 
-    ONE implementation for all four, so the string is stated in one place.
+    ONE implementation for all four deliberately. The string was written out
+    four times, and a fact stated in four places diverges - which is exactly
+    what this unit was sent to fix on the status side, so repeating the mistake
+    on the text side would be perverse.
 
-    THE PATHS ARE SCRUBBED. A mid-generation
+    THE PATHS ARE SCRUBBED, and that is not decoration. A mid-generation
     RuntimeError is not always a tidy "not enough free VRAM" sentence: the GGUF
     loader raises `Failed to load model: <absolute path>` with a native stderr
     tail appended, and an auto-reload inside chat_stream can surface exactly
@@ -4843,10 +5322,10 @@ def inference_error_text(exc: BaseException) -> str:
     disclosure `pathscrub` exists for, and `bugreport.py` already names
     scrub_paths as the rule for a response to a lower-privileged caller.
 
-    scrub_paths REDACTS, it does not mute: the reason, the file name and the
-    line number survive, and only the leading directories are replaced. A caller
-    still learns what failed without learning where this machine keeps its
-    files.
+    scrub_paths REDACTS, it does not mute (AGENTS.md rule 5): the reason, the
+    file name and the line number survive, only the leading directories are
+    replaced. A caller still learns what failed - which is the whole point of
+    the error contract - without learning where this machine keeps its files.
     """
     from localm.pathscrub import scrub_paths
     return f"\n[inference error: {scrub_paths(str(exc))}]"
@@ -4865,9 +5344,11 @@ async def _complete(
     prompt_tokens: Optional[int] = None,
     **gen_kwargs,
 ):
-    # Call the engine's real methods directly: a method-less engine raises here
-    # rather than falling back to fabricated token counts and a canned
-    # completion.
+    # Call the engine's real methods directly. The previous hasattr-guarded
+    # fallbacks (100 prompt tokens, 4096 capacity, an "ok" completion, 10
+    # completion tokens) let a method-less mock pass through, so a broken engine
+    # returned a fabricated 200 instead of surfacing the failure (AUDIT rule 5 /
+    # no facade).
     capacity = engine.context_capacity()
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
@@ -4878,8 +5359,8 @@ async def _complete(
                 from localm.inference.compact import compact_messages
                 def _gen_for_compact(ms: list[dict], max_t: int) -> str:
                     return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
-                # Off the event loop: compaction runs a full generation and must
-                # not block the single-threaded loop.
+                # Off the event loop (see the same fix in _stream_sse): compaction runs a
+                # full generation and must not block the single-threaded loop.
                 _loop = asyncio.get_running_loop()
                 new_messages, changed = await _loop.run_in_executor(
                     None, compact_messages, messages, _gen_for_compact)
@@ -4892,33 +5373,41 @@ async def _complete(
     timing: dict = {}
     async with sem:
         gen_start = time.perf_counter()
-        # Cancelable on client disconnect, so an aborted request releases the
-        # per-model _inference_lock and this semaphore instead of generating to
-        # the end of its budget.
+        # Cancelable on client disconnect so an aborted request releases the
+        # per-model _inference_lock (and this semaphore) instead of generating to
+        # end-of-budget behind the next request's back.
         try:
             text = await _generate_full(engine, messages, request,
                                         timing=timing, **gen_kwargs)
         except _BACKEND_ERROR_TYPES as e:
             # A backend refusal the CALLER can act on (an image this vision model
-            # could not process, a grammar the deferred check rejected at
-            # sampler-build time, a missing image decoder). Each is a ValueError,
-            # so this arm must sit above the RuntimeError catch below and the
-            # generic Exception backstop, or a bare internal-server-error detail
-            # replaces the refusal.
+            # could not process, a grammar the deferred check finally rejected at
+            # sampler-build time, a missing image decoder). Every one of these is a
+            # ValueError, so before this arm existed they sailed past the
+            # RuntimeError catch below into the generic Exception backstop and came
+            # back as {"detail": "Internal server error"} with the reason thrown
+            # away - while the STREAMING twin of this very function delivered that
+            # same reason to the client. Same request, same failure, and only the
+            # non-streaming caller was told nothing.
             #
             # Raised as an HTTPException rather than rendered inline like the
-            # RuntimeError case below: nothing was generated, so the status is
-            # the report. The streaming path cannot match the STATUS, its role
-            # chunk having already put a 200 on the wire, but it carries the same
-            # reason and marks finish_reason as error.
+            # RuntimeError case below, because these are not generation failures
+            # that produced a partial answer: nothing was generated and the status
+            # is the honest report. The streaming path cannot match the STATUS
+            # (its role chunk, and therefore the 200 header, is already on the wire
+            # before generation starts), but it does carry the same reason and
+            # marks finish_reason="error" - so both paths tell the caller what went
+            # wrong, which is the property that was actually broken.
             raise HTTPException(backend_error_status(e), str(e))
         except RuntimeError as e:
             # A generation FAILURE (not enough free VRAM for this prompt, a
-            # conversation that outgrew n_ctx_max, a native decode error) is
-            # raised as RuntimeError and reaches the client as a clean reply,
-            # never a raw HTTP 500. Catches ONLY RuntimeError: a broken engine (a
-            # method-less mock raising AttributeError) must surface loudly, and
-            # CancelledError from a client disconnect must not be swallowed.
+            # conversation that outgrew n_ctx_max, a native decode error) is raised
+            # as RuntimeError; it must reach the client as a clean reply, never a
+            # raw HTTP 500 - the non-streaming twin of the streaming path's
+            # gen_error handling. Catch ONLY RuntimeError, not Exception: a broken
+            # engine (e.g. a method-less mock -> AttributeError) is a real bug that
+            # must surface loudly, not be masked as an "inference error" (rule 5);
+            # and CancelledError (client disconnect) must not be swallowed either.
             from localm.debuglog import logger as _dbg
             _dbg.exception("non-streaming generation failed")
             gen_error = e
@@ -4934,8 +5423,8 @@ async def _complete(
     _audit_exchange(audit, transcript, messages, text)
 
     # Split the model's <think> reasoning out of the visible answer into a
-    # separate field, so API clients get clean content. The token count stays on
-    # the full generated text.
+    # separate field (H4), so API clients get clean content (token count stays on
+    # the full generated text - reasoning was still generated).
     from localm.textnorm import split_think
     answer, reasoning = split_think(text)
 
@@ -4945,9 +5434,9 @@ async def _complete(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
-        # A non-streaming handler still drives chat_stream internally, so the
-        # first-token boundary is observable: ttft_ms is reported too, and tok/s
-        # is computed over the decode window only, never folding in the load.
+        # A non-streaming handler still drives chat_stream internally, so the first
+        # token boundary IS observable: report ttft_ms too, and compute tok/s over
+        # the decode window only (never folding the cold-start load into the rate).
         ttft_ms=_ttft_ms(gen_start, first_token_at),
         tokens_per_sec=_tokens_per_sec(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
@@ -5025,17 +5514,19 @@ def run_advertised(app, host: str, port: int, *, mode: str,
         log_level = uvicorn_log_level()
     scheme = "https" if ssl_certfile else "http"
 
-    # No custom Win32 Ctrl+C handler here: portmux's asyncio.run creates a fresh
-    # loop, so a control-handler OS thread cannot stop the serving loop, and
-    # returning True from one eats the event and defeats uvicorn's own SIGINT
-    # shutdown. Ctrl+C flows through uvicorn instead (KeyboardInterrupt caught in
-    # portmux.run_server), kept responsive on Windows by portmux's loop wakeup.
+    # SRV-CTRLC: no custom Win32 Ctrl+C handler here. A previous one resolved the
+    # loop on the control-handler OS thread - NOT the serving loop (portmux's
+    # asyncio.run makes a fresh loop) - so loop.stop() never fired, yet it returned
+    # True, eating the event and defeating uvicorn's own SIGINT shutdown: it ATE
+    # Ctrl+C and the server hung. Removing it lets Ctrl+C flow through uvicorn
+    # (KeyboardInterrupt caught in portmux.run_server), kept responsive on Windows
+    # by portmux's SRV-6 loop-wakeup. Verified live (Ctrl+Break).
 
     with instances.advertise(app, home_dir(), host=host, port=port, mode=mode,
                              scheme=scheme, project=project, isolated=isolated):
-        # On a TLS bind, a plain-http request on the same port is answered with
-        # an https redirect; plain binds are a direct uvicorn.run. In debug mode
-        # uvicorn logs at info so the console shows requests.
+        # On a TLS bind, also catch a plain-http request on the same port with an
+        # https redirect (issue 8); plain binds are a direct uvicorn.run. SRV-5:
+        # in debug mode uvicorn logs at "info" so the console shows requests.
         portmux.run_server(app, host=host, port=port, log_level=log_level,
                            ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
 
@@ -5056,15 +5547,16 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     refused, never silently relocated. By here it is already a concrete free port
     to bind.
 
-    When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS), the
+    When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS, NET-1), the
     server speaks HTTPS on this port; a plain-HTTP request to it then fails the
     TLS handshake (effectively refused) rather than crossing the network in
     cleartext.
 
     ``mode`` is the instance-registry surface (``"api"`` or ``"full"``).
 
-    Advertises itself in the instance registry so a future launch can discover
-    and attach to it; ``isolated`` keeps it invisible to discovery.
+    Advertises itself in the instance registry (H6 phase 3/4) so a future
+    launch can discover and attach to it; ``isolated`` keeps it invisible to
+    discovery.
     """
     app = create_app(engine, api_landing=True)
     # Record the bind host so routes that depend on it (open-mode seeding,

@@ -47,6 +47,9 @@ class MusicRequest(BaseModel):
     steps: int | None = None
     cfg: float | None = None
     lyrics_strength: float | None = None
+    sampler_name: str | None = None   # KSampler override, e.g. "euler_ancestral"
+    scheduler: str | None = None      # KSampler override, e.g. "karras"
+    shift: float | None = None        # ModelSamplingSD3 override
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
     # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
     model_overrides: dict[str, dict[str, str]] | None = None
@@ -154,6 +157,12 @@ async def music(req: MusicRequest, request: Request):
             kwargs["cfg"] = req.cfg
         if req.lyrics_strength is not None:
             kwargs["lyrics_strength"] = req.lyrics_strength
+        if req.sampler_name is not None:
+            kwargs["sampler_name"] = req.sampler_name
+        if req.scheduler is not None:
+            kwargs["scheduler"] = req.scheduler
+        if req.shift is not None:
+            kwargs["shift"] = req.shift
         if req.model_overrides:
             kwargs["model_overrides"] = req.model_overrides
         ok, message = _backend.generate(

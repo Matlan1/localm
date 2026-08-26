@@ -179,6 +179,7 @@ def save_workflow(media: str, name: str, content: bytes) -> str:
     Raises ValueError when the body is not JSON or not a ComfyUI API-format
     workflow, so a bad upload is rejected with a clear reason rather than silently
     accepted and then failing every generation."""
+    from localm.storekit import atomic_write
     try:
         data = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -196,7 +197,10 @@ def save_workflow(media: str, name: str, content: bytes) -> str:
     p = _confined(media, name)
     p.parent.mkdir(parents=True, exist_ok=True)
     # Re-serialize (normalized) so we never persist arbitrary bytes from upload.
-    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    # atomic_write (temp file + os.replace) so a concurrent reader - the model-slots
+    # probe and every generator's workflow_path().read_text(), none of which take a
+    # lock - never observes a half-written file.
+    atomic_write(p, json.dumps(data, indent=2, ensure_ascii=False))
     return p.name
 
 

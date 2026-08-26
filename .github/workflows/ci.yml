@@ -305,6 +305,15 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: python scripts/check_coverage_floors.py --report
 
+      # coverage.json is computed above and otherwise dies with the runner.
+      # always() so the number is still published when Tests failed on the
+      # ratchet itself; continue-on-error and the script's own exit code keep
+      # this a display step, never a second gate.
+      - name: Publish coverage summary
+        if: always()
+        continue-on-error: true
+        run: python scripts/write_coverage_summary.py
+
       # GUI is vanilla JS (localm/plugins/gui/static); the jsdom harness under
       # tests-js/ loads app.js and exercises it. node:test, no build step.
       - name: Setup Node (GUI JS tests)

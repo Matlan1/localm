@@ -775,7 +775,13 @@ pre:hover .canvas-btn { opacity: 1; }
 #coder-setup .row { display: flex; gap: 8px; align-items: center; }
 #coder-setup .row input[type="text"] { flex: 1; width: auto; }
 #coder-setup .row .btn-secondary { flex-shrink: 0; }
+/* password is listed with text and number, not left to inherit: the API-key
+   field for an off-machine model server is the only password input on this
+   form, and without it that one control rendered as a bare unstyled box a
+   third the width of every field around it. A type-based selector silently
+   excludes each new input type someone adds. */
 #coder-setup input[type="text"], #coder-setup input[type="number"],
+#coder-setup input[type="password"],
 #coder-setup select, #coder-setup textarea {
   width: 100%;
   background: var(--bg-input);

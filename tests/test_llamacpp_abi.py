@@ -304,6 +304,31 @@ def test_benign_default_drift_still_loads():
     assert any("n_ctx" in d for d in v.diagnostics)
 
 
+def test_kv_unified_default_drift_is_diagnostic_not_fatal():
+    """kv_unified is opt-in (only embedder.configure_embed_context turns it
+    on), so llama_context_default_params()'s own default is False on every
+    build seen so far - good_ctx() below leaves it unset (False) precisely
+    because that is the real, measured default. A build reporting True here
+    is corroborating evidence this offset is not landing on the real
+    kv_unified field on THIS runtime (2026-08-25 field report: an embedder
+    context silently coming back kv_unified=false with a sliced n_ctx_seq) -
+    noted, not refused, since it is not on its own a structural invariant."""
+    cp = good_ctx()
+    assert cp.kv_unified is False, "precondition: the unset ctypes default"
+    cp.kv_unified = True
+    v = evaluate(good_model(), cp)
+    assert v.status == "ok"
+    assert any("kv_unified" in d for d in v.diagnostics)
+
+
+def test_kv_unified_expected_default_produces_no_diagnostic():
+    cp = good_ctx()
+    cp.kv_unified = False
+    v = evaluate(good_model(), cp)
+    assert v.status == "ok"
+    assert not any("kv_unified" in d for d in v.diagnostics)
+
+
 # --------------------------------------------------------------------------- #
 #  Safety valves: escape hatch + fail-open
 # --------------------------------------------------------------------------- #

@@ -907,6 +907,96 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             )
         return _text_result(f"Embedding model ready: {path}. Memory and RAG will now use semantic search.")
 
+    def _local_hold(model: str, reg: dict):
+        """Whether an engine resident in THIS process is holding *model*'s file.
+
+        The MCP server keeps its own residents (chat, embed and the coder tool
+        all load through ``engines``), so this process can be the very thing
+        holding the file open while it deletes it. That is not a race: it is
+        deterministic, and it is the most likely way this tool destroys a
+        model, because the agent that just chatted with one is the same agent
+        that asks to remove it.
+        """
+        from localm.model_manager.registry import engine_holding_model_file
+        candidates = [
+            (name, getattr(engine, "model_path", None))
+            for name, engine in list(getattr(engines, "_engines", {}).items())
+            if getattr(engine, "loaded", False)
+        ]
+        return engine_holding_model_file(model, reg, candidates)
+
+    def _remote_hold(model: str):
+        """Why a running localm SERVER means this removal must be refused, or
+        None when every discovered instance positively ruled itself out.
+
+        This process shares no memory with the HTTP/GUI server, so the only way
+        to find out is to ask each running instance over HTTP - the same
+        discovery the ``server_activity`` tool uses, for the same reason.
+
+        EVERY OUTCOME THAT IS NOT AN ANSWER IS A REFUSAL, and the message says
+        which one it was. "That server reports nothing holds it" and "I could
+        not reach that server" are opposite conclusions, and collapsing them
+        would delete a live model's file on the strength of never having found
+        out. A refused delete costs one command and names the server to go and
+        check; a deleted model file is gone.
+        """
+        from localm import instances
+        from localm.bindhost import self_connect_host, url_host
+        from localm.config import home_dir
+        from localm.selfclient import read_model_file_hold
+
+        # include_token=True: this ASKS each instance over HTTP (an internal,
+        # non-display use), so it needs the attach token a genuinely open
+        # (keyless) instance's middleware requires. Never for anything a human
+        # reads.
+        rows = instances.snapshot(home_dir(), include_token=True)
+        for e in rows:
+            scheme = e.get("scheme", "http")
+            where = (scheme + "://"
+                     + url_host(self_connect_host(e.get("host")))
+                     + ":" + str(e.get("port")))
+            if not e.get("alive"):
+                # A failed /whoami is NOT proof the process is gone: snapshot()
+                # reaps entries whose pid has died before this runs, and
+                # instances.py's own comment warns that a transient probe miss
+                # must never be read as death. A listed instance that did not
+                # answer is therefore a live process of unknown state, and
+                # unknown refuses.
+                return (f"a localm server at {where} is registered but did not "
+                        f"answer an identity check, so whether it has this "
+                        f"model loaded could not be established")
+            state, payload = read_model_file_hold(
+                scheme, e.get("port"), model, e.get("token"), e.get("host"))
+            if state == "ok":
+                if not payload.get("held"):
+                    continue          # this server positively ruled itself out
+                key = payload.get("key") or "a loaded model"
+                reason = payload.get("reason")
+                if reason:
+                    return (f"the localm server at {where} has {key!r} loaded "
+                            f"and {reason}, so it cannot be ruled out as "
+                            f"holding this file")
+                return (f"the localm server at {where} still has this model's "
+                        f"file loaded as {key!r}")
+            if state == "absent":
+                continue              # that instance serves a different library
+            if state == "unauthorized":
+                return (f"the localm server at {where} requires an API key this "
+                        f"process does not have, so whether it has this model "
+                        f"loaded could not be established")
+            if state == "unsupported":
+                return (f"the localm server at {where} is an older localm that "
+                        f"cannot report which models it holds, so whether it "
+                        f"has this one loaded could not be established")
+            if state == "unreachable":
+                return (f"the localm server at {where} could not be reached "
+                        f"({payload}), so whether it has this model loaded "
+                        f"could not be established")
+            return (f"the localm server at {where} answered HTTP {payload} "
+                    f"instead of reporting what it holds, so whether it has "
+                    f"this model loaded could not be established")
+        return None
+
     def remove_model(args: dict) -> dict:
         model = args.get("model", "")
         if not model:
@@ -916,6 +1006,36 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         reg = load_registry()
         if model not in reg:
             return _text_result(f"Model not found: {model}", is_error=True)
+
+        # Removing a registered model DELETES ITS FILE when that file lives in
+        # the models dir, and nothing downstream of here asks whether anything
+        # is still using it: model_manager.remove_model is the same code path
+        # `localm rm` runs, with no server and no engine map in front of it.
+        # The GUI's remove route guards exactly this before spawning that
+        # command; this tool did not. Both holders are checked here - the
+        # engines resident in this process, and any running server - and either
+        # one refuses.
+        hold = _local_hold(model, reg)
+        if hold is not None:
+            if hold.reason is None:
+                why = f"this MCP server still has its file loaded as {hold.key!r}"
+            else:
+                why = (f"this MCP server has {hold.key!r} loaded and "
+                       f"{hold.reason}, so it cannot be ruled out as holding "
+                       f"this file")
+            return _text_result(
+                f"Refusing to remove {model!r}: {why}. Removing it would "
+                f"delete the model file while it is in use. Unload it first "
+                f"(or restart this MCP server), then try again.",
+                is_error=True)
+        remote = _remote_hold(model)
+        if remote is not None:
+            return _text_result(
+                f"Refusing to remove {model!r}: {remote}. Removing it could "
+                f"delete the model file while it is in use. Unload it there "
+                f"(or stop that server), then try again.",
+                is_error=True)
+
         with _quiet_stdout():
             try:
                 _rm(model)

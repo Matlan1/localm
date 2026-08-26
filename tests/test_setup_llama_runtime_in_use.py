@@ -2,10 +2,12 @@
 """Provisioning must refuse BEFORE deleting when the runtime is in use, and
 `doctor` must fail an install whose BLAS kernel data is missing.
 
-A `setup-llama --force` on a machine with the runtime loaded can otherwise leave
-a partially cleared install that every other check still reports as healthy.
+Both come from one real incident: a `setup-llama --force` on a machine that had
+the runtime loaded left the install with 14 of 24 libraries and 0 of 995 rocBLAS
+kernels, while every existing check still reported it healthy.
 """
 
+import contextlib
 import ctypes
 import shutil
 import sys
@@ -35,9 +37,12 @@ def test_clear_target_preserves_the_git_sentinels(tmp_path):
 
 
 def test_clear_target_reports_a_file_it_could_not_remove(tmp_path, monkeypatch):
-    """Asserted from OUTSIDE via the return value, not by raising from a patched
+    """The regression this whole change exists for.
+
+    Asserted from OUTSIDE via the return value, not by raising from a patched
     unlink: `_clear_target` catches OSError by design, so an exception-based
-    assertion would be swallowed by the code under test."""
+    assertion would be swallowed by the code under test and the test would pass
+    in both directions (diff-review-discipline item 13)."""
     (tmp_path / "llama.dll").write_bytes(b"\x00")
     (tmp_path / "ggml-base.dll").write_bytes(b"\x00")
 
@@ -60,8 +65,8 @@ def test_clear_target_reports_a_file_it_could_not_remove(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_clear_target_or_refuse_deletes_nothing_when_a_file_is_in_use(tmp_path, monkeypatch):
-    """The pre-flight leaves an INTACT install: reporting after the fact would
-    still leave a half-cleared dir."""
+    """The point of the pre-flight: not merely an honest error, but an INTACT
+    install. Reporting after the fact would still leave a half-cleared dir."""
     (tmp_path / "llama.dll").write_bytes(b"\x00")
     (tmp_path / "ggml-base.dll").write_bytes(b"\x00")
     (tmp_path / "rocblas.dll").write_bytes(b"\x00")
@@ -104,9 +109,12 @@ def test_clear_target_or_refuse_flags_the_probe_to_unlink_race_as_partial(tmp_pa
 
 def test_exit_runtime_in_use_exits_non_zero(capsys):
     """The self-updater runs `setup-llama` as a post-swap command and ROLLS THE
-    WHOLE UPDATE BACK on a non-zero exit (updater.py `_rollback_or_raise`). A
-    runtime that could not be re-provisioned beside freshly swapped code is the
-    ABI mismatch the isolation exists to avoid, so the update is undone."""
+    WHOLE UPDATE BACK on a non-zero exit (updater.py `_rollback_or_raise`). That
+    is the wanted behaviour here and it is why this contract is pinned: a runtime
+    that could not be re-provisioned beside freshly swapped code is exactly the
+    ABI mismatch the isolation exists to avoid, so completing the update would be
+    worse than undoing it. Before this change the same situation could silently
+    fall back to a different backend and report success."""
     with pytest.raises(SystemExit) as ei:
         setup_llama._exit_runtime_in_use(
             setup_llama.RuntimeInUseError([Path("llama.dll")], partial=False))
@@ -202,7 +210,7 @@ def test_blas_flags_an_empty_kernel_directory(tmp_path):
 
 
 def test_blas_flags_a_missing_kernel_directory(tmp_path):
-    """The library is present and its kernel data directory is not."""
+    """The original defect: the library was copied and its data was dropped."""
     d = _install(tmp_path / "i", ["llama.dll", "rocblas.dll"])
     problems = setup_llama.blas_kernel_problems(d)
     assert len(problems) == 1 and "missing entirely" in problems[0]
@@ -229,8 +237,10 @@ def test_blas_matches_the_posix_library_naming(tmp_path):
 
 
 def test_blas_does_not_require_hipblaslt_kernels(tmp_path):
-    """A healthy AMD install ships libhipblaslt with NO hipblaslt/ directory at
-    all, so the check must not require one."""
+    """MEASURED on the shipped b1307 gfx103X archive: libhipblaslt is installed
+    with NO hipblaslt/ directory at all, and that install is healthy. Requiring
+    one would fire on every normal AMD install, which is how a check gets
+    ignored."""
     d = _install(tmp_path / "i",
                  ["llama.dll", "rocblas.dll", "libhipblaslt.dll"],
                  {"rocblas/library": 3})
@@ -258,40 +268,74 @@ def test_blas_ignores_a_path_that_is_not_a_directory(tmp_path):
 #  provisioning notice wording
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("have,want,expect,forbid", [
-    ("amd-rocm", "amd-rocm", "Re-downloading the amd-rocm build (", "with amd-rocm"),
-    ("amd-rocm", "auto",     "with the auto-detected backend",    "with auto."),
-    ("vulkan",   "cuda",     "Replacing vulkan build with cuda", None),
-    (None,       "cuda",     "Replacing unrecorded build with cuda", None),
+class _StoppedBeforeProvisioning(Exception):
+    """Raised by the patched provisioning lock so a test observes the notice
+    text `main()` actually printed without letting it reach the network or
+    the disk - see _invoke_provision_notice."""
+
+
+def _invoke_provision_notice(monkeypatch, tmp_path, capsys, *, have, have_build, want):
+    """Drive the REAL `main()` "already provisioned" notice logic up to, but
+    not through, the point where it would mutate the target or touch the
+    network, and return what it printed.
+
+    have/have_build fake the marker `_provisioned_backend`/`_provisioned_build`
+    would read back; want is the requested --backend. The interactive confirm
+    gate (`want == "auto" or have == want`) is always satisfied (a fake tty
+    plus a patched click.confirm), since both cases it guards are needed to
+    reach every branch of the notice below it."""
+    monkeypatch.setattr(setup_llama, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(setup_llama, "_provisioned_backend", lambda target: have)
+    monkeypatch.setattr(setup_llama, "_provisioned_build", lambda target: have_build)
+    monkeypatch.setattr(setup_llama.click, "confirm", lambda *a, **k: True)
+
+    class _FakeTTYStdin:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(setup_llama.sys, "stdin", _FakeTTYStdin())
+    (tmp_path / setup_llama._lib_name()).write_bytes(b"\x00")
+
+    @contextlib.contextmanager
+    def _refuse_to_provision(target):
+        raise _StoppedBeforeProvisioning()
+        yield  # pragma: no cover - the raise above always fires first
+
+    monkeypatch.setattr(setup_llama, "_provisioning_lock", _refuse_to_provision)
+
+    with pytest.raises(_StoppedBeforeProvisioning):
+        setup_llama.main.callback(
+            from_dir=None, backend=want, url=None, sha256=None,
+            force=False, tag=None, rollback=False, assume_yes=False,
+        )
+    return " ".join(capsys.readouterr().out.split())
+
+
+@pytest.mark.parametrize("have,have_build,want,expect,forbid", [
+    ("amd-rocm", None,     "amd-rocm", "Re-downloading the amd-rocm build (", "with amd-rocm"),
+    ("amd-rocm", None,     "auto",     "with the auto-detected backend",    "with auto."),
+    ("vulkan",   None,     "cuda",     "Replacing vulkan build with cuda", None),
+    (None,       None,     "cuda",     "Replacing unrecorded build with cuda", None),
 ])
-def test_provision_notice_reads_sensibly(have, want, expect, forbid, capsys):
-    """`--force` on an already-provisioned box must not announce "Replacing
+def test_provision_notice_reads_sensibly(monkeypatch, tmp_path, capsys,
+                                         have, have_build, want, expect, forbid):
+    """`--force` on an already-provisioned box used to announce "Replacing
     amd-rocm build with amd-rocm" (it is a re-download) or "...with auto" (auto
-    is not a backend, it is how one gets picked)."""
-    from localm.setup_llama import console
-    if not have:
-        console.print(f"[yellow]Replacing unrecorded build with {want}.[/yellow]")
-    elif want == "auto":
-        console.print(f"[yellow]Replacing {have} build with the "
-                      f"auto-detected backend.[/yellow]")
-    elif have == want:
-        tag = f" ({setup_llama._ROCM_TAG})" if want == "amd-rocm" else ""
-        console.print(f"[yellow]Re-downloading the {have} build{tag}.[/yellow]")
-    else:
-        console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
-    out = " ".join(capsys.readouterr().out.split())
+    is not a backend, it is how one gets picked). Drives the real main()
+    branch instead of a hand-written copy of it."""
+    out = _invoke_provision_notice(monkeypatch, tmp_path, capsys,
+                                   have=have, have_build=have_build, want=want)
     assert expect in out
     if forbid:
         assert forbid not in out
 
 
-def test_redownload_names_the_build_it_is_fetching(capsys):
-    """"Re-downloading the amd-rocm build" alone reads as a no-op, so the notice
-    names the target build. The OLD version cannot be named (the marker records
-    the backend only), and only amd-rocm has a pinned tag constant; the upstream
-    backends resolve theirs with a network call, which a print statement does not
-    get to make."""
-    from localm.setup_llama import console, _ROCM_TAG
-    console.print(f"[yellow]Re-downloading the amd-rocm build ({_ROCM_TAG}).[/yellow]")
-    out = " ".join(capsys.readouterr().out.split())
-    assert _ROCM_TAG in out and _ROCM_TAG.startswith("b")
+def test_redownload_names_the_build_it_is_fetching(monkeypatch, tmp_path, capsys):
+    """"Re-downloading the amd-rocm build" alone reads as a no-op; the case this
+    came from was a real build upgrade. Drives the real main() branch with a
+    recorded build tag that differs from the pinned one, so it must announce
+    the upgrade rather than a bare re-download."""
+    old_tag = f"not-{setup_llama._ROCM_TAG}"
+    out = _invoke_provision_notice(monkeypatch, tmp_path, capsys,
+                                   have="amd-rocm", have_build=old_tag, want="amd-rocm")
+    assert f"Upgrading the amd-rocm build: {old_tag} -> {setup_llama._ROCM_TAG}." in out

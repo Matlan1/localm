@@ -12,17 +12,29 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A coder session started in the browser can now choose which model server
+  answers it.** The setup form offers this localm, any OpenAI-compatible URL
+  (Ollama, LM Studio, vLLM), OpenAI, or Anthropic, per session, matching the
+  choice the terminal has always had. The default is unchanged and offline.
+  Because any other choice sends your prompts and the file contents the agent
+  reads off your machine, it states that when you pick it and keeps a marker on
+  the session for as long as it runs; off-machine models are refused in privacy
+  mode, with a message naming the setting that enables them; choosing a model
+  server needs the owner key; and an API key entered for a session is kept only
+  for that session and never written to disk. A URL on your own machine counts
+  as local and works in privacy mode.
 - **Native HuggingFace AWQ model loading and inference.** HuggingFace AWQ
   (Activation-aware Weight Quantization) 4-bit checkpoints can now be loaded
   and executed natively across Windows ROCm, Linux ROCm, NVIDIA CUDA, Intel XPU,
   and CPU without external compiled binary dependencies (bypassing gptqmodel,
   autoawq, and torchao incompatibilities on Windows ROCm).
 - **Multi-Token Prediction (MTP) model support.** Models trained with MTP or
-  next-n prediction heads (such as DeepSeek-V3/R1 and Qwen MTP variants) can now
-  speculatively generate draft tokens via a dedicated MTP draft context and
-  verify them in batches on the main model graph, speeding up generation without
-  requiring a separate draft model. Configurable via `mtp_enabled` (default true)
-  with seamless fallback to standard autoregressive decoding on standard models.
+  next-n prediction heads (such as Qwen MTP variants) can now speculatively
+  generate draft tokens via a dedicated MTP draft context and verify them in
+  batches on the main model graph, speeding up generation without requiring a
+  separate draft model (structured or tool-calling replies generate one token
+  at a time instead). Configurable via `mtp_enabled` (default true) with
+  seamless fallback to standard autoregressive decoding on standard models.
 - **A collection's individual documents can now be listed and removed from the
   terminal.** `localm rag docs NAME` shows each indexed document with its chunk
   count and whether its source file has since gone missing or was added via an
@@ -412,6 +424,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   five scopes the server treats as privileged are now offered and, exactly
   like the two that were already there, greyed out and refused for anyone
   minting from a merely `keys:admin` device.
+- **Music generation gained three new ACE-Step controls: sampler, scheduler and
+  shift.** The workflow template hardcoded these; they can now be overridden
+  per generation the same way seed, steps and cfg already were. Leaving them
+  unset behaves exactly as before.
+- **Chat's web search/fetch tool calls are now grammar-constrained, not just
+  prompted for.** Once the model starts a `<tool_call>`, a lazy grammar forces
+  it to be valid tool-call JSON instead of hoping the model followed the
+  instructions - the same protection the coder plugin's tool calls already
+  had. Applies to both the interactive chat web toggle and scheduled chat
+  jobs, on local grammar-capable backends; toggle with the new "Grammar-
+  constrain chat tool calls" setting.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
@@ -446,6 +469,35 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Chat comes back on the model you were actually using after generating
+  media.** Making an image, music, or video unloads the chat model to free up
+  VRAM and reloads it when the job finishes. That reload asked for the model
+  the server started with instead of the one you had switched to, so anyone
+  who had picked a different model returned from a generation talking to a
+  different model than they left, with nothing saying it had changed.
+- **One request using a grammar no longer holds up everyone else.** Checking a
+  grammar before generation has to wait for the model to answer, and that wait
+  was blocking every other request on the server rather than just the one that
+  asked for it, so a single constrained request could briefly stall chat for
+  every other client. The check now runs alongside other work.
+- **A model in use can no longer be deleted out from under itself.** Removing a
+  model through an AI assistant (the MCP `remove_model` tool) deleted its file
+  without checking whether anything was still using it, so a model you had just
+  been chatting with could have its downloaded file destroyed while loaded. The
+  same removal in the app has always refused this. It now refuses everywhere,
+  naming what is holding the model, and it also checks a running localm server
+  rather than only the assistant's own session. When it cannot reach a running
+  server to ask, it refuses rather than assuming the model is free.
+- **Downloading the same model twice at once no longer corrupts the download.**
+  Two downloads of the same direct URL wrote into a single partly-downloaded
+  file, interleaving their bytes: the download finished and then failed its
+  checksum, or, with no checksum to check against, was registered as a model
+  that does not load. Downloads to the same destination are now serialised,
+  including between the app and `localm pull` run in a terminal. A download
+  interrupted by a crash is still picked up where it left off.
+- **Starting a download that is already running is refused.** Asking the app to
+  download a model it is already downloading started a second job that could
+  only fail; it now points at the running one instead.
 - **Oversized prompts exceeding model context capacity are now rejected up front
   without crashing the inference worker or evicting loaded models.** Sending a
   prompt whose token count exceeded `n_ctx_max` previously reached the native
@@ -696,8 +748,66 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Intel GPU driver is needed there. The printed note was wrong for Windows;
   it still correctly asks for a system oneAPI install on Linux, where the
   runtime genuinely is not bundled.
+- **Uploading a media workflow while a generation is reading it can no longer
+  leave a corrupted file on disk.** The upload write and a generation's read
+  raced with no protection between them; a generation starting at exactly the
+  wrong moment could load a half-written, invalid workflow file. The write is
+  now atomic, so a read always sees the complete file, before or after the
+  upload.
+- **`localm setup-llama --backend amd-rocm` now fetches the self-contained
+  build that matches your AMD card, instead of always the RX 6000 one.**
+  Explicitly requesting this backend on an RX 7000 or RX 9000 card silently
+  downloaded the RX 6000 (RDNA2) build by name, the same file every card
+  received. The GPU is now detected first and the matching build is
+  requested; RX 6000 keeps its existing behavior unchanged.
+- **Older saved memories could stay stuck in plain keyword search forever.**
+  A memory saved before an embedding model was installed, or a backlog too
+  large for the usual background pass to catch up on its own, used to need a
+  manual `localm setup-embeddings` re-run to become semantically searchable
+  again. A background pass now catches them up on its own while you use
+  localm, so semantic recall keeps improving without a manual step.
+- **Stopping a reply, or running out of memory as one starts, now tells you what
+  actually happened.** Pressing Stop, unloading the model mid-reply, or asking
+  for a context window that does not fit in free memory reported an internal
+  error about a missing variable, instead of either stopping quietly or showing
+  the out-of-memory message that tells you to start a new chat or lower
+  `n_ctx_max`. The real reason now reaches you.
+- **Structured replies from multi-token-prediction models no longer break their
+  own format.** On a model with MTP heads, a JSON-schema, GBNF or tool-calling
+  request drafted tokens ahead using a sampler that ignored the grammar, so the
+  reply could contain text the schema forbids and feeding such a token back
+  could abort generation outright. Constrained requests now generate one token
+  at a time; ordinary chat keeps the speedup.
+- **The coder's shell tools can now actually launch npm, yarn and npx on
+  Windows.** `run_shell` and `run_shell_background` previously handed Windows
+  the bare command name, which it cannot start directly for these three -
+  even with npm installed and on PATH, any coder-run `npm test` or manual
+  `npm`/`npx` command failed immediately with "the system cannot find the
+  file specified". They now resolve to the real, launchable path first.
+- **A coder sub-agent dispatched to its own worktree (`spawn_agent_background`,
+  `dispatch_parallel`) now has its changes checked before being reported as
+  finished.** Such a sub-agent's diff previously sat in a separate worktree
+  that nothing ever verified, so it could be reported as done even when its
+  change did not actually work. It now runs the project's own check (or
+  whichever one you configured) against its own worktree, and a failing
+  check is reported as a failure rather than a success.
+- **HuggingFace-backend chats no longer crash instead of reporting a clean
+  error.** A prompt too long for the model's context window reported a
+  generic worker crash rather than the intended, actionable "conversation
+  exceeded context window" message, and stopping the server while a reply
+  was still streaming could itself crash instead of ending the reply
+  cleanly.
 
 ### Security
+- **Turning network access off no longer left the voice model able to
+  download anyway.** The neural text-to-speech voice is fetched by your
+  browser directly, so localm's network switch, which every other
+  network-triggering action already obeys, had no way to see or stop that
+  request. With network access set to "off" it is now refused outright, with
+  a message telling you how to re-enable it; set to "ask first" (the
+  default), it now asks for a one-time confirmation before the ~86 MB
+  download starts, the same way an embedding model download already does.
+  Nothing changes once the voice model has already been downloaded once.
 - **A form inside a model's reply can no longer send anything off your
   machine.** Replies are rendered as HTML, so a reply could draw a form, and
   the app's security policy did not say where forms were allowed to be
@@ -739,6 +849,31 @@ permanent public record of what shipped and are never rewritten; the in-progress
   backend, is no longer installed.** CVE-2026-59890 is a flaw in how versions
   before 83.0.0 build source packages; localm never builds one itself, but
   the floor is now raised above the fix regardless.
+- **The uninstaller's data-directory guard now refuses a delete it cannot
+  fully check, instead of letting it through.** Before `--purge-data` removes
+  a folder, several checks confirm it is not your home directory, the
+  filesystem root, or the repository itself. If the home-directory check
+  could not run, it was silently skipped rather than treated as a refusal.
+  It now refuses whenever that check cannot be completed, matching how every
+  other check in the same guard already behaved.
+- **A bug report's error detail could still show your Windows account name,
+  even though the same path elsewhere in the report was already hidden.**
+  Some error messages quote the file path in a form the scrubber did not
+  recognize, so the account name inside it slipped through untouched. Every
+  form of the path is now caught.
+- **The no-Python fallback bug reporter no longer files a report without
+  asking you first.** If it could not show the confirmation prompt (no
+  console attached, or nothing left to type into), it used to go ahead and
+  send anyway. It now treats that exactly like you said no: the report is
+  saved locally and nothing is sent, with a note on where to find it.
+- **The weak-key warning no longer implies an 8-character key is "strong".**
+  Binding to the network with a key under the minimum length told you to "set
+  a strong key (>= 8 chars)", which read as if hitting that length made the
+  key strong. It doesn't: the floor only rules out the shortest, easiest
+  guesses, and a short human-chosen key can still be trivially guessable. The
+  warning, and the matching message in the GUI's bind-fallback notice, now
+  say the length is a floor and point at `localm key generate` for an
+  actually strong, random key.
 
 ## [0.1.5rc3] - 2026-08-13
 

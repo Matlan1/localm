@@ -15,6 +15,7 @@ delay the default pool - not just that the two pools are different objects.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 import time
@@ -121,3 +122,116 @@ def test_plugin_tier_files_never_offload_onto_the_default_executor():
             "get_plugin_executor() instead")
         assert "get_plugin_executor" in text, (
             f"{rel} no longer imports/uses get_plugin_executor()")
+
+
+# --------------------------------------------------------------------------- #
+#  A shut-down pool is detected, and never handed back as if it were usable    #
+#                                                                              #
+#  `get_plugin_executor()` used to guard on `_executor is None` ALONE. Once    #
+#  the pool was shut down that check kept returning it, every caller's         #
+#  submit() raised RuntimeError, and nothing recovered for the life of the     #
+#  process - the rag/web/voice/coder/GUI routes that depend on this pool all   #
+#  failed with an error naming a thread pool the user has never heard of.      #
+#                                                                              #
+#  NONE of these tests touch the real process-wide singleton. Each installs    #
+#  its OWN pool as the module global and restores the original afterwards:     #
+#  shutting the real one down would leave a dead pool behind for every later   #
+#  test in this worker, which is the same defect under test, self-inflicted.   #
+# --------------------------------------------------------------------------- #
+
+import concurrent.futures.thread as _cf_thread
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+import localm.executor as _ex
+
+
+@pytest.fixture
+def own_pool():
+    """Install a throwaway pool as the module global; restore the real one."""
+    saved = _ex._executor
+    created: list[ThreadPoolExecutor] = []
+
+    def _install() -> ThreadPoolExecutor:
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-pool")
+        created.append(pool)
+        _ex._executor = pool
+        return pool
+
+    try:
+        yield _install
+    finally:
+        _ex._executor = saved
+        for p in created:
+            p.shutdown(wait=False)
+
+
+def test_a_live_pool_is_still_returned_unchanged(own_pool):
+    # The hot path must not regress: a healthy pool is handed straight back,
+    # same object, no replacement. Without this, a fix for the dead-pool case
+    # could quietly start churning a new pool on every call and every other
+    # assertion here would still pass.
+    pool = own_pool()
+    assert _ex.get_plugin_executor() is pool
+    assert _ex.get_plugin_executor() is pool
+
+
+def test_a_shut_down_pool_is_replaced_with_one_that_actually_works(own_pool):
+    pool = own_pool()
+    pool.shutdown(wait=True)
+
+    # Establish the premise rather than assuming it: this is what every caller
+    # got before the fix, and it is the failure being repaired.
+    with pytest.raises(RuntimeError):
+        pool.submit(lambda: 1)
+
+    replacement = _ex.get_plugin_executor()
+
+    # The load-bearing assertion is NOT "a different object" - that is only a
+    # proxy. The property is that plugin work can be scheduled again, so the
+    # test schedules some. A replacement that were itself dead would satisfy
+    # an identity check and still leave every route broken.
+    assert replacement.submit(lambda: 21 * 2).result(timeout=10) == 42
+    assert replacement is not pool
+
+
+def test_the_replacement_says_so_out_loud(own_pool, caplog):
+    # Rule 5: restoring service must not also hide that the state happened.
+    # Nothing in localm shuts this pool down outside process exit, so a
+    # replacement is evidence of something unexplained and has to be reported.
+    pool = own_pool()
+    pool.shutdown(wait=True)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        _ex.get_plugin_executor()
+    assert any("shut down" in r.getMessage() for r in caplog.records), (
+        "replacing a dead pool logged nothing - the state would be invisible")
+
+
+def test_a_dead_pool_during_interpreter_exit_refuses_instead_of_replacing(
+        own_pool, monkeypatch):
+    """At teardown, replacing is not a recovery - it is pure harm.
+
+    Once ``concurrent.futures.thread._shutdown`` is set, EVERY pool refuses new
+    work, a brand new one included, because ``submit()`` consults that same
+    global. So a replacement there could only spawn threads nothing will join
+    and register an atexit handler mid-atexit, and still fail the call.
+
+    Patches the REAL module global rather than stubbing
+    ``_interpreter_is_exiting``, so the guard's own reader is what gets
+    exercised - a stub would pass even if that function read the wrong thing.
+    """
+    pool = own_pool()
+    pool.shutdown(wait=True)
+    monkeypatch.setattr(_cf_thread, "_shutdown", True)
+    assert _ex._interpreter_is_exiting() is True
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _ex.get_plugin_executor()
+
+    # The message must name WHICH of the two states it was. "The server is
+    # shutting down" and "the pool mysteriously died" send an operator to
+    # completely different places.
+    assert "exiting" in str(excinfo.value)
+    # And it must not have left a replacement behind on the way out.
+    assert _ex._executor is pool

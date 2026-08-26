@@ -93,14 +93,18 @@ def test_status_passes_the_registry_token_to_activity(monkeypatch):
         "pid": 4321, "version": "0.1.0", "token": "the-attach-token"})
     captured = {}
 
-    def _fake_read_activity(scheme, port, instance_token=None):
+    def _fake_read_activity(scheme, port, instance_token=None, bind_host=None):
         captured["instance_token"] = instance_token
+        captured["bind_host"] = bind_host
         return "ok", {"now": 1.0, "operations": []}
 
     monkeypatch.setattr("localm.cli.models.read_activity", _fake_read_activity)
     res = CliRunner().invoke(main, ["status"])
     assert res.exit_code == 0
     assert captured["instance_token"] == "the-attach-token"
+    # The registry entry's own bind host must reach read_activity too, or an
+    # instance bound to a non-default address would be probed on the wrong one.
+    assert captured["bind_host"] == "127.0.0.1"
 
 
 # ------------------------------------------------------------------ #

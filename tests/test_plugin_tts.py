@@ -207,6 +207,27 @@ def test_tts_plugin_serves_client_and_config(env):
         assert c.get("/plugins/tts/tts.js").status_code == 404
 
 
+def test_tts_config_reports_live_net_mode(env, monkeypatch):
+    """R-NET: the Kokoro model is fetched by the BROWSER directly, so the
+    client needs net_mode from /api/tts/config to gate that fetch itself -
+    netpolicy.py's own server-side enforcement never sees a browser-originated
+    request. The field must reflect the CURRENT policy, not a stale value."""
+    from localm.plugins.engine import attach_engine
+    app = FastAPI()
+    attach_engine(app)
+    with TestClient(app) as c:
+        c.post("/api/plugins/tts/install")
+
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        assert c.get("/api/tts/config").json()["net_mode"] == "off"
+
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        assert c.get("/api/tts/config").json()["net_mode"] == "ask"
+
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        assert c.get("/api/tts/config").json()["net_mode"] == "allow"
+
+
 def test_tts_plugin_writes_no_traces(env):
     """The tts plugin renders in the browser: it declares no data dir and its
     routes are read-only, so privacy mode stays trace-free with no gating."""

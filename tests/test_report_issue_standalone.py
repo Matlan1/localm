@@ -396,6 +396,107 @@ def test_powershell_reporter_scrubs_title_and_credentials():
     # Scrub covers URL user:pass@ credentials and sk-/localm-sk API keys.
     assert r"(://)[^/@\s]+@" in text
     assert "localm[_-]sk" in text
+def _copy_ps1_reporter_to_isolated_dir(tmp_path: Path) -> Path:
+    """A byte-identical copy of report_issue.ps1, two directories deep under
+    tmp_path with no localm/config.py anywhere above it. report_issue.ps1
+    resolves its own repo root as two levels up from its own path and reads
+    localm\\config.py from there for the proxy URL/token - so this isolation
+    makes that lookup structurally unreachable (combined with clearing the
+    LOCALM_BUGREPORT_URL/TOKEN env vars below), which is what makes it SAFE
+    to actually execute this reporter's full top-level flow in a test: it
+    cannot discover a real endpoint to send to, network or no network."""
+    real_ps1 = _MOD_PATH.parent / "report_issue.ps1"
+    scripts_dir = tmp_path / "isolated" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    dest = scripts_dir / "report_issue.ps1"
+    dest.write_text(real_ps1.read_text(encoding="utf-8"), encoding="utf-8")
+    assert not (scripts_dir.parent / "localm").exists()
+    return dest
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="the PowerShell fallback reporter only runs on Windows")
+class TestPowerShellReporterFailsSafeUnattended:
+    """report_issue.ps1's three Read-Host prompts ran unguarded. Under
+    -NonInteractive, Read-Host THROWS and $ErrorActionPreference='Stop'
+    aborts the whole script before anything is saved - the report is lost
+    with no trace. Against stdin that is merely closed/redirected (no
+    -NonInteractive flag), Read-Host does not throw at all: it silently
+    returns an empty string, which the confirm prompt's own regex reads as
+    "yes" - so the report was SENT with nobody having reviewed or confirmed
+    it. Both must now fail safe: save locally, never send, never lose the
+    report to an unhandled exception."""
+
+    def _pwsh(self):
+        pwsh = shutil.which("powershell") or shutil.which("pwsh")
+        if not pwsh:
+            pytest.skip("no PowerShell interpreter on PATH")
+        return pwsh
+
+    def _clean_env(self):
+        env = dict(os.environ)
+        env.pop("LOCALM_BUGREPORT_URL", None)
+        env.pop("LOCALM_BUGREPORT_TOKEN", None)
+        assert "LOCALM_BUGREPORT_URL" not in env
+        assert "LOCALM_BUGREPORT_TOKEN" not in env
+        return env
+
+    def test_noninteractive_flag_saves_and_never_sends(self, tmp_path):
+        ps1 = _copy_ps1_reporter_to_isolated_dir(tmp_path)
+        proc = subprocess.run(
+            [self._pwsh(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(ps1), "--summary", "unattended test", "--detail", "no one is here"],
+            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+            env=self._clean_env())
+        out = (proc.stdout or "") + (proc.stderr or "")
+        assert proc.returncode == 0, f"script exited {proc.returncode}: {out}"
+        assert "Sent to the maintainer" not in out, out
+        assert "Not a terminal" in out, out
+        saved = list((ps1.parent.parent / "home" / "bug-reports").glob("bug-*.md"))
+        assert saved, f"nothing was saved locally: {out}"
+        assert "unattended test" in saved[0].read_text(encoding="utf-8")
+
+    def test_closed_stdin_without_noninteractive_flag_saves_and_never_sends(self, tmp_path):
+        """The OTHER failure shape: stdin is closed/redirected but the
+        -NonInteractive flag was never passed. Read-Host does not throw here -
+        it silently returns an empty string, exactly the input that used to
+        read as "yes" at the confirm prompt."""
+        ps1 = _copy_ps1_reporter_to_isolated_dir(tmp_path)
+        proc = subprocess.run(
+            [self._pwsh(), "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(ps1), "--summary", "eof test", "--detail", "no one is here"],
+            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+            env=self._clean_env())
+        out = (proc.stdout or "") + (proc.stderr or "")
+        assert proc.returncode == 0, f"script exited {proc.returncode}: {out}"
+        assert "Sent to the maintainer" not in out, out
+        # The specific message only the fixed early-exit path prints - without
+        # this, the confirm's empty-string answer falls through and is read
+        # as consent, which happens to still fail safe in this test only
+        # because no endpoint is reachable here (exit 1, different message).
+        assert "Not a terminal" in out, out
+        saved = list((ps1.parent.parent / "home" / "bug-reports").glob("bug-*.md"))
+        assert saved, f"nothing was saved locally: {out}"
+
+    def test_yes_flag_with_no_endpoint_configured_saves_and_reports_failure(self, tmp_path):
+        """The pre-existing --yes bypass must still work unchanged: it skips
+        the confirm prompt entirely (this fix never touches that branch), and
+        with no proxy reachable it must say so and save, never claim
+        success - the send path is exercised up to the point of discovering
+        there is nowhere to send to, and no further."""
+        ps1 = _copy_ps1_reporter_to_isolated_dir(tmp_path)
+        proc = subprocess.run(
+            [self._pwsh(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(ps1), "--summary", "yes flag test", "--yes"],
+            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+            env=self._clean_env())
+        out = (proc.stdout or "") + (proc.stderr or "")
+        assert "Sent to the maintainer" not in out, out
+        assert "No bug-report endpoint is configured" in out, out
+        saved = list((ps1.parent.parent / "home" / "bug-reports").glob("bug-*.md"))
+        assert saved, f"nothing was saved locally: {out}"
+
+
 def test_powershell_reporter_scrubs_credential_named_assignments():
     """report_issue.ps1's Scrub function carries the header-line pattern and
     all three branches of the query pattern, not the ?/&-anchored branch

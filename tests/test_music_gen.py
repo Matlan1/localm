@@ -139,6 +139,30 @@ class TestGenerateMusic:
         assert ok
         assert captured["workflow"]["1"]["inputs"]["ckpt_name"] == "my_ace.safetensors"
 
+    def test_sampler_levers_injected(self, tmp_path):
+        """The template hardcoded shift/sampler_name/scheduler with no way to
+        override them. sampler_name/scheduler land on the KSampler node (6);
+        shift lands on the separate ModelSamplingSD3 node (5) that feeds it."""
+        ok, _, captured = self._run(
+            tmp_path, seed=1, sampler_name="euler_ancestral",
+            scheduler="karras", shift=5.0)
+        assert ok
+        wf = captured["workflow"]
+        assert wf["6"]["inputs"]["sampler_name"] == "euler_ancestral"
+        assert wf["6"]["inputs"]["scheduler"] == "karras"
+        assert wf["5"]["inputs"]["shift"] == 5.0
+
+    def test_sampler_levers_default_to_the_template_when_not_given(self, tmp_path):
+        """Omitting the new params must reproduce the exact template values
+        (euler/simple/3.0) - the fix adds a lever, it must not change output
+        for every caller who never touches it."""
+        ok, _, captured = self._run(tmp_path, seed=1)
+        assert ok
+        wf = captured["workflow"]
+        assert wf["6"]["inputs"]["sampler_name"] == "euler"
+        assert wf["6"]["inputs"]["scheduler"] == "simple"
+        assert wf["5"]["inputs"]["shift"] == 3.0
+
 
 class TestWorkflowTemplate:
     def test_committed_template_has_expected_nodes(self):
@@ -146,5 +170,7 @@ class TestWorkflowTemplate:
         assert wf["2"]["class_type"] == "EmptyAceStepLatentAudio"
         assert "seconds" in wf["2"]["inputs"]
         assert wf["3"]["class_type"] == "TextEncodeAceStepAudio"
+        assert wf["5"]["class_type"] == "ModelSamplingSD3"
+        assert "shift" in wf["5"]["inputs"]
         assert wf["6"]["class_type"] == "KSampler"
         assert wf["8"]["class_type"] == "SaveAudio"

@@ -2,13 +2,15 @@
 """Redact machine-identifying absolute paths out of text that crosses a trust
 boundary (an HTTP response body, a shareable bug report).
 
-Two levels, for two different readers:
+Two levels, because two different readers are being protected from two
+different things:
 
 ``scrub_user_paths``
     Drops the user's HOME directory and, as an always-on backstop, the account
     name in any ``C:\\Users\\<name>`` / ``/home/<name>`` / ``/Users/<name>``
-    path. This is the bug-report policy; ``bugreport._scrub_home`` is a thin
-    alias for it, so there is exactly ONE implementation of the username rule.
+    path. This is the long-standing bug-report policy - ``bugreport._scrub_home``
+    is now a thin alias for it, so there is exactly ONE implementation of the
+    username rule instead of a copy that can drift.
 
 ``scrub_paths``
     Everything above PLUS the localm data dir (``LOCALM_HOME``), the install
@@ -19,14 +21,16 @@ Two levels, for two different readers:
     alone would not catch it.
 
 Both KEEP THE STRUCTURE that makes the text useful - the file name, the line
-number, the reason - and replace only the leading directories. A caller told
-"load failed" with the cause removed has been handed a mystery; a caller told
-"not an embedding model" with the path replaced by ``<data>`` has everything
-they can act on and nothing they should not see.
+number, the reason - and replace only the leading directories. That is the
+point: per AGENTS.md rule 5 these paths are being redacted, never muted. A
+caller who is told "load failed" with the cause removed has been handed a
+mystery; a caller told "not an embedding model" with the path replaced by
+``<data>`` has everything they can act on and nothing they should not see.
 
 Every lookup is guarded INDIVIDUALLY and the username backstop runs
 unconditionally, so a failure to resolve one prefix can never cause the raw
-text to be emitted as though it had been scrubbed.
+text to be emitted as though it had been scrubbed (a privacy step that fails
+must not report success).
 """
 
 from __future__ import annotations
@@ -36,21 +40,42 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Tuple
 
-# Matches a home-rooted path's account segment under the well-known user roots.
-# Kept as a pattern STRING, not a compiled object: the flags depend on
-# sys.platform, which is read per call.
-_USER_ROOT_PATTERN = r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+"
+# A home-rooted path whose account segment must go even when it is NOT exactly
+# Path.home() - a different account, or any path under the well-known user
+# roots that an exact-prefix replacement would miss.
+#
+# The Windows separator is matched 1-OR-2 backslashes, never just one: a path
+# that reaches this scrubber after passing through repr() or json.dumps() (an
+# exception's %r-formatted filename, a dict rendered with str()) has every
+# backslash doubled by that escaping, and a single-backslash-only pattern does
+# not match the doubled form at all - the account name then survives intact.
+# Forward slashes are untouched by both encodings, so they stay single.
+#
+# Kept as a PATTERN STRING, not a pre-compiled object: the flags depend on
+# sys.platform, and compiling at import time would freeze them, so a test that
+# patches sys.platform to exercise the Windows branch would silently get the
+# case-SENSITIVE regex. The original implementation this replaces read
+# sys.platform per call, and this stays byte-identical to it. re caches compiled
+# patterns, so there is no per-call compile cost.
+_USER_ROOT_PATTERN = r"([A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)|/home/|/Users/)[^\\/\r\n]+"
 
 
 def _sub_prefix(text: str, prefix: str, replacement: str) -> str:
-    """Replace *prefix* in BOTH separator forms (and case-insensitively on
-    Windows). A value entered with forward slashes does not match the native
-    backslash form, and on Windows a lowercased drive/segment is the same
-    directory - a plain case-sensitive ``str.replace`` leaks on those variants.
+    """Replace *prefix* in every separator form it can appear in (and
+    case-insensitively on Windows). A value entered with forward slashes does
+    not match the native backslash form, and on Windows a lowercased
+    drive/segment is the same directory - a plain case-sensitive
+    ``str.replace`` leaks on those variants. A THIRD form matters just as
+    much: text that has passed through repr() or json.dumps() before reaching
+    here (an exception's ``%r``-formatted filename, a log line built from
+    ``str(some_dict)``) has every backslash doubled, and neither of the other
+    two variants matches that. On a prefix with no backslash (a POSIX home)
+    the doubled variant is identical to *prefix* and the set below simply
+    dedupes it away - no extra work, no extra risk.
     """
     if not prefix:
         return text
-    for variant in {prefix, prefix.replace("\\", "/")}:
+    for variant in {prefix, prefix.replace("\\", "/"), prefix.replace("\\", "\\\\")}:
         if sys.platform == "win32":
             text = re.sub(re.escape(variant), replacement, text,
                           flags=re.IGNORECASE)
@@ -100,10 +125,11 @@ def _machine_prefixes() -> List[Tuple[str, str]]:
         its interpreter with uv, whose directory is a version-less alias
         (``cpython-3.12-windows-x86_64-none``) that ``resolve()`` follows to the
         versioned real path. Frame text carries the alias, so a resolved-only
-        prefix matches nothing and every stdlib frame comes back with a full
-        absolute path. The same applies to a data dir reached through a junction
-        or symlink, or to macOS's /tmp -> /private/tmp, where the leak is the
-        data dir and hence the account name.
+        prefix matched nothing and every stdlib frame came back with a full
+        absolute path while this function reported success. The same trap
+        applies to a data dir reached through a junction or symlink, or to
+        macOS's /tmp -> /private/tmp, where the leak is the data dir and hence
+        the account name.
 
         Guarded per prefix: one unresolvable location must not cost the others,
         and a resolve() failure must still leave the raw form registered.
@@ -132,8 +158,8 @@ def _machine_prefixes() -> List[Tuple[str, str]]:
         add(Path(localm.__file__).resolve().parent.parent, "<install>")
     except Exception:
         pass
-    # The venv / interpreter root, which carries the account name on a per-user
-    # install.
+    # The venv / interpreter root: third-party frames live under it, and on a
+    # per-user install it carries the account name too.
     add(getattr(sys, "prefix", ""), "<env>")
     add(getattr(sys, "base_prefix", ""), "<env>")
 

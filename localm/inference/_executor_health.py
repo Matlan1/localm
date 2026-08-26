@@ -73,7 +73,7 @@ from typing import Optional
 
 
 def pool_health(executor) -> dict:
-    """``{max_workers, threads_spawned, queued, saturated}`` for a
+    """``{max_workers, threads_spawned, queued, saturated, shutdown}`` for a
     ``ThreadPoolExecutor``, or a "nothing to report" shape when *executor*
     is ``None`` (the asyncio default executor is created LAZILY on first
     use - see ``default_executor_ref`` below - so it legitimately does not
@@ -92,13 +92,30 @@ def pool_health(executor) -> dict:
     an exact count: a pool that grew to max_workers and then went idle
     again reports threads_spawned == max_workers with queued == 0, which is
     NOT saturated by this definition (nothing is actually waiting).
+
+    ``shutdown`` is reported SEPARATELY from ``saturated`` because a dead pool
+    is not a busy one, and without it the two are indistinguishable from here.
+    MEASURED on a real pool: after ``.shutdown()`` the other three fields still
+    read plausibly (``max_workers`` unchanged, a spawned thread still listed,
+    ``queued`` at 1 for the wake-up sentinel ``shutdown()`` itself enqueues), so
+    ``saturated`` computes to False and the whole shape is identical to a pool
+    under light load. Every caller of that pool is meanwhile getting
+    ``RuntimeError: cannot schedule new futures after shutdown``. Reporting it
+    is what turns that into a diagnosable state instead of an unexplained 500.
+
+    ``True``/``False`` mean measured; ``None`` means "cannot say" - either
+    introspection failed, or the pool has no such concept (anyio's limiter, see
+    ``anyio_pool_health``). ``None`` is never rendered as healthy.
     """
     if executor is None:
-        return {"max_workers": None, "threads_spawned": 0, "queued": 0, "saturated": False}
+        return {"max_workers": None, "threads_spawned": 0, "queued": 0,
+                "saturated": False, "shutdown": False}
     try:
+        from localm.executor import pool_is_shut_down
         max_workers = executor._max_workers
         threads_spawned = len(executor._threads)
         queued = executor._work_queue.qsize()
+        shutdown = pool_is_shut_down(executor)
     except Exception as e:
         # Collapsing "could not introspect" into the same shape as "genuinely
         # idle" would let this feature go silently blind if a future
@@ -109,17 +126,17 @@ def pool_health(executor) -> dict:
         _dbg.debug("pool_health: could not introspect %r (%s: %s)",
                    executor, type(e).__name__, e)
         return {"max_workers": None, "threads_spawned": None, "queued": None,
-                "saturated": False}
+                "saturated": False, "shutdown": None}
     saturated = bool(max_workers) and threads_spawned >= max_workers and queued > 0
     return {"max_workers": max_workers, "threads_spawned": threads_spawned,
-            "queued": queued, "saturated": saturated}
+            "queued": queued, "saturated": saturated, "shutdown": shutdown}
 
 
 # The "nothing to report" shape shared by pool_health(None) and
 # anyio_pool_health(None) - kept as one literal so the two pools' idle/absent
 # case can never silently drift into looking different from each other.
 _NOTHING_TO_REPORT = {"max_workers": None, "threads_spawned": None,
-                      "queued": None, "saturated": False}
+                      "queued": None, "saturated": False, "shutdown": None}
 
 
 def anyio_pool_health(limiter) -> dict:
@@ -158,8 +175,12 @@ def anyio_pool_health(limiter) -> dict:
                    limiter, type(e).__name__, e)
         return dict(_NOTHING_TO_REPORT)
     saturated = bool(max_workers) and threads_spawned >= max_workers and queued > 0
+    # ``shutdown`` stays None here rather than False: a CapacityLimiter has no
+    # shut-down state at all, so False would assert a fact about this pool that
+    # was never measured. None is this dict's "cannot say", and it keeps the key
+    # present so both pools still render with the identical shape.
     return {"max_workers": max_workers, "threads_spawned": threads_spawned,
-            "queued": queued, "saturated": saturated}
+            "queued": queued, "saturated": saturated, "shutdown": None}
 
 
 def default_executor_ref(loop):
@@ -232,6 +253,12 @@ def start_executor_saturation_watch(loop, *, threshold: float = _DEFAULT_SATURAT
     streak_started: "dict[str, Optional[float]]" = {
         "default": None, "plugin": None, "anyio": None}
     warned: "dict[str, bool]" = {"default": False, "plugin": False, "anyio": False}
+    # Tracked separately from `warned` above: a pool can be dead WITHOUT ever
+    # having been saturated (that is the normal shape - see pool_health's note
+    # on why a shut-down pool computes saturated=False), so sharing one flag
+    # would let either state suppress the other's line.
+    warned_shutdown: "dict[str, bool]" = {
+        "default": False, "plugin": False, "anyio": False}
 
     def _run() -> None:
         from localm.debuglog import logger as _dbg
@@ -243,6 +270,28 @@ def start_executor_saturation_watch(loop, *, threshold: float = _DEFAULT_SATURAT
                 # tick, try again next poll.
                 continue
             for name, health in snapshot.items():
+                # A dead pool first, and unconditionally: unlike saturation
+                # there is no streak to wait out, because nothing in this
+                # process ever brings one back on its own. One line per
+                # transition, then silence while it stays dead - the same
+                # log-once-then-throttle discipline the saturation arm below
+                # uses, for the same reason (this runs every `poll` seconds).
+                # `is True` is deliberate: None means "cannot say" (anyio's
+                # limiter, or failed introspection) and must never warn.
+                if health.get("shutdown") is True:
+                    if not warned_shutdown[name]:
+                        _dbg.warning(
+                            "%s thread pool is SHUT DOWN while the server is "
+                            "still running - work routed to it will fail until "
+                            "the process restarts; see GET /debug/stacks",
+                            name)
+                        warned_shutdown[name] = True
+                elif health.get("shutdown") is False:
+                    # Only an explicit False resets it, so a pool that becomes
+                    # unobservable (None) cannot silently re-arm the warning
+                    # and start alternating.
+                    warned_shutdown[name] = False
+
                 if health["saturated"]:
                     now = time.monotonic()
                     if streak_started[name] is None:

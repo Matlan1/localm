@@ -15,9 +15,8 @@ from .errors import _note_env_override
 # ------------------------------------------------------------------ #
 
 def _mask_key(key: str) -> str:
-    """A key reduced to its first and last four characters, joined by '...'.
-
-    The key is stripped first; one of 8 characters or fewer is masked in full."""
+    """Show enough of a key to recognise it without leaking the whole secret to
+    a terminal log or screen-share. Short keys are fully masked."""
     key = key.strip()
     if len(key) <= 8:
         return "*" * len(key)
@@ -25,8 +24,9 @@ def _mask_key(key: str) -> str:
 
 
 def _fmt_ts(ts) -> str:
-    """A readable local timestamp, ``YYYY-MM-DD HH:MM``, for a single-line
-    message. '-' when *ts* is None or cannot be read as a timestamp."""
+    """A readable local timestamp for a single-line message (the 'key create'
+    confirmation), or '-' when unset. Full precision is fine there - it is one
+    line of prose, not a table column under width pressure."""
     if ts is None:
         return "-"
     try:
@@ -36,9 +36,10 @@ def _fmt_ts(ts) -> str:
 
 
 def _fmt_age(seconds) -> str:
-    """A coarse human duration: Ns, Nm, NhMMm or Nd, whichever fits *seconds*.
-
-    A negative value clamps to 0."""
+    """A coarse human duration (Ns / Nm / NhMMm / Nd), mirroring
+    localm.cli.models._fmt_age's granularity for the same reason: this is "how
+    long", not a stopwatch, so a precise-looking figure would overstate what a
+    once-per-list-call reading actually has."""
     s = int(max(0, seconds))
     if s < 60:
         return f"{s}s"
@@ -50,10 +51,11 @@ def _fmt_age(seconds) -> str:
 
 
 def _fmt_since(ts) -> str:
-    """Elapsed time since *ts* in _fmt_age's form, for a 'key list' table column.
-
-    '-' when *ts* is None or cannot be read as a number. No 'ago' suffix: the
-    column header (Age/Used) supplies that."""
+    """Compact elapsed-time for a 'key list' table column (Age/Used) - '-' when
+    unset. An absolute timestamp does not fit alongside five other columns at a
+    normal terminal width; see _fmt_ts for the single-line form. No 'ago' suffix
+    - the column header (Age/Used) already supplies that context, and every
+    character here is one Rich has to take from a narrower column elsewhere."""
     if ts is None:
         return "-"
     try:
@@ -64,10 +66,12 @@ def _fmt_since(ts) -> str:
 
 
 def _print_wide_table(table) -> None:
-    """Print a Rich table, widened when output is not a terminal.
-
-    Piped or redirected output renders at least 120 columns instead of Rich's
-    80-column fallback. An attached terminal keeps its own real width."""
+    """Print a Rich table, giving it more room than Rich's 80-column
+    non-terminal fallback when output is piped or redirected - a file, `less`,
+    or a test harness has no real screen width to respect, and an 80-column
+    guess is not enough for the 8 columns `key list` now carries (every column
+    would collapse to an ellipsis). A real, attached terminal's actual width is
+    left untouched - only the no-real-terminal fallback changes."""
     if console.is_terminal:
         console.print(table)
         return
@@ -77,9 +81,8 @@ def _print_wide_table(table) -> None:
 
 def _fmt_expires(ts) -> str:
     """Compact expiry for the 'key list' table: 'never' (no deadline), 'in
-    <age>' (still valid), 'expired' (past), or '-' when *ts* is unreadable.
-
-    list_keys() does not filter expired keys out of its result."""
+    <age>' (still valid), or 'expired' - list_keys() does not filter expired
+    keys out, so without that marker a dead key looks identical to a live one."""
     if ts is None:
         return "never"
     try:
@@ -127,12 +130,18 @@ def key_show(reveal):
             console.print("[dim]require_auth is on, so protected routes refuse "
                           "every request until a key is set.[/dim]")
         return
+    from rich.markup import escape
+
     env_key = os.environ.get(auth.ENV_VAR)
     from_env = bool(env_key and env_key.strip())
     source = f"{auth.ENV_VAR} env" if from_env else "auth.key file"
     shown = active if reveal else _mask_key(active)
+    # escape(): unlike key_set's argument, this value can bypass set_api_key's
+    # _KEY_CHARSET gate entirely - get_api_key() reads LOCALM_API_KEY or a
+    # hand-edited auth.key file, neither of which is validated, so a bracketed
+    # value here is exploitable today, not merely defense-in-depth.
     console.print(f"API key [dim](from {source})[/dim]:")
-    console.print(f"  [bold]{shown}[/bold]")
+    console.print(f"  [bold]{escape(shown)}[/bold]")
     if from_env:
         console.print(f"[dim]{auth.ENV_VAR} overrides the stored auth.key file "
                       "while it is set.[/dim]")
@@ -144,9 +153,11 @@ def key_show(reveal):
 def key_generate():
     """Generate a new random owner key, persist it, and print it once."""
     from localm import auth
+    from rich.markup import escape
+
     key = auth.regenerate_key()
     console.print("[green]New API key (shown once - copy it now):[/green]")
-    console.print(f"  [bold]{key}[/bold]")
+    console.print(f"  [bold]{escape(key)}[/bold]")
     console.print("[dim]Clients send it as: Authorization: Bearer <key>[/dim]")
     _note_env_override("is set and overrides this stored key until it is unset.")
 
@@ -158,17 +169,24 @@ def key_generate():
 def key_set(key):
     """Persist a specific owner KEY (use 'generate' for a random one)."""
     from localm import auth
+    from rich.markup import escape
+
     if not key or not key.strip():
         raise click.ClickException("Key must be non-empty.")
     try:
         auth.set_api_key(key)
     except ValueError as e:
         # set_api_key rejects a key that is too short or uses characters an HTTP
-        # header cannot carry. Re-raised as a CLI error so it does not reach the
-        # crash/bug-report handler.
+        # header cannot carry. That is the user mistyping an argument, so present it
+        # as a clean CLI error - letting the ValueError escape routes it to the
+        # crash/bug-report handler, which asks the user to report their own typo as
+        # a localm bug.
         raise click.ClickException(str(e)) from e
+    # escape(): defense-in-depth only - set_api_key succeeding above proves `key`
+    # already matched _KEY_CHARSET (letters/numbers/-/_), so no bracket can reach
+    # here today. Escaped anyway rather than relying on that gate staying in place.
     console.print(f"[green]✓[/green] API key set "
-                  f"[dim]({_mask_key(key)})[/dim]")
+                  f"[dim]({escape(_mask_key(key))})[/dim]")
 
 
 
@@ -186,34 +204,42 @@ def key_clear(yes):
             "requests (unless require_auth is on)"):
         console.print("[dim]Cancelled.[/dim]")
         return
+    from rich.markup import escape
+
     failed = auth.clear_api_key()
-    # A browser owner session carries its own ADMIN scope snapshot and survives
-    # a key roll, so a leftover owner cookie would keep full access after the key
-    # is gone. Every browser session is signed out here, mirroring
-    # /api/auth/key/clear. Device bearer KEYS in the keystore are untouched.
+    # A browser owner session carries its own ADMIN scope snapshot and survives a
+    # key roll (sessions are decoupled from the key value by design), so a
+    # leftover owner cookie would keep full access after the key is gone -
+    # defeating the clear (dangerous when require_auth is on). Sign every
+    # browser session out here, mirroring /api/auth/key/clear. Device bearer
+    # KEYS live in the keystore and are untouched.
     revoked = sessions.revoke_all()
     if failed:
-        # A security step that FAILED never reports success. The underlying
-        # warnings go to debuglog only, so the failure is named here.
+        # A security step that FAILED must never report success (rule 5). The
+        # underlying warnings go to debuglog only, so without this the user saw a
+        # green tick while the key on disk still granted access.
         console.print("[red]x[/red] API key NOT fully cleared - credentials may "
                       "still grant access:")
-        # The CLI is a LOCAL surface, so it prints the path and the OS error;
-        # the HTTP route shows only "what".
+        # The CLI is a LOCAL surface: the user owns this machine and needs the
+        # path and the OS error to fix it by hand. The HTTP route deliberately
+        # shows only "what" (see clear_api_key's docstring).
         for item in failed:
-            console.print(f"  [yellow]-[/yellow] {item['what']}: "
-                          f"{item['path']} ({item['error']})")
+            console.print(f"  [yellow]-[/yellow] {escape(item['what'])}: "
+                          f"{escape(item['path'])} ({escape(item['error'])})")
         console.print("[dim]Delete the listed file(s) by hand, then run "
                       "'localm key clear' again to confirm.[/dim]")
     elif revoked is not None:
         console.print("[green]✓[/green] API key cleared - open mode.")
     if revoked is None:
-        # revoke_all returns None only when the store could not be written,
-        # which means live sessions REMAIN live and a leftover owner cookie keeps
-        # full ADMIN access once any key is configured again. Local surface, so
-        # it names the file and the fix.
+        # Rule 5, the session half. revoke_all returns None only when the store
+        # could not be written, which means live sessions REMAIN live - a leftover
+        # owner cookie keeps full ADMIN access the moment any key is configured
+        # again, which is precisely what this command exists to prevent. The old
+        # code could not tell this from "there were no sessions" and printed the
+        # green tick regardless. Local surface, so it names the file and the fix.
         console.print("[red]x[/red] Browser sessions were NOT signed out - a "
                       "signed-in browser may still have access:")
-        console.print(f"  [yellow]-[/yellow] {sessions.sessions_file()}")
+        console.print(f"  [yellow]-[/yellow] {escape(str(sessions.sessions_file()))}")
         console.print("[dim]Re-run 'localm key clear' once that file is "
                       "writable, or delete it by hand.[/dim]")
     elif revoked:
@@ -231,33 +257,47 @@ def key_recover():
     owner key but still need to manage the server. Existing scoped DEVICE keys are
     untouched, so devices keep working; only the owner credential is rotated. Live
     browser (cookie) sessions are signed out too, so a captured owner cookie cannot
-    outlive the recovery. The old key is not required. To instead drop all auth and
-    return to open mode, use 'key clear'."""
+    outlive the recovery. The local CLI is the trusted recovery path, so this does
+    not require the old key. To instead drop all auth and return to open
+    mode, use 'key clear'."""
     from localm import auth, sessions
+    from rich.markup import escape
+
     had = auth.get_api_key() is not None
     key = auth.regenerate_key()
-    # regenerate_key leaves browser sessions alone, and an owner cookie carries
-    # its own ADMIN snapshot exempt from the keystore recheck, so it survives the
-    # rotation. Every session is revoked here rather than inside regenerate_key,
-    # mirroring /api/auth/key/clear. Device bearer KEYS in the keystore are
-    # untouched.
+    # regenerate_key deliberately leaves browser sessions alone (by design: a GUI
+    # key roll must not log the browser out), but recovery is the compromise path.
+    # An owner cookie carries its own ADMIN snapshot and is exempt from the
+    # keystore recheck, so it would survive the rotation unless dropped here.
+    # Revoke every session (NOT inside regenerate_key, to keep the GUI's
+    # survive-a-roll behavior intact), mirroring /api/auth/key/clear. Device
+    # bearer KEYS in the keystore are untouched.
     revoked = sessions.revoke_all()
     console.print("[green]Owner access recovered. New owner key (shown once - "
                   "copy it now):[/green]")
-    console.print(f"  [bold]{key}[/bold]")
+    console.print(f"  [bold]{escape(key)}[/bold]")
     console.print("[dim]Clients send it as: Authorization: Bearer <key>[/dim]")
     if had:
         console.print("[dim]The previous owner key no longer works; scoped device "
                       "keys are unchanged.[/dim]")
     if revoked is None:
-        # This command always configures a NEW key, so a surviving ADMIN cookie
-        # resolves immediately against it and keeps full access. That failure is
-        # reported rather than passed over, but it is not raised: the exit code
-        # stays 0, matching the credential half of `key clear` and the HTTP route
-        # (200 with cleared:false), and the new key printed above is usable.
+        # THE SHARPEST INSTANCE of the rule-5 session gap, which is why it is
+        # spelled out here as well as in key_clear. This command's whole purpose
+        # is locking a compromised owner OUT, and unlike 'key clear' it always
+        # configures a NEW key - so a surviving ADMIN cookie is not merely inert
+        # residue, it resolves immediately against the fresh key and keeps full
+        # access. Reporting a completed recovery here would tell a user under
+        # active compromise that they were safe when they were not.
+        #
+        # Reported, not raised, and the exit code stays 0 - matching what the
+        # credential half of `key clear` already does for its own failure, and
+        # what the HTTP route does (200 with cleared:false). The new key is
+        # printed above and IS usable, so failing the command would be its own
+        # kind of lie, and inventing a non-zero exit here would break scripts
+        # for a contract this fix has no business changing.
         console.print("[red]x[/red] Browser sessions were NOT signed out, so a "
                       "captured session cookie may still have access:")
-        console.print(f"  [yellow]-[/yellow] {sessions.sessions_file()}")
+        console.print(f"  [yellow]-[/yellow] {escape(str(sessions.sessions_file()))}")
         console.print("[dim]Delete that file by hand, then re-run "
                       "'localm key recover' to confirm.[/dim]")
     elif revoked:
@@ -275,6 +315,13 @@ def key_list():
         console.print("[dim]No named keys. Mint one:  "
                       "localm key create <name> --scope <scope>[/dim]")
         return
+    # escape(): Table.add_row() parses "[...]" as Rich markup on a plain string
+    # cell exactly like Console.print() does (confirmed empirically against this
+    # venv's rich - a bracketed cell either loses its bracketed span or has it
+    # consumed as a style directive). `name` is the sharpest case: create_key()
+    # only strips it, it is never restricted to a safe character class, so a key
+    # minted with a bracketed name would otherwise display wrong in this listing.
+    from rich.markup import escape
     from rich.table import Table
     table = Table(header_style="bold cyan")
     table.add_column("ID", style="bold")
@@ -287,10 +334,11 @@ def key_list():
     table.add_column("Used")
     for k in keys:
         rag_roots = k.get("rag_roots", [])
-        table.add_row(str(k.get("id", "")), str(k.get("name", "")),
-                      ", ".join(k.get("scopes", [])),
-                      str(k.get("fs_access", "none")),
-                      ", ".join(rag_roots) if rag_roots else "(unrestricted)",
+        table.add_row(escape(str(k.get("id", ""))), escape(str(k.get("name", ""))),
+                      ", ".join(escape(s) for s in k.get("scopes", [])),
+                      escape(str(k.get("fs_access", "none"))),
+                      (", ".join(escape(r) for r in rag_roots)
+                       if rag_roots else "(unrestricted)"),
                       _fmt_since(k.get("created")),
                       _fmt_expires(k.get("expires")),
                       _fmt_since(k.get("last_used")))
@@ -330,7 +378,8 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     """Mint a named key limited to SCOPES; print the secret once.
 
     Privileged scopes (admin, keys:admin, plugins:admin, config:write,
-    coder:full) are refused unless --allow-privileged is given.
+    coder:full) are refused unless --allow-privileged is given, so a routine
+    mint can never escalate itself by accident.
 
     --fs-access grants host filesystem reach (default none). The owner key always
     has full host access; this is how you let (or deny) a shared device key browse
@@ -345,6 +394,8 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     """
     from localm import auth
     from localm import scopes as S
+    from rich.markup import escape
+
     expires = time.time() + expires_in if expires_in is not None else None
     try:
         rec = auth.create_key(name, list(scopes), allow_privileged=allow_privileged,
@@ -352,30 +403,44 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
                               rag_roots=list(rag_roots) or None,
                               expires=expires)
     except (ValueError, PermissionError) as e:
-        console.print(f"[red]{e}[/red]")
+        # escape(): a ValueError for an unknown scope embeds the caller's raw
+        # --scope text verbatim ("Unknown scope(s): {bad}") - that text failed
+        # validation, so it is not restricted to any safe character class.
+        console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
-    rag_note = (f"; rag-roots {', '.join(rec['rag_roots'])}"
+    # rec['name'] is exploitable today: create_key() only strips it, it is never
+    # checked against a character class. rec['scopes'], rec['fs_access'] and
+    # priv_granted are each validated/clamped before this point (is_valid_scope,
+    # the --fs-access click.Choice, PRIVILEGED_SCOPES) and escaped anyway rather
+    # than relying on that staying true. rec['rag_roots'] is exploitable today
+    # too - norm_rag_roots() only de-dupes and strips, it does not restrict the
+    # character class of a --rag-root value.
+    rag_note = (f"; rag-roots {', '.join(escape(r) for r in rec['rag_roots'])}"
                 if rec.get("rag_roots") else "")
     expires_note = (f"; expires {_fmt_ts(rec['expires'])}"
                      if rec.get("expires") else "")
     priv_granted = [s for s in rec["scopes"] if s in S.PRIVILEGED_SCOPES]
-    priv_note = (f"; [yellow]privileged:[/yellow] {', '.join(priv_granted)}"
+    priv_note = (f"; [yellow]privileged:[/yellow] "
+                 f"{', '.join(escape(s) for s in priv_granted)}"
                  if priv_granted else "")
-    console.print(f"[green]New key '{rec['name']}' "
-                  f"({', '.join(rec['scopes'])}; fs-access {rec['fs_access']}"
+    console.print(f"[green]New key '{escape(rec['name'])}' "
+                  f"({', '.join(escape(s) for s in rec['scopes'])}; "
+                  f"fs-access {escape(rec['fs_access'])}"
                   f"{rag_note}{expires_note}{priv_note}) - shown once:[/green]")
-    console.print(f"  [bold]{rec['key']}[/bold]")
-    console.print(f"[dim]id {rec['id']}; revoke with: "
-                  f"localm key rm {rec['id']}[/dim]")
-    # Warn at grant time when this key unlocks a plugin the host cannot serve
-    # yet: not installed, or missing its pip extras.
+    console.print(f"  [bold]{escape(rec['key'])}[/bold]")
+    console.print(f"[dim]id {escape(rec['id'])}; revoke with: "
+                  f"localm key rm {escape(rec['id'])}[/dim]")
+    # Catch at grant: if this key unlocks a plugin the host cannot serve yet
+    # (not installed, or missing its pip extras), say so right here.
     try:
         from localm.plugins.engine import PluginManager
         warns = PluginManager(None).scope_deps_warnings(list(scopes))
     except Exception:
         warns = []
     for w in warns:
-        console.print(f"[yellow]Note:[/yellow] {w}")
+        # escape(): built from an installed plugin's own manifest fields
+        # (name/scope), which are not restricted to a safe character class.
+        console.print(f"[yellow]Note:[/yellow] {escape(w)}")
     if warns:
         console.print("[dim]Install missing plugin packages on the host with:  "
                       "localm plugin install-deps --all[/dim]")
@@ -389,11 +454,18 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
 def key_rm(key_id, yes):
     """Revoke a named key by ID (see 'localm key list')."""
     from localm import auth
+    from rich.markup import escape
+
+    # click.confirm() goes through Click's own prompt, not Rich - key_id is
+    # deliberately NOT escaped here, since escape() would show a literal
+    # backslash to the user instead of protecting anything.
     if not yes and not click.confirm(f"Revoke named key '{key_id}'?"):
         console.print("[dim]Cancelled.[/dim]")
         return
+    # key_id is an unvalidated CLI argument, only ever compared by equality
+    # against stored records - escape it for both console.print() sites below.
     if auth.revoke_key(key_id):
-        console.print(f"[green]✓[/green] Revoked {key_id}.")
+        console.print(f"[green]✓[/green] Revoked {escape(key_id)}.")
     else:
-        console.print(f"[red]No such key:[/red] {key_id}")
+        console.print(f"[red]No such key:[/red] {escape(key_id)}")
         sys.exit(1)

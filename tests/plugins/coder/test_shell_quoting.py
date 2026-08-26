@@ -17,6 +17,7 @@ Nothing here reads, stats, or names a file that belongs to the machine.
 """
 
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -238,3 +239,27 @@ class TestTheQuotingDefectsFire:
         new_result = run_subprocess(_shell_argv(command), tmp_path, timeout=60)
         assert new_result.ok, new_result.stderr
         assert MARK in (new_result.stdout or "")
+
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="npm.CMD/WinError 2 is a Windows-only defect")
+    @pytest.mark.skipif(shutil.which("npm") is None,
+                        reason="npm is not installed on this box")
+    def test_the_old_bare_argv_could_not_launch_npm(self, tmp_path):
+        """Defect: a bare, unresolved argv[0] cannot launch npm on Windows.
+
+        npm ships as an npm.CMD shim. Argument-list execution goes through
+        CreateProcess, which finds no PE header for a bare "npm" and fails
+        with WinError 2 even though npm is installed and on PATH - only the
+        RESOLVED path (with its .CMD extension) launches. A test asserting on
+        the STRING _shell_argv returns cannot tell the bug from the fix,
+        because the bug is what CreateProcess does with that string, not what
+        it looks like - so this actually launches the process both ways.
+        """
+        old_result = run_subprocess(["npm", "--version"], tmp_path, timeout=60)
+        assert not old_result.ok, (
+            "a bare 'npm' argv[0] was expected to FAIL to launch: %r"
+            % (old_result.stdout,))
+
+        new_result = run_subprocess(_shell_argv("npm --version"), tmp_path,
+                                    timeout=60)
+        assert new_result.ok, new_result.stderr

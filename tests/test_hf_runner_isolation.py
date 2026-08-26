@@ -165,6 +165,97 @@ class TestChatStreamCrashContainment:
             r.shutdown(grace=0)
 
 
+class TestChildDispatchContextCapacityTransport:
+    """Regression test for the F821 NameError at _hf_runner.py:391
+    (``ContextCapacityExceededError`` undefined in ``_runner_main``'s except
+    clause). Same shape and rationale as
+    tests/test_runner_grammar_unsupported_transport.py::
+    test_child_dispatch_reports_the_refusal_instead_of_dying: an oversized
+    prompt must report a tagged, typed error and leave the worker alive to
+    serve the next request - not crash the dispatch loop with an unrelated
+    NameError while Python tries to evaluate the except clause's own
+    exception type."""
+
+    def test_oversized_prompt_reports_capacity_error_instead_of_crashing(
+            self, monkeypatch):
+        import queue
+        import threading
+
+        import localm._mp_spawn as mp_spawn
+        from localm.inference.backends import _hf_runner, _hf_worker
+        from localm.inference.backends.base import ContextCapacityExceededError
+
+        monkeypatch.setattr(mp_spawn, "install_parent_death_watchdog", lambda *a: None)
+        monkeypatch.setattr(mp_spawn, "suppress_native_error_dialogs", lambda *a: None)
+
+        class _FakeWorker:
+            last_finish_reason = "stop"
+            supports_images = False
+            can_embed = False
+            resolved_device = "cpu"
+
+            def __init__(self, **kw):
+                pass
+
+            def load(self):
+                pass
+
+            def chat_stream(self, **kw):
+                raise ContextCapacityExceededError(
+                    "oversized prompt for this fake worker")
+                yield   # pragma: no cover - makes this a generator, as the real one is
+
+            def count_tokens(self, payload):
+                return 42
+
+        monkeypatch.setattr(_hf_worker, "HFWorker", _FakeWorker)
+
+        req_q, resp_q, ctrl_q = queue.Queue(), queue.Queue(), queue.Queue()
+        died: list = []
+
+        def _run():
+            try:
+                _hf_runner._runner_main(req_q, resp_q, ctrl_q)
+            except BaseException as e:      # noqa: BLE001 - escaping = the worker dies
+                died.append(e)
+
+        t = threading.Thread(target=_run, name="hf-dispatch-under-test", daemon=True)
+        t.start()
+        try:
+            req_q.put(("load", {}))
+            assert resp_q.get(timeout=5)[0] == "ok"
+
+            req_q.put(("chat_stream",
+                       {"messages": [{"role": "user", "content": "hi"}]}, 1))
+            try:
+                envelope = resp_q.get(timeout=5)
+            except queue.Empty:
+                pytest.fail(
+                    f"no envelope arrived within 5s - the dispatch loop "
+                    f"likely crashed instead of reporting an error "
+                    f"envelope; died={died!r}")
+            assert envelope[0] == "error", (
+                f"expected a clean error envelope, got {envelope!r}")
+            # len BEFORE index, so a missing tag reports the LOSS rather than
+            # an IndexError.
+            assert len(envelope) > 2, (
+                f"the capacity refusal crossed the IPC with NO type tag "
+                f"({envelope!r}) - the parent will raise a bare RuntimeError "
+                f"instead of ContextCapacityExceededError")
+            assert envelope[2] == "ContextCapacityExceededError", (
+                f"expected the tagged capacity error, got tag {envelope[2:]!r}")
+
+            # Still serving. Pre-fix, the NameError raised while evaluating
+            # the except clause's own exception type escaped _runner_main
+            # entirely and killed the dispatch loop.
+            req_q.put(("count_tokens", "still alive?"))
+            assert resp_q.get(timeout=5) == ("ok", 42)
+            assert not died, f"the dispatch loop died instead of reporting: {died!r}"
+        finally:
+            req_q.put(None)
+            t.join(timeout=5)
+
+
 class TestSimpleRequestCrashContainment:
     def test_count_tokens_crash_is_contained(self):
         """A crash while handling a simple request (not just load/chat_stream)
@@ -563,6 +654,52 @@ class TestCooperativeCancel:
             "a drain timeout must fall back to killing the worker, not "
             "silently assume the cancel succeeded")
         assert r._req_q is None, "shutdown() must have torn down the queues"
+
+
+class TestShutdownRequestedDuringChatStream:
+    """Regression tests for the F821 NameErrors at _hf_runner.py:755 and
+    :761 (``logger`` undefined in ``HFRunner.chat_stream``). Before the fix,
+    a shutdown requested while a stream is polling for its next envelope
+    crashed with NameError instead of ending the stream cleanly."""
+
+    def test_shutdown_already_requested_ends_the_stream_immediately(self):
+        """Covers :755 - shutdown was requested before the stream even
+        started polling, so the very first check inside the wait loop must
+        return with no tokens."""
+        r = _make_runner()
+        r._shutdown_requested = True
+
+        result = list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
+
+        assert result == [], (
+            "chat_stream must return with no tokens when shutdown was "
+            "already requested before the stream even started polling "
+            "(pre-fix: NameError while logging it)")
+
+    def test_shutdown_requested_while_waiting_ends_the_stream_cleanly(self):
+        """Covers :761 - shutdown is requested WHILE the stream is blocked
+        waiting for an envelope, so it is the check inside the
+        _queue.Empty handler (not the one at :755) that must end the
+        stream."""
+        r = _make_runner()
+        r._shutdown_requested = False
+
+        def _flip_shutdown_soon():
+            time.sleep(runner_mod._POLL_INTERVAL / 4)
+            r._shutdown_requested = True
+
+        threading.Thread(target=_flip_shutdown_soon, daemon=True).start()
+
+        # Nothing is ever put on resp_q, so the first get() times out
+        # (_queue.Empty) after _POLL_INTERVAL - by then the flip above has
+        # already landed, so the SECOND shutdown check (the one inside the
+        # except branch) is what ends the stream.
+        result = list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
+
+        assert result == [], (
+            "chat_stream must return with no tokens once shutdown is "
+            "requested mid-wait, not raise (pre-fix: NameError while "
+            "logging it)")
 
 
 # --------------------------------------------------------------------------- #

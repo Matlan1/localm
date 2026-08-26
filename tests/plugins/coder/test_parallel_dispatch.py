@@ -11,6 +11,7 @@ cleanup) is exercised for real, not mocked.
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -109,10 +110,11 @@ class DummyParent:
         self.disabled_tools = frozenset()
         self.scope = kw.get("scope")
         self._interactive = kw.get("interactive", False)
+        self.verify_cmd = kw.get("verify_cmd")
 
 
 # --------------------------------------------------------------------------
-# Two tasks editing the SAME file do not interfere
+# REQUIRED: two tasks editing the SAME file do not interfere
 # --------------------------------------------------------------------------
 
 def test_two_children_editing_the_same_file_do_not_interfere(repo):
@@ -129,7 +131,7 @@ def test_two_children_editing_the_same_file_do_not_interfere(repo):
     assert a.resolve() != repo.resolve() and b.resolve() != repo.resolve()
 
     # Both children's work survived, each on its own branch, neither overwriting
-    # the other.
+    # the other. This is the property the shared-cwd design could not provide.
     branches = _run(repo, "git", "branch", "--list", "coder/*")
     assert branches.count("coder/") == 2, branches
     contents = set()
@@ -169,7 +171,7 @@ def test_diffs_are_returned_for_review_and_name_their_branch(repo):
 
 
 # --------------------------------------------------------------------------
-# Worktrees cleaned up on success AND failure
+# REQUIRED: worktrees cleaned up on success AND failure
 # --------------------------------------------------------------------------
 
 def test_worktrees_are_cleaned_up_on_the_success_path(repo):
@@ -211,14 +213,14 @@ def test_child_budget_is_released_even_when_a_child_raises(repo):
 
 
 # --------------------------------------------------------------------------
-# A hung child is bounded and reported, never hangs the parent
+# REQUIRED: a hung child is bounded and reported, never hangs the parent
 # --------------------------------------------------------------------------
 
 def test_a_hung_child_is_bounded_and_reported(repo):
     release = threading.Event()
 
     def hang(agent):
-        # Bounded so the test cannot wedge the suite.
+        # Bounded so the test cannot wedge the suite if the guard regresses.
         release.wait(timeout=30)
         return "eventually"
 
@@ -288,7 +290,7 @@ def test_a_hung_childs_worktree_is_reported_not_silently_leaked(repo):
         res = par.tool_dispatch_parallel(
             repo, tasks=["hang", "ok"], timeout_s=2, _parent_agent=parent,
         )
-        # The report says the worktree was left behind.
+        # We must SAY the worktree was left behind rather than pretend it is gone.
         assert "WARNING" in res.output
         assert "left in place" in res.output or "still holds it" in res.output
     finally:
@@ -317,7 +319,7 @@ def test_dispatch_is_rejected_when_the_shared_budget_is_already_spent(repo):
         parent = DummyParent(repo)
         res = par.tool_dispatch_parallel(repo, tasks=["a"], _parent_agent=parent)
         assert not res.ok
-        # The rejection names who holds the budget.
+        # The rejection NAMES who holds the budget, so it is actionable.
         assert "job-a" in res.output and "job-b" in res.output
     finally:
         for t in held:
@@ -344,10 +346,11 @@ def test_partial_budget_degrades_and_says_so(repo):
 # --------------------------------------------------------------------------
 
 def test_unattended_parent_still_fails_closed():
-    """A parent with no handler and no interactive terminal has nobody to ask, so
-    the child must get None (which execution.py turns into a denial) - never a
-    permissive default that self-approves. The property must survive the
-    serialising wrapper.
+    """The 2026-07-09 bypass fix must survive the serialising wrapper.
+
+    A parent with no handler and no interactive terminal has nobody to ask, so the
+    child must get None (which execution.py turns into a denial) - never a
+    permissive default that self-approves.
     """
     parent = DummyParent(Path("."), confirm_handler=None, interactive=False)
     assert par._serialised_confirm_handler(parent, "child1") is None
@@ -456,7 +459,8 @@ def test_two_distinct_models_surface_the_residency_condition(repo, monkeypatch):
         _parent_agent=parent,
     )
     assert "two different models were requested" in res.output
-    # Each child reports the model it actually ran on.
+    # And each child reports the model it ACTUALLY ran on, so an eviction-driven
+    # fallback is visible instead of silent.
     assert "model:    model-a" in res.output
     assert "model:    model-b" in res.output
 
@@ -524,13 +528,109 @@ def test_child_is_confined_to_its_worktree_and_knows_where_it_is(repo):
 
 
 # --------------------------------------------------------------------------
-# An abandoned worker must never overwrite the parent's verdict
+# An isolated child's diff lands in a tree the parent's own verify_cmd (if
+# any) never sees, so it needs an oracle of its own - see
+# tools/agents.py:_isolated_verify_cmd.
+# --------------------------------------------------------------------------
+
+def test_isolated_child_inherits_an_explicit_parent_verify_cmd(repo):
+    """An explicit choice at the parent must not be silently replaced by a
+    different auto-detected command for the child."""
+    parent = DummyParent(repo, verify_cmd="pytest tests/only_this.py -x")
+    captured = {}
+
+    def record(agent):
+        captured["verify_cmd"] = agent.verify_cmd
+        return "ok"
+
+    FakeAgent.behaviour = {"child1": record}
+    par.tool_dispatch_parallel(repo, tasks=["a"], _parent_agent=parent)
+
+    assert captured["verify_cmd"] == "pytest tests/only_this.py -x"
+
+
+def test_isolated_child_without_parent_verify_cmd_detects_its_own(repo):
+    """The common case: a one-shot task-mode parent never sets verify_cmd at
+    all (see core.py's constructor comment), so "inherit only" would leave
+    every isolated child exactly as unverified as today. The child must still
+    get a real oracle, detected against ITS OWN worktree."""
+    (repo / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    _run(repo, "git", "add", "-A")
+    _run(repo, "git", "commit", "-m", "add a pytest marker")
+
+    parent = DummyParent(repo)          # verify_cmd defaults to None
+    captured = {}
+
+    def record(agent):
+        captured["verify_cmd"] = agent.verify_cmd
+        return "ok"
+
+    FakeAgent.behaviour = {"child1": record}
+    par.tool_dispatch_parallel(repo, tasks=["a"], _parent_agent=parent)
+
+    cmd = captured["verify_cmd"]
+    assert cmd is not None, "isolated child got no verify_cmd at all"
+    assert "pytest" in " ".join(str(part) for part in cmd)
+
+
+def test_isolated_child_verify_failure_is_reported_as_error_not_ok(repo):
+    """The severity of the defect: a child whose diff fails verification must
+    be reported as an error, never as ok (which the GUI shows as SUCCESS).
+
+    FakeAgent's own run_task is a full stand-in, so this hook plays the part
+    of the real Agent's own pre-done gate (loop.py's _run_verify_gate) -
+    running the SAME verify_cmd this fix threads to the child and setting
+    last_run_ok from its real exit code, exactly as loop.py does on exhausted
+    retries. Before this fix verify_cmd was always None here, so a child could
+    never even attempt this and always fell back to reporting ok.
+
+    The precondition is asserted OUTSIDE the hook, on the main thread, after
+    dispatch returns - never by raising inside the hook itself. A raise there
+    runs on the pool worker, where dispatch_parallel's own exception handler
+    (its `except Exception as exc: outcome.seal("error", ...)`) catches it and
+    reports the identical "[error]" symptom this test is trying to prove for a
+    real verification failure - so an assertion inside the hook cannot tell
+    "verify_cmd reached the child and failed" from "the hook itself crashed
+    for an unrelated reason", which defeats the whole point of the test.
+    """
+    captured = {}
+
+    def fails_its_own_verification(agent):
+        captured["verify_cmd"] = agent.verify_cmd
+        if agent.verify_cmd is not None:
+            from localm.plugins.coder import verify as _verify
+            code, _out = _verify.run_verify(agent.verify_cmd, agent.cwd)
+            agent.last_run_ok = (code == 0)
+        return "child claims done"
+
+    FakeAgent.behaviour = {"child1": fails_its_own_verification}
+    parent = DummyParent(
+        repo, verify_cmd=[sys.executable, "-c", "import sys; sys.exit(1)"])
+    res = par.tool_dispatch_parallel(repo, tasks=["a"], _parent_agent=parent)
+
+    assert captured.get("verify_cmd") is not None, "no verify_cmd reached the child"
+    assert "[error]" in res.output, res.output
+    assert "[ok]" not in res.output, res.output
+    assert res.ok is False
+
+
+# --------------------------------------------------------------------------
+# THE RACE: an abandoned worker must never overwrite the parent's verdict
 #
-# These tests pin the scheduling instead of racing for it: the real parent,
-# pool, _run_one_child and _ChildOutcome all run, and the hung child is
-# released at the point between the parent stamping its verdict (the
-# `_FuturesTimeout` branch) and reading it back (the commit/teardown/report
-# pass), then waited on until that write lands.
+# A child that outlives the batch deadline is ABANDONED, not stopped, so its
+# thread is still alive and still holding the shared _ChildOutcome while the
+# parent reports on it. Before the seal, that worker's `outcome.status = "ok"`
+# landed on top of the parent's "timeout" and the model was handed a delegated
+# job that read [ok].
+#
+# These tests DRIVE that interleaving instead of racing for it. The window is
+# genuinely microseconds wide in production, so a test that merely hangs a child
+# and hopes would pass on the broken code most runs - which is the same thing as
+# not testing it. Nothing about the mechanism is faked: the real parent, the real
+# pool, the real _run_one_child and the real _ChildOutcome all run. Only the
+# SCHEDULING is pinned, by releasing the hung child at the exact point between
+# the parent stamping its verdict (the `_FuturesTimeout` branch) and reading it
+# back (the commit/teardown/report pass), then waiting for the write to land.
 # --------------------------------------------------------------------------
 
 def _drive_late_write(monkeypatch, release: threading.Event,
@@ -564,7 +664,8 @@ def _drive_late_write(monkeypatch, release: threading.Event,
         def shutdown(self, *a, **kw):
             # The parent has stamped its verdicts and has not yet read one back.
             release.set()
-            # Wait until the abandoned worker's write has actually happened.
+            # Do not proceed until the abandoned worker's write has actually
+            # happened, or "the race did not occur this run" could pass for green.
             assert wrote.wait(timeout=30), "the abandoned child never finished"
             return super().shutdown(*a, **kw)
 
@@ -593,6 +694,7 @@ def test_an_abandoned_child_cannot_report_ok_after_the_parent_gave_up(
         timeout_s=1, _parent_agent=parent,
     )
 
+    # The whole point. On the pre-seal code this reads "=== child1 [ok] ===".
     assert "=== child1 [timeout] ===" in res.output, (
         "an abandoned child's late write overwrote the parent's verdict:\n"
         + res.output)
@@ -606,7 +708,7 @@ def test_an_abandoned_child_cannot_report_ok_after_the_parent_gave_up(
 def test_the_late_result_is_reported_rather_than_silently_dropped(
         repo, monkeypatch):
     """Refusing the write must not hide that the child finished, or where its
-    files went."""
+    files went (AGENTS.md rule 5)."""
     release, wrote = threading.Event(), threading.Event()
 
     def hang(agent):
@@ -662,14 +764,14 @@ def test_a_late_write_cannot_flip_the_tools_ok_flag_or_the_change_set(
 
 
 def test_a_child_that_finishes_in_time_still_reports_ok(repo, monkeypatch):
-    """The seal must not suppress ALL writes.
+    """The fires-control's other half: the seal must not suppress ALL writes.
 
     Runs through the SAME pinned-pool driver, so this cannot pass merely because
     the seam was absent - only because the child published before any seal.
     """
     release, wrote = threading.Event(), threading.Event()
-    # Released up front: the child publishes before the deadline, so the
-    # parent's wait returns normally with nothing to seal.
+    # Released up front: the child never blocks, so it publishes long before the
+    # deadline and the parent's wait returns normally with nothing to seal.
     release.set()
 
     FakeAgent.behaviour = {}

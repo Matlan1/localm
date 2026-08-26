@@ -183,6 +183,22 @@ def llama_n_ctx(ctx: ctypes.c_void_p) -> int:
     return _bind("llama_n_ctx", ctypes.c_uint32, LlamaContext)(ctx)
 
 
+def llama_n_ctx_seq(ctx: ctypes.c_void_p) -> Optional[int]:
+    """The effective per-SEQUENCE context window, or None on a build old
+    enough to predate this accessor (optional, like llama_model_has_mtp
+    above - hasattr-gated, never raises on an absent symbol).
+
+    With kv_unified honoured this is close to llama_n_ctx(ctx); with
+    kv_unified silently not honoured (n_ctx sliced across n_seq_max private
+    KV slots instead of one shared cache) it is far smaller. There is no
+    direct getter for the kv_unified flag itself once a context exists, so
+    this is the closest observable proxy - see embedder._warn_if_context_config_drifted."""
+    lib = load_lib()
+    if not hasattr(lib, "llama_n_ctx_seq"):
+        return None
+    return int(_bind("llama_n_ctx_seq", ctypes.c_uint32, LlamaContext)(ctx))
+
+
 def llama_n_vocab(ctx: ctypes.c_void_p) -> int:
     return _bind("llama_n_vocab", ctypes.c_int32, LlamaContext)(ctx)
 
@@ -864,7 +880,17 @@ def llama_model_has_mrope(model: ctypes.c_void_p) -> bool:
             rtype = _bind("llama_model_rope_type", ctypes.c_int32, LlamaModel)(model)
             if rtype in (3, 4):
                 return True
-        except Exception:
+        except (AttributeError, TypeError):
+            # Only a binding-shape problem is recoverable here: the symbol went
+            # missing between the hasattr above and the bind, or ctypes rejected
+            # the argument. Both mean "this probe is unusable", and the metadata
+            # fallback below can still answer.
+            #
+            # An OSError must NOT be caught. ctypes surfaces a native access
+            # violation as one, which means *model* is not a live model pointer -
+            # and the fallback path dereferences that same pointer again, so
+            # swallowing the first fault only buys a second, worse one reported
+            # from the generic metadata reader instead of from here.
             pass
     if has_model_meta_api():
         arch = llama_model_meta_val_str(model, "general.architecture")

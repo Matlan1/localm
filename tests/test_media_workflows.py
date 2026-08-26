@@ -535,6 +535,82 @@ def test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_file(home):
         "is not preventing torn writes")
 
 
+def test_lockless_reader_never_observes_a_torn_write(home):
+    """Gap left by test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_
+    file above: that test proves writer-vs-writer safety UNDER the per-media lock,
+    but every real reader of a workflow file (music_gen/comfy.py's
+    workflow_path().read_text(), _comfy_model_slots) takes NO lock at all - by
+    design, once the write itself is atomic no reader lock is needed. A writer
+    thread (holding the real per-media lock, as every route does) repeatedly
+    overwrites the SAME filename with two distinguishable large payloads while
+    several reader threads read the raw file with NO lock, exactly mirroring a
+    real generator mid-request. The file on disk must always be complete, valid
+    JSON matching one writer's payload in full - never empty, truncated, or a torn
+    mix of both - at any point a lockless reader might land."""
+    payload_a = {"3": {"class_type": "KSampler", "inputs": {"a": "a" * 80_000}}}
+    payload_b = {"3": {"class_type": "KSampler", "inputs": {"a": "b" * 80_000}}}
+    a_bytes = json.dumps(payload_a).encode()
+    b_bytes = json.dumps(payload_b).encode()
+    target = mw.workflows_dir("music") / "race.json"
+
+    stop = threading.Event()
+    bad_reads = []
+
+    def _writer():
+        for i in range(40):
+            content = a_bytes if i % 2 == 0 else b_bytes
+            with mw._lock_for("music"):
+                # atomic_write's own bounded retry (5x20ms) is occasionally not
+                # enough against THIS test's own hammering readers on a loaded
+                # box (Defender/indexer contention - the exact class atomic_write
+                # already retries, just exhausted here by test-induced pressure
+                # rather than production load). Retrying the whole save is what a
+                # real caller would do; content integrity, not writer throughput
+                # under artificial stress, is the property this test guards.
+                for attempt in range(5):
+                    try:
+                        mw.save_workflow("music", "race.json", content)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+        stop.set()
+
+    def _reader():
+        while not stop.is_set():
+            try:
+                raw = target.read_bytes()
+            except FileNotFoundError:
+                continue   # writer has not created it yet
+            except PermissionError:
+                # Observed live on Windows: os.replace's rename briefly denies a
+                # concurrent open on the destination. Transient and benign - the
+                # property this test guards is CONTENT integrity (never torn/
+                # corrupt), not that every read attempt succeeds instantly.
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                bad_reads.append(("invalid-json", len(raw)))
+                continue
+            if data != payload_a and data != payload_b:
+                bad_reads.append(("mismatched-content", len(raw)))
+
+    writer = threading.Thread(target=_writer)
+    readers = [threading.Thread(target=_reader) for _ in range(2)]
+    writer.start()
+    for r in readers:
+        r.start()
+    writer.join(timeout=30)
+    stop.set()
+    for r in readers:
+        r.join(timeout=5)
+
+    assert not bad_reads, (
+        f"a lockless reader observed a torn/partial write {len(bad_reads)} "
+        f"times: {bad_reads[:5]}")
+
+
 def test_concurrent_list_survives_a_racing_delete(home):
     """A DELETE landing between list_workflows' is_file() check and its later
     stat() calls raises an unhandled FileNotFoundError -> 500. Under the lock, a

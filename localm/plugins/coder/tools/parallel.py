@@ -2,34 +2,40 @@
 """``dispatch_parallel``: run up to two child agents at once, each in its own git
 worktree, and return their diffs for EXPLICIT human review.
 
-RELATIONSHIP TO ``spawn_agent``
--------------------------------
-``spawn_agent`` hands the child the parent's own ``cwd``, is marked destructive,
-and runs strictly serially. This tool is the way to get concurrency: each child
-gets its own checkout, so two children can edit the SAME file without
-interfering, and the parent's working tree is never touched. Concurrency is
-available only through the isolation, never without it.
+WHY THIS EXISTS SEPARATELY FROM ``spawn_agent``
+-----------------------------------------------
+``spawn_agent`` hands the child the parent's own ``cwd``. Two of those running at
+once would edit the same files in the same directory with no isolation at all, so
+``spawn_agent`` is marked destructive and therefore runs strictly serially. This
+tool is the safe way to get real concurrency: each child gets its own checkout, so
+two children can edit the SAME file without interfering, and the parent's working
+tree is never touched.
 
-WHAT IS AND IS NOT ISOLATED
----------------------------
+``spawn_agent`` staying serial is the permanent design, not a stopgap this tool
+lifts. Concurrency is available only through the isolation, never without it.
+
+WHAT IS AND IS NOT ISOLATED (do not overstate this)
+---------------------------------------------------
 Isolated: every file tool. They all resolve paths through ``_confine(cwd, path)``
-(tools/base.py), which rejects anything outside ``cwd``. With ``cwd`` set to the
-child's own worktree, file reads and writes cannot escape it.
+(tools/base.py:84), which rejects anything outside ``cwd``. With ``cwd`` set to the
+child's own worktree, file reads and writes genuinely cannot escape it.
 
 NOT isolated: ``run_shell`` and ``run_tests``. Both are in
-``_INTENTIONALLY_UNSCOPED`` (agent/constants.py), because a path-argument check
-cannot confine arbitrary code. A child can still shell its way out of its
-worktree. So worktree isolation is REAL for file tools and BEST-EFFORT for
-shell; a dispatched child is not sandboxed.
+``_INTENTIONALLY_UNSCOPED`` (agent/constants.py:36-38) because a path-argument check
+cannot confine arbitrary code. A child can still shell its way out of its worktree.
+So worktree isolation is REAL for file tools and BEST-EFFORT for shell. Describe it
+that way; do not call a dispatched child sandboxed.
 
 NEVER AUTO-MERGE
 ----------------
-Each child's work is committed to its own branch and the diff is returned.
-Nothing is ever merged; the human decides.
+Each child's work is committed to its own branch and the diff is returned. Nothing
+is ever merged. A local model resolving a merge conflict unsupervised is the worst
+version of silently papering over a problem, so the human always decides.
 
 The BRANCH is the durable artifact; the WORKTREE is transient. After a child
-finishes its work is committed, its diff captured, and its worktree removed.
-Committing is not merging: the parent's tree is untouched either way.
+finishes we commit its work, capture the diff, and remove the worktree. That way
+the review artifact survives while nothing is left lying around on disk. Committing
+is not merging: the parent's tree is untouched either way.
 """
 
 from __future__ import annotations
@@ -57,18 +63,24 @@ from .git import (
     git_worktree_remove,
 )
 
-# The cap on how many children one dispatch runs at once.
+# The cap. Deliberately a design constraint (the practical resident-model ceiling on
+# one consumer GPU), not a limit to engineer around. This is not a scheduler.
 MAX_PARALLEL_TASKS = 2
 
-# Wall-clock budget for one child.
+# Wall-clock budget for one child. A hung child must be reported, never allowed to
+# hang the parent or its sibling.
 DEFAULT_CHILD_TIMEOUT_S = 600
 
-# How long a child waits for the confirmation channel to free up before giving up.
-# Giving up denies the call (fail closed) and says so.
+# How long a child will wait for the confirmation channel to free up before giving
+# up. Bounded on purpose: an unbounded wait would let one unanswered prompt hang the
+# whole dispatch, which is exactly the failure this tool must not have. Giving up
+# DENIES (fail closed) and says so.
 _CONFIRM_WAIT_S = 120
 
-# Serialises human confirmation across concurrently running children: only one
-# child may hold the channel at a time.
+# Serialises human confirmation across concurrently running children. Two children
+# prompting on one terminal at the same time would interleave their questions and
+# leave the human unable to tell which answer applied to which child - a correctness
+# problem, not just a cosmetic one. Only one child may hold the channel at a time.
 _CONFIRM_LOCK = threading.RLock()
 
 
@@ -80,26 +92,29 @@ def _serialised_confirm_handler(parent: Any, child_label: str):
     the terminal by the announcement line below, and in the GUI by the ``agent``
     keyword this relays to the parent's handler (../confirm.py).
 
-    Fails closed: when the parent has no channel at all (a genuinely unattended
-    run), this returns None, and the caller's ``needs_confirm`` branch denies the
-    tool rather than self-approving. It never invents an approval - it only queues
-    and labels real ones.
+    The fail-closed property is preserved exactly: when the parent has no channel
+    at all (a genuinely unattended run), this returns None, and the caller's
+    ``needs_confirm`` branch denies the tool rather than self-approving. This never
+    invents an approval - it only queues and labels real ones.
     """
     from .agents import _inherited_confirm_handler
     base = _inherited_confirm_handler(parent)
     if base is None:
         # Unattended: no channel to serialise. Returning None keeps the child on
-        # execution.py's fail-closed branch.
+        # execution.py's fail-CLOSED branch. Do NOT substitute a permissive default.
         return None
 
     def handler(call, agent: Optional[str] = None) -> bool:
         # *agent* is the optional attribution keyword (see ../confirm.py). The
-        # child's Agent supplies its own name there, so this normally relays it; the
-        # fallback to child_label covers a caller that invokes the wrapper directly.
+        # child's Agent supplies its own name there, so this normally just relays
+        # it; falling back to child_label keeps the label correct for any caller
+        # that invokes the wrapper directly, as the tests do.
         agent = agent or child_label
         acquired = _CONFIRM_LOCK.acquire(timeout=_CONFIRM_WAIT_S)
         if not acquired:
-            # Another child held the channel past the budget: deny, and say why.
+            # Another child has held the human's attention past the budget. Deny,
+            # loudly. Denying is the safe direction, and saying why keeps this from
+            # looking like a mysterious rejection.
             try:
                 from ..display import console
                 console.print(
@@ -122,13 +137,18 @@ def _serialised_confirm_handler(parent: Any, child_label: str):
 def _announce_asker(child_label: str, call) -> None:
     """Name the child that is about to prompt.
 
+    With several children alive, an unattributed "run_shell? [y/N]" is ambiguous.
     The prompt itself is rendered by the parent's own handler (terminal or GUI) and
-    the ToolCall is not rewritten, so this prints an attribution line immediately
-    before the prompt instead. This is the TERMINAL half of the attribution, and is
-    what a REPL user sees even when a child borrows the parent's ``_confirm_tool``
-    (a plain one-argument handler that cannot be told a label). The GUI half
-    travels the confirm chain as the optional ``agent`` keyword (../confirm.py) and
-    reaches the browser on the confirm_request event.
+    we deliberately do not rewrite the ToolCall to smuggle a label into it, so this
+    prints an attribution line immediately before the prompt instead.
+
+    This line is the TERMINAL half of the attribution and is still what a REPL user
+    sees, including on the REG-507 path where a child borrows the parent's
+    ``_confirm_tool`` (a plain one-argument handler that cannot be told a label).
+    The GUI half no longer depends on it: the label now travels the confirm chain as
+    the optional ``agent`` keyword (../confirm.py) and reaches the browser on the
+    confirm_request event, so a GUI user sees WHICH child is asking on the approval
+    card itself rather than in a server console they are not looking at.
     """
     try:
         from ..display import console
@@ -144,8 +164,8 @@ def _announce_asker(child_label: str, call) -> None:
 def _normalise_tasks(tasks: Any) -> tuple[list[dict], Optional[str]]:
     """Accept the shapes a model actually emits and return [{name, task, model}].
 
-    Tolerates a list of strings, a list of dicts, or a single string. Returns
-    (tasks, error).
+    Tolerates a list of strings, a list of dicts, or a single string, because a
+    local model will produce all three. Returns (tasks, error).
     """
     if tasks is None:
         return [], "dispatch_parallel needs a 'tasks' list"
@@ -167,9 +187,12 @@ def _normalise_tasks(tasks: Any) -> tuple[list[dict], Optional[str]]:
             raw_name = str(entry.get("name") or f"child{i + 1}")
             model = entry.get("model")
             if model is not None and not isinstance(model, str):
-                # An unhashable model value is rejected here, at the edge, before
-                # it reaches the set comprehension that builds the requested-model
-                # set.
+                # Rejected HERE, at the edge, rather than left to blow up deeper:
+                # an unhashable value (a dict or list, both shapes a local model
+                # plausibly emits) used to raise a TypeError out of the set
+                # comprehension that builds the requested-model set, past every
+                # cleanup path, which is how two malformed calls could zero the
+                # process-wide child budget for the life of the session.
                 return [], (f"task {i + 1}'s 'model' must be a model name (a "
                             f"string), got {type(model).__name__}")
             out.append({
@@ -185,12 +208,15 @@ def _normalise_tasks(tasks: Any) -> tuple[list[dict], Optional[str]]:
 def _absorb_child_errors(parent: Any, errors: list) -> None:
     """Fold a finished child's error trace into the parent, and nothing else.
 
-    ERRORS ONLY. A child ran in its own worktree, so its ``_changed_files`` keys
-    are relative to a tree this parent does not have and would resolve against the
-    PARENT's cwd. Errors carry no path, so that half stays valid.
+    ERRORS ONLY, deliberately. A child ran in its own worktree, so its
+    ``_changed_files`` keys are relative to a tree this parent does not have:
+    merging them would make ``session_diff()`` resolve them against the PARENT's
+    cwd and either fabricate a diff for a file the parent never touched or lose
+    the child's work silently. Errors carry no path, so that half stays valid -
+    the same split the background absorption path makes.
 
-    Must be called on the parent's OWN thread once every worker has been waited
-    on, never from a worker.
+    Called on the parent's OWN thread once every worker has been waited on, never
+    from a worker.
     """
     if not errors:
         return
@@ -215,22 +241,28 @@ def _safe_label(raw: str) -> str:
 class _ChildOutcome:
     """What happened to one dispatched child, for the review report.
 
-    SHARED BETWEEN TWO THREADS, so every write is synchronised. A child that
-    outlives the batch deadline is ABANDONED, not stopped - a Python thread cannot
-    be killed - so its worker is still running, and still holds a reference to this
-    object, while the parent reports on it and tears the batch down. Two rules
-    govern that:
+    SHARED BETWEEN TWO THREADS, so the writes are synchronised rather than left to
+    luck. A child that outlives the batch deadline is ABANDONED, not stopped - a
+    Python thread cannot be killed - so its worker is still running, and still
+    holds a reference to this object, while the parent reports on it and tears the
+    batch down. Two rules make that safe:
 
     * The PARENT's terminal verdict is authoritative and one-way. ``seal()``
       records it and locks the object; no later worker write can move the status
-      off it.
+      off it. Without this a child abandoned at the deadline could write
+      ``status = "ok"`` a moment later and the parent would then read its own
+      timeout back as a success - rendering ``[ok]``, returning ``ok=True``,
+      recording an ``ok`` change-set, and committing and removing a worktree a live
+      thread is still writing into.
     * A WORKER publishes through ``publish()`` only, which writes every field under
-      one lock acquisition, so a parent never sees ``status="ok"`` next to the
-      ``turns=0`` of a child that had not finished.
+      one lock acquisition. Atomic on purpose: the fields are read together, so a
+      parent must never see ``status="ok"`` next to the ``turns=0`` of a child that
+      had not finished.
 
-    A refused publish is REPORTED in ``late_note``, never silently dropped: the
-    child did finish, too late to be used, and the files it wrote are uncommitted
-    in a worktree that was left in place.
+    A refused publish is a real event and is REPORTED (``late_note``), never
+    silently dropped: the child did finish, just too late to be used, and the
+    files it wrote are sitting uncommitted in a worktree we deliberately left in
+    place. Saying so is what lets the operator find them.
     """
 
     def __init__(self, name: str) -> None:
@@ -251,7 +283,7 @@ class _ChildOutcome:
         self.model = ""          # the model this child ACTUALLY ran on
         self.file_count = 0      # files this child changed, for the /diff footer
         # What an abandoned worker tried to report after the parent had already
-        # given up on it. Rendered in the report.
+        # given up on it. Rendered in the report; see the class docstring.
         self.late_note = ""
         self._lock = threading.Lock()
         self._sealed = False
@@ -304,21 +336,23 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
     itself. ``outcome.worktree`` remains the root, which is what gets committed,
     diffed, and removed.
 
-    Runs on a pool worker, so every write to *outcome* MUST go through
-    ``publish()``, never a bare attribute assignment: this thread can outlive the
-    parent's wait. ``detail`` is accumulated in a LOCAL string rather than read
-    back off the shared object, so there is no read-modify-write across the two
-    threads either.
+    Runs on a pool worker, so every write to *outcome* goes through
+    ``publish()`` - never a bare attribute assignment. This thread can outlive the
+    parent's wait (an abandoned child cannot be killed, only left), and a bare
+    assignment from here would overwrite the parent's own verdict. ``detail`` is
+    accumulated in a LOCAL string rather than read back off the shared object, so
+    there is no read-modify-write across the two threads either.
     """
     from ..agent import Agent
-    from .agents import inherited_child_kwargs
+    from .agents import _isolated_verify_cmd, inherited_child_kwargs
 
     detail = ""
     backend = parent.backend
     model = spec.get("model")
     if model and model != getattr(backend, "model_id", None):
-        # Falls back to the parent's backend when the requested model cannot be
-        # loaded, recording why in detail.
+        # A second model is only a WIN when the server can hold both resident. When
+        # it cannot, falling back to the parent's backend keeps the dispatch working
+        # at reduced benefit rather than failing outright - and we say so in detail.
         from ..backends.http import make_localm_backend
         raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8642/v1")
         try:
@@ -333,14 +367,23 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
             backend = parent.backend
 
     # Published before the run so an abandoned child still reports which model it
-    # was on. publish() refuses once the parent has sealed the verdict.
+    # was on. The deadline cannot realistically have passed this early, and if it
+    # somehow has, publish() refuses rather than writing over the verdict.
     outcome.publish(model=getattr(backend, "model_id", "") or "", detail=detail)
 
-    # One shared constructor for every child agent, used by this path and by
-    # spawn_agent. scope is INHERITED, not set to the worktree: cwd is what
-    # confines the file tools here (each resolves through _confine). An inherited
-    # glob like src/** stays meaningful because the child sits at the same
-    # relative position inside its worktree as the parent occupies in the repo.
+    # One shared constructor for every child agent, so this path and spawn_agent
+    # cannot drift apart on a safety property. scope is INHERITED, not set to the
+    # worktree: cwd is what confines the file tools here (each resolves through
+    # _confine), so re-scoping would add nothing and would DISCARD a narrowing the
+    # parent had. An inherited glob like "src/**" stays meaningful only because the
+    # child sits at the same relative position inside its worktree as the parent
+    # occupies in the repo - which is why that mirroring above matters.
+    #
+    # verify_cmd is always computed here, never left None: every child this
+    # function builds is worktree-isolated (that is the whole point of this
+    # tool), so its diff lands in a tree the parent's own pre-done verify_cmd
+    # (if any) never sees. Without its own oracle a child can finish and be
+    # reported ok on a diff nothing ever checked - see _isolated_verify_cmd.
     child = Agent(**inherited_child_kwargs(
         parent,
         backend=backend,
@@ -350,9 +393,10 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
         # The serialising wrapper, so concurrent children cannot talk over each
         # other on the parent's single confirmation channel.
         confirm_handler=_serialised_confirm_handler(parent, spec["name"]),
+        verify_cmd=_isolated_verify_cmd(parent, child_cwd),
     ))
-    # Record the child's location, so a caller reporting on a finished child knows
-    # which worktree and branch its diff belongs to.
+    # Make the child's location introspectable: a caller that reports on a finished
+    # child needs to know which worktree and branch its diff belongs to.
     child.worktree_path = outcome.worktree or str(child_cwd)
     child.worktree_branch = branch
 
@@ -361,14 +405,23 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
         from ..provenance import neutralise
         summary = neutralise(str(result_text))
         detail = (detail + "\n" if detail else "") + summary
-    # ASK THE CHILD whether it succeeded: run_task RETURNS its failure message
-    # rather than raising, so reaching here without an exception is not success.
+    # ASK THE CHILD whether it succeeded. run_task RETURNS its failure message
+    # rather than raising (a child that hit max_turns or tripped the circuit
+    # breaker comes back normally), so "we got here without an exception" is not
+    # success. Reporting an unconditional "ok" made a failed child read as ok to
+    # every machine consumer: the report, the ToolResult, the /diff delegated
+    # footer, the parent's own last_run_ok, the --ci exit code and the episodic
+    # outcome, so no failure lesson was ever stored.
     #
     # ONE publish for the whole verdict, so the parent can never read a status
-    # next to the turns/errors/detail of a child that had not finished yet.
-    # Refused outright if the parent already gave up on this child. The error
-    # trace is stashed here and folded in on the parent's own thread once the wait
-    # is over; the changed-file keys are not carried up at all.
+    # next to the turns/errors/detail of a child that had not finished yet. It is
+    # refused outright if the parent already gave up on this child - see
+    # _ChildOutcome. The child's error trace is worth keeping even though its
+    # CHANGED FILES are not: errors carry no path, so they stay valid in the
+    # parent, while file keys would resolve against the parent's cwd and fabricate
+    # or lose a diff. Same split the background path makes. Stashed here, folded
+    # in on the parent's own thread once the wait is over, so a worker never
+    # mutates parent state.
     outcome.publish(
         turns=getattr(child, "turns", 0),
         status="ok" if getattr(child, "last_run_ok", True) else "error",
@@ -408,10 +461,12 @@ def tool_dispatch_parallel(
 
     Notes
     -----
-    This tool is registered ``destructive=True``, so under ``--dry-run`` the whole
-    dispatch is skipped (no worktrees, no child turns burned), and an unattended
-    parent with ``auto_approve=False`` and no confirm handler FAILS CLOSED on it
-    instead of dispatching unconfirmed.
+    This tool is registered ``destructive=True``, which has two consequences worth
+    knowing rather than discovering: under ``--dry-run`` the whole dispatch is
+    skipped (no worktrees, no child turns burned), and an unattended parent with
+    ``auto_approve=False`` and no confirm handler FAILS CLOSED on it instead of
+    dispatching unconfirmed. Both are intended - dispatching two children that
+    write files is exactly the kind of action that should need a human.
     """
     if _parent_agent is None:
         return ToolResult.error("dispatch_parallel requires a running parent agent")
@@ -436,25 +491,31 @@ def tool_dispatch_parallel(
             f"the children are kept apart), but '{cwd}' is not inside one."
         )
 
-    # Who was already holding the budget BEFORE we take any of it: once we acquire,
-    # describe_holders() would also list our own children.
+    # Who was already holding the budget BEFORE we take any of it. Captured up
+    # front because once we acquire, describe_holders() would also list OUR OWN
+    # children and report them to the user as if they were the blockers.
     prior_holders = child_limit.describe_holders()
 
-    # Everything that can hold a slot happens inside the try below, so the finally
-    # is the single place the budget is returned. The acquire has to stay inside it:
-    # child_limit's gate is a process-wide singleton with no timeout and no reaper,
-    # so a slot skipped by an exception is never given back.
+    # EVERYTHING that can hold a slot happens inside the try below, so the finally
+    # is the single place the budget is returned. The acquire used to sit out here,
+    # ahead of the guarded block: any exception raised between it and the `try`
+    # (a malformed `model` value reaching the set comprehension was the live one)
+    # skipped the release entirely, and child_limit's gate is a process-wide
+    # singleton with no timeout and no reaper. Two such calls zeroed the budget for
+    # the life of the session, refusing every later child with only a generic
+    # "Tool error" to show for it.
     tokens: list[Any] = []
-    # Every future we submitted, read from the finally to tell which children are
-    # still alive. Bound here so an early return cannot leave the name undefined.
+    # Every future we submitted, readable from the finally: the budget release
+    # needs to know which children are still alive, and an early return must not
+    # leave the name undefined.
     futures_started: list[Any] = []
     degraded = ""
     residency_note = ""
     outcomes = [_ChildOutcome(s["name"]) for s in specs]
     created: list[tuple[Path, str, _ChildOutcome]] = []
     run_id = uuid.uuid4().hex[:8]
-    # Where the parent sits inside the repo, so each child is placed at the same
-    # relative spot in its worktree rather than at the wider worktree root.
+    # Where the parent sits inside the repo, so each child can be placed at the
+    # SAME relative spot in its worktree rather than at the (wider) worktree root.
     try:
         _rel = cwd.resolve().relative_to(repo.resolve())
         rel_cwd = None if str(_rel) == "." else _rel
@@ -462,7 +523,7 @@ def tool_dispatch_parallel(
         rel_cwd = None
 
     try:
-        # Take the concurrency budget before creating anything on disk, and inside
+        # Take the concurrency budget before creating anything on disk, but INSIDE
         # the guarded block so every exit path returns it.
         for spec in specs:
             tok = child_limit.try_acquire("parallel", spec["name"])
@@ -484,11 +545,20 @@ def tool_dispatch_parallel(
                 "parallelism rather than being rejected. Results are unaffected.\n\n"
             )
 
-        # Two distinct models run genuinely side by side only when the server can
-        # hold both resident; otherwise it evicts the idle LRU peer and the two
-        # children take turns. That is not predicted here and the caller's model
-        # choice is not rewritten: the note below states the condition and each
-        # child reports the model it actually ran on.
+        # Two DISTINCT models only run genuinely side by side when the server can
+        # hold both resident: it loads alongside with no eviction when free VRAM is
+        # measured and fits, and otherwise evicts the idle LRU peer (http_server.py).
+        # Requesting two models that do not both fit therefore means the two children
+        # take turns evicting each other rather than running in parallel.
+        #
+        # We do NOT predict that here. Deciding it needs the per-model VRAM sizing the
+        # server already does, and re-deriving it in a coder tool would be duplicated,
+        # brittle, and a second place to get wrong; probing GPUs from a hot path is
+        # also what once hung the server. Nor do we silently rewrite the caller's
+        # explicit model choice. So the server stays the authority, the SAFE case is
+        # the default (omit `model` and both children share the parent's
+        # already-resident engine), and when two distinct models ARE asked for we say
+        # what the condition is and report which model each child actually ran on.
         requested = {s.get("model") for s in specs if s.get("model")}
         if len(requested) > 1:
             residency_note = (
@@ -502,7 +572,8 @@ def tool_dispatch_parallel(
 
         base_sha, ok = _git(repo, "rev-parse", "HEAD")
         if not ok:
-            # An empty repo has no commit to branch a worktree from.
+            # An empty repo has no commit to branch a worktree from. Say that
+            # plainly instead of letting `worktree add` fail with git's wording.
             return ToolResult.error(
                 f"'{repo}' has no commits yet, so there is nothing to base an "
                 "isolated worktree on. Make an initial commit first."
@@ -518,15 +589,19 @@ def tool_dispatch_parallel(
             out, ok = git_worktree_add(repo, worktree, branch, base_sha)
             if not ok:
                 # Sealed like every other parent verdict. No worker exists for this
-                # child: it is dropped from runnable below and never submitted.
+                # child (it is dropped from `runnable` below and never submitted),
+                # so there is nothing to lock out today; sealing uniformly is what
+                # keeps "the parent's verdict is final" true of the whole class
+                # rather than of three call sites somebody has to remember.
                 outcome.seal("error",
                              f"could not create an isolated worktree: {out}")
                 continue
             outcome.branch = branch
             outcome.worktree = str(worktree)
-            # The child's cwd mirrors the parent's position WITHIN the repo. Handing
-            # the child the worktree root would widen its reach to files the parent
-            # itself could not touch, since cwd is what confines the file tools.
+            # The child's cwd mirrors the parent's position WITHIN the repo. If the
+            # parent is working in repo/sub, handing the child the worktree ROOT
+            # would widen its reach to files the parent itself could not touch
+            # (cwd is what confines the file tools), so re-apply the same subpath.
             outcome.child_cwd = worktree / rel_cwd if rel_cwd else worktree
             created.append((worktree, branch, outcome))
 
@@ -549,18 +624,22 @@ def tool_dispatch_parallel(
                 futures[fut] = outcome
                 futures_started.append(fut)
             # ONE shared deadline for the whole batch, not a fresh timeout per
-            # future, so two hung children cannot block the parent for twice the
-            # budget the caller asked for.
+            # future: waiting `timeout_s` on each in turn would let two hung
+            # children block the parent for twice the budget the caller asked for.
             deadline = time.monotonic() + timeout_s
             for fut, outcome in futures.items():
                 try:
                     fut.result(timeout=max(0.0, deadline - time.monotonic()))
                 except _FuturesTimeout:
-                    # cancel() succeeds only on a future that never started. With
-                    # fewer slots than tasks the pool runs them in turn, so a child
-                    # still QUEUED when the batch deadline expires is reported as
-                    # not_started rather than as a timeout: it ran no turns and holds
-                    # no worktree, so the teardown must not skip its worktree.
+                    # cancel() SUCCEEDS only on a future that never started. With
+                    # fewer slots than tasks the pool runs them in turn, so an
+                    # earlier child can burn the whole batch deadline while a later
+                    # one is still QUEUED - and that one is not a timeout: it never
+                    # ran, it holds no worktree and it burned no turns. Reporting it
+                    # as "exceeded its budget, its worktree is held by the running
+                    # thread" was false in every clause, and it made the teardown
+                    # skip a worktree that nothing was holding, leaking it and its
+                    # branch to disk with no reaper.
                     if fut.cancel():
                         outcome.seal("not_started", (
                             f"never started: the batch's {timeout_s}s budget was "
@@ -570,10 +649,16 @@ def tool_dispatch_parallel(
                         ))
                     else:
                         # Running, and a thread cannot be killed, only abandoned. It
-                        # writes into its OWN worktree.
+                        # writes into its OWN worktree, so an abandoned child
+                        # corrupts only its own checkout - what the isolation buys.
                         #
-                        # SEALED, not assigned: cancel() returning False means the
-                        # worker is still alive and still holding this object.
+                        # SEALED, not assigned: cancel() returning False is positive
+                        # proof that worker is still alive and still holding this
+                        # object, so a bare assignment here is exactly the write it
+                        # can overwrite a moment later - handing the model a
+                        # delegated job that reads [ok] after the parent gave up on
+                        # it, and sending the teardown to commit and remove a
+                        # worktree that thread is still writing into.
                         outcome.seal("timeout", (
                             f"exceeded the {timeout_s}s batch budget and was "
                             "abandoned. Its worktree is still held by the running "
@@ -581,8 +666,8 @@ def tool_dispatch_parallel(
                             "force-removed."
                         ))
                 except Exception as exc:
-                    # The future raised, so its worker has stopped; seal anyway, so
-                    # the parent's verdict is the one reported.
+                    # The future raised, so its worker has stopped - but seal for
+                    # the same reason: the parent's verdict is the one reported.
                     outcome.seal("error", f"{type(exc).__name__}: {exc}")
         finally:
             pool.shutdown(wait=False)
@@ -590,13 +675,15 @@ def tool_dispatch_parallel(
         # Fold each child's error trace into the parent, on the PARENT's thread now
         # that every worker has been waited on or abandoned. Errors only, never the
         # child's changed-file keys: those are relative to a tree this parent does
-        # not have.
+        # not have. Without this a failed child left the parent with no record of
+        # what went wrong beyond the human-readable report text.
         for outcome in outcomes:
             if outcome.errors:
                 _absorb_child_errors(_parent_agent, outcome.errors)
 
         # 3. Commit each child's work and capture its diff BEFORE teardown. A child
-        #    that never started has nothing to commit and no diff to read.
+        #    that never started has nothing to commit and no diff to read; running
+        #    the commit anyway would only manufacture a "could not commit" warning.
         for worktree, branch, outcome in created:
             if outcome.status in ("timeout", "not_started"):
                 continue
@@ -619,8 +706,9 @@ def tool_dispatch_parallel(
                 outcome.cleanup_warning = f"could not read the child's diff: {diff}"
 
         # Record each change-set on the parent so /diff and /changes can POINT at
-        # it. A pointer, never merged into the parent's own diff: session_diff()
-        # feeds the self-reviewer and episodic memory.
+        # it. Deliberately a pointer, never merged into the parent's own diff:
+        # session_diff() feeds the self-reviewer and episodic memory, so foreign
+        # content there would corrupt two model-facing loops, not just a view.
         for _wt, branch, outcome in created:
             if not branch or outcome.status == "not_started":
                 # Nothing ran, so there is no change set to point at: the branch is
@@ -649,40 +737,55 @@ def tool_dispatch_parallel(
                 continue
             out, ok = git_worktree_remove(repo, worktree)
             if not ok:
-                # A failed removal is real (dirty tree, or a process still holding
-                # it): report it rather than forcing past it.
+                # A failed removal is REAL (dirty tree, or a process still holding
+                # it). Report it so the operator can reap it; never --force past it.
                 outcome.cleanup_warning = out
                 continue
             if outcome.status == "not_started" and branch:
-                # Nothing ever ran on it, so the branch is still exactly base_sha and
-                # there is no work to preserve. -d, never -D: if it does carry a
-                # commit, git refuses and the branch is kept.
+                # Nothing ever ran on it, so the branch is still exactly base_sha
+                # and there is no work to preserve. Leaving it would litter the
+                # user's branch list with an empty branch per never-started child.
+                # -d (never -D): if it somehow does carry a commit, git refuses and
+                # we keep it rather than destroy work.
                 _git(repo, "branch", "-d", branch)
 
-        # Scoped prune, with its outcome reported. A bare git worktree prune is
+        # SCOPED prune, with its outcome REPORTED. A bare `git worktree prune` is
         # repo-wide and takes no pathspec, so it would also drop the record of a
-        # user's worktree that lives on a drive that is not mounted right now. Only
-        # runs when we actually created something.
+        # USER's worktree that merely lives on a drive that is not mounted right
+        # now; and wrapping it in `except: pass` made a failed prune invisible.
+        # Only when we actually created something: a dispatch rejected for lack of
+        # a free slot has nothing of ours to reap, and should not pay for a git
+        # subprocess to discover that.
         if created:
             pruned, pok = git_prune_child_worktrees(repo)
             if not pok and outcomes:
-                # Append to whatever warning is already there, so a prune failure is
-                # not dropped when every child already carries one.
+                # APPEND to whatever is there. Picking "the first outcome with no
+                # warning yet" finds nothing when every child already has one, and
+                # the prune failure then disappears - the exact swallow this change
+                # exists to remove.
                 target = outcomes[0]
                 target.cleanup_warning = (
                     f"{target.cleanup_warning}; {pruned}"
                     if target.cleanup_warning else pruned)
 
-        # Return the budget only for children that have actually TERMINATED: an
-        # abandoned child is still running, so its slot goes back when its thread
-        # ends, not when this call returns. add_done_callback fires immediately if
-        # the future finished in the meantime, so there is no lost-release race.
+        # Return the budget only for children that have actually TERMINATED. An
+        # abandoned child is still running and still occupying the box, so its slot
+        # goes back when its thread really ends, not when this call returns.
+        # Releasing unconditionally here let two abandoned-but-live children plus
+        # two newly admitted ones run at once - exactly the "two mechanisms each
+        # capping at 2 jointly admit 4" failure child_limit exists to prevent, and
+        # the rule the background path already states: released on FINISH, not on
+        # submit. add_done_callback fires immediately if the future finished in the
+        # meantime, so there is no lost-release race.
         #
-        # Each token is paired with the child it was TAKEN FOR wherever the two
-        # line up, since child_limit's holder list is what a later rejection names.
-        # Where they cannot line up (fewer slots than tasks, so child2 occupies the
-        # slot child1 finished with) a spare token is held back instead; the COUNT
-        # is what must be right, the label is only the diagnostic.
+        # Pair each token with the child it was TAKEN FOR wherever the two line up,
+        # because child_limit's holder list is what a later rejection NAMES: keeping
+        # child1's token alive to cover child2's thread reports a child that
+        # finished long ago as the one still running. Where they cannot line up -
+        # fewer slots than tasks, so child2 is occupying the slot child1 finished
+        # with - a spare token is held back instead. The budget counts RUNNING
+        # children, so the COUNT is what must never be wrong; the label is the
+        # diagnostic.
         keep: list = []
         spare: list = []
         unpaired: list = []
@@ -739,8 +842,9 @@ def _render_report(outcomes: list[_ChildOutcome], repo: Path) -> str:
             lines.append(o.detail.strip())
         if o.cleanup_warning:
             lines.append(f"WARNING: {o.cleanup_warning}")
-        # A worker that finished after the parent gave up. Its result was refused,
-        # the sealed verdict stands, and this note says the work exists and where.
+        # A worker that finished after the parent gave up. Its result was refused
+        # (the sealed verdict above is what stands), but refusing it silently would
+        # hide both that the work exists and where it is.
         if o.late_note:
             lines.append(f"NOTE: {o.late_note}")
         if o.diff:
@@ -752,7 +856,8 @@ def _render_report(outcomes: list[_ChildOutcome], repo: Path) -> str:
 
     # Surface anything of ours still on disk. After a clean run this is empty; a
     # non-empty list means an earlier dispatch was hard-killed between creating a
-    # worktree and removing it.
+    # worktree and removing it. That cannot be prevented, only made discoverable,
+    # so we say it rather than let stale worktrees pile up unnoticed.
     live = [p for p in git_list_child_worktrees(repo)
             if str(p) not in {o.worktree for o in outcomes if o.status == "timeout"}]
     if live:

@@ -122,7 +122,7 @@ def _unsafe_data_dir(path: str, repo: Path) -> Optional[str]:
         if rp == Path.home().resolve():
             return "user home directory"
     except Exception:
-        pass
+        return "cannot resolve home directory"
     repo_r = repo.resolve()
     if rp == repo_r:
         return "repository root"

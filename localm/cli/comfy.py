@@ -6,17 +6,21 @@ lifecycle of whichever ComfyUI localm is targeting.
 targets, and (by default) whether that ComfyUI is actually running. `remove`
 deletes the managed instance under the localm data dir (reversible,
 self-contained). `setup` provisions one: it REPLICATES the user's existing
-ComfyUI when they have one (the COPY path - clone at the same commit, a fresh
-localm venv, the same packages, shared models), or installs a FRESH,
-hardware-matched ComfyUI when they do not (a pinned ComfyUI, the PyTorch build
-for their GPU, and the custom nodes localm's workflows need). The user's own
-ComfyUI is never touched.
+ComfyUI when they have one (stage S2, the COPY path - clone at the same commit,
+a fresh localm venv, the same packages, shared models), or installs a FRESH,
+hardware-matched ComfyUI when they do not (stage S3 - a pinned ComfyUI, the
+PyTorch build for their GPU, and the custom nodes localm's workflows need). The
+user's own ComfyUI is never touched.
 
-`start` / `stop` / `restart` drive the PROCESS through the running localm server
-rather than acting in-process. The handle on a ComfyUI localm launched lives in
-`comfy_client`'s process-local `_spawned_procs`, so only the process that
-spawned it can end it; the CLI discovers that instance and POSTs to it, the same
-shape `localm stop` and `localm unload` use.
+`start` / `stop` / `restart` drive the PROCESS, and they go through the running
+localm server rather than acting in-process. That is not indirection for its own
+sake: the handle on a ComfyUI localm launched lives in `comfy_client`'s
+process-local `_spawned_procs`, so a fresh CLI process calling `stop_comfy()`
+directly finds no handle, leaves a server-launched ComfyUI running with its VRAM
+held, and reports "localm did not launch this ComfyUI" - a false statement about
+the very thing the user asked about. Only the process that spawned it can end
+it, so the CLI asks that process. This is the same discover-instance-and-POST
+shape `localm stop` and `localm unload` already use.
 """
 
 import time
@@ -28,34 +32,38 @@ from ._core import (console, main, no_server_message, report_server_failure,
                     running_server, server_call)
 from ..media_workflows import MEDIA_TYPES
 
-# Each client timeout must exceed the SERVER-side budget for the same call. The
-# server bounds status at _COMFY_STATUS_TIMEOUT_S (15s) and stop at
-# _COMFY_STOP_TIMEOUT_S (90s) in localm/inference/routes/config.py.
+# Each client timeout must exceed the SERVER-side budget for the same call, or
+# the CLI gives up while the server is still working and reports a failure that
+# did not happen. The server bounds status at _COMFY_STATUS_TIMEOUT_S (15s) and
+# stop at _COMFY_STOP_TIMEOUT_S (90s) in localm/inference/routes/config.py.
 _STATUS_TIMEOUT = 20.0
 _STOP_TIMEOUT = 100.0
-# Transport slack added on top of the launch budget _launch_timeout computes.
+# Transport slack added on top of a launch budget that is computed, never
+# guessed - see _launch_timeout below.
 _LAUNCH_SLACK = 30.0
 
-# The image plugin serves its generation routes under /api/imagine; music and
-# video use their own names. comfy-launch lives under the generation prefix in
-# all three.
+# The image plugin serves its generation routes under /api/imagine, music and
+# video under their own names; comfy-launch lives under the generation prefix in
+# all three (see the GUI's own GENERATE_PREFIX in static/pages/workflow.js).
 _LAUNCH_PREFIX = {"image": "imagine", "music": "music", "video": "video"}
 
 
 def _launch_timeout(cfg) -> float:
-    """How long to wait on a launch: the configured comfy_launch_timeout budget
-    ensure_comfy honours, plus transport slack.
+    """How long to wait on a launch, derived from the SAME configured budget
+    ensure_comfy will actually honour.
 
-    A ZLUDA/ROCm cold start compiles GPU kernels and can take minutes;
-    comfy_launch_timeout is the configurable bound on that wait."""
+    comfy_launch_timeout exists because a ZLUDA/ROCm cold start compiles GPU
+    kernels and can take minutes. An independent client-side guess would drift
+    below a user's own setting and abort a launch that was still legitimately
+    progressing, so read the one number rather than inventing a second."""
     from ..media.comfy_client import comfy_launch_wait_seconds
     return comfy_launch_wait_seconds(cfg) + _LAUNCH_SLACK * 2
 
 
 def _restart_timeout(cfg) -> float:
     """The restart route's own budget plus slack: it stops (bounded at the
-    server's 90s stop budget) and THEN launches, so both halves are allowed
-    for."""
+    server's 90s stop budget) and THEN launches, so a client that only allowed
+    for the launch half would abandon a restart mid-flight."""
     return _STOP_TIMEOUT + _launch_timeout(cfg)
 
 
@@ -71,7 +79,7 @@ def comfy_group() -> None:
     """localm's own managed ComfyUI (optional, off by default).
 
     localm can run its OWN ComfyUI under the data folder instead of depending on
-    your install, at a pinned version carrying localm's own fixes. Off by
+    your install - so it can pin a known-good version and carry fixes. Off by
     default (inert until you set one up); your own ComfyUI is never modified.
     Run 'localm comfy setup', then leave comfy_target on its default 'own' (or
     set it in Settings -> Media) to route media to it.
@@ -82,10 +90,12 @@ def _print_process_status(api_url: str, ping: bool) -> None:
     """The RUNNING half of `comfy status`: is that ComfyUI up, and can localm
     control it.
 
-    Asks the running localm server: `launched_by_localm` is only knowable inside
-    the process that did the launching. With no server to ask, falls back to a
-    direct liveness probe, which answers "is it up" and leaves the control
-    question at "unknown" rather than "no".
+    Asks the running localm server, because `launched_by_localm` is only
+    knowable inside the process that did the launching (see this module's
+    docstring). With no server to ask, fall back to a direct liveness probe -
+    which answers "is it up" perfectly well, and answers the control question
+    not at all. Those two are printed as different things: "no" would be a
+    claim, and the honest word is "unknown".
     """
     console.print()
     console.print("[bold]ComfyUI process[/bold]")
@@ -113,8 +123,8 @@ def _print_process_status(api_url: str, ping: bool) -> None:
                               "[dim]aborts its render and frees its VRAM but leaves "
                               "the process running.[/dim]")
             return
-        # Could not ask the server: report that, then fall through to the
-        # direct probe below.
+        # Could not ask the server. Say so, then still answer what a direct
+        # probe CAN answer rather than printing nothing at all.
         report_server_failure(state, payload, "ask the localm server about ComfyUI")
 
     _print_direct_probe(api_url, had_server=server is not None)
@@ -123,9 +133,11 @@ def _print_process_status(api_url: str, ping: bool) -> None:
 def _print_direct_probe(api_url: str, *, had_server: bool) -> None:
     """Liveness straight from ComfyUI, with the control question left open.
 
-    Runs the same /system_stats call the server's own route makes, so it
-    answers "is it running". "Did localm launch it" is reported as unknown, not
-    as no: only the process holding the subprocess handle knows.
+    A direct probe is a real answer to "is it running" - it is the same
+    /system_stats call the server's own route makes. It is NOT an answer to
+    "did localm launch it": the only process that knows is the one holding the
+    subprocess handle, so reporting `no` here would be inventing a negative out
+    of not having asked.
     """
     from ..media.comfy_client import _comfy_alive
 
@@ -148,6 +160,8 @@ def _print_direct_probe(api_url: str, *, had_server: bool) -> None:
 def comfy_status(ping: bool) -> None:
     """Show whether a managed ComfyUI is installed, where, which ComfyUI localm
     currently targets, and whether that ComfyUI is running."""
+    from rich.markup import escape
+
     from ..config import load_config
     from ..media.managed_comfy import (
         MANAGED_COMFY_API_URL, is_managed_comfy_installed, managed_comfy_paths,
@@ -159,18 +173,28 @@ def comfy_status(ping: bool) -> None:
     installed = is_managed_comfy_installed()
 
     console.print("[bold]Managed ComfyUI[/bold]")
-    console.print(f"  Preferred target  : {cfg.get('comfy_target', 'own')}")
+    # comfy_target is a SELECT field (options own/user) when set through the
+    # GUI/CLI config setters, but config.json can be hand-edited, so this print
+    # does not rely on that validation holding - same defense-in-depth stance
+    # as rag.py's already-safe collection names (escape() is a no-op on "own").
+    console.print(f"  Preferred target  : {escape(str(cfg.get('comfy_target', 'own')))}")
     if installed:
-        console.print(f"  Installed         : yes, at {paths.root}")
+        # paths.root/models_dir are <LOCALM_HOME>/comfyui(-models) - LOCALM_HOME
+        # itself is user-configurable (env var / --home), so these are not
+        # provably bracket-free.
+        console.print(f"  Installed         : yes, at {escape(str(paths.root))}")
         console.print(f"  Managed API URL   : {MANAGED_COMFY_API_URL}")
-        console.print(f"  Managed models    : {paths.models_dir}")
+        console.print(f"  Managed models    : {escape(str(paths.models_dir))}")
     else:
         console.print("  Installed         : no - not set up "
                       "(run 'localm comfy setup' to replicate your ComfyUI)")
 
     target = resolve_comfy_target(cfg)
     which = "localm's managed ComfyUI" if target.managed else "your own ComfyUI"
-    console.print(f"  Target now        : {which} ({target.api_url})")
+    # target.api_url is comfy_api_url (admin-set free text) when not managed -
+    # genuinely user-controlled, unlike MANAGED_COMFY_API_URL above (a fixed
+    # loopback constant derived only from MANAGED_COMFY_PORT).
+    console.print(f"  Target now        : {which} ({escape(target.api_url)})")
 
     _print_process_status(target.api_url, ping)
 
@@ -201,8 +225,9 @@ def comfy_start(media) -> None:
         raise SystemExit(1)
     url, headers = server
 
-    # Ask first and stop here when it is already up: the /v1/comfy/restart
-    # fallback below aborts whatever ComfyUI is currently rendering.
+    # Ask first, and stop here when it is already up. The fallback below
+    # (/v1/comfy/restart) would otherwise abort whatever ComfyUI is currently
+    # rendering, which is the opposite of what "start" promises.
     state, payload = _live_status(server)
     if state == "ok" and (payload or {}).get("alive"):
         console.print("[green]ComfyUI is already running.[/green]")
@@ -211,12 +236,12 @@ def comfy_start(media) -> None:
     if state not in ("ok", "unsupported"):
         report_server_failure(state, payload, "ask the localm server about ComfyUI")
         raise SystemExit(1)
-    # Positively established down, not merely not established up. The
+    # POSITIVELY established down, as opposed to merely not established up. The
     # per-plugin launch routes are safe either way (ensure_available only brings
-    # ComfyUI up), but the /v1/comfy/restart fallback's stop half ABORTS an
-    # in-flight render, so it runs only on a confirmed-down ComfyUI. An
-    # "unsupported" status read means the server lacks the route; it is not
-    # evidence that nothing is rendering.
+    # ComfyUI up), but the kernel fallback below goes through /v1/comfy/restart,
+    # whose stop half ABORTS an in-flight render. That one is only allowed on a
+    # confirmed-down ComfyUI. An "unsupported" status read is a server too old
+    # to have the route; it is not evidence that nothing is rendering.
     confirmed_down = state == "ok" and not (payload or {}).get("alive")
 
     cfg = load_config()
@@ -241,8 +266,8 @@ def comfy_start(media) -> None:
         raise SystemExit(1)
 
     # No media plugin is installed, so no per-plugin launch route exists. The
-    # kernel restart route launches from the GLOBAL comfy_launch_cmd; with
-    # ComfyUI confirmed down above, its stop half has nothing to abort.
+    # kernel restart route launches from the GLOBAL comfy_launch_cmd, and with
+    # ComfyUI confirmed down above its stop half has nothing to abort.
     if not confirmed_down:
         console.print("[yellow]![/yellow]  No media plugin is installed, and this "
                       "server cannot say whether ComfyUI is already running.")
@@ -262,8 +287,8 @@ def comfy_stop() -> None:
     """Stop ComfyUI: abort the in-flight render, clear the queue, free its VRAM.
 
     When localm launched it, its process is also ended. When YOU launched it,
-    localm only aborts and frees: it never kills a process it did not start, and
-    says so.
+    localm only aborts and frees - it never kills a process it did not start,
+    and says so rather than implying it stopped something it did not.
     """
     server = running_server()
     if server is None:
@@ -301,8 +326,9 @@ def _report_action(state, payload, what: str) -> None:
     """Print the outcome of a comfy lifecycle POST, and exit 1 on failure.
 
     The routes answer 200 with ``{"ok": false, "message": ...}`` for a refusal
-    they handled cleanly, so a 2xx is NOT by itself success: the payload's
-    ``ok`` field decides.
+    they handled cleanly, so a 2xx is NOT by itself success - reading only the
+    status code here would report a failed stop as done, which is the exact
+    shape of a discarded return value.
     """
     from rich.markup import escape
 
@@ -331,6 +357,8 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
     Removes <LOCALM_HOME>/comfyui. Your own ComfyUI (comfy_workdir) is NEVER
     touched. Add --models to also delete the managed models folder.
     """
+    from rich.markup import escape
+
     from ..media.managed_comfy import (managed_comfy_remove_targets,
                                        remove_managed_comfy)
 
@@ -339,17 +367,22 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
         console.print("[dim]Nothing to remove - no managed ComfyUI is installed.[/dim]")
         return
 
-    listing = "\n".join(f"  {t}" for t in targets)
+    # targets are Path objects under LOCALM_HOME, which is user-configurable -
+    # same reasoning as comfy_status's paths.root/models_dir above.
+    listing = "\n".join(f"  {escape(str(t))}" for t in targets)
     console.print(f"This will delete:\n{listing}")
     if not yes and not click.confirm("Remove it?", default=False):
         console.print("[dim]Cancelled.[/dim]")
         return
 
-    # remove_managed_comfy is the shared removal (also used by the GUI route);
-    # it returns every path it could NOT delete instead of claiming success.
+    # remove_managed_comfy is the shared removal (also used by the GUI route); it
+    # reports any path it could NOT delete (rule 5) instead of claiming success.
+    # Each failed entry is "<path> (<OSError>)" - both halves can carry the
+    # same LOCALM_HOME-derived path text as `targets` above.
     _, failed = remove_managed_comfy(with_models)
     if failed:
-        console.print("[red]Could not remove:[/red]\n  " + "\n  ".join(failed))
+        console.print("[red]Could not remove:[/red]\n  "
+                      + "\n  ".join(escape(str(f)) for f in failed))
         raise SystemExit(1)
     console.print("[green]Removed localm's managed ComfyUI.[/green]")
 
@@ -362,13 +395,13 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
                    "omitted, you are asked when custom nodes are present. Copy path "
                    "only (a fresh install starts clean).")
 def comfy_setup(copy_custom_nodes) -> None:
-    """Set up localm's own ComfyUI (copy yours, or install a fresh one).
+    """Set up localm's own ComfyUI (stage S2 copy / stage S3 fresh).
 
     If you already have a working ComfyUI (comfy_workdir set, with a venv under it),
     localm REPLICATES it at the same commit into the localm data folder, makes a FRESH
     localm venv, installs the same packages, and shares your models via
-    extra_model_paths. If you do NOT, localm installs a FRESH, hardware-matched
-    ComfyUI: it clones a pinned ComfyUI, makes a localm venv, installs the PyTorch
+    extra_model_paths (S2). If you do NOT, localm installs a FRESH, hardware-matched
+    ComfyUI (S3): it clones a pinned ComfyUI, makes a localm venv, installs the PyTorch
     build for your GPU, and adds the custom nodes its shipped workflows need. Your own
     ComfyUI is never touched. You are asked before any of your custom nodes are copied
     (copy path only).
@@ -383,7 +416,7 @@ def comfy_setup(copy_custom_nodes) -> None:
     from ..model_manager import _emit_outcome
 
     cfg = load_config()
-    # Announce which path will run, before a potentially multi-GB operation.
+    # Heads-up before a potentially multi-GB operation: which path will run.
     if prov.discover_user_comfy(cfg) is None:
         console.print(
             "No existing ComfyUI to copy - installing a fresh, hardware-matched "
@@ -404,8 +437,11 @@ def comfy_setup(copy_custom_nodes) -> None:
         console.print(f"[red]{escape(result.message)}[/red]")
         raise SystemExit(1)
 
-    # The install (clone/venv/packages/marker) is complete at this point, so the
-    # outcome is emitted BEFORE any of the purely cosmetic status lines below.
+    # Emitted BEFORE any of the prints below: real work (clone/install/venv/
+    # marker) is already done by this point, so a crash in one of these purely
+    # cosmetic status lines - the exact class of bug pull.py's _report_success
+    # exists to guard against - must not un-say a completed install to the GUI
+    # job runner, which otherwise infers status from the exit code alone.
     _emit_outcome("done")
     console.print(f"[green]{escape(result.message)}[/green]")
     if result.status == "copied":
@@ -462,7 +498,9 @@ def comfy_update(reinstall_requirements: bool, commit) -> None:
                       f"({COMFYUI_PINNED_COMMIT[:12]}) and re-applying localm's "
                       "patches. This can take a while...")
     else:
-        console.print(f"Updating to ComfyUI {commit[:12]} (advanced override) and "
+        # commit is raw --commit user input (unlike COMFYUI_PINNED_COMMIT above,
+        # a hardcoded module constant), so it needs escaping unlike its sibling.
+        console.print(f"Updating to ComfyUI {escape(commit[:12])} (advanced override) and "
                       "re-applying localm's patches...")
 
     result = upd.update_managed_comfy(
@@ -473,8 +511,9 @@ def comfy_update(reinstall_requirements: bool, commit) -> None:
         _emit_outcome("failed")
         console.print(f"[red]{escape(result.message)}[/red]")
         raise SystemExit(1)
-    # The update (checkout/patches/rollback) is complete at this point, so the
-    # outcome is emitted BEFORE the cosmetic print that follows.
+    # See comfy_setup's identical comment: real work (checkout/patches/rollback)
+    # is already done here, so this signal must land before the cosmetic print
+    # that follows it, not after.
     _emit_outcome("done")
     console.print(f"[green]{escape(result.message)}[/green]")
 
@@ -493,15 +532,17 @@ def workflow_group() -> None:
 
 
 def _fmt_wf_size(n: int) -> str:
-    """A short size for a workflow JSON file: KB, or MB from 1 MiB up."""
+    """A short size for a workflow JSON file - these run tens of KB, never the
+    GB range `localm list`'s model-file formatting assumes."""
     if n >= 1024 * 1024:
         return f"{n / 1024**2:.1f} MB"
     return f"{n / 1024:.1f} KB"
 
 
 def _fmt_wf_age(seconds) -> str:
-    """A coarse human duration for the 'Modified' column: Ns / Nm / NhMMm / Nd,
-    each suffixed 'ago'."""
+    """A coarse human duration for the 'Modified' column - mirrors
+    localm.cli.keys._fmt_age's granularity (this is "how long ago", not a
+    stopwatch)."""
     s = int(max(0, seconds))
     if s < 60:
         return f"{s}s ago"
@@ -516,11 +557,18 @@ def _fmt_wf_age(seconds) -> str:
 @click.argument("media", type=click.Choice(MEDIA_TYPES))
 def workflow_list(media: str) -> None:
     """List MEDIA's uploaded workflows and show which one is active."""
+    from rich.markup import escape
+
     from ..media_workflows import list_workflows, selected_name
 
+    # media is click.Choice(MEDIA_TYPES)-validated (always "image"/"music"/
+    # "video"), so it is safe unescaped throughout this function. active/w["name"]
+    # are user-chosen workflow filenames: save_workflow only enforces
+    # path-traversal safety (pathsafe.confined_name), never a safe charset, so a
+    # name like "flux[draft].json" is a genuinely accepted, real filename.
     active = selected_name(media)
     console.print(f"[bold]{media} workflow[/bold]: "
-                 + (f"[green]{active}[/green]" if active
+                 + (f"[green]{escape(active)}[/green]" if active
                     else "[dim](built-in default - none selected)[/dim]"))
     items = list_workflows(media, active=active)
     if not items:
@@ -536,7 +584,9 @@ def workflow_list(media: str) -> None:
     table.add_column("Modified")
     now = time.time()
     for w in items:
-        table.add_row(w["name"], "[green]yes[/green]" if w["is_active"] else "",
+        # Table cell strings go through the SAME markup parsing as
+        # console.print f-strings (confirmed empirically), not just plain text.
+        table.add_row(escape(w["name"]), "[green]yes[/green]" if w["is_active"] else "",
                       _fmt_wf_size(w["size_bytes"]), _fmt_wf_age(now - w["mtime"]))
     console.print(table)
 
@@ -557,8 +607,11 @@ def workflow_add(media: str, file: Path, name, activate: bool) -> None:
       localm comfy workflow add music alt_ace.json
 
     Validates FILE is ComfyUI's API-format JSON (a dict of nodes, each with a
-    class_type) before storing it.
+    class_type) before storing it, so a bad upload fails now instead of every
+    later generation.
     """
+    from rich.markup import escape
+
     from ..media_workflows import save_workflow, select_workflow
 
     content = file.read_bytes()
@@ -568,11 +621,12 @@ def workflow_add(media: str, file: Path, name, activate: bool) -> None:
             select_workflow(media, saved)
     except ValueError as e:
         raise click.ClickException(str(e))
-    console.print(f"[green]Saved[/green] {media} workflow [bold]{saved}[/bold]"
+    # saved is the stored (user-chosen) filename - see workflow_list's comment.
+    console.print(f"[green]Saved[/green] {media} workflow [bold]{escape(saved)}[/bold]"
                  + (" and selected it." if activate else "."))
     if not activate:
         console.print("[dim]Select it with[/dim] "
-                      f"localm comfy workflow use {media} {saved}")
+                      f"localm comfy workflow use {media} {escape(saved)}")
 
 
 @workflow_group.command("use")
@@ -585,9 +639,11 @@ def workflow_use(media: str, name, clear: bool) -> None:
     """Select MEDIA's active workflow (or clear it with --clear).
 
     Governs `localm image`/`music`/`video` too, not just the GUI's own picker
-    on the same page. This is the same selection `localm plugin config <media>
-    workflow <name>` writes.
+    on the same page. (The same selection `localm plugin config <media>
+    workflow <name>` writes - this is the discoverable, dedicated form of it.)
     """
+    from rich.markup import escape
+
     from ..media_workflows import select_workflow
 
     if clear:
@@ -602,7 +658,8 @@ def workflow_use(media: str, name, clear: bool) -> None:
     except ValueError as e:
         raise click.ClickException(str(e))
     if selected:
-        console.print(f"[green]{media} now uses[/green] [bold]{selected}[/bold]")
+        # selected is the user-chosen workflow filename - see workflow_list.
+        console.print(f"[green]{media} now uses[/green] [bold]{escape(selected)}[/bold]")
     else:
         console.print(f"[green]{media} cleared[/green] - falling back to the "
                       "built-in default.")
@@ -615,6 +672,8 @@ def workflow_use(media: str, name, clear: bool) -> None:
 def workflow_rm(media: str, name: str, yes: bool) -> None:
     """Delete an uploaded MEDIA workflow (refuses to delete the active one -
     select another first)."""
+    from rich.markup import escape
+
     from ..media_workflows import delete_workflow
 
     if not yes:
@@ -624,4 +683,5 @@ def workflow_rm(media: str, name: str, yes: bool) -> None:
         delete_workflow(media, name)
     except ValueError as e:
         raise click.ClickException(str(e))
-    console.print(f"[green]Deleted[/green] {media} workflow [bold]{name}[/bold].")
+    # name is the user-supplied workflow filename argument - see workflow_list.
+    console.print(f"[green]Deleted[/green] {media} workflow [bold]{escape(name)}[/bold].")

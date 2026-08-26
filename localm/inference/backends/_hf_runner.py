@@ -232,6 +232,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
 
     from localm.inference.backends._hf_worker import HFWorker
     from localm.inference.backends.base import (
+        ContextCapacityExceededError,
         GrammarUnsupportedError,
         InvalidGrammarError,
         UnsupportedInputError,
@@ -598,6 +599,7 @@ class HFRunner:
         queue. Released when this generator is exhausted, errors, or is
         closed - all on the single producer thread that drives it, so the
         non-reentrant Lock is always released on the thread that took it."""
+        from localm.debuglog import logger
         first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
         awaiting_first = True
         with self._q_lock:

@@ -17,6 +17,7 @@ import os
 import re
 import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -1712,6 +1713,97 @@ def test_embedding_context_requests_a_shared_kv_cache():
     )
     assert cp.n_seq_max == 32
     assert cp.embeddings is True
+
+
+# --------------------------------------------------------------------------
+# THE REQUEST ABOVE CAN SILENTLY NOT TAKE.
+#
+# #1320 (just above) fixed the REQUEST (kv_unified=True). This covers whether
+# the loaded runtime actually HONOURS it - a field report (2026-08-25) of
+# native embed batches failing to decode with kv_unified requested, traced to
+# the loaded context coming back with kv_unified=false and a much smaller
+# effective n_ctx_seq. llama.cpp exposes no getter for kv_unified once a
+# context exists, so llama_n_ctx_seq is the closest observable proxy: sliced
+# (kv_unified not honoured) hands each sequence n_ctx/n_seq_max tokens instead
+# of the full shared n_ctx. This is a DIAGNOSTIC ONLY (a log line) - it cannot
+# fix or explain a drift, only make it loud instead of silent.
+
+class _FakeCtxApi:
+    """Stands in for the llamacpp _api module: only the two calls
+    _warn_if_context_config_drifted makes."""
+
+    def __init__(self, n_ctx, n_ctx_seq):
+        self._n_ctx = n_ctx
+        self._n_ctx_seq = n_ctx_seq
+
+    def llama_n_ctx(self, ctx):
+        return self._n_ctx
+
+    def llama_n_ctx_seq(self, ctx):
+        return self._n_ctx_seq
+
+
+def test_context_drift_check_silent_when_honoured(caplog):
+    caplog.set_level(logging.WARNING, logger="localm")
+    emb._warn_if_context_config_drifted(_FakeCtxApi(2048, 2048), object(), 2048)
+    assert caplog.records == []
+
+
+def test_context_drift_check_warns_when_kv_unified_not_honoured(caplog):
+    """The exact field-reported shape: n_ctx round-trips fine, but n_ctx_seq
+    comes back sliced (n_ctx/n_seq_max-sized) instead of the full window."""
+    caplog.set_level(logging.WARNING, logger="localm")
+    emb._warn_if_context_config_drifted(_FakeCtxApi(2048, 64), object(), 2048)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "kv_unified" in warnings[0].getMessage()
+    assert "64" in warnings[0].getMessage()
+
+
+def test_context_drift_check_warns_on_n_ctx_mismatch(caplog):
+    """Isolates the n_ctx check from the kv_unified one: n_ctx_seq (500) stays
+    above half of the ACTUAL n_ctx's own value is irrelevant here - it must
+    stay above half of what was REQUESTED (600) so only the n_ctx-mismatch
+    warning fires, not both."""
+    caplog.set_level(logging.WARNING, logger="localm")
+    emb._warn_if_context_config_drifted(_FakeCtxApi(512, 500), object(), 600)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "n_ctx=512" in warnings[0].getMessage()
+
+
+def test_context_drift_check_silent_on_older_build_with_no_n_ctx_seq(caplog):
+    """llama_n_ctx_seq returns None on a build too old to export it - a
+    missing accessor is not evidence of drift, so this must not warn."""
+    caplog.set_level(logging.WARNING, logger="localm")
+    emb._warn_if_context_config_drifted(_FakeCtxApi(2048, None), object(), 2048)
+    assert caplog.records == []
+
+
+def test_context_drift_check_never_raises(caplog):
+    class _BrokenApi:
+        def llama_n_ctx(self, ctx):
+            raise RuntimeError("native call failed")
+
+    caplog.set_level(logging.DEBUG, logger="localm")
+    emb._warn_if_context_config_drifted(_BrokenApi(), object(), 2048)   # must not raise
+
+
+def test_llama_n_ctx_seq_returns_none_on_older_build(monkeypatch):
+    """Optional accessor (like llama_model_has_mtp): absent on a build old
+    enough to predate it must degrade to None, never raise."""
+    from localm.inference.backends.llamacpp import _api
+    mock_dll = MagicMock(spec=[])            # exports no llama_n_ctx_seq
+    monkeypatch.setattr(_api, "load_lib", lambda: mock_dll)
+    assert _api.llama_n_ctx_seq(object()) is None
+
+
+def test_llama_n_ctx_seq_reads_the_native_value(monkeypatch):
+    from localm.inference.backends.llamacpp import _api
+    mock_dll = MagicMock()
+    mock_dll.llama_n_ctx_seq.return_value = 64
+    monkeypatch.setattr(_api, "load_lib", lambda: mock_dll)
+    assert _api.llama_n_ctx_seq(object()) == 64
 
 
 # --------------------------------------------------------------------------- #

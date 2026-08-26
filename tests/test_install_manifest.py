@@ -142,6 +142,15 @@ def test_unsafe_data_dir_refuses_symlink(tmp_path):
     assert im._unsafe_data_dir(str(link), tmp_path)           # symlink refused
 
 
+def test_unsafe_data_dir_refuses_when_home_cannot_be_resolved(tmp_path, monkeypatch):
+    # A broken Path.home() must make the guard REFUSE the path, not silently
+    # treat it as safe just because the $HOME comparison itself blew up.
+    def _broken_home():
+        raise RuntimeError("could not determine home directory")
+    monkeypatch.setattr(Path, "home", staticmethod(_broken_home))
+    assert im._unsafe_data_dir(str(tmp_path / "data"), tmp_path) is not None
+
+
 def test_uninstall_refuses_when_data_dir_is_unsafe(tmp_path):
     # Record a manifest whose data_dir is the repo root itself, then purge.
     (tmp_path / "runtime" / "lib").mkdir(parents=True)

@@ -52,6 +52,9 @@ def _bare_llama() -> LlamaCpp:
     llm._ctx_capacity = 4096
     llm._kv_supported = None
     llm._vram_check = None
+    # __init__ always sets this; a hand-built instance that omits it is
+    # not a LlamaCpp, and the generate path reads it directly.
+    llm._mtp_ctx_ptr = None
     llm._gen_lock = threading.RLock()
     llm._stop = threading.Event()
     llm._inference_lock = threading.Lock()
@@ -86,6 +89,10 @@ def _mock_native_api() -> MagicMock:
     mock_api.llama_sampler_sample.return_value = 42
     mock_api.llama_sampler_free = MagicMock()
     mock_api.llama_model_chat_template.return_value = None
+    # Every predicate has to be answered explicitly: an unset MagicMock attribute
+    # returns a TRUTHY mock, so leaving this one out claims the model uses M-RoPE
+    # and silently sends _can_reuse_kv down the no-reuse path.
+    mock_api.llama_model_has_mrope.return_value = False
     return mock_api
 
 

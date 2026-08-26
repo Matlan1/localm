@@ -21,7 +21,10 @@ from localm.inference.backends.llamacpp.llama import (
     _format_chatml,
 )
 
+import localm.inference.backends.llamacpp._api as _api
+
 _LLAMA_API = "localm.inference.backends.llamacpp.llama.api"
+_API = "localm.inference.backends.llamacpp._api"
 _APPLY_TEMPLATE = "localm.inference.backends.llamacpp.llama._apply_model_template"
 
 
@@ -237,3 +240,35 @@ class TestFallbackReasonReachesTheInstance:
             llm.create_chat_completion(
                 [{"role": "user", "content": "x"}], stream=False)
         assert llm.chat_template_fallback_reason is None
+
+
+class TestMropeProbeDoesNotSwallowANativeFault:
+    """llama_model_has_mrope probes an optional export and falls back to GGUF
+    metadata when that export is unusable. An access violation is not
+    "unusable": it means the model pointer is dead, and the fallback goes on to
+    dereference that SAME pointer, so swallowing the first fault only buys a
+    second one reported from the generic metadata reader instead (rule 5)."""
+
+    def _lib_whose_rope_type(self, side_effect):
+        lib = MagicMock()
+        lib.llama_model_rope_type = MagicMock(side_effect=side_effect)
+        return lib
+
+    def test_access_violation_reaches_the_caller(self):
+        lib = self._lib_whose_rope_type(
+            OSError("exception: access violation reading 0x000000000000744F"))
+        with patch(_API + ".load_lib", return_value=lib),              patch(_API + ".has_model_meta_api", return_value=True),              patch(_API + ".llama_model_meta_val_str") as meta:
+            with pytest.raises(OSError, match="access violation"):
+                _api.llama_model_has_mrope(111)
+        # The load-bearing half: it must not walk on and dereference the same
+        # dead pointer a second time.
+        meta.assert_not_called()
+
+    def test_unusable_export_still_falls_back_to_metadata(self):
+        """A binding-shape problem genuinely is recoverable, and that fallback
+        has to keep working - narrowing the guard must not become removing it."""
+        lib = self._lib_whose_rope_type(TypeError("wrong argument type"))
+        with patch(_API + ".load_lib", return_value=lib),              patch(_API + ".has_model_meta_api", return_value=True),              patch(_API + ".llama_model_meta_val_str",
+                   return_value="qwen2vl") as meta:
+            assert _api.llama_model_has_mrope(111) is True
+        meta.assert_called()

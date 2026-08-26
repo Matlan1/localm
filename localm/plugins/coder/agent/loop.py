@@ -815,9 +815,13 @@ class _LoopMixin:
         Returns None to fall through to the remaining gates, or the
         ``(should_break, final_response)`` pair ``_handle_no_tool_calls`` returns.
 
-        Only the CLI's outer ``--until`` loop or an interactive/GUI session sets
-        ``verify_cmd``, and never both for the same run, so the command is never
-        executed twice per iteration."""
+        ``verify_cmd`` is set by the CLI's outer ``--until`` loop, an
+        interactive/GUI session, or (tools/agents.py's ``_isolated_verify_cmd``)
+        a worktree-isolated child - never more than one of these for the same
+        Agent instance's own run, so the command is never executed twice per
+        iteration. A parent that dispatches an isolated child and ALSO has its
+        own verify_cmd runs two independent gates on two independent trees,
+        which is by design, not a double-count of one."""
         if self.verify_cmd is None or st.verify_settled:
             return None
         # Nothing written since the last passing check means nothing to verify.

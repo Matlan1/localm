@@ -158,7 +158,16 @@ def register(app: FastAPI, ctx) -> None:
                     # Rejects a deeply unbalanced grammar before the native GBNF
                     # parser sees it.
                     check_grammar_structure(req.grammar)
-                    engine.validate_grammar(req.grammar, lazy=bool(req.grammar_lazy))
+                    # Off the event loop, for the same reason the trigger probe
+                    # above is: validate_grammar's backend RPC waits on the
+                    # isolated model worker, so a direct call here would freeze
+                    # the single event loop for every concurrent request, not
+                    # just this one, for as long as that worker takes to answer.
+                    # The executor re-raises in this coroutine, so every arm
+                    # below still catches exactly what it caught before.
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: engine.validate_grammar(
+                            req.grammar, lazy=bool(req.grammar_lazy)))
                 except GrammarUnsupportedError as e:
                     # The backend cannot apply a grammar at all. Separate from the
                     # InvalidGrammarError arm below, and above the `if req.stream:`
@@ -450,7 +459,11 @@ def register(app: FastAPI, ctx) -> None:
                     # Rejects a deeply unbalanced grammar before the native GBNF
                     # parser sees it.
                     check_grammar_structure(req.grammar)
-                    engine.validate_grammar(req.grammar, lazy=bool(req.grammar_lazy))
+                    # Same off-the-event-loop offload as /v1/chat/completions,
+                    # for the same reason - see that route.
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: engine.validate_grammar(
+                            req.grammar, lazy=bool(req.grammar_lazy)))
                 except GrammarUnsupportedError as e:
                     # Same capability refusal as /v1/chat/completions: the backend
                     # cannot apply a grammar at all.

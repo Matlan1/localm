@@ -1027,7 +1027,125 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
 
 
 # ------------------------------------------------------------------ #
-#  Chat hooks: recall injection (inlet) + consolidation trigger (outlet)
+#  Automatic (unattended) vector backfill                             #
+# ------------------------------------------------------------------ #
+# backfill_all (memory.backfill) walks EVERY namespace under the memory root to
+# completion; before this its only caller was the manual `setup-embeddings` CLI
+# command. The debounced auto-consolidate pass above only backfills the ONE
+# store for whichever principal just chatted, bounded to 64 records per pass
+# (MemoryStore.backfill_vectors) - so an unrelated namespace, or a backlog
+# bigger than that bound, never converges without the user re-running that
+# command by hand. Records written before an embedder existed then kept no
+# vector indefinitely, the semantic gate stayed unusable, and recall silently
+# fell back to the importance-ordered fallback (2026-08-14 low_coverage
+# report). This sweep needs only the EMBEDDER, not a loaded chat model, so it
+# is deliberately independent of memory_auto_consolidate and of whether a
+# model is currently loaded - coupling it to either would silently disable an
+# unrelated capability.
+
+BACKFILL_SWEEP_MIN_INTERVAL = 3600.0  # >= 1h between full-root backfill sweeps
+_sweep_lock = _threading.Lock()       # guards the marker read + in-progress flag
+_sweep_running = False                 # True while a background sweep is in flight
+
+
+def _sweep_marker() -> "Path":
+    return _memory_root() / ".backfill_sweep"
+
+
+def _sweep_last_run() -> float:
+    """Epoch of the last backfill sweep, persisted so the debounce survives a
+    restart. 0.0 when never run or unreadable (treated as 'due')."""
+    try:
+        return float(_sweep_marker().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _sweep_stamp(now: float) -> None:
+    try:
+        m = _sweep_marker()
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.write_text(str(now), encoding="utf-8")
+    except OSError as e:
+        # Non-fatal: a failed stamp just means the next turn may re-check sooner.
+        # Surfaced, not hidden (rule 5).
+        from localm.debuglog import logger
+        logger.debug("memory backfill sweep: could not stamp marker: %s", e)
+
+
+def _backfill_sweep_bg() -> None:
+    """Run one backfill_all pass over EVERY namespace in the background,
+    mirroring _auto_consolidate_bg's shape. Never raises (a daemon thread);
+    clears the in-progress flag and stamps the marker when done. A missing
+    embedder is a normal, expected outcome (backfill_all(..., None) is a
+    documented no-op), not an error."""
+    global _sweep_running
+    from localm.debuglog import logger
+    try:
+        from localm.memory.backfill import backfill_all
+        res = backfill_all(_memory_root(), _embed_fn())
+        if res["embedded"]:
+            logger.info("memory backfill sweep: embedded %d record(s) across "
+                        "%d namespace(s)", res["embedded"], res["namespaces"])
+        if res["remaining"] or res["unreadable"]:
+            logger.warning(
+                "memory backfill sweep: %d record(s) still lack a vector, %d "
+                "namespace(s) unreadable - will retry next sweep",
+                res["remaining"], res["unreadable"])
+    except Exception as e:
+        logger.warning("memory backfill sweep failed: %s", e)
+    finally:
+        import time as _time
+        _sweep_stamp(_time.time())
+        with _sweep_lock:
+            _sweep_running = False
+
+
+def _maybe_sweep_backfill() -> None:
+    """Best-effort trigger for the debounced full-root vector backfill sweep.
+    Cheap when not due or nothing is pending (a local vectorless scan - no
+    embedder/network touch on this thread; that stays deferred to the
+    background pass, same discipline _maybe_auto_consolidate uses to keep
+    engine work off the calling turn); spawns at most one daemon thread."""
+    global _sweep_running
+    try:
+        from localm.config import load_config
+        if not load_config().get("memory_enabled", True):
+            return
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("memory backfill sweep: config read failed, skipping "
+                     "this turn: %s", e)
+        return
+    if not _persist_enabled():
+        return                                # privacy: nothing to fill in
+    import os
+    import time as _time
+    try:
+        interval = float(os.environ.get(
+            "LOCALM_MEMORY_BACKFILL_INTERVAL", BACKFILL_SWEEP_MIN_INTERVAL))
+    except (TypeError, ValueError):
+        interval = BACKFILL_SWEEP_MIN_INTERVAL
+    now = _time.time()
+    with _sweep_lock:
+        if _sweep_running:
+            return
+        if now - _sweep_last_run() < interval:
+            return
+        from localm.memory.backfill import vectorless_scan
+        pending, unreadable_ns = vectorless_scan(_memory_root())
+        if not pending and not unreadable_ns:
+            _sweep_stamp(now)         # checked and clean: don't rescan every
+            return                    # turn until the interval elapses again
+        _sweep_running = True
+        # Stamp immediately, same burst guard as auto-consolidate above; the
+        # finally-stamp in _backfill_sweep_bg refreshes it on completion.
+        _sweep_stamp(now)
+    _threading.Thread(target=_backfill_sweep_bg, daemon=True).start()
+
+
+# ------------------------------------------------------------------ #
+#  Chat hooks: recall injection (inlet) + consolidation/backfill outlet
 # ------------------------------------------------------------------ #
 
 def _user_msg_text(m) -> str:
@@ -1074,6 +1192,14 @@ def _memory_outlet(text, messages, ctx):
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory outlet skipped: %s", e)
+    try:
+        # A separate try/except from the consolidation trigger above: the two are
+        # independent capabilities (see _maybe_sweep_backfill's docstring), so a
+        # failure in one must not skip the other.
+        _maybe_sweep_backfill()
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("memory backfill sweep trigger skipped: %s", e)
     return text
 
 

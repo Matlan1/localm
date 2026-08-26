@@ -451,6 +451,16 @@ def evaluate(mp, cp) -> AbiVerdict:
         ("context_params.flash_attn_type", cp.flash_attn_type, -1),
         ("model_params.split_mode", mp.split_mode, 1),
         ("model_params.use_extra_bufts", bool(mp.use_extra_bufts), True),
+        # kv_unified is opt-in (embedder.configure_embed_context is the one
+        # caller that turns it on), so llama_context_default_params()'s own
+        # default is False on every build seen so far. A build that reports
+        # anything else here is corroborating evidence that this offset (which
+        # V1 and V2 share unchanged - see _structs) is not landing on the real
+        # kv_unified field on THIS runtime, which is the field-reported
+        # embedder context drift (2026-08-25) this check exists to make loud
+        # instead of silent. See embedder._warn_if_context_config_drifted for
+        # the companion LIVE (post-load) check this cannot make on its own.
+        ("context_params.kv_unified", bool(cp.kv_unified), False),
     ]
     # The mmap default is expressed differently per layout, so name the field
     # that layout actually has. Two values count as typical, AUTO and MMAP;

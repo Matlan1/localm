@@ -8,7 +8,7 @@ without external compiled dependencies like gptqmodel, autoawq, or torchao.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn

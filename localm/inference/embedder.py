@@ -457,6 +457,50 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         return None
 
 
+def _warn_if_context_config_drifted(api, ctx, requested_n_ctx: int) -> None:
+    """Best-effort, log-only comparison of what this embedder REQUESTED for its
+    context (n_ctx, and kv_unified=True - see configure_embed_context) against
+    what the loaded native runtime actually reports, via llama_n_ctx /
+    llama_n_ctx_seq - the closest observable proxy for kv_unified, since
+    llama.cpp exposes no direct getter for that flag once a context exists.
+
+    With kv_unified honoured, n_ctx_seq is close to n_ctx; a runtime that
+    silently falls back to slicing n_ctx across n_seq_max private KV slots
+    instead reports a much smaller n_ctx_seq - exactly the field-reported shape
+    (a large embedding batch failing native decode). This can only OBSERVE and
+    log the drift, not explain it (see _abi.py's own kv_unified diagnostic for
+    the complementary load-time struct-offset check) - the root cause needs a
+    live reproduction on the affected hardware.
+
+    Never raises: a probe failure here must not take down an otherwise-working
+    embedder, and this never changes what was actually configured."""
+    try:
+        actual_n_ctx = int(api.llama_n_ctx(ctx))
+        actual_n_ctx_seq = api.llama_n_ctx_seq(ctx)
+    except Exception as e:
+        logger.debug("embedder context drift check failed: %s", e)
+        return
+    if actual_n_ctx != requested_n_ctx:
+        logger.warning(
+            "embedder: requested n_ctx=%d but the loaded context reports "
+            "n_ctx=%d - the runtime may not honour the requested context size",
+            requested_n_ctx, actual_n_ctx)
+    if actual_n_ctx_seq is None:
+        return                    # older build with no llama_n_ctx_seq accessor
+    # A generous margin, not exact equality: kv_unified honoured can still
+    # leave n_ctx_seq a hair under n_ctx on some builds. Below half is only
+    # reachable via the sliced-KV fallback (n_ctx / n_seq_max, and n_seq_max
+    # is always >= 2 whenever this matters - see _choose_n_seq_max), so it is
+    # a safe, non-noisy threshold for "kv_unified was silently not honoured".
+    if actual_n_ctx_seq < requested_n_ctx // 2:
+        logger.warning(
+            "embedder: requested kv_unified=True (n_ctx=%d) but the loaded "
+            "context reports n_ctx_seq=%d, far smaller than requested - "
+            "kv_unified was likely not honoured by this runtime build, and a "
+            "large embedding batch may fail to decode",
+            requested_n_ctx, actual_n_ctx_seq)
+
+
 class GGUFEmbedder:
     """A dedicated embedding GGUF loaded in embeddings mode via the native llama.dll."""
 
@@ -547,6 +591,7 @@ class GGUFEmbedder:
                 self._model = None
                 raise RuntimeError("failed to create embedding context")
         self._mem = api.llama_get_memory(self._ctx) if api.has_memory_api() else None
+        _warn_if_context_config_drifted(api, self._ctx, self.n_ctx)
 
     def _tokenize(self, text: str) -> List[int]:
         """Tokenize *text*, truncated to fit n_ctx. Returns ``[]`` only for

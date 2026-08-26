@@ -94,6 +94,9 @@ def _build_music_workflow(
     lyrics_strength: float,
     ckpt_name: Optional[str],
     float_type: Optional[str],
+    sampler_name: Optional[str] = None,
+    scheduler: Optional[str] = None,
+    shift: Optional[float] = None,
 ) -> tuple[bool, str]:
     """Shape the ACE-Step workflow in place from the call's parameters.
 
@@ -129,6 +132,17 @@ def _build_music_workflow(
         sampler["inputs"]["steps"] = steps
     if "cfg" in sampler.get("inputs", {}):
         sampler["inputs"]["cfg"] = cfg
+    if sampler_name and "sampler_name" in sampler.get("inputs", {}):
+        sampler["inputs"]["sampler_name"] = sampler_name
+    if scheduler and "scheduler" in sampler.get("inputs", {}):
+        sampler["inputs"]["scheduler"] = scheduler
+    # Shift lives on the ModelSamplingSD3 node feeding the sampler, not on the
+    # sampler node itself - found by class_type (same idiom as ckpt_loader below)
+    # so a user's own exported graph works without renumbering (MEDIA-1).
+    if shift is not None:
+        _, model_sampling = find_node_by_class(workflow, "ModelSamplingSD3")
+        if model_sampling is not None and "shift" in model_sampling.get("inputs", {}):
+            model_sampling["inputs"]["shift"] = shift
     # Optional checkpoint override, found by class_type.
     if ckpt_name:
         _, ckpt_loader = find_node_by_class(
@@ -160,6 +174,9 @@ def generate_music(
     steps: int = 50,
     cfg: float = 5.0,
     lyrics_strength: float = 0.99,
+    sampler_name: Optional[str] = None,
+    scheduler: Optional[str] = None,
+    shift: Optional[float] = None,
     ckpt_name: Optional[str] = None,
     model_overrides: Optional[dict] = None,
     localm_url: Optional[str] = None,
@@ -201,6 +218,14 @@ def generate_music(
         ComfyUI ACE-Step template - raise steps for more polish.
     lyrics_strength
         How strongly the lyrics steer generation (0..1).
+    sampler_name / scheduler
+        Override the KSampler's sampler/scheduler (defaults from the workflow
+        template: "euler" / "simple"). Any value ComfyUI's own KSampler accepts;
+        an unsupported one is rejected by ComfyUI at submit time with a clear
+        error, not validated here.
+    shift
+        Override the ModelSamplingSD3 node's shift value (default from the
+        workflow template: 3.0).
     ckpt_name
         Override the checkpoint filename inside ComfyUI's models/checkpoints.
     model_overrides
@@ -265,6 +290,9 @@ def generate_music(
         steps=steps,
         cfg=cfg,
         lyrics_strength=lyrics_strength,
+        sampler_name=sampler_name,
+        scheduler=scheduler,
+        shift=shift,
         ckpt_name=ckpt_name,
         float_type=float_type,
     )

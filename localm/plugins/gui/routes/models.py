@@ -596,6 +596,20 @@ def register(app: FastAPI, ctx) -> None:
         # The textual check runs first, so a UNC spec never reaches a stat.
         if _spec_names_a_host_path(spec):
             require_fs_host(request)
+        # Fail here rather than starting a second download of the same spec that
+        # cannot finish. ADVISORY ONLY, and deliberately not the guard: reading
+        # the job list and then starting a job are two steps, so two requests
+        # can both find nothing running and both proceed. What actually keeps
+        # two downloads from writing the same file is the cross-process lock the
+        # pull itself takes, which also covers the contender this cannot see - a
+        # `localm pull` a user ran in a terminal. This only spares the user a
+        # job that would start and immediately refuse.
+        label = f"Model pull {spec}"
+        if any(j.get("kind") == "pull" and j.get("status") == "running"
+               and j.get("label") == label for j in jobs.snapshot()):
+            raise HTTPException(
+                409, f"Already downloading {spec} - watch the running job "
+                     f"instead of starting a second one.")
         # Pass the spec after "--" so a value like "-h" or "--help" is treated as
         # the model argument, not parsed by the CLI as an option/help flag.
         args = ["pull"]

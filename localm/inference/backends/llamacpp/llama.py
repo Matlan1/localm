@@ -42,12 +42,14 @@ def _quiet_stderr():
     Redirect fd 2 (stderr) away from the terminal for the duration of the block.
 
     llama.cpp writes model-loading noise (create_tensor, llama_kv_cache,
-    sched_reserve, ...) directly via fprintf(stderr, ...), bypassing Python's
-    logging system entirely, so silencing it means redirecting the file
-    descriptor at the OS level.
+    sched_reserve, …) directly via fprintf(stderr, …), bypassing Python's
+    logging system entirely.  The only reliable way to silence it is to
+    redirect the file descriptor at the OS level.
 
     In debug mode the stream goes into the debug log file instead of
-    /dev/null, so native abort messages land there.
+    /dev/null - native abort messages (the reason for a hard crash) land
+    there, which is the difference between a diagnosable crash and a
+    silent one.
     """
     global _devnull_fd
     with _stderr_lock:
@@ -73,20 +75,28 @@ def _quiet_stderr():
 
 def _stderr_ctx_for_generate(verbose: bool):
     """Which stderr-handling context manager _generate() wraps its (single,
-    contiguous) prefill + decode-loop scope in. A pure function of *verbose*,
-    independent of grammar/grammar_lazy, so the decision is directly
-    unit-testable without constructing a real LlamaCpp/native model.
+    contiguous) prefill + decode-loop scope in. Pulled out as a pure function,
+    isolated from grammar/grammar_lazy entirely now, so the decision is
+    directly unit-testable without constructing a real LlamaCpp/native model.
 
-    verbose lets native output straight through unfiltered - nullcontext.
-    Otherwise this is always ``dedup_native_stderr`` (debuglog.py), for
-    grammar-constrained requests exactly the same as plain ones. _LineGrouper's
-    repeat-count collapsing handles the lazy sampler's per-token "Grammar still
-    awaiting trigger" volume, including a repeating multi-line CYCLE.
+    verbose already lets native output straight through unfiltered, so there
+    is nothing here to suppress or group - nullcontext. Otherwise this is
+    always ``dedup_native_stderr`` (debuglog.py), for grammar-constrained
+    requests exactly the same as plain ones.
 
-    Sharing dedup_native_stderr is safe here because BOTH of _generate()'s call
-    sites for this context manager wrap one whole prefill/decode-loop scope,
-    never re-entered per token - the requirement dedup_native_stderr's own
-    docstring imposes."""
+    Grammar used to get its own full-suppression path (_quiet_stderr) here,
+    because the lazy grammar sampler logs "Grammar still awaiting trigger
+    after token N" for every token until the trigger fires - hundreds of
+    identical lines per response with the pre-#952/#963 grouper, which only
+    collapsed a line repeated immediately after itself. That volume concern
+    is now exactly what _LineGrouper's repeat-count collapsing handles (it
+    also now tolerates a repeating multi-line CYCLE, not just one line), so
+    there is no remaining reason to hide this path's native output entirely -
+    doing so also hid real grammar diagnostics (AGENTS.md rule 5). Sharing
+    dedup_native_stderr is safe here specifically because BOTH of
+    _generate()'s call sites for this context manager already wrap one whole
+    prefill/decode-loop scope, never re-entered per token - the one
+    requirement dedup_native_stderr's own docstring imposes."""
     if verbose:
         return contextlib.nullcontext
     from localm.debuglog import dedup_native_stderr
@@ -95,13 +105,24 @@ def _stderr_ctx_for_generate(verbose: bool):
 
 # llama.cpp's own load-time report of where each backend's share of the model's
 # weights ended up, e.g. "load_tensors:        ROCm0 model buffer size =   3.35 MiB"
-# or "load_tensors:    ROCm_Host model buffer size =   3.20 MiB". llama.h exposes
-# no API for the per-backend split, so this printf is the only source for it.
+# or "load_tensors:    ROCm_Host model buffer size =   3.20 MiB". This is the ONLY
+# place that per-backend split is ever reported - llama.h exposes no API for it
+# (verified: no buffer/tensor-size introspection function is bound in _api.py,
+# and none exists to bind), it is a printf inside llama.cpp's own model-loading
+# code. Format confirmed against a real load's captured native stderr on this
+# platform's ROCm build (see dev-notes/moe-placement-report.md).
 #
-# The backend-name group is [A-Za-z0-9_]+ rather than a non-whitespace class, so
-# a failed match terminates immediately instead of backtracking across the rest
-# of the captured native stderr. Every real backend name (ROCm0, ROCm_Host,
-# CUDA0, CUDA_Host, Vulkan0, Metal, CPU, CPU_Mapped, ...) fits that class.
+# The backend-name group is deliberately [A-Za-z0-9_]+, not \S+: this text comes
+# from captured native stderr, which a hostile GGUF could in principle influence
+# (an embedded string surfacing near a "load_tensors:" line), so CodeQL correctly
+# flagged \S+ as polynomial-time on adversarial input - a string with many
+# "load_tensors:" restart points each failing to complete lets \S+ backtrack
+# across the whole remaining text at every one, O(n^2) total. Every real backend
+# name (ROCm0, ROCm_Host, CUDA0, CUDA_Host, Vulkan0, Metal, CPU, CPU_Mapped, ...)
+# is plain alphanumeric/underscore, which shares no characters with "load_tensors:"
+# (the colon) or the literal " model buffer size" (the leading space) that
+# follows - so the class has a clean, unambiguous boundary and a failed attempt
+# terminates immediately with no backtracking, restoring linear-time scanning.
 _MODEL_BUFFER_RE = re.compile(
     r"load_tensors:\s*([A-Za-z0-9_]+) model buffer size\s*=\s*([\d.]+)\s*MiB")
 
@@ -133,8 +154,9 @@ class _CapturedStderr:
         or "CPU_*" buffer, or any GPU backend's "*_Host" pinned-transfer buffer,
         is system RAM; a plain device name (ROCm0, CUDA0, Vulkan0, Metal, ...) is
         that device's VRAM. Best-effort: [] on any read failure, or when this
-        llama.cpp build's output does not match. A caller must treat an empty
-        list as "not reported", never as "0 bytes everywhere"."""
+        llama.cpp build's output does not match (a future format change) - a
+        caller must treat an empty list as "not reported", never as "0 bytes
+        everywhere" (AGENTS.md rule 5)."""
         out = []
         for m in _MODEL_BUFFER_RE.finditer(self._read()):
             name = m.group(1)
@@ -157,10 +179,14 @@ def _capture_stderr():
 
     The temp file is removed when the block exits, so a caller that wants
     .tail()/.model_buffers() MUST read them from inside the ``with`` block, not
-    after it - reading after exit silently returns "" / []. When debug mode is
-    on, the full captured text is ALSO appended to the debug log before removal,
-    matching _quiet_stderr's "debug mode sees the native stream" contract; this
-    capture is the one span _quiet_stderr does not cover (see its docstring).
+    after it - reading after exit silently returns "" / [] (this bit a first
+    version of this function, which read the failure detail after the block
+    had already unlinked the file; verified live, see the git history of this
+    docstring). When debug mode is on, the full captured text is ALSO appended
+    to the debug log before removal, matching _quiet_stderr's "debug mode sees
+    the native stream" contract at its other call sites - this capture is the
+    one span _quiet_stderr does not cover (see its docstring), so without this
+    the load's own native report would be invisible even under LOCALM_DEBUG=1.
     """
     fd, path = tempfile.mkstemp(prefix="localm_load_", suffix=".log")
     saved_fd = os.dup(2)
@@ -188,9 +214,9 @@ def _capture_stderr():
 class _CapturedStdio:
     """Holder yielded by _capture_stdio; .tail() reads whatever native text
     landed on EITHER stream while it was open. Distinct from _CapturedStderr
-    above (fd 2 only, used for llama.cpp's structured load_tensors report):
-    this one keeps an uncategorised native banner off the terminal and, on
-    failure, off the floor entirely."""
+    above (fd 2 only, used for llama.cpp's structured load_tensors report) -
+    this one exists purely to keep an uncategorised native banner off the
+    terminal and, on failure, off the floor entirely."""
 
     def __init__(self, out_path: str, err_path: str) -> None:
         self._out_path = out_path
@@ -204,9 +230,11 @@ class _CapturedStdio:
             return ""
 
     def tail(self, max_chars: int = 1500) -> str:
-        # Best-effort read of whatever landed on stdout/stderr; never raises.
-        # Order between the two streams is not preserved (they are separate
-        # files), which is enough to answer "was there anything at all".
+        # Best-effort read of whatever landed on stdout/stderr; never raise
+        # from a diagnostics helper. Order between the two streams is not
+        # preserved (they are separate files) - good enough for "was there
+        # anything at all", which is all a caller needs to decide whether to
+        # surface it.
         text = "\n".join(s for s in (self._read(self._out_path),
                                       self._read(self._err_path)) if s).strip()
         return text[-max_chars:] if len(text) > max_chars else text
@@ -218,22 +246,27 @@ def _capture_stdio():
     duration of the block.
 
     Unlike _capture_stderr above (fd 2 only - llama.cpp's structured
-    load_tensors report is always on stderr), this covers native output whose
-    stream is not documented: the ggml/backend-registration banner a GPU build
-    prints while its native library loads (e.g. "ggml_cuda_init: found 1 ROCm
-    devices..."), which load_lib() (_loader.py) triggers with no capture scope
-    of its own. Left unredirected it lands mid-line in whatever this process's
-    inherited console is currently rendering.
+    load_tensors report is always on stderr), this exists for native output
+    whose stream is not documented and not worth trusting either way: the
+    ggml/backend-registration banner a GPU build prints while its native
+    library loads (e.g. "ggml_cuda_init: found 1 ROCm devices..."), which
+    load_lib() (_loader.py) triggers with no capture scope of its own. Left
+    unredirected it lands mid-line in whatever this process's inherited
+    console is currently rendering - a parent-owned live Rich load spinner,
+    on the one caller (GgufWorker.load) this was written for.
 
     Always pair with debuglog.suppress_console_mirror() around the SAME
     scope: this only handles the OS-level fd redirect, and load_lib() also
     calls logger.warning (e.g. "no ggml compute backends registered") - in
     debug mode that reaches the terminal through the console mirror, which
-    is immune to an fd redirect (see suppress_console_mirror's own docstring).
+    is BY DESIGN immune to an fd redirect (see suppress_console_mirror's own
+    docstring; _capture_stderr's caller in this same module hit the exact
+    same gap first, for the exact same reason).
 
     The temp files are removed when the block exits, so a caller that wants
     .tail() MUST read it from inside the ``with`` block, same contract as
-    _capture_stderr above.
+    _capture_stderr above - see its docstring for why (reading after exit
+    silently returns "").
     """
     out_fd, out_path = tempfile.mkstemp(prefix="localm_loadlib_", suffix=".out.log")
     err_fd, err_path = tempfile.mkstemp(prefix="localm_loadlib_", suffix=".err.log")
@@ -307,7 +340,7 @@ class _Tokenizer:
         can straddle two tokens, so callers that stream or join multiple tokens
         must accumulate bytes and decode the run as a whole (see ``detokenize``
         and ``_utf8_pieces``); decoding each token's bytes in isolation produces
-        U+FFFD replacement characters at the split."""
+        U+FFFD replacement characters at the split (R46)."""
         buf = ctypes.create_string_buffer(256)
         n = api.llama_token_to_piece(self._vocab, token, buf, 256, 0, True)
         if n < 0:
@@ -315,8 +348,9 @@ class _Tokenizer:
             n = api.llama_token_to_piece(self._vocab, token, buf, len(buf), 0, True)
             if n < 0:
                 # The retry buffer is sized from the first call's answer, so a
-                # still-negative n means the decode genuinely failed. Slicing
-                # buf.raw[:n] with a negative n would return garbage bytes.
+                # correct runtime cannot land here; a still-negative n means the
+                # decode genuinely failed. Slicing buf.raw[:n] with a negative n
+                # would silently return garbage bytes instead (rule 5).
                 raise RuntimeError(
                     f"llama_token_to_piece failed for token {token} (returned {n})"
                 )
@@ -333,7 +367,7 @@ class _Tokenizer:
 
 
 # Stop strings supplement llama_vocab_is_eog(): some models don't register their
-# end-of-turn token in the vocab EOG list, so each token's text is checked too.
+# end-of-turn token in the vocab EOG list, so we also check each token's text.
 _STOP_STRINGS: frozenset = frozenset({
     "<|im_end|>",       # ChatML  (Mistral, Qwen, etc.)
     "<end_of_turn>",    # Gemma 1-3
@@ -371,16 +405,20 @@ def _format_chatml(messages: List[Dict]) -> str:
 
 
 def _warn_chatml_fallback(reason: str) -> None:
-    """Log that the model's own chat template could not be used and generic
-    ChatML was substituted.
-
-    ``llama_chat_apply_template`` is not a Jinja engine: it pattern-matches the
-    model's template string against a fixed list of hardcoded signatures in
-    llama.cpp's own ``llm_chat_apply_template`` and returns -1 for anything it
-    does not recognize. A model whose real dialect is not among those (most
-    non-mainstream VLMs) is then prompted in a format it was never fine-tuned
-    on, for chat and vision requests alike, so the substitution is announced
-    rather than made silently."""
+    """RAG-VISION-1: `llama_chat_apply_template` is not a real Jinja engine - it
+    pattern-matches the model's template string against a fixed list of ~54
+    hardcoded signatures in llama.cpp's own `llm_chat_apply_template` and
+    returns -1 for anything it does not recognize (confirmed against upstream
+    llama-chat.cpp). A model whose real dialect is not among those - most
+    non-mainstream VLMs, e.g. moondream2 - previously fell back to generic
+    ChatML SILENTLY: no log line, no error, just an out-of-distribution prompt
+    the model was never fine-tuned on, feeding chat AND vision requests alike.
+    Confirmed root cause of moondream2 producing degenerate/hallucinated
+    "descriptions" during a RAG image-description live test - the model itself
+    was never actually asked in a format it understands. Surfacing this
+    (AGENTS.md rule 5) does not fix that model's output quality (the real fix
+    is routing through llama.cpp's own full chat-template engine, a larger
+    change), but it stops the mismatch from being invisible."""
     from localm.debuglog import logger
     logger.warning(
         "chat template not recognized by llama.cpp's built-in matcher (%s) - "
@@ -400,10 +438,10 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Op
     normal templated render, or the reason ChatML was substituted instead
     (already passed to :func:`_warn_chatml_fallback` for the debug log). This
     function runs inside the isolated worker process and must never
-    console.print. A caller that reaches a real generation request is
-    responsible for propagating the reason to a channel visible without
-    ``--debug`` once it is back in the parent process; see GgufBackend's
-    ``_chatml_fallback`` latch in gguf.py.
+    console.print (see check_hygiene.py's child-process list) - a caller that
+    reaches a real generation request is responsible for propagating the
+    reason to a channel visible without ``--debug`` once it is back in the
+    parent process; see GgufBackend's ``_chatml_fallback`` latch in gguf.py.
     """
     tmpl_str = api.llama_model_chat_template(model_ptr)
     if not tmpl_str:
@@ -445,11 +483,11 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Op
     return buf.raw[:needed].decode("utf-8", errors="replace"), None
 
 
-# UTF-8-safe token-bytes -> text stream: a multibyte character is often emitted
-# across two or more tokens, so its bytes straddle a token boundary. Decoding
-# each token in isolation yields U+FFFD at the split, so the incremental decoder
-# buffers an incomplete trailing sequence until the next token's bytes complete
-# it.
+# UTF-8-safe token-bytes -> text stream (R46): a multibyte character is often
+# emitted across two or more tokens, so its bytes straddle a token boundary.
+# Decoding each token in isolation yields U+FFFD at the split (mid-word mojibake);
+# an incremental decoder buffers an incomplete trailing sequence until the next
+# token's bytes complete it.
 
 def _utf8_pieces(token_bytes: Iterator[bytes]) -> Iterator[str]:
     """Decode a stream of per-token byte pieces into text, never splitting a
@@ -468,8 +506,8 @@ def _utf8_pieces(token_bytes: Iterator[bytes]) -> Iterator[str]:
 
 
 # Streaming stop-string filter: an end-of-turn marker like <|im_end|> is often
-# spread across multiple tokens ('<','|','im','_','end','|>'), so the accumulated
-# text stream is filtered rather than each token.
+# spread across multiple tokens ('<','|','im','_','end','|>'), so a per-token
+# check can never catch it; we filter the accumulated text stream instead.
 
 _MAX_STOP_LEN: int = max(len(s) for s in _STOP_STRINGS)
 
@@ -520,18 +558,27 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
 # (LOCALM_DEBUG) also writes the raw unscrubbed text to the debug log. Thinking-
 # channel markers are not dropped but normalised to canonical <think> ... </think>.
 
-# The marker-scrubbing helpers live in a shared module and are re-imported here
-# under the original private names for the GGUF decode pipeline below. A second
-# pass at the engine layer is idempotent.
+# Marker scrubbing now lives in a shared module so every backend normalises the
+# same way and the engine can apply it once for all of them. It is re-imported
+# here (under the original private names) for the GGUF decode pipeline below; a
+# second pass at the engine layer is idempotent.
 from localm.textnorm import scrub_stream as _scrub_stream  # noqa: E402
 
 
 # Suffix tokens are prefilled in chunks of this size (matches n_batch ceiling)
 _PREFILL_CHUNK = 2048
 
-# Coarse decode-progress heartbeat: every N generated tokens, never per token.
-# Logged at DEBUG, so it reaches the shared debug-log file once --debug is on
-# without spending the always-on 400-record ring buffer on every generation.
+# Coarse decode-progress heartbeat: every N generated tokens, never per token
+# (a per-token line would flood the shared debug log and the bug-report
+# digest's benign-record budget - see debuglog.py's ring-buffer docstring).
+# Logged at DEBUG, not INFO - unlike the boundary markers (prefill start/
+# complete, decode entered, complete/aborted), this one recurs every N tokens
+# for the life of a generation, and the always-on ring buffer is a fixed 400
+# records shared with everything else the server logs; an INFO line here
+# would be spent forever, evicting unrelated diagnostics. It still reaches
+# the shared debug-log file once --debug is on. 50 gives several checkpoints
+# even on a short reply while keeping a stalled or crashed generation
+# localized to within ~50 tokens of decode time.
 _DECODE_PROGRESS_INTERVAL = 50
 
 
@@ -558,13 +605,13 @@ def _build_sampler(
 ) -> int:
     """
     Construct a sampler chain:
-        [grammar] -> [penalties] -> top_k -> top_p -> min_p -> temperature -> dist
+        [grammar] → [penalties] → top_k → top_p → min_p → temperature → dist
 
     The optional grammar sampler sits first so it masks invalid tokens before
     any scoring or sampling stage sees them.  The repetition-penalty stage is
     added when ``repeat_penalty != 1.0`` and the DLL exports it - without it
     models prone to looping repeat the same marker lines until max_tokens.
-    For temperature <= 0 greedy sampling replaces the stochastic stages.
+    For temperature ≤ 0 greedy sampling replaces the stochastic stages.
 
     Parameters
     ----------
@@ -580,9 +627,11 @@ def _build_sampler(
         output matches a trigger pattern; the grammar enforces from there
         (text-or-tool). When the runtime lacks the lazy export, or no
         triggers are given, the request is REFUSED with
-        :class:`GrammarUnsupportedError`: a lazy request never silently
-        becomes a strict constraint (which stalls thinking models), and never
-        silently becomes NO constraint either.
+        :class:`GrammarUnsupportedError` - a lazy request must never silently
+        become a strict constraint (a strict grammar stalls thinking models,
+        live-verified 2026-07-02), and it must never silently become NO
+        constraint either (the caller is told the reply matches a grammar it
+        was never sampled against).
     """
     from localm.inference.backends.base import (
         GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE,
@@ -595,11 +644,15 @@ def _build_sampler(
     chain_params.no_perf = True
     chain = api.llama_sampler_chain_init(chain_params)
 
-    # The grammar sampler masks logits before any scoring stage touches them.
-    # llama_sampler_init_grammar[_lazy_patterns] returns NULL (ctypes -> None)
-    # when the native GBNF parser rejects the grammar, and adding that NULL to
-    # the chain NULL-derefs at sample time. The return is checked and raised as a
-    # typed error the request path turns into a clean 400.
+    # Grammar sampler masks logits before any scoring stage touches them.
+    # llama_sampler_init_grammar[_lazy_patterns] returns NULL (ctypes -> None) when
+    # the native GBNF parser rejects the grammar. Adding that NULL to the chain
+    # NULL-derefs at sample time (a native access violation): the GGUF backend
+    # CATCHES that fault and latches _grammar_unsupported, silently stripping
+    # grammar from EVERY later request (valid ones too) until reload - one bad
+    # grammar poisoned the whole feature for all clients. So check the return and
+    # raise a typed error the request path can turn into a clean 400, instead of
+    # letting a malformed grammar reach the crash-and-latch path.
     if grammar and grammar_lazy:
         if grammar_triggers and api.has_lazy_grammar():
             gsampler = api.llama_sampler_init_grammar_lazy_patterns(
@@ -611,23 +664,34 @@ def _build_sampler(
                 raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
             api.llama_sampler_chain_add(chain, gsampler)
         else:
-            # REFUSE, do not drop: dropping the grammar would answer the request
-            # with a normal 200 of unconstrained text. http_server.py's
-            # _BACKEND_ERROR_STATUS maps GrammarUnsupportedError to 400, and
-            # _runner.py carries the type across the worker IPC as a tagged
-            # envelope, not the worker-faulted RuntimeError that evicts the model.
+            # REFUSE, do not drop. Dropping the grammar here answered the request
+            # with a normal 200 of unconstrained text that the caller had every
+            # reason to believe was grammar-conformant - the exact "a step that
+            # failed must never report success" violation, and the one the coder
+            # acts on by parsing that reply for tool calls. A typed refusal costs
+            # the caller one clean 400 naming what to do instead
+            # (http_server.py's _BACKEND_ERROR_STATUS already maps
+            # GrammarUnsupportedError -> 400; _runner.py carries the type across
+            # the worker IPC as a tagged envelope so it does not degrade into the
+            # worker-faulted RuntimeError that would evict the loaded model).
             #
-            # Two DISTINCT messages, because the two recoveries differ: a missing
-            # trigger list is fixed by sending one, a build without the native
-            # export only by dropping grammar_lazy.
+            # Two DISTINCT messages because the two recoveries are opposite: the
+            # caller fixes a missing trigger list by sending one, and can only fix
+            # a build without the native export by dropping grammar_lazy. See
+            # GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE for why reusing one string here
+            # would also mis-latch the coder's session-wide lazy-grammar disable.
             #
-            # `not grammar_triggers` is tested FIRST, mirroring the short-circuit
-            # in the `if` above: with no triggers, has_lazy_grammar() was never
-            # called, so this branch cannot know whether the export exists.
+            # `not grammar_triggers` FIRST, deliberately, and it mirrors the
+            # short-circuit in the `if` above: with no triggers, has_lazy_grammar()
+            # was never called, so this branch has no idea whether the export
+            # exists and must not imply one. A caller who is BOTH missing triggers
+            # AND on an old build therefore learns it in two steps - which is the
+            # honest order, since the missing triggers are the problem they
+            # introduced and the one they can act on right now.
             #
-            # Free the chain first, as the two InvalidGrammarError arms do:
-            # nothing else owns it yet, so raising past it leaks the native
-            # allocation.
+            # Free the chain first, exactly like the two InvalidGrammarError arms:
+            # nothing else owns it yet, so raising past it would leak the native
+            # allocation on every refusal.
             api.llama_sampler_free(chain)
             raise GrammarUnsupportedError(
                 GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE if not grammar_triggers
@@ -639,10 +703,10 @@ def _build_sampler(
             raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
         api.llama_sampler_chain_add(chain, gsampler)
 
-    # Repetition penalty applies to greedy and stochastic sampling alike. Newer
-    # builds take the vocabulary size as a leading argument; _api dispatches on
-    # the build but needs the real n_vocab to pass, since a 0 would
-    # under-allocate the sampler's frequency counters.
+    # Repetition penalty applies to greedy and stochastic sampling alike.
+    # Newer builds take the vocabulary size as a leading argument (upstream
+    # #26520); _api dispatches on the build, but it needs the real n_vocab to
+    # pass - a 0 there would under-allocate the sampler's frequency counters.
     if repeat_penalty and repeat_penalty != 1.0 and api.has_penalties_sampler():
         n_vocab = api.llama_vocab_n_tokens(vocab) if vocab else 0
         if not n_vocab and api.penalties_needs_n_vocab():
@@ -669,10 +733,13 @@ def _build_sampler(
     return chain
 
 
-# The exact, user-facing text for each way _apply_cpu_moe can decline to apply
-# the override. A single source of truth read by both the debug-log caller inside
-# the isolated child and the PARENT, which is the only process that renders it.
-# Keyed by the same short reason string _apply_cpu_moe returns.
+# The exact, user-facing text for each way _apply_cpu_moe can decline to
+# apply the override - a SINGLE source of truth read by both the (debug-log)
+# caller inside the isolated child and the PARENT, which is the only process
+# allowed to render it (see _apply_cpu_moe's own docstring for why this
+# moved out of the function entirely). Keyed by the same short reason string
+# _apply_cpu_moe returns, so the parent-side renderer cannot drift from the
+# child-side log line describing the identical fact.
 MOE_SKIP_MESSAGES = {
     "no_experts": (
         "[yellow]  n_cpu_moe:[/yellow] this model has no experts (it is not a "
@@ -696,29 +763,42 @@ def _apply_cpu_moe(mp, n_layers: int, model_path: str):
     on success, or a key into ``MOE_SKIP_MESSAGES`` naming why not.
 
     Runs inside the ISOLATED WORKER CHILD (this whole class is loaded only
-    there - see the module docstring) and must never ``console.print``: a
-    child's stdout is not the server's own console. This function only reports
-    the FACT, via ``skip_reason``, carried out through
-    ``LlamaCpp.moe_skip_reason`` and ``GgufWorker.load()``'s returned metadata
-    to ``GgufBackend._load_native()``, which renders
-    ``MOE_SKIP_MESSAGES[skip_reason]`` from the PARENT. It still logs locally
-    (``_dbg.info``/``.warning``) for the debug log.
+    there - see the module docstring / PR #606's containment). A child must
+    never ``console.print`` (its stdout is not the server's own console -
+    see ``isolated-child-must-not-console-print`` and ``_hf_worker.py``'s
+    identical note): a call here was garbling the parent's Rich spinner
+    output mid-line (confirmed live, issues/MoE model issues.txt). *This
+    function only reports the FACT* - via ``skip_reason``, carried out
+    through ``LlamaCpp.moe_skip_reason`` and ``GgufWorker.load()``'s
+    returned metadata, the exact channel this same feature already uses for
+    the placement report (see ``GgufBackend._load_native()``, which renders
+    ``MOE_SKIP_MESSAGES[skip_reason]`` from the PARENT). It still logs
+    locally (``_dbg.info``/``.warning``) for the debug log, unchanged.
 
-    A skip is LOUD, never silent: the load still proceeds with the ordinary
-    placement, and only the parent can say so without garbling its own
-    output."""
+    A skip is deliberately LOUD, never silent: the user asked for a specific
+    placement, and quietly loading with a DIFFERENT one would report success
+    for something that did not happen (AGENTS.md rule 5). The load still
+    proceeds, because a normal load is a working load - the user just has to
+    be TOLD it happened, and only the parent can tell them without garbling
+    its own output."""
     from ._loader import cpu_buffer_type
     from localm.debuglog import logger as _dbg
     # The FUSED per-layer expert weights, as llama.cpp's converters name them:
     # blk.<i>.ffn_gate_exps / ffn_down_exps / ffn_up_exps. Only these move. The
     # router (ffn_gate_inp) and any SHARED expert stay wherever the layer
-    # assignment put them: they are read for EVERY token and are tiny.
+    # assignment put them on purpose: they are read for EVERY token, and they
+    # are tiny, so moving them to system RAM would cost per-token bandwidth
+    # for almost no VRAM back.
     #
-    # Imported, not redefined here: the VRAM preflight (llamacpp/_sizing.py, via
-    # model_manager.gguf.gguf_moe_pinned_expert_bytes) must know before the load
-    # exactly which tensors this pins.
-    # A dense model has no expert tensors, so every pattern below matches nothing
-    # and the setting does nothing; that case is reported instead.
+    # SINGLE SOURCE OF TRUTH, imported rather than redefined here: the VRAM
+    # preflight (llamacpp/_sizing.py, via model_manager.gguf.gguf_moe_pinned_
+    # expert_bytes) needs to know EXACTLY which tensors this pins, before the
+    # load, to charge them correctly - a second, independently-maintained
+    # copy of this pattern would risk silently disagreeing with what
+    # actually gets pinned here.
+    # A dense model has no expert tensors, so every pattern below would match
+    # nothing and the setting would silently do nothing. Say so instead: a control
+    # that appears to apply but cannot is exactly the silent no-op rule 5 forbids.
     from localm.model_manager.gguf import (
         _MOE_TENSOR_PREFIX, _MOE_TENSOR_SUFFIX, gguf_expert_count)
     from pathlib import Path as _Path
@@ -777,16 +857,18 @@ class LlamaCpp:
         self._n_ctx       = n_ctx
         self._mtp_enabled = mtp_enabled
         # Optional preflight consulted by _prefill_fresh_context() before
-        # (re)creating a BIGGER context (conversation growth, not just the initial
-        # load already guarded by the caller's own preflight). Called with
-        # (target_n_ctx, current_ctx_capacity); returns True to keep the KV cache
-        # in VRAM, False to place it in system RAM, or None when VRAM is
-        # unmeasurable (keep the default). None (the attribute) means no check.
+        # (re)creating a BIGGER context (conversation growth, not just the
+        # initial load already guarded by the caller's own preflight). Called
+        # with (target_n_ctx, current_ctx_capacity); returns True to keep the KV
+        # cache in VRAM, False to place it in system RAM (a degrade, never an
+        # abort), or None when VRAM is unmeasurable (keep the default). None (the
+        # attribute) = no check (only a NULL-pointer check on the result after).
         self._vram_check  = vram_check
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
-        # (grow exactly as far as needed). An explicitly requested base larger
-        # than the ceiling wins; the cap only governs automatic growth.
+        # (the pre-dynamic behaviour: grow exactly as far as needed).
+        # An explicitly requested base larger than the ceiling wins - the
+        # user asked for it, the cap only governs automatic growth.
         self._n_ctx_max   = max(n_ctx_max, n_ctx) if n_ctx_max else None
         self._n_ctx_grow  = max(256, n_ctx_grow)
         self._seed        = seed
@@ -798,32 +880,32 @@ class LlamaCpp:
         self._mmproj_path = mmproj_path
         self._mtmd        = None   # MtmdContext (vision) when an mmproj is loaded
         self._tokenizer   = None   # type: ignore[assignment]
-        # Serializes native calls (prefill/decode/free) against unload: without
-        # it, an unload on another thread can llama_free the context between the
-        # generator's None-check and its next native call, a use-after-free that
-        # crashes the GPU driver. The decode loop holds _gen_lock around each
-        # native step; close()/_free_native take it too, after setting _stop so an
-        # in-flight generation bails at its next step.
+        # Serialize native calls (prefill/decode/free) against unload. Without
+        # this, an unload on another thread can llama_free the context between
+        # the generator's None-check and its next native call - a use-after-
+        # free that crashes the GPU driver. The decode loop holds _gen_lock
+        # around each native step; close()/_free_native take it too, after
+        # setting _stop so an in-flight generation bails at its next step.
         self._gen_lock    = threading.RLock()
         self._stop        = threading.Event()
         self._inference_lock = threading.Lock()
         # Persistent KV cache bookkeeping (prefix reuse across calls)
         self._cached_tokens: List[int] = []   # tokens currently in the KV cache
         self._ctx_capacity  = n_ctx           # n_ctx of the live context
-        # Where the live context's KV cache actually lives: True = VRAM
-        # (offload_kqv), False = system RAM (a prior grow found VRAM too tight).
-        # The initial context below is created with offload_kqv=True.
-        # _prefill_fresh_context updates this, and GgufBackend._check_context_fit
-        # reads it so a further grow charges the KV correctly (full target vs net
-        # delta).
+        # Where the live context's KV cache actually lives: True = VRAM (offload_kqv),
+        # False = system RAM (a prior grow found VRAM too tight). The initial context
+        # below is created with offload_kqv=True. _prefill_fresh_context updates this,
+        # and GgufBackend._check_context_fit reads it so a further grow charges the KV
+        # correctly (full target vs net delta) - otherwise a RAM-resident KV would be
+        # under-charged and wrongly flipped back to VRAM, overflowing and aborting.
         self._offload_kqv   = True
         self._kv_supported: Optional[bool] = None   # lazy llama_memory_* probe
         # Non-None once _apply_model_template has had to substitute a generic
-        # ChatML prompt because this model's own embedded template could not be
-        # used. Sticky for the life of this instance, since the underlying
-        # template never changes for a loaded model. Read by GgufWorker (via the
-        # "done" envelope) so the PARENT process can surface the degrade once,
-        # outside --debug.
+        # ChatML prompt because this model's own embedded template could not
+        # be used (RAG-VISION-1). Sticky for the life of this instance - the
+        # underlying template never changes for a loaded model. Read by
+        # GgufWorker (via the "done" envelope) so the PARENT process can
+        # surface the degrade once, outside --debug (see gguf.py).
         self.chat_template_fallback_reason: Optional[str] = None
 
         # --- load model ---
@@ -842,58 +924,85 @@ class LlamaCpp:
         # (device 0) untouched when unset. See discover.apply_main_gpu.
         from localm.discover import apply_gpu_split, apply_main_gpu
         apply_main_gpu(mp)
-        # Multi-GPU tensor-split: spreads the model across 2+ configured devices
-        # when gpu_split_indices is set (see discover.apply_gpu_split).
-        # gpu_split_ratios carries the PARENT's already-resolved effective ratios
-        # (discover.resolve_auto_split_ratios) into this isolated worker, which
-        # must not probe for them itself. The returned buffer must stay alive
-        # through llama_load_model_from_file below: it is read once at load time,
-        # not held as a live pointer.
+        # Multi-GPU tensor-split: spreads the model across 2+ configured
+        # devices when gpu_split_indices is set (see discover.apply_gpu_split).
+        # gpu_split_ratios carries the PARENT's already-resolved effective
+        # ratios (auto free-VRAM-proportional distribution,
+        # discover.resolve_auto_split_ratios) into this isolated worker, which
+        # must not probe for them itself - see that function's docstring.
+        # The returned buffer must stay alive through llama_load_model_from_file
+        # below - it is read once at load time, not held as a live pointer.
         _tensor_split_keepalive = apply_gpu_split(
             mp, ratios_override=gpu_split_ratios)
-        # Read AFTER apply_gpu_split, which forces main_gpu inside the configured
-        # split set (substituting the first split device, with a warning, when the
-        # configured main_gpu_index is not one of them). So this is the load's
-        # RESOLVED primary device, not the raw config value. The vision projector
-        # follows it below.
+        # Read AFTER apply_gpu_split, which is what makes this value meaningful:
+        # it forces main_gpu inside the configured split set (substituting the
+        # first split device, with a warning, when the configured main_gpu_index
+        # is not one of them). So this is the load's RESOLVED primary device, not
+        # the raw config value. The vision projector follows it (below) so it does
+        # not land on a card the user's split deliberately excluded.
         self._main_gpu_index = int(mp.main_gpu)
 
         # MoE expert placement (opt-in, n_cpu_moe > 0): keep the EXPERT weights of
         # the first N layers in system RAM while everything else follows the normal
         # layer assignment. This is llama.cpp's own --n-cpu-moe, driven through
-        # llama_model_params.tensor_buft_overrides. It trades VRAM FOOTPRINT, not
-        # throughput, and is default-off.
+        # llama_model_params.tensor_buft_overrides.
+        #
+        # It buys VRAM FOOTPRINT, not throughput - measured, and the distinction
+        # matters because the opposite was assumed first. On a 64-expert/8-active
+        # MoE at MATCHED VRAM it is throughput-neutral (52.23 vs 52.04 tok/s), but
+        # it reaches a given speed in far less VRAM: 21.28 tok/s in 241 MiB where
+        # whole-layer offload needed 859 MiB for 20.19. Sparsity already applies
+        # under layer offload too (a CPU-resident layer's experts are still only
+        # 8-of-64 read per token), which is why the throughput is a wash and why
+        # this is default-off: it is a footprint dial, not a free speed-up.
         #
         # The array must stay alive across llama_load_model_from_file - it is read
-        # at load time, exactly like tensor_split above - and so must every
-        # `pattern` bytes object with it, hence keeping the list, not just the
-        # array.
+        # at load time, exactly like tensor_split above - and every `pattern` bytes
+        # object with it, hence keeping the list, not just the array.
         self._moe_override_keepalive = None
-        # Why the override did not apply (a key into MOE_SKIP_MESSAGES), or None
-        # on success and when n_cpu_moe was never requested. Carried out to the
-        # parent (GgufWorker.load()'s returned metadata), which is the only
-        # process that renders it. The CALL itself is below, inside the merged
-        # native-call scope.
+        # Why the override did not apply (a key into MOE_SKIP_MESSAGES), or
+        # None on success / when n_cpu_moe was never requested - carried out
+        # to the parent (GgufWorker.load()'s returned metadata), which is the
+        # only process allowed to render it. See _apply_cpu_moe's own
+        # docstring for why this cannot be a console.print here. The CALL
+        # itself moved below, inside the merged native-call scope - see that
+        # scope's own comment for why.
         self.moe_skip_reason: Optional[str] = None
 
         # Preemptive model switching: wire llama.cpp's native load-progress
         # callback so a load can be ABORTED mid-flight. The callback returns false
         # once `cancel_event` is set, at which point llama_load_model_from_file
-        # stops and returns NULL. The CFUNCTYPE object must stay alive on self for
-        # the whole load span, or ctypes GCs it and the native side calls freed
-        # memory. The callback must NEVER raise: a Python exception inside a
-        # ctypes callback is reported as a false return, which would abort a load
-        # nobody asked to cancel, so it is fully guarded and defaults to
-        # "continue" (return True).
+        # stops and returns NULL - so a model the user has already switched away
+        # from does not run its (slow) load to completion. Keep the CFUNCTYPE
+        # object alive on self for the whole load span; ctypes would otherwise GC
+        # it and the native side would call freed memory. The callback must NEVER
+        # raise: a Python exception inside a ctypes callback is reported as a
+        # false return, which would abort a load we did not mean to cancel - so it
+        # is fully guarded and defaults to "continue" (return True).
         self._cancel_event = cancel_event
         self._load_progress_cb = None   # keep-alive ref for the native callback
         if cancel_event is not None:
-            # _progress is DISCARDED: the callback count is per-TENSOR, not
-            # per-unit-time, so most of a load elapses before the first call and
-            # the rest can fire inside one sub-millisecond tick. Load progress is
-            # reported as a PHASE over _runner.py's non-terminal "progress"
-            # envelope instead; a percentage is only meaningful inside the
-            # tensor-upload phase.
+            # _progress is DISCARDED ON PURPOSE, and it is worth saying why: it
+            # looks like a ready-made load percentage and it is not one.
+            # MEASURED 2026-08-05 across 7 configurations, by recording every
+            # call (full data: dev-notes/P14-load-progress-fraction-
+            # measurement-2026-08-05.md):
+            #   - The VALUE is impeccable - 0.0 -> 1.0, STRICTLY increasing,
+            #     zero regressions, every sample distinct, in all 7 arms.
+            #   - The TIMING is unusable. The span between the first and last
+            #     callback covers 0.0% of load wall time on CPU-only and at
+            #     best 44.5% when offloading, because the count is per-TENSOR,
+            #     not per-unit-time: it is 292 calls for a 0.5B and 340 for a
+            #     7B regardless of whether that load took 1.2s or 13.0s.
+            #   - 49% to 99% of every load elapses BEFORE the first call. On a
+            #     cold CPU-only 7B, 12.859 of 12.984s pass silently and then
+            #     all 340 calls fire inside one sub-millisecond tick.
+            # So rendering this as a bar would sit dead for most of the wait and
+            # then flash 0->100%, which is the same "claims what it does not
+            # know" defect #1098 fixed on the download path. If load progress is
+            # wanted, report a PHASE over _runner.py's non-terminal "progress"
+            # envelope; a percentage is only meaningful INSIDE the tensor-upload
+            # phase and must be labelled as such.
             @ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_float, ctypes.c_void_p)
             def _load_progress(_progress, _user_data, _ev=cancel_event):
                 try:
@@ -903,24 +1012,49 @@ class LlamaCpp:
             self._load_progress_cb = _load_progress
             mp.progress_callback = ctypes.cast(_load_progress, ctypes.c_void_p)
 
-        # ONE CONTIGUOUS scope for the whole native-call span, from backend init
-        # through the model load, so nothing between llama_backend_init() and
-        # llama_load_model_from_file() can reach fd 2 unredirected. The Python-only
-        # setup calls inside this scope write nothing to fd 2 themselves.
+        # ONE CONTIGUOUS scope for the whole native-call span, from backend
+        # init through the model load - llama_backend_init() used to get its
+        # own separate _quiet_stderr() scope that exited before this one
+        # began, leaving a gap (this span's Python-only setup above: GPU
+        # split/main_gpu, and - the concrete bug this closes - _apply_cpu_moe)
+        # where fd 2 was back to whatever the CHILD inherited from the PARENT
+        # at spawn, i.e. the SAME terminal the parent's Rich load spinner
+        # renders to. Merging removes that gap entirely: nothing between
+        # llama_backend_init() and llama_load_model_from_file() can now reach
+        # fd 2 unredirected. Safe to include the Python-only setup calls in
+        # this same scope - none of them write to fd 2 themselves (confirmed:
+        # apply_main_gpu/apply_gpu_split's only native call, llama_max_devices(),
+        # is a compile-time-constant getter, not a device probe).
         #
-        # suppress_console_mirror() is paired with it: debuglog.py's console
-        # mirror is immune to an fd-2 redirect, so _apply_cpu_moe's own logging
-        # calls would otherwise write straight to the terminal from this child
-        # process and desync the parent's Rich Live region.
+        # THAT ALONE IS NOT ENOUGH, which is why suppress_console_mirror() is
+        # paired with it below. _apply_cpu_moe's own _dbg.info/.warning calls
+        # (kept "for the debug log", per its docstring) go through Python's
+        # logging module, not fd 2 - and in debug mode, debuglog.py's console
+        # mirror is BY DESIGN immune to this exact fd-2 redirect (see
+        # _stable_console_stream's own docstring: "so the console mirror is
+        # immune to the OS-level fd-2 redirection... juggled"), so it still
+        # wrote straight to the terminal from this child process, invisible
+        # to the parent's Rich Live region, desyncing its cursor bookkeeping
+        # and stranding an orphaned "0:00:00" spinner frame on screen -
+        # reported live from a real load with LOCALM_DEBUG on and n_cpu_moe
+        # set, root-caused to this exact call site by tracing the code (no
+        # native fd-2 write was ever unaccounted for; the console mirror's
+        # own documented fd-2 immunity was the missing piece).
+        # Do NOT assume widening this redirect scope on its own would ever
+        # cover that: the mirror's whole point is to survive an fd-2 redirect,
+        # so it needs its OWN, separate gate every time this scope is touched.
         #
-        # Capture (not just quiet) for the whole span, non-verbose only, so a NULL
-        # return still carries its cause (OOM / no-backends / bad-quant) and a
-        # successful return still carries llama.cpp's load_tensors report of where
-        # each backend's share of the weights landed (see _MODEL_BUFFER_RE). Both
-        # reads happen INSIDE the ``with`` block: _capture_stderr unlinks its temp
-        # file the moment the block exits, so reading after exit returns "" or [].
-        # Verbose mode leaves this untouched (nullcontext, captured=None, mirror
-        # left alone).
+        # Capture (not just quiet) for the whole span, non-verbose only, so a
+        # NULL return still carries its cause (OOM / no-backends / bad-quant),
+        # and a successful return still carries llama.cpp's own load_tensors
+        # report of where each backend's share of the weights actually landed
+        # (the only source for that - see _MODEL_BUFFER_RE). Both reads happen
+        # INSIDE the ``with`` block - _capture_stderr unlinks its temp file the
+        # moment the block exits, so reading after exit silently returns ""
+        # / [] (see that function's docstring). Verbose mode leaves this
+        # untouched (nullcontext, captured=None; mirror also left alone): the
+        # native stream already reaches terminal/debug directly, and there is
+        # nothing captured to parse.
         from localm.debuglog import suppress_console_mirror
         _load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
         _mirror_ctx = suppress_console_mirror if not verbose else contextlib.nullcontext
@@ -952,9 +1086,17 @@ class LlamaCpp:
                 f"Failed to load model: {model_path}{hint}{suffix}")
 
         # Model's true transformer layer count, read once here from the loaded
-        # model. The GGUF backend caches it (localm.model_meta) so later loads and
-        # the GUI VRAM estimate can size a partial GPU offload precisely; the
-        # clamp note below reuses it.
+        # model. This is the only place it is currently EXPOSED, which is NOT the
+        # same as the only place it is knowable: this comment used to claim "there
+        # is no pre-load GGUF header parser in the tree" and that is simply false.
+        # model_manager/gguf.py parses the header before any load, and
+        # gguf_kv_bytes_per_token already reads <arch>.block_count off it - it just
+        # consumes the value for KV arithmetic instead of surfacing it. So a
+        # pre-load layer count is an extraction away, not a missing capability;
+        # anyone weighing a layer-count denominator should cost it on that basis.
+        # The GGUF backend caches this one (localm.model_meta) so later loads and
+        # the GUI VRAM estimate can size a partial GPU offload precisely; the clamp
+        # note below reuses it.
         self.n_layers: Optional[int] = None
         try:
             actual = api.llama_model_n_layer(self._model_ptr)
@@ -966,12 +1108,14 @@ class LlamaCpp:
         # Architecture-accurate KV-cache size PER TOKEN, in bytes, read once here
         # from the model's attention shape (see _read_kv_bytes_per_token). This is
         # what a full-context KV cache costs per token in VRAM; the grow-time
-        # decision (GgufBackend._check_context_fit) reads this attribute.
+        # decision (GgufBackend._check_context_fit, which reads this attribute) uses
+        # it instead of a file-size heuristic that under-counted wide-KV models by
+        # ~2.6x.
         self.kv_bytes_per_token: int = self._read_kv_bytes_per_token()
 
-        # llama.cpp already offloads min(n_gpu_layers, actual), so an over-large
-        # value is harmless, but a clamped SPECIFIC number is surfaced as a
-        # message. 99 = "offload all", so it is skipped.
+        # REC-GPULAYERS-CLAMP: llama.cpp already offloads min(n_gpu_layers, actual),
+        # so an over-large value is harmless - but silently clamping a SPECIFIC
+        # number is confusing, so surface a message. 99 = "offload all", so skip it.
         if 0 < n_gpu_layers < 99 and self.n_layers and n_gpu_layers > self.n_layers:
             from localm.debuglog import logger
             logger.info(
@@ -990,10 +1134,11 @@ class LlamaCpp:
             cp.n_threads       = n_threads
             cp.n_threads_batch = n_threads
 
-        # A separate, later native call than the merged load scope above (it needs
-        # the just-loaded self._model_ptr), kept on plain _quiet_stderr: nothing
-        # here logs via the isolated child's console mirror, and there is nothing
-        # to capture or parse from this call.
+        # A separate, later native call than the merged load scope above (it
+        # needs the just-loaded self._model_ptr) - kept on plain _quiet_stderr,
+        # not the mirror-gated/capture scope: nothing runs here that logs via
+        # the isolated child's console mirror, so there is no equivalent gap
+        # to close, and there is nothing to capture/parse from this call.
         _ctx = _quiet_stderr if not verbose else contextlib.nullcontext
         with _ctx():
             self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
@@ -1034,19 +1179,22 @@ class LlamaCpp:
 
     def _load_mmproj(self, mmproj_path: str, verbose: bool) -> None:
         """Load *mmproj_path* via mtmd and set self._mtmd, or leave it None on
-        any failure. Pulled out of __init__ so the wrap is directly unit-testable
+        any failure. Pulled out of __init__ (same reasoning as
+        _stderr_ctx_for_generate above) so the wrap is directly unit-testable
         without a real native model.
 
         Wrapped in the SAME mirror+capture scope as the main model load in
         __init__: MtmdContext.__init__ makes several native calls of its own
         (mtmd_init_from_file for the CLIP/vision projector, then the
-        mtmd_tokenize-based ABI probe in _detect_input_text_class), so without it
-        the projector's tensor-by-tensor load report and the ABI probe's raw text
-        payload land on the real console unfiltered. _capture_stderr also keeps a
-        failure's native reason: MtmdContext.__init__ RAISES rather than
-        returning NULL (unlike the main model load in __init__), so the detail is
-        grabbed INSIDE the ``with`` block, before its temp file is unlinked on
-        exit (see _capture_stderr's own docstring)."""
+        mtmd_tokenize-based ABI probe in _detect_input_text_class) and none of
+        them were ever redirected, so the projector's tensor-by-tensor load
+        report and the ABI probe's raw text payload both landed on the real
+        console unfiltered - see dev-notes for the field logs this was found
+        from. _capture_stderr also means a failure still carries its native
+        reason instead of losing it: MtmdContext.__init__ RAISES rather than
+        returning NULL (unlike the main model load in __init__), so the detail
+        is grabbed INSIDE the ``with`` block, before its temp file is unlinked
+        on exit (see _capture_stderr's own docstring)."""
         from localm.debuglog import suppress_console_mirror
         _mtmd_load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
         _mtmd_mirror_ctx = suppress_console_mirror if not verbose else contextlib.nullcontext
@@ -1055,8 +1203,10 @@ class LlamaCpp:
             with _mtmd_mirror_ctx(), _mtmd_load_ctx() as captured:
                 try:
                     from .mtmd import MtmdContext
-                    # getattr, not self._main_gpu_index: the attribute can be
-                    # absent, and 0 is the "leave clip's own default alone" value.
+                    # getattr, not self._main_gpu_index: this method is unit-tested
+                    # directly against instances that never ran __init__ (see this
+                    # docstring's note on why it was pulled out), and 0 is exactly
+                    # the "leave clip's own default alone" value.
                     mt = MtmdContext(
                         mmproj_path, self._model_ptr,
                         gpu_index=getattr(self, "_main_gpu_index", 0))
@@ -1071,8 +1221,10 @@ class LlamaCpp:
         except Exception as exc:
             from localm.debuglog import logger
             suffix = f"\n{_mtmd_detail}" if _mtmd_detail else ""
-            # WARNING, not debug: a vision model dropping to text-only is a
-            # capability loss the user must see without LOCALM_DEBUG=1.
+            # WARNING, not debug: a vision model that silently drops to
+            # text-only is a real capability loss the user asked for and
+            # did not get (AGENTS.md rule 5) - it must reach a level they
+            # will actually see, not only LOCALM_DEBUG=1.
             logger.warning(
                 "mmproj load failed (%s); model stays text-only%s", exc, suffix)
             self._mtmd = None
@@ -1085,17 +1237,18 @@ class LlamaCpp:
 
         K and V cache = n_layers x n_head_kv x head_dim, times 2 (K and V) and
         times 2 bytes/element (the f16 KV cache, llama.cpp's default type_k/type_v).
-        head_dim = n_embd / n_head. n_head_kv is fewer than n_head under
-        grouped-query attention, so the true KV cost is smaller than a naive
-        n_head estimate.
+        head_dim = n_embd / n_head. n_head_kv (fewer than n_head under grouped-query
+        attention) is exactly why the true KV cost is smaller than a naive n_head
+        estimate - and why estimating it from file size alone is unreliable.
 
         REFUSES on a hybrid/recurrent stack. That formula assumes every layer holds
         a KV cache, which is false for Qwen3-Next, Granite 4 H, LFM2, Jamba and the
         rest, where most layers keep a FIXED-size recurrent state instead and cost
         no per-token KV at all. The exported llama_model_n_head_kv reports LAYER 0
         only (upstream n_head_kv() defaults il=0), so there is nothing here to sum
-        over. Returning 0 hands the question to the caller's next source, the GGUF
-        header probe, which CAN read the exact per-layer array."""
+        over - and answering anyway over-charges by the ratio of attending layers
+        to all layers. Returning 0 hands the question to the caller's next source,
+        the GGUF header probe, which CAN read the exact per-layer array."""
         try:
             if self.n_layers and api.has_kv_head_api():
                 if api.has_hybrid_api() and (
@@ -1110,8 +1263,10 @@ class LlamaCpp:
                     return self.n_layers * n_head_kv * head_dim * 2 * 2
         except Exception as exc:
             # A genuine failure here (NOT the expected has_kv_head_api-False path,
-            # which skips the block and returns 0 cleanly) drops back to the
-            # under-counting size heuristic, so it is logged before degrading.
+            # which skips the block and returns 0 cleanly) silently drops back to
+            # the under-counting size heuristic - which can re-enable the very
+            # Vulkan crash this figure exists to avoid. Log it so that regression is
+            # discoverable rather than invisible (rule 5: surface, then degrade).
             from localm.debuglog import logger as _dbg
             _dbg.debug("kv_bytes_per_token computation failed (%s); falling back to "
                        "the size-class estimate", type(exc).__name__)
@@ -1174,8 +1329,8 @@ class LlamaCpp:
 
     def detokenize(self, tokens: Iterable[int]) -> str:
         # Join the raw token bytes first, then decode once, so a multibyte
-        # character that straddles a token boundary is not split into U+FFFD.
-        # Per-token decode would mangle exactly those boundaries.
+        # character that straddles a token boundary is not split into U+FFFD
+        # (R46). Per-token decode would mangle exactly those boundaries.
         raw = b"".join(self._tokenizer.token_to_piece_bytes(t) for t in tokens)
         return raw.decode("utf-8", errors="replace")
 
@@ -1261,33 +1416,44 @@ class LlamaCpp:
             # minimal reply cannot fit any more.
             max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
 
-            # grammar/grammar_lazy do not select a different stderr context here;
-            # the grammar path uses the same one as plain generation (see
-            # _stderr_ctx_for_generate).
+            # grammar/grammar_lazy no longer pick a different stderr context here -
+            # see _stderr_ctx_for_generate's docstring for why the grammar path
+            # was folded into the same one as plain generation.
             _ctx = _stderr_ctx_for_generate(self._verbose)
 
             # If unlimited (<= 0), allocate a modest chunk up front and grow later
             initial_budget = max_new_tokens if max_new_tokens > 0 else 512
             needed = n_prompt + initial_budget + 64
 
-            # BOUNDARY LOGGING at INFO, placing a native crash mid-generation in
-            # prefill vs decode. This method runs inside the isolated worker
-            # process and the parent's ring buffer is process-local, so it reaches
-            # a bug report only once --debug is on. Per-token detail never lands
-            # here - see _DECODE_PROGRESS_INTERVAL.
+            # BOUNDARY LOGGING (dev-notes/generation-path-logging-instrumentation-
+            # 2026-08-12.md): between "model loaded" and either a token or a
+            # corpse this worker used to emit nothing at any level, so a native
+            # crash mid-generation could not be placed in prefill vs decode.
+            # INFO, following discover.py's resolve_auto_split_ratios precedent
+            # ("the always-on ring buffer is INFO+, so a bug report ... shows
+            # what was decided") - though here that only reaches a bug report
+            # once --debug is on, since this method runs inside the isolated
+            # worker process and the parent's ring buffer is process-local (see
+            # the dev-note). Per-token detail never lands here - see
+            # _DECODE_PROGRESS_INTERVAL.
             from localm.debuglog import logger
             logger.info("gguf generate: prefill starting, %d prompt token(s)", n_prompt)
             _t0 = time.monotonic()
             tokens_generated = 0
             in_decode = False
+            # Both handles are freed in the finally below, which is reachable
+            # before either is bound: the _stop check right after the lock, and
+            # any raise out of prefill, both exit early. Binding one inside the
+            # try loses the real error to an UnboundLocalError.
             sampler = None
+            draft_sampler = None
             try:
                 # One contiguous suppression scope covering context work and
                 # prefill. The ROCm lazy-buffer verification messages fire
                 # asynchronously after llama_init_from_model returns but before
                 # the first llama_decode completes, so separate windows leave a
-                # gap. Prefill (re)creates and decodes into the context, so it
-                # must hold the lock against a concurrent unload too.
+                # gap. Prefill (re)creates/decodes into the context, so it must
+                # hold the lock against a concurrent unload too.
                 with self._gen_lock:
                     if self._stop.is_set():
                         return
@@ -1316,7 +1482,18 @@ class LlamaCpp:
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
                 )
-                draft_sampler = api.llama_sampler_init_greedy() if self._mtp_ctx_ptr is not None else None
+                # Drafting samples with a plain greedy sampler and then pushes the
+                # winning token into the main chain. With a grammar in that chain
+                # the token was chosen without the grammar's mask, so it can be one
+                # the grammar forbids, and accepting it advances the parse stacks
+                # out of step - the same mis-sequenced accept documented below,
+                # which throws across the C ABI. Constrained requests therefore
+                # take the single-token path.
+                draft_sampler = (
+                    api.llama_sampler_init_greedy()
+                    if self._mtp_ctx_ptr is not None and grammar is None
+                    else None
+                )
 
                 pos = n_prompt
                 # Why generation ended, read by callers as self.last_finish_reason.
@@ -1329,11 +1506,12 @@ class LlamaCpp:
                 _decode_t0 = time.monotonic()
                 # ONE contiguous _ctx() scope for the whole streaming loop, not
                 # re-entered per native call: dedup_native_stderr() spins up a
-                # background reader thread, and re-entering it per token resets its
-                # dedup state and pays thread-creation cost per token. The native
-                # calls below run unwrapped inside this single scope; the yield in
-                # between stays wrapped, since inference is already serialized
-                # process-wide.
+                # background reader thread, so re-entering it per-token would
+                # both reset its dedup state every time (defeating grouping
+                # across tokens) and pay thread-creation cost per token. The
+                # native calls below run unwrapped inside this single scope;
+                # the yield in between is safe to leave wrapped too, since
+                # inference is already serialized process-wide.
                 with _ctx():
                     while max_new_tokens <= 0 or tokens_generated < max_new_tokens:
                         # --- locked native region 1: sample the next token ---
@@ -1344,12 +1522,14 @@ class LlamaCpp:
                                 # into the native library, which crashes the driver.
                                 self.last_finish_reason = "error"
                                 break
-                            # llama_sampler_sample() already ACCEPTS the sampled
-                            # token into every stateful sampler in the chain. A
-                            # second explicit accept advances the grammar parser
-                            # twice per token, emptying its parse stacks and
-                            # throwing std::runtime_error across the C ABI, and it
-                            # double-counts tokens in the repetition-penalty
+                            # llama_sampler_sample() already ACCEPTS the sampled token
+                            # into every stateful sampler in the chain (documented
+                            # upstream as "sample and accept"). A second explicit
+                            # accept here advanced the grammar parser twice per token,
+                            # emptying its parse stacks and throwing std::runtime_error
+                            # across the C ABI (WinError 0xe06d7363) - the "grammar
+                            # sampler fault" that kept grammar enforcement dormant. It
+                            # also double-counted tokens in the repetition-penalty
                             # window. Do NOT re-add an accept after sample.
                             token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
                             eog = self._tokenizer.is_eog(token)
@@ -1361,7 +1541,32 @@ class LlamaCpp:
                         yield token   # consumer runs here; an unload can interleave
                         tokens_generated += 1
 
+                        # Coarse heartbeat, OUTSIDE the lock above (never add
+                        # work to a native-call-holding region). DEBUG, not
+                        # INFO: the file-side ring-buffer precedent this whole
+                        # scheme follows (discover.py) is explicit that INFO is
+                        # for a decision made once per call, not a recurring
+                        # tick - the always-on ring buffer holds 400 records
+                        # SHARED across everything the server logs, and an
+                        # INFO line here is spent on every generation forever.
+                        # Only the phase BOUNDARIES (prefill start/complete,
+                        # decode entered, complete/aborted - roughly four per
+                        # generation) are affordable at that level; this one
+                        # still reaches the shared debug-log file once --debug
+                        # is on, which is where a stalled-vs-hung decode is
+                        # actually diagnosed.
+                        if (tokens_generated
+                                and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
+                            logger.debug(
+                                "gguf generate: decode progress, %d token(s) in %.2fs",
+                                tokens_generated, time.monotonic() - _decode_t0)
+
                         if max_new_tokens > 0 and tokens_generated >= max_new_tokens:
+                            # The while/else below only runs when the loop exits by
+                            # CONDITION, and this break skips it, so the reason is
+                            # set here too. Callers read it to tell a reply that ran
+                            # out of budget from one the model chose to end.
+                            self.last_finish_reason = "length"
                             # Final token budget reached, update KV cache bookkeeping
                             with self._gen_lock:
                                 if not (self._stop.is_set() or self._ctx_ptr is None):
@@ -1459,13 +1664,14 @@ class LlamaCpp:
                                         current_needed = pos + 512
                                         target = self._target_ctx(current_needed)
                                         if target > self._ctx_capacity:
-                                            # Growth is possible: re-prefill the
-                                            # context. Free the old batch (its
-                                            # layout matches the OLD context)
+                                            # We can grow! Re-prefill the context. Free the
+                                            # old batch (its layout matches the OLD context)
                                             # BEFORE the re-prefill, because
-                                            # _prefill_fresh_context can raise and
-                                            # a llama_batch_init allocation is
-                                            # freed only by llama_batch_free.
+                                            # _prefill_fresh_context can raise (NULL context,
+                                            # a decode failure, an unload) and the native
+                                            # batch must not leak if it does. AUDIT: a
+                                            # llama_batch_init allocation is freed only by
+                                            # llama_batch_free.
                                             api.llama_batch_free(batch)
                                             batch = None
                                             prompt_and_gen = self._cached_tokens.copy()
@@ -1488,17 +1694,6 @@ class LlamaCpp:
                                     # _prefill_fresh_context above raises mid-growth.
                                     if batch is not None:
                                         api.llama_batch_free(batch)
-                        # Coarse heartbeat, OUTSIDE the lock above: never add work
-                        # to a native-call-holding region. DEBUG, not INFO, since
-                        # it recurs for the life of a generation and the always-on
-                        # ring buffer holds 400 records shared across everything
-                        # the server logs. It still reaches the shared debug-log
-                        # file once --debug is on.
-                        if (tokens_generated
-                                and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
-                            logger.debug(
-                                "gguf generate: decode progress, %d token(s) in %.2fs",
-                                tokens_generated, time.monotonic() - _decode_t0)
                     else:
                         # Budget exhausted without the model finishing its turn
                         self.last_finish_reason = "length"
@@ -1568,15 +1763,22 @@ class LlamaCpp:
         on the image path. mtmd fills the KV from scratch, so the text KV-reuse
         cache is invalidated afterwards.
 
-        BOUNDARY LOGGING: same scheme as _generate (prefill start/complete, decode
-        entered, complete/aborted with phase and token count), with a "vision" tag
-        on every line so a shared debug log distinguishes the two paths.
-
-        Structural constraint: this method's ``_ctx()``/dedup_native_stderr usage
-        is re-entered per native call here, unlike _generate's single contiguous
-        scope. Every ``with _ctx():`` block must keep its exact position and entry
-        count; the try/except/finally covers prefill as well as decode, so an
-        exception during eval_into does not look identical to a hang."""
+        BOUNDARY LOGGING (dev-notes/generation-path-logging-instrumentation-
+        2026-08-12.md): same scheme as _generate (prefill start/complete,
+        decode entered, complete/aborted with phase and token count) - this
+        is the OTHER live generation path in this file, and the crash log
+        that motivated the scheme was a vision-model load, so leaving this
+        path uninstrumented would have reproduced the exact gap being fixed.
+        The "vision" tag on every line distinguishes it from _generate's in a
+        shared debug log. Structural note: this method's own comment above
+        (kept verbatim below) explicitly warns against restructuring its
+        _ctx()/dedup_native_stderr usage - re-entered per native call here,
+        unlike _generate's single contiguous scope. This change does not
+        touch that: the try/except/finally widens to cover prefill as well
+        as decode (matching _generate's restructuring for the SAME reason -
+        an exception during eval_into must not look identical to a hang -
+        see _generate's own note on this), but every `with _ctx():` block
+        keeps its exact original position and entry count."""
         with self._inference_lock:
             if not self._model_ptr or getattr(self, "_mtmd", None) is None:
                 raise RuntimeError("vision is not available on this model")
@@ -1596,12 +1798,18 @@ class LlamaCpp:
                 bos_markers = ("<bos>", "<s>", "﻿")
                 add_special = not any(prompt.startswith(m) for m in bos_markers)
 
-                # Stays on _quiet_stderr rather than _generate()'s
-                # dedup_native_stderr: below, _ctx() is entered once for the mtmd
-                # prefill AND AGAIN INSIDE THE PER-TOKEN LOOP, never hoisted into
-                # one contiguous scope. dedup_native_stderr spins up a background
-                # reader thread per entry, so re-entering it per token resets its
-                # dedup grouping and pays thread-creation cost per token.
+                # Stays on _quiet_stderr rather than _generate()'s dedup_native_stderr
+                # (see the why-comment there): below, _ctx() is entered once for the
+                # mtmd prefill AND AGAIN INSIDE THE PER-TOKEN LOOP (the llama_decode
+                # call further down), never hoisted to one contiguous scope the way
+                # _generate() was restructured to do. dedup_native_stderr spins up a
+                # background reader thread per entry - re-entering it per token would
+                # both reset its dedup grouping on every token (defeating it) and pay
+                # real thread-creation cost per token, exactly the anti-pattern
+                # dedup_native_stderr's own docstring warns against. Widening this
+                # path needs the same per-call-not-per-token restructuring _generate()
+                # got in #443 first; doing it as a side effect here risks regressing
+                # a working vision-generation path for a log-formatting fix.
                 _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
                 self.last_finish_reason = "stop"
                 with self._gen_lock:
@@ -1616,12 +1824,13 @@ class LlamaCpp:
                             pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
                                                        add_special=add_special)
                         except MtmdGpuEncodeFailed:
-                            # The projector runs on the GPU, and a GPU encode that
-                            # fails mid-flight gets exactly one CPU retry before
-                            # the request fails. The KV must be reset again first:
-                            # the failed evaluation already wrote into it.
-                            # Rebuilding is latched in the MtmdContext, so this
-                            # costs one retry per model load, not one per image.
+                            # The projector runs on the GPU now; a GPU encode that fails
+                            # mid-flight (the documented gfx1030 / RDNA2 hipBLAS BF16
+                            # case) is worth exactly one CPU retry before the request
+                            # fails. The KV must be reset again first: the failed
+                            # evaluation already wrote into it. Rebuilding is latched in
+                            # the MtmdContext, so this costs one retry per model load,
+                            # not one per image.
                             if not self._mtmd.retry_on_cpu():
                                 raise
                             self._reset_kv_for_image()
@@ -1648,7 +1857,7 @@ class LlamaCpp:
                             self.last_finish_reason = "error"
                             break
                         # No explicit accept: llama_sampler_sample() accepts
-                        # internally (see the note in _generate).
+                        # internally (see the why-comment in _generate).
                         token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
                         eog = self._tokenizer.is_eog(token)
                     if eog:
@@ -1769,12 +1978,13 @@ class LlamaCpp:
 
         # Drop cached tokens past the common prefix. The empty-bookkeeping case
         # (``not self._cached_tokens``) is NOT redundant with ``prefix < len(...)``:
-        # an image turn (_generate_image never appends its tokens) and a
-        # mid-generate decode failure both leave the NATIVE KV populated while
-        # _cached_tokens is []. Without this branch the guard is 0 < 0 (False),
-        # the wipe is skipped, and the new prompt decodes onto stale KV at shifted
-        # positions. When empty, prefix is 0, so seq_rm(0, 0, -1) drops the
-        # residual and the suffix decodes cleanly from position 0.
+        # an image turn (_generate_image never appends its tokens) and a mid-generate
+        # decode failure both leave the NATIVE KV populated while _cached_tokens is [].
+        # Without this branch the guard is 0 < 0 (False), the wipe is skipped, and the
+        # new prompt decodes onto stale KV at shifted positions (U-1: "sees earlier
+        # text out of order"). A zero prefix clears the memory outright instead of
+        # removing a range: recurrent and M-RoPE state cannot be partially rewound,
+        # so a range removal can leave them stale.
         if prefix == 0:
             api.llama_memory_clear(mem, True)
             if self._mtp_ctx_ptr is not None:
@@ -1848,21 +2058,23 @@ class LlamaCpp:
         freeing the live context, so a refusal leaves the old, still-working
         context and its cache intact instead of destroying it first and only
         then discovering the bigger replacement cannot fit. This is the same
-        "will it fit" question the caller's own preflight answers for the
-        INITIAL load, applied to growth - which the very first prompt already
-        triggers whenever it needs more than the base n_ctx.
+        "will it fit" question the caller's own preflight already answered for
+        the INITIAL load; growth (e.g. the very first prompt, since a request
+        needing more than the base n_ctx forces a grow here) got no such check
+        until this hook - only a NULL-pointer check on the result, after the
+        native call already ran.
         """
         target = self._target_ctx(needed)
         offload_kqv = True
         vram_check = getattr(self, "_vram_check", None)
         if vram_check is not None:
             # Ask WHERE this context's KV cache must live. The check reads
-            # self._offload_kqv (the CURRENT placement) to charge correctly: the
-            # net growth when the old KV is in VRAM and reclaimed by the free
-            # below, or the full target when the old KV is already in system RAM.
-            # When it does not fit VRAM, the FULL window is kept and the KV cache
-            # goes to system RAM (slower) rather than shrinking the window or
-            # refusing.
+            # self._offload_kqv (the CURRENT placement) to charge correctly: the net
+            # growth when the old KV is in VRAM and reclaimed by the free below, or the
+            # full target when the old KV is already in system RAM (nothing to reclaim).
+            # If it does not fit VRAM, keep the FULL window but put the KV cache in
+            # system RAM (slower) rather than shrinking the window or refusing - a
+            # degrade, not an abort, so a model that can run always runs.
             decision = vram_check(target, self._ctx_capacity)
             if decision is False:
                 offload_kqv = False
@@ -1880,10 +2092,10 @@ class LlamaCpp:
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
         if not self._ctx_ptr:
-            # The native context could not be created. Report where the KV was
-            # placed: "even in system RAM" only when RAM was actually chosen; when
-            # it was judged to fit VRAM and still failed, say that rather than
-            # claim a RAM fallback that was never attempted.
+            # The native context could not be created. Report HONESTLY where the KV was
+            # placed (rule 5): "even in system RAM" only when we actually chose RAM;
+            # if we judged it fit VRAM and it still failed, say so - do not claim a RAM
+            # fallback we never attempted.
             where = ("even with the KV cache in system RAM"
                      if not offload_kqv else "with the KV cache in VRAM")
             raise RuntimeError(
@@ -1970,7 +2182,7 @@ class LlamaCpp:
         With ``stream=False`` returns a single completion dict.
         """
         # Use the model's embedded chat template when available (Gemma, Llama3,
-        # Mistral, etc.).
+        # Mistral, etc.) so we don't force ChatML on every model.
         prompt, fallback_reason = _apply_model_template(self._model_ptr, messages)
         if fallback_reason:
             self.chat_template_fallback_reason = fallback_reason
@@ -2034,7 +2246,7 @@ class LlamaCpp:
         where chat content is never persisted (debug_content_enabled)."""
         from localm.debuglog import debug_content_enabled, logger
         # Decode token BYTES through one UTF-8-safe stream so a character split
-        # across a token boundary is reassembled, not turned into U+FFFD.
+        # across a token boundary is reassembled, not turned into U+FFFD (R46).
         raw = _utf8_pieces(self._tokenizer.token_to_piece_bytes(t) for t in gen)
         if debug_content_enabled():
             captured: list = []

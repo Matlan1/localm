@@ -6,7 +6,7 @@ The native DLL is never loaded - the api module is mocked throughout.
 """
 
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -58,12 +58,30 @@ def _bare_llama() -> LlamaCpp:
     llm._ctx_capacity = 4096
     llm._kv_supported = None
     llm._vram_check = None
+    # __init__ always sets this (None when the model has no MTP heads), and
+    # twelve call sites read it directly. A hand-built instance that omits it
+    # is not a LlamaCpp.
+    llm._mtp_ctx_ptr = None
     # Native-call serialization primitives normally set up in __init__.
     llm._gen_lock = threading.RLock()
     llm._stop = threading.Event()
     llm._inference_lock = threading.Lock()
     _LIVE_FAKES.append(llm)
     return llm
+
+
+@pytest.fixture(autouse=True)
+def _no_native_mrope_probe():
+    """_can_reuse_kv asks the model whether it uses M-RoPE, and that probe is a
+    REAL native call. Handed this file's fake integer model pointer it loads the
+    llama.cpp runtime and faults on a bad address, so answering it here is what
+    keeps the module docstring's promise that the DLL is never touched. Tests
+    that care about the M-RoPE branch patch it themselves."""
+    with patch(
+        "localm.inference.backends.llamacpp.llama.api.llama_model_has_mrope",
+        return_value=False,
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +134,17 @@ class TestCanReuseKv:
         ):
             assert llm._can_reuse_kv(100) is False
         assert llm._kv_supported is False
+
+    def test_no_reuse_for_mrope_models(self):
+        """M-RoPE positions tokens on a multi-dimensional coordinate grid that
+        sequence removal cannot rewind, so the context must start clean."""
+        llm = _bare_llama()
+        llm._kv_supported = True
+        with patch(
+            "localm.inference.backends.llamacpp.llama.api.llama_model_has_mrope",
+            return_value=True,
+        ):
+            assert llm._can_reuse_kv(100) is False
 
     def test_probe_result_cached(self):
         llm = _bare_llama()
@@ -207,25 +236,27 @@ class TestPrefillWithReuse:
         with ctx:
             llm._prefill_with_reuse([1, 2, 3])
 
-        mock_api.llama_memory_seq_rm.assert_called_once_with(333, 0, 0, -1)
+        mock_api.llama_memory_clear.assert_called_once_with(333, True)
+        mock_api.llama_memory_seq_rm.assert_not_called()
         # Full prompt decoded from position 0 after the wipe.
         args = mock_api.llama_batch_init.call_args[0]
         assert args[0] == 3
         assert llm._cached_tokens == [1, 2, 3]
 
-    def test_empty_cache_seq_rm_failure_falls_back_to_clear(self):
-        """Same empty-bookkeeping case, but partial removal is unsupported: fall
-        back to a full clear so the stale native KV is still wiped."""
+    def test_zero_prefix_also_clears_the_draft_context_memory(self):
+        """A model with MTP heads keeps a second KV cache for its draft context.
+        Wiping only the main one leaves the draft still holding the previous
+        turn, so the two disagree about what has been seen."""
         llm = _bare_llama()
         llm._cached_tokens = []
-        ctx, mock_api = self._patch_api(
-            llama_memory_seq_rm=MagicMock(return_value=False))
+        llm._mtp_ctx_ptr = 444
+        ctx, mock_api = self._patch_api()
+        mock_api.llama_get_memory.side_effect = {222: 333, 444: 555}.__getitem__
         with ctx:
             llm._prefill_with_reuse([1, 2, 3])
 
-        mock_api.llama_memory_clear.assert_called_once()
-        args = mock_api.llama_batch_init.call_args[0]
-        assert args[0] == 3
+        assert mock_api.llama_memory_clear.call_args_list == [
+            call(333, True), call(555, True)]
         assert llm._cached_tokens == [1, 2, 3]
 
     def test_decode_failure_wipes_cache_state(self):
@@ -429,3 +460,107 @@ class TestInferenceLock:
             # Now the lock is released
             assert not llm._inference_lock.locked()
 
+
+
+# ---------------------------------------------------------------------------
+#  Early-exit cleanup in _generate
+# ---------------------------------------------------------------------------
+
+class TestGenerateEarlyExitCleanup:
+    """Regression: the cleanup block frees a draft sampler that is only bound
+    after prefill, so every exit taken before that point raised
+    UnboundLocalError - destroying the real reason the request stopped."""
+
+    def _mock_api(self, **overrides):
+        mock_api = MagicMock()
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+        for k, v in overrides.items():
+            setattr(mock_api, k, v)
+        return mock_api
+
+    def _run(self, llm, mock_api):
+        return llm._generate(
+            prompt_tokens=[1, 2, 3], max_new_tokens=4,
+            temperature=0.8, top_k=40, top_p=0.95, repeat_penalty=1.1)
+
+    def test_stop_before_prefill_ends_cleanly(self):
+        """An unload or a user Stop landing before prefill: no tokens, no error."""
+        llm = _bare_llama()
+        llm._stop.set()
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            produced = list(self._run(llm, mock_api))
+        assert produced == []
+        # Nothing was allocated this early, so cleanup must free nothing.
+        mock_api.llama_sampler_free.assert_not_called()
+
+    def test_context_creation_failure_reaches_the_caller_intact(self):
+        """The out-of-memory diagnostic IS the value of this failure - it tells
+        the user to start a new chat or lower n_ctx_max. Cleanup must not
+        replace it, and must not swallow it either."""
+        llm = _bare_llama()
+        # A NULL context back from llama_init_from_model is how the native
+        # library reports that the requested window does not fit.
+        mock_api = self._mock_api(
+            llama_init_from_model=MagicMock(return_value=0))
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            gen = self._run(llm, mock_api)
+            with pytest.raises(RuntimeError) as excinfo:
+                next(gen)
+        message = str(excinfo.value)
+        assert "Not enough memory to create a" in message
+        assert "lower n_ctx_max" in message
+
+
+# ---------------------------------------------------------------------------
+#  MTP speculative drafting vs grammar-constrained sampling
+# ---------------------------------------------------------------------------
+
+class TestMtpDraftingRespectsGrammar:
+    """Drafting picks tokens with a bare greedy sampler and then accepts them
+    into the main chain. With a grammar in that chain the accepted token was
+    never masked by the grammar, so a JSON-schema or tool-calling reply could
+    emit text the schema forbids - and the out-of-step accept is the documented
+    cause of a native abort. Constrained requests take the single-token path."""
+
+    _MTP_CTX = 444
+
+    def _mock_api(self):
+        mock_api = MagicMock()
+        mock_api.llama_sampler_sample.return_value = 42
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+        return mock_api
+
+    def _drive(self, grammar):
+        llm = _bare_llama()
+        llm._mtp_ctx_ptr = self._MTP_CTX
+        llm._tokenizer.is_eog.return_value = False
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
+             patch("localm.inference.backends.llamacpp.llama._build_sampler",
+                   return_value=999):
+            list(llm._generate(
+                prompt_tokens=[1, 2, 3], max_new_tokens=2, temperature=0.8,
+                top_k=40, top_p=0.95, repeat_penalty=1.1, grammar=grammar))
+        # Sampling against the draft context is what drafting does and nothing
+        # else does. Counting DECODES there would also catch the draft
+        # context's own prefill, which happens either way.
+        drafted = [c for c in mock_api.llama_sampler_sample.call_args_list
+                   if c[0][1] == self._MTP_CTX]
+        return mock_api, drafted
+
+    def test_no_drafting_while_a_grammar_constrains_sampling(self):
+        mock_api, drafted = self._drive(grammar='root ::= "a"')
+        mock_api.llama_sampler_init_greedy.assert_not_called()
+        assert drafted == []
+        # A token chosen off-grammar must never be pushed into the real chain.
+        mock_api.llama_sampler_accept.assert_not_called()
+
+    def test_drafting_still_runs_for_unconstrained_requests(self):
+        """The gate is narrow on purpose: MTP models keep their speedup on
+        ordinary chat, which is what makes this a refusal and not a disable."""
+        mock_api, drafted = self._drive(grammar=None)
+        mock_api.llama_sampler_init_greedy.assert_called_once()
+        assert drafted, "MTP drafting should still run without a grammar"

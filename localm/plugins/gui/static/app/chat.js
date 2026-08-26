@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - chat. */
+/* localm GUI - chat (split from app.js). Classic script: it
+   shares the one global lexical environment with the other app/* and
+   pages/* scripts, so every cross-section reference resolves by bare
+   name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -21,28 +25,54 @@ export const chat = {
   docs: [],          // document attachments: {name, text, chars, truncated}
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
   systemDefault: "", // default system prompt from Settings; a blank drawer inherits it
+  toolGrammar: true, // chat_tool_grammar from /v1/config - grammar-constrain web-tool calls
+  // Set once a backend REFUSES a web-tool grammar request; never cleared until
+  // reload. Kept separate from toolGrammar (the config preference, refreshed
+  // by refreshCtxLimit's 30s poll) - a config refresh must not resurrect a
+  // grammar THIS backend has already demonstrated it cannot honour.
+  toolGrammarUnsupported: false,
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
-  stick: true,       // follow the stream to the bottom until the user scrolls up
-  // True only while reconcileInstanceId's verdict is "confirmed". Starts true so
-  // the first paint renders optimistically; refreshCtxLimit overwrites it on
-  // every path, including its failure paths. It is the gate for anything that
-  // WRITES to the backend - "unknown" may still render cached data but never
-  // uploads.
+  stick: true,       // R31: follow the stream to the bottom until the user scrolls up
+  // AUD-INSTANCEID residual 2: true ONLY once reconcileInstanceId returns
+  // "confirmed" - a real, positive match against the connected backend's
+  // instance id. Defaults to true so the FIRST paint (before refreshCtxLimit's
+  // round trip lands) still renders optimistically, but refreshCtxLimit
+  // overwrites it on EVERY path - including the two failure paths, which used
+  // to leave this default standing (below) - so by the time anything acts on
+  // it the value reflects the last real answer, never a guess. Deliberately
+  // NOT true for "unknown" (an old server with no instance_id field, or a
+  // /v1/config round trip that failed or was rejected) - unknown state may
+  // still RENDER whatever is cached (see refreshCtxLimit below), but must
+  // never be read as permission to upload. See initServerConversations, which
+  // gates re-uploading a not-yet-synced local conversation on this flag.
   instanceMatch: true,
-  // The raw verdict ("confirmed" | "mismatched" | "unknown"), for callers that
-  // must tell "unknown" and "mismatched" apart.
+  // The raw tri-state itself ("confirmed" | "mismatched" | "unknown"), kept
+  // alongside instanceMatch so a caller that needs to tell "unknown" and
+  // "mismatched" apart (initServerConversations' render gate, below) does not
+  // have to re-derive it - only instanceMatch (confirmed-only) is the right
+  // gate for anything that WRITES to the backend.
   instanceState: "confirmed",
-  // True once the in-memory privacy-mode wipe below has run for this page load.
-  // refreshCtxLimit() is also polled every 30s, and the wipe must fire only on
-  // the first confirmation of privacy mode, never against a live conversation.
+  // True once the in-memory privacy-mode wipe below has run for this page
+  // load. refreshCtxLimit() also runs on a 30s poll for the tab's whole
+  // lifetime (init.js), and the wipe must fire only the FIRST time privacy
+  // mode is confirmed - never again while a conversation is live, or a slow
+  // enough reply (or just enough elapsed time) makes the poll erase the
+  // user's own in-flight or just-landed message, misreporting a real answer
+  // as if nothing was said.
   privacyWiped: false,
 };
 
-// System-injected messages (retrieved web/kb/doc content) carry role:"user" so
-// the model reads them as conversation context. noteLabel() is the single source
-// of truth for the human-facing label override, called by both renderChat()
-// below and exportConversation() (settings-perf.js).
+// System-injected messages (retrieved web/kb/doc content) are pushed with
+// role:"user" so the MODEL reads them as conversation context - changing that
+// would be a model-behaviour change, not a labelling fix. noteLabel() is the
+// single source of truth for the human-facing override instead: renderChat()
+// below AND exportConversation() (settings-perf.js) both call it, so a message
+// flagged here can never render as "You:" in the live UI but slip through
+// unlabelled in an exported transcript, or the reverse. Extracted after
+// NEW-WEBSEARCH-UX-EXPORT-ATTRIBUTES-TOOL-RESULTS-TO-USER - the export path
+// used to check only m.role, attributing raw web-search/knowledge-base/
+// document text to the user as though they had typed it.
 const NOTE_LABELS = { web: "Web", doc: "Doc", kb: "Sources" };
 
 export function noteLabel(m) {
@@ -51,16 +81,17 @@ export function noteLabel(m) {
 }
 
 // Conversation compaction mirrors localm/inference/compact.py: once the estimate
-// passes 70% of the ceiling, summarise the oldest turns and keep the recent ones
-// verbatim, by token budget. The summariser is fed whole messages truncated at
-// word boundaries with reasoning stripped, and its summary is sanitised before
-// it re-enters context. Never blocks chat.
+// passes 70% of the ceiling, summarise the OLDEST turns and keep the recent ones
+// verbatim. R44: keep recent turns by token budget (not a flat last-4), feed the
+// summariser whole messages truncated at word boundaries with reasoning stripped,
+// and sanitise the returned summary so half-words / <think> never re-enter
+// context. Never blocks chat.
 export const COMPACT_RATIO = 0.7;
 export const COMPACT_KEEP = 4;            // floor: always keep at least this many recent turns
-export const COMPACT_TARGET = 0.5;        // keep recent turns verbatim up to ~50% of the ceiling
+export const COMPACT_TARGET = 0.5;        // R44: keep recent turns verbatim up to ~50% of the ceiling
 
-/** Rough token estimate: ~4 chars/token plus a small per-message overhead for
- *  the role and delimiters. */
+/** R44: rough token estimate - ~4 chars/token plus a small per-message overhead
+ *  for the role and delimiters. Coarse, but less skewed than a bare length/4. */
 export function estimateTokens(text) {
   return Math.ceil((text || "").length / 4) + 4;
 }
@@ -73,7 +104,8 @@ export function estimateConvTokens(conv) {
   return total;
 }
 
-/** Truncate at a word boundary, appending an explicit marker. */
+/** R44: truncate at a word boundary with an explicit marker, instead of a raw
+ *  mid-word slice that fed half-words (e.g. "REA") into the summariser. */
 export function truncateAtWord(text, max) {
   if (!text || text.length <= max) return text || "";
   const cut = text.slice(0, max);
@@ -83,8 +115,9 @@ export function truncateAtWord(text, max) {
 
 export async function compactConversation(conv) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
-  // Keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET of
-  // the ceiling (at least COMPACT_KEEP), summarising only what is older.
+  // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
+  // of the ceiling (at least COMPACT_KEEP), summarising only what is older -
+  // instead of always discarding everything but the last 4 turns.
   const budget = (chat.ctxMax && chat.ctxMax > 0) ? COMPACT_TARGET * chat.ctxMax : 0;
   let keepCount = 0, used = 0;
   for (let i = conv.messages.length - 1; i >= 0; i--) {
@@ -100,7 +133,8 @@ export async function compactConversation(conv) {
   const recent = conv.messages.slice(-keepCount);
   if (!older.length) return false;
 
-  // Whole messages, truncated at a word boundary with reasoning blocks stripped.
+  // R44: feed whole messages truncated at a word boundary, with reasoning blocks
+  // stripped, so the summariser never sees half-words or display-only <think>.
   const excerpt = older.map((m) =>
     `${m.role.toUpperCase()}: ${truncateAtWord(stripThink(msgText(m)), 1200)}`).join("\n\n");
 
@@ -127,7 +161,7 @@ export async function compactConversation(conv) {
       summary = (data.choices?.[0]?.message?.content || "").trim();
     }
   } catch (e) { /* summarisation unavailable - fall back to a note below */ }
-  // Strip any leaked <think> blocks and control markers from the summary.
+  // R44: sanitise the summary so leaked <think>/markers never re-enter context.
   summary = stripThink(scrubMarkers(summary)).trim();
 
   const bridge = summary
@@ -140,7 +174,8 @@ export async function compactConversation(conv) {
 
   conv.messages = [...bridge, ...recent];
   // Forks anchored in the summarised-away region can no longer be reached by
-  // the ‹ › navigation; their content is archived and the count reported.
+  // the ‹ › navigation; archive their content and DISCLOSE the count instead
+  // of deleting them silently (memory-audit 2026-07-02).
   const lostBranches = pruneBranches(conv);
   saveConversations(conv);
   renderChat();
@@ -162,14 +197,21 @@ export async function maybeCompactConversation(conv) {
 
 let _instanceUnknownWarned = false;   // one warning per breakage, re-armed on success
 
-/** Record that /v1/config could not be read, so this load has no answer about
- *  which backend is behind this origin: the "unknown" state. Nothing is wiped,
- *  cached data keeps rendering, and no write to the backend is authorised. */
+/** AUD-INSTANCEID residual 2: /v1/config could not be read, so this load has NO
+ *  answer about which backend is behind this origin. That is not a mismatch (we
+ *  wipe nothing) and it is emphatically not a match either, so it lands on the
+ *  same "unknown" state an older server without an instance_id produces: keep
+ *  showing whatever is cached, never authorise a write into a store we have not
+ *  identified. Loud rather than silent (AGENTS.md rule 5) - the round trip that
+ *  produced this used to be swallowed with no trace at all. */
 function markInstanceUnknown(why) {
   chat.instanceState = "unknown";
   chat.instanceMatch = false;
-  // The state is set every call; only the log line is deduped, since
-  // refreshCtxLimit is polled every 30s for the tab's whole lifetime.
+  // The STATE is set every time; only the LINE is deduped. refreshCtxLimit is
+  // polled every 30s for the tab's whole lifetime (init.js), so an unreachable
+  // server would otherwise print two lines a minute for as long as the tab is
+  // open, and a flood is how a real warning gets ignored. Same one-per-breakage
+  // shape as _convPushWarned below, re-armed the moment a verdict lands.
   if (_instanceUnknownWarned) return;
   _instanceUnknownWarned = true;
   console.warn("localm: /v1/config could not be read (" + why + ") - the " +
@@ -178,32 +220,47 @@ function markInstanceUnknown(why) {
 }
 
 export async function refreshCtxLimit() {
-  // Set once reconcileInstanceId has returned a verdict for this call, so a
-  // throw from the rendering work below cannot downgrade a "mismatched" verdict
-  // to "unknown" in the catch.
+  // Set once reconcileInstanceId has returned a real verdict for THIS call, so
+  // a throw from the rendering work further down (which runs only AFTER the
+  // verdict) cannot be mistaken for "we never got an answer" and downgrade a
+  // confirmed "mismatched" to "unknown" - that would re-permit rendering the
+  // foreign cache the mismatch branch exists to remove.
   let reconciled = false;
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (!r.ok) {
+      // A resolved-but-failed round trip is NOT the "missing information" the
+      // permissive defaults were chosen for: the server answered and we still
+      // do not know who it is.
       markInstanceUnknown("HTTP " + r.status);
     } else {
       const cfg = await r.json();
       // Prefer the resolved ceiling (VRAM-derived under ctx_auto) over the
-      // static config value.
+      // static config value - compaction should track what the model can
+      // actually hold.
       chat.ctxMax = cfg.effective_ctx_max ?? cfg.n_ctx_max ?? 16384;
       // The Settings "Default system prompt": a chat with a blank System prompt
       // field inherits this (the per-chat drawer overrides it).
       chat.systemDefault = (cfg.chat_system_prompt || "").trim();
-      // The coder session rail's side. An unknown/absent value falls through to
-      // the CSS default (right).
+      chat.toolGrammar = cfg.chat_tool_grammar !== false;
+      // The coder session rail's side. Applied here because this is the one boot
+      // round trip that already has the config in hand - a second fetch just for a
+      // panel side would be a request per page load for a value that never changes
+      // between them. Unknown/absent falls through to the CSS default (right), so
+      // an older server or a partial payload lays out correctly rather than blank.
       applyCoderRailSide(cfg.coder_rail_side);
 
-      // Confirm this browser origin is talking to the same backend data
-      // directory whose cache it holds, before that cache is trusted for
-      // merging or uploading. "confirmed" is the only state that may upload;
-      // "mismatched" wipes the instance-scoped localStorage keys and the
-      // in-memory state a boot-time read already loaded, then repaints;
-      // "unknown" keeps whatever is already rendered.
+      // AUD-INSTANCEID: confirm this browser origin is actually talking to the
+      // SAME backend data directory whose cache it holds, BEFORE any of that
+      // cache is trusted for merging/uploading. Three states now (residual 2):
+      // "confirmed" is the only one that may upload; "mismatched" wipes the
+      // instance-scoped localStorage keys AND the in-memory state a synchronous
+      // boot-time read may already have loaded, then repaints so nothing
+      // foreign is ever shown or re-uploaded; "unknown" (no server info - an
+      // old server, or a round trip that failed, which markInstanceUnknown
+      // below routes here rather than leaving the boot defaults standing)
+      // keeps whatever is already rendered - permissive about DISPLAY, never
+      // about upload.
       const instanceState = reconcileInstanceId(cfg.instance_id);
       reconciled = true;
       _instanceUnknownWarned = false;   // a verdict landed: re-arm the warning
@@ -215,14 +272,22 @@ export async function refreshCtxLimit() {
         convUI.collapsed = new Set();
         renderConvList();
         renderChat();
-        // reconcileInstanceId wiped "localm.coderCwd" from localStorage, but
-        // init.js has already read that key into the Coder tab's "Project
-        // directory" input at boot and nothing else re-reads it, so clear the
-        // field here.
+        // AUD-INSTANCEID: reconcileInstanceId already wiped "localm.coderCwd"
+        // from localStorage, but init.js reads that key into the Coder tab's
+        // "Project directory" INPUT VALUE synchronously at boot (before this
+        // round trip can resolve) whenever ANY instance id was previously
+        // cached - so on a confirmed MISMATCH the input itself still holds a
+        // different install's host filesystem path until something corrects
+        // it here. Nothing else re-reads that key into the field afterwards.
         const cwdInput = $("setup-cwd");
         if (cwdInput) cwdInput.value = "";
-        // Same for the landing page: init.js restores a saved view at boot and
-        // nothing re-asserts it afterwards.
+        // Residual 1: the landing PAGE is the same kind of leftover as the
+        // input above - a savedView restored synchronously at boot (init.js,
+        // gated only on instanceCacheTrusted()'s PRESENCE check, not a
+        // confirmed match) can already have switched to a foreign install's
+        // last-open page before this round trip lands. Nothing else re-asserts
+        // the view afterwards, so a confirmed mismatch must correct it here,
+        // the same way it already corrects the cache and the cwd input.
         showView("chat");
       }
 
@@ -232,22 +297,31 @@ export async function refreshCtxLimit() {
       chat.privacy = cfg.effective_mode === "privacy";
       if (chat.privacy) {
         for (const key of INSTANCE_SCOPED_KEYS) localStorage.removeItem(key);
-        // The in-memory reset below runs only the first time privacy mode is
-        // confirmed for this page load, not on every polled refreshCtxLimit()
-        // call, so it never erases a live conversation.
+        // GUI-LIVE-WIPE: the destructive in-memory reset below must run only
+        // the FIRST time privacy mode is confirmed for this page load, not on
+        // every refreshCtxLimit() call - this function is also polled every
+        // 30s for the tab's whole lifetime (init.js). Re-running it against a
+        // LIVE conversation (the user's own current chat, not a leftover from
+        // a previous non-privacy session) wipes an in-flight or just-answered
+        // message out of the transcript with no error, before the user ever
+        // gets to read the reply.
         if (!chat.privacyWiped) {
           chat.privacyWiped = true;
-          // Clear the in-memory copy and the sidebar painted from it, matching
-          // the localStorage wipe above.
+          // The localStorage wipe above used to leave the already-populated
+          // in-memory chat.conversations (and the sidebar list already painted
+          // from it) untouched, so the stale list stayed on screen for the
+          // whole session even though the on-disk wipe "succeeded" (AUD-PRIV-2).
           chat.conversations = [];
           chat.activeId = null;
           convUI.collapsed = new Set();
-          setWebAskSession(null);                        // forget the session choice
+          setWebAskSession(null);                        // R27: forget the session choice
           renderConvList();
           renderChat();
-          // Same DOM-field gap as the mismatch branch above: the Coder tab's
-          // "Project directory" input was populated from "localm.coderCwd" at
-          // boot and nothing else re-reads that key into the field.
+          // AUD-INSTANCEID/AUD-PRIV-2: same DOM-field gap as the mismatch branch
+          // above - the Coder tab's "Project directory" input was already
+          // populated from "localm.coderCwd" at boot before this could run, and
+          // nothing else re-reads that key into the field, so the wipe above
+          // needs a matching correction here too.
           const cwdInputPriv = $("setup-cwd");
           if (cwdInputPriv) cwdInputPriv.value = "";
         }
@@ -262,39 +336,55 @@ export async function refreshCtxLimit() {
           h.after(hint);
         }
       } else {
-        // Re-arm the wipe: once the server leaves privacy mode, anything painted
-        // afterwards is non-privacy content the next privacy-mode confirmation
-        // must wipe.
+        // GUI-LIVE-WIPE re-arm: privacyWiped only guards against re-wiping a LIVE
+        // conversation while privacy mode stays on for this page load (the 30s
+        // poll). Once the server leaves privacy mode, any leftovers painted here
+        // are non-privacy content the next privacy-mode confirmation is supposed
+        // to wipe (AUD-PRIV-2) - without this reset, a later restart back into
+        // privacy mode would suppress that wipe and leave them on screen for the
+        // rest of the tab's life.
         chat.privacyWiped = false;
       }
-      hydrateChatToggles(cfg);   // reflect saved choice / global net policy
+      hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
   } catch (e) {
-    // The rest of this function is best-effort, but a rejected fetch still has
-    // to land on "unknown" - unless the verdict itself already landed.
+    // The rest of this function stays best-effort (a repaint that throws must
+    // not break the 30s poll), but the instance guard is not: a rejected fetch
+    // - server down, connection dropped, TLS refused - is the loudest possible
+    // "no answer", and leaving the boot defaults standing made it read as a
+    // confirmed match. Only claim it if the verdict itself never landed.
     if (!reconciled) markInstanceUnknown(e && e.message ? e.message : String(e));
   }
 }
 
-// The single entry point for every instance-scoped localStorage write: it drops
-// the write in privacy mode and warns when the key is missing from
-// INSTANCE_SCOPED_KEYS, so the write gate and the wipe list stay in step.
+// LM-DA-047: privacy mode's "no traces, not even localStorage" guarantee used
+// to rest on two independently hand-maintained mechanisms - a per-call-site
+// `if (!chat.privacy) localStorage.setItem(...)` guard at every write site,
+// and helpers.js's INSTANCE_SCOPED_KEYS wipe list - with nothing checking they
+// agreed, and two keys had drifted (write-gated but never wiped). Every
+// instance-scoped write now goes through this one function instead, so the
+// write-gate decision lives in exactly one place.
 export function lsSetScoped(key, value) {
   if (chat.privacy) return;
   if (!INSTANCE_SCOPED_KEYS.includes(key)) {
-    // Warn rather than throw, so the write itself still succeeds.
+    // Loud, not silent (AGENTS.md rule 5): a key reaching here that is not in
+    // the wipe list is LM-DA-047's exact failure mode. Warn rather than throw
+    // so a real write still succeeds; tests-js/privacy-scoped-keys.test.mjs
+    // source-scans every lsSetScoped call site and fails before this ever
+    // ships, so this branch is a live backstop, not the primary defense.
     console.warn(`localm: "${key}" written via lsSetScoped but missing from ` +
       "INSTANCE_SCOPED_KEYS (helpers.js) - add it so a privacy-mode or " +
       "instance-mismatch wipe covers it too.");
   }
   try { localStorage.setItem(key, value); }
-  catch (e) { /* storage full or blocked */ }
+  catch (e) { /* storage full/blocked - callers already tolerate a miss */ }
 }
 
-// Set the per-chat Web-access and Speak-aloud toggles from the user's saved
-// choice. With no saved choice, web falls back to the global net policy
-// (net_mode=allow enables it; ask/off leave it off). Reads are skipped in
-// privacy mode.
+// R34: the per-chat Web-access and Speak-aloud toggles used to reset to OFF on
+// every load, so the user had to re-enable them in every session. Reflect the
+// user's saved choice; for web, when there is no saved choice fall back to the
+// global net policy (net_mode=allow auto-enables web; ask/off leave it off so
+// consent still applies). Writes are gated on privacy mode (no traces there).
 export function hydrateChatToggles(cfg) {
   const webEl = $("p-web"), speakEl = $("p-speak");
   if (!webEl || !speakEl) return;
@@ -304,7 +394,7 @@ export function hydrateChatToggles(cfg) {
   const savedWeb = chat.privacy ? null : lsGet("localm.webAccess");
   if (savedWeb !== null) webEl.checked = savedWeb === "1";
   else if (cfg && cfg.net_mode === "allow") webEl.checked = true;
-  // The brain toggle mirrors the server-side memory_enabled config.
+  // The brain toggle mirrors the server-side memory_enabled config (default on).
   const memEl = $("p-memory");
   if (memEl && cfg && typeof cfg.memory_enabled === "boolean")
     memEl.checked = cfg.memory_enabled;
@@ -313,8 +403,9 @@ window.hydrateChatToggles = hydrateChatToggles;
 
 export function saveConversations(changed) {
   if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
-  // Only full conversations are cached: server index-only rows (_meta) carry no
-  // messages and would shadow a real local copy.
+  // R40: do NOT cache server index-only rows (_meta) - they carry no messages, so
+  // caching them would shadow a real local copy and show empty conversations
+  // offline. Only full conversations are cached locally.
   const cacheable = chat.conversations.filter((c) => !c._meta);
   try {
     localStorage.setItem("localm.conversations",
@@ -352,8 +443,10 @@ export function pushConversation(conv) {
                                branches: conv.branches || [],
                                messages: conv.messages }),
       });
-      // A resolved-but-failed save (500, or 413 on a huge conversation) is
-      // reported once per breakage and re-armed by the next successful save.
+      // A resolved-but-failed save (500, 413 on a huge conversation) means
+      // server-side persistence quietly stopped; localStorage still holds the
+      // copy, so surface it ONCE per breakage (this runs on every debounce
+      // tick), re-arming after the next successful save.
       if (!r.ok && !_convPushWarned) {
         _convPushWarned = true;
         console.error("conversation save failed (HTTP " + r.status +
@@ -361,7 +454,9 @@ export function pushConversation(conv) {
       } else if (r.ok) {
         _convPushWarned = false;
       }
-    } catch (e) { /* offline - localStorage still has the copy */ }
+    } catch (e) { /* offline - localStorage still has the copy; a reachable
+                     server that ANSWERS with an error is the r.ok branch
+                     above, not this one */ }
   }, 600));
 }
 
@@ -374,14 +469,15 @@ export function deleteConversationRemote(convId) {
   }).then((r) => {
     if (!r.ok) throw new Error("HTTP " + r.status);
   }).catch((e) => {
-    // The UI copy is already gone, and a server copy that survived would
-    // reappear on the next load, so report the failure.
+    // Deleting is privacy-relevant and the UI copy is already gone: a failed
+    // server delete must not pass silently - the server copy would resurrect
+    // on the next load while the user believes it was deleted.
     toast("Could not delete the conversation on the server - it may reappear", true);
     console.error("conversation delete failed: " + (e && e.message ? e.message : e));
   });
 }
 
-/** Fetch a full conversation's body on demand and replace its index-only
+/** R40: fetch a full conversation's body on demand and replace its index-only
  *  ("_meta") placeholder in chat.conversations. Returns true on success. */
 export async function hydrateConversation(conv) {
   if (!conv || !conv._meta) return true;
@@ -405,13 +501,13 @@ export async function hydrateConversation(conv) {
 window.hydrateConversation = hydrateConversation;
 
 /** Load the server store and merge with the localStorage cache: the newer copy
- *  of each conversation wins; local-only ones are uploaded. The server list is
- *  a lightweight index (no message bodies); each conversation's messages load
- *  lazily on open via hydrateConversation. */
+ *  of each conversation wins; local-only ones are uploaded. R40: the server
+ *  list is a lightweight index (no message bodies); each conversation's messages
+ *  load lazily on open via hydrateConversation. */
 export async function initServerConversations() {
   if (chat.privacy) return;
   try {
-    // Lightweight, paginated index - no message bodies or data-URI images.
+    // R40: lightweight, paginated index - no message bodies or data-URI images.
     const r = await fetch("/api/conversations?meta=true&limit=200&offset=0",
                           { headers: authHeaders() });
     if (!r.ok) return;
@@ -424,19 +520,34 @@ export async function initServerConversations() {
     for (const local of chat.conversations) {
       const remote = byId.get(local.id);
       if (!remote) {
-        // A cached conversation this backend's index does not know about is
-        // either a local-only chat not yet synced back to the same instance, or
-        // one belonging to a different backend that shares this browser origin.
-        // Rendering and uploading are gated separately: a "mismatched" state
-        // renders nothing (refreshCtxLimit has already emptied
-        // chat.conversations), "unknown" may still render what is cached, and
-        // only a confirmed match may write it into the backend's store.
+        // AUD-INSTANCEID residual 2: a cached conversation THIS backend's own
+        // index does not know about is either (a) a real local-only chat not
+        // yet synced back to the SAME instance after a restart (legitimate -
+        // keep + push), or (b) a conversation that belongs to an entirely
+        // DIFFERENT backend data directory that happens to share this browser
+        // origin. Keeping (b) would show foreign chat history in the sidebar,
+        // and pushConversation would PERMANENTLY WRITE it into this install's
+        // own data directory - the worst part of the cross-instance leak.
+        //
+        // RENDERING and UPLOADING are different risk levels, so they are
+        // gated separately. A CONFIRMED "mismatched" state (chat.instanceState,
+        // set by refreshCtxLimit's reconcileInstanceId) already wiped
+        // chat.conversations entirely before this ever runs (see refreshCtxLimit),
+        // so there is nothing foreign left in this loop to render by the time
+        // we get here - the check below is a defensive belt for that same
+        // property, not a coincidence this code relies on silently. An
+        // "unknown" state (an old server with no instance_id field, or a
+        // failed /v1/config round trip) is NOT a confirmed mismatch, so it may
+        // keep rendering whatever was already cached (an old server, or an
+        // offline boot, must still work) - but only a CONFIRMED match
+        // (chat.instanceMatch) may write it into the backend's own store.
         if (chat.instanceState !== "mismatched") byId.set(local.id, local);
         if (chat.instanceMatch) pushConversation(local);
         continue;
       }
-      // Keep the local full copy unless the server has a strictly newer version;
-      // a tie keeps the local copy rather than demoting it to a placeholder.
+      // Keep the local FULL copy unless the server has a strictly newer version
+      // (>= keeps it on a tie, so an already-cached conversation is not demoted to
+      // an index-only placeholder that would need a needless re-fetch / break offline).
       if ((local.updated_at || 0) >= (remote.updated_at || 0)) {
         byId.set(local.id, local);
         pushConversation(local);
@@ -489,10 +600,12 @@ export function msgImages(m) {
     .map((p) => p.image_url?.url).filter(Boolean);
 }
 
-/** Replace every user-attached image (a data: URI) in the conversation with a
- *  short text note, so a model that rejected the image is never sent it again.
- *  Server-generated /api/ images are display-only and left alone. Returns the
- *  number of images dropped. */
+/** VIS-1: replace every user-attached image (a data: URI) in the conversation
+ *  with a short text note, so a model that rejected the image is never asked for
+ *  it again. Re-sending a rejected image 400s on every turn and wedges the chat
+ *  in endless empty assistant replies; dropping it keeps the chat usable.
+ *  Server-generated /api/ images are display-only (already mapped to text before
+ *  sending), so they are left alone. Returns the number of images dropped. */
 export function stripUserImages(conv) {
   let dropped = 0;
   for (const m of conv.messages) {
@@ -601,7 +714,7 @@ export function buildConvItem(conv, snippet) {
   item.onclick = async () => {
     chat.activeId = conv.id;
     renderConvList();
-    if (conv._meta) await hydrateConversation(conv);   // load the body on open
+    if (conv._meta) await hydrateConversation(conv);   // R40: load the body on open
     renderChat();
     showView("chat");
   };
@@ -681,8 +794,8 @@ $("conv-search").addEventListener("input", (e) => {
   renderConvList();
 });
 
-// A download name for a chat image: from the data: URI's mime type, or the /api
-// path's basename, falling back to localm-image.png.
+// A sensible download name for a chat image (VIS-2): from the data: URI's mime,
+// or the /api path's basename, falling back to localm-image.png.
 export function imageFilename(url) {
   try {
     if (url.startsWith("data:")) {
@@ -694,9 +807,9 @@ export function imageFilename(url) {
   } catch (e) { return "localm-image.png"; }
 }
 
-// Copy an image (by its resolved src) to the clipboard. Returns true on success,
-// and false where the browser or context cannot write an image, which callers
-// surface as a fallback.
+// Copy an image (by its resolved src) to the clipboard. Returns true on success.
+// Not every browser/context can write an image to the clipboard, so the caller
+// surfaces a fallback instead of silently failing (RULE 5).
 export async function copyImageSrc(src) {
   try {
     if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write)
@@ -708,8 +821,8 @@ export async function copyImageSrc(src) {
 }
 window.copyImageSrc = copyImageSrc;
 
-// Full-view image lightbox: a click on a chat image opens it large with Save
-// (download to disk) and Copy controls. Closes on the backdrop, the Close
+// Full-view image lightbox (VIS-2): a click on a chat image opens it large with
+// Save (download to disk) and Copy controls. Closes on the backdrop, the Close
 // button, or Escape.
 export function openImageLightbox(src, name) {
   if (!src) return;
@@ -753,8 +866,9 @@ export function openImageLightbox(src, name) {
 }
 window.openImageLightbox = openImageLightbox;
 
-// Human-readable labels for the recall degrade reasons the server reports
-// (store._vector_status), shown in the memory chip's tooltip.
+// F11 observability: human-readable labels for the recall degrade reasons the
+// server reports (store._vector_status). Shown in the memory chip's tooltip so
+// lexical-only / pending-embedding recall is visible, not invisible.
 const MEMORY_DEGRADE_LABELS = {
   no_embedder: "keyword match only - no embedding model installed",
   no_vectors: "keyword match only - memories not embedded yet (run setup-embeddings)",
@@ -763,8 +877,9 @@ const MEMORY_DEGRADE_LABELS = {
   query_embed_failed: "keyword match only - could not embed this message",
 };
 
-/** Build the memory-icon "N" chip for an assistant turn: how many remembered
- *  facts the server injected into that reply. Clicking opens the memory modal.
+/** F11: build the memory-icon "N" chip for an assistant turn - how many
+ *  remembered facts the server injected into that reply. Click opens the memory
+ *  modal so a wrong or stale fact steering an answer is correctable in place.
  *  The tooltip lists the facts used and any recall degrade reason. */
 export function buildMemoryChip(mem) {
   const n = mem.n | 0;
@@ -790,14 +905,17 @@ export function addMessageRow(container, role, text, opts = {}) {
     opts.label || (role === "user" ? "You" : mName)));
   const body = el("div", "msg-body");
   if (role === "user") {
-    // A user's own message renders literally, exactly as typed: .msg-literal
-    // is pre-wrap, and the content is set via textContent so it is inert.
+    // CHAT-1: a user's OWN message renders LITERALLY (exactly as typed). Markdown is
+    // the model's output format, not the user's input - so typed *asterisks*, # hashes,
+    // or pasted code/URLs are never silently reformatted. pre-wrap (.msg-literal)
+    // preserves their line breaks; content is set via textContent so it is inert.
     body.classList.add("msg-literal");
     body.textContent = text;
   } else {
-    // opts.final marks a settled message (a reload or renderChat rebuild) rather
-    // than a fresh streaming shell; only then does renderMarkdown show its
-    // "(no reply text)" note.
+    // opts.final marks a SETTLED message (a reload / renderChat rebuild), not a
+    // fresh streaming shell - only then does renderMarkdown show its "(no reply
+    // text)" note for a body that rendered to nothing, so a live shell that is
+    // briefly empty before its first token never flashes it.
     renderMarkdown(body, text, { final: opts.final });
   }
   for (const url of opts.images || []) {
@@ -809,8 +927,9 @@ export function addMessageRow(container, role, text, opts = {}) {
     } else {
       img.src = url;   // data: URI from the user's own attachment
     }
-    // Click opens a full-view lightbox with Save / Copy. imageFilename takes the
-    // original url (a data: URI or /api path); img.src is the resolved source.
+    // Interactable (VIS-2): click to open a full-view lightbox with Save / Copy.
+    // imageFilename uses the ORIGINAL url (a data: URI or /api path) for a sane
+    // download name, while img.src is the resolved displayable source.
     img.style.cursor = "zoom-in";
     img.title = "Click to view, save, or copy";
     img.addEventListener("click", () => openImageLightbox(img.src, imageFilename(url)));
@@ -838,8 +957,9 @@ export function addMessageRow(container, role, text, opts = {}) {
   copy.onclick = async () => {
     const plain = stripThink(text) || text;
     const firstImg = body.querySelector(".msg-img");
-    // An image-only message copies the image; a text+image message copies the
-    // text, with the image reachable from the lightbox.
+    // Image-only message (e.g. a bare attachment): copy the IMAGE, not empty
+    // text - the "copy copied the prompt, not the image" report (VIS-2). For a
+    // text+image message the text copy is kept; the image is in the lightbox.
     if (!plain && firstImg && firstImg.src) {
       const ok = await copyImageSrc(firstImg.src);
       copy.textContent = ok ? "copied" : "copy";
@@ -852,8 +972,9 @@ export function addMessageRow(container, role, text, opts = {}) {
       copy.textContent = "copied";
       setTimeout(() => (copy.textContent = "copy"), 1200);
     } catch (e) {
-      // A failure (permission denied, insecure context) is reported rather than
-      // shown as "copied", matching the image branch above.
+      // Matches the image branch above: a real failure (permission denied,
+      // insecure context) must never be reported as "copied" - that is
+      // claiming a step happened that did not (AGENTS.md rule 5).
       toast("Could not copy - your browser blocked clipboard access", true);
     }
   };
@@ -901,9 +1022,12 @@ export function buildEmptyHint() {
   return div;
 }
 
-// Render (or clear) the tok/s line and context gauge for *usage*, the shape the
-// server sends on a completed turn's final SSE chunk. Shared by the
-// live-completion path (settings-perf.js) and renderChat() below.
+// Render (or clear) the tok/s line and context gauge for *usage* - the same
+// shape the server sends on a completed turn's final SSE chunk. Shared by the
+// live-completion path (settings-perf.js) and renderChat() below, so a
+// reloaded or switched-to conversation shows the same figures a live
+// generation would have, instead of the last conversation's stats lingering
+// on screen or reload wiping them entirely.
 export function updateUsageDisplay(usage) {
   const gaugeContainer = $("context-gauge-container");
   const gaugeBar = $("context-gauge-bar");
@@ -930,9 +1054,9 @@ export function renderChat() {
   const box = $("chat-messages");
   box.innerHTML = "";
   const conv = currentConv();
-  // A not-yet-loaded conversation (server index row) hydrates its body on first
-  // render, then re-renders. Tried once per row: a failed or offline load sets
-  // _hydrateFailed.
+  // R40: a not-yet-loaded conversation (server index row) hydrates its body on
+  // first render, then re-renders. Try once per row (a failed/offline load sets
+  // _hydrateFailed so we never spin).
   if (conv && conv._meta && !conv._hydrating && !conv._hydrateFailed) {
     conv._hydrating = true;
     hydrateConversation(conv).then((ok) => {
@@ -946,8 +1070,8 @@ export function renderChat() {
     updateUsageDisplay(null);
     return;
   }
-  // Track the previous assistant turn's model so a divider marks where the
-  // active model changed mid-conversation.
+  // NEW-1 model-switch-indication: track the model of the previous assistant turn
+  // so a small divider marks where the active model changed mid-conversation.
   let lastAssistantModel = null;
   conv.messages.forEach((m, i) => {
     if (m.role === "assistant" && m.model) {
@@ -993,31 +1117,35 @@ export function renderChat() {
       actions,
       variant,
       model: m.model,
-      memory: m.memory,           // "used N memories" chip (assistant turns)
+      memory: m.memory,           // F11: "used N memories" chip (assistant turns)
       cls: tag ? "web-note" : "",
       label: noteLabel(m) || undefined,
-      // A settled turn from history, so renderMarkdown may surface its
-      // "(no reply text)" note for a body that rendered blank.
+      // A settled turn from history: let renderMarkdown surface a "(no reply
+      // text)" note if this message rendered to a blank body (empty ```fence).
       final: true,
     });
   });
-  // Only re-pin to the bottom when the user has not scrolled up; this tail runs
-  // on every re-render, including mid-stream.
+  // R31: only re-pin to the bottom when the user has not scrolled up. This tail
+  // runs on every re-render (incl mid-stream web/finalize), so an unconditional
+  // scroll here used to yank a reader back down while a reply was still streaming.
   if (chat.stick) box.scrollTop = box.scrollHeight;
-  // Reflect the last turn's usage, or clear it, so the figures shown match the
-  // conversation on screen.
+  // Reflect the last turn's usage (or clear it) so the figures shown match
+  // whatever conversation is actually on screen - a reload or a switch to a
+  // different conversation must not leave a previous turn's stats lingering,
+  // and a completed turn's stats must survive a reload instead of vanishing.
   const lastMsg = conv.messages[conv.messages.length - 1];
   updateUsageDisplay(lastMsg && lastMsg.role === "assistant" ? lastMsg.usage : null);
 }
 
 /* ---- message branching ----
-   conv.messages is always the live linear branch. Alternative timelines are
-   parked at fork points:
+   conv.messages is always the LIVE linear branch (so compaction, retrieval
+   injection, export, and the API mapping stay untouched). Alternative
+   timelines are parked at fork points:
      conv.branches = [{parent: <msg id or "root">, tails: [[msg…]…], current}]
    The slot at `current` belongs to the live tail and is only written back
    when switching away. Editing a message or regenerating a reply parks the
-   old tail as a sibling; ‹ k/N › in the message meta row navigates between
-   siblings. */
+   old tail as a sibling instead of destroying it; ‹ k/N › in the message
+   meta row navigates between siblings. */
 
 export let _msgIdCounter = 0;
 
@@ -1068,11 +1196,12 @@ export function switchBranch(conv, index, dir) {
   renderChat();
 }
 
-/** Drop fork records whose parent message no longer exists anywhere (active
- *  branch or any parked tail), called after compaction rewrites old history.
- *  Returns the number of alternative (non-current) parked timelines dropped,
- *  and archives their content to conv.droppedBranches so it stays reachable
- *  through export. */
+/** Drop fork records whose parent message no longer exists anywhere
+ *  (active branch or any parked tail) - called after compaction rewrites
+ *  old history. Returns the number of ALTERNATIVE (non-current) parked
+ *  timelines that were dropped, and archives their content to
+ *  conv.droppedBranches so a summarised-away fork is recoverable via export,
+ *  never a silent hard delete (memory-audit 2026-07-02). */
 export function pruneBranches(conv) {
   if (!conv.branches || !conv.branches.length) return 0;
   const ids = new Set(["root"]);
@@ -1142,10 +1271,11 @@ export function branchesLostByRevert(conv, index) {
   return lost;
 }
 
-/** Revert the conversation to *index*: destructively drop this message and
- *  everything after it, and put the clicked message back into the composer.
- *  Stays in the same branch. Reverting past a fork point destroys the sibling
- *  branches in the removed region, which is confirmed first. */
+/** Revert the conversation to *index*: drop this message and everything after it
+ *  DESTRUCTIVELY (unlike editMessage, which forks a sibling), and drop the
+ *  clicked message back into the composer to modify and resend. Stays in the
+ *  SAME branch. Reverting past a fork point destroys the sibling branches in the
+ *  removed region, so confirm first when that would happen (the safeguard). */
 export function revertTo(conv, index) {
   if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
   if (index < 0 || index >= conv.messages.length) return;
@@ -1154,9 +1284,10 @@ export function revertTo(conv, index) {
 
   const apply = () => {
     const orig = conv.messages;
-    // Keep only forks that diverge strictly before the revert point. A fork at
-    // or after it is destroyed; a fork whose parent is not on the live branch
-    // is left for pruneBranches to judge.
+    // Keep only forks that diverge STRICTLY before the revert point. A fork at
+    // or after it (parent inside the removed region, or the live tail being
+    // reverted) is destroyed; a fork whose parent is not on the live branch
+    // (nested in a surviving parked tail) is left for pruneBranches to judge.
     conv.branches = (conv.branches || []).filter((rec) => {
       if (rec.parent === "root") return index > 0;
       const p = orig.findIndex((x) => x.id === rec.parent);
@@ -1229,8 +1360,8 @@ export function renderAttachChips() {
   });
 }
 
-/** Document attachment → text via /api/rag/extract. The file is converted in
- *  memory on the server and never written to disk. */
+/** Document attachment → text via /api/rag/extract. The file is converted
+ *  in memory on the server and never written to disk (privacy-clean). */
 export async function attachDocument(file) {
   const b64 = await new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1242,8 +1373,8 @@ export async function attachDocument(file) {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify({ filename: file.name, content_b64: b64 }),
   });
-  // A non-JSON body (e.g. a plain-text 500) falls back to {}, so the error
-  // below reports statusText rather than a parse error.
+  // A plain-text 500 body is not JSON; fall back to {} so the error message
+  // below is the clean statusText, not a JSON parse error.
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || r.statusText);
   chat.docs.push({ name: data.filename, text: data.text,
@@ -1253,7 +1384,7 @@ export async function attachDocument(file) {
 
 /** Ingest files as chat attachments: images inline (data URI), every other
  *  type extracted to text server-side. Shared by the file picker and the
- *  drag-and-drop zone. */
+ *  drag-and-drop zone so both behave identically. */
 export function addAttachedFiles(files) {
   for (const file of files) {
     if (file.type.startsWith("image/")) {
@@ -1277,6 +1408,8 @@ $("chat-file").addEventListener("change", (e) => {
 });
 
 // Dedicated camera button (mobile): opens the camera directly to attach a photo.
+// The OS file picker on the attach button already offers camera + gallery, but a
+// one-tap "take a photo" makes the phone feel like a real input, not a website.
 {
   const cam = $("chat-camera"), camFile = $("chat-camera-file");
   if (cam && camFile) {
@@ -1288,9 +1421,9 @@ $("chat-file").addEventListener("change", (e) => {
   }
 }
 
-/** Ingest items the phone's share sheet sent to localm (PWA share target).
- *  Images become chat attachments, text and links drop into the composer, and
- *  the server inbox is cleared afterwards. */
+/** Ingest images shared INTO localm from the phone's share sheet (PWA share
+ *  target). The server stashed them; we pull them as chat attachments and then
+ *  clear the server inbox. Text/links shared in drop into the composer. */
 export async function ingestSharedFiles() {
   let items;
   try {
@@ -1315,9 +1448,10 @@ export async function ingestSharedFiles() {
     }
   }
   renderAttachChips();
-  // Clear the server inbox now the data is held client-side. Best-effort: on
-  // failure the items stay stashed and the next ingest re-sends the ids, and
-  // the failure is logged.
+  // We have the data client-side now; clear the server inbox. Best-effort: on
+  // failure the items stay stashed server-side and the NEXT ingest re-clears
+  // them (the ids are re-sent), so this self-heals - but leave a trace so a
+  // persistent failure is diagnosable from the client log.
   fetch("/api/share/clear", {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
@@ -1328,12 +1462,14 @@ export async function ingestSharedFiles() {
                     ") - will retry on the next share ingest");
       return;
     }
-    // The endpoint deletes best-effort and reports the entries it could not
-    // remove, so a 200 does not by itself mean the inbox is empty. A server
-    // that omits the field yields 0.
+    // A 200 is not the same as "the inbox is empty now": the endpoint deletes
+    // best-effort and reports the entries it could NOT remove (locked file,
+    // permission denied). Nothing rendered that count, so a partial failure on
+    // a privacy-adjacent store looked identical to a clean sweep from here.
+    // A server that does not report the field yields 0 and changes nothing.
     let failed = 0;
     try { failed = Number((await r.json()).failed) || 0; }
-    catch (e) { /* missing or non-JSON body */ }
+    catch (e) { /* no/!JSON body: nothing more to report than the 200 above */ }
     if (failed > 0) {
       console.error("share-inbox clear: " + failed + " item(s) could not be " +
                     "deleted server-side - retried on the next share ingest");
@@ -1347,8 +1483,8 @@ export async function ingestSharedFiles() {
 }
 
 /** Drag-and-drop files anywhere on the chat view to attach them, with a
- *  highlight while a file is hovering. Reacts only to file drags, not text
- *  selections, and preventDefault stops the browser opening the dropped file. */
+ *  highlight while a file is hovering. Only reacts to file drags (not text
+ *  selections), and preventDefault stops the browser opening the dropped file. */
 export function setupChatDropZone() {
   const zone = $("view-chat");
   if (!zone) return;

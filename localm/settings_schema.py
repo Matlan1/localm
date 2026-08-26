@@ -321,6 +321,13 @@ CORE_FIELDS: list = [
                  "Upper limit on tokens per reply, a runaway guard not a target. "
                  "Thinking models need plenty of room.",
                  group="Chat", owner="chat", min=1, step=1),
+    SettingField("chat_tool_grammar", Widget.TOGGLE,
+                 "Grammar-constrain chat tool calls",
+                 "Once the model starts a <tool_call> (the web search/fetch tool), "
+                 "force it to be valid tool-call JSON (lazy GBNF grammar; local "
+                 "grammar-capable backends only). Free text and thinking are "
+                 "unaffected.",
+                 group="Chat", owner="chat", applies=Applies.LIVE),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
                  "Port the API/GUI server binds to (default 8642); auto-bumps to "

@@ -517,6 +517,49 @@ class TestScopeInheritance:
 
 
 # --------------------------------------------------------------------------- #
+#  verify_cmd on the isolated background construction path                    #
+# --------------------------------------------------------------------------- #
+
+class TestVerifyCmdOnBackgroundChild:
+    """A background child's diff lands in a worktree the parent's own
+    verify_cmd (if any) never sees - tools/agents.py:_isolated_verify_cmd."""
+
+    def _capture_child(self, repo, **parent_kwargs):
+        captured = {}
+
+        def _capture(self, task):
+            captured["child"] = self
+            return "ok"
+
+        parent = _parent(repo, **parent_kwargs)
+        with patch.object(Agent, "run_task", _capture):
+            res = tool_spawn_agent_background(repo, "t", name="vc",
+                                              _parent_agent=parent)
+            assert res.ok, res.output
+            _drain_all()
+        return captured["child"]
+
+    def test_background_child_inherits_an_explicit_parent_verify_cmd(self, repo):
+        """An explicit choice at the parent must not be silently replaced by a
+        different auto-detected command for the child."""
+        child = self._capture_child(repo, verify_cmd="pytest -x")
+        assert child.verify_cmd == "pytest -x"
+
+    def test_background_child_without_parent_verify_cmd_detects_its_own(self, repo):
+        """The common case: a plain session never sets verify_cmd at all (see
+        core.py's constructor comment), so the isolated child must still get a
+        real oracle of its own, detected against ITS OWN worktree rather than
+        left unverified like today."""
+        (repo / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "add a pytest marker")
+
+        child = self._capture_child(repo)   # verify_cmd defaults to None
+        assert child.verify_cmd is not None
+        assert "pytest" in " ".join(str(part) for part in child.verify_cmd)
+
+
+# --------------------------------------------------------------------------- #
 #  10. Disable-family: no bypass via the background variant                    #
 # --------------------------------------------------------------------------- #
 

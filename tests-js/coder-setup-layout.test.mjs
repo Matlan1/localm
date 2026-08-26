@@ -40,3 +40,17 @@ test("coder setup: a wrapped flag label keeps its checkbox on the first line", (
   assert.match(r, /align-items:\s*start/,
     "centering floats the checkbox to the middle of a two-line label");
 });
+
+test("coder setup: the API key field is styled like every other field on the form", () => {
+  // The width/border/padding rule selects by input TYPE, so it silently excludes
+  // any type nobody thought to list. The model-server API key is the form's only
+  // password input, and it rendered as a bare unstyled box a third the width of
+  // its neighbours until password was added - invisible to a jsdom test, which
+  // applies no CSS, and caught only by looking at the rendered page.
+  const text = css();
+  const at = text.indexOf('#coder-setup input[type="text"]');
+  assert.ok(at !== -1, "the shared field rule exists");
+  const selector = text.slice(at, text.indexOf("{", at));
+  assert.match(selector, /input\[type="password"\]/,
+    "a password input on this form must share the field styling, not inherit browser defaults");
+});

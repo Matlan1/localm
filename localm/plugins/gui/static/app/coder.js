@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - coder - multi-session. */
+/* localm GUI - coder - multi-session (split from app.js). Classic script: it
+   shares the one global lexical environment with the other app/* and
+   pages/* scripts, so every cross-section reference resolves by bare
+   name exactly as before. */
 "use strict";
 
-// --- ES module imports ---
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, lsSetScoped } from "./chat.js";
 import { $, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { emptyState, iconEl } from "./icons.js";
@@ -31,8 +34,10 @@ export function sessionLabel(info) {
   return `${dir} (${info.id.slice(0, 6)})`;
 }
 
-// Render the state as a .job-state pill: "working…" -> st-running, "idle" ->
-// st-pending, "error" -> st-error, "" -> no variant.
+// docs/gui-design.md rule 6: state renders as a .job-state pill. "working…"
+// maps to st-running, "idle" to st-pending (existing neutral variant), "error"
+// to st-error; the empty string (setup mode, no active session) gets no
+// variant, matching the base pill's dim/no-background look.
 function setCoderState(text) {
   const node = $("coder-state");
   node.textContent = text;
@@ -61,15 +66,20 @@ export function renderSessionSelect() {
     if (id === coder.activeId) opt.selected = true;
     sel.appendChild(opt);
   }
-  renderCoderSessionList();   // keep the rail in lockstep with the dropdown
+  renderCoderSessionList();   // R17: keep the right-side rail in lockstep with the dropdown
 }
 
-// The coder's open-sessions rail. The #session-select dropdown is the mobile
-// fallback.
+// R17: the coder's right-side open-sessions rail (mirrors the chat conversation
+// list). The #session-select dropdown stays as the mobile fallback.
 /** Put the session rail on the configured side.
  *
- * Sets the `data-rail` attribute the CSS reads. Only "left" is written; any
- * other value removes the attribute, leaving the CSS default right-hand rail.
+ * Drives a `data-rail` attribute rather than toggling a class per side: one
+ * attribute with one value cannot end up in the both-classes state that two
+ * independent toggles can reach, and CSS reads it directly.
+ *
+ * An unknown or absent value is left alone deliberately - the CSS default is the
+ * right-hand rail, so an older server, a partial config payload or a typo lays the
+ * page out correctly instead of producing a rail on neither side.
  */
 export function applyCoderRailSide(side) {
   const view = $("view-coder");
@@ -78,8 +88,10 @@ export function applyCoderRailSide(side) {
   else delete view.dataset.rail;
 }
 
-// Past sessions, grouped by project, as the server last reported them. Held
-// separately from coder.sessions, which is the live in-memory set.
+// Past sessions, grouped by project, as the server last reported them. Kept
+// separate from coder.sessions (which is LIVE, in-memory, authoritative) so a
+// failed or slow dormant fetch can never blank the list of sessions the user
+// currently has open.
 export const dormant = { projects: [], note: "", loaded: false };
 
 function _when(iso) {
@@ -105,8 +117,8 @@ function _dormantRow(projectPath, sess, available) {
     item.onclick = () => startCoderSession(
       { resume: true, cwd: projectPath, checkpointId: sess.id });
   } else {
-    // The conversation exists but its project folder does not, so the row is
-    // marked unavailable and gets no click handler.
+    // The conversation is still here, the FOLDER is not. Offering a click that
+    // then fails at the server is worse than saying so up front.
     item.classList.add("unavailable");
     item.title = "The project folder is missing, so this session cannot be continued";
   }
@@ -118,7 +130,7 @@ export function renderCoderSessionList() {
   if (!list) return;
   list.replaceChildren();
 
-  // 1. LIVE: the in-memory sessions, first.
+  // 1. LIVE. Always from memory, always first: these are running right now.
   if (coder.sessions.size) {
     list.appendChild(el("div", "coder-rail-head", "Open"));
     for (const [id, s] of coder.sessions) {
@@ -144,7 +156,8 @@ export function renderCoderSessionList() {
     }
   }
 
-  // 3. OTHER PROJECTS, collapsed.
+  // 3. OTHER PROJECTS, collapsed. This is the half that did not exist: a past
+  // session is reachable without first typing its project path into the form.
   const others = dormant.projects.filter((p) => !p.current && p.sessions.length);
   if (others.length) {
     list.appendChild(el("div", "coder-rail-head", "Other projects"));
@@ -166,13 +179,16 @@ export function renderCoderSessionList() {
     list.appendChild(el("div", "coder-session-empty", "No sessions yet"));
   }
 
-  // The note text comes from the server, and shows only once dormant loaded.
+  // The note is PERMANENT, not an empty state, and its text comes from the
+  // server rather than a string here - one wording, which cannot drift from
+  // what the endpoint actually guarantees.
   const note = $("coder-rail-note");
   if (note) note.textContent = dormant.loaded ? (dormant.note || "") : "";
 }
 
-// Past sessions across every remembered project. Never throws, and leaves what
-// is already shown in place on any failure.
+// Past sessions across every remembered project. Never throws and never clears
+// what is already shown: a listing that blanks on a transient error looks
+// exactly like "you have no past work".
 export async function refreshDormant() {
   const cwdEl = $("setup-cwd");
   const cwd = cwdEl ? cwdEl.value.trim() : "";
@@ -197,8 +213,9 @@ export function showCoderUI(hasSession) {
   // Keep the bar while other sessions exist so they stay reachable
   $("coder-bar").classList.toggle("open", hasSession || coder.sessions.size > 0);
   if (!hasSession) {
-    // Setup mode: park every session feed and clear the session labels, and
-    // remember the current session so "back to session" can return to it.
+    // Setup mode: park every session feed and clear the session labels -
+    // the form must not render on top of a previous session's transcript.
+    // Remember where we came from so "back to session" can return there.
     if (coder.activeId && coder.sessions.has(coder.activeId)) {
       coder.lastActiveId = coder.activeId;
     }
@@ -208,7 +225,7 @@ export function showCoderUI(hasSession) {
     setCoderState("");
     $("coder-usage").textContent = "";
     renderSessionSelect();
-    refreshResumable();   // reveal "Continue last session" if the cwd has one
+    refreshResumable();   // reveal "Continue last session" if the cwd has one (CODER-2)
     refreshDormant();     // and list past sessions across every remembered project
   }
   $("setup-cancel").style.display =
@@ -227,8 +244,32 @@ export function activateSession(id) {
     $("coder-usage").textContent = s.info.total_tokens
       ? `${s.info.total_tokens} tok · turn ${s.info.turns}` : "";
   }
-  // The patch button is shown only for a patch-mode session.
+  // "patch" only exists for a patch-mode session: in any other session the
+  // writes went to disk, so the button would download an empty file and read
+  // as "the agent changed nothing".
   $("coder-patch").style.display = s && s.info.patch_mode ? "" : "none";
+  // A session whose model is not on this machine says so for as long as it
+  // exists. The setup hint is consent at the moment of choosing; this is the
+  // reminder while you are typing into it, which is the half that a hint shown
+  // once cannot cover. Driven off the SERVER's descriptor, never off the form -
+  // the form is what was asked for, this is what was actually built.
+  const bi = s && s.info.backend_info;
+  const remote = $("coder-remote");
+  if (bi && bi.leaves_machine) {
+    // The HOST, not the whole URL. The session bar already carries eleven
+    // controls, and a full "https://api.anthropic.com/v1" pushed the End button
+    // off the right edge at an ordinary window width - a badge that hides a
+    // control is a worse trade than a badge that abbreviates. The full target
+    // stays in the tooltip and in session.info(), so nothing is lost.
+    let where = bi.target;
+    try { where = new URL(bi.target).host || bi.target; } catch { /* keep raw */ }
+    remote.textContent = `remote: ${where}`;
+    remote.title = "This session sends your prompts and the file contents it "
+                 + "reads to " + bi.target + ". They leave this machine.";
+    remote.style.display = "";
+  } else {
+    remote.style.display = "none";
+  }
   renderSessionSelect();
   showCoderUI(!!s);
 }
@@ -242,7 +283,7 @@ export function registerSession(info, { replay }) {
     busy: info.busy || false,
     liveBody: null,
     liveText: "",
-    liveReasoning: "",   // thinking model's reasoning, streamed via "reasoning" events
+    liveReasoning: "",   // H4: thinking model's reasoning, streamed via "reasoning" events
     pendingCards: [],
     confirmCards: new Map(),   // confirm_id → {card, title, buttons, tool}
     closed: false,
@@ -268,10 +309,12 @@ export function startAssistantBlock(s) {
   s.liveReasoning = "";
 }
 
-// Rebuild <think>reasoning</think>content from the two separately-streamed
-// accumulators and hand it to renderMarkdown, which splits it back into a
-// collapsible .think-block plus the main body. Both the "token" and
-// "reasoning" event handlers call this.
+// H4: rebuild <think>reasoning</think>content from the two separately-streamed
+// accumulators and hand it to renderMarkdown, which already knows how to split
+// that back into a collapsible .think-block + the main body (same trick the
+// regular chat GUI uses in settings-perf.js's runCompletion). Both the "token"
+// and "reasoning" event handlers call this so a mid-stream re-render of one
+// channel never clobbers the other.
 function renderLiveBlock(s) {
   const stick = nearBottom(s.feedEl);
   renderMarkdown(s.liveBody,
@@ -280,7 +323,9 @@ function renderLiveBlock(s) {
 }
 
 export function flushAssistantBlock(s) {
-  // Drop the "Model" row when the assistant turn produced no visible text.
+  // CODER-EMPTY-MODEL: when the assistant turn produced no VISIBLE text (it emitted
+  // only a tool call, or its text scrubbed to nothing), drop the empty "Model" row
+  // instead of leaving a blank bubble stacked above the tool card.
   if (s.liveBody && !s.liveBody.textContent.trim()) {
     const row = s.liveBody.closest(".msg-row");
     if (row) row.remove();
@@ -312,9 +357,10 @@ export function slimArgs(args) {
   return slim;
 }
 
-/** Head-line hint for a set_todos call: progress plus the item in progress.
- *  Returns "" for anything that is not a todo list. Markers: [x] done,
- *  [>] in progress, anything else pending. */
+/** Head-line hint for a set_todos call: progress plus the item being worked on,
+ *  so the user sees the model's plan move without opening the card. Mirrors
+ *  todos_summary() in coder/tools/tasks.py; "" for anything that is not a todo
+ *  list. Markers: [x] done, [>] in progress, anything else pending. */
 export function todoHint(items) {
   if (!Array.isArray(items) || !items.length) return "";
   const lines = items.map((t) =>
@@ -333,8 +379,8 @@ export function buildToolCard(ev) {
   const hintVal = ev.args?.path || ev.args?.command || ev.args?.pattern
     || ev.args?.url || todoHint(ev.args?.items) || "";
   head.appendChild(el("span", "hint", String(hintVal).slice(0, 120)));
-  // A just-created card is still executing, so its .job-state pill starts at
-  // st-running until the result lands.
+  // docs/gui-design.md rule 6: state renders as a .job-state pill. A just-created
+  // card is actively executing (result not back yet), so st-running until it lands.
   head.appendChild(el("span", "state job-state st-running", "…"));
   const body = el("div", "body");
   if (ev.diff) {
@@ -375,7 +421,9 @@ export function buildConfirmCard(s, ev) {
   title.appendChild(el("span", "name", ev.tool));
   title.appendChild(document.createTextNode("?"));
   inner.appendChild(title);
-  // Which sub-agent is asking. Absent for the session's own agent.
+  // Which sub-agent is asking. Parallel dispatch serialises several children onto
+  // this one channel, so without it two identical cards arrive with nothing to
+  // tell them apart. Absent for the session's own agent - its card is unchanged.
   if (ev.agent) {
     const who = el("div", "asker");
     who.appendChild(document.createTextNode("sub-agent "));
@@ -409,8 +457,8 @@ export function buildConfirmCard(s, ev) {
         }),
       });
       if (!r.ok) {
-        // Already answered elsewhere or timed out server-side; the
-        // confirm_resolved event carries the outcome.
+        // Already answered elsewhere (another tab) or timed out server-side -
+        // the confirm_resolved event carries the real outcome.
         toast("Confirmation was no longer pending", true);
         return;
       }
@@ -434,8 +482,8 @@ export function buildConfirmCard(s, ev) {
 }
 
 export function handleCoderEvent(s, ev) {
-  // Keep an event log, minus token and reasoning events, for "export" to
-  // rebuild the session as markdown.
+  // Keep a light event log (no token/reasoning spam) so "export" can rebuild
+  // the session as markdown without another server round-trip.
   if (ev.type !== "token" && ev.type !== "reasoning") {
     (s.eventLog = s.eventLog || []).push(ev);
   }
@@ -447,17 +495,22 @@ export function handleCoderEvent(s, ev) {
       break;
     }
     case "reasoning": {
-      // A thinking model's reasoning, kept in its own collapsible block by
-      // renderLiveBlock and never mixed into the answer.
+      // H4: a thinking model's reasoning (AUD-HIGH-17-3), kept in its own
+      // collapsible block via renderLiveBlock - never mixed into the answer.
       startAssistantBlock(s);
       s.liveReasoning += ev.text;
       renderLiveBlock(s);
       break;
     }
     case "assistant_text": {
-      // Fix-up sent once the harness knows which spans of the just-streamed
-      // response were real tool calls: replaces the live-streamed text with
-      // the actual leftover text. Usually re-sends what is already shown.
+      // Authoritative fix-up, sent once the harness knows which spans of the
+      // just-streamed response were REAL tool calls (loop.py, right before
+      // dispatching them): replaces whatever streamed live with the actual
+      // leftover text, so a call written in a shape the live "token" stream
+      // does not know how to hide (e.g. a ```json fence) does not linger in
+      // the bubble as visible raw JSON once it has been executed. Usually a
+      // no-op - the live stream already got the common <tool_call> shape
+      // right, so this just re-sends the same text the bubble already shows.
       if (!s.liveBody && !ev.text) break;   // nothing streamed, nothing to fix
       if (!s.liveBody) startAssistantBlock(s);
       s.liveText = ev.text || "";
@@ -488,8 +541,11 @@ export function handleCoderEvent(s, ev) {
       const card = s.pendingCards.shift();
       if (card) {
         const state = card.querySelector(".state");
-        // Server-side timing of the tool invocation. Absent on events replayed
-        // from an older session, in which case nothing is shown.
+        // Real server-side timing (execution.py) around the tool invocation
+        // itself - not a client-side guess between two render events, which
+        // read ~0.0s whenever both arrived in the same tick. Absent on events
+        // replayed from a session recorded before this field existed; show
+        // nothing rather than a fabricated number.
         const took = typeof ev.duration_s === "number"
           ? ` · ${ev.duration_s.toFixed(1)}s` : "";
         state.textContent = (ev.summary || (ev.ok ? "ok" : "failed")) + took;
@@ -522,8 +578,9 @@ export function handleCoderEvent(s, ev) {
       break;
     }
     case "episodes_recalled": {
-      // Which past lessons this run pulled in, with the id that
-      // `localcoder --forget-episode <id>` takes.
+      // Which past lessons this run pulled in, with the id `localcoder
+      // --forget-episode <id>` takes. Recall used to be invisible, so a lesson
+      // that steered a run badly could not be traced back or removed.
       const eps = ev.episodes || [];
       if (!eps.length) break;
       flushAssistantBlock(s);
@@ -533,8 +590,9 @@ export function handleCoderEvent(s, ev) {
       break;
     }
     case "estimate": {
-      // A plan that was never executed (the CLI's --estimate), rendered as a
-      // labelled assistant row.
+      // A plan that was never executed (the CLI's --estimate). Rendered as an
+      // assistant row because it is multi-paragraph prose, but labelled, so it
+      // cannot be mistaken on replay for a turn that actually ran.
       flushAssistantBlock(s);
       feedAppend(s, el("div", "feed-info", `Estimate for: ${ev.task || ""}`));
       addMessageRow(s.feedEl, "assistant", ev.text || "");
@@ -546,7 +604,7 @@ export function handleCoderEvent(s, ev) {
       break;
     }
     case "history": {
-      // A recap row replayed when a past session is resumed: plain,
+      // A recap row replayed when a past session is resumed (CODER-2): plain,
       // role-styled text, no streaming.
       flushAssistantBlock(s);
       addMessageRow(s.feedEl, ev.role === "assistant" ? "assistant" : "user",
@@ -565,8 +623,9 @@ export function handleCoderEvent(s, ev) {
       s.info.total_tokens = ev.total_tokens;
       if (s.info.id === coder.activeId) setCoderState("idle");
       renderSessionSelect();
-      // verify_state "inconclusive" means the check could not run; it is
-      // labelled separately from ev.ok, which is the run's own outcome.
+      // "inconclusive" means the check could not run or collected nothing, so
+      // an unqualified "Task finished" would claim a verification that never
+      // happened. ok stays the run's own outcome; this names the gate's.
       const verifyNote = ev.verify_state === "inconclusive"
         ? " (not verified)" : "";
       let finalLine = (ev.ok ? "Task finished" : "Task ended") + verifyNote +
@@ -633,7 +692,9 @@ export function populateSetupModels() {
 
 export async function startCoderSession(opts = {}) {
   const resume = !!opts.resume;
-  // An explicit cwd (a rail row names its own project) overwrites the form.
+  // A rail row names its OWN project, which is usually not the one in the form -
+  // that is the whole point of listing other projects. Taking the form's value
+  // there would start a session in the wrong folder while looking correct.
   if (opts.cwd) $("setup-cwd").value = opts.cwd;
   const cwd = $("setup-cwd").value.trim();
   if (!cwd) { toast("Enter a project directory", true); return; }
@@ -646,36 +707,57 @@ export async function startCoderSession(opts = {}) {
       // Writes become a unified diff instead of landing on disk (the CLI's
       // --patch-mode); download it from the "patch" button in the session bar.
       patch_mode: $("setup-patch").checked,
-      // Only meaningful with auto-approve, but sent unconditionally.
+      // Only meaningful WITH auto-approve, which is exactly what it carves an
+      // exception out of - sent unconditionally anyway so the session reports
+      // back what it was actually given rather than what we guessed it meant.
       interactive_confirm: $("setup-interactive-confirm").checked,
-      // The CLI's --native-tools. The server reports in info.notes below
-      // whether it could be honoured.
+      // The CLI's --native-tools. The server reports back whether it could
+      // actually be honoured - see info.notes below - rather than us guessing
+      // here, so this stays a plain request.
       native_tools: $("setup-native-tools").checked,
       mode: $("setup-mode").value,
       resume,
-      // Which past conversation to resume, when the rail named a specific one.
-      // Null for the plain "continue last session" button, which means the
-      // most recent one here.
+      // WHICH past conversation, when the rail offered a specific one. Absent
+      // for the plain "continue last session" button, which still means "the
+      // most recent here".
       resume_checkpoint_id: opts.checkpointId || null,
     };
-    // Blank omits the field, so the server's own default applies.
+    // Blank = the server's own default (sessions.py), matching temperature two
+    // lines below - a hardcoded "|| 40" here duplicated that default instead
+    // of leaving it the single source of truth (NEW-DEFAULT-VALUE-PLACEHOLDER).
     const maxTurns = $("setup-max-turns").value.trim();
     if (maxTurns !== "") body.max_turns = Number(maxTurns);
     const model = $("setup-model").value;
     if (model) body.model = model;
     const temp = $("setup-temperature").value.trim();
     if (temp !== "") body.temperature = Number(temp);
-    // Blank means no seed at all, which is not the same as seed 0, so the
-    // field is omitted rather than coerced.
+    // Blank = no seed at all (a fresh random one per run), which is NOT the same
+    // as seed 0 - a real and reproducible value. Omit rather than coerce.
     const seed = $("setup-seed").value.trim();
     if (seed !== "") body.seed = Number(seed);
+    // WHICH model server answers this session (the CLI's --online/--anthropic/
+    // --url). Sent only when it is not the default, so an unchanged form posts
+    // exactly the body it always did.
+    const backend = $("setup-backend").value;
+    if (backend && backend !== "local") {
+      body.backend = backend;
+      const burl = $("setup-backend-url").value.trim();
+      if (burl) body.backend_url = burl;
+      const bmodel = $("setup-backend-model").value.trim();
+      if (bmodel) body.backend_model = bmodel;
+      // Never stored, never put in localStorage, and cleared from the field
+      // below once the session is created: this only has to survive the POST.
+      const bkey = $("setup-backend-key").value;
+      if (bkey) body.backend_api_key = bkey;
+    }
     const scope = $("setup-scope").value.trim();
     if (scope) body.scope = scope;
     const system = $("setup-system").value.trim();
     if (system) body.custom_instructions = system;
-    // The exit-code oracle (the CLI's --verify / --no-verify). Blank plus
-    // auto_verify uses the project's detected check; "skip verification" wins
-    // over a typed command.
+    // The exit-code oracle (the CLI's --until / --verify / --no-verify). Blank
+    // + auto_verify = the project's detected check; "skip verification" is the
+    // --no-verify half, and it wins over a typed command the same way the CLI's
+    // flag does.
     const verify = $("setup-verify").value.trim();
     if ($("setup-no-verify").checked) body.auto_verify = false;
     else if (verify) body.verify = verify;
@@ -689,12 +771,18 @@ export async function startCoderSession(opts = {}) {
     });
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const info = await r.json();
+    // The key has done its one job. Drop it out of the DOM rather than leaving
+    // it sitting in a field for the rest of the page's life, where a later
+    // screenshot, a shared screen or a stray autofill can pick it up.
+    $("setup-backend-key").value = "";
     lsSetScoped("localm.coderCwd", cwd);
-    // A resumed session replays its restored recap from the server; a fresh
-    // one has no history to replay.
+    // A resumed session replays its restored recap from the server; a fresh one
+    // has no history to replay (CODER-2).
     registerSession(info, { replay: !!info.resumed });
     activateSession(info.id);
-    // Relay the server's notes about options it could not honour.
+    // An option the server could not honour is SAID, not silently swallowed -
+    // otherwise a ticked box and an ignored one look identical (AGENTS.md
+    // rule 5). The server decides; this only relays.
     for (const note of info.notes || []) toast(note, true);
     if (info.resumed) toast("Resumed your last session in this folder");
     else if (resume) toast("No saved session to resume - started fresh");
@@ -706,8 +794,9 @@ export async function startCoderSession(opts = {}) {
   }
 }
 
-/* A "Continue last session" button, created here rather than in index.html and
- * revealed when the chosen directory has a saved conversation. */
+/* Resume (CODER-2): a dynamically-created "Continue last session" button in the
+ * setup panel, revealed when the chosen directory has a saved conversation. Built
+ * in JS so it needs no index.html change. */
 export let _coderContinueBtn = null;
 export function coderContinueButton() {
   if (_coderContinueBtn) return _coderContinueBtn;
@@ -753,17 +842,19 @@ export async function reattachSessions() {
       activateSession(data.sessions[data.sessions.length - 1].id);
       toast("Reattached to a running coder session");
     } else {
-      // Sessions can exist with none activated; still show them in the
-      // selector and the bar.
+      // Sessions may exist without one being activated (e.g. the host did not
+      // auto-open a session). Still surface them in the selector + bar so the
+      // host sees the same session list the mobile view does, without having to
+      // enter a session first (CODER-3).
       renderSessionSelect();
       if (coder.sessions.size > 0) $("coder-bar").classList.add("open");
     }
-  } catch (e) { /* ignored */ }
+  } catch (e) { /* server unreachable; startup poller will retry models anyway */ }
 }
 
-/* coder file attachments - extracted to text server-side via /api/rag/extract
- * and prepended to the task message, so the agent sees the content without the
- * file being inside cwd. */
+/* coder file attachments - extracted to text server-side (same in-memory
+ * /api/rag/extract path as chat docs) and prepended to the task message,
+ * so the agent sees the content without needing the file inside cwd. */
 
 export function renderCoderAttachChips() {
   const box = $("coder-attach-chips");
@@ -844,8 +935,8 @@ export async function sendCoderTask() {
       setCoderState("working…");
       renderSessionSelect();
     }
-    // The user message arrives back through the event stream, so no
-    // client-side row is added here.
+    // The user message arrives back through the event stream (so replay
+    // works after a page reload) - no client-side row here.
     input.value = "";
     autoGrow(input);
     coder.docs = [];
@@ -878,15 +969,15 @@ $("session-new").onclick = () => {
   showCoderUI(false);
   $("coder-bar").classList.add("open");   // keep the bar so sessions stay reachable
 };
-// The open-sessions rail's "+" mirrors the bar's "+ new".
+// R17: the open-sessions rail's "+" mirrors the bar's "+ new".
 if ($("coder-new-session")) $("coder-new-session").onclick = () => $("session-new").click();
-renderCoderSessionList();   // show the empty-state rail on first load
+renderCoderSessionList();   // R17: show the empty-state rail on first load
 
 const _railFlip = $("coder-rail-flip");
 if (_railFlip) _railFlip.onclick = async () => {
   const view = $("view-coder");
   const next = view && view.dataset.rail === "left" ? "right" : "left";
-  applyCoderRailSide(next);            // applied before the save round-trip
+  applyCoderRailSide(next);            // instant, so the click never feels lost
   try {
     const r = await fetch("/v1/config", {
       method: "PATCH", headers: authHeaders(),
@@ -894,13 +985,68 @@ if (_railFlip) _railFlip.onclick = async () => {
     });
     if (!r.ok) throw new Error("save failed");
   } catch {
-    // Put it back: the save failed, so the screen must not disagree with it.
+    // Put it back rather than leaving the screen disagreeing with what was
+    // saved - a side that silently reverts on the next load is worse than one
+    // that refuses now and says why.
     applyCoderRailSide(next === "left" ? "right" : "left");
     toast("Could not save which side the session list sits on", true);
   }
 };
 // Arrow wrapper: a bare `.onclick = startCoderSession` would pass the click
-// Event as opts, making opts.resume truthy.
+// Event as opts, making opts.resume truthy and always resuming (CODER-2).
+/* Reveal only the fields the chosen model server actually needs, and state the
+   consequence of the choice where it cannot be missed.
+
+   The privacy line here is a CONVENIENCE, not the gate. The server refuses an
+   off-machine model in privacy mode on its own (localm/remotegate.py), the same
+   way memory and the coder reviewer already do. Telling the user before they
+   press the button just saves them a round trip; it never decides anything. */
+function syncCoderBackendFields() {
+  const mode = $("setup-backend").value;
+  const remote = mode === "openai" || mode === "anthropic";
+  const hint = $("setup-backend-hint");
+  $("setup-backend-url-wrap").style.display = mode === "url" ? "" : "none";
+  $("setup-backend-key-wrap").style.display = mode === "local" ? "none" : "";
+  $("setup-backend-model-wrap").style.display = mode === "local" ? "none" : "";
+
+  if (mode === "local") {
+    hint.style.display = "none";
+    hint.textContent = "";
+    return;
+  }
+  let text;
+  if (mode === "url") {
+    // Deliberately does NOT try to classify the URL as local or remote. The
+    // server already does that with the canonical classifier, and a second
+    // one here would diverge exactly on the awkward input the first exists for.
+    text = "A URL on this machine (Ollama, LM Studio, vLLM) stays local. A URL "
+         + "anywhere else sends your prompts and the file contents the agent "
+         + "reads off this machine.";
+  } else {
+    const who = mode === "openai" ? "OpenAI" : "Anthropic";
+    text = `Sends your prompts and the file contents the agent reads to ${who}. `
+         + "They leave this machine, and it spends your credit with them.";
+  }
+  // Grammar-constrained tool calls are a localm-server capability, so every
+  // other option loses them. Said here rather than discovered later.
+  text += " Grammar-constrained tool calls are off for this option.";
+  if ($("setup-mode").value === "privacy") {
+    text += remote
+      ? " This session is set to privacy, which keeps everything on this "
+        + "machine, so it will refuse this. Set session persistence to log or "
+        + "full to use it."
+      : " This session is set to privacy, so it will refuse this URL unless it "
+        + "is on this machine.";
+  }
+  hint.textContent = text;
+  hint.style.display = "";
+}
+
+$("setup-backend").addEventListener("change", syncCoderBackendFields);
+// The persistence choice changes whether the backend choice is even allowed,
+// so it has to re-run the hint too.
+$("setup-mode").addEventListener("change", syncCoderBackendFields);
+
 $("setup-start").onclick = () => startCoderSession();
 // Probe for a resumable checkpoint as the directory changes (debounced).
 export let _resumeProbeTimer = null;
@@ -916,7 +1062,9 @@ $("setup-cancel").onclick = () => {
   if (id) activateSession(id);
 };
 
-/* ---- directory picker (browse… on the setup form) ---- */
+/* ---- directory picker (browse… on the setup form) ----
+   pickDirectory / pickFile / pickPath now live in app/picker.js; the coder setup
+   form imports pickDirectory from there. */
 
 $("setup-browse").onclick = async () => {
   const dir = await pickDirectory("Pick a project directory",

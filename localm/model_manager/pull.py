@@ -5,10 +5,12 @@ resumable downloads, hashing-on-the-wire, and GUI progress streaming."""
 import localm.model_manager as _mm  # read package-patchable names at call time
 
 import contextlib
+import json
 import os
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import List
 from typing import Optional
@@ -29,8 +31,9 @@ from .registry import alias_model
 from .registry import find_aliases_by_path
 
 # HF_ENDPOINT / HF_HUB_ENDPOINT are ambient env vars localm never exposes as a
-# setting. This endpoint is pinned explicitly at every huggingface_hub call site
-# below, so an env var in the user's shell cannot redirect a model pull.
+# setting anywhere (no settings_schema.py key, no CLI flag, no docs). Pinned
+# explicitly at every huggingface_hub call site below so a stray env var in
+# the user's shell can never silently redirect a model pull elsewhere.
 _HF_ENDPOINT = "https://huggingface.co"
 
 
@@ -54,10 +57,11 @@ def _progress_file_info(target_parts: List[Path]) -> "tuple[str | None, int, int
 class _ProgressOutcome:
     """Explicit success signal for the progress context managers.
 
-    The body must SAY it finished by calling ``ok()``; silence means it did not.
-    The absence of an exception is not enough: ``_pull_gguf_file`` reports a
-    failed part with ``return False`` from INSIDE its ``with`` block, which
-    unwinds perfectly cleanly.
+    A context manager cannot infer success from the absence of an exception:
+    ``_pull_gguf_file`` reports a failed part with ``return False`` from INSIDE
+    its ``with`` block, which unwinds perfectly cleanly. Detecting only
+    exceptions would still announce 100% for that download. So the body has to
+    SAY it finished, and silence means it did not.
     """
 
     __slots__ = ("succeeded",)
@@ -74,13 +78,14 @@ def _incomplete_prefixes(base_dir: Path, rel_parts: List[str]) -> "set[str] | No
 
     huggingface_hub names a local-dir temp file
     ``<short_hash(<name>.metadata)>.<etag>.incomplete`` under
-    ``<local_dir>/.cache/huggingface/download/<subpath>/``. The etag is not
-    knowable in advance, but the hash prefix is, and it is what separates OUR
-    parts from a concurrent pull's.
+    ``<local_dir>/.cache/huggingface/download/<subpath>/`` (verified against
+    huggingface_hub 1.23.0). The etag is not knowable in advance, but the hash
+    prefix is, and it is what separates OUR parts from a concurrent pull's.
 
-    Returns None when the layout cannot be computed. The caller then falls back
-    to an unfiltered scan of this destination, which is coarser but never counts
-    another DESTINATION's bytes.
+    Returns None when the layout cannot be computed - this reaches into
+    huggingface_hub internals, so a version that moves them must degrade rather
+    than break. The caller then falls back to an unfiltered scan of this
+    destination, which is coarser but never counts another DESTINATION's bytes.
     """
     try:
         from huggingface_hub._local_folder import _short_hash
@@ -91,8 +96,9 @@ def _incomplete_prefixes(base_dir: Path, rel_parts: List[str]) -> "set[str] | No
             out.add(_short_hash(paths.metadata_path.name))
         return out or None
     except Exception as e:
-        # Non-fatal: progress simply gets coarser. Logged at debug so a
-        # huggingface_hub layout change stays discoverable.
+        # Not fatal and not silenced: progress simply gets coarser. Surfaced at
+        # debug so a huggingface_hub layout change is discoverable rather than
+        # showing up as mysteriously chunky download bars.
         logger.debug("cannot compute .incomplete prefixes (progress will be "
                      "coarser, not wrong): %s", e)
         return None
@@ -106,7 +112,9 @@ def _download_progress(target_parts: List[Path], total_size: int, *,
 
     Active in GUI mode (LOCALM_PROGRESS_JSON=1). A total of 0 means "we could
     not size this": progress still streams with ``pct: null`` so the GUI shows a
-    busy bar with a running byte count, matching _snapshot_progress.
+    busy bar with a running byte count, matching _snapshot_progress. Emitting
+    NOTHING in that case (the old behaviour) turned a single failed HEAD into a
+    completely silent multi-GB download.
 
     Yields a _ProgressOutcome; call ``.ok()`` on the success path or the closing
     event reports the measured partial instead of 100%.
@@ -132,8 +140,10 @@ def _download_progress(target_parts: List[Path], total_size: int, *,
         if cache_root.is_dir():
             try:
                 for f in cache_root.rglob("*.incomplete"):
-                    # Count only the .incomplete files belonging to THIS job, so a
-                    # concurrent pull's temp file is not added to this numerator.
+                    # Scoped to THIS job. The scan used to be a hardcoded
+                    # MODELS_DIR walk with no filter, so a --comfy-dest-dir pull
+                    # looked in the wrong tree entirely, and any concurrent pull's
+                    # temp file was added to this job's numerator.
                     if prefixes is not None and f.name.split(".")[0] not in prefixes:
                         continue
                     try:
@@ -161,9 +171,11 @@ def _download_progress(target_parts: List[Path], total_size: int, *,
     t = threading.Thread(target=_poll, daemon=True)
     t.start()
     fn0, fi0, fc0 = _progress_file_info(target_parts)
-    # Seed from the measurement rather than a literal 0: on a resume, parts already
-    # on disk make 0 wrong. zero_is_unknown renders the fresh case, where the
-    # measurement is genuinely 0, as unknown rather than a confident 0%.
+    # Seed from the MEASUREMENT, not from a literal 0. They agree on a fresh
+    # pull and disagree on every resume, where parts already on disk make a
+    # hardcoded 0 a false statement the next poll immediately contradicts.
+    # zero_is_unknown covers what that left: on a fresh pull the measurement IS
+    # 0, so the seed was still claiming a confident 0% before any byte moved.
     _emit_progress(_downloaded_bytes(), total_size, name=fn0, index=fi0, count=fc0,
                    zero_is_unknown=True)
     try:
@@ -213,8 +225,9 @@ def _snapshot_progress(disk_bytes_fn, total_size: int):
     t = threading.Thread(target=_poll, daemon=True)
     t.start()
     # Seed from the measurement (see _download_progress): a resumed snapshot or
-    # .part file already has bytes on disk. zero_is_unknown renders a measured 0
-    # as unknown rather than a confident 0%.
+    # a resumed .part file already has bytes on disk, and a hardcoded 0 claims
+    # otherwise. zero_is_unknown then covers the fresh case, where the
+    # measurement is 0 and a rendered "0%" cannot be told from a stall.
     _emit_progress(_measured(), total_size, zero_is_unknown=True)
     try:
         yield outcome
@@ -232,17 +245,23 @@ def _snapshot_progress(disk_bytes_fn, total_size: int):
 
 
 def _report_success(rich_msg: str, plain_msg: str) -> None:
-    """Announce a completed pull. A DISPLAY failure never reads as an OPERATION
-    failure: every exception raised by the announcement is caught here.
+    """Announce a completed pull without letting a DISPLAY failure read as an
+    OPERATION failure. Every call site reaches this only after the download,
+    checksum verification and registry write are already fully done - that is
+    the precondition that makes swallowing a failure here safe: there is no
+    remaining work this call could be masking. Moving a call to this function
+    earlier, before that work completes, would silently break that guarantee.
 
-    Precondition: at every call site the download, checksum verification and
-    registry write are already fully done, so there is no remaining work this
-    call could be masking. A call moved earlier, before that work completes,
-    breaks that guarantee.
-
-    The rich message is printed first; on any exception a warning is logged and
-    the plain-ASCII message is printed instead. A failure of that fallback is
-    logged too and never propagates.
+    ``except Exception`` (not a narrower type) is deliberate and MEASURED, not
+    a guess: this exact line has independently crashed two different ways on
+    the checkmark glyph - a ``ModuleNotFoundError`` from rich's cell-width
+    lookup (``rich._unicode_data``) and a ``UnicodeEncodeError`` from a legacy
+    Windows console write path (see
+    dev-notes/ROOTCAUSE-pull-success-reported-as-failed-2026-08-05.md) - so an
+    enumerated except clause would have missed one of them. The GUI runs pull
+    as a subprocess and treats a non-zero exit as "the pull failed"
+    (localm/plugins/gui/jobs.py), so an uncaught exception here reports a
+    provably successful multi-GB download as failed.
     """
     try:
         console.print(rich_msg)
@@ -286,42 +305,60 @@ def pull_model(
     spec = _mm.resolve_spec(model_spec)
     type_is_auto = (model_type == "auto")
 
-    # A local filesystem path is registered in place rather than parsed as an
-    # owner/repo:file spec, and this runs BEFORE any network auto-detect so a local
-    # path is never probed against huggingface.co. Only an absolute path or an
-    # existing file counts, so a bare HF owner/repo is not shadowed by a same-named
-    # local directory. add_local does the validation and dedup.
+    # A local filesystem path is not a remote spec: register it in place rather
+    # than mis-parsing a Windows drive-colon as an owner/repo:file spec, or
+    # rejecting it as "Unknown spec" (H1). This is checked BEFORE any network
+    # auto-detect so registering a local file never leaks its path (and model
+    # filename) to huggingface.co - a POSIX absolute path or a forward-slash
+    # relative path both contain "/" and would otherwise be probed against HF
+    # (AUDIT-HIGH-6). Only an absolute path or an existing file counts, so a bare
+    # HF "owner/repo" is never shadowed by a same-named local directory. add_local
+    # does the validation + dedup.
+    # escape(): model_spec (and so `local`) is the raw CLI/GUI-supplied spec
+    # string, and expected_sha256 (`want`) is the raw --sha256 value - neither
+    # is charset-validated before this point (a bad --sha256 only fails the
+    # digest COMPARISON below, which happens after these prints run). `actual`
+    # is a real hashlib hexdigest and cannot carry markup, but is escaped too
+    # rather than relying on that staying true.
+    from rich.markup import escape
     try:
         local = Path(model_spec).expanduser()
         is_local_path = local.exists() and (local.is_absolute() or local.is_file())
     except OSError:
         is_local_path = False
     if is_local_path:
-        # A user-supplied --sha256 is verified against the real bytes for a local
-        # file and refused on mismatch. A full HF repo refuses the flag outright.
+        # FAC-5 / AGENTS.md rule 5: a user-supplied --sha256 is a SAFETY assertion.
+        # For a local file we can and MUST actually verify it, never register the
+        # file and report success while silently ignoring the hash (a false-success
+        # that tells the user integrity held when it was never checked). A full HF
+        # repo refuses --sha256 outright; a single local file we verify against the
+        # real bytes and refuse on mismatch, mirroring the URL/GGUF download paths.
         if expected_sha256:
             if local.is_dir():
                 console.print(
                     "[red]--sha256 is not supported for a local directory[/red] "
-                    f"({local}): a folder has many files and no single digest to "
-                    "verify. Drop --sha256, or point at a single .gguf file.")
+                    f"({escape(str(local))}): a folder has many files and no single "
+                    "digest to verify. Drop --sha256, or point at a single .gguf file.")
                 return False
             want = expected_sha256.strip().lower()
             actual = _verify_digest(local).lower()
             if actual != want:
                 console.print(
-                    f"[red]SHA256 mismatch![/red] {local} is {actual[:16]}…, not "
-                    f"--sha256 {want[:16]}…. Refusing to register.")
+                    f"[red]SHA256 mismatch![/red] {escape(str(local))} is "
+                    f"{escape(actual[:16])}…, not --sha256 {escape(want[:16])}…. "
+                    "Refusing to register.")
                 return False
-            _report_success(f"[green]✓[/green] SHA256 verified: {actual[:16]}…",
-                            f"[green]OK[/green] SHA256 verified: {actual[:16]}…")
-        # A local file gets no remote type probe: honour an explicit --type, else
-        # let add_local detect it (GGUF -> llm, HF dir -> config.json, otherwise
-        # 'unknown').
+            _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
+                            f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
+        # A local file gets no remote type probe: honour an explicit --type, else let
+        # add_local deterministically detect it (GGUF -> llm, HF dir -> config.json,
+        # otherwise the 'unknown' sentinel rather than a silent 'llm').
         local_type = None if model_type == "auto" else model_type
         return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
 
-    # net_mode=off stops a remote pull, including the type auto-detect probe below.
+    # SSRF-PULL: honour the net_mode kill switch for a REMOTE pull. net_mode=off
+    # means "no network at all", so it must stop a model download - and the type
+    # auto-detect probe below - too.
     from localm.netpolicy import network_mode
     if network_mode() == "off":
         console.print(
@@ -330,29 +367,35 @@ def pull_model(
         return False
 
     # Remote spec: resolve the model type (a network probe against HF for a bare
-    # owner/repo). Reached only for confirmed-remote specs, after the local-path and
-    # net_mode gates above.
+    # owner/repo). Only reached for confirmed-remote specs, after the local-path
+    # and net_mode gates above.
     detected_type = "llm"
     if model_type == "auto":
         if "/" in spec and not (spec.startswith("http://") or spec.startswith("https://")):
             repo_id = spec.split(":")[0] if ":" in spec else spec
-            # A named .gguf file is typed 'llm' from the container format alone,
-            # without falling back to the repo's HF pipeline_tag. Matches both file
-            # forms the dispatch below accepts (owner/repo:file.gguf and
-            # owner/repo/file.gguf) via the last path segment; the pipeline tag is
-            # probed only for a bare repo.
+            # A named .gguf file is a hard LLM signal (the container format itself),
+            # exactly like a local `add` of a .gguf - so type it 'llm' and do NOT
+            # fall back to the repo's HF pipeline_tag, which a GGUF-quant repo often
+            # lacks, mislabeling the model 'unknown'. An 'unknown' type then hides
+            # the model from the desktop launcher and blocks auto-chat selection, so
+            # a plain `localm pull owner/repo:model.gguf` would vanish from the UI.
+            # Catch both file forms the dispatch below accepts (owner/repo:file.gguf
+            # AND owner/repo/file.gguf) via the last path segment; only probe the
+            # pipeline tag for a bare repo (no specific .gguf file).
             if spec.rsplit("/", 1)[-1].lower().endswith(".gguf"):
                 detected_type = "llm"
             else:
                 detected_type = _hf_pipeline_tag_to_type(repo_id)
                 logger.info("Auto-detected model type for %s: %s", repo_id, detected_type)
                 # A bare owner/repo pull is a full snapshot, and _pull_hf_snapshot
-                # re-checks the type against the config.json it downloads and
-                # announces the outcome itself. Every other spec in this branch
-                # registers the probe's answer as-is, so it is announced here.
+                # gets a second, HARDER look at the config.json it downloads, so it
+                # announces the outcome itself. Saying "registering it as 'unknown'"
+                # here would be a false statement whenever that resolves the type
+                # (REG-477). Every other spec in this branch registers the probe's
+                # answer as-is, so it is announced now.
                 if detected_type == "unknown" and ":" in spec:
-                    # An 'unknown' model is not auto-loaded for chat, but it stays
-                    # runnable by name.
+                    # Surface the honest result (AGENTS.md rule 5): it won't be
+                    # auto-loaded for chat, but it stays runnable by name.
                     console.print(
                         "[yellow]Could not determine this model's type[/yellow] - "
                         "registering it as 'unknown'. Run it by name, or set its type "
@@ -366,12 +409,17 @@ def pull_model(
     is_single_file_spec = not is_url_spec and "/" in spec and (
         ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"))
     if dest_dir is not None and not is_single_file_spec:
-        # dest_dir routing is wired only through _pull_gguf_file, so any other spec
-        # shape is refused rather than downloaded to MODELS_DIR.
+        # dest_dir routing is only wired through _pull_gguf_file - refuse rather
+        # than silently downloading to MODELS_DIR while the caller believed it
+        # went to dest_dir (AGENTS.md rule 5: no silent wrong-destination writes).
         console.print(
             "[red]dest_dir is only supported for a single-file spec[/red] "
             "(owner/repo:file or owner/repo/file.gguf) - "
-            f"{model_spec!r} would pull a full snapshot or direct URL instead."
+            # Quoted by hand rather than via !r/repr(): escape() after repr()
+            # re-escapes repr()'s own backslash, and repr() after escape() is
+            # the wrong order too (see localm/cli/doctor.py's identical note).
+            f"'{escape(model_spec)}' would pull a full snapshot or direct "
+            "URL instead."
         )
         return False
 
@@ -391,7 +439,7 @@ def pull_model(
             res = _mm._pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
                                      redownload=redownload, model_type=detected_type)
     else:
-        console.print(f"[red]Unknown spec:[/red] {model_spec}")
+        console.print(f"[red]Unknown spec:[/red] {escape(model_spec)}")
         console.print("Formats:")
         console.print("  [bold]owner/repo[/bold]              full HF model directory")
         console.print("  [bold]owner/repo:file.gguf[/bold]   single GGUF file")
@@ -400,14 +448,16 @@ def pull_model(
         res = False
 
     # A single-file GGUF spec already threaded mmproj_spec into _pull_gguf_file
-    # above, which fetched it and recorded it on the registry entry. This tail
-    # covers the other dispatch shapes (a direct URL, a full HF snapshot), where the
-    # projector is only downloaded, not attached.
+    # above (fetched AND recorded on the registry entry). This tail only
+    # covers the other dispatch shapes (a direct URL / a full HF snapshot),
+    # where the main model isn't a llama.cpp GGUF registration to attach a
+    # projector to - just download the file for the user to wire up by hand.
     if res and mmproj_spec and not is_single_file_spec:
-        console.print(f"Pulling mmproj: {mmproj_spec}")
-        # A '/' must be present (an owner/repo), the same precondition
-        # _fetch_explicit_mmproj enforces: a bare 'file.gguf' would otherwise reach
-        # _pull_gguf_file's split and raise IndexError.
+        console.print(f"Pulling mmproj: {escape(mmproj_spec)}")
+        # "/" must be present (an owner/repo), same precondition
+        # _fetch_explicit_mmproj enforces: without it a bare "file.gguf" (no
+        # repo) passes the .endswith(".gguf") half of this check and then
+        # crashes _pull_gguf_file's own identical split with an IndexError.
         if "/" in mmproj_spec and (
                 ":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf")):
             _mm._pull_gguf_file(mmproj_spec, name=None, register=False)
@@ -426,13 +476,15 @@ def _stem_from_url(url: str) -> str:
 
 
 def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
-    """Verify there is at least *required_bytes* of free space on the volume that
-    holds *dest_dir*. Prints a warning and returns False when space is
+    """
+    Verify there is at least *required_bytes* of free space on the volume that
+    holds *dest_dir*.  Prints a warning and returns False when space is
     insufficient; returns True when fine or when the check is skipped
     (e.g. ``required_bytes == 0``).
 
-    An unmeasurable free-space check (offline models dir, permission denied,
-    etc.) is treated as OK: a WARNING is logged and the download proceeds.
+    If the free-space check itself cannot be measured (offline models dir,
+    permission denied, etc.) it is treated as OK by design: a WARNING is
+    logged and the download proceeds rather than blocking a working setup.
     """
     if not required_bytes:
         return True
@@ -441,9 +493,13 @@ def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
         if usage.free < required_bytes:
             need_gb  = required_bytes / 1024**3
             free_gb  = usage.free / 1024**3
+            # escape(): dest_dir can be caller-supplied (e.g. --comfy-dest-dir);
+            # need_gb/free_gb are floats formatted with :.1f and cannot carry markup.
+            from rich.markup import escape
             console.print(
                 f"[red]Not enough disk space.[/red] "
-                f"Need {need_gb:.1f} GB, have {free_gb:.1f} GB free on {dest_dir}"
+                f"Need {need_gb:.1f} GB, have {free_gb:.1f} GB free on "
+                f"{escape(str(dest_dir))}"
             )
             return False
     except Exception as e:
@@ -475,22 +531,26 @@ def _hf_file_sha256(repo_id: str, filename: str) -> Optional[str]:
 
 
 def _pick_best_of_same_repo_mmprojs(cands: List[str]) -> str:
-    """Deterministic pick among several mmproj filenames found in the SAME repo,
-    once stem-matching (``_pick_mmproj_candidate``) could not narrow them to one.
-    Every candidate here comes from the ONE repo the caller is pulling from, so
-    they are quantised variants of the same projector for the same model.
-    Prefers the conventional highest-precision f16 build; falls back to a
-    sorted-first pick for determinism."""
+    """Deterministic pick among several mmproj filenames found in the SAME
+    repo, once stem-matching (``_pick_mmproj_candidate``) couldn't narrow them
+    to one. Unlike a cross-model directory glob (``find_sibling_mmproj``),
+    every candidate here already comes from the ONE repo the caller is
+    pulling from, so they are near-certainly quantised variants of the SAME
+    projector for the SAME model rather than projectors for different models -
+    guessing among them costs precision, never correctness. Prefers the
+    conventional highest-precision f16 build; falls back to a sorted-first
+    pick for determinism."""
     f16 = [c for c in cands if "f16" in c.lower()]
     return f16[0] if f16 else sorted(cands)[0]
 
 
 def _hf_repo_files(repo_id: str) -> Optional[List[str]]:
     """*repo_id*'s file listing, or None when it could not be fetched at all
-    (offline, API error, rate limit) - kept distinct from "fetched, and it lists
-    none". A listing FAILURE must never be read as "this repo has no projector",
-    which would print a false "no vision projector found" note on a transient HF
-    API hiccup."""
+    (offline, API error, rate limit) - kept distinct from "fetched, and it
+    lists none": a listing FAILURE must never be read as "this repo has no
+    projector" (AGENTS.md rule 5 - do not collapse 'could not look' into
+    'looked and found nothing'), or a transient HF API hiccup would print a
+    false "no vision projector found" note."""
     try:
         from huggingface_hub import HfApi
         return HfApi(endpoint=_HF_ENDPOINT).list_repo_files(repo_id)
@@ -506,12 +566,13 @@ def _pick_mmproj_from_listing(
     """The mmproj (vision projector) filename among *files* (a repo's file
     listing) that pairs with *model_filename*, or None when none qualify.
 
-    *files* comes from a REMOTE HF repo listing, so every candidate is confined
-    through ``_safe_models_filename`` - the same guard an explicit --mmproj
-    filename gets - before it is considered for picking, not merely rejected
-    after being chosen. A single-path-component check alone (e.g. "no '/'") is
-    not enough: on Windows a value with no forward slash can still be a
-    drive-qualified or backslash-relative path. ``_safe_models_filename`` also
+    *files* comes from a REMOTE HF repo listing, so every candidate is
+    confined through ``_safe_models_filename`` (the same guard an explicit
+    --mmproj filename gets, GAP-CLI-2) before it is even considered for
+    picking - not merely rejected after being chosen. A single-path-component
+    check alone (e.g. "no '/'") is not enough: on Windows a value with no
+    forward slash at all can still be a drive-qualified or backslash-relative
+    path, and ``_safe_models_filename`` is what actually rejects those, plus
     confines the result to land inside *base_dir*."""
     cands = [f for f in files
              if f != model_filename and "mmproj" in f.lower()
@@ -524,10 +585,15 @@ def _pick_mmproj_from_listing(
     picked = _mm._pick_mmproj_candidate(Path(model_filename).stem, cands)
     if picked:
         return picked
-    # _pick_mmproj_candidate gives up in two cases it cannot distinguish: no
-    # candidate shares the model's leading token, or several do. Only the second is
-    # resolved here, so _pick_best_of_same_repo_mmprojs only ever chooses among
-    # candidates already known to relate to this model.
+    # _pick_mmproj_candidate gave up, which happens for two different reasons
+    # it cannot itself distinguish: NONE of the candidates share the model's
+    # leading token (no confirmed relation to *this* model at all - guessing
+    # here risks attaching a genuinely different model's projector), or
+    # SEVERAL do (confirmed related, merely ambiguous between quantised
+    # variants of the SAME projector). Only the second is safe to guess in:
+    # _pick_best_of_same_repo_mmprojs's "same repo" trust assumption only
+    # holds once every candidate it sees is already known to be about this
+    # model, never as a blanket license to pick among total strangers.
     stem = Path(model_filename).stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
     stem_matches = [c for c in cands if stem and stem in c.lower()]
     if len(stem_matches) >= 2:
@@ -540,9 +606,10 @@ def _hf_repo_mmproj_filename(
 ) -> Optional[str]:
     """The mmproj (vision projector) filename in *repo_id*'s OWN file listing
     that pairs with *model_filename*, or None when the repo ships none (or its
-    listing could not be fetched at all). A free HuggingFace metadata call (repo
-    file listing, no download), so a GUI/MCP pull can attach a vision model's
-    projector without the CLI --mmproj flag."""
+    listing could not be fetched at all). A free HuggingFace metadata call
+    (repo file listing, no download) - this is what lets a GUI/MCP pull attach
+    a vision model's projector automatically, instead of requiring the CLI
+    --mmproj flag the user would otherwise have to name by hand."""
     files = _hf_repo_files(repo_id)
     if files is None:
         return None
@@ -550,17 +617,29 @@ def _hf_repo_mmproj_filename(
 
 
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Optional[Path]:
-    """Auto-attach companion: look for a vision projector shipped in the SAME HF
-    repo as *filename* and fetch it too.
+    """Auto-attach companion: look for a vision projector shipped in the SAME
+    HF repo as *filename* and fetch it too - the repo listing is available at
+    pull time, which is exactly when this decision is cheap (#957: a GUI pull
+    of a vision GGUF silently had no projector, so the model downloaded but
+    could never actually see an image).
 
     Returns the local Path of a verified projector to record on the model's
-    registry entry, or None. When the listing could not be fetched at all, stays
-    silent (see ``_hf_repo_files``). Only when the repo listing was genuinely
-    read and *filename* looks like a vision-language release (by name) with no
-    usable projector among it does this print an informational note, so the gap
-    is visible at pull time rather than at first image; registry.py's
-    ``vision_input_guidance`` is the analogous message for the chat-time case.
+    registry entry, or None. When the listing could not be fetched at all,
+    stays silent (see ``_hf_repo_files``) - only when the repo listing was
+    genuinely read and *filename* looks like a vision-language release (by
+    name) with no usable projector among it does this print an informational
+    note, so the gap is visible at pull time rather than discovered silently
+    at first image - registry.py's ``vision_input_guidance`` is the analogous
+    message for the chat-time case.
     """
+    # escape(): repo_id/filename/candidate/e all come from a REMOTE repo
+    # (repo_id/filename from the caller's spec, candidate from that repo's OWN
+    # file listing) - none is charset-restricted. `candidate` in particular
+    # sits directly inside an OPEN [yellow]...[/yellow] tag below, so an
+    # unescaped value there is genuine markup-TAG-INJECTION, not just
+    # bracket-drop (a filename like "x][/yellow][red on white]FAKE[/red on
+    # white][yellow]y" would close the real tag and open fake styled text).
+    from rich.markup import escape
     files = _hf_repo_files(repo_id)
     if files is None:
         return None
@@ -570,7 +649,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
             console.print(
                 "[yellow]Note:[/yellow] this looks like a vision-language "
                 f"model, but no vision projector (mmproj) file was found in "
-                f"{repo_id}. It may not be able to see images - if the "
+                f"{escape(repo_id)}. It may not be able to see images - if the "
                 "projector lives in a different repo, pull it explicitly "
                 "with [bold]--mmproj <repo>:<file>[/bold]."
             )
@@ -578,7 +657,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
 
     dest = base_dir / candidate
     if not dest.exists():
-        console.print(f"Pulling vision projector: {candidate}")
+        console.print(f"Pulling vision projector: {escape(candidate)}")
         try:
             from huggingface_hub import hf_hub_download
             local = hf_hub_download(repo_id=repo_id, filename=candidate,
@@ -587,18 +666,19 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
                 shutil.move(local, dest)
         except Exception as e:
             console.print(
-                f"[yellow]Found a vision projector ({candidate}) in {repo_id} "
-                f"but could not download it: {e}. Vision may not work for "
-                "this model.[/yellow]"
+                f"[yellow]Found a vision projector ({escape(candidate)}) in "
+                f"{escape(repo_id)} but could not download it: {escape(str(e))}. "
+                "Vision may not work for this model.[/yellow]"
             )
             return None
 
     if not _mm.gguf_is_mmproj(dest):
-        # Hard-verify the fetched file against real GGUF metadata: the filename
-        # match is only a heuristic, and a file failing this check is reported as
-        # 'none found' rather than attached.
+        # Hard-verify what was just fetched: the filename match is only a
+        # heuristic, and attaching a file that fails the real GGUF-metadata
+        # check would silently hand the backend a bad projector instead of the
+        # honest "none found" state (AGENTS.md rule 5).
         console.print(
-            f"[yellow]{candidate} does not look like a valid vision "
+            f"[yellow]{escape(candidate)} does not look like a valid vision "
             "projector (GGUF metadata check failed) - not attaching it.[/yellow]"
         )
         return None
@@ -606,12 +686,13 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
 
 
 def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
-    """True when *entry* (a registry entry whose file is *path*) is a plausible
-    target for the mmproj backfill: pulled from an HF repo, a plain LLM
-    registration (never a projector needing its own projector), and not already
-    carrying a recorded ``mmproj``. Pure and does no I/O - the network decision
-    lives in ``backfill_mmproj_for_entry`` below, so a caller can filter cheaply
-    first."""
+    """True when *entry* (a registry entry whose file is *path*) is a
+    plausible target for the #957 mmproj backfill: pulled from an HF repo,
+    a plain LLM registration (never a projector needing its own projector),
+    and not already carrying a recorded ``mmproj``. Pure/no I/O - the network
+    decision lives in ``backfill_mmproj_for_entry`` below, so a caller (e.g.
+    a sync pass counting candidates before deciding whether to spend the
+    per-call budget) can filter cheaply first."""
     source = str(entry.get("source", ""))
     if not source.startswith("hf:"):
         return False
@@ -625,22 +706,35 @@ def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
 
 
 def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
-    """Attach a vision projector to an LLM registry entry that has none, using
-    the same-repo lookup a fresh pull does (``_maybe_fetch_repo_mmproj``) and the
-    ``source`` this entry already recorded (``hf:<repo_id>``). The model itself
-    is not re-downloaded and no user action is needed; the fetched projector gets
-    the same auto-attach plus hard-verify treatment a fresh pull gives it.
+    """#957: an LLM pulled BEFORE the auto-attach fix (or from a build that
+    predates it) has no mmproj recorded and never will on its own - the
+    maintainer's ruling on the issue is explicit that a re-pull is not an
+    acceptable fix ("an already pulled vision model must work just as a
+    freshly pulled one, no half measures"). This is the same-repo lookup a
+    fresh pull already does (``_maybe_fetch_repo_mmproj``), reused so an
+    existing registry entry gets exactly the same auto-attach + hard-verify
+    treatment retroactively, driven by the ``source`` this entry ALREADY
+    recorded (``hf:<repo_id>``) - no re-download of the model itself, no
+    user action.
 
-    Returns the fetched/verified projector Path (the caller records it), or None
-    when not a candidate, blocked by policy, or nothing was found. Never raises,
-    mirroring ``_maybe_fetch_repo_mmproj``'s own contract, so a sync pass is not
-    taken down by one bad entry.
+    Returns the fetched/verified projector Path (caller records it), or None
+    when not a candidate, blocked by policy, or nothing was found - never
+    raises (mirrors ``_maybe_fetch_repo_mmproj``'s own contract; a sync pass
+    must not be taken down by one bad entry).
 
-    Network policy: gated on ``network_mode() != "off"``, the SAME bar
-    ``_pull_gguf_file``'s own net_mode gate uses for this identical
-    HF-listing-plus-download operation on an explicit pull, not the stricter
-    "== allow" bar ``embedder.py`` uses for its background fetch. Only the "off"
-    kill-switch is a hard stop."""
+    Network policy: gated on ``network_mode() != "off"`` - deliberately the
+    SAME bar ``_pull_gguf_file``'s own net_mode gate uses for this identical
+    HF-listing-plus-download operation on an explicit pull (see this
+    module's top-level gate), not the stricter "== allow" bar
+    ``embedder.py``'s automatic download uses for ITS background fetch.
+    embedder.py can afford the stricter bar because a working degraded
+    fallback already exists (lexical BM25); vision has none - the feature is
+    simply broken until the projector exists - and the maintainer's ruling
+    is that this must resolve itself under the SAME default configuration a
+    fresh pull already resolves it under, not only for installs that have
+    separately opted into net_mode=allow. Only the one deliberate "off"
+    kill-switch is honoured as a hard stop, matching the fresh-pull path
+    exactly."""
     if not mmproj_backfill_candidate(entry, path):
         return None
     from localm.netpolicy import network_mode
@@ -654,15 +748,28 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
 
 def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
     """Download the user-named --mmproj file (owner/repo:file.gguf) into
-    *base_dir* and return its local path, verified as a real vision projector -
-    or None on a bad spec, failed download, or failed verification (always
-    printed, never silent). An explicit --mmproj always wins over the same-repo
-    auto-detection in ``_maybe_fetch_repo_mmproj``; the caller only reaches here
-    when the user named one."""
-    # A '/' must be present (an owner/repo) as well as one of the two file markers,
-    # matching pull_model's own is_single_file_spec check. Without the '/' a bare
-    # 'file.gguf' reaches the else branch below, where rsplit on a '/'-free string
-    # returns a ONE-element list and parts[1] raises IndexError.
+    *base_dir* and return its local path, verified as a real vision projector
+    - or None on a bad spec, failed download, or failed verification (always
+    printed, never silent). An explicit --mmproj always wins over the
+    same-repo auto-detection in ``_maybe_fetch_repo_mmproj``: the caller only
+    reaches here when the user named one (never silently override a user's
+    explicit choice)."""
+    # "/" must be present (an owner/repo) as well as one of the two file
+    # markers - matching pull_model's own is_single_file_spec check. Without
+    # the "/" precondition a bare "file.gguf" (ends in .gguf, no repo at all)
+    # passed this guard and then crashed the else branch below with an
+    # IndexError on parts[1], since rsplit("/", 1) on a "/"-free string
+    # returns a ONE-element list.
+    # escape(): mmproj_spec/m_file/safe/e are all attacker/user/MCP-supplied
+    # (mmproj_spec is the raw --mmproj value; m_file/safe are components of
+    # it) and NOT charset-restricted (_safe_models_filename rejects path
+    # traversal and Windows-reserved characters, not '['/']'). `safe` sits
+    # directly inside an OPEN [yellow]...[/yellow] tag below - genuine
+    # markup-TAG-INJECTION, not just bracket-drop. This is also the "genuinely
+    # ironic" site: the message reporting a filename FAILED the safety check
+    # was itself unescaped, so the unsafe filename could weaponize the very
+    # warning about it.
+    from rich.markup import escape
     if not ("/" in mmproj_spec
             and (":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf"))):
         console.print("[red]mmproj spec must be a specific file (owner/repo:file.gguf)[/red]")
@@ -673,16 +780,16 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
         parts = mmproj_spec.rsplit("/", 1)
         m_repo, m_file = parts[0], parts[1]
 
-    # Same traversal guard as the main file: m_file comes from a spec, which may be
-    # user- or client-supplied over MCP.
+    # Same traversal guard as the main file (GAP-CLI-2): m_file comes from a
+    # spec, which may be user- or client-supplied over MCP.
     safe = _mm._safe_models_filename(m_file, base_dir)
     if safe is None:
-        console.print(f"[red]Unsafe mmproj filename:[/red] {m_file}")
+        console.print(f"[red]Unsafe mmproj filename:[/red] {escape(m_file)}")
         return None
 
     dest = base_dir / safe
     if not dest.exists():
-        console.print(f"Pulling mmproj: {mmproj_spec}")
+        console.print(f"Pulling mmproj: {escape(mmproj_spec)}")
         try:
             from huggingface_hub import hf_hub_download
             local = hf_hub_download(repo_id=m_repo, filename=safe, local_dir=str(base_dir),
@@ -690,12 +797,12 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
             if Path(local) != dest:
                 shutil.move(local, dest)
         except Exception as e:
-            console.print(f"[red]mmproj download failed:[/red] {e}")
+            console.print(f"[red]mmproj download failed:[/red] {escape(str(e))}")
             return None
 
     if not _mm.gguf_is_mmproj(dest):
         console.print(
-            f"[yellow]{safe} does not look like a valid vision projector "
+            f"[yellow]{escape(safe)} does not look like a valid vision projector "
             "(GGUF metadata check failed) - not attaching it.[/yellow]"
         )
         return None
@@ -713,7 +820,9 @@ def _mmproj_for_registration(
     """The vision-projector Path to record on this pull's registry entry, or
     None. An explicit --mmproj wins when given, else the same-repo listing is
     auto-checked. Skipped entirely for a foreign destination (ComfyUI's
-    dest_dir), for anything that is not a plain 'llm' registration, and for a
+    dest_dir - not one of localm's own chat models), anything that isn't a
+    plain 'llm' registration (a projector cannot itself need a projector, and
+    an embedding/lora/etc. pull was never going to see an image), and a
     *filename* that already looks like a projector by its own name."""
     if dest_dir is not None or reg_type != "llm" or "mmproj" in filename.lower():
         return None
@@ -737,22 +846,34 @@ def _pull_gguf_file(
     restricted to .gguf - any single-file ``owner/repo:filename`` spec dispatches
     here, see ``pull_model``'s docstring).
 
-    ``expected_sha256`` is the user-supplied ``--sha256`` digest. When given it
-    is reconciled with HuggingFace's own LFS metadata up front, and the
-    downloaded first part is verified against it before the model is registered.
+    ``expected_sha256`` is the user-supplied ``--sha256`` digest. It is NOT a
+    facade here (FAC-5): when given it is reconciled with HuggingFace's own LFS
+    metadata up front, and the downloaded first part is verified against it
+    before the model is registered.
 
     ``dest_dir``, when given, routes the download to that directory instead of
     ``MODELS_DIR`` (e.g. a ComfyUI models subfolder) and is created via
     ``_mkdir_or_explain`` instead of ``ensure_dirs()``. ``register`` still
     controls whether the download is added to localm's own model registry -
-    a file routed elsewhere should normally pass ``register=False``.
+    a file routed elsewhere (e.g. for ComfyUI, not for localm's own chat-model
+    catalog) should normally pass ``register=False``.
 
     ``mmproj_spec``, when given, is the user's explicit ``--mmproj
-    owner/repo:file.gguf`` choice and always wins over the automatic same-repo
-    projector lookup below. When it is None and the pulled file registers as a
-    plain 'llm', the HF repo's own file listing is checked for a vision-projector
-    (mmproj) sibling and, if found, fetched and recorded on the registry entry.
+    owner/repo:file.gguf`` choice and always wins over the automatic
+    same-repo projector lookup below (never silently override an explicit
+    choice). When it is None and the pulled file registers as a plain 'llm',
+    the HF repo's own file listing is checked for a vision-projector (mmproj)
+    sibling and, if found, fetched and recorded on the registry entry - a GUI
+    or MCP pull never had a way to pass --mmproj, so without this a vision
+    GGUF downloaded with no way to ever see an image (#957).
     """
+    # escape(): spec (so repo_id/filename/parts derived from it), the resolved
+    # `part`/`want`/`expected` values below, and every exception's text are
+    # all attacker/user/MCP-supplied or remote-sourced, none charset-
+    # restricted. repo_id/filename in particular sit directly inside OPEN
+    # [bold cyan]/[bold] tags at several sites below - genuine markup-TAG-
+    # INJECTION, not just bracket-drop.
+    from rich.markup import escape
     try:
         from huggingface_hub import hf_hub_download, hf_hub_url
     except ImportError:
@@ -767,19 +888,21 @@ def _pull_gguf_file(
         parts = spec.rsplit("/", 1)
         repo_id, filename = parts[0], parts[1]
 
-    # Split GGUF: normalise to the full ordered part list. The first part is what
-    # gets registered, since llama.cpp loads the model from it. A non-split,
-    # non-gguf file is a one-element list.
+    # Split GGUF: normalise to the full ordered part list. llama.cpp loads
+    # the model from the first part, so that's what gets registered. A
+    # non-split, non-gguf file (e.g. a .safetensors) is just a one-element list.
     all_parts = split_gguf_parts(filename) or [filename]
     filename  = all_parts[0]
 
-    # The filename comes from an untrusted spec (owner/repo:../../evil.gguf), so
-    # every part is confined to base_dir before it is used as a destination. Any
-    # unsafe part rejects the whole pull.
+    # Traversal guard (GAP-CLI-2): the filename comes from an untrusted spec
+    # (owner/repo:../../evil.gguf), so confine every part to base_dir before
+    # it is used as a destination. Reject the whole pull on any unsafe part.
+    # escape(part): the "genuinely ironic" site - a filename that just FAILED
+    # this safety check must not be able to weaponize the warning about it.
     for part in all_parts:
         if _safe_models_filename(part, base_dir) is None:
             console.print(
-                f"[red]Unsafe model filename:[/red] {part}\n"
+                f"[red]Unsafe model filename:[/red] {escape(part)}\n"
                 "A model filename must be a single name inside the models folder "
                 "(no '/', '\\', or '..')."
             )
@@ -792,14 +915,15 @@ def _pull_gguf_file(
     # (Only identifies the first part of a split GGUF, which is enough.)
     expected = _mm._hf_file_sha256(repo_id, filename)
 
-    # Honour a user-supplied --sha256: when HF's own metadata digest is known and
-    # disagrees with it, refuse before downloading.
+    # FAC-5: honour a user-supplied --sha256. If HF's own metadata digest is
+    # known and disagrees with it, the bytes can never match - refuse up front
+    # rather than spending a download to discover the mismatch.
     want = expected_sha256.lower() if expected_sha256 else None
     if want and expected and want != expected.lower():
         console.print(
             f"[red]SHA256 mismatch (before download):[/red] --sha256 "
-            f"{want[:16]}… does not match HuggingFace's metadata for "
-            f"{filename} ({expected[:16]}…). Refusing to download."
+            f"{escape(want[:16])}… does not match HuggingFace's metadata for "
+            f"{escape(filename)} ({escape(expected[:16])}…). Refusing to download."
         )
         return False
     # The digest we will verify against / store: prefer HF metadata, else the
@@ -808,22 +932,25 @@ def _pull_gguf_file(
 
     missing = [p for p in all_parts if not (base_dir / p).exists()]
     if not missing:
-        console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
+        console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         # If the user asserted a hash, verify the file actually on disk before
         # treating it as the requested model.
         if want:
             on_disk = _verify_digest(dest, purpose="to check the file already here")
             if on_disk.lower() != want:
                 console.print(
-                    f"[red]SHA256 mismatch![/red] The file already at {filename} "
-                    f"({on_disk[:16]}…) does not match --sha256 ({want[:16]}…)."
+                    f"[red]SHA256 mismatch![/red] The file already at "
+                    f"{escape(filename)} ({escape(on_disk[:16])}…) does not "
+                    f"match --sha256 ({escape(want[:16])}…)."
                 )
                 return False
         if register:
             reg_type = model_type
-            # One shared header probe backs both the mmproj/embedding refinement
-            # below and the persisted architecture/expert_count, captured
-            # regardless of type_is_auto.
+            # F8-PERSIST-ARCH-AND-EXPERT-COUNT: one shared header probe backs the
+            # mmproj/embedding refinement below AND the persisted architecture/
+            # expert_count, the same sharing _detect_local_model_type does -
+            # capturing it regardless of type_is_auto, since it is a fact about
+            # the file, not about which type label this call ends up choosing.
             gguf_meta = _mm.gguf_registry_metadata(dest)
             if type_is_auto and reg_type == "llm":
                 if _mm.gguf_is_mmproj(dest):
@@ -840,11 +967,15 @@ def _pull_gguf_file(
                                  expert_count=gguf_meta.get("expert_count"))
         return True
 
-    # Pre-download duplicate check: are the same bytes already registered? Applied
-    # only when the destination IS localm's own models dir, since find_by_sha256
-    # answers 'is it in the registry', not 'is it at the destination'. A pull with
-    # an explicit dest_dir is register=False, so neither skipping nor aliasing
-    # applies.
+    # Pre-download duplicate check: same bytes already on disk elsewhere?
+    # Only meaningful when the destination IS localm's own models dir, because
+    # find_by_sha256 answers "is it in localm's REGISTRY", not "is it at the
+    # destination". With an explicit dest_dir (a ComfyUI models folder) the file
+    # is wanted THERE: skipping the download because a copy is registered
+    # elsewhere reported success while nothing reached the ComfyUI folder, and the
+    # next generate still failed with the model missing - success claimed for work
+    # not done (REG-641, AGENTS.md rule 5). Aliasing is equally wrong here: a
+    # dest_dir pull is register=False by design, so it must not touch the registry.
     if verify_digest and not redownload and dest_dir is None:
         dups = _mm.find_by_sha256(verify_digest)
         if dups:
@@ -876,14 +1007,20 @@ def _pull_gguf_file(
     if not _mm._check_disk_space(base_dir, total_size):
         return False
 
+    # TAG-INJECTION site: repo_id/filename sit directly inside OPEN
+    # [bold cyan]/[bold] tags - an unescaped value here could close the real
+    # tag and open fake styled text of its own choosing, not just corrupt its
+    # own display. len(all_parts)/len(missing) are ints, never markup.
     if len(all_parts) > 1:
         console.print(
-            f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold] "
+            f"Pulling [bold cyan]{escape(repo_id)}[/bold cyan] / "
+            f"[bold]{escape(filename)}[/bold] "
             f"[dim](split GGUF, {len(all_parts)} parts, "
             f"{len(missing)} to download)[/dim]"
         )
     else:
-        console.print(f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold]")
+        console.print(f"Pulling [bold cyan]{escape(repo_id)}[/bold cyan] / "
+                      f"[bold]{escape(filename)}[/bold]")
 
     with _download_progress([base_dir / p for p in missing], total_size,
                             base_dir=base_dir, rel_parts=list(missing)) as _prog:
@@ -899,32 +1036,36 @@ def _pull_gguf_file(
                 if Path(local) != final:
                     shutil.move(local, final)
             except Exception as e:
-                console.print(f"[red]Download failed[/red] ({part}): {e}")
-                # Returns without _prog.ok(), so the context manager reports what is
-                # actually on disk instead of 100%.
+                console.print(f"[red]Download failed[/red] ({escape(part)}): "
+                              f"{escape(str(e))}")
+                # Deliberately WITHOUT _prog.ok(): this return unwinds the
+                # context manager cleanly, so silence is the only thing that
+                # stops it announcing 100% for a download that just failed.
                 return False
         _prog.ok()
 
-    # Verify the downloaded first part against the user's --sha256. On mismatch,
-    # delete the part(s) and fail.
+    # FAC-5: verify the downloaded first part against the user's --sha256.
+    # (HF metadata is already trusted; we only need to confirm a user assertion
+    # against the real bytes.) On mismatch, delete the part(s) and fail.
     if want:
         actual = _verify_digest(dest).lower()
         if actual != want:
             console.print(
-                f"[red]SHA256 mismatch![/red] Expected {want[:16]}…, got "
-                f"{actual[:16]}… - deleting downloaded file(s)"
+                f"[red]SHA256 mismatch![/red] Expected {escape(want[:16])}…, got "
+                f"{escape(actual[:16])}… - deleting downloaded file(s)"
             )
             for part in all_parts:
                 p = base_dir / part
                 if p.exists():
                     p.unlink()
             return False
-        _report_success(f"[green]✓[/green] SHA256 verified: {actual[:16]}…",
-                        f"[green]OK[/green] SHA256 verified: {actual[:16]}…")
+        _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
+                        f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
 
     if register:
         reg_type = model_type
-        # One shared header probe, as in the 'already downloaded' branch above.
+        # F8-PERSIST-ARCH-AND-EXPERT-COUNT: see the "already downloaded" branch
+        # above - same shared-probe reasoning, freshly-downloaded case.
         gguf_meta = _mm.gguf_registry_metadata(base_dir / filename)
         if type_is_auto and reg_type == "llm":
             if _mm.gguf_is_mmproj(base_dir / filename):
@@ -939,11 +1080,16 @@ def _pull_gguf_file(
                   sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
                   architecture=gguf_meta.get("architecture"),
                   expert_count=gguf_meta.get("expert_count"))
-        _report_success(f"[green]✓[/green] [bold]{model_name}[/bold] is ready",
-                        f"[green]OK[/green] [bold]{model_name}[/bold] is ready")
+        # model_name is _sanitize_name()-derived (A-Za-z0-9._- only) so this is
+        # defense-in-depth, matching the established convention of not relying
+        # on that charset restriction holding forever.
+        _report_success(f"[green]✓[/green] [bold]{escape(model_name)}[/bold] is ready",
+                        f"[green]OK[/green] [bold]{escape(model_name)}[/bold] is ready")
     else:
-        _report_success(f"[green]✓[/green] [bold]{filename}[/bold] downloaded",
-                        f"[green]OK[/green] [bold]{filename}[/bold] downloaded")
+        # filename here is NOT charset-restricted (register=False routes here,
+        # e.g. a ComfyUI dest_dir pull) - genuine tag-injection position.
+        _report_success(f"[green]✓[/green] [bold]{escape(filename)}[/bold] downloaded",
+                        f"[green]OK[/green] [bold]{escape(filename)}[/bold] downloaded")
     return True
 
 
@@ -963,33 +1109,46 @@ def _warn_if_repo_ships_code(dest: Path, repo_id: str) -> None:
     """Say plainly when a downloaded repo contains Python.
 
     ``snapshot_download`` fetches the WHOLE repo, so a HuggingFace repo's own .py
-    lands on disk like any other file.
+    lands on disk like any other file. Historically the HF backend then loaded a
+    model directory with transformers' remote-code flag hard-coded on, so that
+    Python was imported and executed on the next load (CodeQL alert 49).
 
-    The file is inert: ``hf_trust_remote_code`` defaults to False and a model
-    that needs custom code is refused with an explanation instead of being run
-    (see inference/backends/hf.py). Everything is fetched rather than filtered
-    through an allow_patterns allowlist, which would silently produce a broken,
-    half-downloaded model whenever it missed a needed file (chat templates
-    (.jinja), merges.txt, shard index files, per-component subdirectories for
-    multimodal repos).
+    Two reasons this is a warning and not an allow_patterns allowlist:
+
+    1. Execution is already off. ``hf_trust_remote_code`` defaults to False and a
+       model that needs custom code is refused with an explanation instead of
+       being run (see inference/backends/hf.py), so the file on disk is inert.
+    2. An allowlist is the riskier change. A model needs more than weights plus a
+       tokenizer - chat templates (.jinja), merges.txt, shard index files,
+       per-component subdirectories for multimodal repos - and a pattern list that
+       misses one silently produces a broken, half-downloaded model. Refusing to
+       download a file we might need, to protect against code we already refuse to
+       run, trades a real breakage for no extra safety.
 
     So: fetch everything, and make the presence of code VISIBLE at the moment it
-    arrives.
+    arrives, rather than leaving the user to discover it later or not at all.
     """
+    # escape(): repo_id/e/file names below all come from a REMOTE repo and are
+    # interpolated into a Rich markup string. Unescaped, a file named
+    # '[/b]evil.py' raises MarkupError (which would abort the pull between the
+    # download and the _register call, leaving the model on disk and
+    # unregistered), and one named '[red]x.py' is parsed as a style tag and
+    # VANISHES - a security notice that reports "ships 1 Python file(s) ()"
+    # and names nothing. A repo must not be able to edit, blank, or weaponise
+    # the warning that is about it. Imported up front (not just below the
+    # early-return) so BOTH branches of this function get the same protection
+    # - the early-return branch used to be the one gap.
+    from rich.markup import escape
     try:
         py = sorted(p for p in dest.rglob("*.py") if p.is_file())
     except OSError as e:
-        # A failed scan does not fail the download, and is reported as not checked
-        # rather than as 'no code found'.
-        console.print(f"[yellow]Could not check {repo_id} for bundled code: {e}[/yellow]")
+        # A failed scan must not fail an otherwise-good download, but it must not
+        # read as "no code found" either (AGENTS.md rule 5): say it was not checked.
+        console.print(f"[yellow]Could not check {escape(repo_id)} for bundled "
+                      f"code: {escape(str(e))}[/yellow]")
         return
     if not py:
         return
-    # escape(): these names come from a remote repo and are interpolated into a
-    # Rich markup string. Unescaped, a name like '[/b]evil.py' raises MarkupError
-    # and one like '[red]x.py' is parsed as a style tag and disappears from the
-    # notice.
-    from rich.markup import escape
     shown = ", ".join(escape(p.name) for p in py[:5])
     if len(py) > 5:
         shown += f", and {len(py) - 5} more"
@@ -1008,11 +1167,14 @@ def _resolve_snapshot_type(dest: Path, model_type: str) -> str:
     The pipeline_tag probe runs BEFORE the download and answers 'unknown' for any
     repo without an exact tag (common for base and older repos). The files now on
     disk are a HARDER signal than that API record, so when the probe could not
-    resolve, the real config.json is classified with the same deterministic
-    reader ``add_local`` uses.
+    resolve, classify the real config.json with the same deterministic reader
+    ``add_local`` uses. Registering a plainly-LlamaForCausalLM repo as 'unknown'
+    hid it from GUI auto-select, the MCP EngineCache and the jobs runner even
+    though it downloaded fine (REG-477).
 
     A probe that DID resolve (lora/vae/embedding/...) is authoritative and is
-    never overridden here, and an unresolvable config.json stays 'unknown'.
+    never overridden here, and an unresolvable config.json stays 'unknown' - this
+    fills in a gap, it does not restore the old silent 'llm' fallback.
     """
     if model_type != "unknown":
         return model_type
@@ -1020,11 +1182,16 @@ def _resolve_snapshot_type(dest: Path, model_type: str) -> str:
     logger.info("Snapshot %s typed %r from its downloaded config.json (the HF "
                 "pipeline_tag probe could not resolve it)", dest.name, detected)
     if detected != "unknown":
+        # detected is one of _detect_local_model_type's fixed type-label
+        # vocabulary today, but escaped anyway (defense-in-depth, tag-injection
+        # position) rather than relying on that classifier never echoing back
+        # anything from the downloaded repo's own files.
+        from rich.markup import escape
         console.print(f"[green]Determined model type from config.json:[/green] "
-                      f"[bold]{detected}[/bold]")
+                      f"[bold]{escape(detected)}[/bold]")
     else:
-        # Still no hard signal even from the real files: say so. It stays runnable
-        # by name, it just is not auto-loaded for chat.
+        # Still no hard signal even from the real files: say so (AGENTS.md rule
+        # 5). It stays runnable by name, it just is not auto-loaded for chat.
         console.print(
             "[yellow]Could not determine this model's type[/yellow] - "
             "registering it as 'unknown'. Run it by name, or set its type "
@@ -1043,26 +1210,31 @@ def _snapshot_is_complete(dest: Path, repo_siblings, repo_id: str) -> bool:
     could not be fetched (offline / API error), which degrades to exactly that
     weaker check.
 
-    Module-level rather than a closure, so the confinement below is directly
-    testable."""
-    # Imported inside the function so the CLI download path does not import fastapi
-    # (pulled in by pathsafe for confined_name's HTTPException) just to validate a
-    # filename.
+    Module-level rather than a closure so the confinement below is directly
+    testable (tests/test_registry_confinement.py)."""
+    # Imported inside the function, not at module scope, so the CLI download
+    # path does not pull fastapi (which pathsafe imports for confined_name's
+    # HTTPException) just to validate a filename. By the time this runs we are
+    # mid-pull, where a web-stack import is free next to the download itself.
     from localm import pathsafe
     if not (dest / "config.json").exists():
         return False
     if repo_siblings is None:
         return True
     for sib in repo_siblings:
-        # rfilename comes from the remote model_info response and is not a trusted
-        # path component: an absolute or drive-qualified value would replace dest
-        # entirely, and a '..' walks out of it. Confine before the stat, never
-        # after.
+        # rfilename comes from the remote model_info response, so it is not a
+        # trusted path component: pathlib lets an absolute or drive-qualified
+        # value REPLACE dest entirely (any Windows path naming a drive does), and
+        # a '..' walks out of it. Unconfined, this check would stat files anywhere
+        # on disk - and a repo listing names that happen to exist off-tree could
+        # make an EMPTY download look complete and get registered as ready.
+        # Confine before the stat, never after.
         try:
             fp = pathsafe.confined_under(dest, str(sib.rfilename))
         except ValueError as e:
-            # An out-of-bounds name is logged and reports the snapshot INCOMPLETE,
-            # so it re-downloads rather than registering a half-present tree.
+            # Rule 5: an out-of-bounds name is a real signal about the repo, so
+            # say so. Reporting the snapshot INCOMPLETE is the safe direction - it
+            # re-downloads rather than registering a half-present tree.
             logger.warning("repo %s lists an out-of-bounds filename (%s); "
                            "treating the local snapshot as incomplete", repo_id, e)
             return False
@@ -1081,13 +1253,20 @@ def _pull_hf_snapshot(
     model_type: str = "llm",
 ) -> bool:
     """Download a complete HuggingFace model repo (for transformers/HF format models)."""
-    # A full-repo snapshot is many files with no single digest, so --sha256 is
-    # refused with a message rather than ignored.
+    # escape(): repo_id is the raw caller-supplied spec (CLI/GUI/MCP), dest is
+    # derived from it via _sanitize_name (charset-safe, escaped anyway as
+    # defense-in-depth), and every exception's text is remote-sourced. Several
+    # sites below interpolate repo_id/dest directly inside an OPEN Rich tag -
+    # genuine markup-TAG-INJECTION, not just corruption of their own display.
+    from rich.markup import escape
+    # FAC-5: a full-repo snapshot is many files; there is no single digest to
+    # check --sha256 against. Refuse the flag with a clear message rather than
+    # silently ignoring it (which would give a false sense of verification).
     if expected_sha256:
         console.print(
             "[red]--sha256 is not supported for a full HuggingFace repo[/red] "
-            f"({repo_id}): a snapshot has many files and no single digest to "
-            "verify. Drop --sha256, or pull a single file with "
+            f"({escape(repo_id)}): a snapshot has many files and no single "
+            "digest to verify. Drop --sha256, or pull a single file with "
             "[bold]owner/repo:file.gguf --sha256 <hash>[/bold]."
         )
         return False
@@ -1101,9 +1280,13 @@ def _pull_hf_snapshot(
     model_name = _sanitize_name(name or repo_id.split("/")[-1])
     dest = _mm.MODELS_DIR / model_name
 
-    # Fetch the repo's file listing once: it backs both the completeness check
-    # (every file present at its stated size, not just config.json) and the
-    # disk-space preflight / progress total below.
+    # Fetch the repo's file listing once - used both to verify an existing
+    # download is genuinely complete (every file present with a matching size,
+    # not just config.json) and to size the disk-space preflight / progress
+    # display below. A disk-full mid-download can leave config.json - usually
+    # one of the smallest, earliest files - on disk while weight shards are
+    # still missing; checking only config.json's existence would then register
+    # that broken snapshot as a ready model on the very next retry.
     repo_siblings = None
     total_size = 0
     try:
@@ -1112,13 +1295,14 @@ def _pull_hf_snapshot(
         repo_siblings = info.siblings
         total_size = sum(getattr(s, "size", None) or 0 for s in repo_siblings)
     except Exception as e:
-        # Offline / API error: fall back to a config.json-only completeness check
-        # below and an indeterminate (0) progress total.
+        # Offline / API error: fall back to a config.json-only completeness
+        # check below and an indeterminate (0) progress total - best effort,
+        # matching how _pull_gguf_file/_pull_url degrade when a size HEAD fails.
         logger.debug("could not fetch file listing for %s (%s); falling back "
                      "to a config.json-only completeness check", repo_id, e)
 
     if dest.exists() and _snapshot_is_complete(dest, repo_siblings, repo_id):
-        console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
+        console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
         _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
                                  model_type=_resolve_snapshot_type(dest, model_type))
         return True
@@ -1129,8 +1313,9 @@ def _pull_hf_snapshot(
 
         def _is_same_repo(info) -> bool:
             # Skip a malformed sibling entry (non-dict, or a null / non-string /
-            # empty path) by routing it through _entry_path, so one corrupt entry
-            # cannot crash the pull-dedup scan.
+            # empty path): a single corrupt entry must not crash the pull-dedup
+            # scan (a str entry's .get / Path(None) would). Mirrors #562's registry
+            # consumers - route every entry through _entry_path.
             epath = _mm._entry_path(info)
             if epath is None:
                 return False
@@ -1138,9 +1323,14 @@ def _pull_hf_snapshot(
 
         same_source = sorted(n for n, info in reg.items() if _is_same_repo(info))
         if same_source:
+            # Registry keys are _sanitize_name()-derived (safe charset), so
+            # this is defense-in-depth; quoted by hand rather than via !r -
+            # escape() after repr() re-escapes repr()'s own backslash (see
+            # localm/cli/doctor.py's identical note).
+            names = ", ".join(f"'{escape(n)}'" for n in same_source)
             console.print(
                 f"[yellow]This repo is already downloaded - registered as "
-                f"{', '.join(repr(n) for n in same_source)}[/yellow]"
+                f"{names}[/yellow]"
             )
             if not sys.stdin.isatty():
                 console.print("[dim]Non-interactive session - skipping. "
@@ -1158,26 +1348,43 @@ def _pull_hf_snapshot(
                 alias_model(same_source[0], model_name)
                 return True
 
-    # Collision check: model_name comes from _sanitize_name, a lossy coercion, and
-    # is used as both the MODELS_DIR subdirectory name and the registry key with no
-    # uniqueness check upstream, so two different repos - or a --name reused across
-    # two pulls - can compute the same dest. snapshot_download MERGES into
-    # local_dir instead of clearing it first, so pulling into an occupied folder
-    # mixes the two repos' files together.
+    # COLLISION CHECK (#957-adjacent finding, 2026-08-05): model_name comes from
+    # _sanitize_name, a LOSSY coercion (any run of disallowed characters collapses
+    # to a single '-', consecutive dots collapse to one) used directly as both the
+    # MODELS_DIR subdirectory name and the registry key, with no uniqueness check
+    # anywhere upstream. Two genuinely different repos - or, more commonly, a
+    # plain --name reused across two different pulls, no special characters
+    # required at all - can compute the exact same dest. Without this check,
+    # dest.exists() above only asks "is THIS repo's snapshot already complete
+    # here" (a few lines up) and, when that is False (a genuinely different repo,
+    # or a stale/incomplete download), falls straight through to
+    # snapshot_download's local_dir=dest, which MERGES into whatever is already
+    # there rather than clearing it first - silently mixing a different model's
+    # files in, overwriting its config.json, orphaning its weight files, and
+    # about to overwrite its registry entry too, all reported as an ordinary
+    # successful pull. Confirmed live: this corrupts an earlier pull with zero
+    # warning, not a theoretical concern.
     #
-    # The test: is there ALREADY a registry entry pointing at this exact dest for a
-    # DIFFERENT source? A resumable partial of the SAME repo has no registry entry
-    # yet, and a redownload of the model already registered here has a matching
-    # source, so neither is refused.
+    # The signal: is there ALREADY a registry entry pointing at this exact dest,
+    # for a DIFFERENT source? A resumable partial of the SAME repo (interrupted
+    # before it ever reached registration) has no registry entry yet, so this
+    # does not false-positive on it; a genuine redownload of the model already
+    # registered here has a matching source, so it is excluded, not refused.
     if dest.exists():
         reg_now = _mm.load_registry()
         foreign = [n for n in find_aliases_by_path(dest, reg_now)
                   if reg_now[n].get("source") != f"hf:{repo_id}"]
         if foreign:
+            # repo_id/dest sit directly inside the OPEN [red]...[/red] tag -
+            # genuine tag-injection position. `foreign` entries are registry
+            # keys (safe charset), quoted by hand rather than via !r (see the
+            # same-source note above).
+            foreign_names = ", ".join(f"'{escape(n)}'" for n in foreign)
             console.print(
-                f"[red]Refusing to pull {repo_id} into {dest}:[/red] this "
+                f"[red]Refusing to pull {escape(repo_id)} into "
+                f"{escape(str(dest))}:[/red] this "
                 f"folder already holds a DIFFERENT model, registered as "
-                f"{', '.join(repr(n) for n in foreign)}. Pulling here would "
+                f"{foreign_names}. Pulling here would "
                 f"silently mix the two repos' files together. Pull with "
                 f"[bold]-n <a-different-name>[/bold] to give this repo its "
                 "own directory."
@@ -1187,17 +1394,22 @@ def _pull_hf_snapshot(
     def _disk_bytes() -> int:
         return _snapshot_bytes_on_disk(dest)
 
-    # Only the bytes still MISSING need room: snapshot_download resumes on top of
-    # whatever already landed in dest. _pull_gguf_file sums only the `missing` parts
-    # and _pull_url uses (total - already_have).
+    # Only the bytes still MISSING need room. snapshot_download resumes on top of
+    # whatever already landed in dest, so charging the retry for the FULL repo
+    # size made recovery from a disk-full impossible: free < total refused even
+    # with ample room for the remainder, defeating the resume this preflight
+    # exists to enable (REG-514). _pull_gguf_file sums only the `missing` parts
+    # and _pull_url uses (total - already_have); match them.
     if not _mm._check_disk_space(_mm.MODELS_DIR,
                                  max(0, total_size - _disk_bytes())):
         return False
 
     _mm.ensure_dirs()
+    # TAG-INJECTION site: repo_id/dest sit directly inside OPEN
+    # [bold cyan]/[bold] tags.
     console.print(
-        f"Downloading full model [bold cyan]{repo_id}[/bold cyan] "
-        f"-> [bold]{dest}[/bold]"
+        f"Downloading full model [bold cyan]{escape(repo_id)}[/bold cyan] "
+        f"-> [bold]{escape(str(dest))}[/bold]"
     )
     console.print("[dim]This may take a while for large models...[/dim]")
 
@@ -1210,30 +1422,44 @@ def _pull_hf_snapshot(
             )
             _prog.ok()
     except Exception as e:
-        console.print(f"[red]Download failed:[/red] {e}")
+        console.print(f"[red]Download failed:[/red] {escape(str(e))}")
         return False
 
     _warn_if_repo_ships_code(dest, repo_id)
-    # Registration goes through _register_with_dedup.
+    # _register_with_dedup, not the plain _register _pull_hf_snapshot used to
+    # call here - the same asymmetry the collision check above closes at the
+    # directory level: _pull_gguf_file already routes through the dedup-aware
+    # registration (see its own calls above), this path did not.
     #
-    # Its bool return is checked, not assumed True: the dest-collision block above
-    # only guards a foreign occupant already at THIS path, and model_name can still
-    # be taken by a DIFFERENT path, which _register_with_dedup declines
-    # non-interactively. Real bytes are already on disk by then, so the outcome is
-    # reported rather than assumed.
+    # Its bool return MUST be checked, not assumed True: the dest-collision
+    # block above only guards a foreign occupant already sitting at THIS
+    # path - it says nothing about model_name itself already being taken by
+    # a DIFFERENT path (e.g. dest didn't exist yet, so that block never ran).
+    # _register_with_dedup can still decline in that case (non-interactively,
+    # per its own docstring), and by then the download has already written
+    # real bytes to disk. Reporting success anyway would mean "the model is
+    # on disk under no name" masquerading as an ordinary successful pull -
+    # add_ollama_blob's call site (registry.py) already follows this same
+    # check-and-report-honestly pattern for the identical reason.
     registered = _mm._register_with_dedup(
         model_name, dest, f"hf:{repo_id}",
         model_type=_resolve_snapshot_type(dest, model_type))
     if not registered:
+        # TAG-INJECTION site: repo_id/dest sit directly inside the OPEN
+        # [yellow]...[/yellow] tag. model_name is _sanitize_name()-derived
+        # (safe charset), escaped anyway as defense-in-depth.
         console.print(
-            f"[yellow]{repo_id} was downloaded to {dest}, but could not be "
-            f"registered as '{model_name}'[/yellow] (see message above) - "
-            "the files are on disk. Retry with a different -n name, or "
-            "'localm alias' it in."
+            f"[yellow]{escape(repo_id)} was downloaded to {escape(str(dest))}, "
+            f"but could not be registered as '{escape(model_name)}'[/yellow] "
+            "(see message above) - the files are on disk. Retry with a "
+            "different -n name, or 'localm alias' it in."
         )
         return False
-    _report_success(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}",
-                    f"[green]OK[/green] [bold]{model_name}[/bold] downloaded to {dest}")
+    _report_success(
+        f"[green]✓[/green] [bold]{escape(model_name)}[/bold] downloaded to "
+        f"{escape(str(dest))}",
+        f"[green]OK[/green] [bold]{escape(model_name)}[/bold] downloaded to "
+        f"{escape(str(dest))}")
     return True
 
 
@@ -1242,13 +1468,13 @@ def _pull_hf_snapshot(
 def _ssrf_resolve_final_url(url: str) -> str:
     """Follow the redirect chain HEAD-only, re-validating EVERY hop against the
     netpolicy SSRF guard, and return the final URL. Model pulls legitimately
-    redirect (HuggingFace -> CDN), so redirects are followed, but each hop is
-    checked rather than trusting requests' automatic, UNCHECKED redirect
-    following, which a public URL could use to bounce the download into
-    127.0.0.1 / 169.254.169.254 / an RFC1918 service. Each HEAD is IP-pinned to
-    the validated address so the connect cannot rebind off the checked host.
-    Raises NetworkPolicyError if any hop resolves to a non-public host or cannot
-    be resolved to a validated address."""
+    redirect (HuggingFace -> CDN), so we follow - but check each hop instead of
+    trusting requests' automatic, UNCHECKED redirect following, which a public
+    URL could otherwise use to bounce the download into 127.0.0.1 /
+    169.254.169.254 / an RFC1918 service (SSRF-PULL). Each HEAD is IP-pinned to the
+    validated address so the connect cannot rebind off the checked host
+    (SSRF-REBIND). Raises NetworkPolicyError if any hop resolves to a non-public
+    host or cannot be resolved to a validated address."""
     import urllib.parse
 
     from localm import netpolicy
@@ -1273,6 +1499,132 @@ def _ssrf_resolve_final_url(url: str) -> str:
     return current
 
 
+class PullInFlight(Exception):
+    """Another process is already downloading to this destination."""
+
+
+def _part_lock_dir(filename: str) -> Path:
+    """Where the lock for ``<filename>.part`` lives.
+
+    BESIDE the models dir, never inside it. A lock directory under
+    ``models/`` would sit in the path of the very thing it guards:
+    ``sync_models_dir`` walks that tree three levels deep looking for GGUFs,
+    and a future tidy-up of stray files there would be free to delete a live
+    lock. The filename has already been through ``_safe_models_filename``, so
+    it is a single path component and cannot escape this directory.
+    """
+    return _mm.MODELS_DIR.parent / "locks" / ("pull-" + filename + ".lock")
+
+
+def _part_lock_owner(d: Path):
+    """The recorded holder of lock *d*, or None when that cannot be read."""
+    try:
+        rec = json.loads((d / "owner.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _part_lock_holder_is_gone(d: Path) -> bool:
+    """True only when the recorded holder is PROVEN dead.
+
+    Staleness is decided by PID LIVENESS, never by elapsed time. Any fixed
+    timeout eventually reclaims a live holder's lock and recreates the exact
+    corruption this exists to prevent, and a large model on a slow link is
+    precisely the download that outlives a generous timeout.
+
+    Every uncertainty KEEPS the lock: an owner record that cannot be read (a
+    half-written lock, a permission error) is not evidence its owner died.
+    ``instances.pid_alive`` is conservative in the same direction - it reports
+    True when it genuinely cannot tell - so this composes rather than
+    re-deciding.
+    """
+    from localm import instances
+    rec = _part_lock_owner(d)
+    if rec is None:
+        return False
+    try:
+        pid = int(rec.get("pid", -1))
+    except (TypeError, ValueError):
+        return False
+    # Our OWN pid is alive by definition, so a lock recording it is held, not
+    # stale - including when the holder is another thread of this process.
+    # Reading it as "a previous run died and the pid was not reused" would let
+    # a second acquisition inside one process steal the first one's lock, which
+    # is the corruption this guards against rather than a recovery from it.
+    return not instances.pid_alive(pid)
+
+
+@contextlib.contextmanager
+def _part_lock(filename: str):
+    """Serialise everything writing ``<filename>.part``, ACROSS PROCESSES.
+
+    The contenders are separate processes, not threads: the GUI starts a pull
+    by spawning ``localm pull`` as a child, and a user can run the same command
+    in a terminal at the same time. A ``threading.Lock`` would serialise
+    nothing here while reading, in review, exactly like a correct fix.
+
+    ``mkdir`` is the primitive because it is ATOMIC - the OS either creates the
+    directory or refuses, with nothing in between. A "does the lock exist"
+    check followed by a create is two steps, and two callers can both pass the
+    first one.
+
+    Without this, two pulls of the same URL open one ``.part`` concurrently and
+    the second one's ``already_have`` read decides append-or-truncate from a
+    size the first is still changing: they interleave writes into a single
+    file, and the result passes the download but fails its hash - or, with no
+    ``--sha256`` to check it against, gets registered as a working model.
+
+    Raises :class:`PullInFlight` when someone else holds it.
+    """
+    d = _part_lock_dir(filename)
+    d.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir()
+    except FileExistsError:
+        if not _part_lock_holder_is_gone(d):
+            rec = _part_lock_owner(d) or {}
+            who = rec.get("pid", "unknown")
+            raise PullInFlight(
+                f"{filename} is already being downloaded by process {who}. "
+                f"Wait for it to finish, or - if you are certain no download "
+                f"is running - remove {d}.")
+        # Proven dead. Reclaim, then take the lock through the same atomic
+        # mkdir: whoever else is reclaiming concurrently, exactly one wins.
+        shutil.rmtree(d, ignore_errors=True)
+        try:
+            d.mkdir()
+        except OSError:
+            raise PullInFlight(
+                f"{filename} is already being downloaded by another process.")
+    except OSError as e:
+        raise PullInFlight(f"could not take the download lock for {filename}: {e}")
+
+    # `started` is recorded for the MESSAGE a human reads, never for the
+    # staleness decision - see _part_lock_holder_is_gone.
+    try:
+        (d / "owner.json").write_text(
+            json.dumps({"pid": os.getpid(), "filename": filename,
+                        "started": time.time()}),
+            encoding="utf-8")
+    except OSError:
+        # A lock nobody can identify would be un-reclaimable after a crash, so
+        # do not hold one. Release and refuse rather than wedge the dest.
+        shutil.rmtree(d, ignore_errors=True)
+        raise PullInFlight(
+            f"could not record ownership of the download lock for {filename}")
+    try:
+        yield
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        if d.exists():
+            # Rule 5: a lock we failed to drop blocks every later pull of this
+            # file until our pid dies, so it is reported rather than swallowed.
+            logger.warning(
+                "could not release the download lock at %s - a later pull of "
+                "%s will refuse until this directory is removed", d, filename)
+
+
 def _pull_url(
     url: str,
     name: str,
@@ -1280,56 +1632,101 @@ def _pull_url(
     redownload: bool = False,
     model_type: str = "llm",
 ) -> bool:
-    """Download a model from a direct URL with resumable .part file support."""
-    import requests
-    from localm.netpolicy import NetworkPolicyError
+    """Download a model from a direct URL with resumable .part file support.
 
+    Derives the destination name, then hands the whole download to
+    :func:`_pull_url_locked` under a cross-process lock on that name. The
+    derivation stays here so the lock is keyed on exactly the name the download
+    will write, rather than on a second derivation that could disagree with it.
+    """
+    # escape(): url is the raw caller-supplied spec (CLI/GUI/MCP), and
+    # filename/e are derived from it - _safe_models_filename rejects path
+    # traversal and Windows-reserved characters, not '['/']', so a URL like
+    # "https://host/x][red]FAKE[/red]y.gguf" survives with brackets intact.
+    from rich.markup import escape
     stem = _stem_from_url(url)
     if not stem:
         console.print(
-            f"[red]Invalid URL - no file name in the path:[/red] {url}\n"
+            f"[red]Invalid URL - no file name in the path:[/red] {escape(url)}\n"
             "A direct URL must point at a file, e.g. https://host/model.gguf"
         )
         return False
 
     filename = stem + ".gguf"
 
-    # Traversal guard: the filename is derived from an untrusted URL path segment,
-    # so confine it to MODELS_DIR before using it as a dest.
+    # Traversal guard (GAP-CLI-2): the filename is derived from an untrusted URL
+    # path segment, so confine it to MODELS_DIR before using it as a dest.
+    # escape(filename): another "genuinely ironic" site - a filename that just
+    # FAILED this safety check must not weaponize the warning about it.
     safe = _safe_models_filename(filename)
     if safe is None:
         console.print(
-            f"[red]Unsafe model filename derived from URL:[/red] {filename}\n"
+            f"[red]Unsafe model filename derived from URL:[/red] "
+            f"{escape(filename)}\n"
             "The download destination must be a single name inside the models "
             "folder (no '/', '\\', or '..')."
         )
         return False
     filename = safe
 
+    try:
+        with _part_lock(filename):
+            return _pull_url_locked(url, name, filename, expected_sha256,
+                                    redownload, model_type)
+    except PullInFlight as e:
+        console.print(f"[red]Download already in progress:[/red] {escape(str(e))}")
+        return False
+
+
+def _pull_url_locked(
+    url: str,
+    name: str,
+    filename: str,
+    expected_sha256: Optional[str] = None,
+    redownload: bool = False,
+    model_type: str = "llm",
+) -> bool:
+    """The body of :func:`_pull_url`, run holding the lock on *filename*.
+
+    Split out so the lock can wrap every exit path through a single ``with``
+    instead of a ``try/finally`` wrapped around the whole download.
+    """
+    import requests
+    from localm.netpolicy import NetworkPolicyError
+    # escape(): url is the raw caller-supplied spec, filename/dl_url/e are all
+    # derived from it or remote-sourced, and expected_sha256 is the raw
+    # --sha256 value (not format-validated before this point). `url` sits
+    # directly inside OPEN [bold cyan]/[red] tags at several sites below -
+    # genuine markup-TAG-INJECTION on a value that is FULLY attacker-
+    # controlled (the raw spec string).
+    from rich.markup import escape
+
     dest      = _mm.MODELS_DIR / filename
     part_file = _mm.MODELS_DIR / (filename + ".part")
 
     if dest.exists():
-        # A file with this derived name is already here. It counts as the requested
-        # model only when the caller's --sha256, if given, matches its bytes; a new
-        # name is never aliased onto unrelated existing bytes.
+        # A file with this derived name is already here. Only treat it as the
+        # requested model if the caller's --sha256 (when given) matches its
+        # bytes - never alias a new name onto unrelated existing bytes
+        # (GAP-CLI-2).
         if expected_sha256:
             on_disk = _verify_digest(dest, purpose="to check the file already here")
             if on_disk.lower() != expected_sha256.lower():
                 console.print(
                     f"[red]SHA256 mismatch![/red] A different file already "
-                    f"occupies {filename} ({on_disk[:16]}…); it does not match "
-                    f"--sha256 ({expected_sha256.lower()[:16]}…). Refusing to "
+                    f"occupies {escape(filename)} ({escape(on_disk[:16])}…); "
+                    f"it does not match --sha256 "
+                    f"({escape(expected_sha256.lower()[:16])}…). Refusing to "
                     "alias onto unrelated bytes - use --redownload or a "
                     "different -n name."
                 )
                 return False
             console.print(
-                f"[yellow]Already downloaded:[/yellow] {filename} "
+                f"[yellow]Already downloaded:[/yellow] {escape(filename)} "
                 f"[dim](sha256 verified)[/dim]"
             )
         else:
-            console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
+            console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         _mm._register_with_dedup(name, dest, url, model_type=model_type)
         return True
 
@@ -1349,26 +1746,27 @@ def _pull_url(
     # Determine how much we already have (from a prior interrupted download)
     already_have = part_file.stat().st_size if part_file.exists() else 0
 
-    # Resolve the redirect chain with each hop validated, then use the final CHECKED
-    # URL for both the size HEAD and the streaming GET with redirects OFF, so no
-    # unchecked hop can bounce the download into an internal host.
+    # SSRF-PULL: resolve the redirect chain with each hop validated, then use the
+    # final CHECKED URL for both the size HEAD and the streaming GET with redirects
+    # OFF - so no unchecked hop can bounce the download into an internal host.
     from localm import netpolicy
     try:
         dl_url = _ssrf_resolve_final_url(url)
     except NetworkPolicyError as e:
-        console.print(f"[red]Refused by network policy:[/red] {e}")
+        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
         return False
 
-    # HEAD the final URL for the total file size used by the disk-space check.
-    # Pinned to the validated IP like the GET below; a connect error here is
-    # non-fatal, while the GET fails closed regardless.
+    # HEAD the final URL to get total file size for the disk space check. Pinned to
+    # the validated IP like the GET below; a connect error here is non-fatal (the
+    # size is only for the disk-space check), but the GET fails closed regardless.
     try:
         head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False, timeout=10)
         total = int(head.headers.get("content-length", 0))
     except NetworkPolicyError as e:
-        # A policy refusal fails closed, like the GET below, instead of collapsing
-        # into total=0.
-        console.print(f"[red]Refused by network policy:[/red] {e}")
+        # A policy refusal is NOT the benign case: surface it and fail closed
+        # (like the GET below), rather than collapsing it into total=0 - do not
+        # let a rebind/deny slip through the size probe (AGENTS.md rule 5).
+        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
         return False
     except Exception as e:
         # Benign: a HEAD connect error only costs us the disk-space pre-check; the
@@ -1384,30 +1782,36 @@ def _pull_url(
     headers: dict = {}
     if already_have:
         headers["Range"] = f"bytes={already_have}-"
+        # TAG-INJECTION site: url is FULLY attacker-controlled (the raw spec
+        # string) and sits directly inside an OPEN [bold cyan]...[/bold cyan]
+        # tag.
         console.print(
-            f"Resuming [bold cyan]{url}[/bold cyan] "
+            f"Resuming [bold cyan]{escape(url)}[/bold cyan] "
             f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
         )
     else:
-        console.print(f"Downloading [bold cyan]{url}[/bold cyan]")
+        console.print(f"Downloading [bold cyan]{escape(url)}[/bold cyan]")
 
     try:
         netpolicy.check_url(dl_url)     # revalidate immediately before the connect
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
                                      timeout=30, allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308):
-            console.print(f"[red]Refused:[/red] unexpected redirect from {dl_url}")
+            console.print(f"[red]Refused:[/red] unexpected redirect from "
+                          f"{escape(dl_url)}")
             return False
         r.raise_for_status()
     except NetworkPolicyError as e:
-        console.print(f"[red]Refused by network policy:[/red] {e}")
+        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
         return False
     except requests.HTTPError as e:
+        # code is always an int (a real HTTP status_code) or the literal "?"
+        # fallback - never markup.
         code = getattr(e.response, "status_code", "?")
-        console.print(f"[red]Download failed[/red] (HTTP {code}): {url}")
+        console.print(f"[red]Download failed[/red] (HTTP {code}): {escape(url)}")
         return False
     except requests.RequestException as e:
-        console.print(f"[red]Could not reach[/red] {url}: {e}")
+        console.print(f"[red]Could not reach[/red] {escape(url)}: {escape(str(e))}")
         return False
 
     # Server may ignore the Range header - detect and reset if needed
@@ -1416,9 +1820,14 @@ def _pull_url(
         already_have = 0
 
     content_length = int(r.headers.get("content-length", 0))
-    # Without a content-length the total stays unknown, even when bytes are already
-    # on disk: adding already_have to a zero content_length would make the total
-    # equal already_have and report a stuck 100% for the whole resumed transfer.
+    # No content-length means we do not know the size, and that stays unknown
+    # even when bytes are already on disk. The old `(already_have +
+    # content_length) or None` made the TOTAL equal to already_have on a
+    # resumed chunked download: the first poll then read already_have of
+    # already_have, i.e. a confident 100%, and the change-gate suppressed every
+    # later event, so the whole real transfer ran at a stuck 100%. A fresh
+    # download collapsed to None correctly, so this only ever bit the resume
+    # path - the one the .part machinery exists for.
     total_display = (already_have + content_length) if content_length else None
 
     def _write_chunks(on_chunk=None):
@@ -1430,10 +1839,12 @@ def _pull_url(
                     on_chunk(len(chunk))
 
     if os.environ.get("LOCALM_PROGRESS_JSON") == "1":
-        # GUI mode: stream JSON progress polled from the .part file on disk, the
-        # same mechanism the HuggingFace path uses (_download_progress). The Rich
-        # bar is skipped here; there is no terminal, and its ANSI would clutter the
-        # stdout the GUI parses.
+        # GUI mode: stream JSON progress polled from the .part file on disk - the
+        # same mechanism the HuggingFace path uses (_download_progress). Direct-URL
+        # pulls used to emit only a Rich bar, which the GUI cannot render, so a URL
+        # download looked frozen until it finished (G1). Skip the Rich bar here:
+        # there is no terminal, and its ANSI would only clutter the captured stdout
+        # the GUI parses.
         def _part_bytes() -> int:
             try:
                 return part_file.stat().st_size
@@ -1457,28 +1868,35 @@ def _pull_url(
     # Atomically rename on successful completion
     part_file.rename(dest)
 
-    # SHA256 verification
+    # SHA256 verification. `actual` is a real hashlib hexdigest (cannot carry
+    # markup); expected_sha256 is the raw --sha256 value and is not
+    # charset-validated before this point - escaped anyway, both defense-in-
+    # depth on `actual` and a real fix on `expected_sha256`.
     actual = _verify_digest(dest)
     if expected_sha256:
         if actual.lower() == expected_sha256.lower():
-            _report_success(f"[green]✓[/green] SHA256 verified: {actual[:16]}…",
-                            f"[green]OK[/green] SHA256 verified: {actual[:16]}…")
+            _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
+                            f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
         else:
             console.print(
-                f"[red]SHA256 mismatch![/red] Expected {expected_sha256[:16]}…, "
-                f"got {actual[:16]}… - deleting corrupted file"
+                f"[red]SHA256 mismatch![/red] Expected "
+                f"{escape(expected_sha256[:16])}…, got {escape(actual[:16])}… "
+                "- deleting corrupted file"
             )
             dest.unlink()
             return False
     else:
-        console.print(f"[dim]SHA256: {actual}[/dim]")
+        console.print(f"[dim]SHA256: {escape(actual)}[/dim]")
 
-    # Post-download identity check: is the downloaded file byte-identical to
-    # something already registered? A URL download has no hash up front, so this is
-    # the first point it can be detected.
+    # Post-download identity check: did we just download a byte-identical
+    # copy of something already registered? (URL downloads can't know the
+    # hash up front, so this is the earliest possible detection point.)
     dups = [n for n in _mm.find_by_sha256(actual) if n != name]
     if dups and not redownload:
-        names = ", ".join(f"'{n}'" for n in dups)
+        # dups are registry keys (_sanitize_name-derived, safe charset) -
+        # escaped anyway as defense-in-depth, same TAG-INJECTION position as
+        # the same-source/foreign-name lists in _pull_hf_snapshot above.
+        names = ", ".join(f"'{escape(n)}'" for n in dups)
         console.print(
             f"[yellow]Downloaded file is byte-identical to {names}[/yellow]"
         )
@@ -1491,17 +1909,23 @@ def _pull_url(
                 default="a", show_choices=False,
             )
             if choice.lower() == "a":
-                # Route through _entry_path like every other registry consumer, so a
-                # null/int path and a '..' component are both rejected before the
-                # value decides an unlink().
+                # Route through _entry_path like every other registry consumer
+                # (the invariant documented on it). The raw ``["path"]`` read this
+                # replaces raised TypeError on a null/int path - the exact crash
+                # the choke point exists to prevent - and skipped its ``..``
+                # rejection. That matters more here than at a read-only consumer:
+                # the value decides an unlink().
                 epath = _mm._entry_path(_mm.load_registry().get(dups[0]))
                 if epath is None:
-                    # An unreadable sibling entry keeps both copies and is reported;
-                    # it never licenses deleting a file.
+                    # Say so rather than silently keeping both: an unreadable
+                    # sibling entry is a real registry problem the user should
+                    # see, and it must never license deleting a file. Quoted by
+                    # hand rather than via !r (see the doctor.py note on
+                    # escape()/repr() ordering).
                     console.print(
-                        f"[yellow]Registry entry for {dups[0]!r} is malformed - "
-                        "keeping both copies rather than deleting a file on the "
-                        "strength of an unreadable path.[/yellow]"
+                        f"[yellow]Registry entry for '{escape(dups[0])}' is "
+                        "malformed - keeping both copies rather than deleting "
+                        "a file on the strength of an unreadable path.[/yellow]"
                     )
                 else:
                     existing_path = Path(epath)
@@ -1511,16 +1935,19 @@ def _pull_url(
                     return True
 
     _mm._register(name, dest, url, sha256=actual, model_type=model_type)
-    _report_success(f"[green]✓[/green] [bold]{name}[/bold] is ready",
-                    f"[green]OK[/green] [bold]{name}[/bold] is ready")
+    # name is always _sanitize_name()-derived by pull_model() before reaching
+    # here (the only production caller), but escaped anyway - defense-in-
+    # depth, same TAG-INJECTION position as model_name elsewhere in this file.
+    _report_success(f"[green]✓[/green] [bold]{escape(name)}[/bold] is ready",
+                    f"[green]OK[/green] [bold]{escape(name)}[/bold] is ready")
     return True
 
 
 def _hf_pipeline_tag_to_type(repo_id: str) -> str:
     """Classify a HuggingFace repo's model type from HARD metadata. The real
     implementation lives in localm.discover (shared with search-result
-    classification there); the import is lazy, so localm.discover is not imported
-    at module scope."""
+    classification there); lazy import matches this module's existing
+    convention of not importing localm.discover at module scope."""
     from localm.discover import _hf_pipeline_tag_to_type as _classify
     return _classify(repo_id)
 

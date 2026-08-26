@@ -16,13 +16,14 @@ from ._core import console, main, _complete_model_name
 
 def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException],
                           autostart_attempted: bool = False) -> Optional[str]:
-    """The note to print when `localm run` is about to load the model in THIS
-    process instead of attaching to a background server. Returns None when the
-    user opted out with --no-server.
+    """CLI-1: the note to print when `localm run` is about to load the model in
+    THIS process instead of attaching to a background server, so the fallback is
+    never silent. None when the user opted out with --no-server (stay quiet).
 
-    With *attach_error* set, the note names that error. With
-    ``autostart_attempted`` True, it names the auto-start timeout instead of
-    telling the user no server is serving this directory."""
+    CLI-3: when an auto-start WAS launched but did not come up in time,
+    ``autostart_attempted`` is True so the note acknowledges that timeout instead
+    of telling the user "no server is serving this directory; start one" - which
+    contradicts the `Starting one in the background...` line they just saw."""
     if no_server:
         return None
     if attach_error is not None:
@@ -40,19 +41,27 @@ def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]
 
 def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
                               is_registered: bool, engine) -> None:
-    """Record an explicit --mmproj onto *model*'s registry entry, so a later
-    `localm run model` keeps the projector with the flag left off. Does nothing
-    unless *mmproj* is set, *is_registered* is True, and the backend reports
-    ``supports_images`` for the load that just happened."""
+    """VIS-2: an explicit --mmproj that just PROVED it works (the backend
+    confirmed supports_images for this load, not merely a well-formed path)
+    gets recorded onto the registry entry, so a future `localm run model` -
+    including the one vision_input_guidance itself suggests - keeps seeing
+    it, instead of losing it the moment the flag is left off. Gated on
+    is_registered because there is no entry to write to for a bare direct-path
+    run, and on the CONFIRMED load (not just the flag being present) so a
+    projector that failed to load can never get recorded as working - see
+    persist_cli_mmproj's own docstring for why that would be a NEW
+    false-positive surface."""
     if not (mmproj and is_registered):
         return
     backend = getattr(engine, "_backend", None)
     if not getattr(backend, "supports_images", False):
         return
+    from rich.markup import escape
+
     from ..model_manager import persist_cli_mmproj
     note = persist_cli_mmproj(model, mmproj)
     if note:
-        console.print(f"[dim]{note}[/dim]")
+        console.print(f"[dim]{escape(note)}[/dim]")
 
 
 
@@ -112,9 +121,11 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     Pipe a prompt from stdin:
       echo "Explain RDNA2" | localm run qwen2.5-7b
     """
+    from rich.markup import escape
+
     if debug:
         from ..debuglog import enable_debug
-        console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
+        console.print(f"[yellow]debug log:[/yellow] {escape(str(enable_debug()))}")
 
     from ..audit import MODE_ENV_VAR, SessionMode, effective_mode
     if mode:
@@ -132,8 +143,10 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         console.print(f"[dim]session mode: {session_mode.value} "
                       f"(audit trail in <data dir>/sessions/)[/dim]")
 
-    # Attach to a verified localm server already serving this directory and route
-    # chat through its /v1 over HTTP; --no-server forces an in-process load.
+    # H3 thin-client: ATTACH to the localm server already serving this directory
+    # (route chat through its /v1 over HTTP) instead of loading a SECOND in-process
+    # copy of the model, mirroring `localm gui`. Default is to attach when a verified
+    # server exists; --no-server forces an in-process load.
     engine = None
     is_registered = False
     attach_error: Optional[BaseException] = None
@@ -144,7 +157,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             target = instances.attach_target(
                 home_dir(), instances.resolve_root_dir())
         except Exception as e:
-            # Log the failure and keep it for the in-process fallback note.
+            # CLI-1: do not swallow the reason - log it (debug) and remember it so
+            # the in-process fallback below can say WHY it did not attach.
             from localm.debuglog import logger as _dbg
             _dbg.exception("attach_target failed; falling back to in-process load")
             attach_error = e
@@ -152,40 +166,59 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         if target:
             from ..auth import resolve_bearer_token
             from ..inference.http_engine import HttpEngine, remote_model_status
-            # Prefer the owner key on disk over the discovered per-instance token:
-            # an instance token satisfies the origin guard only, and is rejected
-            # with 401 once an owner key is configured.
+            # AUTH-ATTACH: the discovered instance's own per-instance token is
+            # only meaningful in OPEN mode (it satisfies the origin guard, not
+            # _enforce_request's key check). Once an owner key is configured,
+            # _principal_from_token has no notion of instance tokens at all and
+            # 401s every request that presents one - the CLI and the server
+            # share the same data dir, so the owner key on disk is exactly the
+            # credential this process is entitled to use (checkup 2026-08-11
+            # item 12; same precedence already fixed for cli/models.py's
+            # unload_cmd/stop_cmd and media/comfy_client.py's _localm_unload).
             attach_token = resolve_bearer_token(target.get("token"))
             state, active = remote_model_status(
                 target["base_url"], attach_token)
-            # Refuse when the server serves a known model other than the requested
-            # one, rather than answering with that other model.
+            # CORRECTNESS: never let `localm run X` answer with a DIFFERENT model.
+            # When the running server serves a KNOWN model that is not the one the
+            # user asked for, attaching would stream a reply generated by that other
+            # model - indistinguishable from X answering. Refuse instead of silently
+            # overriding the user's explicit choice (hard-won rule: detect the
+            # mismatch, INFORM, and let the user decide). --no-server is the way out.
             if active and active != model:
                 console.print(
-                    f"[red]The localm server here serves [bold]{active}[/bold], not "
-                    f"the requested [bold]{model}[/bold].[/red]\n"
-                    f"[dim]Attaching would answer with {active}, so localm will not "
-                    f"do that silently. To run {model}, re-run with [bold]--no-server"
+                    f"[red]The localm server here serves "
+                    f"[bold]{escape(active)}[/bold], not "
+                    f"the requested [bold]{escape(model)}[/bold].[/red]\n"
+                    f"[dim]Attaching would answer with {escape(active)}, so localm "
+                    f"will not do that silently. To run {escape(model)}, re-run "
+                    f"with [bold]--no-server"
                     f"[/bold] (loads it in this process).[/dim]")
                 sys.exit(1)
             if state == "empty":
-                # The server is up with no model loaded, so it cannot serve the
-                # requested model.
+                # The server is up but has no model loaded, so it cannot serve the
+                # requested model either. Refuse cleanly rather than attach and fail
+                # mid-stream; --no-server loads the model in this process.
                 console.print(
                     f"[red]A localm server is running for this directory but has no "
-                    f"model loaded, so it cannot serve [bold]{model}[/bold].[/red]\n"
+                    f"model loaded, so it cannot serve [bold]{escape(model)}[/bold]."
+                    f"[/red]\n"
                     f"[dim]Load a model on its Models page/API, or re-run with "
-                    f"[bold]--no-server[/bold] to run {model} in this process.[/dim]")
+                    f"[bold]--no-server[/bold] to run {escape(model)} in this "
+                    f"process.[/dim]")
                 sys.exit(1)
-            # state == "unknown": /v1/models was unreadable (it needs the models
-            # scope, so a chat-scoped attach token gets a 403). Attach quietly and
-            # let the reply come from whatever the server serves.
+            # state == "unknown": the server answered our attach but we could not
+            # read /v1/models (it needs the models scope, so a chat-scoped attach
+            # token gets a 403). Do NOT claim it has no model - it very likely does;
+            # attach quietly and let the reply come from whatever it serves.
             engine = HttpEngine(
                 target["base_url"], token=attach_token,
                 model=active or model, display_name=active or model)
+            # show_url(): target["base_url"] can carry a bracketed IPv6 host
+            # (RFC 3986), the exact case show_url()'s own docstring documents -
+            # not just an arbitrary string that happens to reach this print.
             console.print(
-                f"[dim]connected to the localm server at {target['base_url']} "
-                f"(no second model load)[/dim]")
+                f"[dim]connected to the localm server at "
+                f"{show_url(target['base_url'])} (no second model load)[/dim]")
 
     autostart_attempted = False
     if engine is None and not no_server:
@@ -195,6 +228,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         import time
         
         cmd = [sys.executable, "-m", "localm", "gui", "--no-browser", "--api-mode"]
+        # Use no_model if no model was provided, else pass it
         if not model:
             cmd.append("--no-model")
         else:
@@ -236,12 +270,13 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     if engine is None:
         _note = _attach_fallback_note(no_server, attach_error, autostart_attempted)
         if _note:
-            console.print(f"[dim]{_note}[/dim]")
-        # allow_direct_path: *model* is a command-line argument, so a direct
-        # filesystem path is accepted here.
+            console.print(f"[dim]{escape(_note)}[/dim]")
+        # allow_direct_path: `localm run /full/path` is a documented feature (the
+        # help text right below advertises it), and *model* here is typed by the
+        # operator on their own command line, not received over the wire.
         info = get_model_info(model, allow_direct_path=True)
         if info is None:
-            console.print(f"[red]Model not found:[/red] {model}")
+            console.print(f"[red]Model not found:[/red] {escape(model)}")
             console.print("  [dim]localm list[/dim]              - downloaded models")
             console.print("  [dim]localm models[/dim]            - GGUF shortcuts")
             console.print("  [dim]localm pull owner/repo[/dim]   - download HF model")
@@ -263,8 +298,11 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         else:
             display_name = _display_hint  # None or Ollama suggested name
 
-        # An explicit --mmproj wins; otherwise use the model's own recorded or
-        # sibling projector.
+        # VIS-1: an explicit --mmproj always wins; otherwise fall back to the
+        # model's own recorded/sibling projector, or a pulled vision GGUF run
+        # straight from the CLI (no --mmproj flag given) silently loses image
+        # support (#957). allow_direct_path=True matches the get_model_info
+        # call above: *model* is operator-typed on this command line.
         mmproj_path = mmproj or get_model_mmproj(model, allow_direct_path=True)
 
         engine = Engine(
@@ -303,8 +341,10 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 messages.append(_build_user_message(prompt, list(images)))
                 audit.user(prompt)
                 response = _stream_once(engine, messages, **gen_opts)
-                # The JSONL audit log gets the visible answer only, never the raw
-                # <think> scratchpad. transcript.exchange splits it itself.
+                # AUD-HIGH-17-2: the JSONL audit log is an INTERNAL consumer (see
+                # textnorm.strip_think's docstring), so it must get the visible
+                # answer only, not the raw <think> scratchpad - matching what
+                # transcript.exchange already does via its own split_think() call.
                 from ..textnorm import strip_think
                 audit.llm(strip_think(response))
                 if transcript:
@@ -349,15 +389,20 @@ def _file_to_data_uri(path: str) -> str:
 
 
 class _ThinkPrinter:
-    """Stream a reply to stdout, dimming the model's ``<think>`` reasoning
-    instead of printing raw ``<think>`` tags inline with the answer. The caller
-    still receives the full raw text, tags included, for the audit and
-    transcript, which separate it themselves.
+    """Stream a reply to stdout, dimming the model's ``<think>`` reasoning so it
+    reads as an aside rather than raw ``<think>`` tags inline with the answer
+    (H4). The full raw text (tags included) is still returned by the caller for
+    the audit/transcript, which separate it themselves.
 
-    Streaming is APPEND-ONLY plain ``print`` plus SGR styling (dim/colour): no
-    alternate screen, no cursor repositioning, no spinner or Live region, no
-    ``\\r``-redraw. The terminal emulator therefore owns scrolling, and
-    output keeps appending below a user who has scrolled up mid-stream."""
+    R31 (CLI half): streaming here is APPEND-ONLY plain ``print`` plus SGR styling
+    (dim/colour) - no alternate screen, no cursor repositioning, no spinner/Live
+    region. So the terminal emulator owns scrolling: a user who scrolls up to
+    re-read mid-stream is left alone (output keeps appending below), which is the
+    CLI's native equivalent of the GUI's ``chat.stick`` autoscroll latch. The GUI
+    needed that latch only because its JS re-pinned the viewport to the bottom on
+    every token; we deliberately never do the terminal analogue of that here.
+    Guarded by tests/test_cli_stream_scroll.py - do not wrap streaming in a Live
+    region / alt-screen / ``\\r``-redraw, which would fight the user's scroll."""
 
     def __init__(self) -> None:
         import sys as _sys
@@ -381,9 +426,19 @@ class _ThinkPrinter:
 
 
 
-# Floor on plausible per-token decode time: 1ms/token, a 1000 tok/s ceiling. A
-# measured decode window below it makes _perf_line omit the rate rather than
-# report one that cannot be real.
+# A floor on plausible per-token decode time (mirrors http_server.py's
+# _MIN_SEC_PER_TOKEN - kept local rather than imported, since this module must
+# not pull in the HTTP server's FastAPI/uvicorn import surface just for a single
+# constant). Verified live on real hardware (RX 6900 XT, qwen2.5-0.5b-instruct-
+# q4_k_m) that this is necessary: under concurrent GPU load from unrelated
+# processes, a real request measured a decode window collapsing toward zero,
+# reporting tens of thousands of tok/s. first_at is a SINGLE sample - if the GPU
+# scheduler delays the first token (contended) then delivers the rest in an
+# uncontended burst, the measured window shrinks toward zero even though every
+# timestamp is real. 1ms/token (1000 tok/s ceiling) is deliberately generous for
+# single-stream autoregressive decode (memory-bandwidth-bound: at least one full
+# weight read per token). Below it, omitting the rate is more honest than
+# printing one that cannot physically be true.
 _MIN_SEC_PER_TOKEN = 0.001
 
 
@@ -392,9 +447,14 @@ def _perf_line(n_tokens: int, t0: float, first_at: Optional[float],
     """One-line perf readout for the REPL, or None when there is nothing worth
     showing. tok/s is computed over the DECODE window only (first token -> end);
     the model-load + prompt-prefill time (the wait before the first token) is shown
-    separately as `load` rather than folded into the rate. tok/s is omitted for a
-    single token (no decode interval to time) or an implausibly short decode
-    window (see _MIN_SEC_PER_TOKEN)."""
+    separately as `load` rather than folded into the rate.
+
+    Folding load in made the first call after a load read ~100x too slow (e.g. a
+    cold 0.6 tok/s on a GPU that runs 64 tok/s warm), which tripped the
+    CPU-fallback heuristic in RELEASE.md. This mirrors the server's _tokens_per_sec
+    and the `localm bench` convention: "tok/s measures pure generation after the
+    first token". tok/s is omitted for a single token (no decode interval to time)
+    or an implausibly short decode window (see _MIN_SEC_PER_TOKEN)."""
     total = end - t0
     if first_at is None or total <= 0.5:
         return None
@@ -402,8 +462,9 @@ def _perf_line(n_tokens: int, t0: float, first_at: Optional[float],
     gen = end - first_at          # decode window
     plausible = n_tokens >= 2 and gen >= n_tokens * _MIN_SEC_PER_TOKEN
     rate = f"{n_tokens / gen:.1f} tok/s  " if plausible else ""
-    # Show the load/gen split only when the load is at least 100ms; otherwise use
-    # the single-time form.
+    # Show the load/gen split only when the load is a meaningful slice (a cold
+    # start); a warm call's sub-100ms prefill would just be noise, so keep the
+    # familiar single-time form there.
     if load >= 0.1:
         return f"{n_tokens} tokens  {rate}(load {load:.1f}s, gen {gen:.1f}s)"
     return f"{n_tokens} tokens  {rate}({gen:.1f}s)"
@@ -412,6 +473,8 @@ def _perf_line(n_tokens: int, t0: float, first_at: Optional[float],
 def _stream_once(engine, messages: list, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text."""
     import time as _time
+    from rich.markup import escape
+
     from localm.inference.backends.base import (
         ImageDecodeUnavailable,
         UnsupportedInputError,
@@ -428,23 +491,31 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
             printer.feed(token)
         printer.flush()
     except ImageDecodeUnavailable as e:
-        # Must stay ahead of the UnsupportedInputError arm below, which would
-        # otherwise replace this message with vision-capability guidance. Here the
-        # message names the missing image decoder and the fix.
-        console.print(f"\n[red]{e}[/red]")
+        # BEFORE the UnsupportedInputError arm below, which DISCARDS the message
+        # and prints vision-capability guidance in its place. That guidance is
+        # right for its own case and actively wrong for this one: the model is
+        # vision-capable and the picture is fine, the environment simply has no
+        # image decoder, so "pick or download a vision model" sends the user
+        # after a problem they do not have. This arm keeps the real message,
+        # which names the missing library and the fix.
+        console.print(f"\n[red]{escape(str(e))}[/red]")
         return ""
     except UnsupportedInputError:
-        # Name a vision model this install has, or how to get one.
+        # Capability-aware guidance instead of a flat "can't do that": name a
+        # vision model this install has, or how to get one.
         from localm.model_manager import vision_input_guidance
         backend = getattr(engine, "_backend", None)
         mmproj_failed = bool(getattr(backend, "mmproj_path", None))
         active_model_path = getattr(backend, "model_path", None)
-        console.print(f"\n[yellow]{vision_input_guidance(mmproj_failed=mmproj_failed, active_model_path=active_model_path)}[/yellow]")
+        guidance = vision_input_guidance(
+            mmproj_failed=mmproj_failed, active_model_path=active_model_path)
+        console.print(f"\n[yellow]{escape(guidance)}[/yellow]")
         return ""
     except RuntimeError as e:
-        # An attached server returned an error (no model loaded, unreachable,
-        # ...); print it instead of letting a traceback out.
-        console.print(f"\n[red]{e}[/red]")
+        # An attached server returned an error (no model loaded, unreachable, ...).
+        # Surface it cleanly instead of a traceback (the interactive path already
+        # catches Exception; this is the single-prompt path).
+        console.print(f"\n[red]{escape(str(e))}[/red]")
         return ""
     end = _time.monotonic()
     print()
@@ -460,8 +531,10 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
 
 def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                  audit=None, transcript=None) -> None:  # noqa: C901
+    from rich.markup import escape
+
     console.print(Panel(
-        f"[bold cyan]localm[/bold cyan] - {engine.display_name}\n"
+        f"[bold cyan]localm[/bold cyan] - {escape(engine.display_name)}\n"
         "[dim]Ctrl+C or [bold]/exit[/bold] to quit  ·  "
         "[bold]/clear[/bold] history  ·  [bold]/image <path>[/bold] attach image  ·  "
         "[bold]/help[/bold][/dim]",
@@ -474,7 +547,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-        console.print(f"[dim]system: {system_prompt}[/dim]\n")
+        console.print(f"[dim]system: {escape(system_prompt)}[/dim]\n")
 
     while True:
         img_hint = f" [dim][{len(pending_images)} image(s) queued][/dim]" if pending_images else ""
@@ -505,13 +578,15 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         if audit:
             audit.user(user_input)
 
-        # Summarise older turns before the history collides with the context
-        # ceiling. Never fails: falls back to a visible hard trim when
-        # summarisation is unavailable.
+        # Seamless compaction: summarise older turns before the history
+        # collides with the context ceiling. Never fails - falls back to a
+        # visible hard trim when summarisation is unavailable.
         from ..inference.compact import maybe_compact
-        # Budget against the loaded model's resolved ceiling (VRAM-derived under
-        # ctx_auto), falling back to the config n_ctx_max only when the engine
-        # cannot report a capacity.
+        # Budget against the LOADED model's RESOLVED ceiling (VRAM-derived under
+        # ctx_auto), not the static config n_ctx_max: the config value both
+        # over-compacted a small-window model and under-protected a large one
+        # (memory-audit 2026-07-02 F10). Fall back to the config only when the
+        # engine cannot report a capacity (not loaded).
         limit = engine.context_capacity() or load_config().get("n_ctx_max", 16384) or 0
         compacted_msgs, did_compact = maybe_compact(
             messages,
@@ -542,7 +617,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             printer.flush()
             console.print("\n[dim](interrupted)[/dim]")
         except Exception as e:
-            console.print(f"\n[red]Inference error: {e}[/red]")
+            console.print(f"\n[red]Inference error: {escape(str(e))}[/red]")
             continue
 
         response = "".join(parts) or "(interrupted)"
@@ -553,9 +628,11 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             if line:
                 console.print(f"[dim]{line}[/dim]")
         if response:
-            # Resend and log the visible answer only, never the raw <think>
-            # scratchpad. transcript.exchange takes `response` whole: it splits
-            # the reasoning out itself into a collapsed block.
+            # AUD-HIGH-17-2: resend and log only the visible answer, never the raw
+            # <think> scratchpad (textnorm.strip_think's docstring: "the one
+            # helper every INTERNAL consumer of model output must run before
+            # storing"). transcript.exchange is exempt - it splits `response`
+            # itself and keeps the reasoning in a collapsed block.
             from ..textnorm import strip_think
             visible = strip_think(response)
             messages.append({"role": "assistant", "content": visible})
@@ -568,13 +645,13 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 
 
 # The REPL media-generation commands (/generate-image, /generate-music,
-# /generate-video) share one shape: ensure ComfyUI is reachable (auto-launching
-# it from the configured comfy_launch_cmd/comfy_workdir if needed), unload the
-# chat model to free VRAM, generate one file into <home>/<subdir>, then free
-# ComfyUI's VRAM. Only the generator, output subdir/extension and the argument
-# label differ, so the three paths are table-driven. Each helper imports its
-# generator from the `.comfy` submodule at call time, so patching e.g.
-# localm.image_gen.comfy.generate_image takes effect.
+# /generate-video) all share one shape: ensure ComfyUI is reachable (auto-
+# launching it from the configured comfy_launch_cmd/comfy_workdir if needed),
+# unload the chat model to free VRAM, generate one file into <home>/<subdir>,
+# then free ComfyUI's VRAM. Only the generator, output subdir/extension and the
+# argument label differ, so the three paths are table-driven to stay identical.
+# Each helper imports its generator from the `.comfy` submodule at call time so a
+# test that patches e.g. localm.image_gen.comfy.generate_image is honoured.
 def _media_generate_image():
     from ..image_gen.comfy import generate_image
     return generate_image
@@ -590,8 +667,11 @@ def _media_generate_video():
     return generate_video
 
 
-# The gallery directory names come from localm.media.paths, the same source the
-# image/music/video plugins and the input_image confinement policy read.
+# The gallery directory names come from localm.media.paths, which is also what
+# the image/music/video plugins and the input_image confinement policy use. They
+# were duplicated as literals here, so "the galleries" meant two independent
+# lists that a rename would silently split - and one of those lists decides which
+# directories an img2img input may be read from.
 from ..media import paths as _media_paths  # noqa: E402
 
 
@@ -614,8 +694,10 @@ _MEDIA_REPL = {
 def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None:
     """REPL /generate-image|/generate-music|/generate-video: generate one media
     file via the configured ComfyUI backend, unloading the chat model first to
-    free VRAM. *console* and *home_dir* are supplied by the caller rather than
-    imported here."""
+    free VRAM. console + home_dir are passed in so a caller that resolved the
+    (monkeypatchable) localm.cli.console / localm.cli.HOME_DIR is honoured here."""
+    from rich.markup import escape
+
     spec = _MEDIA_REPL[label]
     if engine is None:
         console.print(f"[dim]/{label} not available in this mode[/dim]")
@@ -625,12 +707,14 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
         return
     from ..image_gen.comfy import default_api_url, ensure_comfy, free_comfy_vram
     api = default_api_url()
-    # Auto-launch ComfyUI from the configured comfy_launch_cmd/comfy_workdir. The
-    # chat model unloads only once ComfyUI is available.
+    # Auto-launch ComfyUI from the configured comfy_launch_cmd/comfy_workdir (the
+    # GUI does this; the CLI used to just bail - H1). Only unload the chat model
+    # once ComfyUI is actually available. escape(t): progress text embeds the
+    # user's own comfy_launch_cmd/comfy_workdir config values verbatim.
     ok, msg = ensure_comfy(
-        api, on_progress=lambda t: console.print(f"[dim]{t}[/dim]"))
+        api, on_progress=lambda t: console.print(f"[dim]{escape(t)}[/dim]"))
     if not ok:
-        console.print(f"[yellow]{msg}[/yellow]")
+        console.print(f"[yellow]{escape(msg)}[/yellow]")
         return
     import time as _t
     out_dir = home_dir / spec["subdir"]
@@ -648,15 +732,19 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
         write_sidecar=not is_privacy,
         delete_outputs=is_privacy,
     )
-    console.print(message)
+    # escape(): message is a bare string passed straight to console.print - Rich
+    # parses "[...]" in ANY printed string, not just inside literal markup tags -
+    # and it embeds the generated output path plus, on failure, arbitrary
+    # exception/config text (see generate_image's own return sites).
+    console.print(escape(message))
     if ok:
         free_comfy_vram(api)
 
 
 def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
     """REPL /generate-image (and the /imagine alias): generate one image via the
-    configured ComfyUI backend. Wraps the shared media path and prints the
-    /imagine rename notice."""
+    configured ComfyUI backend. Thin wrapper over the shared media path that
+    keeps the /imagine rename notice."""
     if cmd == "imagine":
         console.print("[dim]/imagine was renamed to /generate-image[/dim]")
     _cmd_generate_media("generate-image", arg, engine, console, home_dir)
@@ -664,19 +752,21 @@ def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
 
 def _cmd_save(arg: str, messages: list, console) -> None:
     """REPL /save: write the conversation to JSON, confined to the cwd."""
+    from rich.markup import escape
+
     target = arg or "chat.json"
-    # Confine writes to the current working directory: "../x.json" or an absolute
-    # path elsewhere is refused.
+    # Confine writes to the current working directory: a path like "../x.json" or
+    # an absolute path elsewhere must not let the REPL write outside cwd.
     cwd = Path.cwd().resolve()
     try:
         resolved = (cwd / target).resolve()
     except (OSError, ValueError) as e:
-        console.print(f"[red]Invalid save path: {e}[/red]")
+        console.print(f"[red]Invalid save path: {escape(str(e))}[/red]")
         return
     if resolved == cwd or cwd not in resolved.parents:
         console.print(
             f"[red]Refusing to save outside the current directory:[/red] "
-            f"{target}\n[dim]Use a path inside {cwd}[/dim]"
+            f"{escape(target)}\n[dim]Use a path inside {escape(str(cwd))}[/dim]"
         )
         return
     _save_chat(messages, str(resolved))
@@ -690,8 +780,10 @@ def _handle_command(
     engine=None,
 ) -> bool:
     """Handle a /command. Returns True if the session should exit."""
-    # Resolve console + HOME_DIR from the package at call time, so a rebound
-    # localm.cli.console / localm.cli.HOME_DIR is used here.
+    from rich.markup import escape
+
+    # Resolve console + HOME_DIR from the package at call time so tests that
+    # monkeypatch localm.cli.console / localm.cli.HOME_DIR affect this call site.
     from localm import cli as _cli
     console = _cli.console
     HOME_DIR = _cli.HOME_DIR
@@ -736,14 +828,16 @@ def _handle_command(
         else:
             p = Path(arg)
             if not p.exists():
-                console.print(f"[red]File not found:[/red] {arg}")
+                console.print(f"[red]File not found:[/red] {escape(arg)}")
             else:
                 pending_images.append(str(p.resolve()))
-                console.print(f"[dim]Queued {p.name} - will attach to your next message[/dim]")
+                console.print(
+                    f"[dim]Queued {escape(p.name)} - will attach to your next "
+                    f"message[/dim]")
     elif cmd == "images":
         if pending_images:
             for f in pending_images:
-                console.print(f"[dim]  {f}[/dim]")
+                console.print(f"[dim]  {escape(f)}[/dim]")
         else:
             console.print("[dim]No images queued.[/dim]")
     elif cmd == "system":
@@ -763,7 +857,8 @@ def _handle_command(
         except ValueError:
             console.print("[dim]Usage: /temp 0.7[/dim]")
         else:
-            # Clamp to the 0..2 sampling range.
+            # Clamp to a sane sampling range; negative or huge temps are not
+            # meaningful and would otherwise be stored verbatim.
             clamped = max(0.0, min(2.0, requested))
             gen_opts["temperature"] = clamped
             if clamped != requested:
@@ -778,7 +873,8 @@ def _handle_command(
         except ValueError:
             console.print("[dim]Usage: /tokens 2048[/dim]")
         else:
-            # Clamp to 1..MAX_TOKENS_CAP.
+            # max_tokens must be at least 1; cap absurd values so a typo cannot
+            # request an effectively unbounded generation.
             MAX_TOKENS_CAP = 1_000_000
             clamped = max(1, min(MAX_TOKENS_CAP, requested))
             gen_opts["max_tokens"] = clamped
@@ -813,18 +909,24 @@ def _handle_command(
             from ..plugins import catalog
             hint = catalog.suggestion(cmd)
         if hint:
-            console.print(f"[yellow]{hint}[/yellow]")
+            # escape(): hint is only ever non-None for a command the catalog
+            # itself recognises (a fixed, hardcoded set), so this is currently
+            # provably safe - escaped anyway as defense-in-depth, the same
+            # reasoning #1463 applied to rag.py's collection names.
+            console.print(f"[yellow]{escape(hint)}[/yellow]")
         else:
-            console.print(f"[dim]Unknown: /{cmd} -- try /help[/dim]")
+            console.print(f"[dim]Unknown: /{escape(cmd)} -- try /help[/dim]")
     return False
 
 
 
 
 def _save_chat(messages: list, filepath: str) -> None:
+    from rich.markup import escape
+
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(messages, f, indent=2, ensure_ascii=False)
-        console.print(f"[green]✓[/green] Saved: {filepath}")
+        console.print(f"[green]✓[/green] Saved: {escape(filepath)}")
     except Exception as e:
-        console.print(f"[red]Save failed: {e}[/red]")
+        console.print(f"[red]Save failed: {escape(str(e))}[/red]")
