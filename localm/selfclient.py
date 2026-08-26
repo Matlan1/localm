@@ -16,11 +16,20 @@ drift.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 import requests
 
 from localm.bindhost import self_connect_host, url_host
+
+# Matches every C0/C1 control byte, including ESC (the ANSI escape
+# introducer). See test_remote_hold_reason_strips_control_characters.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _no_control_chars(value: str) -> str:
+    return _CONTROL_CHARS.sub("", value)
 
 
 def read_activity(scheme: str, port, instance_token: Optional[str] = None,
@@ -225,6 +234,7 @@ def remote_hold_reason(model: str) -> Optional[str]:
             key = payload.get("key") or "a loaded model"
             reason = payload.get("reason")
             if reason:
+                reason = _no_control_chars(str(reason))
                 return (f"the localm server at {where} has {key!r} loaded "
                         f"and {reason}, so it cannot be ruled out as "
                         f"holding this file")
