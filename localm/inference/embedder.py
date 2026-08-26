@@ -668,8 +668,9 @@ def _warn_if_context_config_drifted(api, ctx, requested_n_ctx: int) -> None:
             "embedder: requested n_ctx=%d but the loaded context reports "
             "n_ctx=%d - the runtime may not honour the requested context size",
             requested_n_ctx, actual_n_ctx)
-    if actual_n_ctx_seq is None:
-        return                    # older build with no llama_n_ctx_seq accessor
+    if not isinstance(actual_n_ctx_seq, int):
+        return                    # no accessor (older build), or a non-int
+                                   # probe result - nothing usable to compare
     # A generous margin, not exact equality: kv_unified honoured can still
     # leave n_ctx_seq a hair under n_ctx on some builds. Below half is only
     # reachable via the sliced-KV fallback (n_ctx / n_seq_max, and n_seq_max
