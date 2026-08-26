@@ -514,6 +514,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   A stop no longer waits for a chat that is still generating: in-flight replies
   get a few seconds to finish and are then ended, instead of holding the server
   open until the longest one completes.
+- **The debug log no longer fills with the same few sentences about which VRAM
+  source is being used.** On a Windows AMD box with the bundled runtime loaded,
+  four notes explaining that choice were written every time the interface asked
+  for GPU information, which is continuously while a page is open, so a debug log
+  recorded dozens of copies a minute and anything else in it was buried. The
+  choice cannot change while localm is running, so it is now worked out once,
+  written once, and written again only if it changes. Free VRAM is still read
+  fresh every time and the readings are unchanged.
 - **A remote image a reply links to no longer disappears without explanation.**
   Showing remote images is off by default, and several other things can stop one
   loading: the host is not on your Allowed domains list, it is unreachable, the
