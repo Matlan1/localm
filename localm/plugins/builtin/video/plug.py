@@ -102,14 +102,15 @@ async def video(req: VideoRequest, request: Request):
     video_dir = _video_dir()
     video_dir.mkdir(parents=True, exist_ok=True)
     out_path = video_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.mp4"
-
-    from localm.config import load_config
-    _cfg = load_config()
-    s = _backend.settings(_cfg)
     owner = principal_id(request)
 
     def _generate(job):
         from localm.audit import SessionMode, effective_mode
+        from localm.config import load_config
+        # Resolved here, in the job's own worker thread, not the route above.
+        # See tests/test_comfy_media_routes_offloaded.py.
+        _cfg = load_config()
+        s = _backend.settings(_cfg)
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
         ok, msg = _backend.ensure_available(
@@ -329,18 +330,20 @@ async def video_comfy_models(request: Request):
 
     Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
     urlopen timeout, which now also covers the registry read the role join
-    needs - see the image plugin's identical route for the full rationale."""
+    needs - see the image plugin's identical route for the full rationale.
+    settings() itself is also offloaded: it can reach sanitize_comfy_url's
+    blocking DNS lookup (tests/test_comfy_media_routes_offloaded.py)."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
     )
     from localm.plugins.media_roles import plugin_model_roles
-    s = _backend.settings(load_config())
     # Read in the request, not in the worker: this walks the plugin manager's
     # in-memory descriptors (no I/O), and handing app state to a thread is not
     # something to do for a lookup that costs nothing here.
     roles = plugin_model_roles(request.app, "video")
     try:
+        s = await run_in_threadpool_bounded(_backend.settings, load_config(), timeout=20.0)
         resolved = await run_in_threadpool_bounded(
             _backend._comfy_model_roles, s, roles, timeout=20.0)
     except ThreadCallTimeout as e:
@@ -354,7 +357,10 @@ async def video_comfy_models(request: Request):
 @_router.post("/api/video/comfy-launch")
 async def video_comfy_launch():
     """Start (or confirm) ComfyUI is up for the video plugin, without running a
-    generation - backs the Workflow panel's "Launch ComfyUI" button.
+    generation - backs the Workflow panel's "Launch ComfyUI" button. settings()
+    itself is also offloaded (a separate, short budget): it can reach
+    sanitize_comfy_url's blocking DNS lookup
+    (tests/test_comfy_media_routes_offloaded.py).
 
     Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
     itself will honour, plus a buffer - see the image plugin's identical
@@ -365,9 +371,9 @@ async def video_comfy_launch():
     )
     from localm.media.comfy_client import comfy_launch_wait_seconds
     cfg = load_config()
-    s = _backend.settings(cfg)
     budget = comfy_launch_wait_seconds(cfg) + 30.0
     try:
+        s = await run_in_threadpool_bounded(_backend.settings, cfg, timeout=20.0)
         ok, message = await run_in_threadpool_bounded(
             _backend.ensure_available, s, timeout=budget)
     except ThreadCallTimeout as e:

@@ -82,6 +82,13 @@ def settings(full_config: dict) -> dict:
     own_active = managed_comfy_active(full_config)
     api_url = ("" if own_active else comfy_blk.get("api_url")) \
         or _comfy.default_api_url()
+    # Sanitise the RESOLVED url: a per-plugin comfy.api_url short-circuits
+    # before default_api_url()'s guard, so an admin-set link-local/metadata
+    # host would otherwise reach the outbound comfy calls (CHK-COMFY-APIURL).
+    # The _checked variant also surfaces a guard fallback through this
+    # settings() warning channel instead of only the debug log (rule 5).
+    api_url, url_warning = _comfy.sanitize_comfy_url_checked(api_url.rstrip("/"))
+    warning = media_config.combine_warnings(warning, url_warning)
     launch_cmd = "" if own_active else (
         comfy_blk.get("launch_cmd")
         or legacy_comfy_value("comfy_launch_cmd", full_config) or "")
@@ -90,10 +97,7 @@ def settings(full_config: dict) -> dict:
         or legacy_comfy_value("comfy_workdir", full_config) or "")
     return {
         "backend": backend_name,
-        # Sanitise the RESOLVED url: a per-plugin comfy.api_url short-circuits
-        # before default_api_url()'s guard, so an admin-set link-local/metadata
-        # host would otherwise reach the outbound comfy calls (CHK-COMFY-APIURL).
-        "api_url": _comfy.sanitize_comfy_url(api_url.rstrip("/")),
+        "api_url": api_url,
         "launch_cmd": launch_cmd,
         "workdir": workdir,
         "output_dir": comfy_blk.get("output_dir")

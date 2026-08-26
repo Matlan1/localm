@@ -119,23 +119,16 @@ WAIT_RECEIVER_HINTS = ("proc", "thread", "queue", "conn", "child", "future",
 # detach an entry - the same reason CodeQL dispositions here are keyed on
 # file::function. Every entry needs a reason and a tracking id: an allowlist
 # without those is how a gate turns into a list of things nobody remembers.
+#
+# NEW-COMFY-URL-SANITIZE-DNS-ON-THE-LOOP previously listed 11 handlers here
+# (imagine/music/video's main + comfy-models + comfy-launch routes, plus
+# media_preflight and model_pull_comfy_source): sanitize_comfy_url's blocking
+# getaddrinfo, reached via settings()/default_api_url()/comfy_models_dest_dir().
+# All 11 now offload that resolution with run_in_threadpool_bounded, so the
+# sweep no longer finds a sink there at all - removed rather than left in, so
+# a future regression at any of these exact sites is reported as a NEW
+# finding instead of silently matching a stale exception.
 ALLOWED: dict[tuple[str, str], str] = {}
-for _handler in (
-    "imagine", "imagine_comfy_models", "imagine_comfy_launch",
-    "music", "music_comfy_models", "music_comfy_launch",
-    "video", "video_comfy_models", "video_comfy_launch",
-    "register.media_preflight", "register.model_pull_comfy_source",
-):
-    ALLOWED[(_handler, "_host_is_link_local")] = (
-        "NEW-COMFY-URL-SANITIZE-DNS-ON-THE-LOOP. sanitize_comfy_url resolves the "
-        "configured comfy_api_url to refuse a link-local/metadata host, and the "
-        "resolution is a blocking getaddrinfo. NOT reachable in the default "
-        "config: comfy_api_url defaults to an IP literal, which ipaddress "
-        "parses without touching DNS. Only an owner who sets a HOSTNAME pays "
-        "it. The DNS lookup itself is load-bearing for the SSRF guard and must "
-        "not be removed; the fix is to offload settings()/default_api_url() at "
-        "each of these handlers, which is being tracked separately because "
-        "those files are under concurrent edit.")
 
 
 def _dotted(node: ast.AST) -> str:
