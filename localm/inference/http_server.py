@@ -2892,12 +2892,15 @@ def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
         pass
 
 
-def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
-    """The actual stop sequence. Unload the model FIRST so the native
-    context is freed cleanly (a hard exit while it is loaded segfaults during
-    teardown), clear the crash marker so this intentional stop is not reported as
-    a crash, then exit the process so the stop is guaranteed (Ctrl+C sometimes
-    does nothing). Separated from the route so it can be tested without exiting.
+def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
+    """The stop sequence, WITHOUT the process exit.
+
+    Stops in-flight job children, unloads the model so the native context is
+    freed cleanly (a hard exit while it is loaded segfaults during teardown),
+    releases the shared embedder, and clears the crash marker so this
+    intentional stop is not reported as a crash on the next boot.
+
+    Safe to run twice: every step tolerates already-stopped state.
 
     *instance_id* (app.state.instance_id, set by instances.advertise()) scopes
     the crash-marker clear to THIS instance only - see bugreport.py's
@@ -2973,6 +2976,28 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
         # misattribution is discoverable instead of silent.
         _dbg_swallow("could not disarm crash guard on shutdown; next boot may "
                      "misreport this intentional stop as a crash", level="warning")
+
+
+def _announce_stopping() -> None:
+    """Print the one line that tells a console user the stop has begun.
+
+    The teardown that follows can take a moment (a native model context has to
+    be freed), and without this the console shows nothing between the keypress
+    and the prompt coming back. Best-effort: a console that cannot be written
+    to must never block the stop itself."""
+    try:
+        from localm.console import console
+        console.print("[dim]Stopping localm...[/dim]")
+    except Exception:
+        pass
+
+
+def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
+    """The full stop: _shutdown_teardown, then exit the process so the stop is
+    guaranteed. Used by the GUI/tray Stop button and the shutdown route, which
+    have no unwinding call stack of their own to return into. Separated from the
+    route so it can be tested without exiting."""
+    _shutdown_teardown(instance_id=instance_id)
     import os
     os._exit(0)
 
@@ -5272,11 +5297,21 @@ def run_advertised(app, host: str, port: int, *, mode: str,
 
     with instances.advertise(app, home_dir(), host=host, port=port, mode=mode,
                              scheme=scheme, project=project, isolated=isolated):
-        # On a TLS bind, also catch a plain-http request on the same port with an
-        # https redirect; plain binds are a direct uvicorn.run. In debug mode
-        # uvicorn logs at "info" so the console shows requests.
-        portmux.run_server(app, host=host, port=port, log_level=log_level,
-                           ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+        try:
+            # On a TLS bind, also catch a plain-http request on the same port
+            # with an https redirect; plain binds are a direct uvicorn.run. In
+            # debug mode uvicorn logs at "info" so the console shows requests.
+            portmux.run_server(app, host=host, port=port, log_level=log_level,
+                               ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+        finally:
+            # Serving has ended - Ctrl+C, a signal, or an error. Runs the same
+            # stop sequence the GUI/tray Stop button runs. _shutdown_teardown
+            # rather than _do_shutdown: the caller's own finally still closes a
+            # tray icon and an mDNS advertisement, which an exit here would skip.
+            _announce_stopping()
+            _shutdown_teardown(
+                instance_id=getattr(getattr(app, "state", None),
+                                    "instance_id", None))
 
 
 def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,

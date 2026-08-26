@@ -64,6 +64,10 @@ _parent_death_watchdog_installed = False
 # scoping rationale as the watchdog flag above.
 _native_error_dialogs_suppressed = False
 
+# Set once console interrupts have been made harmless in this process. Same
+# per-process scoping rationale as the watchdog flag above.
+_interrupts_ignored = False
+
 
 # NTSTATUS exit codes a native crash produces on Windows, where there are no
 # signals. Only unambiguous, reachable codes are listed.
@@ -373,4 +377,56 @@ def suppress_native_error_dialogs() -> bool:
     except Exception:
         return False
     _native_error_dialogs_suppressed = True
+    return True
+
+
+def ignore_interrupt_signals() -> bool:
+    """Make THIS spawned worker deaf to a console interrupt (Ctrl+C, Ctrl+Break).
+
+    Call at the very top of a worker's process-main, alongside
+    install_parent_death_watchdog(). Returns True when the worker is now
+    ignoring interrupts, False in the main process (which stays interruptible)
+    or when the mechanism is unavailable.
+
+    A console interrupt reaches EVERY process on the console, not only the one
+    being typed at - on Windows the CRT raises SIGINT in each of them, on POSIX
+    the terminal signals the whole foreground process group - so a worker sees
+    an interrupt aimed at its parent. Ignoring it leaves the parent as the only
+    thing that stops this worker: its explicit shutdown command on unload/stop,
+    or install_parent_death_watchdog when the parent dies without running any
+    code.
+
+    No-op in the main process (parent_process() is None there). Idempotent and
+    fully guarded: never raises, so it can never block a normal worker start."""
+    global _interrupts_ignored
+    if _interrupts_ignored:
+        return True
+    try:
+        if multiprocessing.parent_process() is None:
+            return False   # the main process, not a spawned child
+    except Exception:
+        return False
+
+    import signal
+    applied = False
+    for name in ("SIGINT", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, signal.SIG_IGN)
+            applied = True
+        except (OSError, ValueError, RuntimeError):
+            pass   # absent on this platform, or not this process's main thread
+    if sys.platform == "win32":
+        # Drop CTRL_C_EVENT at the OS, before the CRT would raise SIGINT.
+        try:
+            import ctypes
+            if ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True):  # type: ignore[attr-defined]
+                applied = True
+        except Exception:
+            pass
+    if not applied:
+        return False
+    _interrupts_ignored = True
     return True
