@@ -841,6 +841,14 @@ export function el(tag, className, text) {
   return node;
 }
 
+/** An avatar value that is a raster image, never anything else that merely
+ * starts with the literal string "data:" - mirrors settings_schema.py's
+ * _AVATAR_DATA_URI_RE exactly. See test_isAvatarImageDataUri_matches_the_server_regex. */
+export const AVATAR_DATA_URI_RE = /^data:image\/(png|jpeg|gif|webp);base64,/i;
+export function isAvatarImageDataUri(value) {
+  return AVATAR_DATA_URI_RE.test(value);
+}
+
 /** Reads an image file client-side and resolves a data:image/png;base64,...
  * URI downscaled so its longest edge is at most maxSize - kept well under
  * settings_schema.py's _AVATAR_MAX_DATA_URI_LEN regardless of the source

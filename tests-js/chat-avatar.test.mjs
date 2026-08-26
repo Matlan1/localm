@@ -103,8 +103,8 @@ test("avatarInfoFor never returns a URL-shaped value - it only ever sees what th
   const { window } = loadApp();
   // Defence in depth at the render layer: even if chat.userAvatar somehow held
   // a URL (it cannot, per settings_schema.py's _validate_avatar_value), the
-  // renderer treats anything not starting with "data:" as an opaque glyph -
-  // textContent, never an <img src>. This is the mechanism that makes that true.
+  // renderer treats anything that does not match isAvatarImageDataUri as an
+  // opaque glyph - textContent, never an <img src>.
   runScript(window, "chat.userAvatar = 'http://evil.example/x.png';");
   const doc = window.document;
   const box = doc.getElementById("chat-messages");
@@ -113,4 +113,27 @@ test("avatarInfoFor never returns a URL-shaped value - it only ever sees what th
   assert.equal(avatar.querySelector("img"), null,
     "a non-data: value is rendered as text, never as an <img src>");
   assert.equal(avatar.textContent, "http://evil.example/x.png");
+});
+
+test("isAvatarImageDataUri only matches a genuine raster data URI, mirroring the server regex", () => {
+  const { window } = loadApp();
+  assert.equal(window.isAvatarImageDataUri("data:image/png;base64,iVBORw0KGgo="), true);
+  assert.equal(window.isAvatarImageDataUri("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="), false,
+    "SVG can carry a <script>; the server rejects it and the client must too");
+  assert.equal(window.isAvatarImageDataUri("data:text/html,<script>1</script>"), false);
+  assert.equal(window.isAvatarImageDataUri("data:evil"), false);
+  assert.equal(window.isAvatarImageDataUri("http://example.com/a.png"), false);
+});
+
+test("a near-miss data: value (not a real image URI) renders as a glyph, never as an <img src>", () => {
+  const { window } = loadApp();
+  // The specific CodeQL js/xss-through-dom shape: a loose startsWith("data:")
+  // check would have let this reach <img src>. It must not.
+  runScript(window, "chat.userAvatar = 'data:text/html,<script>1</script>';");
+  const doc = window.document;
+  const box = doc.getElementById("chat-messages");
+  window.addMessageRow(box, "user", "hi");
+  const avatar = box.querySelector(".msg-row.user .msg-avatar");
+  assert.equal(avatar.querySelector("img"), null);
+  assert.equal(avatar.textContent, "data:text/html,<script>1</script>");
 });

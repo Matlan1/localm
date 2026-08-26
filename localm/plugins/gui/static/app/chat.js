@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, isAvatarImageDataUri, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { openMemoryModal, runCompletion, speak, setWebAskSession } from "./settings-perf.js";
@@ -928,11 +928,11 @@ function avatarInfoFor(role, mName) {
   if (role === "user") {
     const v = (chat.userAvatar || "").trim();
     if (!v) return null;
-    return v.startsWith("data:") ? { kind: "image", value: v } : { kind: "glyph", value: v };
+    return isAvatarImageDataUri(v) ? { kind: "image", value: v } : { kind: "glyph", value: v };
   }
   const override = (chat.modelAvatarOverrides || {})[mName];
   const v = (override || chat.modelAvatarDefault || "").trim();
-  if (v) return v.startsWith("data:") ? { kind: "image", value: v } : { kind: "glyph", value: v };
+  if (v) return isAvatarImageDataUri(v) ? { kind: "image", value: v } : { kind: "glyph", value: v };
   const mono = monogramFor(mName);
   return { kind: "mono", letters: mono.letters, hue: mono.hue };
 }
