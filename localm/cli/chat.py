@@ -516,7 +516,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         # Surface it cleanly instead of a traceback (the interactive path already
         # catches Exception; this is the single-prompt path).
         console.print(f"\n[red]{escape(str(e))}[/red]")
-        return ""
+        sys.exit(1)
     end = _time.monotonic()
     print()
     full = "".join(parts)
