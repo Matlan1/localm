@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from localm import model_manager as mm
+from localm.model_manager.gguf import _GGUF_MIN_BYTES
 
 
 def _gguf_header(tensors, *, version=3, alignment=32):
@@ -159,10 +160,11 @@ class TestTruncatedFileDetection:
         store, models_dir, _ = fake_registry
         f = models_dir / "truncated.gguf"
         # weight.0 declares 4096 bytes, so weight.1 (never reached) is
-        # declared to start at offset 4096 - the file below has only a
-        # handful of bytes of body after the header.
+        # declared to start at offset 4096. The file below clears the plain
+        # magic+size floor (_GGUF_MIN_BYTES) by a few bytes only, so this
+        # case is isolated to the declared-size check, not the older floor.
         header = _gguf_header([("weight.0", 4096), ("weight.1", 1)])
-        f.write_bytes(header.ljust(len(header) + 100, b"\0"))
+        f.write_bytes(header.ljust(_GGUF_MIN_BYTES + 4, b"\0"))
         _backdate(f, seconds=60)   # settled, not mid-copy - both old guards pass
 
         result = mm.sync_models_dir(prune=False)
