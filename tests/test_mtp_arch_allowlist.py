@@ -205,9 +205,12 @@ def test_gate_fires_when_mtp_defaults_on_without_driving_the_head(tmp_path):
     assert _bench_api(tmp_path, _load(), feeds=False, default_on=True, driving=False) == 1
 
 
-def test_gate_fires_when_the_head_is_driven_but_the_default_is_still_off(tmp_path):
-    """Once the work lands, an off default is stale and nothing else would notice."""
-    assert _bench_api(tmp_path, _load(), feeds=True, default_on=False, driving=True) == 1
+def test_driving_the_head_with_mtp_off_is_reported_not_gated(tmp_path):
+    """Driving the head is necessary for speculation to pay, not sufficient: the
+    win also needs a target decode large enough that verifying two tokens costs
+    about what one costs. On a small model it does not and speculation loses, so
+    whether to default it on is a measurement, not something this gate decides."""
+    assert _bench_api(tmp_path, _load(), feeds=True, default_on=False, driving=True) == 0
 
 
 def test_gate_is_quiet_in_the_state_that_actually_ships(tmp_path):

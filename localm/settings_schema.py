@@ -179,8 +179,8 @@ CORE_FIELDS: list = [
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("mtp_enabled", Widget.TOGGLE, "Multi-Token Prediction (MTP)",
                  "Speculative drafting on models with MTP/next-n heads. Off by "
-                 "default: the draft head is not yet fed the hidden state it "
-                 "predicts from, so drafts rarely land and cost more than they save.",
+                 "default: it pays on large models and costs a little on small "
+                 "ones, so try it and keep it if your model gets faster.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or

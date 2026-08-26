@@ -825,6 +825,10 @@ class LlamaCpp:
     # stays off for the rest of the model's life.
     _mtp_usable = True
     _mtp_ctx_capacity = 0        # the draft context's own n_ctx, 0 until created
+    _mtp_wants_h = False         # True once both contexts expose the next-n state
+    _pending_h = None            # the hidden state the next draft will read
+    _h_buf = None                # reusable copy target for it
+    _n_embd = 0
 
     def __init__(
         self,
@@ -869,6 +873,10 @@ class LlamaCpp:
         self.supports_mtp = False  # True when MTP heads and draft context are active
         self.mtp_status   = "not-initialised"  # short token: why MTP is or is not active
         self._mtp_usable = True
+        self._mtp_wants_h = False   # True once both contexts expose the next-n state
+        self._pending_h   = None    # the hidden state the next draft will read
+        self._h_buf       = None    # reusable copy target for it
+        self._n_embd      = 0
         self._mmproj_path = mmproj_path
         self._mtmd        = None   # MtmdContext (vision) when an mmproj is loaded
         self._tokenizer   = None   # type: ignore[assignment]
@@ -1119,6 +1127,18 @@ class LlamaCpp:
         else:
             try:
                 eligible, self.mtp_status = api.llama_model_mtp_support(self._model_ptr)
+                if eligible and not self._cache_can_drop_a_speculative_token():
+                    # Ask before allocating a draft context this model can never
+                    # use: speculation needs to take a rejected token back out.
+                    self.mtp_status = "rewind-unsupported"
+                    self._mtp_usable = False
+                    eligible = False
+                if eligible and not api.mtp_hidden_state_available():
+                    # Without this the draft head reads only the token embedding,
+                    # and its drafts cost more per token than they save. Refusing
+                    # is the better answer than drafting badly.
+                    self.mtp_status = "no-hidden-state-api"
+                    eligible = False
                 cp_mtp = api.llama_context_default_params() if eligible else None
                 if cp_mtp is not None and not hasattr(cp_mtp, "ctx_type"):
                     # Without ctx_type this build cannot be ASKED for an MTP
@@ -1139,8 +1159,20 @@ class LlamaCpp:
                     with _ctx():
                         self._mtp_ctx_ptr = api.llama_init_from_model(self._model_ptr, cp_mtp)
                     if self._mtp_ctx_ptr:
-                        self.supports_mtp = True
                         self._mtp_ctx_capacity = cp_mtp.n_ctx
+                        self._n_embd = api.llama_model_n_embd(self._model_ptr)
+                        # The target exposes its hidden state; the draft consumes
+                        # it masked. Both must take, or the head is starved and
+                        # drafting is worse than not drafting.
+                        exposed = api.llama_set_embeddings_nextn(self._ctx_ptr, True, False)
+                        consumed = api.llama_set_embeddings_nextn(self._mtp_ctx_ptr, True, True)
+                        self._mtp_wants_h = bool(exposed and consumed and self._n_embd > 0)
+                        if not self._mtp_wants_h:
+                            api.llama_free(self._mtp_ctx_ptr)
+                            self._mtp_ctx_ptr = None
+                            self.mtp_status = "hidden-state-refused"
+                        else:
+                            self.supports_mtp = True
                     else:
                         self.mtp_status = "context-refused"
             except Exception as exc:
@@ -1579,11 +1611,14 @@ class LlamaCpp:
                             with self._gen_lock:
                                 if not (self._stop.is_set() or self._ctx_ptr is None):
                                     try:
-                                        d_batch = self._create_batch([token], pos, logits_at_last_only=True)
-                                        d_ret = api.llama_decode(self._mtp_ctx_ptr, d_batch)
-                                        api.llama_batch_free(d_batch)
-                                        if d_ret == 0:
-                                            draft_token = api.llama_sampler_sample(draft_sampler, self._mtp_ctx_ptr, -1)
+                                        if self._pending_h is not None:
+                                            d_batch, d_orig, _hold = self._create_draft_batch(token, pos)
+                                            try:
+                                                d_ret = api.llama_decode(self._mtp_ctx_ptr, d_batch)
+                                            finally:
+                                                self._free_draft_batch(d_batch, d_orig)
+                                            if d_ret == 0:
+                                                draft_token = api.llama_sampler_sample(draft_sampler, self._mtp_ctx_ptr, -1)
                                     except Exception:
                                         draft_token = None
 
@@ -1614,11 +1649,14 @@ class LlamaCpp:
                                             # accept here is the double accept
                                             # that threw across the C ABI.
                                             # Keep MTP context KV cache in sync with accepted draft token
+                                            self._capture_h(1)
                                             if self._mtp_ctx_ptr is not None and self._mtp_usable:
                                                 try:
-                                                    d_acc = self._create_batch([draft_token], pos + 1, logits_at_last_only=False)
-                                                    api.llama_decode(self._mtp_ctx_ptr, d_acc)
-                                                    api.llama_batch_free(d_acc)
+                                                    d_acc, a_orig, _ah = self._create_draft_batch(draft_token, pos + 1)
+                                                    try:
+                                                        api.llama_decode(self._mtp_ctx_ptr, d_acc)
+                                                    finally:
+                                                        self._free_draft_batch(d_acc, a_orig)
                                                 except Exception:
                                                     pass
 
@@ -1634,6 +1672,7 @@ class LlamaCpp:
                                             removed = api.llama_kv_cache_seq_rm(self._ctx_ptr, 0, pos + 1, -1)
                                             if self._mtp_ctx_ptr is not None and self._mtp_usable:
                                                 api.llama_kv_cache_seq_rm(self._mtp_ctx_ptr, 0, pos + 1, -1)
+                                            self._capture_h(0)
                                             self._cached_tokens.append(token)
                                             pos += 1
                                             if not removed:
@@ -1688,6 +1727,8 @@ class LlamaCpp:
                                 batch = self._create_batch([token], pos, logits_at_last_only=True)
                                 try:
                                     ret = api.llama_decode(self._ctx_ptr, batch)
+                                    if ret == 0:
+                                        self._capture_h(-1)
                                     if ret != 0:
                                         # KV cache full or error.
                                         # Attempt mid-generation context growth if there is headroom.
@@ -1984,6 +2025,83 @@ class LlamaCpp:
             return False
         return True
 
+    def _cache_can_drop_a_speculative_token(self) -> bool:
+        """Whether the main cache can drop one trailing position.
+
+        Speculation writes a draft token into the cache and removes it again
+        when the target rejects it. A hybrid or recurrent cache cannot be
+        truncated at all - measured on qwen35, where removal succeeds only for
+        the whole sequence - so speculation there ends every rejection in a full
+        rebuild. Asking two tokens' worth of question at load costs far less
+        than discovering it mid-reply.
+
+        Answers True when the probe itself cannot run: an unanswered question is
+        not evidence of inability, and the rejection path handles the failure.
+        """
+        try:
+            mem = api.llama_get_memory(self._ctx_ptr)
+            if not mem:
+                return True
+            batch = self._create_batch([0, 0], 0, logits_at_last_only=True)
+            try:
+                if api.llama_decode(self._ctx_ptr, batch) != 0:
+                    return True
+            finally:
+                api.llama_batch_free(batch)
+            can = bool(api.llama_memory_seq_rm(mem, 0, 1, -1))
+            api.llama_memory_clear(mem, True)
+            return can
+        except Exception:
+            return True
+
+    def _capture_h(self, row: int = -1) -> bool:
+        """Copy the main context's next-n hidden state for *row* into _pending_h.
+
+        The MTP head at a position consumes the hidden state from the position
+        BEFORE it, so the draft that follows this decode needs the state this
+        decode just produced. The pointer llama.cpp returns is into its own
+        buffer and is overwritten by the next decode, hence the copy.
+        """
+        if not self._mtp_wants_h:
+            return False
+        ptr = (api.llama_get_embeddings_nextn(self._ctx_ptr) if row < 0
+               else api.llama_get_embeddings_nextn_ith(self._ctx_ptr, row))
+        if not ptr:
+            self._pending_h = None
+            return False
+        if self._h_buf is None:
+            self._h_buf = (ctypes.c_float * self._n_embd)()
+        ctypes.memmove(self._h_buf, ptr, self._n_embd * ctypes.sizeof(ctypes.c_float))
+        self._pending_h = self._h_buf
+        return True
+
+    def _create_draft_batch(self, token: int, pos: int):
+        """A one-token batch carrying the hidden state the draft head reads.
+
+        ``llama_batch_init`` allocates token OR embd, never both, so embd comes
+        from the library and the token array is attached here. The original
+        pointer is restored before the batch is freed, so the library's own
+        free() never sees an allocation it did not make.
+        """
+        batch = api.llama_batch_init(1, self._n_embd, 1)
+        original_token = batch.token
+        holder = (llama_token * 1)(token)
+        batch.token = ctypes.cast(holder, ctypes.c_void_p)
+        batch.n_tokens = 1
+        ctypes.cast(batch.pos, ctypes.POINTER(ctypes.c_int32))[0] = pos
+        ctypes.cast(batch.n_seq_id, ctypes.POINTER(ctypes.c_int32))[0] = 1
+        ctypes.cast(batch.seq_id, ctypes.POINTER(ctypes.POINTER(ctypes.c_int32)))[0][0] = 0
+        ctypes.cast(batch.logits, ctypes.POINTER(ctypes.c_int8))[0] = 1
+        ctypes.memmove(batch.embd, self._pending_h,
+                       self._n_embd * ctypes.sizeof(ctypes.c_float))
+        return batch, original_token, holder
+
+    @staticmethod
+    def _free_draft_batch(batch, original_token) -> None:
+        """Detach the caller-owned token array, then free what the library owns."""
+        batch.token = original_token
+        api.llama_batch_free(batch)
+
     def _disable_mtp(self, status: str, detail: str) -> None:
         """Turn speculation off for the rest of this model's life, and say why."""
         self._mtp_usable = False
@@ -2147,6 +2265,7 @@ class LlamaCpp:
                 else:
                     raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
+        self._capture_h(-1)
         if self._mtp_ctx_ptr is not None and self._mtp_usable:
             mtp_tokens = prompt_tokens if mtp_needs_full_prefill else suffix
             mtp_base = 0 if mtp_needs_full_prefill else prefix
@@ -2224,6 +2343,7 @@ class LlamaCpp:
                 self._cached_tokens = []
                 raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
+        self._capture_h(-1)
         if self._mtp_ctx_ptr is not None and self._mtp_usable:
             self._prefill_mtp(prompt_tokens, 0)
 

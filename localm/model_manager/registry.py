@@ -26,6 +26,7 @@ from ._shared import _verify_digest
 from ._shared import console
 from .gguf import _SPLIT_GGUF_RE
 from .gguf import _gguf_first_parts
+from .gguf import _gguf_declared_min_size
 from .gguf import _has_gguf_magic
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
@@ -979,7 +980,21 @@ def relocate_target(new_path: str) -> "tuple[Path | None, str | None]":
         from localm.inference.engine import _is_hf_dir
         if not _is_hf_dir(str(p)):
             return None, f"Not a HuggingFace model directory: {p}"
-    elif p.suffix.lower() != ".gguf" or not _has_gguf_magic(p):
+    elif p.suffix.lower() != ".gguf":
+        return None, f"Not a GGUF model file: {p}"
+    elif not _has_gguf_magic(p):
+        declared_min = _gguf_declared_min_size(p)
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = None
+        if declared_min is not None and size is not None and size < declared_min:
+            return None, (
+                f"{p} looks like a GGUF file that has not finished copying "
+                f"(only {size} of at least {declared_min} bytes present) - "
+                "if it is still being copied or downloaded, wait for it to "
+                "finish and try again."
+            )
         return None, f"Not a GGUF model file: {p}"
     return p, None
 
