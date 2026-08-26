@@ -940,10 +940,14 @@ ws     ::= [ \t\n\r]*
             if on_interrupt is None:
                 raise
             on_interrupt()
-
-        self._accumulate_usage()
-        self._audit.llm(full, tokens=self._total_tokens,
-                        reasoning="".join(reasoning_parts))
+        finally:
+            # Whatever the text streamed so far (on_token/on_reasoning are
+            # caller-supplied and can raise), the turn is recorded before any
+            # exception continues past this point - see
+            # test_a_turn_that_raises_mid_stream_still_records_to_the_audit_log.
+            self._accumulate_usage()
+            self._audit.llm(full, tokens=self._total_tokens,
+                            reasoning="".join(reasoning_parts))
         return full
 
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
