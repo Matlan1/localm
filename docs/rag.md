@@ -83,23 +83,33 @@ person running it can already read their own files.
 
 ### Per-key folder scoping
 
-A named API key's **indexing** reach can be confined further, to a specific
-set of folders it may index at all - narrower than the global policy above,
-not wider than it. Mint one with:
+A named API key's RAG reach can be confined further, to a specific set of
+folders - narrower than the global policy above, not wider than it. Mint one
+with:
 
 ```bash
 localm key create dashboard --scope rag --rag-root D:\docs\manuals --rag-root D:\docs\public
 ```
 
-Any `--rag-root` grant REPLACES the key's indexing reach with exactly those
+Any `--rag-root` grant REPLACES the key's RAG reach with exactly those
 folders, instead of falling back to your home dir, working dir, and the
-configured allowed roots. Omit `--rag-root` to leave indexing unrestricted
-(it still obeys the global folder policy above). **This confines indexing
-only.** Querying and listing collections are not scoped by `rag_roots` at
-all: a key with the `rag` scope can query or list any existing collection on
-the server, including one built from folders outside its granted roots.
-Only the owner key may set `rag_roots` on another key (via `key create` or
-`POST /v1/keys`); the owner's own reach is never confined by it. See
+configured allowed roots. Omit `--rag-root` to leave the key unrestricted (it
+still obeys the global folder policy above). The confinement covers indexing,
+querying, and listing collections:
+
+- **Indexing** (`POST /api/rag/collections/{name}/add`) refuses a path
+  outside the granted roots.
+- **Querying** (`.../query`) is refused (403) for a collection that holds
+  any document indexed from outside the granted roots, even one added by a
+  different, less-restricted key.
+- **Listing** (`GET /api/rag/collections`) leaves such a collection out
+  entirely, rather than showing a name the key cannot then query.
+
+A document added through `.../upload` (bytes from the caller's own device,
+never a host filesystem read) is not subject to this check - it never named a
+host path to confine. Only the owner key may set `rag_roots` on another key
+(via `key create` or `POST /v1/keys`); the owner's own reach, and open mode
+(no key configured), are never confined by it. See
 [cli.md](cli.md#api-keys).
 
 ## Supported file types

@@ -452,7 +452,7 @@ async def _write_off_loop(call):
 
 
 @_router.get("/api/rag/collections")
-async def rag_collections():
+async def rag_collections(request: Request):
     """List every collection's stats.
 
     ``Collection.peek_stats()`` answers from meta.json alone (see its docstring
@@ -483,8 +483,14 @@ async def rag_collections():
     consistent with disk."""
     from localm.inference.embedder import loaded_dim
     from localm.rag import Collection, collection_names
+    from localm.inference.http_server import effective_rag_roots
     loop = asyncio.get_running_loop()
     names = collection_names()
+    key_roots = effective_rag_roots(request)
+    if key_roots:
+        # confined_to returns None for a collection meta.json cannot be
+        # read from; both None and False are excluded here.
+        names = [n for n in names if Collection.confined_to(n, key_roots)]
     peeked = {n: Collection.peek_stats(n) for n in names}
     cold = [n for n, s in peeked.items() if s is None]
     if cold:
@@ -755,6 +761,13 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
 @_router.post("/api/rag/collections/{name}/query")
 async def rag_query(name: str, req: RagQueryRequest, request: Request):
     coll = _get_collection(name)
+    from localm.rag import Collection
+    from localm.inference.http_server import effective_rag_roots
+    key_roots = effective_rag_roots(request)
+    if key_roots and not Collection.confined_to(name, key_roots):
+        raise HTTPException(
+            403, "This key's RAG access is confined to specific folders, "
+            "and this collection includes documents from outside them.")
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     k = max(1, min(req.k, 20))

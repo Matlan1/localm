@@ -20,7 +20,9 @@ CLI never does. A whitelist MISS is offered back to the owner as 'add and
 continue' (409), not a dead-end error.
 """
 
+import base64
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -1162,3 +1164,221 @@ class TestRagAddRouteSecretFile:
             r = client.post("/api/rag/collections/kb/add",
                             json={"paths": [str(pem)], "embed": False}, headers=sc)
             assert r.status_code == 400, r.text
+
+
+# --------------------------------------------------------------------------- #
+#  Collection.confined_to: whether every host-filesystem document a          #
+#  collection holds resolves under a set of per-key rag_roots, independent   #
+#  of the HTTP layer.                                                        #
+# --------------------------------------------------------------------------- #
+
+class TestCollectionConfinedToKeyRoots:
+    def test_no_key_roots_is_always_confined(self, tmp_path):
+        Collection("kb", base=tmp_path / "rag").create()
+        assert Collection.confined_to("kb", [], base=tmp_path / "rag") is True
+
+    def test_doc_inside_granted_root_is_confined(self, tmp_path):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        f = granted / "a.txt"
+        f.write_text("hi", encoding="utf-8")
+        c = Collection("kb", base=tmp_path / "rag").create()
+        c.add_paths([f])
+        assert Collection.confined_to(
+            "kb", [str(granted)], base=tmp_path / "rag") is True
+
+    def test_doc_outside_granted_root_is_not_confined(self, tmp_path):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        f = outside / "a.txt"
+        f.write_text("hi", encoding="utf-8")
+        c = Collection("kb", base=tmp_path / "rag").create()
+        c.add_paths([f])
+        assert Collection.confined_to(
+            "kb", [str(granted)], base=tmp_path / "rag") is False
+
+    def test_one_doc_outside_makes_the_whole_collection_not_confined(self, tmp_path):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        inside = granted / "in.txt"
+        inside.write_text("hi", encoding="utf-8")
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        outside = outside_dir / "out.txt"
+        outside.write_text("hi", encoding="utf-8")
+        c = Collection("kb", base=tmp_path / "rag").create()
+        c.add_paths([inside, outside])
+        assert Collection.confined_to(
+            "kb", [str(granted)], base=tmp_path / "rag") is False
+
+    def test_upload_doc_is_exempt_from_the_check(self, tmp_path):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        c = Collection("kb", base=tmp_path / "rag").create()
+        c.add_uploads([{"filename": "notes.txt", "data": b"hello world"}])
+        assert Collection.confined_to(
+            "kb", [str(granted)], base=tmp_path / "rag") is True
+
+    def test_unreadable_collection_returns_none(self, tmp_path):
+        assert Collection.confined_to(
+            "nosuch", [str(tmp_path)], base=tmp_path / "rag") is None
+
+    def test_every_key_root_unresolvable_fails_closed(self, tmp_path):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        f = granted / "a.txt"
+        f.write_text("hi", encoding="utf-8")
+        c = Collection("kb", base=tmp_path / "rag").create()
+        c.add_paths([f])
+        assert Collection.confined_to(
+            "kb", ["bad\x00root"], base=tmp_path / "rag") is False
+
+
+# --------------------------------------------------------------------------- #
+#  HTTP routes /api/rag/collections/{name}/query and GET /api/rag/collections #
+#  under a per-key rag_roots allowlist: a collection holding any document     #
+#  indexed from outside the key's granted roots - even one added by a        #
+#  different, less-restricted caller into the SAME collection - is refused   #
+#  on query and left out of the listing.                                     #
+# --------------------------------------------------------------------------- #
+
+def _await_job(app, job_id, timeout=30.0):
+    jobs = app.state.jobs
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = jobs.get(job_id)
+        assert job is not None, f"job {job_id} vanished from the registry"
+        if job.status != "running":
+            return job
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} still running after {timeout}s")
+
+
+class TestRagQueryRouteKeyScopedRoots:
+    def test_query_inside_granted_root_allowed(self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        (granted / "a.md").write_text("rocm gfx1030 dll", encoding="utf-8")
+        app, _, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                      rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"}, headers=hdr)
+            r_add = client.post("/api/rag/collections/kb/add",
+                                json={"paths": [str(granted)], "embed": False},
+                                headers=hdr)
+            assert r_add.status_code == 200, r_add.text
+            _await_job(app, r_add.json()["job_id"])
+            r = client.post("/api/rag/collections/kb/query",
+                            json={"query": "rocm gfx1030", "k": 5}, headers=hdr)
+            assert r.status_code == 200, r.text
+            assert r.json()["hits"]
+
+    def test_query_refused_when_collection_holds_content_from_outside(
+            self, tmp_path, monkeypatch):
+        # The owner (unconfined) indexes a folder the scoped key was never
+        # granted into the SAME collection name the scoped key will query.
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                         rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        outside_dir = home / "elsewhere"
+        outside_dir.mkdir()
+        (outside_dir / "secret.md").write_text(
+            "TOPSECRET rocm gfx1030 dll", encoding="utf-8")
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"},
+                        headers=owner_hdr)
+            r_add = client.post("/api/rag/collections/kb/add",
+                                json={"paths": [str(outside_dir)], "embed": False},
+                                headers=owner_hdr)
+            assert r_add.status_code == 200, r_add.text
+            _await_job(app, r_add.json()["job_id"])
+            r = client.post("/api/rag/collections/kb/query",
+                            json={"query": "TOPSECRET", "k": 5}, headers=hdr)
+            assert r.status_code == 403, r.text
+            assert "TOPSECRET" not in r.text
+
+    def test_owner_query_unaffected_by_a_scoped_keys_roots(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, home, _hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        (home / "docs").mkdir()
+        (home / "docs" / "a.md").write_text("rocm gfx1030 dll", encoding="utf-8")
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"},
+                        headers=owner_hdr)
+            r_add = client.post("/api/rag/collections/kb/add",
+                                json={"paths": [str(home / "docs")], "embed": False},
+                                headers=owner_hdr)
+            assert r_add.status_code == 200, r_add.text
+            _await_job(app, r_add.json()["job_id"])
+            r = client.post("/api/rag/collections/kb/query",
+                            json={"query": "rocm gfx1030", "k": 5},
+                            headers=owner_hdr)
+            assert r.status_code == 200, r.text
+            assert r.json()["hits"]
+
+    def test_upload_only_collection_queryable_by_scoped_key(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, _, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                      rag_roots=[str(granted)])
+        content = base64.b64encode(b"rocm gfx1030 dll uploaded notes").decode()
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"}, headers=hdr)
+            r_up = client.post(
+                "/api/rag/collections/kb/upload",
+                json={"files": [{"filename": "notes.txt",
+                                 "content_b64": content}], "embed": False},
+                headers=hdr)
+            assert r_up.status_code == 200, r_up.text
+            _await_job(app, r_up.json()["job_id"])
+            r = client.post("/api/rag/collections/kb/query",
+                            json={"query": "rocm gfx1030", "k": 5}, headers=hdr)
+            assert r.status_code == 200, r.text
+            assert r.json()["hits"]
+
+
+class TestRagListRouteKeyScopedRoots:
+    def test_list_omits_collection_with_content_outside_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        (granted / "in.md").write_text("rocm gfx1030 dll", encoding="utf-8")
+        app, home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                         rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        outside_dir = home / "elsewhere"
+        outside_dir.mkdir()
+        (outside_dir / "out.md").write_text("rocm gfx1030 dll", encoding="utf-8")
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "allowed"},
+                        headers=owner_hdr)
+            r1 = client.post("/api/rag/collections/allowed/add",
+                             json={"paths": [str(granted)], "embed": False},
+                             headers=owner_hdr)
+            _await_job(app, r1.json()["job_id"])
+
+            client.post("/api/rag/collections", json={"name": "forbidden"},
+                        headers=owner_hdr)
+            r2 = client.post("/api/rag/collections/forbidden/add",
+                             json={"paths": [str(outside_dir)], "embed": False},
+                             headers=owner_hdr)
+            _await_job(app, r2.json()["job_id"])
+
+            r_scoped = client.get("/api/rag/collections", headers=hdr)
+            assert r_scoped.status_code == 200, r_scoped.text
+            names = {c["name"] for c in r_scoped.json()["collections"]}
+            assert names == {"allowed"}
+
+            r_owner = client.get("/api/rag/collections", headers=owner_hdr)
+            assert r_owner.status_code == 200, r_owner.text
+            owner_names = {c["name"] for c in r_owner.json()["collections"]}
+            assert owner_names == {"allowed", "forbidden"}
