@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Optional
 
 import localm.plugins.coder.agent as _agent
+from localm.debuglog import logger
+from localm.storekit import atomic_write
 from ..indexer import ProjectMap
 from ..audit import SessionMode
 from .checkpoint import (
@@ -471,9 +473,12 @@ class _PersistenceMixin:
         p = self._checkpoint_path
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            atomic_write(p, json.dumps(data, indent=2, ensure_ascii=False))
         except Exception:
-            pass  # never let checkpoint failure crash the session
+            # Never let checkpoint failure crash the session (AGENTS.md rule 5:
+            # surfaced, not silenced - a resume checkpoint failing to save is
+            # exactly the case a user needs to know about).
+            logger.warning("save_checkpoint: failed to persist %s", p, exc_info=True)
 
     def clear_checkpoint(self) -> None:
         """Remove THIS agent's own saved checkpoint - its own per-session id

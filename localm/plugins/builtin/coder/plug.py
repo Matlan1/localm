@@ -1253,6 +1253,8 @@ async def coder_resumable(request: Request, cwd: str = ""):
     info = checkpoint_info(p.resolve())
     if not info:
         return {"resumable": False}
+    if info.get("unreadable"):
+        return {"resumable": False, "unreadable": True}
     return {"resumable": True, "cwd": str(p.resolve()), **info}
 
 

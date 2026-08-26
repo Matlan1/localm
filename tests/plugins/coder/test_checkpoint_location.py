@@ -115,3 +115,58 @@ def test_distinct_sessions_in_one_project_get_distinct_checkpoint_files(
     proj = tmp_path / "proj"; proj.mkdir()
     assert _checkpoint_path_for(proj, "session-a") != _checkpoint_path_for(proj, "session-b")
     assert _checkpoint_path_for(proj, "session-a") == _checkpoint_path_for(proj, "session-a")
+
+
+def test_save_checkpoint_failure_is_logged_not_silent(tmp_path, monkeypatch, caplog):
+    """NEW-CODER-CHECKPOINT-NONATOMIC: a save failure must not be swallowed
+    outright - the user has no other way to learn their resume checkpoint did
+    not persist."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    proj = tmp_path / "proj"; proj.mkdir()
+    a = _agent(proj, mode=SessionMode.LOG)
+    a._messages = [{"role": "user", "content": "hi"}]
+
+    with patch("localm.plugins.coder.agent.persistence.atomic_write",
+               side_effect=OSError("disk full")):
+        with caplog.at_level("WARNING"):
+            a.save_checkpoint()          # must not raise
+
+    assert any("save_checkpoint" in r.message for r in caplog.records)
+    assert not a._checkpoint_path.exists()   # no torn/partial file either
+
+
+def test_save_checkpoint_uses_the_atomic_write_helper(tmp_path, monkeypatch):
+    """The write goes through storekit.atomic_write (tmp + os.replace), not a
+    bare write_text, so a crash mid-write cannot leave a torn checkpoint."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    proj = tmp_path / "proj"; proj.mkdir()
+    a = _agent(proj, mode=SessionMode.LOG)
+    a._messages = [{"role": "user", "content": "hi"}]
+
+    with patch("localm.plugins.coder.agent.persistence.atomic_write") as mock_write:
+        a.save_checkpoint()
+    assert mock_write.call_count == 1
+    written_path, written_data = mock_write.call_args[0]
+    assert written_path == a._checkpoint_path
+    assert json.loads(written_data)["messages"] == a._messages
+
+
+def test_checkpoint_info_reports_unreadable_for_a_corrupt_checkpoint(
+        tmp_path, monkeypatch):
+    """A user whose only checkpoint is corrupt must be told it exists but
+    could not be read - not the same "nothing to resume" answer as never
+    having saved one at all."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    from localm.plugins.coder.agent import checkpoint_info, _checkpoint_path_for
+    proj = tmp_path / "proj"; proj.mkdir()
+
+    assert checkpoint_info(proj) is None        # nothing saved yet - unchanged
+
+    cp = _checkpoint_path_for(proj, "abc123")
+    cp.parent.mkdir(parents=True, exist_ok=True)
+    cp.write_text("{not valid json", encoding="utf-8")
+
+    assert checkpoint_info(proj) == {"unreadable": True}

@@ -206,6 +206,25 @@ def test_restricted_session_does_not_clobber_the_owner_checkpoint(tmp_path, monk
         assert app.state.coder_sessions.get(c.json()["id"]).agent._messages == owner_msgs
 
 
+def test_resumable_reports_unreadable_for_a_corrupt_checkpoint(tmp_path, monkeypatch):
+    """NEW-CODER-CHECKPOINT-NONATOMIC: a corrupt checkpoint must not read to
+    the caller as "nothing was ever saved here"."""
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    owner = {"Authorization": "Bearer ownersecret"}
+
+    from localm.plugins.coder.agent import _checkpoint_path_for
+    cp = _checkpoint_path_for(proj, "abc123")
+    cp.parent.mkdir(parents=True, exist_ok=True)
+    cp.write_text("{not valid json", encoding="utf-8")
+
+    with TestClient(app) as client:
+        r = client.get("/api/coder/resumable", headers=owner,
+                       params={"cwd": str(proj)}).json()
+    assert r == {"resumable": False, "unreadable": True}
+
+
 def test_resumable_validates_cwd(tmp_path, monkeypatch):
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
     app.state.root_dir = str(tmp_path)
