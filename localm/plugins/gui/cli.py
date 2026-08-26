@@ -49,6 +49,26 @@ def _mdns_addresses(host: str):
     return None if is_wildcard_host(host) else [host]
 
 
+def _model_less_hint(api_mode: bool) -> str:
+    """The console line shown next to "model:" when nothing is loaded yet."""
+    if api_mode:
+        return ("  model: [yellow]none yet - "
+                "add one with `localm pull <name>`[/yellow]")
+    return "  model: [yellow]none yet - add one on the Models page[/yellow]"
+
+
+def _console_url_line(api_mode: bool, base_url: str, open_url: str) -> tuple:
+    """(label, url) for the line naming where to reach the running server.
+
+    api_mode never mounts a GUI, so open_url's GUI-only additions (a
+    view=models/pull deep link, a browser auto-login grant) would name a page
+    that is not being served; base_url is shown instead.
+    """
+    if api_mode:
+        return "API base", base_url
+    return "Open the GUI", open_url
+
+
 def _should_auto_open_browser(no_browser: bool) -> bool:
     """Whether THIS process's own startup should auto-open a browser tab.
 
@@ -843,7 +863,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     _srv_name = "localm API server" if api_mode else "localm GUI"
     console.print(f"[bold green]{_srv_name}[/bold green] → {show_url(base_url)}")
     if model_less:
-        console.print("  model: [yellow]none yet - add one on the Models page[/yellow]")
+        console.print(_model_less_hint(api_mode))
     else:
         console.print(f"  model: [cyan]{display_name or Path(str(model_path)).stem}[/cyan]")
     console.print("  Ctrl+C to stop")
@@ -933,7 +953,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # browser does not open. It carries the one-time grant, which is fine: this is the
     # host's own console. soft_wrap so the long URL is emitted as ONE line (a wrapped
     # URL with an injected newline is not copy-pasteable).
-    console.print(f"  [dim]Open the GUI:[/dim] [cyan]{show_url(open_url)}[/cyan]",
+    _url_label, _shown_url = _console_url_line(api_mode, base_url, open_url)
+    console.print(f"  [dim]{_url_label}:[/dim] [cyan]{show_url(_shown_url)}[/cyan]",
                   soft_wrap=True)
 
     def _open_when_ready(url: str, port: int, timeout: float = 20.0) -> None:
