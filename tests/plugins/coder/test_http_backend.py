@@ -113,6 +113,30 @@ class TestHTTPBackendSetModel(unittest.TestCase):
         backend.set_model("other-model")
         self.assertEqual(id(backend), before)
 
+    @patch("requests.get")
+    def test_set_model_resets_the_cached_context_capacity(self, mock_get):
+        """context_capacity() is per-MODEL (the server's /v1/config reports the
+        CURRENTLY loaded model's ceiling), so a switch must drop the cache -
+        otherwise the coder keeps budgeting history against the OLD model's
+        window."""
+        resp_a = MagicMock()
+        resp_a.ok = True
+        resp_a.json.return_value = {"effective_ctx_max": 4096}
+        mock_get.return_value = resp_a
+        backend = _make_backend()
+        self.assertEqual(backend.context_capacity(), 4096)
+        self.assertEqual(mock_get.call_count, 1)   # cached: a second call must not re-fetch
+        self.assertEqual(backend.context_capacity(), 4096)
+        self.assertEqual(mock_get.call_count, 1)
+
+        resp_b = MagicMock()
+        resp_b.ok = True
+        resp_b.json.return_value = {"effective_ctx_max": 32768}
+        mock_get.return_value = resp_b
+        backend.set_model("other-model")
+        self.assertEqual(backend.context_capacity(), 32768)   # re-fetched, not the stale 4096
+        self.assertEqual(mock_get.call_count, 2)
+
 
 class TestHTTPBackendChatReasoning(unittest.TestCase):
     """AUD-HIGH-17-3: chat() must capture the server's H4 `reasoning_content`
