@@ -22,6 +22,7 @@ import { VIEWS, showView } from "./tabs.js";
 // (our own write). Installed before any fetch so it covers boot too. This, plus
 // deriving the token from the session (never a separate cookie), is what makes
 // "missing CSRF token" unreachable.
+
 // Same-origin paths whose 403 is the ROUTE's own answer rather than a rejected
 // credential. The stale-shell recovery below skips them.
 // See "a 403 from /api/image-proxy is the route saying the feature is OFF" in

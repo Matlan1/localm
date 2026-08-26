@@ -481,6 +481,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   removed before the reply reached you, but the ChatML, Llama 3 and Gemma ones
   were not, so a reply could begin with a stray marker or a bare role word such
   as "model". A role word the model writes in ordinary prose is untouched.
+- **The app no longer reloads itself when a reply links a remote image.**
+  Showing remote images in replies is off by default, and the request the page
+  makes for one is refused while it is off. The app mistook that refusal for its
+  own login being rejected, so it cleared its offline cache and reloaded the
+  page in the middle of the reply that carried the image, losing it. A genuinely
+  expired login still recovers the same way it did before.
 - **Chat comes back on the model you were actually using after generating
   media.** Making an image, music, or video unloads the chat model to free up
   VRAM and reloads it when the job finishes. That reload asked for the model
