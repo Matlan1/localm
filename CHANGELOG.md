@@ -295,10 +295,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   only settable by hand-editing `config.json`.
 - **A scoped key can now be handed access to specific document folders only,
   instead of your whole default RAG reach.** `localm key create` gains a
-  repeatable `--rag-root` option: set it and that key can index and query only
-  the folders you listed, not your home directory, working directory or
-  configured allowed folders. Leave it unset and a key behaves exactly as
-  before. The owner key is never affected by this.
+  repeatable `--rag-root` option: set it and that key can index, query, and
+  list collections built only from the folders you listed, not your home
+  directory, working directory or configured allowed folders. Leave it unset
+  and a key behaves exactly as before. The owner key is never affected by
+  this.
 - **The Models page gained an "Other" tab, a way to keep it out of your main
   list, and a group-by-type view.** A vision projector, or a model localm could
   not classify, used to appear only in the "All" list mixed in with the models
