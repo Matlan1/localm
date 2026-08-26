@@ -1,114 +1,39 @@
 name: CI
 
 on:
-  # THIS WORKFLOW RUNS ONLY WHEN A HUMAN ASKS FOR IT, WITH ONE NARROW,
-  # DELIBERATE EXCEPTION (the `push:` block below, added 2026-08-19). No
-  # general push trigger, no pull_request trigger. Maintainer's directive,
-  # 2026-07-29, stated as: no 7-minute runs on PRs, and that means no runs on
-  # merge either.
+  # WHAT TRIGGERS THIS FILE
   #
-  # READ THE DIRECTIVE AS BEING ABOUT COST, NOT ABOUT WHICH TRIGGER. That
-  # distinction is the whole reason this comment exists. When the pull_request
-  # trigger was removed, the push trigger was treated as the approved substitute
-  # and workflow_dispatch as "free because it costs the dev box nothing" - which
-  # accounted for the wrong resource and preserved the exact spend the removal
-  # was meant to eliminate. Measured on the day this was written: 51 push runs
-  # plus 9 dispatches in a single session, two platforms each, roughly 7 minutes
-  # a side. Adding any automatic trigger back, or routinely dispatching in place
-  # of one, re-creates that and is the same mistake wearing a different name.
+  #   pull_request   the lint + hygiene + tests matrix runs ONLY when the PR
+  #                  carries the `full-ci` label. Every other PR skips it.
+  #                  `labeled` is in the types list so adding the label to an
+  #                  OPEN PR starts the run without needing a new push.
+  #   push           paths-scoped to the two native-binding files below, and it
+  #                  runs abi-check ONLY. It never starts the test matrix.
+  #   workflow_dispatch / schedule   run the matrix unconditionally.
   #
-  # SO: do not add `push:` or `pull_request:` back without asking him. Do not
-  # dispatch this as a routine pre-merge or post-merge gate. A dispatch is for
-  # when someone decides a specific change needs the two-platform matrix and
-  # accepts the cost, not for every unit.
+  # THE LABEL GATE IS THE WHOLE MECHANISM. Do not remove the `full-ci`
+  # condition on the test job and do not widen the push paths filter; either
+  # one puts the two-platform matrix in front of every change. A RELEASE gets
+  # the full suite, so a release PR carries the label - that replaces the old
+  # add-the-trigger-then-remove-it dance, which twice left it switched on for
+  # every PR.
   #
-  # WHAT GATES A PR NOW: code scanning only, per-PR, via codeql.yml (about a
-  # minute per language). Everything else is the local targeted run.
+  # READ THE JOB CONCLUSIONS, NOT THE RUN CONCLUSION. The steps run in order
+  # and stop at the first failure, so a red Tests step silently skips the
+  # coverage floors, the jsdom GUI tests and ruff.
   #
-  # WHAT THAT COSTS, stated so it is not rediscovered as a surprise: a local run
-  # diverges from this job along three axes, none visible from the local run -
-  # PLATFORM (this matrix runs Linux too; a Linux-only regression reached master
-  # that way in #845), DEPENDENCY SET (`.[dev,rag]` has no numpy; a dev venv
-  # usually does), and DEPENDENCY VERSION (CI resolves the newest allowed dev
-  # tool; ruff 0.16 reddened master while local venvs on 0.15 were green). WSL
-  # (Ubuntu, python 3.12) reproduces the first two at no cost to anyone.
-  #
-  # NO `pull_request` TRIGGER. This is the maintainer's standing decision, made
-  # twice (#839, and again here after #860 restored it): a two-OS pytest matrix
-  # costing ~7 minutes per side does not belong in front of every PR. Do not add
-  # it back without asking him - it has now been removed, re-added, and removed
-  # again, and each flip cost a round of confusion about what actually gates a
-  # merge.
-  #
-  # WHAT STILL GATES A PR: code scanning, per-PR, via .github/workflows/
-  # codeql.yml. About a minute per language, and its whole value is catching a
-  # newly introduced alert BEFORE it lands.
-  #
-  # WHAT THIS COSTS, stated plainly rather than left to be rediscovered - #860
-  # restored the trigger for these reasons and they did not stop being true, they
-  # were outweighed. A local suite diverges from this job along three axes, none
-  # of them visible from the local run:
-  #   PLATFORM       contributors run Windows; this matrix runs Windows AND Linux.
-  #                  A Linux-only regression reached master exactly this way
-  #                  (#845), and took four sessions to diagnose.
+  # WHAT A LOCAL RUN CANNOT SEE, which is what this matrix is for:
+  #   PLATFORM       contributors run Windows; this runs Windows AND Linux.
   #   DEPENDENCY SET this job installs `.[dev,rag]`, which has no numpy; a dev
-  #                  venv usually does. A failure needing numpy ABSENT cannot
-  #                  appear locally at all.
-  #   DEPENDENCY VER CI resolves the newest allowed dev tool; a venv lags. ruff
-  #                  0.16 reddened master while every local venv on 0.15 was green.
-  # So the pre-merge signal is again whatever the contributor runs locally, plus
-  # master's post-merge run, which arrives AFTER the merge. Use workflow_dispatch
-  # against a branch when a change is one the three axes above could bite - a
-  # platform-specific path, anything touching dependency resolution - and WSL
-  # (Ubuntu, python 3.12) reproduces two of the three for free.
+  #                  venv usually does, so a failure needing numpy ABSENT
+  #                  cannot appear locally.
+  #   DEPENDENCY VER CI resolves the newest allowed dev tool; a venv lags.
   #
-  # WHAT THE 2026-08-12 WINDOW MEASURED, kept because it is the strongest
-  # argument for opening another one and the only record that it happened. The
-  # pull_request trigger was enabled on the maintainer's explicit request and
-  # removed again the same day (#1248 in, this commit out). Within minutes it
-  # surfaced a red on master that had been there for six weeks, since #1179:
-  # a stale assertion in tests/test_coder_round2_2026_07_01.py against a message
-  # that PR deliberately reworded. Nothing had reported it, and nothing could
-  # have. With no push and no pull_request trigger there is no run that reads
-  # master, and the file sat outside every contributor's targeted selection.
-  #
-  # So the standing decision costs a real thing, and this is its shape: a red
-  # introduced by a change nobody re-runs stays invisible indefinitely. That is
-  # the trade, not an argument against it. A short, deliberate window is the
-  # cheap way to settle "is master actually green", and it is worth asking for
-  # after a run of merges that touched no shared test file.
-  #
-  # The window also showed a second-order effect worth knowing before opening
-  # one: the job's steps run in order and stop at the first failure, so while
-  # Tests was red, every open PR silently skipped coverage floors, the jsdom
-  # GUI tests and ruff. A green Tests step is a precondition for the trigger
-  # telling you anything about the rest of the pipeline.
-  # ON 2026-08-13 ("re-enable ci runs"), OFF AGAIN 2026-08-14, both on the
-  # maintainer's explicit instruction. Ninth flip of this switch. It is his call
-  # in either direction and nobody else's; the argument for it is kept here so
-  # the next person asking does not have to rediscover it.
-  #
-  # WHAT THE DAY IT WAS ON ACTUALLY BOUGHT, measured rather than argued: it
-  # caught a stale assertion that had been red on master for six weeks (#1179)
-  # and nothing was reporting, and it caught a test that passed on a machine
-  # with a llama.cpp runtime provisioned while failing where there is none. With
-  # no push and no pull_request trigger NOTHING ever reads master, so a red
-  # introduced by a change nobody re-runs stays invisible indefinitely. The
-  # three axes a local run cannot see - platform, dependency set, dependency
-  # version - are the same ones that let a Linux-only regression land in #845.
-  #
-  # WHAT IT COST: roughly 7 minutes per side, two platforms, on every PR.
-  #
-  # SO WHAT GATES THINGS NOW: CodeQL per PR, the author's own targeted run, and
-  # for a RELEASE a deliberate `gh workflow run ci.yml --ref master` - the
-  # maintainer's 2026-08-14 rule is that releases of any kind, INCLUDING an
-  # in-place respin, always get a full suite. Dispatch gets that without editing
-  # this file, which is what the old add-it-then-remove-it release dance did and
-  # is why the trigger kept being left switched on.
-  #
-  # READ THE JOB CONCLUSIONS, NOT THE RUN CONCLUSION, whenever this does run:
-  # the steps run in order and stop at the first failure, so a red Tests step
-  # silently skips the coverage floors, the jsdom GUI tests and ruff.
+  # WSL reproduces the PLATFORM axis at no cost. It is Ubuntu 26.04 with
+  # python3 3.14; localm provisions its own 3.12 via setup.sh, so the host
+  # version is not a prerequisite and not a variable in a localm result.
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     # NARROW, DELIBERATE EXCEPTION to the no-automatic-CI policy above,
     # decided 2026-08-19: schedule (weekly) + a paths filter on
@@ -183,11 +108,13 @@ jobs:
     # process spawning) must be caught here, not by a user on the other OS.
     name: lint + hygiene + tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Stays OFF the narrow abi-drift push trigger above: that trigger exists
-    # to run abi-check specifically (see its own `if:` below), not to
-    # reintroduce the full two-platform matrix on every push - see the
-    # policy comment at the top of this file.
-    if: github.event_name != 'push'
+    # Never on the abi-drift push trigger (that runs abi-check only), and on a
+    # pull_request only when the PR carries the `full-ci` label. Unconditional
+    # for workflow_dispatch and schedule.
+    if: >-
+      github.event_name != 'push' &&
+      (github.event_name != 'pull_request' ||
+       contains(github.event.pull_request.labels.*.name, 'full-ci'))
     strategy:
       # Do not cancel the other OS on the first failure: a Linux-only break is
       # exactly the signal this matrix exists to surface, so let Windows finish.
