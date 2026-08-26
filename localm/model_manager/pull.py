@@ -1364,14 +1364,17 @@ def _ssrf_resolve_final_url(url: str) -> str:
     following, which a public URL could use to bounce the download into
     127.0.0.1, 169.254.169.254 or an RFC1918 service. Each HEAD is IP-pinned to
     the validated address so the connect cannot rebind off the checked host.
-    Raises NetworkPolicyError if any hop resolves to a non-public host or cannot
-    be resolved to a validated address."""
+    net_allow_model_downloads exempts this from the net_mode=off floor, same
+    as pull_model's own top-level gate; the SSRF/private-address checks apply
+    regardless. Raises NetworkPolicyError if any hop resolves to a non-public
+    host or cannot be resolved to a validated address."""
     import urllib.parse
 
     from localm import netpolicy
+    allow_off = netpolicy.downloads_allowed_when_off()
     current = url
     for _ in range(6):
-        netpolicy.check_url(current)
+        netpolicy.check_url(current, allow_when_off=allow_off)
         try:
             resp = netpolicy.pinned_request(
                 "HEAD", current, allow_redirects=False, timeout=10)
@@ -1386,7 +1389,7 @@ def _ssrf_resolve_final_url(url: str) -> str:
             current = urllib.parse.urljoin(current, loc)
             continue
         break
-    netpolicy.check_url(current)        # final target, revalidated
+    netpolicy.check_url(current, allow_when_off=allow_off)   # final target, revalidated
     return current
 
 
@@ -1673,7 +1676,8 @@ def _pull_url_locked(
         console.print(f"Downloading [bold cyan]{escape(url)}[/bold cyan]")
 
     try:
-        netpolicy.check_url(dl_url)     # revalidate immediately before the connect
+        # revalidate immediately before the connect
+        netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
                                      timeout=30, allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308):

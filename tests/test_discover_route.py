@@ -84,6 +84,47 @@ def test_formats_param_reaches_hf_search_and_response_has_backend_flag(gui_app, 
     assert body["results"][0]["formats"] == ["hf"]
 
 
+def test_net_mode_off_refuses_with_a_gui_native_message_not_a_cli_command(
+        gui_app, monkeypatch):
+    """A browser has no CLI to run: _run_discover must translate the
+    DiscoverError.off refusal into a Settings-pointing message, never the
+    underlying 'localm config net_mode ask' text discover.py writes for a
+    terminal caller."""
+    app, disc = gui_app
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x", headers=_hdr())
+    assert r.status_code == 403, r.text   # _discover_status: a net_mode refusal
+    detail = r.json()["detail"]
+    assert "localm config" not in detail
+    assert "Settings" in detail
+
+
+def test_net_mode_off_but_downloads_allowed_reaches_the_real_search(
+        gui_app, monkeypatch):
+    """net_allow_model_downloads must reach all the way through the route,
+    not just discover.py's own front-door check - proves the deeper
+    netpolicy.check_url layer (hf_search's actual HTTP fetch) also honours it."""
+    app, disc = gui_app
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    import localm.config as _cfg
+    monkeypatch.setattr(
+        _cfg, "load_config",
+        lambda: {"net_mode": "off", "net_allow_model_downloads": True})
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: False)
+
+    def _fake_fetch(url, **kw):
+        assert kw.get("allow_when_off") is True, \
+            "the route's real hf_search must forward the override to safe_fetch_bytes"
+        import json
+        return url, "application/json", json.dumps([]).encode("utf-8")
+
+    monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", _fake_fetch)
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x", headers=_hdr())
+    assert r.status_code == 200, r.text
+
+
 def test_default_formats_is_gguf(gui_app, monkeypatch):
     app, disc = gui_app
     seen = {}

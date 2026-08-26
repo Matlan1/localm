@@ -138,8 +138,11 @@ def _get(url: str, params: Optional[dict] = None) -> object:
     full = url + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
     try:
         _final, _ctype, body = netpolicy.safe_fetch_bytes(
-            full, max_bytes=32 * 1024 * 1024, timeout=int(_TIMEOUT))
+            full, max_bytes=32 * 1024 * 1024, timeout=int(_TIMEOUT),
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         return _json.loads(body.decode("utf-8"))
+    except netpolicy.NetworkPolicyError as e:
+        raise DiscoverError(f"HuggingFace request failed: {e}", off=e.off)
     except Exception as e:
         raise DiscoverError(f"HuggingFace request failed: {e}")
 
