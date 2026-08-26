@@ -65,7 +65,7 @@ dependencies = [
     # than uv.lock's pinned 1.3.1. Declared explicitly so the ASGI layer
     # fastapi depends on cannot resolve to something far older than what this
     # project is actually tested against.
-    "starlette>=1.3.1",
+    "starlette>=1.6.0",
     "uvicorn>=0.52.4",
     # Built-in TLS (NET-1): localm mints a local CA + leaf cert so a network
     # bind serves HTTPS out of the box. Core, not an extra - encryption on an
