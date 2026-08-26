@@ -325,14 +325,31 @@ def rm(model, yes):
     The confirmation prompt describes exactly what will happen (delete vs
     unregister-only). Disable it permanently with:
     localm config confirm_remove false
+
+    Refuses when a running localm server still has the model's file loaded,
+    whether or not --yes was passed - this one-shot process shares no memory
+    with a server, so it has nothing of its own to check and asks over HTTP.
     """
+    from rich.markup import escape
+
     from ..config import load_registry
     from ..model_manager import (
         _entry_path, find_aliases_by_path, is_owned_model_path)
+    from ..selfclient import remote_hold_reason
+
+    reg = load_registry()
+    if model in reg:
+        reason = remote_hold_reason(model)
+        if reason is not None:
+            console.print(
+                f"[red]Refusing to remove '{escape(model)}':[/red] "
+                f"{escape(reason)}. Removing it could delete the model "
+                f"file while it is in use. Unload it there (or stop that "
+                f"server), then try again.")
+            sys.exit(1)
 
     cfg = load_config()
     if not yes and cfg.get("confirm_remove", True):
-        reg = load_registry()
         if model in reg:
             epath = _entry_path(reg[model])
             if epath is None:

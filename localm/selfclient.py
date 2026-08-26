@@ -169,6 +169,87 @@ def read_model_file_hold(scheme: str, port, model: str,
     return "ok", body
 
 
+def remote_hold_reason(model: str) -> Optional[str]:
+    """Ask every OTHER running localm instance whether it holds the file that
+    removing *model* would delete. Returns None only when every discovered
+    instance POSITIVELY RULES ITSELF OUT; otherwise a ready-to-print reason
+    naming which instance could not be ruled out (or could not be asked).
+
+    Exists for a caller that shares no memory with any server that might be
+    running: ``localm rm`` and the MCP ``remove_model`` tool both delete a
+    registry entry's file from a fresh, one-shot process, so neither can
+    consult an in-process engine map the way the HTTP server's own remove
+    route does (``loaded_engine_holding_model_file``). Asking each discovered
+    instance over :func:`read_model_file_hold` is the only way either caller
+    can find out.
+
+    EVERY OUTCOME THAT IS NOT AN ANSWER IS A REFUSAL, and the message says
+    which one it was. "That server reports nothing holds it" and "I could not
+    reach that server" are opposite conclusions, and collapsing them would
+    delete a live model's file on the strength of never having found out. A
+    refused delete costs one command and names the server to go and check; a
+    deleted model file is gone.
+
+    No server running at all is a certain all-clear (``instances.snapshot``
+    yields nothing to loop over, so this returns None immediately), never a
+    refusal - a tool that blocked every deletion whenever nothing happened to
+    be running would be useless.
+    """
+    from localm import instances
+    from localm.bindhost import self_connect_host, url_host
+    from localm.config import home_dir
+
+    # include_token=True: this ASKS each instance over HTTP (an internal,
+    # non-display use), so it needs the attach token a genuinely open
+    # (keyless) instance's middleware requires. Never for anything a human
+    # reads.
+    rows = instances.snapshot(home_dir(), include_token=True)
+    for e in rows:
+        scheme = e.get("scheme", "http")
+        where = (scheme + "://"
+                 + url_host(self_connect_host(e.get("host")))
+                 + ":" + str(e.get("port")))
+        if not e.get("alive"):
+            # A failed /whoami is NOT proof the process is gone: snapshot()
+            # reaps entries whose pid has died before this runs, and a listed
+            # instance that did not answer is therefore a live process of
+            # unknown state, and unknown refuses.
+            return (f"a localm server at {where} is registered but did not "
+                    f"answer an identity check, so whether it has this "
+                    f"model loaded could not be established")
+        state, payload = read_model_file_hold(
+            scheme, e.get("port"), model, e.get("token"), e.get("host"))
+        if state == "ok":
+            if not payload.get("held"):
+                continue          # this server positively ruled itself out
+            key = payload.get("key") or "a loaded model"
+            reason = payload.get("reason")
+            if reason:
+                return (f"the localm server at {where} has {key!r} loaded "
+                        f"and {reason}, so it cannot be ruled out as "
+                        f"holding this file")
+            return (f"the localm server at {where} still has this model's "
+                    f"file loaded as {key!r}")
+        if state == "absent":
+            continue              # that instance serves a different library
+        if state == "unauthorized":
+            return (f"the localm server at {where} requires an API key this "
+                    f"process does not have, so whether it has this model "
+                    f"loaded could not be established")
+        if state == "unsupported":
+            return (f"the localm server at {where} is an older localm that "
+                    f"cannot report which models it holds, so whether it "
+                    f"has this one loaded could not be established")
+        if state == "unreachable":
+            return (f"the localm server at {where} could not be reached "
+                    f"({payload}), so whether it has this model loaded "
+                    f"could not be established")
+        return (f"the localm server at {where} answered HTTP {payload} "
+                f"instead of reporting what it holds, so whether it has "
+                f"this model loaded could not be established")
+    return None
+
+
 def resolve_self_url(app) -> Optional[str]:
     """This server's own ``/v1`` base URL, or None if it cannot be determined.
 

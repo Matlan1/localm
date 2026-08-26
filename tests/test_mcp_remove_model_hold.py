@@ -97,8 +97,8 @@ def _servers(monkeypatch, rows):
 def _reader(monkeypatch, result):
     """Pin what read_model_file_hold answers, and count that it was consulted.
 
-    Patched on localm.selfclient, which is where _remote_hold imports it from
-    at call time.
+    Patched on localm.selfclient, which is where remote_hold_reason imports
+    it from at call time.
     """
     calls = []
 
