@@ -75,8 +75,7 @@ def test_concurrent_acquires_never_exceed_the_cap(gate):
     """THE RACE TEST. 24 threads start simultaneously against a 2-slot gate.
 
     A non-atomic check-then-insert lets several threads all observe a free slot
-    and all admit. Nothing about ordinary sequential use would reveal that, which
-    is exactly why this test exists.
+    and all admit; ordinary sequential use never reveals that.
     """
     n_threads = 24
     barrier = threading.Barrier(n_threads)
@@ -139,8 +138,8 @@ def test_no_blocking_acquire_is_exposed():
     """The silent queue must be impossible to reintroduce by accident.
 
     A blocking acquire would turn "budget full" into an invisible wait, defeating
-    a background-spawn caller and hanging a caller that meant to reject. The module
-    deliberately offers no such entry point.
+    a background-spawn caller and hanging a caller that meant to reject. The
+    module offers no such entry point.
     """
     assert not hasattr(cl, "acquire"), "a blocking acquire() was added"
     assert not hasattr(cl.ChildLimit, "acquire"), "a blocking acquire() was added"

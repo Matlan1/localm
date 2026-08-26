@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The coder system prompt is rebuilt at several points in a session (set_cwd,
-reindex, reload_memory, and the per-write project-map refresh). A prior bug
-rebuilt with only the MCP tool docs, so plugin tools and agent skills silently
-vanished from the prompt mid-session and the model "forgot" they existed. These
+reindex, reload_memory, and the per-write project-map refresh). A rebuild that
+carries only the MCP tool docs makes plugin tools and agent skills silently
+vanish from the prompt mid-session, so the model "forgets" they exist. These
 tests pin that every rebuild path keeps the COMBINED mcp + plugin + skill docs.
 """
 
@@ -156,9 +156,9 @@ class TestIncrementalMapRefreshCoverage:
     def test_run_shell_marks_the_map_dirty_instead_of_refreshing(self, tmp_path):
         """run_shell has no `path`-shaped arg at all (only `command`), so a
         per-file refresh_file() call is not possible ahead of time - see
-        _MUTATING_TOOLS's own comment. Marking the whole map dirty is the fix
-        that replaced the old known-gap (a real ProjectMap's resulting
-        stat-diff rescan is exercised directly in test_indexer.py)."""
+        _MUTATING_TOOLS's own comment. Marking the whole map dirty is what
+        covers it; a real ProjectMap's resulting stat-diff rescan is exercised
+        by the indexer tests."""
         agent = _make_agent(tmp_path)
         call = _make_call("run_shell", command="echo hi")
         agent._refresh_map_for_tool(call)
@@ -213,10 +213,9 @@ class TestBuildMessagesDeferredRescan:
 class TestRunShellEndToEnd:
     """A REAL Agent with a REAL ProjectMap (unlike _make_agent above, which
     mocks ProjectMap entirely) driven through the actual dispatch path -
-    the integration-level regression test for the bug the unit-level tests
-    above and in test_indexer.py exercise piece by piece. Runs a real
-    `echo` via the real run_shell tool; nothing here is mocked except the
-    LLM backend, which is never called."""
+    the integration-level counterpart to the unit-level tests above. Runs a
+    real `echo` via the real run_shell tool; nothing here is mocked except
+    the LLM backend, which is never called."""
 
     def _make_real_agent(self, tmp_path: Path):
         from localm.plugins.coder.agent import Agent

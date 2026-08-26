@@ -1,17 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LM-DA-016 - kernel HTTP route scope-gating is enforced by convention plus a
-PR-template checklist, not an automated route-enumeration test.
+"""Kernel HTTP route scope-gating, enforced by enumeration.
 
 Unlike plugin routes (structurally gated by ``mount_router``'s
-``include_router`` call - a plugin literally cannot add an ungated route),
-kernel routes in ``localm/inference/http_server.py`` and
-``localm/inference/routes/*.py`` carry ``Depends(require_scope(...))``
-individually per handler, with no shared base router or FastAPI-level default
-dependency. This mirrors the coder plugin's own default-deny contract test
-for its tool registry (``test_scope_allowlist_is_default_deny`` in
-``tests/test_coder_security_2026_07_01.py``): walk the real registry (here,
-the live app's routes) and assert every entry is accounted for, so an
-omission fails CI instead of relying on a manual checklist alone.
+``include_router`` call - a plugin cannot add an ungated route), kernel routes in
+``localm/inference/http_server.py`` and ``localm/inference/routes/*.py`` carry
+``Depends(require_scope(...))`` individually per handler, with no shared base
+router or FastAPI-level default dependency. This walks the live app's routes and
+asserts every entry is accounted for.
 """
 
 import pytest
@@ -67,18 +62,17 @@ _BESPOKE_GATED_ROUTES = {
 def test_every_kernel_route_is_gated_or_explicitly_allowlisted(api_landing):
     """Walk the live app's routes; every one must be either scope/auth-gated
     via a recognized FastAPI dependency, or present on one of the two
-    hardcoded, commented allowlists above. A future route added with
-    neither - the exact gap LM-DA-016 flagged - fails this test.
+    hardcoded, commented allowlists above. A route added with neither fails
+    this test.
 
     Parametrized over both real app shapes: ``create_app(None)`` (GUI mode)
     and ``create_app(None, api_landing=True)`` (the ``localm serve`` API-only
-    shape), which registers one extra inline route (``GET /``) that the
-    GUI-mode shape never exercises - walking only one shape would leave that
-    route permanently outside this test's blast radius."""
+    shape), which registers one extra inline route (``GET /``) the GUI-mode
+    shape never exercises."""
     app = create_app(None, api_landing=api_landing)
     api_routes = [r for r in app.routes if isinstance(r, APIRoute)]
-# Sanity floor: fail loudly if create_app() yields far fewer routes than this,
-# rather than letting the walk below pass over nothing.
+# Sanity floor: fail loudly if create_app() yields far fewer routes than this, so
+# the walk below cannot pass over nothing.
     assert len(api_routes) >= 30, (
         f"only {len(api_routes)} kernel APIRoute(s) found - create_app() "
         "may have changed shape; re-verify this test's route walk still "

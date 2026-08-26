@@ -225,17 +225,15 @@ def _agent_that_changed_something(tmp_path: Path, **kwargs):
     """An agent whose session state says it HAS edited a file, for the review
     tests that mock session_diff to a non-empty diff.
 
-    A diff with no recorded write is not a state the agent can actually reach -
-    the diff comes FROM the writes - and leaving the fixture in it made these
-    tests describe an impossible session. That went unnoticed while nothing
-    read the write ledger at this point in the loop; the zero-tool-call
-    escalation (NEW-CODER-NO-TOOLCALL-SILENT) does read it, to tell a model
-    that is working from one that never touched a tool, and correctly judged
-    the impossible fixture to be the latter.
+    A diff with no recorded write is not a state the agent can reach - the diff
+    comes FROM the writes - so a fixture without one describes an impossible
+    session. The zero-tool-call escalation reads the write ledger to tell a model
+    that is working from one that never touched a tool, and judges such a fixture
+    to be the latter.
 
     self_verify is off because these tests are about the REVIEW gate: with
-    unverified writes present the self-verification nudge would otherwise fire
-    first and add a turn none of their response scripts allow for."""
+    unverified writes present the self-verification nudge would fire first and
+    add a turn none of their response scripts allow for."""
     kwargs.setdefault("self_verify", False)
     agent = _make_agent(tmp_path, **kwargs)
     agent._unverified_writes = {"a.py"}

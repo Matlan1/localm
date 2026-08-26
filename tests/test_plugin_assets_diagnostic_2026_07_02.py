@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HONESTY (resume audit 2026-07-02): PluginHost.mount_surface_assets swallowed
-BOTH the 'assets_dir missing on disk' and the 'assets_dir escapes the plugin
-dir' ValueError into a bare `return None` with a comment that named only the
-first case and no log. The path-confinement security property holds either way
-(nothing is mounted), but a plugin author who fat-fingers `assets_dir = '../x'`
-got a silent SPA 404 with zero diagnostic (rule 5: surface, do not hide). The
-swallow now debug-logs the real cause. Behaviour (return None, keep serving the
-rest of the plugin) is unchanged - this only adds the missing diagnostic."""
+"""PluginHost.mount_surface_assets returns None and keeps serving the rest of
+the plugin for both of its failure causes - 'assets_dir missing on disk' and
+'assets_dir escapes the plugin dir' - and debug-logs which one it was, so a
+manifest typo like `assets_dir = '../x'` is not an undiagnosed SPA 404."""
 
 import logging
 
@@ -25,14 +21,14 @@ def _host(tmp_path, assets_dir: str) -> PluginHost:
 def test_missing_assets_dir_is_logged_not_silent(tmp_path, caplog):
     host = _host(tmp_path, "does-not-exist")
     with caplog.at_level(logging.DEBUG, logger="localm.plugins"):
-        assert host.mount_surface_assets() is None      # unchanged: best-effort
+        assert host.mount_surface_assets() is None      # best-effort
     assert any("does-not-exist" in r.message and "not mounted" in r.message
                for r in caplog.records), "the missing assets_dir must be logged"
 
 
 def test_boundary_escape_is_logged_with_its_real_cause(tmp_path, caplog):
-    # A manifest typo that escapes the plugin dir: the security guard rejects it
-    # (nothing mounted) and the reason is surfaced rather than read as missing.
+    # A manifest typo that escapes the plugin dir: the guard rejects it (nothing
+    # mounted) and the log names the escape, distinct from a missing dir.
     host = _host(tmp_path, "../../../etc")
     with caplog.at_level(logging.DEBUG, logger="localm.plugins"):
         assert host.mount_surface_assets() is None
@@ -48,5 +44,5 @@ def test_present_assets_dir_mounts_and_does_not_warn(tmp_path, caplog):
     host = _host(tmp_path, "static")
     with caplog.at_level(logging.DEBUG, logger="localm.plugins"):
         prefix = host.mount_surface_assets()
-    assert prefix == "/plugins/probe"                   # happy path unaffected
+    assert prefix == "/plugins/probe"                   # happy path
     assert not any("not mounted" in r.message for r in caplog.records)

@@ -8,18 +8,17 @@ both ``_load()`` the same state, mutate their copy and ``_save()``, so one
 update is silently lost and interleaved meta/chunks/vectors can surface later
 as a degraded index. This module closes that, per collection, across processes.
 
-Why not ``config._cross_process_lock``: it reclaims ANY holder older than 30 s
-as abandoned. That is right for a config read-modify-write (milliseconds) and
-fatal here, where indexing a folder legitimately runs for minutes or hours - a
-waiter would reap a LIVE holder and both would write. So a hold here has NO
-wall-clock limit at all. The holder instead proves it is alive with a
-HEARTBEAT, and staleness is keyed on the age of that heartbeat
-(``STALE_AFTER``), not on how long the lock has been held.
+A hold here has NO wall-clock limit. Indexing a folder legitimately runs for
+minutes or hours, so a ``config._cross_process_lock``-style rule that reclaims
+ANY holder older than 30 s would reap a LIVE holder and let both write. The
+holder instead proves it is alive with a HEARTBEAT, and staleness is keyed on
+the age of that heartbeat (``STALE_AFTER``), not on how long the lock has been
+held.
 
-THE HEARTBEAT IS THE LOCK FILE'S MTIME, refreshed with ``os.utime``. It is
-deliberately not a timestamp field rewritten inside the record, because
-rewriting the record means replacing the file, and a replace cannot be made
-conditional: a holder whose write stalls past the staleness window (an
+THE HEARTBEAT IS THE LOCK FILE'S MTIME, refreshed with ``os.utime``, not a
+timestamp field rewritten inside the record. Rewriting the record means
+replacing the file, and a replace cannot be made conditional: a holder whose
+write stalls past the staleness window (an
 unresponsive network share, a long antivirus hold) would land its now-stale
 record ON TOP of the record of whichever process legitimately reclaimed the
 lock meanwhile - destroying the successor's identity and letting a third writer
@@ -38,8 +37,7 @@ hold a meta.json, so the lock file is never mistaken for a collection.
 
 Identity is the per-acquisition ``token`` (uuid4), never the pid: pids are
 reused across process lifetimes, so a leaked lock file can carry the very pid
-the OS later hands to a new localm process (REG-586, learned in config.py).
-The record ALSO pins ``(pid, pid_create_time)``, which is what makes a pid
+the OS later hands to a new localm process. The record ALSO pins ``(pid, pid_create_time)``, which is what makes a pid
 usable as evidence at all: same pid + different create time means the number
 was recycled and the real holder is gone. That pin is only consulted when the
 record was written by a process that shares this one's pid space
@@ -79,7 +77,7 @@ from typing import Callable, Optional
 from localm.debuglog import logger as _log
 
 # How often the holder refreshes its heartbeat. Everything else is a multiple of
-# this, so tuning one value keeps the ratios sane.
+# this.
 HEARTBEAT_INTERVAL = 5.0
 # A holder that has not refreshed its heartbeat for this long is presumed
 # crashed and its lock is reclaimed. NOT a limit on how long a lock may be held:
@@ -89,13 +87,12 @@ HEARTBEAT_INTERVAL = 5.0
 STALE_AFTER = 60.0
 # When the pin PROVES the holder is gone (pid absent, or recycled into another
 # process), waiting out the full STALE_AFTER only delays recovery from a crash.
-# Deliberately still LONGER than the heartbeat failures a live holder tolerates
-# (_Heartbeat keeps going through a transient utime failure): if this dropped to
-# a beat or two, any WRONG "dead" verdict would instantly outrace a living
-# holder's own margin, which is how a safety accelerator turns into a lock thief.
+# Still LONGER than the heartbeat failures a live holder tolerates (_Heartbeat
+# keeps going through a transient utime failure), so a WRONG "dead" verdict
+# cannot outrace a living holder's own margin.
 DEAD_HOLDER_GRACE = 4 * HEARTBEAT_INTERVAL
-# How long a would-be writer waits for the lock before refusing. Bounded on
-# purpose: an unbounded wait turns a stuck peer into a hung CLI or a hung job.
+# How long a would-be writer waits for the lock before refusing. Bounded: an
+# unbounded wait turns a stuck peer into a hung CLI or a hung job.
 WAIT_TIMEOUT = 30.0
 # Only mention waiting once it has actually lasted; the uncontended case (the
 # overwhelming majority) stays silent.
@@ -118,10 +115,9 @@ class CollectionLockedError(RuntimeError):
                  lockpath: Optional[Path] = None, same_process: bool = False,
                  kind: str = "Collection"):
         # *kind* names WHAT is locked, for the message only. It defaults to
-        # "Collection" so every existing RAG raise site reads exactly as before;
-        # agent memory passes "Memory namespace" (see memory/store.py), because
-        # the same machinery now serialises both and "Collection 'a1b2..'" would
-        # be a lie in a memory refusal.
+        # "Collection" for the RAG raise sites; agent memory passes "Memory
+        # namespace" (see memory/store.py), since the same machinery serialises
+        # both.
         self.kind = kind
         self.collection = name
         self.holder = holder
@@ -159,10 +155,9 @@ def lock_path_for(collection_dir: Path) -> Path:
 def describe_holder(rec: Optional[dict], last_alive: Optional[float] = None) -> str:
     """A human sentence naming who holds a lock, from its record.
 
-    Deliberately says only what the record honestly knows: the pid, what it is
-    doing, how long it has held the lock and when it last proved it was alive.
-    No hostname or command line (this file lives in the user's data directory
-    and can end up quoted in a bug report)."""
+    Says only what the record knows: the pid, what it is doing, how long it has
+    held the lock and when it last proved it was alive. No hostname and no
+    command line."""
     if not isinstance(rec, dict):
         return ("another localm process (its lock record is unreadable, so it "
                 "cannot say which)")
@@ -190,9 +185,7 @@ def _duration(seconds: float) -> str:
 def _env_float(name: str, default: float) -> float:
     """An operator override, or *default* if it is unset or not a usable number.
 
-    A malformed value is reported rather than silently ignored: someone who set
-    it meant something by it, and a typo that quietly reverts to the default is
-    exactly the kind of "it looked like it worked" this codebase does not ship."""
+    A malformed value is reported rather than silently ignored."""
     raw = (os.environ.get(name) or "").strip()
     if not raw:
         return default
@@ -222,8 +215,8 @@ def _machine_id() -> str:
     as well.
 
     Hashed rather than stored plainly: the node name is a personal identifier
-    and this record is written into the user's data directory (AGENTS.md rule
-    2). Only ever compared for equality, so the hash is as good as the name."""
+    and this record is written into the user's data directory. Only ever
+    compared for equality, so the hash is as good as the name."""
     global _machine_id_cache
     if _machine_id_cache is None:
         parts = [sys.platform]
@@ -379,10 +372,10 @@ class _Heartbeat(threading.Thread):
             os.utime(self._lockpath, None)
         except FileNotFoundError:
             # Our lock file is gone while we are demonstrably alive: somebody
-            # judged us stale and removed it. Deliberately NOT re-created - a
-            # fresh file here would collide with whoever is taking over, and
-            # re-creating a lock during release is how a phantom lock outlives
-            # the run that owned it. Report and stand down instead.
+            # judged us stale and removed it. NOT re-created - a fresh file here
+            # would collide with whoever is taking over, and a lock re-created
+            # during release outlives the run that owned it. Report and stand
+            # down instead.
             _note(f"the write lock file for '{self._record.get('collection')}' "
                   f"was removed while this process still held it. Another "
                   f"localm process may now be writing to the same collection.")
@@ -390,10 +383,9 @@ class _Heartbeat(threading.Thread):
         except OSError as e:
             # Transient (an antivirus scanner holding the file, a full disk).
             # Missing ONE beat is harmless - STALE_AFTER is twelve of them - so
-            # keep going rather than abandoning a lock we still hold. A run of
-            # them is NOT harmless: it ends with somebody reclaiming this lock
-            # while we are still writing, so it escalates instead of staying a
-            # debug line nobody reads (AGENTS.md rule 5).
+            # keep going rather than abandoning a lock we still hold. A RUN of
+            # them ends with somebody reclaiming this lock while we are still
+            # writing, so it escalates rather than staying a debug line.
             self._failures += 1
             if self._failures == 3:
                 _note(f"cannot refresh the write lock on "
@@ -416,12 +408,10 @@ def _note(message: str) -> None:
     """Surface an unusual lock event through BOTH channels, always.
 
     stderr is for whoever is watching a terminal; the log is the durable record.
-    Neither alone is enough, and the log must not be conditional: every localm
-    entry point installs the always-on ring buffer (debuglog.install_ring_buffer,
-    called from cli/_core.py), which is what a bug report dumps, and a run
-    launched without a console has no usable stderr at all - precisely the
-    unattended case where a reclaim or a mid-write takeover most needs to leave
-    a trace (AGENTS.md rule 5)."""
+    The log is never conditional: every localm entry point installs the
+    always-on ring buffer (debuglog.install_ring_buffer, called from
+    cli/_core.py), which is what a bug report dumps, and a run launched without
+    a console has no usable stderr at all."""
     print(f"[localm] note: {message}", file=sys.stderr)
     _log.warning("rag lock: %s", message)
 
@@ -436,8 +426,7 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
 
     Raises ``CollectionLockedError`` if another process still holds it after
     *timeout* seconds. It never returns without the lock: there is no
-    "carry on unprotected" path, because an unserialised write is precisely the
-    lost update this exists to prevent.
+    "carry on unprotected" path.
 
     *on_wait* is called with a progress line if the wait actually lasts (see
     WAIT_NOTICE_AFTER), so a CLI can say why it is sitting there instead of
@@ -473,8 +462,7 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
             # ERROR_ACCESS_DENIED here rather than the ERROR_FILE_EXISTS that
             # becomes FileExistsError. Letting it propagate aborts the user's
             # command with "localm hit an unexpected error" over a condition
-            # that clears on its own in milliseconds, which is what reddened
-            # the release gate for 0.1.5rc3.
+            # that clears on its own in milliseconds.
             #
             # Treated as "a holder may be there and I could not read it": it
             # waits on the SAME deadline as every other contended path, so it
@@ -506,8 +494,8 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
             # Anything else - a live holder, or a stale lock we could NOT remove
             # (a permissions fault, a handle another process still has open, a
             # fresher lock that appeared under us) - waits on the ONE budget
-            # below. Retrying a reclaim from here instead would spin without ever
-            # consulting the deadline: a hang, dressed as a busy loop.
+            # below. Retrying a reclaim from here instead would spin without
+            # ever consulting the deadline.
             waited = time.time() - started_waiting
             if time.time() >= deadline:
                 raise CollectionLockedError(collection, rec, waited, mtime,
@@ -528,9 +516,9 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
             finally:
                 os.close(fd)
             beat = _Heartbeat(lockpath, record, HEARTBEAT_INTERVAL)
-            # Inside the cleanup block on purpose: a thread that cannot start
-            # (thread exhaustion) would otherwise leave a lock file behind with
-            # nothing refreshing it, blocking this collection until it went stale.
+            # Inside the cleanup block: a thread that cannot start (thread
+            # exhaustion) would otherwise leave a lock file behind with nothing
+            # refreshing it, blocking this collection until it went stale.
             beat.start()
         except BaseException:
             try:

@@ -121,12 +121,10 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertEqual(body["vram_after_bytes"], 20 * GB)
 
     def test_unload_vram_reading_marked_uncertain_on_a_stale_probe(self):
-        """Release-verify-pass bug: /v1/models/unload reported a specific
-        vram_before/after_bytes + vram_freed as fact even when the underlying
-        GPU probe had timed out and fallen back to a stale last-known-good
-        reading (confirmed via an OS-level VRAM counter that the real
-        free/use cycle worked correctly the whole time - the endpoint's OWN
-        reporting was the only thing wrong). The response must now say so."""
+        """/v1/models/unload must not report a specific
+        vram_before/after_bytes + vram_freed as fact when the underlying GPU
+        probe has timed out and fallen back to a stale last-known-good reading.
+        The response must say the reading is uncertain."""
         # A real vram_capacity() only returns a tuple when EXPLICITLY asked
         # (return_status=True); the bare-call polling _free() closure inside
         # wait_for_vram_release expects a plain dict, so the mock mirrors the
@@ -164,13 +162,12 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertNotIn("vram_note", body)
 
     def test_unload_release_detected_via_combined_split_capacity(self):
-        """AUDIT-GPU-SPLIT-1: the C4 release-guard's before/after free-VRAM
-        delta must be measured against discover.vram_capacity() (combined
-        split capacity), not just the single main GPU - a model that frees
-        VRAM mostly on a NON-main split device must still be detected as
-        released. If only the main GPU's free were measured here, this
-        scenario would show no rise at all and incorrectly report
-        vram_freed=False despite VRAM genuinely being freed."""
+        """The release-guard's before/after free-VRAM delta must be measured
+        against discover.vram_capacity() (combined split capacity), not just the
+        single main GPU - a model that frees VRAM mostly on a NON-main split
+        device must still be detected as released. Measuring only the main GPU's
+        free shows no rise at all here and reports vram_freed=False despite VRAM
+        genuinely being freed."""
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         states = iter([

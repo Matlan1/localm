@@ -64,10 +64,10 @@ def test_build_report_has_sections_and_summary():
 
 
 def test_report_footer_strip_removes_exactly_the_disclaimer_block():
-    """LM-DA-PUBTEXT: the in-app "edit before sending" disclaimer (and the
-    maintainer's email that rides with it) must be removable from a real
-    build_report() output as a single, exact, single-sourced block - not a
-    fuzzy substring match that could also eat real report content."""
+    """The in-app "edit before sending" disclaimer (and the maintainer's email
+    that rides with it) must be removable from a real build_report() output as a
+    single, exact, single-sourced block - not a fuzzy substring match that could
+    also eat real report content."""
     text = bugreport.build_report("disk on fire", reason="too hot")
     assert bugreport.MAINTAINER_EMAIL in text
     assert "You can edit anything above before sending." in text
@@ -109,7 +109,7 @@ def test_build_report_includes_error_traceback():
 
 
 def test_build_report_scrubs_credentialed_url_in_error_traceback():
-    """HON-15: an exception message can embed a user-configured credentialed URL
+    """An exception message can embed a user-configured credentialed URL
     (a comfy_api_url / net_search_url / remote-server base with user:pass@), and the
     traceback ships in the uploaded 'Error detail' body. It must be credential-scrubbed
     like the sibling log tail, not merely home-scrubbed."""
@@ -149,8 +149,8 @@ def test_scrub_secrets_leaves_non_credential_query_params_intact():
 
 
 def test_scrub_secrets_still_redacts_user_pass_at_url_creds():
-    """Same assertion block as the query-param cases above, deliberately -
-    see the module comment on this test group."""
+    """Same assertion block as the query-param cases above - see the module
+    comment on this test group."""
     out = bugreport._scrub_secrets("http://user:SECRETPASS@remote:8000/v1")
     assert "SECRETPASS" not in out
     assert "<redacted>" in out
@@ -217,11 +217,10 @@ def test_scrub_secrets_redacts_launch_grants_in_a_printed_gui_url():
 
 
 def test_scrub_secrets_leaves_non_credential_bare_assignments_intact():
-    """The OTHER failure direction, and the one with no natural signal: an
-    over-broad pattern ships green and silently eats diagnostic text out of every
-    report. These are what a pasted config dump or log line is made of.
+    """The OTHER direction: an over-broad pattern eats diagnostic text out of
+    every report. These are what a pasted config dump or log line is made of.
 
-    ``key=`` / ``auth=`` / ``sig=`` are in here deliberately. The short generic
+    ``key=`` / ``auth=`` / ``sig=`` are included. The short generic
     names redact only when prefixed (SECRET_KEY=, x-auth=) or inside a query
     string (?key=, asserted above); bare, they are ordinary config vocabulary.
     ``monkey`` / ``hotkey`` guard the prefix branch against matching a name that
@@ -299,10 +298,9 @@ def test_the_non_secret_suppressor_does_not_fire_when_more_value_follows(line):
     is a flag; ``api_key=1)SECRET`` is not, and the difference is whether
     anything other than whitespace follows the markup.
 
-    The value itself still ends at the first ``)`` / quote, because that is what
-    has always bounded a value here - this test is about the SUPPRESSOR declining
-    to fire, which is why it asserts the redaction marker rather than the absence
-    of the trailing text."""
+    The value itself ends at the first ``)`` / quote. This test is about the
+    SUPPRESSOR declining to fire, so it asserts the redaction marker rather than
+    the absence of the trailing text."""
     out = bugreport._scrub_secrets(line)
     assert "=<redacted>" in out, (
         f"the suppressor swallowed a credential assignment: {out!r}")
@@ -328,12 +326,10 @@ def test_scrub_secrets_redacts_a_quoted_credential_value(line, canary):
 
 
 def test_unterminated_quote_redaction_span_is_what_the_comment_claims():
-    """The three spans an unterminated quote can produce, pinned because the
-    comment beside the pattern got one of them wrong: it claimed end-of-line in
-    all cases, when a later quote on the same line ends the span earlier.
+    """The three spans an unterminated quote can produce. The span runs to
+    end-of-line unless a later quote on the same line ends it earlier.
 
-    All three over-redact rather than under-redact, which is the property that
-    matters; this test exists so the DOCUMENTED boundary stays the real one."""
+    All three over-redact rather than under-redact."""
     # no later quote: to end of line
     out = bugreport._scrub_secrets("api_key=\"UNTERM1 and more text here")
     assert "UNTERM1" not in out
@@ -360,9 +356,7 @@ def test_scrub_secrets_never_marks_redacted_while_leaving_the_secret():
 
 
 def test_scrub_secrets_never_eats_a_non_secret_value_out_of_the_real_docs():
-    """Bound to the SHIPPED artefact, not to a fixture. A fixture only ever
-    contains values its author thought of; the real docs contain the ones nobody
-    thought of, which is the half that keeps going wrong here.
+    """Bound to the SHIPPED artefact, not to a fixture.
 
     Asserts a STRUCTURAL property (no assignment whose value is a non-secret
     literal is ever redacted) rather than specific content, so ordinary edits to
@@ -402,9 +396,9 @@ def test_build_report_no_secret_when_none_given():
 
 
 def test_build_report_scrubs_home_path_in_summary_and_reason():
-    """HON-15: the user-typed summary/reason are the only report fields not
-    otherwise scrubbed; a home path (username) in them would ship in the uploaded
-    body (and, via the derived title, a PUBLIC issue). They are scrubbed at the
+    """The user-typed summary/reason are the only report fields not otherwise
+    scrubbed; a home path (username) in them would ship in the uploaded body
+    (and, via the derived title, a PUBLIC issue). They are scrubbed at the
     build_report choke point, so every caller is covered."""
     text = bugreport.build_report(
         r"crash running Z:\Users\bob\localm\app.py",
@@ -466,20 +460,16 @@ def test_save_user_report_blank_description_still_saves(tmp_path, monkeypatch):
 # ------------------- concurrency: two GUI reports at once ----------------- #
 
 def test_concurrent_save_user_report_calls_never_overlap(tmp_path, monkeypatch):
-    """The GUI endpoint now offloads save_user_report() to a real worker thread
+    """The GUI endpoint offloads save_user_report() to a real worker thread
     (localm/inference/routes/admin.py, off the event loop), so two reports
     filed close together can run this function on two DIFFERENT threads at the
-    same instant - not merely interleaved on one event loop the way the old
-    synchronous handler guaranteed for free. Without _SAVE_REPORT_LOCK, two
-    threads could have save_report() open the SAME same-second-timestamped
-    file for writing at once, interleaving their content into one corrupted
-    report instead of cleanly losing one.
+    same instant. Without _SAVE_REPORT_LOCK, two threads could have
+    save_report() open the SAME same-second-timestamped file for writing at
+    once, interleaving their content into one corrupted report.
 
-    Proven by instrumenting save_report() itself (the actual write) rather
-    than by hoping a real OS race reproduces on this run: a shared flag records
-    whether any thread is already "inside" a save_report() call when another
-    thread arrives, and a sleep widens the window so a missing lock would be
-    caught essentially every time across several threads, not by luck."""
+    save_report() itself (the actual write) is instrumented: a shared flag
+    records whether any thread is already "inside" a save_report() call when
+    another thread arrives, and a sleep widens the window."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     in_critical_section = threading.Event()
     overlap_detected = threading.Event()
@@ -519,10 +509,10 @@ def test_concurrent_save_user_report_calls_never_overlap(tmp_path, monkeypatch):
 
 
 def test_save_user_report_scrubs_home_path_in_description(tmp_path, monkeypatch):
-    """HON-15: the GUI description is inserted AFTER build_report's own scrub pass
-    and is uploaded verbatim in the report body when the user picks upload, so it
-    must be scrubbed at its injection point too - both the derived summary and the
-    full description must be redacted."""
+    """The GUI description is inserted AFTER build_report's own scrub pass and is
+    uploaded verbatim in the report body when the user picks upload, so it is
+    scrubbed at its injection point too - both the derived summary and the full
+    description must be redacted."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     path = bugreport.save_user_report(
         "It broke when I ran it from Z:\\Users\\bob\\localm and clicked send.")
@@ -584,10 +574,10 @@ def test_save_user_report_scrubs_what_expected_and_happened(tmp_path, monkeypatc
 # ------------------- description-only must not duplicate ----------------- #
 
 def test_description_only_renders_not_stated_not_a_duplicate(tmp_path, monkeypatch):
-    """#958's actual artifact, reproduced: before this fix, leaving "what
-    happened" blank made the title AND the "What happened" section repeat
-    the description verbatim - a report that LOOKS like it has three
-    sections of content but is really one sentence copied three times."""
+    """Leaving "what happened" blank must not make the title AND the "What
+    happened" section repeat the description verbatim, producing a report that
+    looks like three sections of content but is one sentence copied three
+    times."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     desc = "the image generator crashed when I clicked generate twice quickly"
     path = bugreport.save_user_report(desc)
@@ -612,10 +602,9 @@ def test_description_and_happened_both_filled_no_duplication(tmp_path, monkeypat
 
 def test_automatic_crash_report_keeps_the_summary_reason_fallback(monkeypatch):
     """The fallback build_report() drops for USER reports (what_i_did present,
-    what_happened blank) must stay EXACTLY as before for an AUTOMATIC report
-    (report_failure / a raised exception, no user-composed fields at all) -
-    there was never a separate "what happened" question to leave blank, and
-    summary+reason genuinely IS the report's account of what happened."""
+    what_happened blank) still applies to an AUTOMATIC report (report_failure /
+    a raised exception, no user-composed fields at all), where summary+reason IS
+    the report's account of what happened."""
     text = bugreport.build_report(
         "image generation crashed", reason="segfault in native worker")
     happened_section = text.split("## What happened")[1].split("## App state")[0]
@@ -655,10 +644,10 @@ def test_report_title_matches_what_save_user_report_actually_titled_it(
 
 
 def test_extra_hang_trace_from_a_different_process_is_attached(tmp_path, monkeypatch):
-    """The localm bug-report CLI's own case (REG-736): its pid never froze,
-    so the internal self-pid check finds nothing, and the CLI must be able
-    to hand save_user_report a trace it found elsewhere (the live server's
-    own registry entry) instead."""
+    """The localm bug-report CLI's own case: its pid never froze, so the
+    internal self-pid check finds nothing, and the CLI must be able to hand
+    save_user_report a trace it found elsewhere (the live server's own registry
+    entry) instead."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     path = bugreport.save_user_report(
         "the app hung", extra_hang_trace="CLI-SUPPLIED-MARKER event loop stalled 30s")
@@ -942,10 +931,8 @@ class TestRecommendedBackendMatchesInstallPolicy:
     """The report's "Recommended backend" must be the policy the INSTALLER would
     apply, not the blanket "vulkan whenever a GPU exists" detection value.
 
-    A real report (#833) from an NVIDIA-on-Windows box said "Recommended backend:
-    vulkan" while that box's policy is cuda (#765) and it was in fact running the
-    CUDA runtime. A diagnostics field that contradicts what the installer would
-    provision sends triage after the wrong thing."""
+    On an NVIDIA-on-Windows box the policy is cuda, so the field must say cuda
+    rather than the detection value's vulkan."""
 
     def _diag_with(self, monkeypatch, vendors, platform):
         from localm import hwdetect
@@ -967,10 +954,7 @@ class TestRecommendedBackendMatchesInstallPolicy:
 
     def test_nvidia_on_linux_reports_cuda_not_vulkan(self, monkeypatch):
         """llama.cpp ships a self-contained cudart bundle on Linux too (no system
-        toolkit needed), and 2026-08-11 field testing confirmed CUDA outperforms
-        vulkan on real NVIDIA Linux hardware - see
-        dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5. A diagnostics field that
-        still said vulkan here would send triage after the wrong backend, same
-        #833 trap as the Windows case above."""
+        toolkit needed), so the recommended backend for NVIDIA on Linux is cuda,
+        not vulkan."""
         diag = self._diag_with(monkeypatch, ["nvidia"], "linux")
         assert diag["recommended_backend"] == "cuda"

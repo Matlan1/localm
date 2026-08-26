@@ -2,15 +2,13 @@
 """Redact machine-identifying absolute paths out of text that crosses a trust
 boundary (an HTTP response body, a shareable bug report).
 
-Two levels, because two different readers are being protected from two
-different things:
+Two levels, for two different readers:
 
 ``scrub_user_paths``
     Drops the user's HOME directory and, as an always-on backstop, the account
     name in any ``C:\\Users\\<name>`` / ``/home/<name>`` / ``/Users/<name>``
-    path. This is the long-standing bug-report policy - ``bugreport._scrub_home``
-    is now a thin alias for it, so there is exactly ONE implementation of the
-    username rule instead of a copy that can drift.
+    path. This is the bug-report policy; ``bugreport._scrub_home`` is a thin
+    alias for it, so there is exactly ONE implementation of the username rule.
 
 ``scrub_paths``
     Everything above PLUS the localm data dir (``LOCALM_HOME``), the install
@@ -21,16 +19,14 @@ different things:
     alone would not catch it.
 
 Both KEEP THE STRUCTURE that makes the text useful - the file name, the line
-number, the reason - and replace only the leading directories. That is the
-point: per AGENTS.md rule 5 these paths are being redacted, never muted. A
-caller who is told "load failed" with the cause removed has been handed a
-mystery; a caller told "not an embedding model" with the path replaced by
-``<data>`` has everything they can act on and nothing they should not see.
+number, the reason - and replace only the leading directories. A caller told
+"load failed" with the cause removed has been handed a mystery; a caller told
+"not an embedding model" with the path replaced by ``<data>`` has everything
+they can act on and nothing they should not see.
 
 Every lookup is guarded INDIVIDUALLY and the username backstop runs
 unconditionally, so a failure to resolve one prefix can never cause the raw
-text to be emitted as though it had been scrubbed (a privacy step that fails
-must not report success).
+text to be emitted as though it had been scrubbed.
 """
 
 from __future__ import annotations
@@ -104,11 +100,10 @@ def _machine_prefixes() -> List[Tuple[str, str]]:
         its interpreter with uv, whose directory is a version-less alias
         (``cpython-3.12-windows-x86_64-none``) that ``resolve()`` follows to the
         versioned real path. Frame text carries the alias, so a resolved-only
-        prefix matched nothing and every stdlib frame came back with a full
-        absolute path while this function reported success. The same trap
-        applies to a data dir reached through a junction or symlink, or to
-        macOS's /tmp -> /private/tmp, where the leak is the data dir and hence
-        the account name.
+        prefix matches nothing and every stdlib frame comes back with a full
+        absolute path. The same applies to a data dir reached through a junction
+        or symlink, or to macOS's /tmp -> /private/tmp, where the leak is the
+        data dir and hence the account name.
 
         Guarded per prefix: one unresolvable location must not cost the others,
         and a resolve() failure must still leave the raw form registered.

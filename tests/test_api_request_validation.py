@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Adversarial /v1 request-validation hardening.
 
-Three break-it findings, each a clean-rejection or info-leak guard:
+Three clean-rejection or info-leak guards:
 
-  BUG-4  max_tokens <= 0 was neither rejected nor honored: it collided with the
-         internal "<=0 == unlimited" sentinel, so a client asking for 0/short
-         tokens got a full, unbounded generation (silent-wrong + soft DoS). Now a
-         request-level max_tokens must be >= 1 (a clean 422), matching OpenAI.
+  * max_tokens <= 0 is neither rejected nor honored: it collides with the
+    internal "<=0 == unlimited" sentinel, so a client asking for 0/short tokens
+    gets a full, unbounded generation (silent-wrong + soft DoS). A
+    request-level max_tokens must be >= 1 (a clean 422), matching OpenAI.
 
-  BUG-5  temperature / top_p / repeat_penalty accepted NaN/Infinity (stdlib json
-         parses the bare tokens; pydantic's default allow_inf_nan admitted them),
-         feeding a non-finite value straight into the native sampler. Now non-finite
-         values are rejected with a clean 422.
+  * temperature / top_p / repeat_penalty accept NaN/Infinity (stdlib json parses
+    the bare tokens; pydantic's default allow_inf_nan admits them), feeding a
+    non-finite value straight into the native sampler. Non-finite values are
+    rejected with a clean 422.
 
-  BUG-3  GET /v1/models/{id} for an entry with an empty path ran
-         Path("").rglob("*") -> a walk of the server CWD (aggregate-size info leak
-         + filesystem-walk DoS). The size branch is now guarded on a real path.
+  * GET /v1/models/{id} for an entry with an empty path runs Path("").rglob("*")
+    - a walk of the server CWD (aggregate-size info leak + filesystem-walk DoS).
+    The size branch is guarded on a real path.
 """
 
 import os
@@ -110,8 +110,7 @@ def test_infinity_repeat_penalty_rejected():
 def test_nan_int_field_is_422_not_500():
     """A non-finite value in an INT field (top_k) fails validation; the 422 error
     body includes the offending `input`, which Starlette's JSONResponse cannot
-    serialize (allow_nan=False) - a live 500 before the safe validation handler.
-    Must be a clean 422, not a 500."""
+    serialize (allow_nan=False). Must be a clean 422, not a 500."""
     r = _chat_raw(_client(),
                   '{"model":"m","messages":[{"role":"user","content":"hi"}],'
                   '"top_k":NaN,"max_tokens":4}')
@@ -177,15 +176,14 @@ def _deep_json(depth: int) -> bytes:
 
 
 def test_deeply_nested_body_is_422_not_500():
-    """THE STATUS CODE ALONE IS NOT A SUFFICIENT ORACLE HERE, and finding that
-    out is why this test also asserts on `errors`.
+    """THE STATUS CODE ALONE IS NOT A SUFFICIENT ORACLE HERE, so this test also
+    asserts on `errors`.
 
     The handler carries a RecursionError fallback that returns a 422 with an
-    EMPTY `errors` list. That fallback is deliberate, but it means the status
-    code is 422 whether the depth prune worked or whether it failed and the net
-    caught it - and in the second case the CPU cost, which is the actual finding,
-    is entirely still there. MEASURED: with the prune reverted, an
-    assert-on-422-only version of this test still PASSED.
+    EMPTY `errors` list. That fallback is intended, but it means the status code
+    is 422 whether the depth prune worked or whether it failed and the net caught
+    it - and in the second case the CPU cost, which is the actual finding, is
+    entirely still there.
 
     So the real property is "the prune worked", and its observable is that the
     structured detail SURVIVED rather than being discarded by the fallback."""

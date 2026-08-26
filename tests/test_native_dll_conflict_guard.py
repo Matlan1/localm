@@ -1,25 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A real, root-cause fix for the torch/ROCm DLL-identity conflict documented
-in VramSizingMixin._torch_rocm_init_broken (llamacpp/_sizing.py): once
-llama.cpp's own native runtime is loaded in a process (always true inside
-GgufWorker or the embedder's isolated worker - each loaded it themselves to
-run their own model), a LATER `import torch` on this project's Windows + AMD
-ROCm build reliably hits an entry-point mismatch between torch's own ROCm
-wheel and whatever DLL the OS loader already resolved for llama.cpp.
+"""A root-cause fix for the torch/ROCm DLL-identity conflict documented in
+VramSizingMixin._torch_rocm_init_broken (llamacpp/_sizing.py): once llama.cpp's
+own native runtime is loaded in a process (always true inside GgufWorker or the
+embedder's isolated worker - each loads it to run its own model), a LATER
+`import torch` on this project's Windows + AMD ROCm build hits an entry-point
+mismatch between torch's own ROCm wheel and whatever DLL the OS loader already
+resolved for llama.cpp.
 
-The PRE-EXISTING `_torch_rocm_init_broken` cache only stops a REPEAT of this
-within one process - it does nothing for the first occurrence, and since every
-worker is a FRESH process, that "first occurrence" happens on every single
-worker, every time, including a real Windows modal dialog the OS shows before
-the exception even reaches Python (confirmed live: the model still finished
-loading and replying, but only after the box was manually dismissed).
+The `_torch_rocm_init_broken` cache only stops a REPEAT of this within one
+process. It does nothing for the first occurrence, and since every worker is a
+FRESH process, that "first occurrence" happens on every single worker, every
+time - including a Windows modal dialog the OS shows before the exception even
+reaches Python, which blocks the load until it is dismissed by hand.
 
-These tests pin the actual fix: _loader.native_lib_loaded() lets
-_free_total_vram_bytes() know AHEAD OF TIME that this exact process is the
-risky one, so it skips the torch attempt entirely instead of triggering the
-conflict and catching the aftermath - and suppress_native_error_dialogs()
-stops the OS from ever presenting that blocking UI in the first place, for
-any OTHER native DLL failure a worker process might hit.
+These tests pin the fix: _loader.native_lib_loaded() lets
+_free_total_vram_bytes() know AHEAD OF TIME that this exact process is the risky
+one, so it skips the torch attempt entirely instead of triggering the conflict
+and catching the aftermath - and suppress_native_error_dialogs() stops the OS
+from presenting that blocking UI at all, for any OTHER native DLL failure a
+worker process might hit.
 """
 
 from __future__ import annotations
@@ -61,10 +60,9 @@ class TestNativeLibLoaded:
 
 class TestFreeTotalVramBytesSkipsTorchWhenNativeLibLoaded:
     def test_never_touches_torch_once_native_lib_is_loaded(self, monkeypatch):
-        """The actual regression this fix closes: a fresh worker process has
-        ALWAYS just loaded llama.cpp's native lib (that is what a worker is
-        for), so this condition is true on every single worker load, not a
-        rare edge case."""
+        """A fresh worker process has ALWAYS just loaded llama.cpp's native lib
+        (that is what a worker is for), so this condition is true on every single
+        worker load, not a rare edge case."""
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: True)
 
         poisoned = MagicMock()
@@ -108,10 +106,7 @@ class TestVramLevelsSkipsTorchWhenNativeLibLoaded:
     """VramSizingMixin._vram_levels() must get the SAME proactive skip as its
     sibling _free_total_vram_bytes() above: it also does a bare `import torch`
     under a broad except, so a resident native runtime makes it re-hit and
-    re-trace the identical STATUS_ENTRYPOINT_NOT_FOUND fault on every call
-    (observed live via tests/test_grammar_sampling.py::
-    test_invalid_grammar_does_not_poison_later_valid_grammars, which runs
-    after a real_gguf-marked test has loaded the native lib in-process)."""
+    re-trace the identical STATUS_ENTRYPOINT_NOT_FOUND fault on every call."""
 
     def test_never_touches_torch_once_native_lib_is_loaded(self, monkeypatch):
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: True)
@@ -135,7 +130,7 @@ class TestVramLevelsSkipsTorchWhenNativeLibLoaded:
         probed.cuda.is_available.assert_called_once()
 
     def test_skip_is_surfaced_at_debug_not_silenced(self, monkeypatch, caplog):
-        """Rule 5 (AGENTS.md): a skip must be diagnosable, never silent."""
+        """A skip must be diagnosable, never silent."""
         import logging
 
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: True)
@@ -148,14 +143,12 @@ def _torch_stub_with_poisoned_cuda(side_effect):
     """A torch stand-in for a FULL `doctor()` CLI run (not just the unit-level
     _check_vram_torch() call): a bare MagicMock() does not survive
     _check_packages()'s later ``importlib.import_module("torch")`` re-fetch of
-    the already-cached module - first ``ValueError: torch.__spec__ is not
-    set`` (a Mock has no real ``__spec__``), then, once given a real
+    the already-cached module - first ``ValueError: torch.__spec__ is not set``
+    (a Mock has no real ``__spec__``), then, once given a real
     ``types.ModuleType``, ``ValueError: torch.__spec__ is None`` (a fresh
-    ModuleType's ``__spec__`` defaults to None) - so a real ``ModuleSpec``
-    must be set explicitly too, exactly as
-    test_doctor_hf_backend_usable.py's ``_BrokenLazyModule.__init__`` already
-    does for transformers, for the identical reason. ``cuda.is_available``
-    stays a MagicMock so tests can still assert on whether it was called."""
+    ModuleType's ``__spec__`` defaults to None) - so a real ``ModuleSpec`` must
+    be set explicitly too. ``cuda.is_available`` stays a MagicMock so tests can
+    still assert on whether it was called."""
     import importlib.machinery
 
     mod = types.ModuleType("torch")
@@ -167,14 +160,13 @@ def _torch_stub_with_poisoned_cuda(side_effect):
 
 
 class TestCheckVramTorchSkipsTorchWhenNativeLibLoaded:
-    """`localm.cli.doctor._check_vram_torch` is the FOURTH call site for the same
+    """`localm.cli.doctor._check_vram_torch` is a fourth call site for the same
     DLL-identity conflict as the two classes above and
-    discover._torch_gpu_probe_known_doomed: it also did a bare `import torch`
+    discover._torch_gpu_probe_known_doomed: it also does a bare `import torch`
     under only a narrow `except ImportError`. Unlike its siblings, `doctor()`
     (cli/doctor.py) calls it with no try/except of its own, so an escaping
-    exception here would silently truncate every later doctor check (GPU
-    verdict, packages, HF backend, plugin deps, managed comfy) - not just
-    re-trace noisily like the other three did before their fixes."""
+    exception here would silently truncate every later doctor check (GPU verdict,
+    packages, HF backend, plugin deps, managed comfy)."""
 
     def test_never_touches_torch_once_native_lib_is_loaded(self, monkeypatch):
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: True)
@@ -200,7 +192,7 @@ class TestCheckVramTorchSkipsTorchWhenNativeLibLoaded:
         probed.cuda.is_available.assert_called_once()
 
     def test_skip_is_surfaced_at_debug_not_silenced(self, monkeypatch, caplog):
-        """Rule 5 (AGENTS.md): a skip must be diagnosable, never silent."""
+        """A skip must be diagnosable, never silent."""
         import logging
 
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: True)
@@ -209,12 +201,11 @@ class TestCheckVramTorchSkipsTorchWhenNativeLibLoaded:
         assert "skipping the torch VRAM probe" in caplog.text
 
     def test_non_importerror_torch_failure_does_not_escape(self, monkeypatch, caplog):
-        """The other half of this fix: a torch import/probe failure that is NOT
-        a plain ImportError (the doomed DLL-identity conflict itself, reached
-        some other way, or any other native fault) must degrade
-        torch_gpu_found to False rather than propagate out of
-        _check_vram_torch() - the original bug this pins, since `doctor()`
-        has no try/except of its own around this call."""
+        """A torch import/probe failure that is NOT a plain ImportError (the
+        doomed DLL-identity conflict itself, reached some other way, or any other
+        native fault) must degrade torch_gpu_found to False rather than propagate
+        out of _check_vram_torch(), since `doctor()` has no try/except of its own
+        around this call."""
         import logging
 
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
@@ -258,15 +249,12 @@ class TestCheckVramTorchSkipsTorchWhenNativeLibLoaded:
 
     def test_doctor_cli_survives_a_non_importerror_torch_failure_end_to_end(
             self, cli_runner, monkeypatch):
-        """The property that matters most about this fix, pinned at the CLI
-        level and kept separate from the guard test above: a torch-probe
-        failure that is NOT the DLL-conflict guard's precondition
-        (native_lib_loaded() False here, so the guard does not fire at all)
-        must still not stop doctor() from running and reporting every LATER
-        check. This is the rule-5 half of the fix (AGENTS.md) - a diagnostic
-        tool must never lose diagnostics silently - and it is exercised by the
-        widened ``except Exception`` alone, with the guard out of the
-        picture."""
+        """Pinned at the CLI level and kept separate from the guard test above: a
+        torch-probe failure that is NOT the DLL-conflict guard's precondition
+        (native_lib_loaded() False here, so the guard does not fire at all) must
+        still not stop doctor() from running and reporting every LATER check. A
+        diagnostic tool must never lose diagnostics silently. Exercised by the
+        widened ``except Exception`` alone, with the guard out of the picture."""
         from localm import cli as _cli
 
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
@@ -284,23 +272,17 @@ class TestCheckVramTorchSkipsTorchWhenNativeLibLoaded:
 
 
 class TestCheckPackagesSkipsTorchWhenNativeLibLoadedAndNotResident:
-    """`localm.cli.doctor._check_packages` is a FIFTH call site for the same
-    DLL-identity conflict, found live while verifying the fourth
-    (_check_vram_torch above): its own bare
-    ``importlib.import_module("torch")`` (under only ``except ImportError``)
-    raised the real ``OSError: [WinError 127]`` when
-    test_doctor_gpu_verdict.py::test_compute_devices_reports_real_devices_when_provisioned
-    loaded the native runtime in-process earlier in the same pytest worker,
-    then test_doctor_hf_backend_usable.py hit it via this exact call.
+    """`localm.cli.doctor._check_packages` is a fifth call site for the same
+    DLL-identity conflict: its own bare ``importlib.import_module("torch")``
+    (under only ``except ImportError``) raises the real
+    ``OSError: [WinError 127]`` once the native runtime has been loaded in-process
+    earlier in the same pytest worker.
 
     Narrower than _check_vram_torch's blanket skip: torch already RESIDENT in
-    sys.modules (a real success earlier in this process, or a test double)
-    must still be returned, never discarded to None just because
-    native_lib_loaded() is True - only a FRESH import is actually doomed. A
-    first version of this fix skipped unconditionally and broke
-    test_doctor_hf_backend_usable.py's own CLI end-to-end test, which
-    pre-mocks a safe torch before invoking doctor() - caught by re-running
-    that exact file paired with test_doctor_gpu_verdict.py after this fix."""
+    sys.modules (a real success earlier in this process, or a test double) must
+    still be returned, never discarded to None just because native_lib_loaded()
+    is True - only a FRESH import is doomed. Skipping unconditionally breaks a
+    CLI end-to-end test that pre-mocks a safe torch before invoking doctor()."""
 
     def _no_torch_resident(self, monkeypatch):
         monkeypatch.delitem(sys.modules, "torch", raising=False)
@@ -359,7 +341,7 @@ class TestCheckPackagesSkipsTorchWhenNativeLibLoadedAndNotResident:
         assert modules.get("torch") is stub
 
     def test_skip_is_surfaced_at_debug_not_silenced(self, monkeypatch, caplog):
-        """Rule 5 (AGENTS.md): a skip must be diagnosable, never silent."""
+        """A skip must be diagnosable, never silent."""
         import logging
 
         self._no_torch_resident(monkeypatch)

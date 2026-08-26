@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Model routes: list, registry detail, and explicit load/unload.
 
-Extracted verbatim from create_app(); behavior unchanged. Reads the live engine
-and inference semaphore from the http_server module globals (a model swap that
-reassigns them is reflected here).
+Reads the live engine and inference semaphore from the http_server module
+globals, so a model swap that reassigns them is reflected here.
 """
 
 from __future__ import annotations

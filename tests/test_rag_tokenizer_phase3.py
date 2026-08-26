@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Phase 3 (GAP-RAG-1): the BM25 tokenizer must be unicode-aware.
+"""The BM25 tokenizer must be unicode-aware.
 
-The original tokenizer used an ASCII-only regex ([a-z0-9]+), so any
-non-latin corpus (CJK, Cyrillic, Arabic, accented latin) tokenized to an
-empty list and BM25 lexical retrieval silently returned no hits. These
-tests pin the unicode behavior while guarding the existing ASCII contract.
+These tests pin the unicode behavior for CJK, Cyrillic, Arabic and accented
+latin corpora while guarding the existing ASCII contract.
 """
 
 from __future__ import annotations
@@ -30,8 +28,7 @@ class TestUnicodeTokenize:
         assert toks == ["مرحبا", "بالعالم"]
 
     def test_cjk_split_per_character(self):
-        # CJK has no spaces, so a run of ideographs must become per-char
-        # tokens so that a query sharing a character can match.
+        # CJK has no spaces, so a run of ideographs must become per-char tokens.
         toks = tokenize("机器学习")
         assert toks == ["机", "器", "学", "习"]
 

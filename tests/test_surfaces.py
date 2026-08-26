@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""On-demand GUI surface mount (H6 phase 5): localm/inference/http_server.py
+"""On-demand GUI surface mount: localm/inference/http_server.py
 ``mount_gui_surface`` + ``POST /v1/surfaces/gui``.
 
 An ``api``-mode instance (``localm serve``) serves only /v1; a later ``localm
 gui`` in the same dir asks it to mount the GUI surface live - one process, no
 second model load. These pin: the mount is gated (this instance's attach token
 OR an owner API key), idempotent, and actually adds the GUI routes; and that the
-gate refuses an unauthenticated / wrong-credential caller (the route exposes the
-coder agent, so the negative cases are the point).
+gate refuses an unauthenticated / wrong-credential caller. The route exposes the
+coder agent, so the negative cases are the point.
 """
 
 import pytest

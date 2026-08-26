@@ -1,23 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Three check-then-use gaps found by an independent read of the CodeQL
-path-injection residue (2026-07-29), each fixed by making the sink consume the
-value the guard returned instead of the caller's original.
+"""Three check-then-use gaps on the path-injection surface, each closed by
+making the sink consume the value the guard returned instead of the caller's
+original.
 
-All three share one shape: a guard was called for its exception and its RETURN
-VALUE was thrown away, so the code decided on one value and acted on another.
-That is the shape ``registry.py`` already documents as an escape at its own
-remove_model gate; these are the three places it had not been applied.
+All three share one shape: a guard is called for its exception and its RETURN
+VALUE thrown away, so the code decides on one value and acts on another.
+``registry.py`` documents that shape as an escape at its own remove_model gate.
 
-1. ``Collection._add_paths_locked`` called ``confine_index_path(p, policy)`` for
-   its side effect and then walked the caller's unresolved path.
-2. ``model_manager/pull.py`` read ``load_registry()[name]["path"]`` raw, skipping
-   the ``_entry_path`` choke point - and used it to decide an ``unlink()``.
-3. ``registry.py`` read ``entry["mmproj"]`` raw, so the recorded projector path
-   bypassed the type check and the ``..`` rejection every other stored path gets.
+1. ``Collection._add_paths_locked`` must walk the path
+   ``confine_index_path(p, policy)`` returned, not the caller's unresolved one.
+2. ``model_manager/pull.py`` must read a registry path through the
+   ``_entry_path`` choke point, never ``load_registry()[name]["path"]`` raw,
+   because that value decides an ``unlink()``.
+3. ``registry.py`` must read ``entry["mmproj"]`` through the same choke point,
+   so the recorded projector path gets the type check and the ``..`` rejection
+   every other stored path gets.
 
-Each test below fails on the pre-fix code. Where a test asserts an ABSENCE (no
-crash, no traversal), it is paired with a control that proves the same test can
-still observe the positive case, so it cannot pass by testing nothing.
+Where a test asserts an ABSENCE (no crash, no traversal), it is paired with a
+control that proves the same test can still observe the positive case.
 """
 
 from pathlib import Path
@@ -41,18 +41,17 @@ class TestIndexActsOnTheConfinedPath:
     """``confine_index_path`` returns the RESOLVED path it validated, and the
     walk has to use THAT value.
 
-    Scope note, so this file does not overstate itself: on the shipped code an
-    out-of-policy file was never indexed even before the fix, because ``_expand``
-    re-confines every file it emits on that file's own resolved path. What is
-    asserted here is the wiring - that the top-level walk root is the value
-    confinement returned - not the repair of a live escape.
+    What is asserted is the WIRING - that the top-level walk root is the value
+    confinement returned - not the repair of a live escape: ``_expand``
+    re-confines every file it emits on that file's own resolved path.
 
     Asserting it needs a collaborator whose return differs observably from its
-    input, because every real difference (resolve(), symlink following) is either
-    normalised away downstream or needs a symlink privilege the test may not hold
-    on Windows. So ``confine_index_path`` is substituted with one that returns a
-    DIFFERENT directory. The unit under test is ``_add_paths_locked``'s wiring;
-    the substituted function is its collaborator, not the thing being tested.
+    input, because every real difference (resolve(), symlink following) is
+    either normalised away downstream or needs a symlink privilege the test may
+    not hold on Windows. So ``confine_index_path`` is substituted with one that
+    returns a DIFFERENT directory. The unit under test is
+    ``_add_paths_locked``'s wiring; the substituted function is its
+    collaborator.
     """
 
     def test_the_walk_uses_the_path_confinement_returned(self, tmp_path, monkeypatch):
@@ -155,8 +154,9 @@ class TestEntryPathCoversTheProjectorField:
 
 class TestPullDedupRoutesThroughTheChokePoint:
     """The post-download dedup branch offers "alias and delete the duplicate".
-    It read the sibling's path raw, so a malformed sibling entry crashed the
-    pull with TypeError - and the value it read decides an unlink()."""
+    It must read the sibling's path through the choke point: a raw read crashes
+    the pull with TypeError on a malformed sibling entry, and the value read
+    decides an unlink()."""
 
     @staticmethod
     def _drive_dedup(monkeypatch, tmp_path, sibling_entry, answer="a"):

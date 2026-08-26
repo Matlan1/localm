@@ -12,7 +12,7 @@ PREVIEWS the exact text alongside the destination host, and only files it - as a
 account-less GitHub issue via the proxy - after the user confirms. Only http/https
 endpoints are accepted, so an overridden proxy is visible rather than silent. A
 failed or declined send never reports success: it saves the report to a file and
-points at the maintainer email (AGENTS.md rule 5, "we do not hide problems").
+points at the maintainer email.
 
 What it NEVER collects: environment variables (which can hold a key), config
 secrets, or chat/transcript content. Only OS / arch / Python, a few version
@@ -58,10 +58,9 @@ ALLOWED_ENDPOINT_SCHEMES = ("http", "https")
 def endpoint_is_allowed(url: str | None) -> bool:
     """True if *url* is a POST-able http(s) endpoint with a host.
 
-    Defence in depth, not a remote-attack fix: the URL's only producers are the
-    process environment and localm's own source (read_proxy), so reaching it
-    already means controlling the process or the code. It is cheap to make the
-    scheme explicit rather than trusting whatever urlopen() would dispatch on.
+    The URL's only producers are the process environment and localm's own source
+    (read_proxy), so this makes the accepted scheme explicit rather than trusting
+    whatever urlopen() would dispatch on.
     """
     if not url:
         return False
@@ -130,7 +129,10 @@ _QUERY_SECRET_RE = re.compile(
     # 2. Anywhere else, unprefixed.
     r"|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature)"
-    # 3. Anywhere else, prefixed by a mandatory separator.
+    # 3. Anywhere else, prefixed by a separator that must stay MANDATORY:
+    #    [_-] and never [_-]?. The names begin with an alnum, so an optional
+    #    separator lets the prefix split more than one way and makes matching
+    #    superlinear on hostile pasted text.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
     r")=)"

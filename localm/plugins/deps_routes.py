@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Host-side plugin dependency-install routes (pip extras).
 
-Split out of engine.attach_engine into its own module with top-level fastapi
-imports, keeping engine.py fastapi-free at import time (it imports fastapi
-lazily).
+Carries top-level fastapi imports, keeping engine.py fastapi-free at import time
+(it imports fastapi lazily).
 
 Security: a remote client must NEVER trigger a server-side pip. Both endpoints
 fail closed with 403 whenever the server is on a NETWORK bind - decided from the

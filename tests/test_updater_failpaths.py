@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Failure-path coverage for the self-updater that the existing suite did not yet
-pin (TEST-2). The self-updater swaps the install tree, so a silent regression on a
-recovery path is exactly the costly kind: these tests cover the post-step CRASH
-(runner raises, distinct from a non-zero exit), the corrupt-manifest fallback, and
-the backend-detection fallback. Everything uses the apply()/download injectables so
-no test ever touches the real install or the network."""
+"""Failure-path coverage for the self-updater: the post-step CRASH (runner raises,
+distinct from a non-zero exit), the corrupt-manifest fallback, and the
+backend-detection fallback. Everything uses the apply()/download injectables, so
+no test touches the real install or the network."""
 
 import base64
 import io
@@ -84,8 +82,9 @@ def _fake_install(tmp_path, deps=("click",)):
 
 
 def test_apply_rolls_back_when_post_step_raises(tmp_path, monkeypatch):
-    """The runner RAISING (not just exiting non-zero) is a distinct branch: it must
-    still roll back and surface a 'crashed' LocalmError, never a half-applied tree."""
+    """The runner RAISING (not just exiting non-zero) is a distinct branch: it
+    still rolls back and surfaces a 'crashed' LocalmError, never a half-applied
+    tree."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     _pin_sig_env(monkeypatch)
@@ -104,8 +103,8 @@ def test_apply_rolls_back_when_post_step_raises(tmp_path, monkeypatch):
 
 
 def test_apply_crash_then_rollback_failure_demands_manual_recovery(tmp_path, monkeypatch):
-    """Worst case: the post step CRASHES and rollback ALSO fails. apply() must say
-    manual recovery is needed - never hide a broken install behind a clean message."""
+    """The post step CRASHES and rollback ALSO fails: apply() says manual
+    recovery is needed rather than reporting a clean rollback."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     _pin_sig_env(monkeypatch)
@@ -123,24 +122,19 @@ def test_apply_crash_then_rollback_failure_demands_manual_recovery(tmp_path, mon
 
 
 # --------------------------- _installed_backend ---------------------------
-# _installed_backend() must PRESERVE whatever backend is already installed
-# (setup_llama's on-disk marker) rather than re-derive one from the current
-# hardware-recommendation policy: a change to that policy would otherwise
-# silently re-provision an already-working install onto a different backend.
+# _installed_backend() PRESERVES whatever backend is already installed
+# (setup_llama's on-disk marker) rather than re-deriving one from the current
+# hardware-recommendation policy.
 
 def test_installed_backend_preserves_what_is_actually_installed(tmp_path, monkeypatch):
-    """THE regression test: an install with amd-rocm actually provisioned must
-    stay on amd-rocm across an update, even though the CURRENT hardware
-    recommendation has since moved to something else entirely. Exercises the
-    REAL on-disk marker (setup_llama._record_provisioned_backend /
-    _provisioned_backend) rather than a mocked return value, so this proves
-    the whole read path, not just the updater's own branching.
+    """An install with amd-rocm provisioned stays on amd-rocm across an update,
+    even when the CURRENT hardware recommendation names something else.
+    Exercises the REAL on-disk marker (setup_llama._record_provisioned_backend /
+    _provisioned_backend) rather than a mocked return value.
 
-    Asserts recommended_install_backend was never even CALLED, from OUTSIDE
-    the call (a plain counter, not a raised exception) - _installed_backend()
-    wraps both its lookups in a broad except, so an exception raised as the
-    mock's side_effect would be silently swallowed and prove nothing (see
-    diff-review-discipline item 13)."""
+    Asserts recommended_install_backend was never CALLED, from OUTSIDE the call
+    with a plain counter: _installed_backend() wraps both its lookups in a broad
+    except, which would swallow an exception raised as a mock side_effect."""
     from localm import hwdetect, setup_llama
     monkeypatch.setattr(setup_llama, "_repo_runtime_lib", lambda: tmp_path)
     setup_llama._record_provisioned_backend(tmp_path, "amd-rocm")
@@ -158,8 +152,8 @@ def test_installed_backend_preserves_what_is_actually_installed(tmp_path, monkey
 def test_installed_backend_falls_back_to_recommendation_when_nothing_provisioned(
         tmp_path, monkeypatch):
     """No marker on disk (a fresh install, or one predating the marker) means
-    there is nothing to preserve, so this is a first-time pick - not an
-    override - and falls back to the current hardware recommendation."""
+    there is nothing to preserve, so it falls back to the current hardware
+    recommendation."""
     from localm import hwdetect, setup_llama
     monkeypatch.setattr(setup_llama, "_repo_runtime_lib", lambda: tmp_path)   # empty: no marker
     monkeypatch.setattr(hwdetect, "recommended_install_backend",
@@ -169,7 +163,7 @@ def test_installed_backend_falls_back_to_recommendation_when_nothing_provisioned
 
 def test_installed_backend_falls_back_to_vulkan_when_everything_fails(monkeypatch):
     """Both the marker read AND the hardware detection raise -> the universal
-    default. A detection failure must never break an update."""
+    default, so a detection failure does not break an update."""
     from localm import hwdetect, setup_llama
 
     def boom_lib_dir():

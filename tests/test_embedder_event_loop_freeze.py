@@ -3,32 +3,19 @@
 freezes the WHOLE server, not just its own request - a distinct hazard from
 the cross-thread deadlock covered by test_embedder_vram_swap.py.
 
-Root cause: since #643 (subprocess-isolate the GGUF embedder), get_embedder()
-can hold embedder._LOCK for the full duration of an IsolatedEmbedder native/
-subprocess load (up to its load timeout - 300s in production), on WHATEVER
-thread called it (a RAG-indexing executor thread, an embedding-setup job
-thread, ...). loaded_dim()/loaded_path() both also acquire that same _LOCK.
-Three call sites this PR added called one of them directly on an async
-route's coroutine instead of via loop.run_in_executor(), unlike every other
-blocking call in those same functions:
-  - http_server.unload_all_models() -> loaded_dim()
-  - http_server._unload_embedder_if_matches() -> loaded_path()
-  - gui/routes/models.py's GET /api/models -> loaded_path()
-
-A synchronous call blocked on _LOCK inside a coroutine blocks asyncio's
-single-threaded event loop entirely - not just that one request, EVERY other
-in-flight or incoming request on the same server, for as long as the lock is
-held. Confirmed via adversarial review (2026-07-14) with a live reproduction
-(a lock held for 2s blocked a concurrent loaded_dim() call for ~1.78s of that
-window). Fixed by wrapping each call in loop.run_in_executor(), matching this
-codebase's own established pattern for every other blocking call in these
-same functions.
+get_embedder() can hold embedder._LOCK for the full duration of an
+IsolatedEmbedder native/subprocess load (up to its load timeout, 300s in
+production), on WHATEVER thread called it - a RAG-indexing executor thread, an
+embedding-setup job thread. loaded_dim() and loaded_path() acquire that same
+_LOCK, so a synchronous call to either inside a coroutine blocks asyncio's
+single-threaded event loop entirely: not just that request, EVERY other
+in-flight or incoming request, for as long as the lock is held. Each such call
+therefore goes through loop.run_in_executor().
 
 These tests reproduce the mechanism directly: hold embedder._LOCK on a
-background thread (standing in for an in-progress IsolatedEmbedder load,
-however long it takes) and assert a TRIVIAL, unrelated coroutine scheduled
-concurrently on the SAME event loop still gets to run promptly - proving the
-call under test yielded the loop instead of blocking it outright.
+background thread (standing in for an in-progress IsolatedEmbedder load) and
+assert a TRIVIAL, unrelated coroutine scheduled concurrently on the SAME event
+loop still gets to run promptly.
 """
 
 from __future__ import annotations
@@ -71,9 +58,9 @@ def hsclean():
 async def _assert_event_loop_stays_responsive(make_awaitable, *, lock_hold_s=2.0):
     """Hold embedder._LOCK on a background thread for *lock_hold_s* seconds,
     then run ``await make_awaitable()`` concurrently with a trivial coroutine
-    on the same loop. Fails loudly if the trivial coroutine does not get to
-    run promptly - proof the call under test blocked the WHOLE event loop, not
-    just its own task."""
+    on the same loop. Fails when the trivial coroutine does not get to run
+    promptly, which means the call under test blocked the WHOLE event loop
+    rather than just its own task."""
     hold_started = threading.Event()
     release_lock = threading.Event()
 
@@ -162,10 +149,10 @@ def test_gui_models_route_does_not_freeze_event_loop(hsclean, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  embedder.active_requests() has the IDENTICAL _LOCK-blocking hazard as      #
-#  loaded_dim()/loaded_path() above, so it must also be executor-offloaded at  #
-#  both call sites that gate an embedder release on it. Structural check:      #
-#  the call goes through run_in_executor.                                      #
+#  embedder.active_requests() takes the same _LOCK as loaded_dim() and         #
+#  loaded_path() above, so it is executor-offloaded at both call sites that    #
+#  gate an embedder release on it. Structural check: the call goes through     #
+#  run_in_executor.                                                            #
 # --------------------------------------------------------------------------- #
 
 class _FakeLoadedEmbedder:
@@ -198,14 +185,9 @@ def _offloaded(calls, fn):
 
 
 def test_unload_all_models_offloads_active_requests_check(hsclean, monkeypatch):
-    """reset_embedder(force=False) is what now takes embedder._LOCK to decide
-    the busy/idle question atomically (see embedder.reset_embedder's
-    docstring: the old separate, unlocked active_requests() call before an
-    unconditional reset_embedder() left a real TOCTOU window, so the check
-    moved INSIDE reset_embedder itself). It must still run via
-    loop.run_in_executor - a direct call reintroduces the exact
-    event-loop-freeze hazard this file's other tests already prove for
-    loaded_dim()/loaded_path() against the same lock."""
+    """reset_embedder(force=False) takes embedder._LOCK to decide the busy/idle
+    question atomically, so it runs via loop.run_in_executor; a direct call
+    would block the event loop on the same lock."""
     monkeypatch.setattr("localm.discover.vram_capacity", lambda: {"free": None})
     monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
     emb._EMBEDDER = _FakeLoadedEmbedder()
@@ -245,10 +227,9 @@ def test_unload_embedder_if_matches_offloads_active_requests_check(hsclean, monk
 
 
 # --------------------------------------------------------------------------- #
-#  The same hazard on three more routes: a cheap-looking embedder reader       #
-#  taking _LOCK on an `async def` handler. These checks are behavioural -      #
-#  they hold the real _LOCK and require an unrelated coroutine to still get    #
-#  its turn.                                                                   #
+#  The same hazard on more routes: a cheap-looking embedder reader taking      #
+#  _LOCK on an `async def` handler. These checks hold the real _LOCK and       #
+#  require an unrelated coroutine to still get its turn.                       #
 # --------------------------------------------------------------------------- #
 
 def _gui_endpoint(path: str, method: str = "POST"):
@@ -264,10 +245,9 @@ def _gui_endpoint(path: str, method: str = "POST"):
 
 
 def test_embedding_warmup_does_not_freeze_event_loop(hsclean, monkeypatch):
-    """POST /api/embedding/warmup - QA #5, NEW-EMBEDDING-WARMUP-FREEZES-THE-EVENT-LOOP.
-
-    Its first statement is a loaded_dim() fast-path check ("already warm?").
-    Held against a load, that read waits for the whole load."""
+    """POST /api/embedding/warmup: its first statement is a loaded_dim()
+    fast-path check ("already warm?"), which against a running load waits for
+    that whole load."""
     endpoint = _gui_endpoint("/api/embedding/warmup")
 
     # The route's `jobs` comes from its register() closure, not a module global,
@@ -289,11 +269,9 @@ def test_embedding_warmup_does_not_freeze_event_loop(hsclean, monkeypatch):
 
 def test_rag_embedding_status_does_not_freeze_event_loop(monkeypatch):
     """GET /api/rag/embedding - the Knowledge page's own poll, so on a cold
-    server it lands exactly while the first embedder load is running.
-
-    Three readers in one handler (loaded_dim, last_error, gpu_fallback_reason),
-    all on the same lock, under a docstring that says "Cheap: it never loads a
-    model"."""
+    server it lands while the first embedder load is running. Three readers in
+    one handler (loaded_dim, last_error, gpu_fallback_reason), all on the same
+    lock."""
     from localm.plugins.builtin.rag import plug as ragplug
 
     endpoint = None

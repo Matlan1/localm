@@ -58,12 +58,8 @@ _IDLE_REAP_SECONDS = 24 * 3600
 class SessionUnavailable(RuntimeError):
     """The session refused a claim: it is already busy, or it is closed.
 
-    A DEDICATED type, not a bare RuntimeError with a magic string, because the
-    caller has to tell this apart from "the model call blew up" and those need
-    opposite answers - one is "try again in a moment" (409), the other is
-    "something is broken" (502). Matching on RuntimeError alone reported a real
-    model failure as a scheduling conflict, which is the more dangerous
-    direction: it hides a fault behind a status that invites a retry.
+    A dedicated type, so a caller can tell a scheduling conflict ("try again in
+    a moment", 409) apart from a failed model call ("something is broken", 502).
     """
 
     def __init__(self, reason: str) -> None:
@@ -212,10 +208,9 @@ class CoderSession:
 
     @staticmethod
     def _detect_verify(cwd: Path):
-        """The project's obvious check, or None. Best-effort: a detection failure
-        means no oracle for this session, never a failed session - but it is
-        surfaced as an event-free warning in the log rather than swallowed, so a
-        check the user expected is not silently missing."""
+        """The project's obvious check, or None. Best-effort: a detection
+        failure means no oracle for this session, never a failed session, and is
+        surfaced as a warning in the log."""
         try:
             from .verify import detect_verify_command
             return detect_verify_command(cwd)
@@ -268,13 +263,10 @@ class CoderSession:
 
         *agent* names the sub-agent asking, or is None when this session's own
         agent is. It is the optional attribution keyword of the confirm-handler
-        protocol (coder/confirm.py) and reaches the browser on the event, because
-        concurrent sub-agents share this one channel: worktree-isolated parallel
-        dispatch serialises their prompts, so without a label the user gets two
-        identical "Approve run_shell?" cards in a row with no way to tell which
-        child each belongs to. A child's own tool_call events are NOT forwarded
-        here (children do not inherit on_event), so the card is the only place
-        that context can appear at all.
+        protocol (coder/confirm.py) and reaches the browser on the event, which
+        is the only place that attribution appears: concurrent sub-agents share
+        this one channel, and a child's own tool_call events are not forwarded
+        here (children do not inherit on_event).
         """
         # Tools granted "always allow" earlier in the session skip the flow
         if call.name in self.allowed_tools:
@@ -409,22 +401,16 @@ class CoderSession:
     def run_estimate(self, task: str) -> dict:
         """One planning turn on this session, claimed like an ordinary task.
 
-        The claim matters and is not ceremony. Estimating is a second TRIGGER
-        for the shared backend, and before this the session had exactly one
-        (send_message). Two concurrent turns on one backend would interleave on
-        its per-call state - ``last_usage`` in particular, which this function
-        reads AFTER its own call returns, so a task turn finishing in that
-        window would make the estimate report the task's token numbers as its
-        own. Taking ``busy`` under the same lock ``send_message`` uses makes
-        the two mutually exclusive without inventing a second lock, and a
-        caller that loses the race is told (raises), never silently queued.
+        Estimating is a second trigger for the shared backend alongside
+        ``send_message``, and two concurrent turns would interleave on its
+        per-call state - ``last_usage`` in particular, which this function reads
+        after its own call returns. ``busy`` is taken under the same lock
+        ``send_message`` uses, so the two are mutually exclusive, and a caller
+        that loses the race raises rather than queueing.
 
-        The drain in the ``finally`` is the other half: while an estimate holds
-        ``busy``, ``send_message`` queues rather than starts, and the only code
-        that ever re-runs a queued message is the task thread's own finally.
-        Without this, a message typed during an estimate would sit unsent until
-        the user typed again. No checkpoint is persisted: an estimate changes
-        no conversation, so there is nothing new to save.
+        The drain in the ``finally`` re-runs a message queued while the estimate
+        held ``busy``. No checkpoint is persisted: an estimate changes no
+        conversation.
         """
         from .estimate import estimate_task
         with self._lock:
@@ -449,12 +435,9 @@ class CoderSession:
     def push_estimate(self, task: str, result: dict) -> None:
         """Put an estimate into the session feed (and the replay buffer).
 
-        A dedicated event type rather than an ``info`` line: the plan is
-        multi-paragraph prose that wants message rendering, and a consumer
-        (the export, a future filter) has to be able to tell a plan that was
-        never executed apart from a turn that was. It carries the task it
-        answered, because by the time it is replayed the composer no longer
-        shows what was asked."""
+        A dedicated event type, not an ``info`` line, so a consumer can tell a
+        plan that was never executed apart from a turn that was. It carries the
+        task it answered, which the composer no longer shows by replay time."""
         self._push({
             "type": "estimate",
             "task": task,
@@ -485,30 +468,17 @@ class CoderSession:
     def set_auto_approve(self, value: bool) -> None:
         """Grant or REVOKE auto-approve on a live session (the REPL's /approve).
 
-        Deliberately NOT busy-guarded, unlike set_model(): the safety-relevant
-        half of this control is REVOKING, and refusing that while the agent is
-        mid-run refuses it in precisely the case a user reaches for it. The
-        writes are plain attribute assignments, read at the next tool dispatch,
-        so there is nothing to tear.
+        NOT busy-guarded, unlike set_model(): revoking must work while the agent
+        is mid-run. The writes are plain attribute assignments, read at the next
+        tool dispatch, so there is nothing to tear.
 
-        THE CONFIRM HANDLER IS THE LOAD-BEARING HALF, NOT THE FLAG. A GUI
-        session runs _loop(interactive=False), so when a destructive tool needs
-        confirmation and confirm_handler is None the agent takes its fail-closed
-        branch and DENIES the call outright - correct as a default, useless as a
-        revoke, because the user gets no approval card and the session can no
-        longer do anything at all. __init__ leaves the handler None for an
-        auto-approving session, so revoking without installing it here would
-        hand back a session that can only refuse.
-
-        __init__ now installs it for every session, so in practice this branch
-        is belt and braces - kept because it costs one comparison and covers a
-        CoderSession whose agent was built or swapped some other way (the tests
-        replace backends on a live session already). The gap it guards against
-        was real and shipped: fixing only this method left the identical denial
-        one constructor away, on a session created with auto_approve AND
-        interactive_confirm, where always_confirm={run_shell,
-        run_shell_background} met a None handler - under a checkbox whose own
-        tooltip promises the command "still stops for you".
+        Also installs the confirm handler when the agent has none. A GUI session
+        runs _loop(interactive=False), so a destructive tool that needs
+        confirmation with confirm_handler None takes the fail-closed branch and
+        DENIES the call outright, leaving a revoked session unable to do
+        anything. __init__ installs the handler for every session, so this
+        branch only covers a CoderSession whose agent was built or swapped some
+        other way.
         """
         self.auto_approve = bool(value)
         self.agent.auto_approve = bool(value)
@@ -518,16 +488,13 @@ class CoderSession:
     def set_scope(self, scope: Optional[str]) -> Optional[str]:
         """Set or clear the file-tool glob confinement (the REPL's /scope).
 
-        Not busy-guarded, for the same reason as set_auto_approve: TIGHTENING a
-        scope mid-run is a safety action. The scope never enters the system
-        prompt (build_system_prompt takes no scope argument - checked, not
-        assumed), so there is no prompt to rebuild and no window in which the
-        model believes one boundary while the dispatcher enforces another.
+        Not busy-guarded, like set_auto_approve: tightening a scope mid-run is a
+        safety action. The scope never enters the system prompt
+        (build_system_prompt takes no scope argument), so there is no prompt to
+        rebuild.
 
         Newly setting a scope re-emits the "a scope does not confine the shell
-        tools" notice. That warning exists so nobody holds a confinement belief
-        they do not have, and a scope set from here creates that belief exactly
-        as much as one passed at session start.
+        tools" notice.
         """
         scope = (scope or "").strip() or None
         had = self.agent.scope
@@ -547,9 +514,7 @@ class CoderSession:
         Returns the new command (a shell string or an argv list), or None for
         off. Raises SessionUnavailable for a RESTRICTED session: those have no
         process execution at all (SAFE_RESTRICTED_TOOLS), and a verify command
-        IS process execution, so accepting one would hand a scoped key back the
-        capability the restriction exists to remove. __init__ refuses it at
-        creation for the same reason; refusing here keeps the two agreeing.
+        IS process execution. __init__ refuses it at creation too.
         """
         if self.restricted:
             raise SessionUnavailable(
@@ -569,9 +534,7 @@ class CoderSession:
         """Move a live session to another project directory (the REPL's /cd).
 
         False when the agent is mid-task. Busy-guarded where the settings above
-        are not, and for the opposite reason: this rebuilds the project map AND
-        the system prompt, so applying it under a running turn would change the
-        prompt out from under a request already in flight.
+        are not: this rebuilds the project map AND the system prompt.
 
         The CALLER owns the UNC/device refusal and running this off the event
         loop - it scans the project tree.
@@ -619,10 +582,9 @@ class CoderSession:
         """Append a bullet AND refresh the system prompt (agent.remember does
         both).
 
-        The refresh is the whole reason this goes through the agent rather than
-        writing the file directly: asking the agent to edit LOCALCODER.md never
-        calls reload_memory, so a plain file edit does not reach the running
-        session at all - it only takes effect next session.
+        Goes through the agent rather than writing the file directly: a plain
+        file edit never calls reload_memory, so it only takes effect next
+        session.
         """
         self.agent.remember(text)
         return self.memory()
@@ -645,17 +607,13 @@ class CoderSession:
     def background(self) -> dict:
         """This session's background jobs, plus what has aged out of the table.
 
-        Filtered by this session's own job-owner id, never the whole registry.
-        get_registry() is PROCESS-WIDE, so an unfiltered list would show one GUI
-        session another session's work under a heading claiming otherwise - and
-        job labels are full command lines, so it would also hand a scoped key
-        the owner's commands. The CLI passes no owner and keeps listing
-        everything, which for a one-session process is the same answer.
+        Filtered by this session's own job-owner id, never the whole registry:
+        get_registry() is PROCESS-WIDE, and job labels are full command lines.
+        The CLI passes no owner and lists everything, which for a one-session
+        process is the same answer.
 
-        ``dropped`` is reported rather than omitted: an evicted sub-agent
-        completion is a real and unrecoverable loss, and a bounded table that
-        says nothing about what it discarded is the silent-truncation shape
-        AGENTS.md rule 5 forbids.
+        ``dropped`` reports what the bounded table evicted, so a lost sub-agent
+        completion is visible rather than silently truncated.
         """
         from localm.plugins.coder.background import get_registry
         registry = get_registry()
@@ -668,20 +626,14 @@ class CoderSession:
     def set_model(self, model: str) -> bool:
         """Repoint this session's backend at a different model, in place -
         conversation history, tools and agent state are untouched (no new
-        Agent/backend is built). Without this, a session's model is pinned at
-        creation forever: the backend keeps sending the ORIGINAL model name on
-        every request (see HTTPBackend._body()), so a later model switch
-        elsewhere in the app never reaches an already-running session, and the
-        session's own next request can reload that stale model - dragging it
-        back into VRAM even after the user deliberately switched away from it.
+        Agent/backend is built). The backend otherwise keeps sending the
+        ORIGINAL model name on every request (see HTTPBackend._body()), so a
+        model switch elsewhere in the app never reaches a running session.
 
-        False when the agent is mid-task (same "do not repoint under a running
-        turn" as undo()/compact()'s busy guard - a turn answered by a model
-        that changed under it would be a torn response) or the backend does
-        not support being repointed (only HTTPBackend does today; a future
-        backend type without set_model degrades to "not supported" rather than
-        an AttributeError, matching the getattr(backend, "model_id", "") tolerance
-        already used in __init__)."""
+        False when the agent is mid-task (the same busy guard undo() and
+        compact() use) or the backend does not support being repointed (only
+        HTTPBackend does today; a backend without set_model degrades to "not
+        supported" rather than an AttributeError)."""
         with self._lock:
             if self.busy:
                 return False
@@ -720,21 +672,17 @@ class CoderSession:
 
     def resume_from_checkpoint(self, checkpoint_id: Optional[str] = None) -> bool:
         """Load a saved conversation back into the agent and replay a readable
-        recap into the feed (CODER-2). The model gets the FULL restored history;
-        the feed rows are a visual summary. True when something was restored.
-        Tool-call markup is stripped from the recap, and tool-result envelopes /
+        recap into the feed. The model gets the FULL restored history; the feed
+        rows are a visual summary. True when something was restored. Tool-call
+        markup is stripped from the recap, and tool-result envelopes and
         steering notes are skipped.
 
-        *checkpoint_id* is None to restore this cwd's MOST RECENT conversation,
-        which is what this always did and stays the default. Pass an id from
-        ``list_checkpoints()`` to continue one PARTICULAR past session - the
-        agent has accepted that argument since sessions stopped overwriting each
-        other, and this is the caller that lets a listing act on it.
+        *checkpoint_id* is None (the default) to restore this cwd's MOST RECENT
+        conversation. Pass an id from ``list_checkpoints()`` to continue one
+        PARTICULAR past session.
 
-        An id that no longer resolves returns False rather than silently falling
-        back to the newest: those are different conversations, and continuing
-        the wrong one looks like a restore while quietly abandoning the session
-        the user picked."""
+        An id that no longer resolves returns False; it never falls back to the
+        newest conversation."""
         try:
             data = self.agent.load_checkpoint(checkpoint_id)
         except Exception:
@@ -899,19 +847,12 @@ class SessionManager:
         activity, and not BUSY) for more than *max_idle_s*. Returns the ids
         reaped.
 
-        A GUI session the user abandons without an explicit DELETE (a closed
-        tab, a killed server) otherwise never triggers close() - and with it,
-        never writes the "session ended" audit record (audit.py) a normally-
-        ended session gets. Called opportunistically from list() rather than
-        run on a background timer: the GUI already polls the session list
-        regularly to render the sidebar, so this needs no new thread or
-        shutdown hook to own.
+        Reaping runs close(), which writes the "session ended" audit record
+        (audit.py). Called opportunistically from list(), which the GUI already
+        polls to render the sidebar, so it needs no thread or shutdown hook.
 
-        A BUSY session is never reaped regardless of *last_activity_at* - a
-        long-running task (a big verify, a slow model) is still very much
-        alive even though it has not pushed a NEW event recently at the exact
-        moment this runs; only send_message()'s own "started"/"queued" gate
-        and close() itself decide when a busy session actually ends."""
+        A BUSY session is never reaped regardless of *last_activity_at*: a
+        long-running task may not have pushed a new event recently."""
         now = time.time() if now is None else now
         with self._lock:
             idle_ids = [s.id for s in self._sessions.values()

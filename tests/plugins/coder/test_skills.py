@@ -136,20 +136,19 @@ def test_use_skill_confines_to_folder(tmp_path):
 
 
 def test_use_skill_rejects_reserved_characters(tmp_path):
-    """Same class #1068 fixed for model filenames: a colon opens an NTFS
-    Alternate Data Stream rather than failing the read, so a naive
-    'no separators' check would pass 'ref.txt:hidden' straight through. The
-    OLD hand-rolled _confine_skill_file had no such check at all."""
+    """A colon opens an NTFS Alternate Data Stream rather than failing the read,
+    so a naive 'no separators' check would pass 'ref.txt:hidden' straight
+    through."""
     _make_skill(tmp_path / ".localcoder" / "skills", "alpha", files={"ref.txt": "REFDATA"})
     out = S.tool_use_skill(tmp_path, name="alpha", file="ref.txt:hidden")
     assert not out.ok
 
 
 def test_use_skill_alias_leaf_does_not_read_a_different_file(tmp_path, monkeypatch):
-    """An OS-level short-name alias resolving 'file' to a DIFFERENT, real
-    sibling inside the same skill folder stays strictly under the folder -
-    containment alone would not catch it. Deterministic simulation, no real
-    8.3-enabled volume needed (same technique as test_pathsafe_confined_under.py)."""
+    """An OS-level short-name alias resolving 'file' to a DIFFERENT, real sibling
+    inside the same skill folder stays strictly under the folder - containment
+    alone would not catch it. Deterministic simulation, no real 8.3-enabled
+    volume needed."""
     d = _make_skill(tmp_path / ".localcoder" / "skills", "alpha",
                     files={"LongReferenceFileName.md": "SECRET REFERENCE DATA"})
     victim = d / "LongReferenceFileName.md"
@@ -282,7 +281,7 @@ def test_skill_restriction_is_retired_by_the_next_user_request(skill_agent):
         _tool_call("write_file", path="x.txt"), interactive=False).ok
     write.assert_not_called()
 
-    skill_agent._last_user_request = "do the thing"      # byte-identical on purpose
+    skill_agent._last_user_request = "do the thing"      # the same request text again
     res = skill_agent._execute_tool(_tool_call("write_file", path="x.txt"),
                                     interactive=False)
     assert res.ok
@@ -335,14 +334,13 @@ def test_two_restricted_skills_intersect(tmp_path, clean_registry):
     """Two declarations compose to their INTERSECTION, not their union.
 
     The second skill declares a tool the first did NOT, which is the only shape
-    that tells intersect apart from last-one-wins. Chosen deliberately after a
-    fires-control: an earlier version made the second set a SUBSET of the first,
-    where both implementations give the identical answer, so the test passed with
-    the intersection replaced by a plain assignment.
+    that tells intersect apart from last-one-wins: with the second set a SUBSET
+    of the first, both implementations give the identical answer and the test
+    would pass with the intersection replaced by a plain assignment.
 
-    That distinction is the security property, not a nicety. Last-one-wins is a
-    one-line bypass of the entire gate, because a skill body is untrusted content
-    and can simply tell the model to load a second, more permissive skill.
+    That distinction is the security property. Last-one-wins is a one-line bypass
+    of the entire gate, because a skill body is untrusted content and can tell
+    the model to load a second, more permissive skill.
     """
     root = tmp_path / ".localcoder" / "skills"
     _make_skill(root, "reader",
@@ -415,10 +413,10 @@ def test_spawned_child_inherits_the_active_skill_restriction(skill_agent):
 def _slow_arming(registry, gate):
     """Hold ``use_skill``'s real work open until *gate* is set (bounded).
 
-    Makes the unfixed failure deterministic instead of a timing coin flip: the
-    arming call cannot finish until the sibling has actually run. Under the fix
-    the sibling is in a LATER segment and never starts, so the wait always
-    reaches its bound - one short pause, paid once.
+    The arming call cannot finish until the sibling has actually run, which makes
+    an unguarded race deterministic instead of a timing coin flip. With the
+    sibling in a LATER segment it never starts, so the wait always reaches its
+    bound - one short pause, paid once.
     """
     import dataclasses
     real = registry["use_skill"].fn
@@ -433,12 +431,12 @@ def _slow_arming(registry, gate):
 def test_a_batch_sibling_cannot_outrun_the_skill_restriction(skill_agent):
     """THE RACE: use_skill plus a tool its skill forbids, in ONE model reply.
 
-    _execute_tools groups CONSECUTIVE NON-DESTRUCTIVE calls and runs the group
-    in parallel, and use_skill is non-destructive, so before the fix a sibling
-    could clear the dispatch gate before _activate_skill had armed it and run
-    completely unrestricted. read_env is the sibling because it is exactly what
-    a declaration of `allowed-tools: read_file` is meant to keep out: the
-    process environment, api keys and tokens included.
+    _execute_tools groups CONSECUTIVE NON-DESTRUCTIVE calls and runs the group in
+    parallel, and use_skill is non-destructive, so a sibling could clear the
+    dispatch gate before _activate_skill had armed it and run completely
+    unrestricted. read_env is the sibling because it is exactly what a
+    declaration of `allowed-tools: read_file` is meant to keep out: the process
+    environment, api keys and tokens included.
     """
     from unittest.mock import MagicMock
     import threading
@@ -472,11 +470,10 @@ def test_a_batch_sibling_cannot_outrun_the_skill_restriction(skill_agent):
 
 
 def test_a_batch_sibling_before_the_arming_call_still_runs(skill_agent):
-    """The boundary narrows FORWARD only, and this is a scope guard, not the
-    regression guard above: it passes on the unfixed code too. It exists so a
-    later, broader fix (arming at parse time, or restricting the whole batch)
-    cannot pass unnoticed - a call the model emitted BEFORE any skill was loaded
-    must not be refused retroactively.
+    """The boundary narrows FORWARD only. A scope guard rather than a regression
+    guard: it exists so a later, broader change (arming at parse time, or
+    restricting the whole batch) cannot pass unnoticed - a call the model emitted
+    BEFORE any skill was loaded must not be refused retroactively.
     """
     env = _counting_tool(TOOL_REGISTRY, "read_env")
     blocks = skill_agent._execute_tools(

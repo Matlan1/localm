@@ -2,10 +2,9 @@
 """GUI model routes: registry list/load, VRAM estimate, pull/remove/alias, and
 HuggingFace discovery.
 
-Extracted verbatim from attach_gui(); behavior unchanged. The active-model
-accessor, the model-switch callable, and the background job manager are unpacked
-from the register ``ctx`` into ``active_model`` / ``switch_model`` / ``jobs`` once
-at the top of register(), so each handler body is identical to the original.
+The active-model accessor, the model-switch callable, and the background job
+manager are unpacked from the register ``ctx`` into ``active_model`` /
+``switch_model`` / ``jobs`` once at the top of register().
 """
 
 from __future__ import annotations
@@ -46,32 +45,18 @@ def _spec_names_a_host_path(spec: str) -> bool:
     caller-chosen absolute path into registry.json. That is host filesystem
     reach and belongs behind require_fs_host, not behind MODELS_WRITE alone.
 
-    Deliberately textual and existence-INDEPENDENT, for three reasons. It cannot
-    stall: a UNC spec is classified without the stat that would block in the SMB
-    redirector for minutes (see pathsafe.is_unc_or_device_path). It cannot become
-    an existence oracle: the authorisation answer is identical whether or not the
-    file is there. And it has no TOCTOU: "may this caller name a host path" is
-    not a question whose answer may change between the check and the pull. That
-    makes it deliberately BROADER than pull.py's own is_local_path (which also
-    requires the path to exist) - a non-existent absolute path is refused here
-    even though pull.py would have gone on to treat it as a remote spec, which is
-    the safe direction to differ in.
+    Textual and existence-INDEPENDENT. It cannot stall (a UNC spec is classified
+    without the stat that would block in the SMB redirector - see
+    pathsafe.is_unc_or_device_path), it cannot become an existence oracle (the
+    authorisation answer is identical whether or not the file is there), and it
+    has no TOCTOU. It is therefore BROADER than pull.py's own is_local_path,
+    which also requires the path to exist: a non-existent absolute path is
+    refused here even though pull.py would treat it as a remote spec.
 
-    An earlier revision ALSO probed the filesystem for a relative spec, since
-    "owner/repo" and "models/foo.gguf" are the same shape and only a stat can
-    tell them apart. That probe was removed: it made the 403-vs-200 answer depend
-    on whether the named file exists, i.e. it handed a caller WITHOUT host
-    filesystem access an existence oracle for any relative path - the very
-    capability this gate exists to withhold. Trading a narrow registration gap for
-    a general-purpose oracle is a bad trade, and it also reintroduced the stat
-    this function is built to avoid.
-
-    RESIDUAL, stated rather than papered over: a relative spec with no ".."
-    component that happens to name an existing FILE is still registered in place
-    without this gate firing. Its reach is bounded by the server's working
-    directory, it is unchanged from previous behaviour rather than something
-    introduced here, and closing it needs a filesystem answer - which is exactly
-    what cannot be spent here without rebuilding the oracle."""
+    RESIDUAL: a relative spec with no ".." component that names an existing FILE
+    is still registered in place without this gate firing. Its reach is bounded
+    by the server's working directory, and closing it would need a filesystem
+    answer."""
     s = spec.strip()
     if not s:
         return False
@@ -289,27 +274,15 @@ def register(app: FastAPI, ctx) -> None:
         it; the final progress event before "end" carries added/skipped/method
         (the same fields the old synchronous response returned directly).
 
-        BOTH forms require `require_fs_host` - called BEFORE either branch
-        below, so its 403 propagates as-is rather than getting reported as a
-        generic 500. Either one walks a host directory and writes the resulting
-        absolute paths into registry.json, a capability equivalent to the host
-        file/folder browser (/api/fs/dirs), so a MODELS_WRITE-only key that
-        lacks host filesystem access must not reach it.
-
-        The gate used to be `if workdir:`, which made that guarantee false for
-        the exact case the paragraph above asserts: `comfy_workdir` was then a
-        plain Widget.FOLDER settable by any config:write key, so a bodyless
-        POST scanned a caller-CHOSEN folder with no fs_access check at all.
-        comfy_workdir is admin_only now (settings_schema.py, core field and its
-        per-plugin twin), but this route's own require_fs_host below is what
-        actually enforces the guarantee - relying on comfy_workdir's write gate
-        alone would leave a MODELS_WRITE-only key free to trigger a scan of
-        whatever folder an admin previously configured, with no host-fs
-        privilege of its own. The registered rows are permanent and every
-        consumer re-stats them on each launch, so a planted UNC row is a
-        lasting event-loop stall plus outbound SMB from the server process.
-        Scanning is authorised by host filesystem reach, not by where the
-        folder name happened to come from."""
+        BOTH forms require `require_fs_host`, called BEFORE either branch below
+        so its 403 propagates as-is instead of becoming a generic 500. Either
+        one walks a host directory and writes the resulting absolute paths into
+        registry.json, a capability equivalent to the host file/folder browser
+        (/api/fs/dirs), so a MODELS_WRITE-only key that lacks host filesystem
+        access must not reach it. Scanning is authorised by host filesystem
+        reach, never by where the folder name came from: `comfy_workdir` being
+        admin_only is not what enforces this, this route's own require_fs_host
+        is."""
         from localm.model_manager.scan import preview_comfy_models, scan_comfy_models
         import asyncio
         from functools import partial
@@ -407,15 +380,12 @@ def register(app: FastAPI, ctx) -> None:
     async def embedding_warmup(request: Request):
         """Load the shared embedder NOW, from an explicit user action, instead of
         the first real /v1/embeddings / memory-consolidate / RAG-recall call
-        silently paying the cost - measured up to two 300s timeout windows (a
-        VRAM-eviction wait plus the isolated child's spawn+native-load) on a cold
-        server, even after ``localm setup-embeddings`` (which only pre-fetches
-        the file, never warms the singleton - a restart resets it too).
+        paying the cost. ``localm setup-embeddings`` only pre-fetches the file
+        and never warms the singleton, and a restart resets it.
 
-        Coarse PARENT-side stage events only (ADR-0004 Unit B): the isolated
-        embedder child's own load/embed IPC protocol is untouched. Uses the same
-        JobManager/SSE mechanism as model pull/remove - a 9th consumer of an
-        already-proven primitive, not a new channel."""
+        Reports coarse PARENT-side stage events only; the isolated embedder
+        child's own load/embed IPC protocol is untouched. Uses the same
+        JobManager/SSE mechanism as model pull/remove."""
         from localm.inference.embedder import (PEEK_TIMEOUT_S, get_embedder,
                                                last_error, loaded_dim)
         # Off the event loop: loaded_dim() takes embedder._LOCK, and get_embedder
@@ -551,18 +521,17 @@ def register(app: FastAPI, ctx) -> None:
         ``probe_status`` tells the consumer whether ``gpus`` is a FRESH reading
         (``ok`` - an empty list then genuinely means no GPU) or an inconclusive
         one (``timeout``/``busy`` - the driver was wedged or contended, and
-        ``gpus`` is a frozen last-known-good or []). Without it, a timed-out
-        probe was indistinguishable from a GPU-less box, so the Settings GPU
-        controls silently vanished on a slow driver (AGENTS.md rule 5).
+        ``gpus`` is a frozen last-known-good or []), so a timed-out probe is
+        distinguishable from a GPU-less box.
 
         ``index_space`` (present only as ``"native"``) says the ``gpus``
         indices are the ones a MODEL LOAD consumes rather than list_gpus()'s
         torch/nvidia-smi numbering - see the vulkan branch below; the client
-        labels the numbering accordingly. Note that is llama.cpp's own device
-        list, NOT the raw ggml registry order: integrated GPUs and
-        accelerators are dropped and the rest renumbered before they get here
-        (discover._llama_visible_devices), because these numbers are written
-        straight into main_gpu_index / gpu_split_indices."""
+        labels the numbering accordingly. That is llama.cpp's own device list,
+        NOT the raw ggml registry order: integrated GPUs and accelerators are
+        dropped and the rest renumbered before they get here
+        (discover._llama_visible_devices). These numbers are written straight
+        into main_gpu_index / gpu_split_indices."""
         from localm.config import load_config
         from localm.discover import GPU_PROBE_OK
         cfg = load_config()
@@ -603,11 +572,11 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/models/pull-token/redeem",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_pull_token_redeem(req: PullTokenRedeemRequest, request: Request):
-        """SEC-PULL-CONFIRM: redeem the single-use grant `localm gui --pull`
-        minted for its own deep link (see mint_pull_grant/init.js). Only a
-        genuine, unused, unexpired grant bound to this EXACT spec succeeds - a
-        forged `?pull=` link cannot know the secret, so it 403s here and the
-        frontend falls back to requiring an explicit human confirmation."""
+        """Redeem the single-use grant `localm gui --pull` minted for its own
+        deep link (see mint_pull_grant/init.js). Only a genuine, unused,
+        unexpired grant bound to this EXACT spec succeeds; anything else 403s
+        and the frontend falls back to requiring an explicit human
+        confirmation."""
         if not consume_pull_grant(request.app, req.spec.strip(), req.token):
             raise HTTPException(403, "Invalid or expired pull token")
         return {"ok": True}
@@ -774,29 +743,17 @@ def register(app: FastAPI, ctx) -> None:
     async def model_pull_comfy_source(req: ComfyPullRequest, request: Request):
         """Download one CURATED ComfyUI model into the ComfyUI models folder.
 
-        Requires host filesystem access for the same reason /api/models/scan
-        does, and it is the same folder either way. When the managed ComfyUI
-        instance is not active - the DEFAULT state of a fresh install -
-        comfy_models_dest_dir() resolves to `<comfy_workdir>/models/<subfolder>`.
-        comfy_workdir itself is admin_only (settings_schema.py, both the core
-        field and its per-plugin twin - REC-MEDIA-CMD closed the back door where
-        only one of the two was gated), so a plain config:write key can no longer
-        CHOOSE that folder. But an ADMIN may have already configured it once, and
-        this route's own caller only needs MODELS_WRITE - so without its own
-        check, any MODELS_WRITE key could still stream a multi-gigabyte download
-        into whatever host directory an admin previously set, with no host-fs
-        privilege of its own. require_fs_host() below closes that: the CALLER
-        triggering the write must independently hold host filesystem reach, not
-        merely benefit from a destination someone else configured. The curated
-        table fixes the filename and subfolder, so this is not arbitrary-path
-        WRITE - but choosing the parent directory is still host filesystem
-        reach, and a UNC value draws the same outbound SMB authentication from
-        the server that the scan gate exists to prevent.
-
-        This route was the inconsistent survivor when scan and pull were gated:
-        same invariant, same config value, same harm, no gate. Fixing one door
-        and leaving its neighbour open is how a boundary gets believed to be
-        closed when it is not."""
+        Requires host filesystem access, the same gate /api/models/scan uses on
+        the same folder. When the managed ComfyUI instance is not active - the
+        DEFAULT state of a fresh install - comfy_models_dest_dir() resolves to
+        `<comfy_workdir>/models/<subfolder>`. comfy_workdir is admin_only
+        (settings_schema.py, both the core field and its per-plugin twin), but
+        this route's own caller only needs MODELS_WRITE, so require_fs_host()
+        below is what requires the CALLER triggering the write to independently
+        hold host filesystem reach. The curated table fixes the filename and
+        subfolder, so this is not an arbitrary-path write, but choosing the
+        parent directory is still host filesystem reach and a UNC value draws
+        outbound SMB authentication from the server."""
         from localm.media.managed_comfy import comfy_models_dest_dir
         from localm.model_manager.registry import resolve_comfy_model_source
         from localm.plugins.media_config import MEDIA_PLUGINS
@@ -919,19 +876,16 @@ def register(app: FastAPI, ctx) -> None:
     async def model_relocate(req: RelocateModelRequest, request: Request):
         """GUI form of `localm relocate MODEL NEW_PATH`: re-point a registered
         model's file after it was MOVED (the CLI's 'missing' row, mirrored here
-        as `missing`/`last_path` on /api/models). No route re-pointed a registry
-        entry before this - the only prior GUI recourse was remove + re-add,
-        which mints a new registration and drops aliases/source/sha256.
+        as `missing`/`last_path` on /api/models). Keeps the registration, and
+        with it the aliases, source and sha256.
 
         require_fs_host, unconditionally: unlike a pull spec (which may name a
         remote HuggingFace repo), new_path here always names a location on the
         SERVER's own disk, the same capability class as /api/models/scan and
-        /api/models/pull-comfy-source. Without this gate, a models:write-only
-        key (fs_access="none") could use the specific validation error below
-        (does not exist / not a GGUF / not a HF dir) as an existence-and-
-        validity oracle over the server's filesystem - exactly what
-        _spec_names_a_host_path's docstring warns a plain write scope must not
-        grant.
+        /api/models/pull-comfy-source. Without that gate a models:write-only key
+        (fs_access="none") could use the specific validation error below (does
+        not exist / not a GGUF / not a HF dir) as an existence-and-validity
+        oracle over the server's filesystem.
         """
         require_fs_host(request)
         _require_registered(req.model)
@@ -975,14 +929,10 @@ def register(app: FastAPI, ctx) -> None:
         """Off-thread vram_capacity() plus its extracted 'total' bytes, both
         of which discover_search/discover_files feed into fit_label().
 
-        The returned dict's `free` is withheld unless the reading is BOTH
-        fresh and device-global (sysstats._vram_reading_trusted, same gate
-        /api/vram-estimate and /api/stats already apply) - `total` is a static
-        hardware fact that stands even under a stale/process-scoped probe,
-        but forwarding an untrusted `free` verbatim as this route's own
-        `vram.free` would let the API contract present exactly the
-        wrong-number-as-fact this repo already fixed on the other VRAM
-        surfaces (AGENTS.md rule 5)."""
+        The returned dict's `free` is withheld unless the reading is BOTH fresh
+        and device-global (sysstats._vram_reading_trusted, the same gate
+        /api/vram-estimate and /api/stats apply). `total` is a static hardware
+        fact and stands even under a stale or process-scoped probe."""
         from localm.discover import vram_capacity
         from localm.sysstats import _vram_reading_trusted
         loop = asyncio.get_running_loop()

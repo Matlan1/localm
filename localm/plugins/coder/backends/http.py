@@ -26,36 +26,26 @@ _RETRY_STATUSES = {429, 500, 502, 503, 529}
 _MAX_RETRIES = 4
 _BACKOFF_BASE_S = 2.0
 
-# 503 from OUR OWN local server is never retried at all (#964) - unlike
-# 429/500/502/529, which keep the full budget above unchanged (a cloud
-# provider's genuine rate-limit/overload signal). This is not "we cannot
-# tell 503 apart from a real error", it is TRACED: every 503 reachable from
-# this backend's own call path (/v1/chat/completions, /v1/completions, both
-# resolve their engine via inference/http_server.py's get_engine(), which
-# always calls switch_engine(..., preempt=False)) is either deterministic or
-# has already exhausted its own resolution window server-side before the
-# response ever reaches this client:
-#   - "Model load was superseded by a newer request" (http_server.py) is
-#     UNREACHABLE here: superseding only cancels a preempt=True load (an
-#     explicit GUI/CLI model switch), and switch_engine's own comment says so
-#     plainly - "API-routed loads (preempt=False) run to completion, never
-#     cancelled by a concurrent different-model load". A preempt=False
-#     load's cancel token is created but never wired to the global one that
-#     .set() actually triggers, so ModelLoadCancelled cannot fire for it.
-#   - A VRAM-refusal 503 already waited on wait_for_vram_release() (vram.py,
-#     5s default) SERVER-SIDE before refusing - a client retry on top adds
-#     latency without improving the odds, since the server already tried.
+# 503 from OUR OWN local server is never retried at all, unlike 429/500/502/529,
+# which keep the full budget above (a cloud provider's genuine
+# rate-limit/overload signal). Every 503 reachable from this backend's own call
+# path (/v1/chat/completions, /v1/completions, both resolving their engine via
+# inference/http_server.py's get_engine(), which always calls
+# switch_engine(..., preempt=False)) is either deterministic or has already
+# exhausted its own resolution window server-side:
+#   - "Model load was superseded by a newer request" is UNREACHABLE here:
+#     superseding only cancels a preempt=True load (an explicit GUI/CLI model
+#     switch), and a preempt=False load's cancel token is never wired to the
+#     global one that .set() triggers.
+#   - A VRAM-refusal 503 already waited on wait_for_vram_release() (vram.py, 5s
+#     default) SERVER-SIDE before refusing.
 #   - "No model loaded"/"No engine initialised" need an explicit user action
 #     (load a model), not a passing few seconds.
-#   - The grammar-check/embedding worker-fault 503 (inference/routes/chat.py,
-#     #991) is a deterministic isolated-worker crash that will almost
-#     certainly recur on the identical retried request.
-# Before this, EVERY local 503 got the full 4-retry/~30s budget, so the
-# deterministic case cost the user up to 30s of blind waiting before an
-# already-informative error message (see CoderServerError/_raise_for_status
-# above) ever reached them, for zero real chance of success. A NON-local
-# OpenAI-compatible endpoint (cloud or otherwise) is unaffected - its 503
-# causes were never traced here and keep the existing behaviour.
+#   - The grammar-check/embedding worker-fault 503 (inference/routes/chat.py) is
+#     a deterministic isolated-worker crash that will almost certainly recur on
+#     the identical retried request.
+# A NON-local OpenAI-compatible endpoint (cloud or otherwise) is unaffected and
+# keeps the existing behaviour.
 
 
 class CoderAuthError(RuntimeError):
@@ -69,10 +59,9 @@ class CoderAuthError(RuntimeError):
 class CoderServerError(RuntimeError):
     """A non-2xx response the server explained (a FastAPI ``{"detail": "..."}``
     body, or plain text), folded into the message - unlike
-    ``resp.raise_for_status()``, which only ever reports the status line
+    ``resp.raise_for_status()``, which only reports the status line
     ("503 Server Error: Service Unavailable for url: ...") and never reads the
-    body, so a server-side diagnostic (e.g. "the model worker faulted (...)")
-    never reached the user (#964)."""
+    body."""
 
 
 def _response_detail(resp) -> str:
@@ -198,8 +187,7 @@ class HTTPBackend(BaseLLMBackend):
         # comment above _RETRY_STATUSES). Stored directly rather than reusing
         # supports_grammar below: that flag is ALSO False whenever anthropic
         # is set, which would wrongly re-enable full 503 retries for the
-        # (never actually constructed) localm_server=True, anthropic=True
-        # combination.
+        # localm_server=True, anthropic=True combination.
         self._is_local_server = bool(localm_server)
         # TLS verification for the POST. A localm network bind serves HTTPS via
         # its own local CA, so a loopback self-call must trust that CA; external
@@ -210,10 +198,10 @@ class HTTPBackend(BaseLLMBackend):
             verify = tls.requests_verify(base_url)
         self._verify = verify
         self._last_usage: dict = {}
-        # Most recent call's reasoning text (H4 `reasoning_content`), the
+        # Most recent call's reasoning text (`reasoning_content`), the
         # non-streaming counterpart of chat_stream's on_reasoning callback - see
-        # last_reasoning. Never mixed into chat()/chat_stream()'s returned/yielded
-        # text (AUD-HIGH-17-3).
+        # last_reasoning. Never mixed into chat()/chat_stream()'s returned or
+        # yielded text.
         self._last_reasoning: str = ""
         self.native_tools  = native_tools
         # Anthropic speaks the Messages API (/v1/messages, x-api-key,
@@ -224,13 +212,12 @@ class HTTPBackend(BaseLLMBackend):
         self._tool_defs: list = []   # OpenAI-format tool definitions
 
         # GBNF grammar sampling is only supported by our own local server, so
-        # only a backend EXPLICITLY constructed for one advertises it. The old
-        # blacklist (not api.openai.com/api.anthropic.com) mislabelled every
-        # third-party OpenAI-compatible server (LM Studio, vLLM, a remote URL)
-        # as grammar-capable, which mattered once the coder started sending
-        # grammar kwargs BY DEFAULT - unknown body fields can 400 there. A
-        # remote localm reached via a hand-typed --backend URL loses grammar
-        # (conservative); the attach flow and self-connections pass the flag.
+        # only a backend EXPLICITLY constructed for one advertises it. A
+        # blacklist approach would mislabel every third-party OpenAI-compatible
+        # server (LM Studio, vLLM, a remote URL) as grammar-capable, and unknown
+        # body fields can 400 there. A remote localm reached via a hand-typed
+        # --backend URL loses grammar (conservative); the attach flow and
+        # self-connections pass the flag.
         self.supports_grammar = bool(localm_server) and not anthropic
         self._ctx_capacity_cached = False
         self._ctx_capacity: Optional[int] = None
@@ -239,34 +226,33 @@ class HTTPBackend(BaseLLMBackend):
     def supports_native_tools(self) -> bool:
         """Can the CONNECTED server actually honour ``native_tools``?
 
-        False for localm's OWN server, and that is a measured fact rather than
-        a guess: ``localm.inference.protocol.ChatRequest`` declares no ``tools``
-        or ``tool_choice`` field, and pydantic's default ``extra`` policy is
-        ``ignore``, so a native-tools body reaches localm and is silently
-        dropped. Nothing errors; the model simply answers with the XML tool-call
-        convention the system prompt already teaches it (``native_tools`` does
-        not change that prompt), so the request is inert rather than broken.
+        False for localm's OWN server: ``localm.inference.protocol.ChatRequest``
+        declares no ``tools`` or ``tool_choice`` field, and pydantic's default
+        ``extra`` policy is ``ignore``, so a native-tools body reaches localm and
+        is silently dropped. Nothing errors; the model simply answers with the
+        XML tool-call convention the system prompt already teaches it
+        (``native_tools`` does not change that prompt), so the request is inert
+        rather than broken.
 
         True for everything else - the OpenAI and Anthropic backends are built
-        with ``native_tools=True`` precisely because those APIs implement it,
-        and a third-party OpenAI-compatible server reached by ``--url`` (Ollama,
-        vLLM, LM Studio) is exactly the case the flag exists for.
+        with ``native_tools=True`` because those APIs implement it, and a
+        third-party OpenAI-compatible server reached by ``--url`` (Ollama,
+        vLLM, LM Studio) is the case the flag exists for.
 
-        Kept as a capability QUESTION rather than folded into ``native_tools``
-        itself so the requested value and the effective one stay distinguishable:
-        a caller that asked for something it did not get has to be told
-        (AGENTS.md rule 5), which is impossible once the two are the same field.
-        localm's own grammar-constrained tool calls (``supports_grammar``) are
-        the equivalent guarantee on this path."""
+        A capability QUESTION rather than a value folded into ``native_tools``
+        itself, so the requested value and the effective one stay
+        distinguishable and a caller that asked for something it did not get can
+        be told. localm's own grammar-constrained tool calls
+        (``supports_grammar``) are the equivalent guarantee on this path."""
         return not self._is_local_server
 
     def context_capacity(self) -> Optional[int]:
         """The loaded model's RESOLVED context ceiling from the server's
         /v1/config (VRAM-derived under ctx_auto), cached after the first
         successful fetch. Lets the coder budget its history against the real
-        window instead of a static 4096 default (memory-audit 2026-07-02 F10).
-        Best-effort: None on any error (the caller falls back to its default),
-        and only a localm server exposes it, so non-localm backends stay None."""
+        window instead of a static 4096 default. Best-effort: None on any error
+        (the caller falls back to its default), and only a localm server exposes
+        it, so non-localm backends stay None."""
         if self._ctx_capacity_cached:
             return self._ctx_capacity
         self._ctx_capacity_cached = True
@@ -303,13 +289,13 @@ class HTTPBackend(BaseLLMBackend):
 
     @property
     def last_reasoning(self) -> str:
-        """The most recent call's full reasoning text (H4 ``reasoning_content``),
+        """The most recent call's full reasoning text (``reasoning_content``),
         or ``""`` when the model/server did not emit one. ``chat()`` populates this
         directly; ``chat_stream()`` accumulates it from the same deltas passed to
         ``on_reasoning`` as they arrive. Mirrors ``last_usage``'s pull-after-call
-        pattern (AUD-HIGH-17-3) - useful for a caller (e.g. a non-interactive/
-        silent agent turn) that has no live callback wired up but still wants the
-        reasoning for its own audit record."""
+        pattern - for a caller (e.g. a non-interactive or silent agent turn) that
+        has no live callback wired up but still wants the reasoning for its own
+        audit record."""
         return self._last_reasoning
 
     def set_tools(self, tool_defs: list) -> None:
@@ -335,8 +321,7 @@ class HTTPBackend(BaseLLMBackend):
         chunks (index -> {"name", "arguments"}), or None if none were
         accumulated.
 
-        Shared by chat_stream's and _anthropic_stream's identical tail blocks
-        (CODER-3) - previously duplicated verbatim in both.
+        Shared by chat_stream's and _anthropic_stream's identical tail blocks.
         """
         if not tc_buf:
             return None
@@ -503,12 +488,12 @@ class HTTPBackend(BaseLLMBackend):
             self._last_usage = data["usage"]
         message = data["choices"][0]["message"]
         text    = message.get("content") or ""
-        # H4: the server splits a thinking model's reasoning into its own
-        # `reasoning_content` field, kept OUT of `text` (AUD-HIGH-17-3) - unlike
-        # HttpEngine's chat REPL, the coder loop has no downstream splitter, so
-        # inlining it here would leak raw <think> tags into the visible answer,
-        # the audit log, and conversation history. Callers that want it read
-        # last_reasoning after this call returns.
+        # The server splits a thinking model's reasoning into its own
+        # `reasoning_content` field, kept OUT of `text`: unlike HttpEngine's chat
+        # REPL, the coder loop has no downstream splitter, so inlining it here
+        # would leak raw <think> tags into the visible answer, the audit log, and
+        # conversation history. Callers that want it read last_reasoning after
+        # this call returns.
         self._last_reasoning = message.get("reasoning_content") or ""
         # Native tool calls: convert to our XML format and append
         tool_calls = message.get("tool_calls") or []
@@ -522,7 +507,7 @@ class HTTPBackend(BaseLLMBackend):
                     **kwargs) -> Iterator[str]:
         if self.anthropic:
             # Anthropic extended-thinking events are a distinct shape this
-            # backend does not translate; not in scope here (AUD-HIGH-17-3).
+            # backend does not translate.
             yield from self._anthropic_stream(messages, **kwargs)
             return
         import json as _json
@@ -558,7 +543,7 @@ class HTTPBackend(BaseLLMBackend):
                 if chunk.get("usage"):
                     self._last_usage = chunk["usage"]
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
-                # H4 reasoning delta: routed to on_reasoning (a SEPARATE channel
+                # Reasoning delta: routed to on_reasoning (a SEPARATE channel
                 # from the yielded content), never yielded inline - see chat()'s
                 # comment and BaseLLMBackend.chat_stream's docstring.
                 reasoning = delta.get("reasoning_content") or ""
@@ -675,11 +660,10 @@ def make_localm_backend(model: str, port: int = 8642, *, host: str = "",
     if given, else the owner key this install has configured (env var, else
     the persisted ``auth.key`` - ``auth.get_api_key()``), else ``"localm"``
     (open-mode servers accept any non-empty string). A hardcoded ``"localm"``
-    would 401 against a ``require_auth`` server - the C1 keystone bug this
-    resolves. Checking only ``$LOCALM_API_KEY`` and never ``auth.key`` was a
-    narrower re-open of the same bug (checkup 2026-08-11 item 12): a server
-    keyed via ``localm key generate`` (persisted to file, no env var set)
-    still 401'd every ``localcoder --no-server`` attach."""
+    would 401 against a ``require_auth`` server, and checking only
+    ``$LOCALM_API_KEY`` without ``auth.key`` would 401 every
+    ``localcoder --no-server`` attach on a server keyed via
+    ``localm key generate``."""
     from localm.auth import get_api_key
     from localm.bindhost import self_connect_host, url_host
     key = api_key or get_api_key() or "localm"

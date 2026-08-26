@@ -1,39 +1,34 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Active self-checks, as a callable core no surface owns.
 
-``localm doctor`` grew five ACTIVE probes - checks that go and try the thing
-rather than read a version string - and every one of them lived inside a
-function that printed rich markup to a terminal. That made them reachable from
-exactly one surface. This module holds the probes; ``localm/cli/doctor.py``
-renders them for a terminal and ``localm/plugins/gui/routes/doctor.py`` renders
-them for a browser, so neither surface can drift from the other and neither has
-to parse the other's output. ADR-0001 named this refactor as a follow-up and
-named the alternative too: "parsing doctor's console output would be a facade".
+Five ACTIVE probes - checks that go and try the thing rather than read a version
+string. This module holds the probes; ``localm/cli/doctor.py`` renders them for
+a terminal and ``localm/plugins/gui/routes/doctor.py`` renders them for a
+browser, so neither surface has to parse the other's output.
 
-The five, and why each is here rather than in the read-only status routes:
+The five:
 
   llama_lib      a provisioned llama library that EXISTS but is 0 bytes or
                  truncated, plus rocBLAS/hipBLASLt kernel data missing next to
                  a library that loads fine (the silent one - chat works and the
                  crash arrives on the first GEMM)
   native_abi     the struct-layout self-check against the actual DLL
-  worker_spawn   a real multiprocessing "spawn" round trip (#617: a plain
-                 subprocess probe passes when this is broken)
-  venv           a real ``-m venv`` plus a pip-landed check (#621)
-  hf_backend     transformers' lazy classes really resolve (0.1.2: `import
-                 transformers` succeeded while every model load died)
+  worker_spawn   a real multiprocessing "spawn" round trip (a plain subprocess
+                 probe passes when this is broken)
+  venv           a real ``-m venv`` plus a pip-landed check
+  hf_backend     transformers' lazy classes really resolve (`import
+                 transformers` can succeed while every model load dies)
 
-The narrower reads a surface already had - VRAM, the GPU list, the installed
-backend, plugin pip extras, the Python version, package versions - are
-deliberately NOT here. They have GUI equivalents already, and duplicating them
-would create the second source of truth this module exists to remove.
+The narrower reads a surface already has - VRAM, the GPU list, the installed
+backend, plugin pip extras, the Python version, package versions - are NOT here.
+They have GUI equivalents already, and duplicating them would create a second
+source of truth.
 
 NOTHING IN THIS MODULE PRINTS, and nothing here imports click or rich: a caller
 renders findings, and a caller that cannot render markup (a JSON route) must not
 have to strip it. Findings carry plain text plus the two decorations the
-terminal renderer needs (an inline ``note``, indented ``hints``), so the CLI can
-reproduce its old output character for character while the GUI shows the same
-sentences without markup.
+terminal renderer needs (an inline ``note``, indented ``hints``), so the CLI
+renders markup and the GUI shows the same sentences without it.
 
 RUNNING THIS IN A SERVER PROCESS IS NOT THE SAME AS RUNNING IT IN A FRESH ONE.
 ``check_hf_backend`` imports torch and transformers, which on this project's
@@ -126,10 +121,9 @@ class CheckResult:
 
     @property
     def healthy(self) -> bool:
-        """True only for a clean pass. A warning is not a pass: every caller of
-        the old ``_check_llama_lib`` return value used it to decide whether it
-        was safe to load-test the runtime, and a truncated library is precisely
-        the case that must answer no."""
+        """True only for a clean pass. A warning is not a pass: callers use this
+        to decide whether it is safe to load-test the runtime, and a truncated
+        library must answer no."""
         return self.status == OK
 
     def as_dict(self) -> dict:
@@ -260,9 +254,9 @@ def _blas_findings(binary_dir) -> list:
     hard-crash the native process (uncatchable from Python) the first time a
     workload dispatches through Tensile - the embedder's batch encode.
 
-    That state is reachable two ways, and this catches both: the original defect
-    where the provision copied the library and dropped its data, and a provision
-    interrupted part-way (a locked file on a machine with the runtime open).
+    That state is reachable two ways, and this catches both: a provision that
+    copied the library and dropped its data, and a provision interrupted
+    part-way (a locked file on a machine with the runtime open).
 
     FAIL rather than WARN, because the failure it predicts is a hard process
     crash, and because the remedy is one command."""
@@ -404,16 +398,15 @@ def _worker_spawn_probe(conn) -> None:
 def check_worker_spawn() -> CheckResult:
     """Verify localm can actually spawn its isolated worker process - the SAME
     ``multiprocessing.get_context("spawn")`` mechanism every GGUF model load and
-    the voice/STT engine depend on (see localm/_mp_spawn.py, #617).
+    the voice/STT engine depend on (see localm/_mp_spawn.py).
 
     The native-ABI and GPU-probe checks isolate via a PLAIN subprocess
-    (``run_probe_subprocess``), a different code path - that proves the native
+    (``run_probe_subprocess``), a different code path: that proves the native
     library loads and computes correctly, but it does NOT exercise
     multiprocessing's own spawn machinery, which on Windows redirects the
     child's executable under conditions a renamed launcher (LocaLM.exe) can
-    break. That gap is exactly why #617 (every GGUF load failing with
-    "[WinError 2] The system cannot find the file specified") passed a doctor
-    run showing everything green. This check would have caught it."""
+    break, so every GGUF load fails with "[WinError 2] The system cannot find
+    the file specified" while every other check stays green."""
     label = _SPAWN_LABEL
     try:
         from localm._mp_spawn import ensure_spawn_uses_venv_python
@@ -463,23 +456,22 @@ _VENV_LABEL = "Nested venv creation"
 def check_venv_creation() -> CheckResult:
     """Verify localm can actually create a nested venv via ``-m venv`` using
     ``real_base_python()`` - the SAME mechanism the managed-ComfyUI installer
-    depends on (managed_comfy_fresh.py, #621). Creates and immediately discards a
-    throwaway venv under a temp dir; never touches LOCALM_HOME or any real install.
+    depends on (managed_comfy_fresh.py). Creates and immediately discards a
+    throwaway venv under a temp dir; never touches LOCALM_HOME or any real
+    install.
 
     A DIFFERENT code path from the worker-spawn check above (that exercises
-    multiprocessing's spawn machinery; this exercises stdlib venv's own basename-
-    matching + mandatory ensurepip bootstrap): #621 (managed ComfyUI setup
-    silently failing with "[WinError 2]") passed a doctor run showing everything
-    green precisely because nothing probed this. This check would have caught it.
+    multiprocessing's spawn machinery; this exercises stdlib venv's own
+    basename-matching plus its mandatory ensurepip bootstrap), so a managed
+    ComfyUI setup failing with "[WinError 2]" is invisible without it.
 
-    Also probes that pip actually landed inside the new venv (NEW-MANAGED-COMFY-
-    VENV-MISSING-PIP): ``-m venv`` can report success - return code 0, the
-    interpreter file present - while its own mandatory ensurepip bootstrap
-    silently failed (a base Python with ensurepip stripped, or a broken
-    install). The managed-ComfyUI installer pip-installs into a venv it just
-    created with no ``--without-pip`` fallback, so a pip-less venv here would
-    read as doctor-green right up until provisioning fails deep inside with an
-    opaque "No module named pip"."""
+    Also probes that pip actually landed inside the new venv: ``-m venv`` can
+    report success - return code 0, the interpreter file present - while its own
+    mandatory ensurepip bootstrap silently failed (a base Python with ensurepip
+    stripped, or a broken install). The managed-ComfyUI installer pip-installs
+    into a venv it just created with no ``--without-pip`` fallback, so a
+    pip-less venv reads as doctor-green right up until provisioning fails deep
+    inside with an opaque "No module named pip"."""
     import tempfile
     from pathlib import Path
 
@@ -594,12 +586,12 @@ def check_hf_backend(torch_mod: Any = None, transformers_mod: Any = None, *,
     ``import transformers`` can succeed - and a package-version line reports a
     clean version - while every one of those classes is dead.
 
-    This exact gap shipped in 0.1.2: transformers 5.14 hard-imports fsdp on the
-    tokenizer path, which needs ``torch._C._distributed_c10d`` - absent from the
-    pinned ROCm/Windows torch build - so EVERY HF model load died at "loading
-    processor..." while ``localm doctor`` printed both packages OK (found during
-    the 0.1.2 release verification; see tests/test_gpu_extra_pins.py for the
-    version-pin guard this backs up with a functional one).
+    Concretely: transformers 5.14 hard-imports fsdp on the tokenizer path, which
+    needs ``torch._C._distributed_c10d`` - absent from the pinned ROCm/Windows
+    torch build - so EVERY HF model load dies at "loading processor..." while a
+    package-version check reports both packages OK (see
+    tests/test_gpu_extra_pins.py for the version-pin guard this backs up with a
+    functional one).
 
     *resolved* says the caller already resolved the two modules and a None means
     absent, so this must not go importing them itself. ``doctor`` passes the
@@ -683,10 +675,9 @@ def run_checks(on_check_start: Optional[Callable] = None) -> list:
     ``(key, label, done, total)`` immediately BEFORE each check, where ``done``
     is how many have actually finished. Reported before rather than after so a
     watching surface can name the check that is currently taking the time, and
-    so ``done`` is never a number nothing has earned yet (ADR-0008 R1: an
-    operation with no established denominator is at an unknown percentage, not
-    at 0%). A callback that raises must not cost the caller its report, so it is
-    guarded - but the failure is logged rather than swallowed.
+    so ``done`` is never a number nothing has earned yet. A callback that raises
+    must not cost the caller its report, so it is guarded - but the failure is
+    logged rather than swallowed.
 
     See the module docstring before calling this from a long-lived process: it
     imports torch and transformers.
@@ -725,9 +716,9 @@ def run_checks(on_check_start: Optional[Callable] = None) -> list:
 def verdict(checks) -> str:
     """The aggregate for a surface that leads with one word.
 
-    Deliberately NOT a claim about the machine as a whole: it aggregates these
-    five checks and nothing else, so a caller must say WHICH checks it ran
-    rather than render it as "everything is fine"."""
+    NOT a claim about the machine as a whole: it aggregates these five checks
+    and nothing else, so a caller must say WHICH checks it ran rather than
+    render it as "everything is fine"."""
     return _worst(c.status for c in checks) or OK
 
 
@@ -753,8 +744,7 @@ def run_report_isolated(*, timeout: Optional[float] = None,
                         ) -> DiagnosticsReport:
     """Run the checks in a FRESH child interpreter and parse its one JSON line.
 
-    This is what a server surface must use. Three reasons, and the first alone
-    settles it:
+    This is what a server surface must use, for three reasons:
 
       * ``check_hf_backend`` imports torch and transformers. In a process that
         has already loaded llama.cpp's native runtime that is the known-doomed
@@ -779,8 +769,7 @@ def run_report_isolated(*, timeout: Optional[float] = None,
     its stdout closes. NOTE what the kill does NOT reach: the child's own
     grandchildren (the ABI probe, the venv probe). Each of those carries its own
     shorter timeout (120s, 60s, 30s), so they self-terminate rather than leak
-    indefinitely - stated rather than glossed, because "the parent was killed"
-    and "everything it started is gone" are not the same claim on any platform.
+    indefinitely.
     """
     import threading
 

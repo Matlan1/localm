@@ -1,15 +1,12 @@
-"""A key clear that FAILED must never report success (AGENTS.md rule 5).
+"""A key clear that FAILED must never report success.
 
-``clear_api_key`` only ever warned through ``debuglog.logger``, which a user
-never sees without ``--debug``, and both callers printed/returned success
-unconditionally. So an undeletable ``auth.key`` (an AV or indexer lock, a
-permissions or profile change) produced a green tick on the CLI and
-``{"cleared": true}`` from the API while the key on disk STILL GRANTED ACCESS.
+An undeletable ``auth.key`` (an AV or indexer lock, a permissions or profile
+change) must not produce a green tick on the CLI or ``{"cleared": true}`` from
+the API while the key on disk still grants access.
 
 These drive the real functions and assert from OUTSIDE the call. The failure is
 injected at the lowest honest point - ``Path.unlink`` raising ``OSError``, which
-is exactly what a locked file does - rather than by patching the function under
-test, so every layer above it runs for real.
+is exactly what a locked file does - so every layer above it runs for real.
 """
 
 import pytest
@@ -69,11 +66,9 @@ class TestClearApiKeyReportsWhatSurvived:
 
     def test_the_failure_is_also_written_to_the_local_log(
             self, runner, monkeypatch, caplog):
-        """The HTTP route deliberately logs NOTHING of its own, on the grounds
-        that clear_api_key already records each failure here with the path and
-        the OS error. That justification is load-bearing: if this warning were
-        ever refactored away, the route would lose its only local signal and
-        nothing else would notice. Pin it."""
+        """The HTTP route logs nothing of its own; clear_api_key records each
+        failure here with the path and the OS error, which is the route's only
+        local signal."""
         import logging
         runner.invoke(main, ["key", "generate"])
         key_name = auth.key_file().name
@@ -92,8 +87,7 @@ class TestClearApiKeyReportsWhatSurvived:
     def test_label_is_path_free_so_a_network_caller_can_use_it(
             self, runner, monkeypatch):
         """``what`` must never carry the path: it is the ONLY field the HTTP
-        route is allowed to put on the wire, so if it embedded the path the
-        route's disclosure boundary would be defeated silently."""
+        route puts on the wire."""
         runner.invoke(main, ["key", "generate"])
         _unlink_denied_for(monkeypatch, auth.key_file().name)
         home = str(auth.key_file().parent)
@@ -124,9 +118,8 @@ class TestKeyClearCliDoesNotClaimSuccess:
 
 
 class TestClearRouteDoesNotClaimSuccess:
-    """The API contract matters more than the CLI string: the GUI renders
-    open-mode state from ``cleared``, so a false true is shown to the user as a
-    keyless install."""
+    """The GUI renders open-mode state from ``cleared``, so a false true is
+    shown to the user as a keyless install."""
 
     def _client(self):
         from fastapi.testclient import TestClient
@@ -159,10 +152,9 @@ class TestClearRouteDoesNotClaimSuccess:
 
     def test_response_discloses_no_path_and_no_exception_text(
             self, runner, monkeypatch):
-        """Honest does not mean verbose. The absolute path carries the account
-        name (rule 2) and raw OS exception text is stack-trace exposure, so
-        neither may ride out on an HTTP response - CodeQL flagged exactly this
-        on the first draft of the fix. The local CLI still shows both."""
+        """The absolute path carries the account name and raw OS exception text
+        is stack-trace exposure, so neither may ride out on an HTTP response.
+        The local CLI still shows both."""
         runner.invoke(main, ["key", "generate"])
         key = auth.get_api_key()
         _unlink_denied_for(monkeypatch, auth.key_file().name)

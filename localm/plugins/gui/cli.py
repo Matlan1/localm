@@ -24,10 +24,9 @@ def _complete_model(ctx, param, incomplete):
 def _report_preload_failure(console, exc: Exception) -> None:
     """The background model-preload thread's failure handler: notify the console
     AND log it. ``console.print`` alone never reaches the debug log file (it is
-    not a logging call), so a preload failure with no other symptom - the user
-    never explicitly tries to chat - left NO trace a bug report could ever
-    surface, no matter how good the log-tail digest got. Log it too, with the
-    full traceback, so it is captured like any other failure (#617 follow-up)."""
+    not a logging call), so a preload failure with no other symptom would leave
+    no trace a bug report could surface. Logged with the full traceback, so it is
+    captured like any other failure."""
     console.print(f"[yellow]Background model load failed: {exc}[/yellow]")
     from localm.debuglog import logger
     logger.exception("background model preload failed")
@@ -72,26 +71,24 @@ def _tray_callbacks(app, hs):
     Returns LAZY closures over *app*, not functools.partial-bound values:
     app.state.instance_id/instance_port are set by instances.advertise()
     inside hs.run_advertised(), which is called just below this function's
-    own call site - AFTER the tray is wired, not before. A partial would
-    freeze instance_id/port at None (their state at wire time); these
-    closures read app.state at CALL time instead - by the time a user can
-    physically click Restart/Stop, run_advertised() has long since entered
-    advertise()'s context and populated both.
+    own call site - AFTER the tray is wired. A partial would freeze
+    instance_id/port at None (their state at wire time); these closures read
+    app.state at CALL time instead, and by the time a user can physically click
+    Restart/Stop, run_advertised() has entered advertise()'s context and
+    populated both.
 
-    Bug this fixes (verified against real code, not a guess): appface
-    invokes on_restart/on_stop with NO arguments
+    appface invokes on_restart/on_stop with NO arguments
     (``threading.Thread(target=self.on_restart)``, appface.py), and both
     hs._do_restart and hs._do_shutdown are keyword-only with None defaults.
-    Wiring the bare functions directly (the previous code) meant a tray
-    Restart/Stop always called disarm_crash_guard(instance_id=None), which
-    clears the LEGACY unscoped marker (bugreport.py's per-instance-scoping
-    fallback) and leaves this instance's real server-crash.<instance_id>.marker
-    still armed - so the NEXT start reports a crash that never happened. The
-    HTTP routes (routes/admin.py's restart/stop endpoints) already pass the
-    real instance_id and get this right; only the tray path was broken.
-    _do_restart losing its port the same way meant _restart_argv omitted
-    ``-p``, so a re-exec'd server could come back on a different port -
-    stranding the tray/GUI's own open window on a dead one."""
+    Wiring the bare functions directly makes a tray Restart/Stop call
+    disarm_crash_guard(instance_id=None), which clears the LEGACY unscoped
+    marker (bugreport.py's per-instance-scoping fallback) and leaves this
+    instance's real server-crash.<instance_id>.marker still armed, so the NEXT
+    start reports a crash that never happened. _do_restart losing its port the
+    same way makes _restart_argv omit ``-p``, so a re-exec'd server can come
+    back on a different port and strand the tray/GUI's own open window on a dead
+    one. The HTTP routes (routes/admin.py's restart/stop endpoints) pass the
+    real instance_id."""
     def on_restart():
         hs._do_restart(instance_id=getattr(app.state, "instance_id", None),
                        port=getattr(app.state, "instance_port", None))
@@ -106,8 +103,8 @@ def _gui_bind_warning(host: str):
     """Warning text when the GUI binds past loopback without auth, or None when
     the bind is safe. Builds on the server's check, then escalates for the GUI:
     it also exposes the coder agent (shell + file edits). Traffic itself is
-    encrypted by built-in TLS on a network bind (NET-1); the warning is about the
-    coder agent's reach, not about cleartext.
+    encrypted by built-in TLS on a network bind; the warning is about the coder
+    agent's reach, not about cleartext.
     """
     from localm.cli import _exposed_bind_warning
     base = _exposed_bind_warning(host)
@@ -121,12 +118,11 @@ def _gui_bind_warning(host: str):
 
 
 def _mount_remote_gui(entry: dict) -> bool:
-    """Ask a running ``api``-mode instance to mount its GUI surface on demand
-    (H6 phase 5). POSTs to its loopback ``/v1/surfaces/gui`` with the instance's
-    own registry attach token (a local same-user secret). Returns True on
-    success, False on any failure - an older instance without the endpoint, a
-    missing token, or a network error - so the caller can fall back to just
-    opening the address."""
+    """Ask a running ``api``-mode instance to mount its GUI surface on demand.
+    POSTs to its loopback ``/v1/surfaces/gui`` with the instance's own registry
+    attach token (a local same-user secret). Returns True on success, False on
+    any failure - an older instance without the endpoint, a missing token, or a
+    network error - so the caller can fall back to just opening the address."""
     import requests
     scheme = entry.get("scheme") or "http"
     port = entry.get("port")

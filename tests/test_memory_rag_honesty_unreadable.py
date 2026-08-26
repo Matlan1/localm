@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Honesty-audit (AGENTS.md rule 5) regression: a present-but-UNREADABLE sidecar
-must NOT be collapsed into "absent" and then rewritten to a lesser state.
+"""A present-but-UNREADABLE sidecar must NOT be collapsed into "absent" and then
+rewritten to a lesser state.
 
-The systematic gap these guard: ``except OSError: return []`` treats a file that
-EXISTS but cannot be read (a transient Windows AV/indexer lock - see
-storekit.py) exactly like a file that is simply ABSENT. When the empty result
-then feeds a full-sidecar REWRITE, every prior entry is silently wiped while the
-caller is told it succeeded. The in-tree precedent is sessions.py:_load, which
-re-raises on an unreadable store so lookup fails CLOSED.
+``except OSError: return []`` treats a file that EXISTS but cannot be read (a
+transient Windows AV/indexer lock - see storekit.py) exactly like a file that is
+simply ABSENT. When the empty result then feeds a full-sidecar REWRITE, every
+prior entry is silently wiped while the caller is told it succeeded.
+sessions.py:_load re-raises on an unreadable store so lookup fails CLOSED.
 
 Fault is injected only at the DISK BOUNDARY (a per-path ``Path.read_text`` that
 raises, or an embedded-NUL config root that ``resolve()`` rejects) - the real
-store/rag code under test runs unmocked, so this exercises the actual behavior,
-not a stand-in for it.
+store/rag code under test runs unmocked.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from localm.rag.store import indexing_policy
 
 @pytest.fixture
 def allow_writes(monkeypatch):
-    # Mirror the F12b suite: memory writes are gated on a non-privacy mode.
+    # Memory writes are gated on a non-privacy mode.
     monkeypatch.setenv("LOCALM_MODE", "log")
 
 

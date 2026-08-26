@@ -2,9 +2,9 @@
 """workflow_model_slots() / apply_model_overrides() (the model-picker feature):
 enumerate every model-file combo slot in a workflow against ComfyUI's live
 /object_info, and let a caller override any of them by node_id/input_name.
-Shares the same node/input walk preflight_models() already used to validate
-model choices - these tests also pin that the refactor kept preflight_models
-byte-for-byte behavior-preserving."""
+Shares the same node/input walk preflight_models() uses to validate model
+choices - these tests also pin that preflight_models' own observable behaviour
+is unchanged."""
 
 from unittest.mock import patch
 
@@ -73,15 +73,15 @@ class TestWorkflowModelSlots:
             assert comfy_client.workflow_model_slots(wf, "http://x") == []
 
     def test_slot_surfaces_when_comfyui_has_none_of_that_file_type_installed(self):
-        """The reproduced bug: ComfyUI has ZERO files of a given type installed, so
-        its live /object_info reports that combo's options as [] - which alone can
-        never look like model files (_looks_like_model_files([]) is False). Without
+        """ComfyUI has ZERO files of a given type installed, so its live
+        /object_info reports that combo's options as [] - which alone can never
+        look like model files (_looks_like_model_files([]) is False). Without
         folding the node's current value into that heuristic, every slot in a
         workflow whose ComfyUI is missing all its models vanishes from the picker
-        instead of surfacing exactly the "you're missing these" case it exists for.
-        VAELoader's vae_name is ComfyUI's own built-in latent-space pseudo-option
-        ("pixel_space"), not a model file - it must still be recognized because the
-        workflow's current value is a real filename."""
+        instead of surfacing exactly the you-are-missing-these case it exists
+        for. VAELoader's vae_name is ComfyUI's own built-in latent-space
+        pseudo-option ("pixel_space"), not a model file - it must still be
+        recognized because the workflow's current value is a real filename."""
         info = _object_info()
         info["UnetLoaderGGUFAdvanced"]["input"]["required"]["unet_name"] = [[], {}]
         info["DualCLIPLoader"]["input"]["required"]["clip_name1"] = [[], {}]
@@ -154,9 +154,9 @@ class TestApplyModelOverrides:
 
 
 class TestPreflightModelsStillWorksAfterRefactor:
-    """preflight_models() now builds on workflow_model_slots() internally -
-    pin that its own observable behavior (substitution + missing-file message)
-    is unchanged."""
+    """preflight_models() builds on workflow_model_slots() internally - pin that
+    its own observable behavior (substitution + missing-file message) is the
+    same."""
 
     def test_substitutes_the_one_unambiguous_variant(self):
         wf = _workflow()

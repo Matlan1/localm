@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""AUD-HIGH-17-2: once HttpEngine.chat_stream re-wraps a thinking model's
-reasoning as inline <think>...</think> (H4, localm run's default attach mode),
-cli/chat.py must not resend or log that raw scratchpad as if it were the
-visible answer. textnorm.strip_think's docstring calls this out explicitly:
-"the one helper every INTERNAL consumer of model output must run before
-storing or parsing a reply". transcript.exchange is the one exception - it
-splits the raw text itself and keeps the reasoning in a collapsed block."""
+"""Once HttpEngine.chat_stream re-wraps a thinking model's reasoning as inline
+<think>...</think> (localm run's default attach mode), cli/chat.py neither
+resends nor logs that raw scratchpad as the visible answer: it runs
+textnorm.strip_think first, as every INTERNAL consumer of model output does.
+transcript.exchange is the one exception - it splits the raw text itself and
+keeps the reasoning in a collapsed block."""
 
 from unittest.mock import MagicMock
 

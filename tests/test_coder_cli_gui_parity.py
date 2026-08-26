@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""O5: the six coder options that used to exist only on the CLI now have a web
-form, per the standing rule that anything available in the CLI must be available
-in SOME form in GUI mode.
+"""The six coder options that exist on the CLI each have a web form, per the
+standing rule that anything available in the CLI must be available in SOME form
+in GUI mode.
 
   --estimate       POST /api/coder/sessions/{id}/estimate
   --patch-mode     patch_mode on create + GET .../patch and .../patch/download
@@ -9,12 +9,12 @@ in SOME form in GUI mode.
   --output-format  GET .../result (the CLI's json payload, no SSE needed)
   --episodes       GET /api/coder/episodes?cwd=
   --until          unified onto the existing verify oracle; its retry cap
-                   (the CLI's --goal-max-iters) is now settable as
+                   (the CLI's --goal-max-iters) is settable as
                    verify_max_retries
 
-The two properties these tests exist to pin, because both fail SILENTLY:
-reading a patch must not consume it, and an option the server cannot honour
-must be reported as not applied rather than echoed back as if it were.
+The two properties these tests pin, because both fail SILENTLY: reading a patch
+must not consume it, and an option the server cannot honour must be reported as
+not applied rather than echoed back as if it were.
 """
 
 import inspect
@@ -24,8 +24,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-# Non-routable RFC5737 (TEST-NET-1): guaranteed never to route anywhere, so even
-# a total guard failure cannot dial a real host.
+# Non-routable RFC5737 documentation address: guaranteed never to route anywhere,
+# so even a total guard failure cannot dial a real host.
 _UNC = "\\\\192.0.2.1\\share"
 _UNC_FWD = "//192.0.2.1/share"
 _DEVICE = "\\\\.\\PhysicalDrive0"
@@ -318,7 +318,7 @@ def test_native_tools_is_reported_as_not_applied_against_localms_own_server(
         tmp_path, monkeypatch):
     """localm's /v1/chat/completions declares no tools/tool_choice, so the
     fields are dropped and the run proceeds exactly as if the option had never
-    been passed. Nothing breaks - which is why silence was the problem. The
+    been passed. Nothing breaks, so silence is the problem. The
     response must say it did not take effect."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
@@ -348,10 +348,9 @@ def test_not_asking_for_native_tools_produces_no_note(tmp_path, monkeypatch):
 
 
 def test_localm_chat_request_really_has_no_tools_field():
-    """The measured premise the whole native_tools decision rests on. If localm
-    ever DOES implement the tools API, this test fails and the "not applied"
-    note above becomes a lie that needs removing - which is exactly the reminder
-    a future reader needs."""
+    """The premise the whole native_tools decision rests on. If localm ever DOES
+    implement the tools API, this test fails and the "not applied" note above
+    becomes a lie that needs removing."""
     from localm.inference.protocol import ChatRequest
     req = ChatRequest(model="m", messages=[{"role": "user", "content": "hi"}],
                       tools=[{"type": "function"}], tool_choice="auto")
@@ -480,10 +479,9 @@ def test_episodes_refuses_unc_and_device_cwd(tmp_path, monkeypatch, bad):
 
     The spy covers ``resolve`` AND ``is_dir``, not merely whichever one this
     route calls today. A spy pointed at a single method goes structurally DEAD
-    the moment the code reaches for the other one - and a dead fault injector is
+    the moment the code reaches for the other one, and a dead fault injector is
     indistinguishable from a guard that correctly found nothing to refuse, since
-    both produce a clean green. This test was written against ``is_dir`` and the
-    route stopped calling it in the same change."""
+    both produce a clean green."""
     real = {"resolve": Path.resolve, "is_dir": Path.is_dir}
 
     def make_spy(name):
@@ -509,9 +507,10 @@ def test_episodes_refuses_unc_and_device_cwd(tmp_path, monkeypatch, bad):
 # --------------------------------------------------------------------------- #
 
 def test_verify_max_retries_is_settable_from_the_web(tmp_path, monkeypatch):
-    """--goal-max-iters had no web equivalent at all: the GUI got the Agent's
-    hardcoded default and no way to change it. Bounded 1..50, matching the CLI's
-    own IntRange, so a request cannot pin the shared engine on an endless loop."""
+    """--goal-max-iters needs a web equivalent, or the GUI gets the Agent's
+    hardcoded default with no way to change it. Bounded 1..50, matching the
+    CLI's own IntRange, so a request cannot pin the shared engine on an endless
+    loop."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         r = client.post("/api/coder/sessions", headers=owner,
@@ -542,10 +541,9 @@ def test_verify_max_retries_is_bounded(tmp_path, monkeypatch, bad):
 
 
 def test_the_web_oracle_is_the_same_one_until_uses():
-    """The reason --until is unified rather than rebuilt: the agent's pre-done
-    gate runs verify.py's own primitives, so a web session and ``--until`` judge
-    a task by the same exit code and feed back the same anti-gaming text. If
-    this ever diverges, "unify" stops being the right answer."""
+    """--until is unified rather than rebuilt: the agent's pre-done gate runs
+    verify.py's own primitives, so a web session and ``--until`` judge a task by
+    the same exit code and feed back the same anti-gaming text."""
     from localm.plugins.coder import verify as v
     from localm.plugins.coder.cli import goal as g
     assert g._run_verify is v.run_verify

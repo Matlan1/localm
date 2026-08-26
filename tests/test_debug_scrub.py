@@ -19,7 +19,7 @@ def _scrub(pieces):
 
 
 class TestUtf8PieceReassembly:
-    """R46: a multibyte character whose UTF-8 bytes straddle two tokens must be
+    """A multibyte character whose UTF-8 bytes straddle two tokens is
     reassembled, not decoded into U+FFFD replacement characters mid-word."""
 
     def test_two_byte_char_split_across_tokens(self):
@@ -55,7 +55,7 @@ class TestUtf8PieceReassembly:
         # the split.
         per_token = "".join(b.decode("utf-8", errors="replace")
                             for b in [b"caf\xc3", b"\xa9"])
-        assert "�" in per_token                  # the old, broken result
+        assert "�" in per_token                  # per-token decoding mangles it
         fixed = "".join(_utf8_pieces(iter([b"caf\xc3", b"\xa9"])))
         assert "�" not in fixed and fixed == "café"
 
@@ -98,7 +98,7 @@ class TestMarkerScrub:
         assert _scrub(["before <unused2> after"]) == "before  after"
 
     def test_truncated_unused_token_at_stream_end(self):
-        # The crash trace ended mid-token: "<unused2" with no closing ">"
+        # The stream ends mid-token: "<unused2" with no closing ">".
         assert _scrub(["text then <unused2"]) == "text then "
 
     def test_marker_straddling_chunks(self):

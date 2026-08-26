@@ -9,9 +9,6 @@ and a module exposing ``register(host)`` / ``unregister()``; the engine hands it
 a `PluginHost` to attach routes, a GUI tab, and settings. The host mounts the
 plugin's routes onto the live FastAPI app with the plugin's capability scope
 applied, and removes them again on disable - so toggling a plugin is instant.
-
-Phase 2 builds the machinery and the management API; the bundled features become
-first-party plugins in Phase 3.
 """
 
 from __future__ import annotations
@@ -50,30 +47,22 @@ def _is_valid_plugin_name(name: Any) -> bool:
     """True iff *name* is a legal plugin id: ONE path component, shaped like an
     identifier once hyphens are folded to underscores.
 
-    This is deliberately the SAME rule ``parse_spec`` applies to a manifest's
-    ``[plugin] name`` (see below), so the id that names a directory and the id
-    inside the manifest cannot drift. It is enforced at the two places a name
-    becomes a path (``_installed_dir`` / ``_store_dir``) because those feed
-    ``shutil.rmtree``/``copytree``/``rename``: the id arrives from the CLI and
-    from the HTTP ``{name}`` path param, and starlette's path-param regex is
-    ``[^/]+`` while uvicorn unquotes before routing - so ``..%5Coutside``
-    reaches a handler as the single segment ``..\\outside``.
+    The SAME rule ``parse_spec`` applies to a manifest's ``[plugin] name``, and
+    it is enforced at the two places a name becomes a path (``_installed_dir``
+    / ``_store_dir``).
     """
     if not name or not isinstance(name, str):
         return False
     # isidentifier() rejects every separator, dot, space and leading digit, so
-    # '.', '..', '../x', 'a/b' and a drive-qualified path are all refused. The
+    # '.', '..', '../x', 'a/b' and a drive-qualified path are all refused; the
     # Path(name).name comparison re-checks that the id is a single path
-    # component. This is a SHAPE check, not a uniqueness one: 'MyTool' is legal
-    # and names the same directory as 'mytool' on a case-insensitive
-    # filesystem.
+    # component. A SHAPE check, not a uniqueness one: 'MyTool' names the same
+    # directory as 'mytool' on a case-insensitive filesystem.
     return name == Path(name).name and name.replace("-", "_").isidentifier()
 
 
 def _check_plugin_name(name: str) -> str:
-    """Return *name* if it is a legal plugin id, else raise ValueError. Raising
-    (rather than an HTTP error) is deliberate: the CLI, the MCP tools and the
-    HTTP routes all reach these helpers, and only the routes may speak HTTP."""
+    """Return *name* if it is a legal plugin id, else raise ValueError."""
     if not _is_valid_plugin_name(name):
         raise ValueError(f"invalid plugin name: {name!r}")
     return name
@@ -91,28 +80,15 @@ def _reject_source_links(src: Path) -> None:
     """Refuse an untrusted plugin source tree that contains ANY link (symlink or
     Windows directory junction). Raises ValueError.
 
-    Copying such a tree with ``shutil.copytree``'s default ``symlinks=False``
-    DEREFERENCES the link, flattening the target file's CONTENTS into the
-    installed plugin dir - and a plugin's declared assets dir is then served by
-    a StaticFiles mount, so the link never has to be followed at read time for
-    the data to escape. ``mount_static``'s own resolve()-based guard cannot see
-    this: by then the bytes are an ordinary file.
+    ANY link, not merely one that escapes. ``shutil.copytree``'s default
+    ``symlinks=False`` DEREFERENCES a link, flattening the target file's
+    CONTENTS into the installed plugin dir, and on Windows ``copytree`` demotes
+    a directory JUNCTION to a non-symlink and recurses into it, so
+    ``symlinks=True`` neither preserves a junction nor bounds a junction cycle.
+    An ABSOLUTE link whose target sits inside the source resolves inside it and
+    passes an escape check, yet is copied verbatim.
 
-    The rule is ANY link, not merely one that escapes, and that is deliberate.
-    An escape-only rule does not hold on Windows: ``shutil.copytree`` demotes a
-    directory JUNCTION to a non-symlink and recurses into it on purpose
-    (stdlib shutil.py, "Special check for directory junctions, which appear as
-    symlinks but we want to recurse"), so ``symlinks=True`` does NOT preserve a
-    junction and does NOT bound a junction cycle. Measured: a junction pointing
-    back at the source root produced a 63-level nested copy before failing on
-    path length. ``mklink /J`` needs no elevation, while ``os.symlink`` does, so
-    the junction is the MORE reachable primitive of the two.
-
-    Rejecting every link also makes the installed tree self-contained plain
-    files, which an escape-only rule does not: an ABSOLUTE link whose target sits
-    inside the source still resolves inside it, passes an escape check, and is
-    then copied verbatim so the installed plugin keeps pointing at the operator's
-    source directory.
+    The result is an installed tree of self-contained plain files.
     """
     root = Path(src).resolve()
     try:
@@ -127,9 +103,7 @@ def _reject_source_links(src: Path) -> None:
             st = entry.stat(follow_symlinks=False)
             # A Windows junction reports is_symlink() False, so its reparse tag
             # is what detects it. Only the two tags that alias another path are
-            # tested, not the broader FILE_ATTRIBUTE_REPARSE_POINT bit, which
-            # also covers non-aliasing reparse points such as a Windows Store
-            # AppExecLink.
+            # tested, not the broader FILE_ATTRIBUTE_REPARSE_POINT bit.
             tag = getattr(st, "st_reparse_tag", 0)
             is_link = entry.is_symlink() or tag in _ALIASING_REPARSE_TAGS
         except OSError as e:          # unreadable/malformed reparse point
@@ -223,8 +197,8 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
     """Parse a plugin.toml in *plugin_dir* into a PluginSpec. Raises ValueError
     on an invalid manifest. When *warnings* is given, non-fatal manifest
     problems (unknown/misspelled keys in [plugin] or [surface]) are appended to
-    it as human-readable strings - surfaced, never escalated: a plugin with an
-    unknown key must still parse and load (LM-DA-007)."""
+    it as human-readable strings. A plugin with an unknown key still parses and
+    loads."""
     manifest = plugin_dir / "plugin.toml"
     if not manifest.is_file():
         raise ValueError(f"no plugin.toml in {plugin_dir}")
@@ -240,8 +214,7 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
     if not name or not isinstance(name, str) or not name.replace("-", "_").isidentifier():
         raise ValueError(f"{manifest}: invalid or missing plugin name")
 
-    # [tools] exports must be a list of strings, matching the legacy loader's
-    # check and message shape.
+    # [tools] exports must be a list of strings.
     _tools = data.get("tools", {})
     exports = _tools.get("exports", []) if isinstance(_tools, dict) else []
     if not (isinstance(exports, list) and all(isinstance(t, str) for t in exports)):
@@ -420,21 +393,17 @@ class PluginHost:
         ``/plugins/<name>`` prefix. The engine calls this right after
         ``register(host)`` so any plugin that declares ``assets_dir`` /
         ``client_entry`` serves its assets without having to call
-        ``mount_static`` itself - otherwise the SPA's ``import()`` of the client
-        entry 404s silently (api_state already advertises ``assets_base`` for
-        such a plugin, so serving it keeps the two in sync). Idempotent: a plugin
-        that DID mount the prefix in register() short-circuits here. Best-effort:
-        an absent assets_dir is ignored, never fatal."""
+        ``mount_static`` itself. Idempotent: a plugin that DID mount the prefix
+        in register() short-circuits here. Best-effort: an absent assets_dir is
+        ignored, never fatal."""
         surface = self._spec.surface
         if not surface or not surface.assets_dir:
             return None
         try:
             return self.mount_static(surface.assets_dir)
         except ValueError as e:
-            # Best-effort: keep serving the rest of the plugin. mount_static
-            # raises both for an absent assets_dir and for one that escapes the
-            # plugin dir; log the exception message, which distinguishes the
-            # two, at debug.
+            # Best-effort: keep serving the rest of the plugin, logging at debug
+            # which of mount_static's two failures occurred.
             _log.debug("plugin %s: assets_dir %r not mounted (%s); its client "
                        "entry will 404", self._spec.name, surface.assets_dir, e)
             return None
@@ -443,13 +412,10 @@ class PluginHost:
         """Run *callback* once the server's event loop is running.
 
         On a stock server start, plugins register() before uvicorn creates the
-        loop, so loop-dependent work started here (e.g. the jobs scheduler)
-        used to no-op silently and never run (memory-audit 2026-07-02 C2).
-        With no running loop the callback is queued and the app lifespan runs
-        it; with a running loop (plugin enabled at runtime via the management
-        API) it runs immediately, so runtime toggling behaves as before.
-        Failures are logged, never raised (a bad plugin must not take the
-        server down)."""
+        loop. With no running loop the callback is queued and the app lifespan
+        runs it; with a running loop (a plugin enabled at runtime via the
+        management API) it runs immediately. Failures are logged, never
+        raised."""
         import asyncio
         try:
             asyncio.get_running_loop()
@@ -491,11 +457,8 @@ class PluginHost:
         plugin_settings_* helpers).
 
         Validates the SHAPE up front - real PluginSettingField instances with a
-        widget settings_schema.Widget actually knows - so a plugin author's
-        mistake fails loudly at register() time instead of silently never
-        rendering (contrast has_scope/require_scope above: those raise because
-        the capability genuinely cannot be implemented here; this raises
-        because the input is malformed, the capability itself is real)."""
+        widget settings_schema.Widget actually knows - so a malformed field
+        raises at register() time instead of silently never rendering."""
         from localm.settings_schema import all_widgets
         widgets = all_widgets()
         for f in fields:
@@ -524,13 +487,10 @@ class PluginHost:
     def _own_config_key(self, name: Optional[str]) -> str:
         """Confine plugin config r/w to the plugin's OWN block.
 
-        A plugin must not read or tamper with ANOTHER plugin's persisted settings
-        through the Host API, even under the install=owner-trust model: cross-plugin
-        config access is a compartmentalisation / least-privilege break (a buggy or
-        supply-chain-compromised plugin could corrupt or exfiltrate a sibling's
-        config). ``name`` is accepted for backward compatibility (a plugin passing
-        its own name is fine) but a DIFFERENT name is refused - it resolves to this
-        plugin's own name, and the attempt is surfaced (we do not hide it)."""
+        A plugin cannot read or write ANOTHER plugin's persisted settings through
+        the Host API. ``name`` is accepted for backward compatibility (a plugin
+        passing its own name is fine); a DIFFERENT name resolves to this plugin's
+        own name, and the attempt is logged."""
         if name is not None and name != self._spec.name:
             from localm.debuglog import logger as _dbg
             _dbg.warning(
@@ -575,11 +535,8 @@ class PluginHost:
 
         Wrap this around the actual chat_stream/complete call - never around a
         bare engine()/inference_engine access used only to check .loaded or read
-        a name. idle-unload cannot otherwise tell a plugin genuinely driving the
-        model apart from one that merely looked at it, and a model can be
-        unloaded mid-task on a quiet server (no concurrent HTTP request) as a
-        result. See localm.inference.http_server.driving_engine for the full
-        mechanism (why active_requests, not just a timestamp, is required)."""
+        a name. See localm.inference.http_server.driving_engine for the
+        mechanism."""
         from localm.inference.http_server import driving_engine as _driving_engine
         return _driving_engine(engine if engine is not None else self.engine())
 
@@ -730,18 +687,15 @@ class PluginManager:
     def get_all_plugin_settings(self) -> list[dict]:
         """Settings sections contributed by currently ACTIVE (loaded) plugins
         via host.add_settings(), one entry per plugin that registered at least
-        one field. Mirrors get_all_model_roles's aggregation shape.
+        one field.
 
         Fields are returned as-is (PluginSettingField objects, not yet
-        resolved against config or filtered for a caller's ownership) -
-        GET/POST /v1/plugins/<name>/settings do that per-request, exactly like
-        media_schema_json/tts_schema_json take the config block and is_owner
-        as call-time arguments rather than baking them in here.
+        resolved against config or filtered for a caller's ownership);
+        GET/POST /v1/plugins/<name>/settings do that per-request.
 
         Disabling a plugin drops its whole loaded entry (_unload pops it from
         _loaded and unmounts the host), so a disabled plugin's fields vanish
-        from this list automatically - the same mechanism that already
-        unmounts its routes, with no separate cleanup needed here."""
+        from this list automatically."""
         out = []
         for name, entry in self._loaded.items():
             spec, module, host, uniq = entry
@@ -757,8 +711,7 @@ class PluginManager:
     def run_startup_callbacks(self) -> None:
         """Run every queued startup callback once. Called by the app lifespan
         with the event loop running. Best-effort per callback: one plugin's
-        failure is logged (rule 5: discoverable, not silent) and must not stop
-        the others or the server."""
+        failure is logged and does not stop the others or the server."""
         callbacks, self._startup_callbacks = self._startup_callbacks, []
         for name, cb in callbacks:
             try:
@@ -771,14 +724,10 @@ class PluginManager:
         """Discover INSTALLED plugins only (the installed folder). The store shelf
         is never discovered - it is just the source for install().
 
-        Self-heals preinstalled/protected plugins (chat) onto disk first. Without
-        this, a data dir where the server/GUI has never started (only headless CLI
-        commands like `plugin install X` have run) never gets chat physically
-        provisioned - `_ensure_preinstalled` was previously only called from
-        `load_enabled()` (the server-start path), so `missing_requires`/
-        `_installed_set` saw chat as absent and every CLI dependency check on a
-        plugin that `requires = ["chat"]` (e.g. jobs) falsely reported it as not
-        installed, even though chat is always supposed to be present."""
+        Self-heals preinstalled/protected plugins (chat) onto disk first, so a
+        data dir where only headless CLI commands have run still has chat
+        physically provisioned before `missing_requires` / `_installed_set`
+        read the installed set."""
         self._ensure_preinstalled()
         self._specs = {}
         prior = self._discover_errors        # for change-only warning logs below
@@ -845,12 +794,10 @@ class PluginManager:
     def cli_entries(self) -> list[tuple[str, str]]:
         """(name, "module.path:attr") for every first-party plugin that
         declares a CLI entry point in its manifest's ``cli`` key, in catalog
-        order. Read from the bundled store (NOT the installed set): a
-        first-party CLI command like ``localm coder`` must stay reachable
-        regardless of plugin install/enable state - only its pip extras
-        (ImportError) gate it, matching cli/maintenance.py's existing
-        try/except contract. Lets shipping a new first-party plugin with a
-        CLI surface skip adding a new hardcoded wiring block."""
+        order. Read from the bundled store (NOT the installed set), so a
+        first-party CLI command like ``localm coder`` stays reachable
+        regardless of plugin install/enable state; only its pip extras
+        (ImportError) gate it."""
         from localm.plugins import catalog as _cat
         order = {e.name: i for i, e in enumerate(_cat.CATALOG)}
         out = []
@@ -905,9 +852,8 @@ class PluginManager:
 
         Each plugin is loaded sequentially and reported as it goes: a line is
         logged (``localm.plugins`` logger) and, if given, *on_event* is called
-        ``on_event(name, status, error)`` with status "loaded" or "failed" - the
-        GUI uses this to show load progress (U2). A raising callback is ignored
-        so it can never break startup."""
+        ``on_event(name, status, error)`` with status "loaded" or "failed". A
+        raising callback is ignored so it can never break startup."""
         self._ensure_preinstalled()                # first-run: provision chat etc.
         self._refresh_installed_builtins()         # upgrade: re-copy stale builtins
         self.discover()
@@ -989,8 +935,7 @@ class PluginManager:
     def _maybe_fire_first_use(self, name: str) -> None:
         """Invoke the ``on_first_use`` lifecycle hook exactly once per plugin - the
         first time it is loaded (its first activation). Persisted in config so it
-        does not re-fire on every server start. Previously ``on_first_use`` was
-        reserved in the contract but never invoked - a dead promise (REC-ONFIRSTUSE)."""
+        does not re-fire on every server start."""
         # Only plugins that define on_first_use are tracked here, so the rest
         # never trigger a config write on their first load.
         entry = self._loaded.get(name)
@@ -1031,8 +976,8 @@ class PluginManager:
 
     def _invoke_hook(self, name: str, hook_name: str, **kwargs) -> None:
         """Call an optional plugin lifecycle hook if the loaded module defines it.
-        Best-effort (mirrors on_uninstall): a hook error never blocks the action,
-        but it is never SILENT either (rule 5) - see the handler below."""
+        Best-effort: a hook error is logged at WARNING and never blocks the
+        action."""
         entry = self._loaded.get(name)
         if not entry:
             return
@@ -1059,11 +1004,7 @@ class PluginManager:
 
         Returns True only if THIS call created the directory. The caller must
         pass that through to _provision_and_verify's rollback: rolling back a
-        directory we did not create is destructive, and it is the mechanism
-        behind two separate data-loss bugs (a traversing id resolving onto a
-        sibling of the plugins root, and - on a case-insensitive filesystem - an
-        id like 'MyTool' whose is_file() probe matches an already-installed
-        'mytool', so the rollback rmtree'd the real plugin and its data)."""
+        directory this call did not create is destructive."""
         import shutil
         dest = self._installed_dir(name)
         if (dest / "plugin.toml").is_file():
@@ -1264,13 +1205,12 @@ class PluginManager:
     def _reject_scope_collision(self, spec0: PluginSpec) -> None:
         """Refuse a third-party manifest whose scope collides with a kernel
         capability, a first-party plugin's scope, a privileged scope, or
-        another already-installed plugin's scope (LM-DA-019). A manifest that
-        omits ``scope`` defaults to the plugin's own NAME
+        another already-installed plugin's scope. A manifest that omits
+        ``scope`` defaults to the plugin's own NAME
         (``PluginSpec.__post_init__``), so this triggers via a plausible
         plugin name like "rag"/"web"/"voice", not only a deliberate
         ``scope = "chat"`` line: ``mount_router`` gates every route the
-        plugin registers on this raw string, so an unnoticed collision would
-        silently widen what every key already holding that scope can reach."""
+        plugin registers on this raw string."""
         from localm import scopes as S
         scope = spec0.scope
         # all_known_scopes() is KERNEL_SCOPES | BUILTIN_PLUGIN_SCOPES |
@@ -1291,8 +1231,7 @@ class PluginManager:
 
     def _copy_third_party_source(self, source: Path, *, force: bool):
         """Validate + copy a third-party plugin source dir into the installed
-        folder. ``install_external()``/``set_installed_from_dir()`` did this
-        almost verbatim (PLUGIN-ENGINE-1). Returns (parsed spec, dest dir)."""
+        folder. Returns (parsed spec, dest dir)."""
         import shutil
         src = Path(source)
         # Reject links before anything reads a file out of the untrusted source
@@ -1328,10 +1267,7 @@ class PluginManager:
     def _provision_and_verify(self, name: str, *, rollback_on_fail: bool = True,
                               fail_verb: str = "could not be installed") -> None:
         """Re-discover after a copy landed in the installed folder and confirm
-        the manifest actually parses, rolling back the copy on failure
-        (PLUGIN-ENGINE-2: ``install()``/``install_external()``/
-        ``set_installed_from_dir()``/``set_installed_state()`` all repeated
-        this 'provision, then verify-or-rollback' sequence)."""
+        the manifest actually parses, rolling back the copy on failure."""
         self.discover()
         if name not in self._specs:
             detail = self._discover_errors.get(name, "bad manifest")
@@ -1340,11 +1276,11 @@ class PluginManager:
             raise ValueError(f"plugin {name!r} {fail_verb}: {detail}")
 
     def _resolve_missing_plugin_error(self, name: str, *, hint_ok: bool = True) -> Exception:
-        """The 'not installed -> is it at least known (ValueError with an
-        install hint) or truly unknown (KeyError)' resolution ``enable()``/
-        ``set_enabled_state()`` both repeated (PLUGIN-ENGINE-3). *hint_ok*
-        suppresses the install hint for disable (``set_enabled_state(on=False)``),
-        where 'install it first' makes no sense."""
+        """Resolve 'not installed' into a ValueError with an install hint (the
+        plugin is at least known) or a KeyError (truly unknown). *hint_ok*
+        suppresses the install hint for disable
+        (``set_enabled_state(on=False)``), where 'install it first' makes no
+        sense."""
         from localm.plugins import catalog as _cat
         if hint_ok and (_cat.get(name) or self._store_dir(name)):
             return ValueError(f"plugin {name!r} is not installed; install it first")
@@ -1411,9 +1347,8 @@ class PluginManager:
         self._set_enabled(name, True)
 
     def _require_deps_installed(self, name: str) -> None:
-        """Refuse to enable a plugin whose declared ``requires`` are not installed.
-        Previously 'requires' was surfaced (a print/GUI warning) but never enforced,
-        so a plugin could load with an unmet dependency (REC-PLUGIN-REQUIRES)."""
+        """Refuse to enable a plugin whose declared ``requires`` are not
+        installed."""
         missing = self.missing_requires(name)
         if missing:
             plural = "s" if len(missing) > 1 else ""
@@ -1603,8 +1538,7 @@ class PluginManager:
         is still disabled and unloaded, but some of its files remain on disk; see
         the WARNING logged by _remove_installed_dir / _delete_plugin_data for the
         concrete cause. A caller must never report bare success without checking
-        this return value (AGENTS.md rule 5: a privacy step that fails must never
-        report success). KeyError if wholly unknown."""
+        this return value. KeyError if wholly unknown."""
         self.discover()
         spec = self._specs.get(name)
         was_installed = name in self._installed_set()
@@ -1624,9 +1558,7 @@ class PluginManager:
                 except Exception as e:
                     # Best-effort teardown; the primary uninstall proceeds. A
                     # failed disable leaves dep enabled with a missing
-                    # dependency, which the enable guard
-                    # (_require_deps_installed) and api_state's
-                    # missing_requires report on the next start.
+                    # dependency, reported by the enable guard and api_state.
                     _log.debug("could not fully disable dependent plugin %s during "
                                "cascade uninstall of %s: %s", dep, name, e)
         entry = self._loaded.get(name)
@@ -1660,10 +1592,9 @@ class PluginManager:
         """Delete the plugin's data_subdir. Returns True iff it is confirmed gone
         afterwards (or there was nothing to delete); False if a security refusal
         (data_subdir escapes the data dir) or a removal failure (locked file, AV
-        hold, permission denial) leaves it on disk - the caller (uninstall())
+        hold, permission denial) leaves it on disk. The caller (uninstall())
         must fold this into its reported result rather than treating a removed
-        installed-dir as the whole story (rule 5: a privacy step that fails must
-        never report success)."""
+        installed-dir as the whole story."""
         import shutil
         from localm.config import home_dir
         if not spec.data_subdir:
@@ -1777,10 +1708,9 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
 
     def _valid_name_or_404(name: str) -> None:
         """A ``{name}`` that is not a legal plugin id can never match a plugin,
-        so it is a 404. Called BEFORE each handler's try block on purpose: the
-        handlers catch broad ``Exception`` to turn a failure into a 400, which
-        would otherwise downgrade this 404. The engine rejects such an id again
-        at the path join (_installed_dir); this only fixes the status code."""
+        so it is a 404. Called BEFORE each handler's try block, which catches
+        broad ``Exception`` and would otherwise turn this into a 400. The engine
+        rejects such an id again at the path join (_installed_dir)."""
         if not _is_valid_plugin_name(name):
             raise HTTPException(404, f"No such plugin: {name}")
 
@@ -1805,11 +1735,8 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     async def install_external_plugin_engine(body: dict):
         """Install a THIRD-PARTY plugin from a local directory (the GUI's
         External plugins card). The HTTP sibling of `localm plugin install
-        <dir>`: same manager call, so the two cannot drift. Copy + verify only,
-        no live mount - the plugin loads on the next server start, which is what
-        the GUI tells the user (install_external() would mount it live, but it
-        rolls back any plugin without a loadable register entry, which would
-        reject the legacy entry=/[tools]-exports plugins this card is for)."""
+        <dir>`, using the same manager call. Copy + verify only, no live mount:
+        the plugin loads on the next server start."""
         from pathlib import Path as _P
         source = (body or {}).get("source", "")
         if not source:

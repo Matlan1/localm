@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Role presets for spawned sub-agents: narrowed toolsets that only ever subtract.
 
-Before roles existed, ``spawn_agent`` handed the child the parent's entire
-toolset, so a child asked only to "review this diff" still held write_file,
-run_shell and git_push. ``build_subagent_system_prompt`` had been written to give
-a child a specialised role but was never wired up (zero callers), and it printed
-the RAW cwd, so wiring it in as-was would have leaked the absolute machine path
-and OS username into the prompt (AGENTS.md rule 2).
+Without roles, ``spawn_agent`` hands the child the parent's entire toolset, so a
+child asked only to "review this diff" still holds write_file, run_shell and
+git_push. ``build_subagent_system_prompt`` also prints the RAW cwd, which would
+put the absolute machine path and OS username into the prompt.
 
 These tests drive REAL parent and child Agent objects through the REAL dispatch
 path (``_execute_tool``, exactly what ``run_task``/``_loop`` call), never a mock
@@ -264,9 +262,9 @@ class TestModelEmittedRoleReachesTheChild:
 
 class TestChildPromptHygiene:
     def test_child_prompt_never_contains_the_raw_absolute_cwd(self, tmp_path):
-        """The bug that made the dead builder unwirable: it interpolated {cwd}
-        directly, so the absolute machine path and OS username went into the
-        prompt (and thus into anything the model echoes back)."""
+        """A builder that interpolates {cwd} directly puts the absolute machine
+        path and OS username into the prompt, and thus into anything the model
+        echoes back."""
         for role in ROLE_PRESETS:
             _, child = _spawn_child(tmp_path, role=role)
             prompt = child._system_prompt
@@ -278,8 +276,8 @@ class TestChildPromptHygiene:
 
     def test_codebase_map_header_is_home_anchored_too(self, tmp_path):
         """The map is only emitted for a NON-EMPTY project, so an empty tmp_path
-        would not exercise it. Its header printed the raw absolute root into the
-        same prompt, undoing the anchoring three lines above it."""
+        would not exercise it. Its header must not print the raw absolute root
+        into the same prompt, undoing the anchoring three lines above it."""
         (tmp_path / "app.py").write_text("def main():\n    return 1\n")
         _, child = _spawn_child(tmp_path, role="reviewer")
         prompt = child._system_prompt
@@ -311,9 +309,9 @@ class TestChildPromptHygiene:
         assert ROLE_PRESETS["reviewer"].mission[:40] in reviewer._system_prompt
 
     def test_child_prompt_keeps_the_full_agent_safety_sections(self, tmp_path):
-        """A role must not DOWNGRADE the child. The dead lean builder produced a
-        ~500-char prompt with no RULES and no untrusted-content framing; the
-        child keeps the full prompt and gains the role brief on top."""
+        """A role must not DOWNGRADE the child. A lean builder producing a
+        ~500-char prompt with no RULES and no untrusted-content framing is the
+        failure; the child keeps the full prompt and gains the role brief on top."""
         _, child = _spawn_child(tmp_path, role="reviewer")
         prompt = child._system_prompt
         assert "RULES" in prompt
@@ -321,8 +319,8 @@ class TestChildPromptHygiene:
         assert "AVAILABLE TOOLS" in prompt
 
     def test_narrowed_child_is_not_told_to_use_tools_it_cannot_call(self, tmp_path):
-        """REC-N1-PROSE: advertising a disabled capability wastes turns and is a
-        confusing info-leak. Every role disables spawn_agent and run_shell."""
+        """Advertising a disabled capability wastes turns and is a confusing
+        info-leak. Every role disables spawn_agent and run_shell."""
         _, child = _spawn_child(tmp_path, role="reviewer")
         prompt = child._system_prompt
         assert "use spawn_agent to delegate" not in prompt

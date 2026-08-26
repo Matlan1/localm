@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm.selfclient: the self-authenticated loopback HTTP helper hoisted out
-of five independent copies (RAG-2 / VRAM-GPU-1) - rag/plug.py's three
-_make_self_* factories and vram.py's unload_chat_for_media/reload_chat_after_media.
-Regression: every one of those call sites must go through this single
-implementation of the auth-header + TLS-verify setup, not a re-copied one.
+"""localm.selfclient: the self-authenticated loopback HTTP helper shared by
+rag/plug.py's three _make_self_* factories and vram.py's
+unload_chat_for_media/reload_chat_after_media. Every one of those call sites
+must go through this single implementation of the auth-header + TLS-verify
+setup.
 """
 
 import requests
@@ -44,11 +44,8 @@ def test_builds_auth_header_from_env_key(monkeypatch):
 def test_builds_auth_header_from_persisted_key_file(monkeypatch):
     """A keyed server whose owner key lives in auth.key (``localm key generate`` /
     the launcher) but NOT in the environment must still authenticate its OWN
-    loopback self-calls. Pre-fix self_request read ``LOCALM_API_KEY`` only, so on
-    such a server RAG self-embedding got a 401 and silently degraded to
-    lexical-only while the embedding model sat ready on disk (memory-audit
-    2026-07-02 cluster 19). Now the key is resolved via ``auth.get_api_key()``
-    (env, then the persisted auth.key)."""
+    loopback self-calls: the key is resolved via ``auth.get_api_key()`` (env,
+    then the persisted auth.key)."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     from localm import auth
     auth.set_api_key("file-only-key-123")   # writes <throwaway home>/auth.key
@@ -94,10 +91,9 @@ def test_no_auth_header_in_open_mode(monkeypatch):
 
 
 def test_open_mode_uses_instance_token_when_no_key_configured(monkeypatch):
-    """#1114: an open (keyless) server's own self-call (the chat<->media VRAM
-    handover) sent no Authorization header at all, so http_server.py's
-    open-mode management gate 403'd it - a permanent no-op on the default
-    configuration. Mirrors read_activity's instance_token fallback (#953)."""
+    """An open (keyless) server's own self-call (the chat<->media VRAM handover)
+    must carry an Authorization header, or http_server.py's open-mode management
+    gate 403s it. Mirrors read_activity's instance_token fallback."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}
 
@@ -146,8 +142,7 @@ def test_passes_json_payload_through(monkeypatch):
 
 def test_verify_resolved_via_tls_module_for_loopback_https(monkeypatch, tmp_path):
     """A loopback HTTPS self-call must trust this install's own local CA (not
-    plain True/system trust), the same as every former call site did via
-    localm.tls.requests_verify - only now resolved in one place."""
+    plain True/system trust), resolved via localm.tls.requests_verify."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     ca = tmp_path / "ca.crt"
     ca.write_text("fake-ca")

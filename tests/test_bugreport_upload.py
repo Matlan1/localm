@@ -82,14 +82,12 @@ def test_upload_report_posts_and_returns_issue_url():
 
 
 def test_upload_report_strips_edit_disclaimer_from_body():
-    """LM-DA-PUBTEXT: build_report()'s "you can edit anything above before
-    sending" disclaimer (and the maintainer's email it names) is TRUE for a
-    human reading the saved file or a downloaded copy - it stops being true,
-    and re-publishes the email, the instant the SAME text is what actually
-    got uploaded into a PUBLIC GitHub issue. Stripping at this exact choke
-    point, the one every caller (report_failure, inference/routes/admin.py)
-    flows through, mirrors the existing title-scrub test above and covers
-    every current and future caller the same way."""
+    """build_report()'s "you can edit anything above before sending"
+    disclaimer (and the maintainer's email it names) is TRUE for a human
+    reading the saved file or a downloaded copy. It stops being true, and
+    re-publishes the email, once the SAME text is what actually got uploaded
+    into a PUBLIC GitHub issue, so it is stripped at the upload choke point
+    every caller (report_failure, inference/routes/admin.py) flows through."""
     from localm import bugreport as br
 
     real_report = br.build_report("image gen froze", context={"operation": "run"})
@@ -117,8 +115,7 @@ def test_upload_report_strips_edit_disclaimer_from_body():
 
 def test_upload_report_body_without_footer_is_unaffected():
     """A body that never carried the disclaimer (e.g. a hand-typed test body,
-    or a user who deleted the footer themselves) uploads byte-for-byte, so
-    the strip can never be mistaken for a content-mangling step."""
+    or a user who deleted the footer themselves) uploads byte-for-byte."""
     seen = {}
 
     def opener(url, data, headers, timeout):
@@ -133,10 +130,10 @@ def test_upload_report_body_without_footer_is_unaffected():
 
 
 def test_upload_report_scrubs_home_path_in_title():
-    """HON-03/HON-15: the title becomes a PUBLIC GitHub issue title. Scrubbing at
-    the upload choke point means a home path (username) in ANY caller's title is
-    redacted in what is actually SENT on the wire, no matter which caller passed it
-    (report_failure passes the raw summary, the GUI route the raw first line)."""
+    """The title becomes a PUBLIC GitHub issue title. Scrubbing at the upload
+    choke point means a home path (username) in ANY caller's title is redacted in
+    what is actually SENT on the wire, whichever caller passed it (report_failure
+    passes the raw summary, the GUI route the raw first line)."""
     seen = {}
 
     def opener(url, data, headers, timeout):
@@ -251,7 +248,7 @@ def test_cli_menu_no_upload_option_when_unconfigured(tmp_path, monkeypatch, caps
 def test_cli_menu_channels_stable_when_upload_configured(tmp_path, monkeypatch, capsys):
     """With upload configured, the upload option is [1] but email stays [2] and
     the manual/self channel stays [3] - the always-present channels are not
-    renumbered. There is no GitHub-issue option to renumber around any more."""
+    renumbered."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     monkeypatch.setattr(bugreport, "upload_config",
                         lambda: ("https://proxy.example", "tok"))
@@ -349,11 +346,11 @@ def test_endpoint_uploads_on_request(monkeypatch):
 
 
 def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
-    """HON-15 (GUI upload path): drive the REAL /api/bug-report upload route end to
-    end - description -> save_user_report -> build_report -> upload_report -> the
-    network POST - and assert the actual bytes on the wire carry NO username in the
-    title OR the body. Only the socket is faked (real upload_report runs), so nothing
-    between the user's field and the wire is mocked away (tests real behaviour)."""
+    """Drive the REAL /api/bug-report upload route end to end - description ->
+    save_user_report -> build_report -> upload_report -> the network POST - and
+    assert the actual bytes on the wire carry NO username in the title OR the
+    body. Only the socket is faked, so nothing between the user's field and the
+    wire is mocked away."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)

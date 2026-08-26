@@ -6,7 +6,7 @@ the post-swap deps/runtime step run by ``updater.apply``) fails partway.
 Runs ONLY from an explicit user action (``localm update`` / the GUI "Update now"
 button), NEVER automatically. The swap runs in-process inside ``updater.apply()``
 and the caller restarts afterwards (the CLI tells the user; the server re-execs).
-LM-DA-011: the server's automatic restart (``_do_restart`` in
+The server's automatic restart (``_do_restart`` in
 ``localm/inference/http_server.py``) spawns a DETACHED helper process right
 before re-exec'ing (``updater.spawn_health_watchdog()`` ->
 ``scripts/update_watchdog.py``) that polls the relaunched build's own
@@ -76,7 +76,7 @@ def _copy_into(src, dst, name) -> None:
     any PRESERVE_WITHIN sub-tree. A merge, not a replace: *dst* may already exist and
     its preserved sub-trees are left exactly as they are (never read, written, or
     deleted, so a locked provisioned binary is never disturbed). *name* is the
-    top-level entry, used to build install-root-relative paths for the preserve test."""
+    top-level entry, which builds install-root-relative paths for the preserve test."""
     src, dst = Path(src), Path(dst)
     dst.mkdir(parents=True, exist_ok=True)
     for s in src.rglob("*"):
@@ -101,11 +101,10 @@ def _prune(dst, name, *, keep_src=None) -> list:
     Returns a list of human-readable strings, one per FILE that was meant to be removed
     but could NOT be (its unlink raised - e.g. a Windows AV lock on a freshly written
     file). Such a file is left behind STALE, so the caller must SURFACE it rather than
-    report success over it (we do not hide problems): ``rollback()`` folds these into
-    its RuntimeError, ``apply_files()`` logs them. A dir that will not rmdir is NOT
-    reported: the only dirs we attempt to remove are already-empty ones, and a
-    non-empty (or locked) dir left behind strands no functional state - keeping it is
-    the benign ancestor-protection case, not a failure."""
+    report success over it: ``rollback()`` folds these into its RuntimeError,
+    ``apply_files()`` logs them. A dir that will not rmdir is NOT reported: the only
+    dirs attempted are already-empty ones, and a non-empty (or locked) dir left behind
+    strands no functional state."""
     dst = Path(dst)
     keep_src = Path(keep_src) if keep_src is not None else None
     errors = []
@@ -175,15 +174,15 @@ def _unsafe_member(name: str) -> bool:
 def _unsafe_swap_name(name) -> bool:
     """True if *name* is not usable as a top-level swap/rollback entry.
 
-    Stricter than :func:`_unsafe_member`, and for a different reason. A swap name
-    must be exactly ONE component living directly inside the install, because
-    every caller does ``installed / name`` and then rmtree/unlink/copy on the
-    result. ``_unsafe_member`` only answers "would this ESCAPE the extraction
-    root", which is a narrower question, and three shapes slip past it:
+    Stricter than :func:`_unsafe_member`. A swap name must be exactly ONE
+    component living directly inside the install, because every caller does
+    ``installed / name`` and then rmtree/unlink/copy on the result.
+    ``_unsafe_member`` only answers "would this ESCAPE the extraction root",
+    which is a narrower question, and three shapes slip past it:
 
     * ``""`` and ``"."`` do not escape - they COLLAPSE. ``Path(install) / ""``
-      is the install dir itself (verified on 3.12), so ``shutil.rmtree`` on it
-      deletes the entire installation. Escape is not the only way to be lethal.
+      is the install dir itself, so ``shutil.rmtree`` on it deletes the entire
+      installation.
     * A NESTED name (``a/b``) reaches a path the swap set never describes.
     * A ``NEVER_TOUCH`` name is by definition not part of any swap: swap_entries
       excludes them, so a manifest naming one is poisoned by construction. This
@@ -307,9 +306,9 @@ def rollback(backup_dir, installed, names) -> None:
     trips over a locked binary.
 
     Raises RuntimeError listing any restore operation that FAILED, so a failed
-    rollback is NEVER silently reported as a success (we do not hide problems). The
-    backup dir is left intact for manual recovery. Best-effort: it attempts every
-    name even if one fails, then reports the collected failures."""
+    rollback is NEVER reported as a success. The backup dir is left intact for manual
+    recovery. Best-effort: it attempts every name even if one fails, then reports the
+    collected failures."""
     backup_dir, installed = Path(backup_dir), Path(installed)
     errors = []
     for name in names:

@@ -1,28 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""MoE expert placement OBSERVABILITY: n_cpu_moe (test_moe_cpu_placement.py) had
-no way to confirm it actually moved anything - the worker never reported
-llama.cpp's own load placement back to the parent, and even the load-FAILURE
-diagnostic was silently broken. This file covers:
+"""MoE expert placement OBSERVABILITY: without a report from the worker,
+n_cpu_moe gives no way to confirm it actually moved anything. This file covers:
 
   * _MODEL_BUFFER_RE / _CapturedStderr.model_buffers() - parsing llama.cpp's
     own "load_tensors: <backend> model buffer size = N MiB" report, the ONLY
     source for a per-backend weight-placement split (no llama.h API exists
-    for it - verified: no buffer-size introspection function is bound in
+    for it: no buffer-size introspection function is bound in
     llamacpp/_api.py, and none exists to bind).
-  * _capture_stderr's temp-file lifetime: a real, pre-existing bug found
-    while building this - the temp file was unlinked in the context
-    manager's OWN finally block, before the caller (outside the `with`)
-    ever read it, so BOTH the existing load-failure detail (captured.tail())
-    and this file's new success-path placement report would silently return
-    ""/[] forever. Verified live against a real load-failure RuntimeError
-    before the fix (message carried none of the native reason) and after
-    (the real "invalid magic characters" detail appeared). Fixed by reading
-    inside the `with` block instead of after it exits.
+  * _capture_stderr's temp-file lifetime: unlinking the temp file in the
+    context manager's OWN finally block, before a caller outside the `with`
+    ever reads it, makes BOTH the load-failure detail (captured.tail()) and
+    the success-path placement report silently return ""/[] forever. The read
+    happens inside the `with` block instead.
   * GgufWorker.load()'s meta dict carries weight_placement through the
-    isolated-worker process boundary (see test_gguf_worker.py for the
-    worker-level wiring test).
+    isolated-worker process boundary.
   * GgufBackend._load_native() prints a one-line placement summary, gated on
-    n_cpu_moe>0 so an ordinary load stays as quiet as before.
+    n_cpu_moe>0 so an ordinary load stays quiet.
   * A REAL end-to-end load (@pytest.mark.integration) of a genuine tiny MoE
     GGUF through the full GgufBackend -> isolated worker pipeline, proving
     the printed numbers are real and non-trivial - a field-presence test
@@ -50,8 +43,7 @@ def _s(text: str) -> bytes:
 def _dense_gguf(path):
     """A REAL minimal GGUF header for an architecture with NO expert_count
     key - the "no_experts" skip path _apply_cpu_moe reports via
-    MOE_SKIP_MESSAGES. Same construction as test_moe_cpu_placement.py's own
-    _gguf() helper, trimmed to just this one shape."""
+    MOE_SKIP_MESSAGES."""
     kv = [
         ("general.architecture", _T_STRING, "llama"),
         ("llama.block_count", _T_UINT32, 32),
@@ -124,19 +116,17 @@ class TestModelBufferParsing:
         assert llama_mod._CapturedStderr(str(missing)).model_buffers() == []
 
     def test_adversarial_input_stays_linear_time(self, tmp_path):
-        """CodeQL (py/polynomial-redos, PR #1007) correctly flagged an earlier
-        version of _MODEL_BUFFER_RE that used \\S+ for the backend-name group:
+        """A ``\\S+`` backend-name group is a polynomial-ReDoS hazard here:
         captured native stderr is technically uncontrolled data, and a string
         with many "load_tensors:" restart points that never complete the rest
-        of the pattern let \\S+ backtrack across the whole remaining text at
-        EVERY restart point - O(n^2) total. Measured live before the fix:
-        0.019s/0.081s/0.330s/1.140s for n=500/1000/2000/4000 repetitions (a
-        clean quadratic curve, up to 1853x slower than the fixed version at
-        n=4000). [A-Za-z0-9_]+ has no character overlap with "load_tensors:"'s
-        colon or the following literal's leading space, so a failed attempt
-        terminates immediately with no backtracking - this test proves that
-        property directly (wall-clock IS the security property here, not a
-        proxy for one) rather than merely asserting the regex text changed."""
+        of the pattern lets ``\\S+`` backtrack across the whole remaining text
+        at EVERY restart point - O(n^2) total, and measurably quadratic in the
+        number of repetitions. ``[A-Za-z0-9_]+`` has no character overlap with
+        "load_tensors:"'s colon or the following literal's leading space, so a
+        failed attempt terminates immediately with no backtracking. This test
+        proves that property directly (wall-clock IS the security property
+        here, not a proxy for one) rather than merely asserting the regex text
+        changed."""
         import time
         p = tmp_path / "adversarial.log"
         # 20_000 repetitions with no valid completion anywhere; the pattern still
@@ -168,13 +158,12 @@ class TestCaptureStderrLifetime:
         assert buffers == [{"backend": "ROCm0", "mib": 9.0, "is_ram": False}]
 
     def test_reading_after_the_block_exits_is_empty_not_stale(self):
-        """Regression lock for the bug this file's module docstring describes:
-        _capture_stderr unlinks its temp file in its OWN finally, so a caller
-        that reads captured.tail()/.model_buffers() AFTER the `with` block has
-        exited must see ""/[] - never raise, and never silently look like a
-        successful-but-empty read. This is exactly the shape llama.py's load
-        call used to have (reads happened after the block) and no longer does
-        (see the _load_ctx restructuring in llama.py's __init__)."""
+        """_capture_stderr unlinks its temp file in its OWN finally, so a
+        caller that reads captured.tail()/.model_buffers() AFTER the `with`
+        block has exited must see ""/[] - never raise, and never silently look
+        like a successful-but-empty read. llama.py's load call reads inside the
+        block instead (see the _load_ctx restructuring in llama.py's
+        __init__)."""
         with llama_mod._capture_stderr() as captured:
             os.write(2, b"load_tensors: ROCm0 model buffer size =   9.00 MiB\n")
         assert captured.tail() == ""
@@ -217,9 +206,8 @@ class TestLoadFailureDetailSurvivesUnlink:
         _capture_stderr in isolation) with the native call faked to return
         NULL after writing a diagnosable reason to fd 2 - proving the
         RuntimeError's message carries that reason, not just the generic
-        '(run with LOCALM_DEBUG=1 ...)' hint the pre-fix code always fell
-        back to (verified live against this exact code path: a corrupted
-        GGUF's RuntimeError contained zero native detail before this fix)."""
+        '(run with LOCALM_DEBUG=1 ...)' hint it would otherwise fall back
+        to."""
         # Layout-agnostic here: only tensor_buft_overrides is touched, and it is
         # at the same offset in both llama_model_params layouts (guarded by
         # test_moe_cpu_placement.test_tensor_buft_overrides_offset_is_layout_agnostic).
@@ -472,8 +460,8 @@ class TestPlacementSummaryPrint:
         assert "n_cpu_moe=2" in out
 
     def test_silent_when_n_cpu_moe_is_off(self, tmp_path, capsys):
-        """The default (off) load must stay exactly as quiet as before this
-        change - the summary is opt-in observability, not new noise."""
+        """The default (off) load must stay quiet - the summary is opt-in
+        observability, not new noise."""
         b = _backend(tmp_path, n_cpu_moe=0)
         _load(b, weight_placement=[
             {"backend": "ROCm0", "mib": 800.0, "is_ram": False},
@@ -483,8 +471,8 @@ class TestPlacementSummaryPrint:
 
     def test_honest_when_n_cpu_moe_set_but_not_reported(self, tmp_path, capsys):
         """verbose mode or a parse miss reports [] - which must never be
-        silently read as "0 bytes everywhere" (AGENTS.md rule 5): say
-        plainly that it was not reported."""
+        silently read as "0 bytes everywhere": say plainly that it was not
+        reported."""
         b = _backend(tmp_path, n_cpu_moe=2)
         _load(b, weight_placement=[])
         out = capsys.readouterr().out
@@ -493,15 +481,12 @@ class TestPlacementSummaryPrint:
 
 
 class TestMoeSkipReasonPrint:
-    """The message _apply_cpu_moe used to print directly from the ISOLATED
-    CHILD (garbling the parent's spinner - issues/MoE model issues.txt) now
-    renders from the PARENT, from the moe_skip_reason fact carried through
-    GgufWorker.load()'s metadata (see test_gguf_worker.py's
-    test_load_passes_through_moe_skip_reason_from_llamacpp for that leg, and
-    test_moe_cpu_placement.py's test_skip_reasons_never_console_print_from_
-    this_function for proof the child itself stays silent). This class
-    closes the loop: given the fact arrives, does the PARENT actually print
-    the right message."""
+    """The skip message renders from the PARENT, from the moe_skip_reason fact
+    carried through GgufWorker.load()'s metadata; _apply_cpu_moe printing it
+    directly from the ISOLATED CHILD garbles the parent's spinner. The
+    worker-metadata leg and the child's own silence are covered elsewhere;
+    this class closes the loop - given the fact arrives, does the PARENT
+    actually print the right message."""
 
     def test_no_experts_reason_prints_the_exact_message(self, tmp_path, capsys):
         b = _backend(tmp_path, n_cpu_moe=2)
@@ -585,7 +570,7 @@ def test_real_moe_load_reports_nontrivial_placement(capsys):
     the line is present (a field-presence test alone proves plumbing, not
     truth). Checks the SHAPE (positive figures, a plausible backend count)
     rather than hardcoding exact floats, which would break on any other GPU
-    vendor/build than the one this was verified on by hand."""
+    vendor/build."""
     try:
         from localm.inference.backends.llamacpp._loader import load_lib
         load_lib()

@@ -9,11 +9,11 @@ Routes (mounted by the engine, auto-scoped to the ``video`` capability):
   POST   /api/video/file/{name}/move      - move a clip to a folder
 
 Generation runs as a background job streamed through the kernel's /api/jobs/*
-SSE endpoint. It no longer requires the GUI: since ADR-0008 the job registry is
-created by ``attach_engine``, so a headless ``localm serve`` can generate too.
-It still needs this server's own address for the chat/media VRAM handover (see
-``resolve_self_url``), and 503s with that specific reason if it cannot be
-determined. The backend is selected per-plugin (default
+SSE endpoint; the job registry is created by ``attach_engine``, so a headless
+``localm serve`` can generate too. It does need this server's own address for
+the chat/media VRAM handover (see ``resolve_self_url``), and 503s with that
+specific reason when it cannot be determined. The backend is selected
+per-plugin (default
 ComfyUI Wan) and reads this plugin's own config (see backend.py). Ships DISABLED
 by default.
 """
@@ -82,9 +82,8 @@ async def video(req: VideoRequest, request: Request):
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)
 
-    # See the image plugin: the job registry is kernel-level since ADR-0008, so
-    # the real precondition is knowing this server's own address for the VRAM
-    # handover, not the GUI being attached.
+    # The preconditions are a background-job registry and this server's own
+    # address for the VRAM handover.
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
         raise HTTPException(503, "Video generation needs this server's "
@@ -127,12 +126,10 @@ async def video(req: VideoRequest, request: Request):
         if notice:
             job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
-        # REG-532: the gate reads COMBINED free VRAM across a configured GPU split, but
-        # each media model component loads WHOLE onto ONE card (localm ORDERS the cards
-        # via --default-device, never masks - the model still lands on one), so a job that
-        # "fits" in 2x4 GB combined can still OOM on one 4 GB card. When the chosen card
-        # cannot hold it, swap anyway: unloading the chat model frees VRAM on every split
-        # card, including that one.
+        # The gate reads COMBINED free VRAM across a configured GPU split, but
+        # each media model component loads WHOLE onto ONE card. When the chosen
+        # card cannot hold it, swap anyway: unloading the chat model frees VRAM
+        # on every split card, including that one.
         shortfall = media_single_device_shortfall(s)
         if shortfall and not swap:
             swap = True
@@ -182,19 +179,15 @@ async def video(req: VideoRequest, request: Request):
         if ok:
             job.result = out_path.name
             gallery.stamp_owner("video", out_path.name, owner)
-        # The real deliverable is decided right here - mark it before the VRAM
-        # handover below, which is best-effort cleanup that can itself raise
-        # (e.g. a non-comfy backend's free_vram()) and must never be able to
-        # turn a genuinely successful generation into a reported failure (jobs.py
-        # start_fn's mark_outcome contract - the in-process sibling of #1126's
-        # CLI-side outcome sentinel).
+        # The outcome is marked BEFORE the VRAM handover below, which is
+        # best-effort cleanup that can itself raise (e.g. a non-comfy backend's
+        # free_vram()) and must not turn a successful generation into a reported
+        # failure (see jobs.py start_fn's mark_outcome contract).
         job.mark_outcome("done" if ok else "failed")
-        # Restore VRAM on EVERY exit path once we have unloaded the chat model -
-        # success, failure, OR cancel. The old code reloaded only on success, so
-        # a failed or cancelled video gen left the chat model unloaded AND the Wan
-        # backend resident in VRAM (a GPU hang). reload_chat_after_media frees the
-        # backend's VRAM first, then reloads the chat model, so it is the right
-        # restore on the error and cancel paths too. Mirrors image/plug.py.
+        # Restore VRAM on EVERY exit path once the chat model has been unloaded -
+        # success, failure, OR cancel. reload_chat_after_media frees the
+        # backend's VRAM first, then reloads the chat model. Mirrors
+        # image/plug.py.
         if swap:
             from localm.vram import reload_chat_after_media
             reload_chat_after_media(job, self_url, s, _backend, "video", instance_token)
@@ -258,10 +251,9 @@ async def video_move(name: str, req: MoveFileRequest, request: Request):
 async def video_rename(name: str, req: RenameFileRequest):
     """Rename a generated clip (and its metadata sidecar) in place.
 
-    Mirrors the image plugin's rename: confined_name re-confines the CALLER's
-    string to the gallery dir, so a traversal or absolute path is rejected
-    rather than escaping it - require_owner proves ownership of the source
-    artifact, never authority over the destination path."""
+    confined_name re-confines the CALLER's string to the gallery dir, so a
+    traversal or absolute path is rejected: require_owner proves ownership of
+    the source artifact, never authority over the destination path."""
     path = _video_path(name)
     new_name = req.new_name.strip()
     if not new_name:
@@ -309,27 +301,20 @@ async def video_history(request: Request):
 @_router.get("/api/video/comfy-models")
 async def video_comfy_models(request: Request):
     """Model-file slots the active video workflow exposes (for the Workflow
-    panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
-    about unreachability (rule 5) - never a silently-empty picker.
+    panel's model-picker dropdowns), resolved against the live ComfyUI. An
+    unreachable ComfyUI is reported as such, never as an empty picker.
 
     Each slot also carries the localm ``model_type`` its loader node holds, the
     declared role it fills (``role_id``/``role_label`` from
-    ``host.register_model_role``), and ``installed`` - decided by the SAME rule
-    preflight uses to call a model missing, so the picker cannot call a slot fine
-    that generation then refuses. ``roles`` reports every declared role including
-    ones this workflow has no slot for, and ``registry_models`` lists this box's
-    own registered component models by type. Both are answered from the registry,
-    so they are returned even when ComfyUI is unreachable - "we could not ask
-    ComfyUI" is a different answer from "you have nothing" (rule 5), and the
-    panel is no longer a dead end when ComfyUI is down.
+    ``host.register_model_role``), and ``installed``, decided by the same rule
+    preflight uses to call a model missing. ``roles`` reports every declared role
+    including ones this workflow has no slot for, and ``registry_models`` lists
+    this box's own registered component models by type. Both are answered from
+    the registry, so they are returned even when ComfyUI is unreachable.
 
     Resolution is a blocking urlopen of ComfyUI's multi-MB /object_info (10s
-    timeout), so it runs OFF the event loop: inline it stalled every concurrent
-    request server-wide while ComfyUI was slow (REG-638).
-
-    Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
-    urlopen timeout, which now also covers the registry read the role join
-    needs - see the image plugin's identical route for the full rationale."""
+    timeout), so it runs OFF the event loop, bounded a little above that
+    timeout. The same budget covers the registry read the role join needs."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
@@ -337,8 +322,7 @@ async def video_comfy_models(request: Request):
     from localm.plugins.media_roles import plugin_model_roles
     s = _backend.settings(load_config())
     # Read in the request, not in the worker: this walks the plugin manager's
-    # in-memory descriptors (no I/O), and handing app state to a thread is not
-    # something to do for a lookup that costs nothing here.
+    # in-memory descriptors and does no I/O.
     roles = plugin_model_roles(request.app, "video")
     try:
         resolved = await run_in_threadpool_bounded(
@@ -356,9 +340,8 @@ async def video_comfy_launch():
     """Start (or confirm) ComfyUI is up for the video plugin, without running a
     generation - backs the Workflow panel's "Launch ComfyUI" button.
 
-    Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
-    itself will honour, plus a buffer - see the image plugin's identical
-    route for the full rationale."""
+    Bounded at the SAME comfy_launch_timeout ensure_comfy itself honours
+    (comfy_launch_wait_seconds) plus a buffer, never an independent guess."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,

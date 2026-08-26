@@ -1,18 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """scripts/check_hygiene.py check 8: no console.print(...) reaching a module
-that executes inside an isolated child process (see that check's own block
-comment for the full "why" - a native crash there must stay a clean,
-catchable error in the parent, so a child reports facts as data and never
-prints directly).
+that executes inside an isolated child process. A child reports facts as data
+and never prints directly, so a native crash there stays a clean, catchable
+error in the parent.
 
-This existed only as a comment in _hf_worker.py asserting the invariant about
-a DIFFERENT file ("GgufWorker has zero console.print calls, for the identical
-reason") - true when written, and it drifted silently false once, when a
-MoE-placement fix added a direct console.print to code that runs inside the
-GGUF child. These tests pin the thing that makes the check worth having: it
-FIRES on a real violation (a check that has never been red proves nothing),
-respects the allowlist for the one confirmed parent-side exception, and does
-not false-positive on an unrelated ``.print(`` call.
+These tests pin what makes the check worth having: it FIRES on a real
+violation, respects the allowlist for the one confirmed parent-side exception,
+and does not false-positive on an unrelated ``.print(`` call.
 """
 
 import ast
@@ -170,9 +164,8 @@ def test_unrelated_print_calls_are_ignored(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_unparseable_child_module_is_reported_not_skipped(tmp_path, monkeypatch):
-    """A file this gate cannot read is one it cannot vouch for - silently
-    treating it as print-free would let a violation hide behind a syntax
-    error (AGENTS.md rule 5)."""
+    """A file this gate cannot read is one it cannot vouch for: treating it as
+    print-free would let a violation hide behind a syntax error."""
     ch = _load_check_hygiene()
     _pkg(tmp_path, {"inference/backends/llamacpp/llama.py": "def (\n"})
     monkeypatch.setattr(ch, "REPO", tmp_path)
@@ -200,12 +193,10 @@ def test_a_module_in_the_list_that_does_not_exist_is_skipped_quietly(tmp_path, m
 # --------------------------------------------------------------------------- #
 
 def test_the_shipped_tree_has_no_unlisted_child_console_prints():
-    """The whole point: master is clean under the real, hand-verified module
-    list and the real allowlist. If this ever goes red, the fix is to stop
-    the child from printing (report the fact as return data instead) - NOT
-    to grow the allowlist, unless the new site is genuinely, verifiably
-    parent-side (see check 8's block comment for what that verification
-    looks like)."""
+    """The tree is clean under the real, hand-verified module list and the real
+    allowlist. If this goes red, the fix is to stop the child from printing
+    (report the fact as return data instead), NOT to grow the allowlist, unless
+    the new site is verifiably parent-side (see check 8's block comment)."""
     ch = _load_check_hygiene()
     assert ch._child_process_console_print_violations() == []
 

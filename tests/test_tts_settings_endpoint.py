@@ -2,19 +2,15 @@
 """The tts plugin's server-side settings write surface: GET/POST /v1/tts/config
 plus the settings_schema helpers behind them.
 
-Before this, config["plugins"]["tts"] (engine, model, device, dtype, voice,
-speed, library, wasm_paths) was resolved READ-ONLY by the plugin and could only
-be changed by hand-editing config.json - the GUI's voice picker wrote a
-DIFFERENT store (browser localStorage), so a user who picked a voice believed
-they had changed the server-side one and had not (2026-07-22 settings-exposure
-audit).
+config["plugins"]["tts"] holds engine, model, device, dtype, voice, speed,
+library and wasm_paths.
 
 Shape mirrors the per-plugin media config (validate_media_block + POST
 /v1/media/config/{name}): validated in settings_schema, deep-merged into the
 plugin's own block, blank clears an override back to the shipped template
 default. The two fields that become a script/wasm URL in EVERY browser client
-(library, wasm_paths) additionally require an owner (ADMIN) principal, mirroring
-REC-MEDIA-CMD for launch_cmd/api_url.
+(library, wasm_paths) additionally require an owner (ADMIN) principal, as
+launch_cmd/api_url do for a media backend.
 """
 
 import pytest
@@ -267,10 +263,8 @@ def test_post_rejects_unknown_field_and_bad_value(client):
 def test_the_plugin_serves_what_the_settings_endpoint_wrote(env):
     """END TO END: the write surface actually changes what the browser gets.
 
-    The plugin's own /api/tts/config is the resolved config tts.js loads; a save
-    through the settings endpoint must show up there, which is the whole point
-    (before this, the GUI voice picker wrote browser localStorage instead and
-    the server-side voice never moved)."""
+    The plugin's own /api/tts/config is the resolved config tts.js loads, so a
+    save through the settings endpoint must show up there."""
     from types import SimpleNamespace
 
     from fastapi import FastAPI
@@ -306,12 +300,12 @@ def test_write_requires_config_write_scope(client, monkeypatch):
 
 
 def test_a_tts_capability_key_cannot_read_or_write_these_settings(env):
-    """The REASON these routes are core and not on the plugin's own router.
+    """These routes are core, not on the plugin's own router.
 
     Routes mounted by a plugin are auto-scoped to that plugin's capability, so a
-    key that merely grants "may use text-to-speech" would have been able to
-    rewrite the voice model id and the script URL every browser loads. Settings
-    cost config:read / config:write instead."""
+    key that merely grants "may use text-to-speech" would be able to rewrite the
+    voice model id and the script URL every browser loads. Settings cost
+    config:read / config:write instead."""
     from localm import auth, scopes
     from localm.inference.http_server import create_app
 
@@ -342,8 +336,8 @@ def test_active_is_false_when_the_plugin_is_not_installed(client):
 
 def test_script_url_fields_require_an_owner_admin_key(env):
     """library / wasm_paths are loaded as a script + wasm base by EVERY browser
-    client, so a non-owner config:write key must not be able to set them
-    (mirrors REC-MEDIA-CMD for a media backend's launch_cmd / api_url)."""
+    client, so a non-owner config:write key must not be able to set them, the
+    same as a media backend's launch_cmd / api_url."""
     from localm import auth, scopes
     from localm.inference.http_server import create_app
 
@@ -370,10 +364,9 @@ def test_script_url_fields_require_an_owner_admin_key(env):
 
 
 def test_get_hides_library_and_wasm_paths_from_a_config_read_only_key(env):
-    """Regression for pentest finding LM-PT-002: a config:read-scoped,
-    non-owner key must not learn library/wasm_paths (the script/wasm URL
-    every browser loads) from GET /v1/tts/config, even though it may
-    legitimately read every other tts setting."""
+    """A config:read-scoped, non-owner key must not learn library/wasm_paths
+    (the script/wasm URL every browser loads) from GET /v1/tts/config, even
+    though it may legitimately read every other tts setting."""
     from localm import auth, scopes
     from localm.inference.http_server import create_app
 
@@ -393,9 +386,9 @@ def test_get_hides_library_and_wasm_paths_from_a_config_read_only_key(env):
 
 def test_post_response_hides_library_and_wasm_paths_from_a_scoped_writer(env):
     """The write endpoint's own response echoes the plugin's resolved fields
-    back too (e.g. after saving voice) - same leak, same fix: a config:write
-    key that is not an owner must not have library/wasm_paths' value echoed
-    back even for a save that never touched either field."""
+    back too (e.g. after saving voice), so a config:write key that is not an
+    owner must not have library/wasm_paths' value echoed back, even for a save
+    that never touched either field."""
     from localm import auth, scopes
     from localm.inference.http_server import create_app
 

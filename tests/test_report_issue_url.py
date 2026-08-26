@@ -2,17 +2,16 @@
 """The standalone reporter must only ever POST to an http/https endpoint, and
 must show the user WHERE the report is going before they confirm.
 
-scripts/report_issue.py built its outbound Request straight from the URL that
-read_proxy() returned, with no scheme check anywhere in the file. That URL has
-only two producers - the LOCALM_BUGREPORT_URL environment variable and a regex
-over the install's own localm/config.py - so this is NOT remotely reachable and
-these tests do not claim it is; an actor who can set either already controls the
-process or the code. It is cheap defence in depth on a sink that hands whatever
-it is given to urlopen(), plus a visible destination so a redirected reporter
-cannot be silent.
+scripts/report_issue.py builds its outbound Request from the URL read_proxy()
+returns. That URL has only two producers - the LOCALM_BUGREPORT_URL environment
+variable and a regex over the install's own localm/config.py - so this is NOT
+remotely reachable and these tests do not claim it is; an actor who can set
+either already controls the process or the code. It is defence in depth on a sink
+that hands whatever it is given to urlopen(), plus a visible destination so a
+redirected reporter cannot be silent.
 
 The override's documented purpose - pointing the reporter at your own proxy or a
-test double - is preserved exactly: http and https both stay accepted.
+test double - is preserved: http and https both stay accepted.
 """
 
 from __future__ import annotations

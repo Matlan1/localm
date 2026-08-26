@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HTTP route POST /api/rag/collections/{name}/repair (NEW-RAG-INDEX-WARN-SPAM).
+"""HTTP route POST /api/rag/collections/{name}/repair.
 
-Before this route existed, the ONLY remedy for a "needs repair" collection was
-the string "Run 'localm rag repair'" - a GUI user had no button, only a
-pointer to a terminal. This mirrors the CLI command (add with force=True from
-coll.documents()), job-backed and collection-locked like add/upload/reembed
-(Collection.add_paths takes both locks itself), and preserves two things the
-CLI already got right rather than reinventing them:
+Mirrors the CLI command (add with force=True from coll.documents()),
+job-backed and collection-locked like add/upload/reembed (Collection.add_paths
+takes both locks itself), and keeps two behaviours the CLI has:
 
   - the embeddings-loss guard (cli/rag.py's --embed/--yes prompt), here as a
     needs_confirm dry-run response instead of a job, mirroring
@@ -32,11 +29,10 @@ from localm.rag import Collection
 @pytest.fixture
 def repair_app(tmp_path, monkeypatch):
     """A headless rag app (no attach_gui, so no self_url/active_model
-    published) - same shape as test_rag_api_mode.py's api_mode_app. self_embed
-    is therefore None by default, which is exactly what the needs_confirm /
-    no-embedder-available tests need; tests that need an embedder available
-    build vectors directly through the Collection primitive instead (the
-    route's own self_embed is irrelevant to what is already on disk)."""
+    published). self_embed is therefore None by default, which is what the
+    needs_confirm / no-embedder-available tests need; tests that need an
+    embedder available build vectors directly through the Collection
+    primitive."""
     from localm.plugins.engine import PluginManager
     from localm.plugins.gui.jobs import JobManager
     home = tmp_path / "userhome"
@@ -89,10 +85,10 @@ class TestRepairRefusesHonestly:
             assert "corrupt" in r.text.lower()
 
     def test_all_upload_only_refuses_instead_of_a_noop_job(self, repair_app):
-        """residual C: a collection built entirely from uploads has no
-        server-side source add_paths(force=True) could rebuild from - it must
-        refuse with an honest reason, never start a job that would silently
-        touch nothing and report success."""
+        """A collection built entirely from uploads has no server-side source
+        add_paths(force=True) could rebuild from: it must refuse with an honest
+        reason, never start a job that would silently touch nothing and report
+        success."""
         app, home = repair_app
         with TestClient(app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
@@ -198,9 +194,9 @@ class TestRepairEmbeddingsLossGuard:
                 "an explicit confirm means the user accepted the drop")
 
     def test_no_confirm_needed_when_collection_has_no_vectors(self, repair_app):
-        """Nothing at risk (BM25-only already) - must never nag for a confirm
-        that protects nothing, exactly like the CLI's own guard is gated on
-        coll.stats().get('has_vectors')."""
+        """Nothing at risk (BM25-only already): no confirm is requested. The
+        CLI's own guard is gated on coll.stats().get('has_vectors') the same
+        way."""
         app, home = repair_app
         with TestClient(app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})

@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Self-authenticated loopback HTTP client: call THIS server's own API.
 
-Five call sites independently built the same request boilerplate - read
-``LOCALM_API_KEY`` from the environment, set an ``Authorization: Bearer``
-header, and POST to a loopback ``self_url`` with
-``verify=localm.tls.requests_verify(url)`` - to have one part of the running
-server call another: RAG's ``_make_self_embed``/``_make_self_classify``/
-``_make_self_describe_image`` (``plugins/builtin/rag/plug.py``) and the
-chat<->media VRAM swap's ``unload_chat_for_media``/``reload_chat_after_media``
-(``vram.py``). Hoisted here, the same way ``bindhost.py``/``pathsafe.py``
-already hoist other shared kernel-level plumbing, so every consumer shares one
-implementation of the auth/TLS setup instead of five copies that can silently
-drift.
+One implementation of the auth/TLS setup every self-call needs: the
+``Authorization: Bearer`` header (owner key, else the per-instance attach token
+in open mode) and ``verify=localm.tls.requests_verify(url)`` against a loopback
+``self_url``. Consumers include RAG's ``_make_self_embed`` /
+``_make_self_classify`` / ``_make_self_describe_image``
+(``plugins/builtin/rag/plug.py``) and the chat<->media VRAM swap's
+``unload_chat_for_media`` / ``reload_chat_after_media`` (``vram.py``).
 """
 
 from __future__ import annotations
@@ -34,32 +30,21 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None,
       ``"http"``         - some other HTTP status; payload is the code
       ``"unreachable"``  - could not connect; payload is a short reason
 
-    Every non-ok state exists so a caller can say WHICH of them happened.
-    Folding them together, or folding any of them into an empty operation list,
-    would report "nothing is running" on the evidence of never having found
-    out - the failure ADR-0008 exists to remove. An empty list is a real answer
-    and is only ever returned under ``"ok"``.
+    Each non-ok state is distinct, so a caller can say WHICH one happened. An
+    empty list is a real answer and is only ever returned under ``"ok"``.
 
-    Lives here rather than in the CLI because there are now two surfaces that
-    must answer this question identically (``localm status`` and the MCP
-    activity tool), and a second copy of a state machine whose entire value is
-    telling five outcomes apart is exactly the kind of thing that drifts into
-    telling four of them apart.
+    Shared by ``localm status`` and the MCP activity tool, which must answer
+    this question identically.
 
-    *instance_token* (#953): a genuinely OPEN (keyless) server's open-mode
-    middleware needs the caller to prove it is a local process, not a browser -
-    an API key does not exist to send in that mode. The per-instance attach
-    token from the 0600 registry file (``instances.attach_target``/``snapshot``)
-    is that proof; a caller with filesystem access to it is exactly the "local
-    process" principal the middleware means to admit. Used ONLY when no API key
-    is configured, matching the server's own condition for requiring it at all -
-    a protected-mode server keeps using the real key, unaffected.
+    *instance_token*: a genuinely OPEN (keyless) server's open-mode middleware
+    needs the caller to prove it is a local process, and no API key exists to
+    send in that mode. The per-instance attach token from the 0600 registry file
+    (``instances.attach_target``/``snapshot``) is that proof. Used ONLY when no
+    API key is configured; a protected-mode server keeps using the real key.
 
-    *bind_host* is the address that server BOUND (the instance registry
-    records it). Omitted, this dials the IPv4 loopback exactly as before -
-    correct for every bind that answers there. Passed, an IPv6-bound server
-    is dialled on an address it is actually listening on, instead of being
-    reported "unreachable" while it is running perfectly.
+    *bind_host* is the address that server BOUND (the instance registry records
+    it). Omitted, this dials the IPv4 loopback; passed, an IPv6-bound server is
+    dialled on an address it is actually listening on.
     """
     from localm import tls as _tls
     from localm.auth import resolve_bearer_headers
@@ -87,20 +72,13 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None,
 def resolve_self_url(app) -> Optional[str]:
     """This server's own ``/v1`` base URL, or None if it cannot be determined.
 
-    ``app.state.self_url`` is published by ``attach_gui`` only, so before
-    ADR-0008 every self-call (the chat/media VRAM swap, RAG self-embedding) was
-    reachable in GUI mode alone. Now that the background-job registry lives at
-    kernel level, those same paths run under a headless ``localm serve`` too and
-    need an address there.
+    ``app.state.self_url`` is published by ``attach_gui`` only, so under a
+    headless ``localm serve`` the fallback rebuilds it from what
+    ``instances.advertise()`` publishes (``instance_scheme`` /
+    ``instance_port``, both set before uvicorn accepts connections).
 
-    The fallback rebuilds it from what ``instances.advertise()`` publishes
-    (``instance_scheme`` / ``instance_port``, both set before uvicorn accepts
-    connections), which is the same shape the GUI launcher computes.
-
-    Returns None rather than "" when it genuinely cannot tell, so a caller
-    reports an honest "this server cannot determine its own address" instead of
-    handing an empty string to self_request(), which raises a bare ValueError
-    from deep inside a background job.
+    Returns None rather than "" when it cannot tell, so a caller can report
+    that instead of handing an empty string to self_request().
     """
     url = getattr(app.state, "self_url", "") or ""
     if url:
@@ -122,31 +100,21 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
 
     Builds an ``Authorization: Bearer`` header from the ACTIVE owner key
     (``localm.auth.get_api_key`` - the ``LOCALM_API_KEY`` env var, else the
-    persisted ``<home>/auth.key``) when one is configured. Reading env-ONLY
-    was the bug behind memory-audit cluster 19: on a ``localm key generate`` /
-    launcher-keyed server the key lives in auth.key, not the env, so every
-    self-call (RAG self-embed, the chat<->media VRAM swap) got a 401 and RAG
-    silently degraded to lexical-only.
+    persisted ``<home>/auth.key``) when one is configured.
 
     *instance_token*: in OPEN (keyless) mode there is no key to send, and the
     open-mode management gate (``_origin_guard``) requires proof of a local
-    process for state-changing calls like ``/v1/models/unload``/``load`` - an
-    empty ``Authorization`` header 403s there. Same fix as #953's
-    ``read_activity`` (this module): the per-instance attach token from the
-    0600 registry file is that proof, and the gate already accepts it. Used
-    ONLY when no API key is configured, mirroring ``read_activity``'s own
-    condition - a protected-mode server keeps using the real key, unaffected.
+    process for state-changing calls like ``/v1/models/unload``/``load``; an
+    empty ``Authorization`` header 403s there. The per-instance attach token
+    from the 0600 registry file is that proof. Used ONLY when no API key is
+    configured, mirroring ``read_activity``.
 
-    Resolves the TLS verify argument via ``localm.tls.requests_verify`` so a
+    Resolves the TLS verify argument via ``localm.tls.requests_verify``, so a
     loopback HTTPS self-call trusts this install's own local CA.
 
     *base_url* is the caller's already-resolved self-URL (e.g.
-    ``http://127.0.0.1:PORT/v1``) - required, since every caller already has
-    one (published on ``request.app.state.self_url`` or threaded through a
-    job); there is no implicit default to guess. Returns the raw
-    ``requests.Response`` - callers already have their own per-endpoint
-    success/error handling (different payloads, different failure messages),
-    so this never raises for a non-2xx status.
+    ``http://127.0.0.1:PORT/v1``) and is REQUIRED; there is no implicit default.
+    Returns the raw ``requests.Response`` and never raises for a non-2xx status.
     """
     if not base_url:
         raise ValueError("self_request: base_url is required")

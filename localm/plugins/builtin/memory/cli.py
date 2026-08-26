@@ -12,31 +12,22 @@ Subcommands:
   localm memory accept ID / reject ID     resolve one proposal
   localm memory clear [--yes]             erase everything (NOT recoverable)
 
-FORGET IS NOT ARCHIVED, and the distinction is measured rather than assumed:
-``MemoryStore.delete`` is a hard delete that never writes the forgotten sidecar.
-Only prune eviction and an accepted correction archive a record, so ``forgotten``
-lists what localm dropped ON ITS OWN and ``restore`` can only reach those. Saying
-"restorable" on ``forget`` would be a promise ``restore`` cannot keep.
-
-WHY THIS EXISTS. Until now the memory plugin shipped no ``cli`` manifest key, so
-installing it added zero CLI commands and every one of the operations above was
-reachable only from the GUI. The asymmetry that made it worth fixing rather than
-noting: ``localm job add --memory`` schedules unattended consolidation, so the
-terminal could already PRODUCE proposals and evictions that it had no way to read,
-accept, reject or undo.
+FORGET IS NOT ARCHIVED. ``MemoryStore.delete`` is a hard delete that never writes
+the forgotten sidecar. Only prune eviction and an accepted correction archive a
+record, so ``forgotten`` lists what localm dropped ON ITS OWN and ``restore`` can
+only reach those.
 
 NAMESPACE. Every command opens the SAME store the chat routes use -
 ``open_store(principal=None, agent="chat", scope_key="", root=<home>/memory)`` via
-:func:`_store` - because a CLI that opened a different agent, scope_key or root
-would show an empty list and let the user conclude localm has learned nothing about
-them. That is the highest-risk mistake available here, so the one helper is the only
-place any of those four values is written, and ``test_memory_cli.py`` pins CLI and
-route against each other rather than each against a constant.
+:func:`_store`. A CLI that opened a different agent, scope_key or root would show
+an empty list and let the user conclude localm has learned nothing about them, so
+that one helper is the only place any of those four values is written, and
+``test_memory_cli.py`` pins CLI and route against each other.
 
 PRINCIPAL. ``None``, which ``principal_of`` maps to the shared ``"owner"``
-namespace. This matches every write path on the route side, which collapses an
-ADMIN-scoped caller to owner for exactly this reason. A terminal user standing at
-the machine IS the owner; there is no bearer to hash.
+namespace, matching every write path on the route side, which collapses an
+ADMIN-scoped caller to owner. A terminal user standing at the machine IS the
+owner; there is no bearer to hash.
 """
 
 from __future__ import annotations
@@ -55,11 +46,11 @@ def _refuse_if_locked():
 
     A memory write shares its namespace with a running server (its consolidation
     pass, or an edit from the GUI). The store waits a bounded time for that other
-    process and then refuses rather than interleaving with it, so this command's
-    job is to report WHO holds it - which the error already names - instead of
-    showing "localm hit an unexpected error" and saving a bug report for what is a
-    normal, recoverable situation. Same shape, and the same reasoning, as
-    ``localm rag``'s handler for the identical error.
+    process and then refuses rather than interleaving with it, so this command
+    reports WHO holds it - which the error already names - instead of showing
+    "localm hit an unexpected error" and saving a bug report for a normal,
+    recoverable situation. Same shape as ``localm rag``'s handler for the
+    identical error.
 
     Nothing was written when this fires: the store refuses rather than proceeding
     unprotected, so re-running once the other process finishes is always safe."""
@@ -73,10 +64,8 @@ def _refuse_if_locked():
 class _MemoryGroup(click.Group):
     """Applies _refuse_if_locked to every subcommand, present and future.
 
-    Wrapping at the group rather than per command body on purpose: a verb added
-    later would otherwise silently get the traceback-and-bug-report behaviour
-    back, and nothing would flag it - the failure only shows up when a second
-    process happens to hold the namespace."""
+    Wrapped at the group rather than in each command body, so a verb added later
+    does not silently get the traceback-and-bug-report behaviour back."""
 
     def invoke(self, ctx):
         with _refuse_if_locked():
@@ -91,8 +80,8 @@ def main() -> None:
 def _store():
     """The chat memory store, opened exactly as the routes open it.
 
-    The four values here are load-bearing and deliberately not parameterised: see
-    this module's NAMESPACE note.
+    The four values here are load-bearing and are not parameterised: see this
+    module's NAMESPACE note.
     """
     from localm import memory as _mem
     from localm.config import home_dir
@@ -103,19 +92,17 @@ def _embed_fn():
     """The embedding callable, or None when no embedder is available.
 
     None is a NORMAL outcome, not a failure: recall and consolidation fall back to
-    lexical BM25, and the store's own writers all accept ``embed_fn=None``. So no
-    command here requires an embedder to run - a CLI that refused to save a fact
-    because no embedding model was loaded would be worse than one that saves it
-    without a vector and lets the next backfill catch up.
+    lexical BM25, and the store's own writers all accept ``embed_fn=None``. No
+    command here requires an embedder to run; a fact saved without a vector is
+    picked up by the next backfill.
     """
     try:
         from localm.inference.embedder import get_embedder
         emb = get_embedder()
         return emb.embed if emb is not None else None
     except Exception:                                          # noqa: BLE001
-        # Best effort by design. Report it rather than swallowing it, because a
-        # silently vectorless save is a real (if minor) degradation and the user
-        # should be able to correlate it with a broken embedder later.
+        # Best effort. Reported rather than swallowed, so a vectorless save is
+        # visible and can be correlated with a broken embedder later.
         click.echo("Note: no embedding model available, so this runs without "
                    "semantic vectors (lexical fallback).", err=True)
         return None
@@ -124,9 +111,8 @@ def _embed_fn():
 def _fail(msg: str) -> None:
     """Print to stderr and exit non-zero.
 
-    Non-zero matters: these commands are scriptable, and a "no such id" that exited
-    0 would be indistinguishable from a successful forget to anything reading the
-    exit code.
+    These commands are scriptable, and a "no such id" that exited 0 would be
+    indistinguishable from a successful forget to anything reading the exit code.
     """
     click.echo(msg, err=True)
     sys.exit(1)
@@ -231,13 +217,12 @@ def memory_add(text: str, kind: str, importance: float) -> None:
     """Save a fact yourself, without going through a chat turn.
 
     Produces the SAME record `POST /api/memory/append` does - kind semantic,
-    source user, importance 0.8, and the same cap refusal. That parity is not
-    cosmetic: `MemoryRecord.__post_init__` silently coerces an unknown kind to
-    "semantic" and an unknown source to "synth", so a CLI that invented its own
-    values would file the user's own assertion as machine-synthesised at a lower
-    weight, and prune's user-fact eviction reporting would stop seeing it. Both
-    coercions are silent, which is why the choices here are constrained rather
-    than free text.
+    source user, importance 0.8, and the same cap refusal.
+    `MemoryRecord.__post_init__` silently coerces an unknown kind to "semantic"
+    and an unknown source to "synth", so different values here would file the
+    user's own assertion as machine-synthesised at a lower weight and prune's
+    user-fact eviction reporting would stop seeing it. Both coercions are silent,
+    so the choices here are constrained rather than free text.
     """
     if not text.strip():
         _fail("Refusing to save an empty memory.")
@@ -259,10 +244,9 @@ def memory_add(text: str, kind: str, importance: float) -> None:
 def memory_forget(mem_id: str, yes: bool) -> None:
     """Delete one fact. NOT recoverable.
 
-    MEASURED, and the reason this help does not say "restorable": ``store.delete``
-    is a hard delete that does not write the forgotten archive at all. Only prune
-    eviction and an accepted correction archive a record. Telling the user they
-    could restore this would be a promise `memory restore` then cannot keep.
+    ``store.delete`` is a hard delete that does not write the forgotten archive
+    at all. Only prune eviction and an accepted correction archive a record, so
+    `memory restore` cannot reach anything deleted here.
     """
     store = _store()
     rec = store.get(mem_id)
@@ -305,13 +289,13 @@ def memory_clear(yes: bool) -> None:
         click.echo(f"This erases {live} remembered fact(s) and {gone} archived "
                    "one(s), including the copies you could otherwise restore.")
         click.confirm("This cannot be undone. Continue?", abort=True)
-    # include_forgotten=True is load-bearing, not tidiness: a plain clear() leaves
-    # every archived record readable in the sidecar, so reporting the memory
-    # cleared without it would be a privacy claim that is not true.
+    # include_forgotten=True: a plain clear() leaves every archived record
+    # readable in the sidecar, so reporting the memory cleared without it would
+    # be untrue.
     store.clear(include_forgotten=True)
-    # Read back rather than trusting clear(). This is the one command with no undo,
-    # so "erased" has to be a MEASURED claim: a partial erase reported as success
-    # would leave remembered text on disk under a promise that was not kept.
+    # Read back rather than trusting clear(). This command has no undo, so
+    # "erased" is only claimed once the read-back confirms it; a partial erase
+    # reported as success would leave remembered text on disk.
     after = _store()
     remaining = len(after.all()) + len(after.forgotten())
     if remaining:
@@ -329,9 +313,7 @@ def memory_clear(yes: bool) -> None:
 def memory_corrections(as_json: bool) -> None:
     """Proposals consolidation left for you to review.
 
-    This is the command the whole group exists for: `localm job add --memory`
-    schedules the consolidation that CREATES these, so without it the terminal
-    could generate proposals it had no way to see.
+    `localm job add --memory` schedules the consolidation that CREATES these.
     """
     rows = _store().corrections()
     if as_json:
@@ -356,12 +338,9 @@ def _resolve(correction_id: str, accept: bool) -> None:
         # `resolve_correction` returns None for TWO different reasons: the id is
         # genuinely unknown, OR the corrections sidecar could not be READ (a
         # transient lock), which it logs a warning for and treats as
-        # non-destructive. Asserting "no such correction" would be a clean negative
-        # for a step that may simply have failed, and would send the user away from
-        # a proposal that is still sitting there. `corrections()` cannot
-        # disambiguate either - it returns [] on the same unreadable sidecar - so
-        # the honest answer names both and stays non-zero, since the resolve did
-        # not happen in either case.
+        # non-destructive. `corrections()` cannot disambiguate either - it returns
+        # [] on the same unreadable sidecar - so the message names both cases and
+        # the exit stays non-zero, since the resolve did not happen either way.
         _fail(f"Did not resolve {correction_id}: either there is no pending "
               "correction with that id, or the corrections file could not be "
               "read just now. Nothing was changed. `localm memory corrections` "

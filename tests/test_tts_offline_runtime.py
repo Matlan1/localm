@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The onnxruntime-web runtime is VENDORED, so neural TTS needs no CDN.
 
-Until 2026-08-18 the Kokoro bundle fetched its ONNX backend from
-cdn.jsdelivr.net on every cold load, so text-to-speech never worked offline or
-behind a filtering proxy, and the GUI's Content-Security-Policy had to grant
-that origin in script-src (a dynamic import() is a module script). The runtime
-now ships under ``static/vendor/onnxruntime/`` and the CSP grants nothing.
+The Kokoro bundle otherwise fetches its ONNX backend from cdn.jsdelivr.net on
+every cold load, so text-to-speech would not work offline or behind a filtering
+proxy, and the GUI's Content-Security-Policy would have to grant that origin in
+script-src (a dynamic import() is a module script). The runtime ships under
+``static/vendor/onnxruntime/`` and the CSP grants nothing.
 
 These tests guard the three things that would silently put the CDN back: the
 shipped default losing its value, the two places that state that default
 drifting apart, and the vendored file set no longer matching what the bundle
-actually asks for. The CSP half is asserted in tests/test_security_headers.py.
+actually asks for. The CSP half is asserted separately.
 """
 
 import re
@@ -27,8 +27,7 @@ _STATIC = _PLUGIN / "static"
 _VENDOR = _STATIC / "vendor"
 
 # The two artefacts @huggingface/transformers ships in dist/, and the only two
-# the bundle names. Read back out of kokoro.min.js by
-# test_every_runtime_file_the_bundle_asks_for_is_vendored rather than trusted.
+# the bundle names. Read back out of kokoro.min.js rather than trusted.
 _RUNTIME_MJS = "ort-wasm-simd-threaded.jsep.mjs"
 _RUNTIME_WASM = "ort-wasm-simd-threaded.jsep.wasm"
 

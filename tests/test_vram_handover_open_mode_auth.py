@@ -3,30 +3,16 @@
 reload_chat_after_media) must actually authenticate on a keyless (open-mode,
 default) server.
 
-Regression: selfclient.self_request only ever built an Authorization header
-from an API key. In open mode there is no key, so it sent no header at all,
-and _origin_guard's open-mode management gate (http_server.py) 403s any
+_origin_guard's open-mode management gate (http_server.py) 403s any
 unsafe-method call to /v1/models/unload|load that carries neither a key nor
-the loopback shell_token/instance_token - /v1/models/* was never added to
-_CROSS_ORIGIN_OK. So the documented "unload the chat model before a media
-model loads, reload it after" handover was a PERMANENT NO-OP on every
-default install, silently defeating the exact GPU-driver-hang protection
-vram.py exists to provide.
+the loopback shell_token/instance_token, and /v1/models/* is not in
+_CROSS_ORIGIN_OK. So self_request threads this instance's own attach token
+(request.app.state.instance_token, from the 0600 per-instance registry file,
+never reachable by a browser), the same way read_activity does.
 
-Fix mirrors #953's read_activity (same file): thread this instance's own
-attach token (request.app.state.instance_token, from the 0600 per-instance
-registry file, never reachable by a browser) through self_request the same
-way read_activity already does, instead of widening _CROSS_ORIGIN_OK (which
-would let ANY unauthenticated loopback caller manage models) or using
-shell_token (which the gate's own comment says is the wrong credential for a
-server-side self-call, since it DOES reach the browser).
-
-THE TRAP THIS TEST EXISTS TO AVOID: tests/test_vram_reading_honesty.py and
-tests/test_vram_reload_message.py both mock selfclient.self_request DIRECTLY,
-so neither can see the _origin_guard interaction at all - the mock stands
-exactly where this bug lived. This file drives a REAL uvicorn server on a
-real loopback socket and calls the real self_request -> real HTTP ->
-real _origin_guard round trip, so a regression here shows up as a real 403.
+This file drives a REAL uvicorn server on a real loopback socket and calls the
+real self_request -> real HTTP -> real _origin_guard round trip, so a
+regression shows up as a real 403.
 """
 
 import asyncio
@@ -63,8 +49,7 @@ def _wait_sync(cond, want=True, timeout: float = 6.0) -> bool:
 def _real_open_mode_server():
     """A real uvicorn instance on a real loopback socket, open (keyless) mode,
     with app.state.instance_token set the way instances.advertise() sets it
-    in production (unconditionally, for the life of the process) - so the
-    fix under test sees exactly what a real server would hand it."""
+    in production: unconditionally, for the life of the process."""
     app = create_app(None)
     app.state.instance_token = "test-instance-token-abcdef123456"
 
@@ -91,9 +76,9 @@ def _shutdown(server, th):
 
 
 def test_unload_chat_for_media_authenticates_with_instance_token_open_mode():
-    """The regression test: WITH the fix's instance_token threaded through,
-    the real round trip must get PAST _origin_guard (no 403) and reach the
-    real /v1/models/unload handler, which reports nothing loaded."""
+    """With instance_token threaded through, the real round trip must get PAST
+    _origin_guard (no 403) and reach the real /v1/models/unload handler, which
+    reports nothing loaded."""
     app, port, server, th = _real_open_mode_server()
     try:
         self_url = f"http://127.0.0.1:{port}/v1"
@@ -111,9 +96,8 @@ def test_unload_chat_for_media_authenticates_with_instance_token_open_mode():
 
 
 def test_unload_chat_for_media_still_403s_with_no_token_open_mode():
-    """Sanity/negative: the gate was never bypassable by omitting the
-    credential either - this is what the bug looked like before the fix, and
-    proves the fix is additive (a real credential is still required)."""
+    """Negative case: omitting the credential still 403s, so a real credential
+    remains required."""
     app, port, server, th = _real_open_mode_server()
     try:
         self_url = f"http://127.0.0.1:{port}/v1"
@@ -127,10 +111,10 @@ def test_unload_chat_for_media_still_403s_with_no_token_open_mode():
 
 
 def test_reload_chat_after_media_authenticates_with_instance_token_open_mode():
-    """Same fix, the sibling function/endpoint (/v1/models/load). No default
-    model is configured in this throwaway app, so the real route legitimately
-    503s past the origin guard ("No model specified") - that 503, not a 403,
-    is the proof the gate let the authenticated request through."""
+    """The sibling function/endpoint (/v1/models/load). No default model is
+    configured in this throwaway app, so the real route 503s past the origin
+    guard ("No model specified") - that 503, not a 403, is the proof the gate
+    let the authenticated request through."""
     app, port, server, th = _real_open_mode_server()
     try:
         self_url = f"http://127.0.0.1:{port}/v1"

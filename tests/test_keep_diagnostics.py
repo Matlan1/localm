@@ -57,7 +57,7 @@ def test_keep_diagnostics_enable_failure_warns_not_silent(cli_runner, monkeypatc
     monkeypatch.setattr("localm.debuglog.enable_debug", _boom)
     result = cli_runner.invoke(
         guicli.main, ["--no-model", "--no-browser", "--keep-diagnostics"])
-    assert result.exit_code == 0, result.output   # a diagnostics nicety must not abort startup
+    assert result.exit_code == 0, result.output   # startup continues past the failure
     assert "could not enable" in result.output and "keep_diagnostics" in result.output, (
         "the failed keep_diagnostics debug log must be surfaced, not silently swallowed:\n"
         + result.output)

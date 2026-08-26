@@ -105,10 +105,9 @@ def test_clear_id_cannot_escape_inbox(share_client, tmp_path):
 def _raw_share_body(*names, boundary=b"BOUND"):
     """A hand-built multipart body carrying *names* verbatim.
 
-    Needed because httpx percent-encodes a NUL in the Content-Disposition it
-    generates ("photo\\x00.png" goes out as "photo%00.png", an ordinary safe
-    name), so `files=` cannot deliver one and a test written with it would pass
-    while exercising nothing. A real client writes the header itself, and the
+    httpx percent-encodes a NUL in the Content-Disposition it generates
+    ("photo\\x00.png" goes out as "photo%00.png", an ordinary safe name), so
+    `files=` cannot deliver one. A real client writes the header itself, and the
     route parses the body itself, so this is the reachable shape.
     """
     out = b""
@@ -158,10 +157,9 @@ class TestShareFilenameGuard:
         assert list(_inbox().iterdir()) == []
 
     def test_still_accepts_a_legitimate_name(self, share_client):
-        """Fires-control. Without it, a guard that refused everything would look
-        exactly as green as a correct one - and it also proves _post_raw builds
-        a request the route accepts, so the 400s above are the name, not the
-        hand-built body."""
+        """A guard that refused everything would look exactly as green as a
+        correct one. This also shows _post_raw builds a request the route accepts,
+        so the 400s above are the name, not the hand-built body."""
         r = _post_raw(share_client, "ok.png")
         assert r.status_code == 303
         assert r.headers["location"] == "/?shared=1"
@@ -259,10 +257,10 @@ class TestShareInboxOwnership:
 def _inject_unlink_failure(monkeypatch, fail_on_name_containing: str):
     """Make Path.unlink raise OSError for matching entries only.
 
-    A raising side_effect is legitimate HERE because it is the FAULT being
-    injected, not an assertion - share_clear catches OSError by design, so an
-    AssertionError raised from inside would be swallowed as an input and the
-    test would pass in both directions (diff-review item 13).
+    The raising side_effect is the FAULT being injected, not an assertion.
+    share_clear catches OSError by design, so an AssertionError raised from
+    inside would be swallowed as an input and the test would pass in both
+    directions.
     """
     real_unlink = Path.unlink
 
@@ -281,9 +279,8 @@ def test_share_clear_reports_a_delete_that_failed(share_client, monkeypatch):
     _inject_unlink_failure(monkeypatch, "locked")
     body = share_client.post("/api/share/clear", json={}).json()
 
-    # Assert on the data first: if the injection silently failed to match, the
-    # entry would be gone and this fails on the deletion itself rather than on a
-    # status code.
+    # Assert on the data first: if the injection failed to match, the entry is
+    # gone and this fails on the deletion itself, not on a status code.
     still_there = share_client.get("/api/share/pending").json()["items"]
     assert len(still_there) == 1, "the entry was deleted, so no fault was injected"
 
@@ -318,8 +315,8 @@ def test_share_clear_partial_failure_reports_both_counts(share_client, monkeypat
 def test_share_clear_logs_the_path_of_a_failed_delete(share_client, monkeypatch, caplog):
     """A count tells the user; the log tells whoever has to diagnose it.
 
-    Asserted from OUTSIDE via caplog rather than by raising inside the handler,
-    which catches broadly and would absorb an assertion as an ordinary input.
+    Asserted from OUTSIDE via caplog, not by raising inside the handler, which
+    catches broadly and would absorb an assertion as an ordinary input.
     """
     import logging
     share_client.post("/share-target", files={"files": ("noisy.png", _PNG, "image/png")})

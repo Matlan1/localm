@@ -97,8 +97,8 @@ class TestCoderSession:
         assert final["ok"] is True
 
     def test_custom_instructions_thread_into_agent(self, tmp_path):
-        """rec#584 GUI field: a session created with custom_instructions injects
-        them into the agent's system prompt under '## User Instructions'."""
+        """A session created with custom_instructions injects them into the
+        agent's system prompt under '## User Instructions'."""
         session = CoderSession(
             tmp_path, ScriptedBackend(["ok"]), auto_approve=True,
             custom_instructions="Always use guard clauses.")
@@ -135,8 +135,8 @@ class TestCoderSession:
         assert "## User Instructions" not in session.agent._system_prompt
 
     def test_busy_queues_second_message(self, tmp_path):
-        """Sending mid-task no longer bounces - the message is queued as a
-        steering note and surfaced in the feed with queued=True."""
+        """Sending mid-task queues the message as a steering note and surfaces
+        it in the feed with queued=True."""
         class SlowBackend(ScriptedBackend):
             def chat_stream(self, messages, **kw):
                 time.sleep(0.5)
@@ -421,9 +421,9 @@ _FAKE_REGISTRY = {
 
 
 def test_set_model_type_endpoint(gui_app, monkeypatch):
-    """Branch A: POST /api/models/type flips a model's registry type (the one-click
-    GUI set-type control's backend). 404 for an unknown model, 400 for an
-    out-of-vocab type. On master the route does not exist (404)."""
+    """POST /api/models/type flips a model's registry type (the one-click GUI
+    set-type control's backend). 404 for an unknown model, 400 for an
+    out-of-vocab type."""
     from localm import model_manager as mm
     app, _ = gui_app
     store = {"m1": {"path": "Z:/x/m1.gguf", "source": "local", "model_type": "unknown"}}
@@ -449,12 +449,11 @@ def test_set_model_type_endpoint(gui_app, monkeypatch):
 
 
 class TestModelShortcutsEndpoint:
-    """S6: GET /api/models/shortcuts serializes MODEL_SHORTCUTS + _SHORTCUT_SIZES
-    for the Add-a-model dialog's curated picker. The audit finding it fixes
-    (PARITY-AUDIT-CLI-GUI-2026-08-19.md #14) is specifically that this must be a
-    fixed local list rather than a HuggingFace query, so it stays usable under
-    net_mode=off - unlike /api/discover/search (see TestDiscoverEndpoints's
-    test_net_off_is_403 for that route's contrasting behavior)."""
+    """GET /api/models/shortcuts serializes MODEL_SHORTCUTS + _SHORTCUT_SIZES
+    for the Add-a-model dialog's curated picker. A fixed local list rather than
+    a HuggingFace query, so it stays usable under net_mode=off - unlike
+    /api/discover/search (see TestDiscoverEndpoints's test_net_off_is_403 for
+    that route's contrasting behavior)."""
 
     def test_returns_every_shortcut_alias_spec_and_size(self, gui_app):
         from localm.model_manager import MODEL_SHORTCUTS, _SHORTCUT_SIZES
@@ -484,10 +483,9 @@ class TestModelShortcutsEndpoint:
             assert resolve_spec(row["alias"]) == row["spec"]
 
     def test_still_serves_data_under_net_mode_off(self, gui_app, monkeypatch):
-        """Reproduces the audit's exact claim: /api/discover/search 403s with
-        net_mode=off (test_net_off_is_403), but this route must not - it never
-        reaches HuggingFace at all, so a user with the network off still gets a
-        working model-discovery path."""
+        """/api/discover/search 403s with net_mode=off (test_net_off_is_403),
+        but this route must not: it never reaches HuggingFace at all, so a user
+        with the network off still gets a working model-discovery path."""
         import localm.netpolicy as netpolicy
         monkeypatch.setattr(netpolicy, "network_mode", lambda: "off")
         app, _ = gui_app
@@ -498,7 +496,7 @@ class TestModelShortcutsEndpoint:
 
 
 class TestEmbeddingWarmupRoute:
-    """ADR-0004 Unit B: POST /api/embedding/warmup triggers get_embedder() from an
+    """POST /api/embedding/warmup triggers get_embedder() from an
     explicit user action (instead of the first real request paying the cost
     silently), streaming coarse stage text through the same job/SSE mechanism
     model pull already uses. Drives the REAL JobManager (attach_gui wires a real
@@ -583,7 +581,7 @@ class TestEmbeddingWarmupRoute:
 
 
 class TestLogExportEndpoint:
-    """R30: copy every instance log into a user-chosen folder."""
+    """Copy every instance log into a user-chosen folder."""
 
     def test_export_copies_logs_into_timestamped_subfolder(self, gui_app, tmp_path, monkeypatch):
         app, _ = gui_app
@@ -645,8 +643,8 @@ class TestLogExportEndpoint:
         assert "no log files were found" in body["message"].lower()
 
     def test_export_all_copies_fail_reports_failure_not_empty(self, gui_app, tmp_path, monkeypatch):
-        # http-2 core: files EXIST but every copy fails. Must NOT report the
-        # empty-case reason and must NOT return 200.
+        # Files EXIST but every copy fails. Must NOT report the empty-case
+        # reason and must NOT return 200.
         app, _ = gui_app
         home = tmp_path / "home"; (home / "logs").mkdir(parents=True)
         (home / "logs" / "a.log").write_text("a", encoding="utf-8")
@@ -667,8 +665,8 @@ class TestLogExportEndpoint:
         assert "2" in detail                              # found 2
 
     def test_export_partial_failure_is_surfaced(self, gui_app, tmp_path, monkeypatch):
-        # http-2: some copy, some fail -> 200 (logs WERE exported) but the failures
-        # are reported, not silently dropped.
+        # Some copy, some fail -> 200 (logs WERE exported) but the failures are
+        # reported, not silently dropped.
         app, _ = gui_app
         home = tmp_path / "home"; (home / "logs").mkdir(parents=True)
         (home / "logs" / "ok.log").write_text("ok", encoding="utf-8")
@@ -806,8 +804,8 @@ class TestVramEstimate:
         assert r.json()["fits"] is None        # can't claim fit without a reading
 
     def test_estimate_reflects_combined_split_capacity(self, gui_app, tmp_path):
-        """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, /api/vram-estimate
-        must weigh 'fits' against the COMBINED free VRAM, not just the single
+        """With a configured 2-GPU split, /api/vram-estimate must weigh 'fits'
+        against the COMBINED free VRAM, not just the single
         main GPU - this route calls discover.vram_capacity(), not vram_info(),
         specifically so a split-configured machine sees the right ceiling."""
         app, _ = gui_app
@@ -836,9 +834,9 @@ class TestVramEstimate:
     def test_estimate_uses_cached_layer_count_for_partial_offload(self, gui_app, tmp_path):
         """A model's true layer count, cached by a prior load (localm.model_meta),
         lets /api/vram-estimate scale a partial offload (n_gpu_layers < 99) by the
-        REAL layer count instead of the /99 sentinel - the dead-but-correct
-        sysstats branch, now wired. Weights for a 16-of-32-layer offload must be
-        materially below the /99 full offload for the same model."""
+        REAL layer count instead of the /99 sentinel. Weights for a
+        16-of-32-layer offload must be materially below the /99 full offload for
+        the same model."""
         app, _ = gui_app
         model_file = tmp_path / "m.gguf"
         model_file.write_bytes(b"\0" * 800_000)   # small real file; ratio is size-agnostic
@@ -887,11 +885,10 @@ class TestVramEstimate:
 
     def test_estimate_uses_the_real_kv_shape_for_a_sparse_moe_gguf(
             self, gui_app, tmp_path):
-        """AUDIT-KV-SYSSTATS: the route must charge KV from the GGUF header's
-        attention shape (#865), not from model_bytes // 100_000 - the file-size
-        heuristic #865 replaced everywhere else except this one leftover call
-        site. A sparse MoE's file is inflated by expert weights that cost no
-        KV, so the heuristic and the real shape disagree here."""
+        """The route must charge KV from the GGUF header's attention shape, not
+        from a model_bytes // 100_000 file-size heuristic. A sparse MoE's file
+        is inflated by expert weights that cost no KV, so the heuristic and the
+        real shape disagree here."""
         from tests.test_kv_bytes_from_gguf import _gguf, _shape
         from localm.model_manager.gguf import gguf_kv_bytes_per_token
         app, _ = gui_app
@@ -953,15 +950,12 @@ class TestVramEstimate:
 
     def test_estimate_discounts_pinned_moe_experts_from_the_configured_n_cpu_moe(
             self, gui_app, tmp_path):
-        """AUDIT-KV-SYSSTATS, the sequel: the same GUI estimate this class's
-        KV-shape tests already fixed once was ALSO blind to n_cpu_moe -
-        _sizing.py's VramSizingMixin._effective_model_bytes_for_vram gained
-        this exact discount for the load-time preflight, but the route had no
-        n_cpu_moe query param and estimate_vram had no parameter for it, so
-        the live readout still showed the whole file as VRAM-needed even
-        after a load with experts pinned would succeed. n_cpu_moe has no GUI
-        slider (unlike n_ctx/n_gpu_layers), so the route reads it from the
-        SAVED config, not a query param."""
+        """The GUI estimate must apply the same n_cpu_moe discount
+        _sizing.py's VramSizingMixin._effective_model_bytes_for_vram applies in
+        the load-time preflight, or the live readout shows the whole file as
+        VRAM-needed even where a load with experts pinned would succeed.
+        n_cpu_moe has no GUI slider (unlike n_ctx/n_gpu_layers), so the route
+        reads it from the SAVED config, not a query param."""
         from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors, _T_STRING
         from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
         from localm.config import load_config as real_load_config
@@ -995,22 +989,15 @@ class TestVramEstimate:
 
     def test_estimate_skips_moe_probe_when_registry_confirms_dense(
             self, gui_app, tmp_path):
-        """F8-PERSIST-ARCH-AND-EXPERT-COUNT (#1042) persists expert_count on a
-        registry entry at registration time. expert_count == 0 is a CONFIRMED
-        fact (the header was read and resolved to a known-dense architecture),
-        so with n_cpu_moe left over from an earlier MoE model, this dense
-        entry should skip gguf_moe_pinned_expert_bytes entirely - it would
-        find nothing (no expert tensors match the pinning pattern) at the
-        cost of a real ~200ms-class tensor-info re-parse for nothing.
+        """expert_count is persisted on a registry entry at registration time,
+        and expert_count == 0 means the header was read and resolved to a
+        known-dense architecture. With n_cpu_moe left over from an earlier MoE
+        model, such a dense entry skips gguf_moe_pinned_expert_bytes entirely.
 
-        Asserted via call count, NOT a raising side_effect: the route's own
-        MoE-probe call is wrapped in `except Exception: log and continue`
-        (a deliberate contract - see the route's own comment - so a probe
-        failure never breaks the whole estimate), which would silently
-        swallow a side_effect=AssertionError and pass this test whether or
-        not the shortcut actually fired. Caught live: an earlier draft of
-        this test used exactly that pattern and stayed green with the
-        shortcut reverted."""
+        The skip is asserted by call count rather than by a raising
+        side_effect: the route wraps its MoE-probe call in
+        `except Exception: log and continue`, which swallows an
+        AssertionError raised inside it."""
         from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors, _T_STRING
         from unittest.mock import MagicMock
         app, _ = gui_app
@@ -1040,10 +1027,10 @@ class TestVramEstimate:
     def test_estimate_still_probes_when_expert_count_unknown(
             self, gui_app, tmp_path):
         """expert_count absent (never backfilled, or the header could not be
-        read at registration time) must NOT be treated as "confirmed dense" -
-        the real probe still runs, same as before F8. A missing key is a
-        different fact from a confirmed 0 (see gguf_registry_metadata's own
-        docstring: 0 is only ever set once architecture actually resolved)."""
+        read at registration time) must NOT be treated as "confirmed dense":
+        the real probe still runs. A missing key is a different fact from a
+        confirmed 0 (see gguf_registry_metadata's own docstring: 0 is only ever
+        set once architecture actually resolved)."""
         from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors, _T_STRING
         from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
         app, _ = gui_app
@@ -1095,9 +1082,9 @@ class TestVramEstimate:
 class TestStatsVramTrust:
     """The status-bar VRAM figure (/api/stats -> sysstats._vram) shows used/percent
     ONLY when the reading is a FRESH, DEVICE-GLOBAL measurement. A stale or
-    process-blind reading shows total alone - never a wrong used presented as live
-    (AGENTS.md rule 5). Mutation check: drop either gate in _vram_reading_trusted
-    and the total-only cases below go red (used reappears).
+    process-blind reading shows total alone - never a wrong used presented as
+    live. Dropping either gate in _vram_reading_trusted turns the total-only
+    cases below red (used reappears).
 
     sysstats._vram() is throttled/single-flighted (see test_sysstats.py): the
     real vram_capacity() call runs on a background thread and the FIRST poll
@@ -1187,9 +1174,9 @@ class TestGpusEndpoint:
         """A timed-out/contended probe serves [] - which is NOT "no GPUs", it is
         "could not look". The payload must carry that status so the Settings JS
         can refrain from hiding the GPU controls: concluding "single GPU" from a
-        wedged driver made a multi-GPU box silently render as single-GPU
-        (AGENTS.md rule 5). Mutation guard: reverting the route to the bare
-        list_gpus() call drops the key and turns this red."""
+        wedged driver would make a multi-GPU box silently render as single-GPU.
+        Reverting the route to the bare list_gpus() call drops the key and turns
+        this red."""
         app, _ = gui_app
         with patch("localm.discover.list_gpus",
                    new=probe_double([], status=GPU_PROBE_TIMEOUT)), \
@@ -1257,8 +1244,8 @@ class TestGpusEndpoint:
 
 
 class TestGpusEndpointNativeIndexSpace:
-    """GET /api/gpus on the vulkan native build (GPU-SPLIT-VKINDEX follow-up):
-    the split/main-GPU selectors write indices the LOADER consumes, and on the
+    """GET /api/gpus on the vulkan native build: the split/main-GPU selectors
+    write indices the LOADER consumes, and on the
     vulkan build those live in ggml-vulkan's own index space, which
     list_gpus() (torch.cuda / nvidia-smi) cannot see - so the route must serve
     the native registry's devices (via the crash-isolated probe daemon) and
@@ -1371,7 +1358,7 @@ class TestGpusEndpointNativeIndexSpace:
 
 class TestCompanionEndpoint:
     """The Companion-app card's phone-reachable address feed (LAN / Tailscale).
-    Showing the loopback origin was wrong - a phone cannot reach 127.0.0.1."""
+    The loopback origin is never offered: a phone cannot reach 127.0.0.1."""
 
     def test_loopback_bind_reports_not_network(self, gui_app):
         app, _ = gui_app
@@ -1547,8 +1534,8 @@ class TestModelEndpoints:
         assert [m["name"] for m in proj_r.json()["models"]] == ["vision-proj"]
 
     def test_models_exposes_architecture_and_expert_count(self, gui_app):
-        """F8-PERSIST-ARCH-AND-EXPERT-COUNT: entry.get(...) with no default -
-        a confirmed-MoE entry, a confirmed-dense entry (expert_count: 0, a real
+        """entry.get(...) with no default - a confirmed-MoE entry, a
+        confirmed-dense entry (expert_count: 0, a real
         fact, must survive as 0, not be coerced away), and a legacy entry with
         NEITHER key must each reach the client distinctly - the legacy row as
         None/None, never a false 0/"" that would misreport an unchecked model
@@ -1576,9 +1563,8 @@ class TestModelEndpoints:
             "a legacy entry with no key at all must report None (unknown), never a false 0"
 
     def test_models_exposes_vision_tristate(self, gui_app, tmp_path):
-        """NEW-MODEL-CAPABILITY-TAGS (vision slice): /api/models reports vision
-        as true / false / KEY ABSENT, never collapsing "checked, text-only"
-        together with "could not check".
+        """/api/models reports vision as true / false / KEY ABSENT, never
+        collapsing "checked, text-only" together with "could not check".
 
         Same discipline as expert_count above, but by PRESENCE rather than by
         null, because this is measured from the model's files on every request:
@@ -1690,9 +1676,9 @@ class TestModelEndpoints:
                 assert r.status_code == 400
 
     def test_pull_sha256_forwarded_to_cli(self, gui_app, monkeypatch):
-        """The GUI's #pull-sha256 field (S2, PARITY-AUDIT-CLI-GUI-2026-08-19) is
-        the only integrity assertion a GUI user pulling an arbitrary https URL
-        has - it must reach the CLI as --sha256, exactly like `localm pull
+        """The GUI's #pull-sha256 field is the only integrity assertion a GUI
+        user pulling an arbitrary https URL has - it must reach the CLI as
+        --sha256, exactly like `localm pull
         --sha256`. pull_model() does the real verification/refusal downstream;
         this route's only job is to not drop the flag."""
         app, _ = gui_app
@@ -1787,7 +1773,7 @@ class TestModelEndpoints:
 
 
 class TestPullTokenRedeemEndpoint:
-    """SEC-PULL-CONFIRM: `POST /api/models/pull-token/redeem` is the HTTP surface
+    """`POST /api/models/pull-token/redeem` is the HTTP surface
     init.js calls before auto-starting a `?pull=` deep link with zero clicks. Only
     a genuine mint_pull_grant token, bound to the exact spec, unused and
     unexpired, may succeed - see TestPullGrant in test_gui_key_bootstrap.py for
@@ -1840,9 +1826,9 @@ class TestPullTokenRedeemEndpoint:
 @pytest.fixture
 def coder_app(tmp_path, monkeypatch):
     """GUI app with the builtin coder plugin installed; isolated home.
-    coder became a plugin in Phase 3 - installed BEFORE attach_gui (production
-    order: the engine mounts /api/coder routes first, then attach_gui publishes
-    app.state.coder_sessions / switch_model, which the routes read lazily)."""
+    Installed BEFORE attach_gui, the production order: the engine mounts
+    /api/coder routes first, then attach_gui publishes app.state.coder_sessions
+    / switch_model, which the routes read lazily."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -1895,9 +1881,9 @@ class TestCoderEndpoints:
             assert client.delete(f"/api/coder/sessions/{sid}").status_code == 404
 
     def test_create_session_threads_custom_instructions(self, coder_app, tmp_path):
-        """rec#584: POST /api/coder/sessions with custom_instructions reaches the
-        session's agent (end-to-end request -> CreateSessionRequest -> CoderSession
-        -> Agent)."""
+        """POST /api/coder/sessions with custom_instructions reaches the
+        session's agent (end-to-end request -> CreateSessionRequest ->
+        CoderSession -> Agent)."""
         app, _ = coder_app
         with TestClient(app) as client:
             info = client.post("/api/coder/sessions",
@@ -2100,10 +2086,10 @@ class TestSessionExtras:
         assert switched == ["model-b"]
 
     def test_set_model_repoints_backend_and_info(self, coder_app, tmp_path):
-        """The bug this closes: a session's model was pinned forever at
-        creation - the backend kept sending the ORIGINAL name on every request
-        no matter what the user later switched to elsewhere. set_model must
-        change both what info() reports and what the backend actually sends."""
+        """A session's model must not stay pinned at creation, with the backend
+        sending the ORIGINAL name on every request no matter what the user later
+        switched to elsewhere. set_model changes both what info() reports and
+        what the backend actually sends."""
         app, switched = coder_app
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
             with TestClient(app) as client:
@@ -2310,8 +2296,8 @@ class TestPlatformEndpoints:
 
     def test_config_accepts_plugins_enabled(self, v1_client, tmp_path):
         """plugins_enabled is a real config key (managed by the engine); it must
-        not be rejected as unknown - that was B3 ('Unknown config keys:
-        plugins_enabled' on every settings save)."""
+        not be rejected as unknown, which would emit 'Unknown config keys:
+        plugins_enabled' on every settings save."""
         cfg_file = tmp_path / "config.json"
         with patch("localm.config.CONFIG_FILE", cfg_file), \
              patch("localm.config.HOME_DIR", tmp_path), \
@@ -2351,10 +2337,10 @@ def _patched_without_leaking(module, name, replacement):
     ``from ..model_manager import X`` against the patched package and binds
     ``replacement`` into its own globals; monkeypatch has no knowledge of that
     second reference, so it outlives teardown and poisons the rest of the pytest
-    process. Measured on ``get_model_info``: it leaked into localm.cli,
-    localm.cli.chat AND localm.cli.models, and localm/cli/chat.py then called it
-    with ``allow_direct_path=True``, failing five unrelated tests with a
-    TypeError in any selection that collected this file first.
+    process. ``get_model_info`` leaks that way into localm.cli, localm.cli.chat
+    and localm.cli.models, and localm/cli/chat.py then calls it with
+    ``allow_direct_path=True``, failing unrelated tests with a TypeError in any
+    selection that collected this file first.
 
     The sweep matches by object IDENTITY rather than against a list of known
     consumers, so a module that grows the same ``from``-import later is repaired
@@ -2497,10 +2483,10 @@ class TestJobs:
 @pytest.fixture
 def persist_app(tmp_path, monkeypatch):
     """GUI app with the builtin CHAT plugin installed; data dir under tmp_path.
-    chat became the protected, default-enabled plugin #0 in Phase 3 - installed
-    BEFORE attach_gui so /api/conversations|memory|prompts mount. The config
-    constants are pinned (like music_app) so install()'s enable write stays in
-    the throwaway home."""
+    chat is the protected, default-enabled plugin #0, installed BEFORE
+    attach_gui so /api/conversations|memory|prompts mount. The config constants
+    are pinned (like music_app) so install()'s enable write stays in the
+    throwaway home."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -2743,8 +2729,8 @@ class TestConcurrentConfirmations:
 
 @pytest.fixture
 def web_app(tmp_path, monkeypatch):
-    """A bare app with the builtin web plugin loaded (open mode). web became a
-    plugin in Phase 3, so its routes are mounted by enabling it - not attach_gui."""
+    """A bare app with the builtin web plugin loaded (open mode). Its routes are
+    mounted by enabling the plugin, not by attach_gui."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     import localm.config as _cfg
@@ -2869,8 +2855,8 @@ class TestDiscoverEndpoints:
         assert data["files"][0]["fit"] == "fits"
 
     def test_files_fit_reflects_combined_split_capacity(self, gui_app, monkeypatch):
-        """AUDIT-GPU-SPLIT-1: /api/discover/files must badge against COMBINED
-        split capacity (discover.vram_capacity()), not just vram_info()'s
+        """/api/discover/files must badge against COMBINED split capacity
+        (discover.vram_capacity()), not just vram_info()'s
         single main-GPU number - a file too big for one GPU alone but that
         fits split across a configured 2-GPU split must badge "fits"."""
         app, _ = gui_app
@@ -2938,8 +2924,8 @@ class TestDiscoverEndpoints:
 
 @pytest.fixture
 def voice_app(tmp_path, monkeypatch):
-    """A bare app with the builtin voice plugin loaded (open mode). voice became
-    a plugin in Phase 3, so its routes are mounted by enabling it - not attach_gui.
+    """A bare app with the builtin voice plugin loaded (open mode). Its routes
+    are mounted by enabling the plugin, not by attach_gui.
 
     install() fires voice's on_install hook, which prefetches the Whisper model
     on a background thread: stub the prefetch (no network in a unit test) and
@@ -3117,9 +3103,9 @@ class TestPromptLibraryUnreadable:
 
     Every writer here does read-modify-write, so starting from {} makes the next
     save replace the WHOLE library with the single entry being written. These
-    assert on the FILE before the status code deliberately: the status code is a
-    proxy, the file is the property, and a failure that reads "personas were
-    destroyed" cannot be talked away as an assertion needing a tweak.
+    assert on the FILE before the status code: the status code is a proxy, the
+    file is the property, and a failure that reads "personas were destroyed"
+    cannot be talked away as an assertion needing a tweak.
     """
 
     def _seed(self, client):
@@ -3268,8 +3254,8 @@ class TestChatPlugin:
 @pytest.fixture
 def rag_app(tmp_path, monkeypatch):
     """GUI app (for the shared job manager + /api/jobs SSE) with the builtin rag
-    plugin enabled. rag became a plugin in Phase 3; its handlers read the shared
-    services (jobs / self_url / active_model) that attach_gui puts on app.state.
+    plugin enabled. Its handlers read the shared services (jobs / self_url /
+    active_model) that attach_gui puts on app.state.
     The plugin is enabled BEFORE attach_gui so its routes sit ahead of the
     catch-all "/" static mount - the production order (plugins, then GUI)."""
     home = tmp_path / ".localm"
@@ -3589,9 +3575,9 @@ class TestAgentHooks:
 
 @pytest.fixture
 def img_app(tmp_path, monkeypatch):
-    """GUI app with the builtin image plugin enabled; images dir under tmp.
-    image became a plugin in Phase 3 - its routes are mounted by enabling it
-    (before attach_gui, the production order), not by attach_gui."""
+    """GUI app with the builtin image plugin enabled; images dir under tmp. Its
+    routes are mounted by enabling the plugin, before attach_gui (the production
+    order), not by attach_gui itself."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -3815,8 +3801,8 @@ class TestImageGeneration:
     def test_lora_strength_omitted_keeps_generate_image_default(self, img_app, monkeypatch):
         """Leaving the strength fields blank must not send an explicit None that
         would override generate_image()'s own defaults (1.0 / 0.5) - mirrors how
-        img-seed/img-guidance/img-denoise are left blank rather than pre-filled
-        (the NEW-DEFAULT-VALUE-PLACEHOLDER anti-pattern this avoids)."""
+        img-seed/img-guidance/img-denoise are left blank rather than
+        pre-filled."""
         app, _ = img_app
         import localm.image_gen.comfy as comfy
         monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
@@ -3842,9 +3828,9 @@ class TestImageGeneration:
         assert "lora_strength_clip" not in seen
 
     def test_cfg_forwarded_to_backend(self, img_app, monkeypatch):
-        """S4 (CLI/GUI parity): the GUI's cfg field reaches the shared ComfyUI
-        plumbing's generate_image() the same way the CLI's --cfg already does -
-        mirrors test_lora_forwarded_to_backend."""
+        """The GUI's cfg field reaches the shared ComfyUI plumbing's
+        generate_image() the same way the CLI's --cfg does - mirrors
+        test_lora_forwarded_to_backend."""
         app, _ = img_app
         import localm.image_gen.comfy as comfy
         monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
@@ -3891,16 +3877,14 @@ class TestImageComfyModelPicker:
     panel's "Launch ComfyUI" button and per-slot model dropdowns."""
 
     def test_comfy_models_reports_unreachable_honestly(self, img_app, tmp_path):
-        """No ComfyUI is running in this test app - the route must say so
-        (rule 5: never a silently-empty picker that looks like "no slots").
+        """No ComfyUI is running in this test app - the route must say so,
+        never present a silently-empty picker that looks like "no slots".
 
-        Unreachability is CONSTRUCTED, not assumed: this used to rely on
-        nothing answering the real ComfyUI default (127.0.0.1:8188), which
-        goes red on any box actually running ComfyUI there (a real, common
-        setup for this project's audience) - the test then reads as a
-        regression in whatever unrelated diff happens to be in flight.
-        free_loopback_port() gives a port nothing answers on, so this is
-        correct on a box with ComfyUI running on 8188 AND on one without."""
+        Unreachability is CONSTRUCTED, not assumed: relying on nothing
+        answering the real ComfyUI default (127.0.0.1:8188) goes red on any box
+        actually running ComfyUI there. free_loopback_port() gives a port
+        nothing answers on, so this is correct on a box with ComfyUI running on
+        8188 AND on one without."""
         import json
 
         app, _ = img_app
@@ -4008,8 +3992,8 @@ class TestImageComfyModelPicker:
 @pytest.fixture
 def music_app(tmp_path, monkeypatch):
     """GUI app with the builtin music plugin enabled; music dir under tmp.
-    music became a plugin in Phase 3 - enabled before attach_gui (production
-    order), reading its own per-plugin backend config."""
+    Enabled before attach_gui (the production order), reading its own per-plugin
+    backend config."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -4108,8 +4092,8 @@ class TestMusicPlugin:
 @pytest.fixture
 def video_app(tmp_path, monkeypatch):
     """GUI app with the builtin video plugin enabled; video dir under tmp.
-    video became a plugin in Phase 3 - enabled before attach_gui (production
-    order), reading its own per-plugin backend config."""
+    Enabled before attach_gui (the production order), reading its own per-plugin
+    backend config."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -4354,10 +4338,9 @@ def _seed_registry(mm, entries):
 
 
 def test_alias_route_reports_the_name_it_actually_stored(gui_app, alias_env):
-    """REG-562: alias_model sanitizes the new name, so a user-supplied name with a
-    space is stored as 'daily-driver' while the route used to answer 200 with the
-    RAW 'daily driver' - a name that does not exist in the registry. The GUI then
-    toasted a name the user could never use."""
+    """alias_model sanitizes the new name, so a user-supplied name with a space
+    is stored as 'daily-driver'. The route must answer with the STORED name, not
+    the raw 'daily driver', which does not exist in the registry."""
     from localm import model_manager as mm
     app, _ = gui_app
     _seed_registry(mm, {"gemma3-12b": {"path": "x/g.gguf", "source": "local"}})
@@ -4376,10 +4359,9 @@ def test_alias_route_reports_the_name_it_actually_stored(gui_app, alias_env):
 
 
 def test_alias_route_refuses_a_sanitized_collision_instead_of_faking_success(gui_app, alias_env):
-    """REG-562, the worse half: 'daily driver' sanitizes onto an EXISTING
-    'daily-driver' key, so alias_model creates nothing and returns False. The
-    route ignored that and still answered 200 'aliased' - a step reporting
-    success after not doing the work (AGENTS.md rule 5)."""
+    """'daily driver' sanitizes onto an EXISTING 'daily-driver' key, so
+    alias_model creates nothing and returns False. The route must not answer 200
+    'aliased' after nothing was done."""
     from localm import model_manager as mm
     app, _ = gui_app
     _seed_registry(mm, {
@@ -4397,9 +4379,8 @@ def test_alias_route_refuses_a_sanitized_collision_instead_of_faking_success(gui
 
 
 def test_alias_route_still_takes_an_already_safe_name(gui_app, alias_env):
-    """The happy path stays intact: a name that needs no sanitizing round-trips
-    unchanged (this is the shape the suite already covered, which is why the
-    regression hid)."""
+    """The happy path stays intact: a name that needs no sanitizing
+    round-trips unchanged."""
     from localm import model_manager as mm
     app, _ = gui_app
     _seed_registry(mm, {"gemma3-12b": {"path": "x/g.gguf", "source": "local"}})
@@ -4440,8 +4421,8 @@ def test_rename_route_reports_the_name_it_actually_stored(gui_app, alias_env):
 
 
 def test_rename_route_surfaces_the_migration_notes_to_the_caller(gui_app, alias_env):
-    """CONTROL review: rename_model_with_notes's honest report of what could
-    NOT be migrated (a per-project .localcoder/config.toml, unreachable from
+    """rename_model_with_notes's honest report of what could NOT be migrated
+    (a per-project .localcoder/config.toml, unreachable from
     <data dir>) must reach the HTTP caller, not just the server console -
     otherwise a user renames a model, gets a bare 200, and only discovers
     later (via a confusing coder error) that a project config still names
@@ -4711,12 +4692,10 @@ class TestRebuildLauncherEndpoint:
         assert body["notes"] == ["could not locate the base interpreter to copy"]
 
     def test_refuses_a_concurrent_rebuild(self, gui_app, monkeypatch):
-        """make_launcher() had exactly one caller before this route (a terminal, which
-        cannot double-click a CLI invocation mid-run) and no locking of its own
-        (diff-review-discipline.md item 26). A GUI button CAN be double-clicked, and
-        --force's fast path overwrites the launcher exe with no coordination - so the
-        route's own lock must refuse a second concurrent request rather than let two
-        copies race the same destination file."""
+        """make_launcher() has no locking of its own, and --force's fast path
+        overwrites the launcher exe with no coordination, so the route's own lock
+        must refuse a second concurrent request rather than let two copies race
+        the same destination file."""
         from localm.plugins.gui.routes import admin as admin_routes
         calls = []
         monkeypatch.setattr("localm.applaunch.make_launcher",

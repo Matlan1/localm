@@ -13,25 +13,22 @@ The first (and today only) patch is the ``__func__`` tolerance: ComfyUI core's
 ``comfy_api/internal/__init__.py::make_locked_method_func`` does the bare
 ``getattr(type_obj, func).__func__``, assuming a node's FUNCTION is a bound method.
 A node whose FUNCTION resolves to a plain function (core VAEDecodeAudio, used by
-native ACE-Step music) has no ``.__func__`` -> ``AttributeError``. Refs:
-Comfy-Org/ComfyUI #12116, patientx/ComfyUI-Zluda #424. The patch rewrites that one
-access to the tolerant ``attr = getattr(type_obj, func); method = attr.__func__ if
-hasattr(attr, "__func__") else attr`` - the SAME change the T1 shim makes in memory
-(localm/media/comfy_shim/sitecustomize.py), here a persistent file edit since we own
-the checkout.
+native ACE-Step music) has no ``.__func__`` and raises AttributeError. The patch
+rewrites that one access to the tolerant ``attr = getattr(type_obj, func); method
+= attr.__func__ if hasattr(attr, "__func__") else attr`` - the SAME change the T1
+shim makes in memory (localm/media/comfy_shim/sitecustomize.py), here a persistent
+file edit.
 
 Every patch is:
   - GUARDED: it only rewrites when the exact known-fragile shape is present; an
-    already-tolerant file (upstream fixed it, or we patched it earlier) or an
+    already-tolerant file (upstream fixed it, or localm patched it earlier) or an
     unexpected shape is left ALONE.
   - IDEMPOTENT: re-applying is a byte no-op (the fragile shape is gone after the
     first apply, so the second finds nothing to do).
-  - FAIL-SAFE (AGENTS.md rule 5, no facade, no corruption): a missing/renamed target
-    is skipped WITHOUT error; a rewrite whose result would not parse is NEVER written
-    (an ast.parse gate) and is reported failed; the write is atomic (temp file +
-    os.replace) so a crash mid-write can never leave a half-written core file.
-
-Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
+  - FAIL-SAFE: a missing/renamed target is skipped WITHOUT error; a rewrite whose
+    result would not parse is NEVER written (an ast.parse gate) and is reported
+    failed; the write is atomic (temp file + os.replace) so a crash mid-write can
+    never leave a half-written core file.
 """
 
 from __future__ import annotations
@@ -55,7 +52,7 @@ FAILED = "failed"
 
 # A transform takes the current file TEXT and returns (new_text, note): new_text is
 # None (or unchanged) for a deliberate no-op; the note explains the decision either
-# way, so a SKIPPED outcome is never a silent mystery (rule 5).
+# way, so a SKIPPED outcome is never a silent mystery.
 Transform = Callable[[str], Tuple[Optional[str], str]]
 
 
@@ -86,13 +83,13 @@ class PatchOutcome:
 
 
 # --------------------------------------------------------------------------- #
-#  Patch 1: make_locked_method_func plain-function tolerance (#12116).        #
+#  Patch 1: make_locked_method_func plain-function tolerance.                 #
 # --------------------------------------------------------------------------- #
 
 # The exact fragile access: ``method = getattr(type_obj, func).__func__`` on its own
-# line. Indentation is captured and reproduced so the rewrite matches the surrounding
-# style. Whitespace inside the call is tolerated; a trailing comment makes it NOT match
-# (we only touch the shape we know exactly), so an unexpected variant is left alone.
+# line. Indentation is captured and re-emitted so the rewrite matches the
+# surrounding style. Whitespace inside the call is tolerated; a trailing comment
+# makes it NOT match, so an unexpected variant is left alone.
 _FRAGILE_RE = re.compile(
     r"^(?P<indent>[ \t]*)method[ \t]*=[ \t]*"
     r"getattr\([ \t]*type_obj[ \t]*,[ \t]*func[ \t]*\)\.__func__[ \t]*$",
@@ -113,7 +110,8 @@ def _func_tolerant_transform(text: str) -> Tuple[Optional[str], str]:
         return new_text, (f"rewrote {n} fragile make_locked_method_func access(es) to "
                           "tolerate a plain-function node")
 
-    # No fragile access present. Say WHY we are not touching it (rule 5: no silent skip).
+    # No fragile access present. The note names what was found, so a SKIPPED
+    # outcome is never silent.
     if "make_locked_method_func" not in text:
         return None, "make_locked_method_func not found (renamed or restructured upstream)"
     if '"__func__"' in text or "'__func__'" in text:
@@ -173,7 +171,7 @@ def apply_patch(patch: ComfyPatch, managed_comfy_dir) -> PatchOutcome:
     if new_text is None or new_text == original:
         return PatchOutcome(patch.name, SKIPPED, note)
 
-    # Never write source that does not parse (rule 5: no corrupt-but-shipped facade).
+    # Never write source that does not parse.
     try:
         ast.parse(new_text)
     except SyntaxError as e:
@@ -191,7 +189,7 @@ def apply_patches(managed_comfy_dir, patches: Optional[Tuple[ComfyPatch, ...]] =
                   ) -> List[PatchOutcome]:
     """Apply the localm patch set to the managed ComfyUI at *managed_comfy_dir*.
     Returns one PatchOutcome per patch, in order. Never raises. Callers surface any
-    FAILED outcome (rule 5) but a failed COMPAT patch is non-fatal to the base install
-    (it only breaks the workflow that needs it), so provisioning does not abort on it."""
+    FAILED outcome, but a failed COMPAT patch is non-fatal to the base install (it
+    only breaks the workflow that needs it), so provisioning does not abort on it."""
     patches = PATCHES if patches is None else patches
     return [apply_patch(p, managed_comfy_dir) for p in patches]

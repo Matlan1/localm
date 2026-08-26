@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The installers must NEVER use ~/.localm as a data directory. The default is a
 CONTAINED ./home inside the clone; a shared/other location is an explicit Custom
-choice recorded in localm-home.cfg (asked + recorded, never a silent guess). This
-replaces the old "Shared (~/.localm)" option, which wrote data outside the clone
-and relied on config.py's silent ~/.localm fallback (both now removed).
+choice recorded in localm-home.cfg (asked and recorded, never a silent guess).
 """
 
 from pathlib import Path

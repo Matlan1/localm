@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REC-EXTPATH-RELOCATE - mark external models + re-point a moved one."""
+"""Mark external models and re-point a moved one."""
 
 from pathlib import Path
 
@@ -64,9 +64,9 @@ def test_relocate_rejects_bad_inputs(env):
 
 
 def test_relocate_target_shared_validator(env):
-    """relocate_target is the validator relocate_model AND the GUI's POST
-    /api/models/relocate route both call - so it needs its own direct coverage,
-    not just indirect coverage through relocate_model's bool return."""
+    """relocate_target is the validator both relocate_model and the GUI's POST
+    /api/models/relocate route call, so it is covered directly here rather than
+    only through relocate_model's bool return."""
     import localm.model_manager as mm
     tmp, _ = env
     good = _gguf(tmp / "ok.gguf")

@@ -262,12 +262,11 @@ def env(tmp_path, monkeypatch):
 
 
 def test_get_hides_launch_cmd_and_api_url_from_a_config_read_only_key(env):
-    """Regression for pentest finding LM-PT-002: a config:read-scoped,
-    non-owner key (part of the app's own suggested 'Full' key preset) must not
-    learn a media backend's launch_cmd (a shell command) or api_url (a render
-    target) from GET /v1/media/config, even though it may legitimately read
-    every other field. The write side already refuses this key the ability to
-    SET either field (REC-MEDIA-CMD); the read side must match."""
+    """A config:read-scoped, non-owner key (part of the app's own suggested
+    'Full' key preset) must not learn a media backend's launch_cmd (a shell
+    command) or api_url (a render target) from GET /v1/media/config, even though
+    it may legitimately read every other field. The write side already refuses
+    this key the ability to SET either field; the read side must match."""
     from localm import auth, scopes
 
     auth.set_api_key("owner-secret-media-123")                # protected mode
@@ -324,9 +323,9 @@ def test_generic_config_get_does_not_leak_per_plugin_media_secrets(env):
     GET /v1/media/config hides those three from a non-owner, but the media
     plugins keep their OWN copy at cfg["plugins"][<plugin>]["comfy"][...]. That
     subtree lives under the `plugins` key, which is engine_managed - a WRITE
-    gate only, never popped from a read - so before the scrub a plain
+    gate only, never popped from a read - so without the scrub a plain
     config:read key could fetch from /v1/config exactly what /v1/media/config
-    refused it. Same generic-outranks-specific shape as X8, on the read side.
+    refuses it.
     """
     from localm import auth, scopes
     from localm.config import update_config

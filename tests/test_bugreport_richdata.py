@@ -4,9 +4,9 @@ backend, session mode, plugins), an allowlisted config subset, dependency
 versions, the in-memory recent-activity log, and (for the GUI) browser context -
 while NEVER leaking the API key, config secrets, or chat content.
 
-This pins the "reports still contain no useful data" fix: the rich sections are
-present and correct, and the privacy boundary holds (DEBUG-level model output and
-non-allowlisted config keys stay out).
+These pin both halves: the rich sections are present and correct, and the
+privacy boundary holds (DEBUG-level model output and non-allowlisted config keys
+stay out).
 """
 
 from __future__ import annotations
@@ -128,12 +128,11 @@ def test_config_subset_allowlisted_and_scrubbed(monkeypatch):
 
 
 def test_config_subset_redacts_query_string_credential_by_name(monkeypatch):
-    """QA-FINDING-bugreport-url-query-secret-leak-2026-08-13: comfy_api_url /
-    net_search_url / coder_reviewer are user-supplied URLs that routinely carry
-    a credential as a query parameter, not only via user:pass@. The config
-    subset chain does not call _scrub_secrets (it has its own narrower chain),
-    so this is a genuinely separate path from the _scrub_secrets tests in
-    test_bugreport.py and must be verified independently."""
+    """comfy_api_url / net_search_url / coder_reviewer are user-supplied URLs
+    that routinely carry a credential as a query parameter, not only via
+    user:pass@. The config subset chain does not call _scrub_secrets (it has its
+    own narrower chain), so this is a genuinely separate path from the
+    _scrub_secrets tests and must be verified independently."""
     fake = {
         "net_search_url": "https://searx.example.com/search?api_key=CANARY1",
         "comfy_api_url": "http://qauser:CANARY2@127.0.0.1:8188",
@@ -183,8 +182,8 @@ def test_corrupt_config_flagged_unreadable_not_silently_defaulted(tmp_path, monk
     one - see bugreport._config_unreadable / config.load_config_checked.
 
     Uses REAL files on disk rather than monkeypatching load_config, unlike the
-    tests above: a lambda can never be "unreadable", which is exactly the
-    fixture shape that let a corrupt config go undetected in the first place.
+    tests above: a lambda can never be "unreadable", so that fixture shape
+    cannot express this case at all.
     """
     import localm.config as cfg
     home = tmp_path / "home"

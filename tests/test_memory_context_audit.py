@@ -68,16 +68,16 @@ def test_gguf_backend_count_messages_tokens_with_llm():
 
 def test_hf_backend_count_messages_tokens_with_tokenizer():
     # Tests HFWorker (_hf_worker.py), not the HFBackend proxy (hf.py): the
-    # chat-template + tokenizer logic runs only in the isolated child process, and
-    # HFBackend.count_messages_tokens is an RPC to it. The tokenizer is mocked (the
-    # external boundary) so the real logic under test still runs.
+    # chat-template + tokenizer logic runs only in the isolated child process,
+    # and HFBackend.count_messages_tokens is an RPC to it. Only the tokenizer
+    # itself is mocked.
     from localm.inference.backends._hf_worker import HFWorker
 
-    # Safe ONLY because count_messages_tokens's body has zero torch/transformers
-    # imports. _hf_worker.py's other methods (load/embed/chat_stream) do
-    # function-local torch/transformers imports with no native_lib_loaded() guard
-    # and rely on process isolation. A test that calls one of THOSE needs the same
-    # guard as test_hf_prompt_tokenization.py/test_hf_runner_isolation.py.
+    # Building an HFWorker in-process is safe ONLY because
+    # count_messages_tokens's body has zero torch/transformers imports. The
+    # other methods (load/embed/chat_stream) do function-local
+    # torch/transformers imports with no native_lib_loaded() guard and rely on
+    # process isolation, so a test that calls one of THOSE needs that guard.
     backend = HFWorker.__new__(HFWorker)
     mock_tokenizer = MagicMock()
     mock_tokenizer.apply_chat_template.return_value = "hello world"

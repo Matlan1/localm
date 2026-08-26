@@ -1,22 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The GUI form of ``localm update --rollback``: GET/POST /api/update/rollback.
 
-Three properties this file exists to pin, in the order they matter:
+Three properties this file pins, in the order they matter:
 
-1. **The probe never performs the action.** ``rollback_info()`` answers "is there a
-   backup" WITHOUT calling ``rollback_last()``, which MOVES THE INSTALL. An existence
-   check implemented as try-the-action-and-catch would roll a user back for opening a
-   settings page.
+1. **The probe never performs the action.** ``rollback_info()`` answers "is
+   there a backup" WITHOUT calling ``rollback_last()``, which MOVES THE
+   INSTALL. An existence check implemented as try-the-action-and-catch would
+   roll a user back for opening a settings page.
 2. **A partial restore never reads as success, and never restarts.**
-   ``_apply_update.rollback`` reports a half-restored tree by raising; that is the one
-   outcome that must be loudest, and it must not be confused with the benign "there is
-   no backup" refusal.
-3. **The route is OWNER-only, not merely config:write.** Restoring an older build can
-   put back a fixed defect, so a delegated config:write key - which drives the rest of
-   the Updates card - must not reach it. See CHK-UPDATE-ROLLBACK in routes/admin.py.
+   ``_apply_update.rollback`` reports a half-restored tree by raising; that
+   outcome must be the loudest, and must not be confused with the benign "there
+   is no backup" refusal.
+3. **The route is OWNER-only, not merely config:write.** Restoring an older
+   build can put back a fixed defect, so a delegated config:write key - which
+   drives the rest of the Updates card - must not reach it.
 
-Assertions about a restore lead with the FILES and only then the status code: a status
-code invites you to "fix" the number, a restored-or-not file does not.
+Assertions about a restore lead with the FILES and only then the status code.
 """
 from __future__ import annotations
 
@@ -42,9 +41,9 @@ def _engine():
 def _seed_install(tmp_path, monkeypatch, *, with_backup=True):
     """A fake install plus (optionally) the backup an earlier apply() left behind.
 
-    ``marker.txt`` is the discriminator: "new" in the install, "old" in the backup. It
-    is a file the fixture can express BOTH values of, so a rollback that silently did
-    nothing cannot pass (diff-review item 19)."""
+    ``marker.txt`` is the discriminator: "new" in the install, "old" in the
+    backup. It is a file the fixture can express BOTH values of, so a rollback
+    that silently did nothing cannot pass."""
     import json
     home = tmp_path / "home"
     home.mkdir()
@@ -100,8 +99,8 @@ def test_rollback_info_reports_nothing_and_creates_nothing(tmp_path, monkeypatch
 
 def test_rollback_info_names_the_backed_up_version_without_restoring_it(
         tmp_path, monkeypatch):
-    """The load-bearing property: after the probe the install is UNCHANGED. This is
-    what makes it safe to call on every settings load."""
+    """After the probe the install is UNCHANGED, which is what makes it safe to
+    call on every settings load."""
     _home, install = _seed_install(tmp_path, monkeypatch)
     info = updater.rollback_info()
     assert (install / "marker.txt").read_text(encoding="utf-8") == "new", \
@@ -202,15 +201,14 @@ def test_a_partial_restore_is_reported_as_such_and_does_not_restart(
 
 def test_rollback_is_refused_while_an_update_holds_the_lock(
         tmp_path, monkeypatch, no_restart):
-    """apply() and rollback_last() mutate the SAME install tree. Before the GUI
-    route, rollback was unserialised and safe only by accident of having exactly one
-    caller; a route makes an apply and a rollback two buttons in one Settings card.
-    A rollback that interleaved with a swap would remove names the swap is restoring.
+    """apply() and rollback_last() mutate the SAME install tree, and a route
+    makes an apply and a rollback two buttons in one Settings card. A rollback
+    that interleaved with a swap would remove names the swap is restoring.
 
     The lock dir is created DIRECTLY (an atomic mkdir at the real path), not
-    monkeypatched, so this exercises the cross-process guard as a separate process
-    would actually contend with it - the CLI in a terminal is a real contender that
-    no in-process lock could see."""
+    monkeypatched, so this exercises the cross-process guard the way a separate
+    process would contend with it: the CLI in a terminal is a real contender
+    that no in-process lock could see."""
     _open_mode(monkeypatch)
     home, install = _seed_install(tmp_path, monkeypatch)
     (home / "updates" / "apply.lock").mkdir()
@@ -247,7 +245,7 @@ def protected(tmp_path, monkeypatch, no_restart):
 
 
 def test_scoped_config_write_key_cannot_roll_the_install_back(protected):
-    """config:write drives Check and Update now. It must NOT drive a downgrade:
+    """config:write drives Check and Update. It must NOT drive a downgrade:
     restoring an older build can put back a defect the newer one fixed."""
     c, scoped, install, restarts = protected
     r = c.post("/api/update/rollback", headers={"Authorization": f"Bearer {scoped}"})

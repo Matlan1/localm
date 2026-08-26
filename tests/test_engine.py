@@ -135,8 +135,8 @@ class TestEngineContextManager(unittest.TestCase):
 
 class TestEngineLoadSerialization(unittest.TestCase):
     """Model loads must serialise process-wide, even across separate Engine
-    instances (server chat vs a background job), to avoid the concurrent-load
-    VRAM storm that can freeze the machine (issue B1)."""
+    instances (server chat vs a background job), so two loads never compete for
+    VRAM at once."""
 
     def _slow_backend(self, state, lock):
         """A backend whose load() takes ~40ms and records peak concurrency."""
@@ -184,8 +184,8 @@ class TestEngineLoadSerialization(unittest.TestCase):
 
 class TestEngineGpuPlacement(unittest.TestCase):
     """Engine.gpu_placement: whether the last load's transformer layers ended
-    up on GPU or CPU, so a caller can tell a full GPU load from a silent CPU
-    fallback (AGENTS.md rule 5) instead of a bare "loaded" that hides it."""
+    up on GPU or CPU, so a caller can tell a full GPU load from a CPU
+    fallback."""
 
     def _make_engine(self, *, gpu_layers_offloaded=None, gpu_layers_total=None):
         from localm.inference.engine import Engine

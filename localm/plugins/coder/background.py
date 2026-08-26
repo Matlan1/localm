@@ -1,23 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Background job registry for the coder plugin.
 
-The coder's process tools were blocking-only, so it could not start a dev server
-and then talk to it, or run a long build while doing anything else. This module
-is the async half: a GENERIC job registry (``JobRegistry``) plus the concrete
-:class:`ShellJob`.
+A GENERIC job registry (``JobRegistry``) plus the concrete :class:`ShellJob` and
+:class:`AgentJob`. ``BackgroundJob`` knows only about a lifecycle (running ->
+done/killed/failed), an OPAQUE per-kind result payload, a kill hook, and a
+bounded output buffer; everything process-specific lives in ``ShellJob``.
 
-Generic on purpose, because it is shared infrastructure. ``BackgroundJob`` knows
-only about a lifecycle (running -> done/killed/failed), an OPAQUE per-kind result
-payload, a kill hook, and a bounded output buffer; everything process-specific
-lives in ``ShellJob``. A background sub-agent is a second subclass with
-``kind = "agent"`` and its own payload, not a second registry: two parallel job
-systems in one plugin would be a design smell.
+The registry offers three things a non-shell caller needs:
 
-The registry therefore offers three things a non-shell caller needs:
-
-* **Per-kind caps.** ``kind_caps`` holds a separate ceiling per job kind (shell
-  jobs and agent jobs exhaust different resources, so one shared number would be
-  wrong for both).
+* **Per-kind caps.** ``kind_caps`` holds a separate ceiling per job kind, since
+  shell jobs and agent jobs exhaust different resources.
 * **Atomic check-and-insert.** The cap check and the spawn happen under one lock
   acquisition, so two near-simultaneous submits can never both observe a free
   slot and both be admitted.
@@ -25,45 +17,21 @@ The registry therefore offers three things a non-shell caller needs:
   since the last drain, for a caller that absorbs completions at a turn boundary
   rather than polling a known id.
 
-Concurrency style follows the GUI coder sessions (``sessions.py``): daemon
-threads plus a bounded buffer that drops the oldest entry when full. That
-module's ``queue.Queue`` is per-session and not reusable as a general table, so
-the pattern is reproduced here rather than lifted.
+Concurrency style, shared with the GUI coder sessions (``sessions.py``): daemon
+threads plus a bounded buffer that drops the oldest entry when full.
 
-Why this is NOT the builtin jobs plugin
----------------------------------------
-``localm/plugins/builtin/jobs/`` already exists and owns the word "job" in the
-user-facing product: a GUI Jobs tab, ``localm job ...``, ``/api/jobs``. This
-table is a DIFFERENT thing that happens to share a noun, and the five reasons
-are recorded here so nobody later "consolidates" the two (which would break the
-CLI case outright) or flags this module as duplicating shipped infrastructure.
-Each was checked against the source, not assumed:
-
-1. That plugin is SCHEDULE-CENTRIC. Every ``Job`` carries ``schedule_kind``
-   ("interval" | "cron") and ``store.py`` validates it against ``SCHEDULE_KINDS``.
-   A one-shot background command has no schedule; we would have to invent one.
-2. It is DURABLE USER DATA, stored under ``<data dir>/jobs/`` (``store.jobs_dir``)
-   and, per ``docs/jobs.md``, its "recorded results are saved in every session
-   mode, including privacy". An ephemeral in-session thread is not user data and
-   must not land in the user's jobs store or the Jobs tab.
-3. It is an OPTIONAL plugin (``localm plugin install jobs``; docs/jobs.md line 5).
-   A core coder capability cannot require an optional plugin to be present.
-4. Decisively: its scheduler "starts only when the plugin is loaded under a
-   running event loop" (``jobs/plug.py``), i.e. inside ``localm gui`` / ``serve``.
-   A plain ``localcoder`` REPL has no event loop, so background work routed
-   through it would SILENTLY NEVER RUN - exactly the case this module exists for.
-5. Lifetimes are opposite: theirs survive restarts, ours are in-process threads
-   scoped to one session and killed at exit.
-
-The existing integration also runs the other way (a jobs task_kind of "coder"
-runs a coder agent). This is coder -> background work, the reverse direction.
+This table is NOT ``localm/plugins/builtin/jobs/``, which owns the word "job" in
+the user-facing product (a GUI Jobs tab, ``localm job ...``, ``/api/jobs``). That
+plugin is schedule-centric (every ``Job`` carries a ``schedule_kind`` validated
+against ``SCHEDULE_KINDS``), stores durable user data under ``<data dir>/jobs/``,
+is an optional install, and its scheduler starts only when the plugin is loaded
+under a running event loop - so a plain ``localcoder`` REPL, which has no event
+loop, would silently never run work routed through it. Jobs here are in-process
+threads scoped to one session and killed at exit.
 
 Naming: nothing here is a bare "job" - ``check_shell_job`` / ``kill_shell_job``
 read as shell job control (jobs/bg/fg/kill %1), not as a schedule entry. A
-user-facing listing command should be ``/bg``, never ``/jobs``; "tasks" was
-considered and rejected because ``task`` is already the coder's own core noun
-(``localcoder [TASK]``, ``run_task``), which would be a worse ambiguity inside
-one component.
+user-facing listing command is ``/bg``, never ``/jobs``.
 
 Three invariants are load-bearing:
 
@@ -71,7 +39,7 @@ Three invariants are load-bearing:
    and this module is the single reaping call site for its children. So a
    ``poll() is None`` observed under that lock proves the child is still
    unreaped: on POSIX it is a live process or a zombie (either way the pid is
-   not reusable), and on Windows we still hold the process handle (which
+   not reusable), and on Windows the process handle is still held (which
    reserves the pid). Killing by pid is therefore safe at that instant. psutil's
    ``create_time`` is pinned alongside the pid as a second, independent check,
    but correctness does not depend on it: psutil is an OPTIONAL dependency here,
@@ -79,18 +47,18 @@ Three invariants are load-bearing:
 2. **Kill reaps the TREE, and says so only once it has CHECKED.** A build or dev
    server spawns children; killing only the direct child strands them. POSIX
    gets its own session/process group (``start_new_session``) and is killed with
-   ``killpg``; Windows uses ``taskkill /F /T``, which walks the child tree. We
-   never kill by port or by image name - only by a pid we have just proven is
-   still ours. Delivery being tree-wide is not the same as the tree being DEAD,
-   though: the direct child exiting is all ``Popen.poll()`` can ever show, and a
+   ``killpg``; Windows uses ``taskkill /F /T``, which walks the child tree.
+   Nothing is ever killed by port or by image name - only by a pid just proven
+   to be still ours. Tree-wide delivery is not the same as the tree being DEAD:
+   the direct child exiting is all ``Popen.poll()`` can ever show, and a
    descendant that handles the signal and then hangs would satisfy it while
    still holding its port. So the tree is pinned before the kill
    (``_snapshot_tree``) and re-checked after (``_verify_tree_gone``), survivors
    are killed by their pinned identity, and anything left - or an install where
-   psutil cannot tell us - is reported as a warning rather than folded into a
-   flat "killed".
+   psutil cannot tell - is reported as a warning rather than folded into a flat
+   "killed".
 3. **Bounded memory.** A chatty process cannot grow the buffer without limit,
-   and anything dropped is COUNTED and reported (never silently discarded).
+   and anything dropped is COUNTED and reported, never silently discarded.
 """
 
 from __future__ import annotations
@@ -151,10 +119,10 @@ class JobCapacityError(JobError):
 class RingBuffer:
     """A capped FIFO of text chunks, dropping the OLDEST when full.
 
-    Stores raw chunks rather than lines so that output with no newlines (a
-    ``\\r`` progress bar, a binary-ish blob) is capped just like any other.
-    ``dropped`` counts the characters evicted, so a caller can say how much was
-    lost instead of presenting a truncated tail as if it were everything.
+    Stores raw chunks rather than lines, so output with no newlines (a ``\\r``
+    progress bar, a binary-ish blob) is capped like any other. ``dropped`` counts
+    the characters evicted, so a caller can say how much was lost instead of
+    presenting a truncated tail as if it were everything.
     """
 
     def __init__(self, max_chars: int = _RING_MAX_CHARS) -> None:
@@ -209,9 +177,9 @@ def _process_create_time(pid: int) -> Optional[float]:
 def _describe(job) -> str:
     """Name a job for an error message, without trusting it to be well-formed.
 
-    Used on the atexit path, where the job we are describing is the one that
-    just misbehaved: reading ``.id`` / ``.label`` is a call into someone else's
-    object and must not be what turns a reported failure into a traceback.
+    Never raises. Reading ``.id`` / ``.label`` is a call into someone else's
+    object, and this runs on the atexit path where a reported failure must not
+    become a traceback.
     """
     try:
         return f"{job.id} ({str(job.label)[:60]})"
@@ -231,8 +199,8 @@ def _decode(raw) -> str:
 def _still_the_same_process(pid: int, create_time: Optional[float]) -> bool:
     """Is *pid* still the process we started?
 
-    Returns True when we cannot tell (no psutil, or an unexpected probe error) -
-    the caller's lock-plus-unreaped-child argument is the primary guarantee, and
+    Returns True when it cannot tell (no psutil, or an unexpected probe error):
+    the caller's lock-plus-unreaped-child argument is the primary guarantee and
     this check only ever adds a veto. Returns False only on positive evidence of
     a mismatch (the pid is gone, or its start time no longer matches).
     """
@@ -258,12 +226,12 @@ def _still_the_same_process(pid: int, create_time: Optional[float]) -> bool:
 class BackgroundJob:
     """One unit of asynchronous work tracked by :class:`JobRegistry`.
 
-    The record is deliberately kind-agnostic::
+    The record is kind-agnostic::
 
         {id, kind, label, state, started_at, finished_at, result, error, warnings}
 
     ``result`` is an OPAQUE per-kind payload (a shell job puts ``exit_code``
-    there; an agent job would put its own summary), so adding a kind never means
+    there; an agent job puts its own summary), so adding a kind never means
     reshaping the table. Subclasses implement :meth:`_poll`, :meth:`_terminate`
     and optionally :meth:`_result_for` / :meth:`_drain`.
     """
@@ -496,8 +464,8 @@ class ShellJob(BackgroundJob):
     def _read_stream(self, stream, ring: RingBuffer, name: str) -> None:
         """Drain one pipe into *ring* until EOF.
 
-        Deliberately touches no job state except ``warnings``: it must never
-        take ``self._lock``, or a bounded join under that lock could deadlock.
+        Touches no job state except ``warnings``, and must never take
+        ``self._lock``: a bounded join under that lock could deadlock.
         """
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         try:
@@ -627,11 +595,11 @@ class ShellJob(BackgroundJob):
     def _snapshot_tree(self) -> None:
         """Pin every live descendant as ``(pid, create_time)`` before signalling.
 
-        Taken while the child is still alive on purpose: once it exits and is
-        reaped its children are re-parented (to init on POSIX, to nothing we can
-        follow on Windows), so they are unreachable from our pid afterwards. The
-        create_time pin is what makes killing a survivor safe later - it is the
-        same identity check the direct child uses, so a recycled pid can never be
+        Must be taken while the child is still alive: once it exits and is reaped
+        its children are re-parented (to init on POSIX, to nothing followable on
+        Windows), so they are unreachable from our pid afterwards. The
+        create_time pin is what makes killing a survivor safe later - the same
+        identity check the direct child uses, so a recycled pid can never be
         signalled.
         """
         self._tree_snapshot = None
@@ -658,9 +626,9 @@ class ShellJob(BackgroundJob):
     def _surviving_descendants(self) -> Optional[list]:
         """Snapshot entries still alive under their ORIGINAL identity.
 
-        ``None`` means we could not look; ``[]`` means we looked and the tree is
-        clean. Collapsing those two would turn "unverified" into "verified good",
-        which is the exact failure this check exists to prevent.
+        ``None`` means it could not look; ``[]`` means it looked and the tree is
+        clean. The two are never collapsed, which would turn "unverified" into
+        "verified good".
         """
         if self._tree_snapshot is None:
             return None
@@ -732,7 +700,7 @@ class ShellJob(BackgroundJob):
 # --------------------------------------------------------------------------- #
 
 class AgentJob(BackgroundJob):
-    """A background sub-agent: the second kind, exactly as this module intended.
+    """A background sub-agent.
 
     The child Agent is built by the CALLER on the parent's thread and handed in
     already constructed, so a construction error (bad role, unreadable preload)
@@ -741,13 +709,12 @@ class AgentJob(BackgroundJob):
 
     ``result`` payload: ``{"summary": str, "turns": int}``.
 
-    NOT PREEMPTIBLE, and we say so rather than pretending. ``Agent.run_task`` is
-    a blocking call with no cooperative cancellation anywhere in the agent
-    package (the only interruption path is a KeyboardInterrupt in the INTERACTIVE
-    loop, which a worker thread cannot raise). So ``_terminate`` cannot stop a
-    turn already in flight: it records a warning and marks intent, and the daemon
-    thread dies with the process. That is why this PR ships no ``kill_agent_job``
-    tool - offering one that cannot actually stop the work would be a facade.
+    NOT PREEMPTIBLE. ``Agent.run_task`` is a blocking call with no cooperative
+    cancellation anywhere in the agent package (the only interruption path is a
+    KeyboardInterrupt in the INTERACTIVE loop, which a worker thread cannot
+    raise). ``_terminate`` therefore cannot stop a turn already in flight: it
+    records a warning and marks intent, and the daemon thread dies with the
+    process. There is no ``kill_agent_job`` tool.
     """
 
     kind = "agent"
@@ -851,9 +818,9 @@ class AgentJob(BackgroundJob):
 class JobRegistry:
     """Tracks background jobs, caps how many run at once per kind, reaps at exit.
 
-    Kind-agnostic by design: it holds :class:`BackgroundJob` instances, so a
-    background sub-agent registers here too and inherits the caps, the lookup,
-    the drain, and the shutdown behaviour.
+    Kind-agnostic: it holds :class:`BackgroundJob` instances, so a background
+    sub-agent registers here too and inherits the caps, the lookup, the drain,
+    and the shutdown behaviour.
     """
 
     def __init__(self, kind_caps: Optional[dict] = None,
@@ -953,9 +920,8 @@ class JobRegistry:
     def list_status(self, kind: Optional[str] = None, owner=_ANY_OWNER) -> list:
         """Every tracked job, optionally narrowed to one *kind* and/or *owner*.
 
-        *owner* defaults to the "do not filter" sentinel, so an existing caller
-        is unaffected. Pass a real owner id (or None) to get exactly that
-        owner's jobs - see BackgroundJob.owner for why a GUI caller must.
+        *owner* defaults to the "do not filter" sentinel. Pass a real owner id
+        (or None) to get exactly that owner's jobs - see BackgroundJob.owner.
         """
         with self._lock:
             jobs = [j for j in self._jobs.values()
@@ -1034,14 +1000,13 @@ class JobRegistry:
     def take_dropped_undrained(self, kind: Optional[str] = None) -> int:
         """Uncollected completions lost since the last call, and RESET the count.
 
-        The reporting half of ``dropped_undrained``: a counter nobody reads is
-        bookkeeping, not honesty. A drain-based consumer calls this next to its
-        ``drain_finished`` and tells the user what it lost, because from the
-        consumer's side a discarded completion is indistinguishable from "nothing
-        finished". Consumed exactly once, like the drain itself, so a turn-
-        boundary caller warns per loss instead of every turn forever. The
-        cumulative ``dropped_undrained`` total is deliberately NOT reset here -
-        that one stays readable all session (``/bg`` shows it).
+        The reporting half of ``dropped_undrained``. A drain-based consumer calls
+        this next to its ``drain_finished`` and tells the user what it lost,
+        because from the consumer's side a discarded completion is
+        indistinguishable from "nothing finished". Consumed exactly once, like
+        the drain itself, so a turn-boundary caller warns per loss instead of
+        every turn forever. The cumulative ``dropped_undrained`` total is NOT
+        reset here and stays readable all session (``/bg`` shows it).
         """
         with self._lock:
             if kind is None:
@@ -1054,14 +1019,11 @@ class JobRegistry:
         """Kill every running job. Returns how many were killed. Never raises.
 
         This is the atexit hook, so it is the LAST chance to say anything: a job
-        we could not kill is a live process the coder started outliving localm -
-        precisely the orphan the hook exists to prevent, and precisely what the
-        shipped "stopped at exit rather than orphaned" claim promises does not
-        happen. ``kill()`` reports that failure by RETURN VALUE ("kill FAILED
+        that could not be killed is a live process the coder started outliving
+        localm. ``kill()`` reports that failure by RETURN VALUE ("kill FAILED
         - ..."), not by raising, so counting every non-raising call as a success
         would report the orphan case as a clean shutdown. Failures are counted
-        out and printed instead (AGENTS.md rule 5: a safety step that failed must
-        never report success).
+        out and printed instead.
         """
         running = self.running()
         if running:
@@ -1097,8 +1059,7 @@ class JobRegistry:
 
         Runs from atexit, where ``sys.stderr`` can already be closed or replaced
         by None. Failing to PRINT must not become an exception escaping the hook,
-        but staying silent about an orphan is not acceptable either - so we try,
-        and give up only when the stream itself is gone.
+        so it tries and gives up only when the stream itself is gone.
         """
         try:
             stream = sys.stderr
@@ -1119,9 +1080,9 @@ def get_registry() -> JobRegistry:
 
     Process-wide rather than per-session: the tools are dispatched as plain
     functions that receive only *cwd*, with no session handle to hang a registry
-    off. That is not a trust boundary - only a full-capability (non-restricted)
+    off. This is not a trust boundary - only a full-capability (non-restricted)
     session can reach these tools at all, and such a session already has
-    ``run_shell``, i.e. arbitrary code execution.
+    ``run_shell``.
     """
     global _registry
     with _registry_lock:

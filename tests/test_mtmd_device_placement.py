@@ -1,24 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The vision projector must not sit on a device the user's configuration excluded.
 
-Field evidence (issue 1222): ``clip_ctx: CLIP using Vulkan0 backend`` while
-``auto GPU split: device 1: 50%, device 2: 50%`` - the projector held ~857 MiB of
-weights plus a 248 MiB compute buffer on the one card the configured split left out.
 ``mtmd_context_params`` has no device field; clip reads the process environment
-variable ``MTMD_BACKEND_DEVICE`` instead (upstream ``tools/mtmd/clip.cpp:184-195``).
+variable ``MTMD_BACKEND_DEVICE`` instead (upstream ``tools/mtmd/clip.cpp``).
+Without it the projector can hold its weights and compute buffer on a card the
+configured GPU split left out.
 
-Two properties are pinned here, and they pull in opposite directions on purpose:
+Two properties are pinned here, and they pull in opposite directions:
 
 * the variable IS set, to the right name, when localm can determine it exactly;
-* it is NOT set when localm cannot - because ggml's registry order and llama.cpp's
+* it is NOT set when localm cannot - ggml's registry order and llama.cpp's
   ``model->devices`` order are NOT the same sequence (llama.cpp drops iGPUs whenever
   a discrete GPU exists, skips ACCEL, dedups by device_id and hoists RPC), so a
   positional lookup is only valid when every non-CPU device is a plain GPU.
 
-The second half is the one worth having: a wrong name is non-fatal upstream
-(clip warns and falls back), so nothing here would CRASH if the guard were dropped -
-it would just quietly move a gigabyte onto an arbitrary card. See
-dev-notes/mmproj-device-placement-2026-08-12.md.
+A wrong name is non-fatal upstream (clip warns and falls back), so dropping the
+guard does not crash anything: it moves a gigabyte onto an arbitrary card.
 """
 
 import os
@@ -56,10 +53,9 @@ class TestResolveBackendDeviceName:
     """The guard: resolve a name only when the index space is provably positional."""
 
     def test_index_zero_resolves_to_nothing(self, monkeypatch):
-        """Device 0 is already clip's own default, so there is nothing to correct.
-
-        Returning None here (rather than the correct name for device 0) is what
-        keeps every default install byte-identical."""
+        """Device 0 is already clip's own default, so there is nothing to correct
+        and the resolver returns None instead of device 0's name, leaving a
+        default install untouched."""
         _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
         assert mtmd_mod._resolve_backend_device_name(0) is None
 
@@ -74,9 +70,9 @@ class TestResolveBackendDeviceName:
         assert mtmd_mod._resolve_backend_device_name(1) == "Vulkan1"
 
     def test_cpu_device_position_does_not_shift_the_index(self, monkeypatch):
-        """The CPU device is skipped wherever it sits in the registry. Ordering it
-        LAST here is deliberate: a resolver that sliced ``devices[1:]`` instead of
-        filtering by type would pass the test above and fail this one."""
+        """The CPU device is skipped wherever it sits in the registry. It is
+        ordered LAST here, so a resolver that sliced ``devices[1:]`` instead of
+        filtering by type passes the test above and fails this one."""
         _devices(monkeypatch, [("Vulkan0", GPU), ("Vulkan1", GPU), ("CPU", CPU)])
         assert mtmd_mod._resolve_backend_device_name(1) == "Vulkan1"
 
@@ -86,13 +82,11 @@ class TestResolveBackendDeviceName:
         assert mtmd_mod._resolve_backend_device_name(2) == "Vulkan2"
 
     def test_integrated_gpu_present_refuses(self, monkeypatch):
-        """THE DIVERGENCE THAT ACTUALLY BITES, and the reason this guard exists.
-
-        ggml-vulkan enumerates integrated GPUs and types them IGPU
-        (ggml-vulkan.cpp:17878); llama.cpp's llama_prepare_model_devices admits an
-        iGPU ONLY when no discrete GPU was found. So on this registry llama.cpp's
-        device list is ["Vulkan0"] alone - one entry - and index 1 does not name
-        Vulkan1 there, it names nothing at all. Refuse."""
+        """ggml-vulkan enumerates integrated GPUs and types them IGPU;
+        llama.cpp's llama_prepare_model_devices admits an iGPU ONLY when no
+        discrete GPU was found. So on this registry llama.cpp's device list is
+        ["Vulkan0"] alone - one entry - and index 1 does not name Vulkan1 there,
+        it names nothing at all. Refuse."""
         _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", IGPU)])
         assert mtmd_mod._resolve_backend_device_name(1) is None
 
@@ -210,9 +204,9 @@ class TestOpenSetsTheEnvironment:
         assert mtmd_mod._MTMD_DEVICE_ENV not in os.environ
 
     def test_ambiguous_registry_never_sets_the_env(self, monkeypatch):
-        """The guard, observed through _open rather than through the resolver -
-        so a future refactor that resolves correctly but forgets to honour None
-        still fails."""
+        """The guard, observed through _open and not through the resolver, so a
+        refactor that resolves correctly but forgets to honour None still
+        fails."""
         _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", IGPU)])
         lib = _FakeLib()
         _ctx(lib, 1)._open(use_gpu=True)
@@ -298,8 +292,8 @@ class TestConstructorAppliesItInTime:
 
     def test_unusable_index_warns_and_keeps_vision(self, monkeypatch, caplog):
         """A bad index must not cost the user vision, and must not be silent
-        either (rule 5). Unreachable from llama.py, which passes an int derived
-        from mp.main_gpu, so this pins the contract rather than a live path."""
+        either. Unreachable from llama.py, which passes an int derived from
+        mp.main_gpu, so this pins the contract, not a live path."""
         _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
         lib = self._fake_lib_class(_FakeLib())
         monkeypatch.setattr(mtmd_mod, "_load_lib", lambda: lib)

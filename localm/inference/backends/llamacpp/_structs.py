@@ -2,10 +2,6 @@
 """
 ctypes Structure definitions for the llama.cpp C API.
 
-These layouts were derived by diffing the ACTUAL ``include/llama.h`` at the
-ACTUAL upstream commit each prebuilt was built from, and corroborated by probing
-the shipped DLL's ``*_default_params()`` return bytes.
-
 upstream appends fields to the params structs several times a quarter with no ABI
 or soname bump, so localm OVER-allocates both by-value params structs (a named
 trailing field for what we know plus a reserved pad) and round-trips
@@ -16,25 +12,23 @@ is therefore harmless.
 
 A mid-struct REORDER is NOT harmless, and upstream did one:
 
-TWO TAG NAMESPACES, AND THEY COLLIDE - READ THIS BEFORE RESOLVING ANY TAG BELOW
--------------------------------------------------------------------------------
+TWO TAG NAMESPACES, AND THEY COLLIDE
+------------------------------------
 ``b1288`` / ``b1307`` are **lemonade-sdk/llamacpp-rocm** tags: the bundled AMD
 build. ``b9xxx`` / ``b10xxx`` are **ggml-org/llama.cpp** tags: upstream itself.
 They are different numbering schemes and they OVERLAP on a real string -
-``b1288`` also exists upstream, published 2023-09-28, as an unrelated
-three-year-old release. So resolving a lemonade tag against upstream does not
-give you a 404, it gives you a plausible WRONG ARTIFACT with no signal that
-anything is off. Every tag below therefore names its repository.
+``b1288`` also exists upstream as an unrelated release. So resolving a lemonade
+tag against upstream does not give you a 404, it gives you a plausible WRONG
+ARTIFACT with no signal that anything is off. Every tag below therefore names
+its repository.
 
 TWO llama_model_params LAYOUTS EXIST, BOTH 72 BYTES
 ---------------------------------------------------
 ``llama_model_params`` was reordered in place between llama.cpp `7c158fbb4aec`
 (lemonade b1288, ggml 0.13.1) and `07132750825a` (lemonade b1307, ggml 0.18.1).
-The change is PINNED, not bracketed: it landed in upstream release **b10105**
-(commit `e6dd0e29a675`, ggml-org/llama.cpp#20834, "args: refactor
-mlock/mmap/directio into load-mode", published 2026-07-24). Upstream b10103 is
-the last release with the old layout; b10104 was never tagged. ``sizeof`` is 72
-on BOTH sides, so nothing about the size trips - the fields simply moved:
+The change landed in upstream release **b10105**. Upstream b10103 is the last
+release with the old layout; b10104 was never tagged. ``sizeof`` is 72 on BOTH
+sides, so nothing about the size trips - the fields simply moved:
 
     offset   V1 (lemonade b1288,       V2 (lemonade b1307,
              upstream <= b10103)        upstream >= b10105)
@@ -56,11 +50,11 @@ drops the user's GPU selection while changing how the weights are mapped; writin
 ``check_tensors`` at the V1 offset lands in V2's ``no_alloc``, which loads
 metadata and no weights at all. None of it raises.
 
-localm therefore ships BOTH layouts and picks one per loaded library at load time
-(``_abi.detect_model_params_layout``), rather than binding one and hoping. There
-is deliberately NO bare ``LlamaModelParams`` name: a caller must go through
-``_abi.model_params_class()`` / ``_api.llama_model_default_params()`` so it is not
-possible to construct the wrong one by habit.
+localm ships BOTH layouts and picks one per loaded library at load time
+(``_abi.detect_model_params_layout``). There is NO bare ``LlamaModelParams``
+name: a caller must go through ``_abi.model_params_class()`` /
+``_api.llama_model_default_params()``, so the wrong one cannot be constructed by
+habit.
 
 Fields at offsets that did NOT move (``devices``, ``tensor_buft_overrides``,
 ``n_gpu_layers``, ``split_mode``, ``tensor_split``, the callbacks,
@@ -74,8 +68,7 @@ Verified NATIVE sizes:
     llama_context_params = 152 bytes on lemonade b1288; 160 bytes on
                            upstream b9682+ / lemonade b1307
                            (adds a trailing ``ctx_other`` pointer). Trailing
-                           append only - no mid-struct movement, re-diffed
-                           7c158fbb4aec -> 07132750825a on 2026-08-05.
+                           append only - no mid-struct movement.
     llama_batch          = 56 bytes (7 pointers + 1 int32 + padding)
 
 The ``sizeof`` asserts below guard against editing these definitions wrong; they
@@ -264,9 +257,8 @@ def set_use_mmap(mp, enabled: bool) -> None:
     were bound, silently write into ``check_tensors``). Call sites use this
     instead of naming either field.
 
-    Any mlock the caller already asked for is preserved across the flip -
-    localm does not set mlock today, but mapping "no mmap" onto a bare
-    LLAMA_LOAD_MODE_NONE would silently drop it if that ever changes.
+    Any mlock the caller already asked for is preserved across the flip:
+    mapping "no mmap" onto a bare LLAMA_LOAD_MODE_NONE would drop it.
     """
     if isinstance(mp, LlamaModelParamsV2):
         keep_mlock = mp.load_mode in (LLAMA_LOAD_MODE_MLOCK,
@@ -284,18 +276,16 @@ def set_use_mmap(mp, enabled: bool) -> None:
 def get_use_mmap(mp) -> bool:
     """Read back whether the weights will be memory-mapped, on either layout.
 
-    DIRECT_IO is deliberately NOT mmap: upstream documents it as taking
-    precedence over mmap, and V1 carried it as its own separate flag.
+    DIRECT_IO is NOT mmap: upstream documents it as taking precedence over
+    mmap, and V1 carried it as its own separate flag.
 
     AUTO reports False, and that is a KNOWN IMPRECISION rather than an answer:
     under LLAMA_LOAD_MODE_AUTO the build picks at load time from device
     capabilities, so whether the weights end up mapped is not knowable from the
-    params at all, and a bool cannot say "undetermined". Left as-is deliberately
-    - every localm call site writes an explicit mode through set_use_mmap before
-    any read, so AUTO does not reach here in practice (there is no production
-    caller of this function today; only tests). Anyone who DOES start calling it
-    on unmodified default params on a b10373-or-newer build must not read False
-    as "mmap is off".
+    params at all, and a bool cannot say "undetermined". Every localm call site
+    writes an explicit mode through set_use_mmap before any read, so AUTO does
+    not reach here in practice; a caller reading unmodified default params on a
+    b10373-or-newer build must not read False as "mmap is off".
     """
     if isinstance(mp, LlamaModelParamsV2):
         return mp.load_mode in (LLAMA_LOAD_MODE_MMAP, LLAMA_LOAD_MODE_MMAP_MLOCK)

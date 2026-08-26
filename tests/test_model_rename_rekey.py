@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """localm.inference.http_server.rekey_loaded_model: re-keys every in-memory
 record of a loaded model's identity after its registry entry is renamed, so a
-still-loaded/serving engine is not orphaned under its old name. See
-tests/test_driving_engine.py for the sibling http_server module-state test
-pattern this reuses.
+still-loaded/serving engine is not orphaned under its old name.
 
 The second half of this file covers what happens when NOBODY re-keys, which is
 not a hypothetical: `localm rename` runs in a separate process and physically
 cannot reach into a running server's memory, so it leaves the engine map keyed
 on the old name while the registry holds the new one. Every name-keyed guard on
-the remove route then missed, and the route deleted a loaded model's GGUF.
+the remove route then misses, and the route deletes a loaded model's GGUF.
 Those tests use a REAL file inside a REAL models dir, because the guard turns
 on `resolve_deletion_target`, and a fixture with a fictional path like
 "x/a.gguf" can never make it return anything - it would execute the guard and
@@ -78,13 +76,12 @@ def test_rekey_is_a_noop_when_the_old_name_is_not_loaded():
 
 
 def test_rekey_also_moves_the_startup_and_last_active_pointers():
-    """Found by the live repro, not by reasoning: after renaming the model a
-    server was STARTED with, GET /v1/models still listed a row for the old
-    name, because list_models adds _default_model_name whenever the registry
-    lacks it. The same stale pointer also makes switch_engine's registration
-    check accept a name the registry no longer has, and
-    _resolve_unnamed_model_name falls back to _last_active_model_name after an
-    eviction. All three are records of a loaded model's identity, so all three
+    """After renaming the model a server was STARTED with, GET /v1/models still
+    lists a row for the old name, because list_models adds _default_model_name
+    whenever the registry lacks it. The same stale pointer also makes
+    switch_engine's registration check accept a name the registry no longer has,
+    and _resolve_unnamed_model_name falls back to _last_active_model_name after
+    an eviction. All three are records of a loaded model's identity, so all three
     move."""
     _reset()
     eng = _FakeEngine("old")
@@ -138,9 +135,9 @@ def test_rekey_fixes_the_stale_active_model_guard_hazard():
     """The concrete hazard this function exists to close: active_model()
     reads _engine.display_name, and the GUI's remove-model guard is exactly
     `req.model == active_model()`. Without the rekey, renaming the active
-    model would leave that comparison checking the NEW registry name against
-    the engine's stale OLD display_name, so it would never match - and the
-    GUI could delete the file out from under the model still serving
+    model leaves that comparison checking the NEW registry name against
+    the engine's stale OLD display_name, so it never matches - and the
+    GUI can delete the file out from under the model still serving
     requests. Reproduces active_model()'s own read directly (it is a closure
     built per-app, but it always reduces to exactly this)."""
     _reset()
@@ -178,10 +175,7 @@ def models_home(tmp_path, monkeypatch):
     model_manager.MODELS_DIR is what is_owned_model_path (and therefore
     resolve_deletion_target) reads; config.MODELS_DIR is pinned to the same
     directory so nothing can silently answer against the session's real home
-    and make these tests pass vacuously. Same reasoning as
-    tests/test_cli_rm_prompt.py's `home` fixture, which documents why leaving
-    the second one unpinned once made a whole file pass against the very bug it
-    existed to catch.
+    and make these tests pass vacuously.
     """
     home = tmp_path / ".localm"
     models = home / "models"
@@ -388,9 +382,8 @@ def _raise_on_resolve(monkeypatch, bad: str, exc=OSError("unreachable")):
 
     Compared through Path + normcase, NOT as the raw string handed in: on
     Windows ``str(Path("//share/x"))`` comes back with BACKSLASHES, so a raw
-    equality test silently never matches. The first version of this helper did
-    exactly that - the fault was never injected, nothing refused, and the file
-    was deleted. The test caught it, but only because it asserts on the FILE.
+    equality test silently never matches, no fault is injected, nothing refuses,
+    and the file is deleted.
     """
     import os as _os
     from pathlib import Path as _P
@@ -414,11 +407,11 @@ def _raise_on_resolve(monkeypatch, bad: str, exc=OSError("unreachable")):
 
 def test_remove_refuses_when_a_loaded_engines_path_will_not_resolve(
         models_home, gui_client, monkeypatch):
-    """THE fail-open: `except (OSError, ValueError): continue` skipped a LOADED
-    engine and let the loop fall through to "nothing holds this file". A model
-    served off a momentarily-unreachable UNC share therefore had its GGUF
-    deleted out from under it - the same unrecoverable outcome the guard
-    exists to prevent, reached through the error path."""
+    """THE fail-open: `except (OSError, ValueError): continue` skips a LOADED
+    engine and lets the loop fall through to "nothing holds this file". A model
+    served off a momentarily-unreachable UNC share then has its GGUF deleted out
+    from under it - the same unrecoverable outcome the guard exists to prevent,
+    reached through the error path."""
     app, started = gui_client
     gguf = _make_model_file(models_home)
     _register(models_home, {"victim": {"path": str(gguf), "source": "local"}})
@@ -479,19 +472,17 @@ def test_remove_refuses_when_the_models_own_path_will_not_resolve(
     """The third case, and it is NOT a data-loss one - stated precisely
     because the other two are and it would be easy to bundle them.
 
-    MEASURED against the previous code: an unresolvable registry path made
-    find_aliases_by_path raise (it resolves the path it is handed and catches
-    only for SIBLING entries), so the guard blew up before reaching
-    resolve_deletion_target and the route answered 500. Nothing was deleted.
-    So the collapse inside resolve_deletion_target - which returns None for
-    "unresolvable" exactly as it does for "outside the models dir" and
-    "already gone" - was LATENT, not live.
+    An unresolvable registry path makes find_aliases_by_path raise (it resolves
+    the path it is handed and catches only for SIBLING entries), so the guard
+    blows up before reaching resolve_deletion_target and the route answers 500.
+    Nothing is deleted. The collapse inside resolve_deletion_target - which
+    returns None for "unresolvable" exactly as it does for "outside the models
+    dir" and "already gone" - is therefore LATENT rather than live.
 
-    Two reasons it is fixed anyway. A guard whose job is to answer a question
-    calmly should not crash the request (rule 5: a failure gets reported at
-    its own altitude, not as a stack trace). And the latent hole goes LIVE the
-    moment anything reorders those two calls - which this very change does,
-    moving the resolve probe ahead of find_aliases_by_path.
+    It is still guarded: a guard whose job is to answer a question calmly should
+    not crash the request, and the latent hole goes LIVE the moment anything
+    reorders those two calls, which moving the resolve probe ahead of
+    find_aliases_by_path does.
     """
     app, started = gui_client
     gguf = _make_model_file(models_home)
@@ -798,8 +789,8 @@ def test_cli_rename_warns_out_loud_before_falling_back_past_a_live_server(
         monkeypatch, capsys):
     """A 401 (a keyed server this CLI has no credential for) still leaves the
     user's rename to do, so it happens locally - but that strands the running
-    server on the old name, and saying nothing about it is exactly the silent
-    degradation that produced this bug. The warning must name the remedy."""
+    server on the old name. The warning must name the remedy rather than
+    degrading silently."""
     import requests
 
     from localm.cli import models as cli_models

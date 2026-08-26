@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-UPDATER-INTEGRITY (signature half): the self-updater verifies an Ed25519
-signature over the downloaded build against a PINNED public key before extracting
-or executing it. Signing is auth-model style: with a key pinned it ENFORCES (a
-missing, unsigned, tampered, or downgraded build all refuse before any swap); with
-NO key pinned it fails OPEN (applies on the HTTPS + private-channel trust) so the
-feature is not inert out of the box. The SHIPPED default pins a key, and a guard
-below keeps it non-empty so the "empty key bricks self-update" bug cannot recur.
+"""The self-updater verifies an Ed25519 signature over the downloaded build
+against a PINNED public key before extracting or executing it. Signing is
+auth-model style: with a key pinned it ENFORCES (a missing, unsigned, tampered,
+or downgraded build all refuse before any swap); with NO key pinned it fails OPEN
+(applies on the HTTPS + private-channel trust) so the feature is not inert out of
+the box. The SHIPPED default pins a key, and a guard below keeps it non-empty so
+an empty key cannot brick self-update.
 """
 
 import base64
@@ -228,7 +228,7 @@ def test_sign_release_script_roundtrip(tmp_path, monkeypatch):
     if not script.is_file():
         # scripts/sign_release.py is gitignored, maintainer-only release
         # tooling, so a fresh clone or an uncopied worktree does not have this
-        # file. The import runs at TEST-EXECUTION time, so a plain pytest.skip
+        # file. The import runs while the test executes, so a plain pytest.skip
         # is enough; the rest of the file keeps running.
         pytest.skip(f"{script} not present (gitignored maintainer-only "
                     "release tooling, AGENTS.md rule 6) - skipping the "

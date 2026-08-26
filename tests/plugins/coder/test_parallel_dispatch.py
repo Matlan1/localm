@@ -344,11 +344,10 @@ def test_partial_budget_degrades_and_says_so(repo):
 # --------------------------------------------------------------------------
 
 def test_unattended_parent_still_fails_closed():
-    """The 2026-07-09 bypass fix must survive the serialising wrapper.
-
-    A parent with no handler and no interactive terminal has nobody to ask, so the
-    child must get None (which execution.py turns into a denial) - never a
-    permissive default that self-approves.
+    """A parent with no handler and no interactive terminal has nobody to ask, so
+    the child must get None (which execution.py turns into a denial) - never a
+    permissive default that self-approves. The property must survive the
+    serialising wrapper.
     """
     parent = DummyParent(Path("."), confirm_handler=None, interactive=False)
     assert par._serialised_confirm_handler(parent, "child1") is None
@@ -607,7 +606,7 @@ def test_an_abandoned_child_cannot_report_ok_after_the_parent_gave_up(
 def test_the_late_result_is_reported_rather_than_silently_dropped(
         repo, monkeypatch):
     """Refusing the write must not hide that the child finished, or where its
-    files went (AGENTS.md rule 5)."""
+    files went."""
     release, wrote = threading.Event(), threading.Event()
 
     def hang(agent):
@@ -663,7 +662,7 @@ def test_a_late_write_cannot_flip_the_tools_ok_flag_or_the_change_set(
 
 
 def test_a_child_that_finishes_in_time_still_reports_ok(repo, monkeypatch):
-    """The fires-control's other half: the seal must not suppress ALL writes.
+    """The seal must not suppress ALL writes.
 
     Runs through the SAME pinned-pool driver, so this cannot pass merely because
     the seam was absent - only because the child published before any seal.

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REPL media-generation parity (rec#437): /generate-music and /generate-video
-mirror /generate-image - they unload the chat model, resolve the configured
-ComfyUI api_url (not a hardcoded default), and honour the privacy contract by
+"""REPL media-generation parity: /generate-music and /generate-video mirror
+/generate-image - they unload the chat model, resolve the configured ComfyUI
+api_url (not a hardcoded default), and honour the privacy contract by
 suppressing the on-disk sidecar in privacy mode.
 
-These mirror tests/plugins/coder/test_image_tool.py's /generate-image tests so
-the three media commands stay behaviourally identical.
+These mirror the /generate-image tests so the three media commands stay
+behaviourally identical.
 """
 
 from unittest.mock import MagicMock, patch

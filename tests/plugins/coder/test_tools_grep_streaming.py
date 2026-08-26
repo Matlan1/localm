@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""grep: streaming, pre-filter skips, and configurable caps (WORKITEMS B4).
+"""grep: streaming, pre-filter skips, and configurable caps.
 
-grep used to read every candidate file whole - including everything under .git
-and node_modules, which pathlib's ``**/*`` walks into - and its two caps were
-hardcoded. It now streams line by line, skips noise directories / binaries /
-oversized files before reading them, and takes its caps from call args or config.
+grep streams line by line, skips noise directories, binaries and oversized files
+before reading them, and takes its caps from call args or config.
 
-The bar these tests hold is not "it got faster", it is:
+These tests hold three properties:
 
-- results did not change for the files it still searches (line numbers, context
-  windows, hit counts, the exact "N more" remainders);
-- every new skip is REPORTED. A search that quietly covers less than it used to
-  is the exact "hidden problem" AGENTS.md rule 5 forbids, and it is worse than a
-  slow search because the caller cannot tell;
-- the caps are actually configurable, and 0 really means no cap.
+- results are correct for the files it searches: line numbers, context windows,
+  hit counts, and the exact "N more" remainders;
+- every skip is REPORTED, so a search never covers less than it says;
+- the caps are configurable, and 0 means no cap.
 """
 
 import tracemalloc
@@ -64,8 +60,8 @@ class TestResultsUnchanged:
     def test_zero_context_shows_only_the_hit(self, project):
         """A context=0 window is ONE line. The rolling-window matcher closes a
         hit only when its trailing context arrives, so a hit needing zero
-        trailing lines has to be closed at creation or it picks up the next
-        line - silently doubling output and halving the reach of the line cap."""
+        trailing lines is closed at creation rather than picking up the next
+        line."""
         r = tool_grep(project, "def target", context=0)
         assert "→    3: def target(a):" in r.output
         assert "return a" not in r.output
@@ -107,8 +103,8 @@ class TestSkipsAreReported:
         assert "1 binary" in r.output
 
     def test_extensionless_text_file_is_still_searched(self, project):
-        """A NUL sniff, not an extension allowlist - or Makefile/LICENSE would
-        silently drop out of every search."""
+        """The binary check is a NUL sniff, not an extension allowlist, so
+        Makefile and LICENSE are still searched."""
         (project / "Makefile").write_text("target: build\n", encoding="utf-8")
         r = tool_grep(project, "target: build")
         assert "Makefile" in r.output
@@ -139,8 +135,8 @@ class TestSkipsAreReported:
         assert ".git" in r.output and "node_modules" in r.output   # named, not "..."
 
     def test_the_noise_note_counts_directories_not_entries(self, project):
-        """The note exists to state coverage accurately. Counting every entry
-        under node_modules reports thousands of 'files' when a handful were."""
+        """The note counts directories, so a deep node_modules reports one
+        skipped directory rather than thousands of entries."""
         nm = project / "node_modules" / "dep" / "lib"
         nm.mkdir(parents=True)
         for i in range(5):
@@ -151,9 +147,8 @@ class TestSkipsAreReported:
         assert "8" not in r.output.split("[not searched")[1]
 
     def test_a_noise_dir_named_in_the_glob_is_searched(self, project):
-        """glob="build/**/*.py" must not silently return nothing - the caller
-        named the directory, so it is not noise to them. _SKIP_DIRS contains
-        build/dist/target/venv, so this is not a corner case."""
+        """A directory named in the glob is searched even though it is in
+        _SKIP_DIRS (which holds build/dist/target/venv)."""
         b = project / "build"
         b.mkdir()
         (b / "gen.py").write_text("needle here\n", encoding="utf-8")
@@ -169,7 +164,7 @@ class TestSkipsAreReported:
 
     def test_pointing_path_at_a_noise_dir_still_searches_it(self, project):
         """Pruning is by name BELOW the search root, so an explicit
-        grep(path="node_modules") is not silently empty."""
+        grep(path="node_modules") still searches it."""
         nm = project / "node_modules" / "dep"
         nm.mkdir(parents=True)
         (nm / "index.js").write_text("needle here\n", encoding="utf-8")
@@ -187,7 +182,7 @@ class TestSkipsAreReported:
         assert "1 binary" in r.output
 
     def test_unreadable_file_is_still_reported(self, project, monkeypatch):
-        """The pre-existing honesty note must survive the rework."""
+        """A file that cannot be read is named in the report."""
         (project / "src" / "locked.py").write_text("target\n", encoding="utf-8")
         from localm.plugins.coder.tools import files as files_mod
         real = files_mod._grep_file_hits
@@ -256,8 +251,8 @@ class TestConfigurableCaps:
         assert "30 match(es)" in r.summary
 
     def test_config_keys_are_registered_settings(self):
-        """A cap read from config that has no registered default cannot be set
-        with `localm config ...` - the coder_index_timeout lesson."""
+        """A cap read from config needs a registered default, or it cannot be
+        set with `localm config ...`."""
         from localm.config import DEFAULT_CONFIG
         for key in ("coder_grep_max_per_file", "coder_grep_max_output_lines",
                     "coder_grep_max_file_bytes"):
@@ -289,8 +284,8 @@ class TestConfigurableCaps:
 
 class TestStreaming:
     def test_a_large_file_is_not_materialised(self, project):
-        """The point of streaming: peak allocation must not track file size.
-        Reading a 16 MB file whole costs >16 MB (more, as a list of str)."""
+        """Peak allocation does not track file size: reading a 16 MB file whole
+        would cost more than 16 MB as a list of str."""
         big = project / "big.txt"
         line = "x" * 99 + "\n"
         big.write_text(line * 160_000, encoding="utf-8")     # ~16 MB
@@ -310,8 +305,8 @@ class TestStreaming:
             "the file is being read whole, not streamed")
 
     def test_hit_windows_are_correct_in_a_streamed_file(self, project):
-        """Context comes from a rolling window, so an off-by-one shows up as a
-        wrong line number rather than a crash."""
+        """Context comes from a rolling window, so the surrounding line numbers
+        are asserted exactly."""
         lines = [f"line{i}" for i in range(1, 101)]
         lines[49] = "needle"                                  # line 50
         (project / "long.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")

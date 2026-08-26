@@ -2,9 +2,8 @@
 """GUI system routes: hardware-monitor stats, the companion-app address, and the
 per-key navigation entitlements.
 
-Extracted verbatim from attach_gui(); behavior unchanged. These read framework
-state off ``app.state`` (the bind host, the plugin manager) rather than the shared
-``ctx``.
+These read framework state off ``app.state`` (the bind host, the plugin manager)
+rather than the shared ``ctx``.
 """
 
 from __future__ import annotations
@@ -25,19 +24,17 @@ def _probe_available(what: str, fn) -> bool:
     """Best-effort "is this optional feature configured" probe, isolated per
     feature.
 
-    ONE probe per try block, deliberately. These checks were previously bundled,
-    so an exception in the FIRST left the others at their fail-closed default
-    even though their own functions had never been called - a raise inside
-    ``issue_tracker.available()`` silently withdrew the UPDATE banner, a feature
-    it has nothing to do with (the two read independent endpoints). Collapsing
-    independent outcomes into one is the bug; isolating them is the fix.
+    ONE probe per try block. Bundled, an exception in the FIRST leaves the others
+    at their fail-closed default even though their own functions were never
+    called - a raise inside ``issue_tracker.available()`` would withdraw the
+    UPDATE banner, a feature it has nothing to do with, since the two read
+    independent endpoints.
 
-    Failing CLOSED stays correct - hiding a control that might not work beats
-    offering one that errors - but failing closed SILENTLY is not, so the reason
-    is logged. DEBUG rather than WARNING because this runs on every GUI capability
-    fetch: a broken probe would flood at warning level, and log flood is how a
-    real warning gets ignored. The user-visible consequence (a missing button) is
-    the signal at the right altitude; this line is the detail behind it."""
+    Fails CLOSED - hiding a control that might not work beats offering one that
+    errors - and logs the failure rather than failing closed silently. DEBUG
+    rather than WARNING: this runs on every GUI capability fetch, so a broken
+    probe would flood at warning level. The user-visible consequence is the
+    missing button; this line is the detail behind it."""
     try:
         return bool(fn())
     except Exception:
@@ -92,11 +89,10 @@ def register(app: FastAPI, ctx) -> None:
             "network_bind": not _web._is_loopback_host(bind_host),
             "lan": addrs.get("lan") or "",
             "tailscale": addrs.get("tailscale") or "",
-            # Why a CONFIGURED network bind was not applied at startup (no
-            # strong API key / TLS unavailable), or "". The card shows it so a
-            # browser-only user learns what to fix - without it, setting
-            # Bind address and restarting would look like it silently did
-            # nothing (we do not hide problems).
+            # A CONFIGURED network bind that was not applied at startup names its
+            # blocker here (no strong API key / TLS unavailable), else "". The
+            # card shows it, so setting Bind address and restarting does not look
+            # like it silently did nothing.
             "bind_fallback": getattr(app.state, "bind_fallback", None) or "",
         }
 
@@ -107,11 +103,12 @@ def register(app: FastAPI, ctx) -> None:
         ONLY the tabs this key can actually use - a capability the key's scopes do
         not grant is never rendered (no show-then-'no access').
 
-        Baseline-gated (any valid key) on purpose: a key must be able to learn its
-        OWN entitlements without holding plugins:read, otherwise a narrow key could
-        never see the tabs it IS allowed. In open mode (no key configured) caller is
-        None and everything is granted. chat is always present - chatting needs no
-        scope; the 'chat' scope gates the chat-HISTORY plugin, not the chat turn."""
+        Baseline-gated (any valid key): a key must be able to learn its OWN
+        entitlements without holding plugins:read, otherwise a narrow key could
+        never see the tabs it IS allowed. In open mode (no key configured) caller
+        is None and everything is granted. chat is always present - chatting needs
+        no scope; the 'chat' scope gates the chat-HISTORY plugin, not the chat
+        turn."""
         held = caller                      # None => open mode / full access
         def granted(required: str) -> bool:
             return held is None or scopes.grants(held, required)
@@ -132,10 +129,10 @@ def register(app: FastAPI, ctx) -> None:
             for p in state.get("plugins", []):
                 if granted(p.get("scope") or p.get("name") or ""):
                     plugins.append(p)
-        # Three INDEPENDENT optional features, probed independently - see
-        # _probe_available for why they no longer share a try block. Each shows
-        # its control only when it will actually work; a probe that raises
-        # reports only ITS OWN feature unavailable, and says so in the debug log.
+        # Three INDEPENDENT optional features, probed independently through
+        # _probe_available rather than a shared try block. Each shows its control
+        # only when it will actually work; a probe that raises reports only ITS
+        # OWN feature unavailable, and says so in the debug log.
         bug_upload = _probe_available("bug-report upload",
                                       _bugreport_upload_available)
         issues_avail = _probe_available("issues view", _issues_available)

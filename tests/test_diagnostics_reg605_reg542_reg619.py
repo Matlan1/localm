@@ -1,28 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression audit 2026-07-14: three defects that make localm's own diagnostics
-lie about what went wrong.
+"""Three defects that make localm's own diagnostics lie about what went wrong.
 
-REG-619 [LOW] localm/_log_digest.py:180 - when the errors alone do not fit the
-budget, _fit_budget only keeps a block that fits WHOLE. A single error bigger
-than the budget therefore never fits, is counted as "omitted", and the digest
-comes back as JUST the notice string with ZERO bytes of the actual crash. The
-_recent_log_tail this replaced always returned the last max_chars, which for a
-crash always included the innermost exception type+message - the most actionable
-line there is. So a bug report for exactly the deep native-load crash this code
-targets now surfaces no error at all.
+localm/_log_digest.py - when the errors alone do not fit the budget, _fit_budget
+only keeps a block that fits WHOLE. A single error bigger than the budget
+therefore never fits, is counted as "omitted", and the digest comes back as JUST
+the notice string with ZERO bytes of the actual crash. A plain last-max_chars
+tail always included the innermost exception type+message - the most actionable
+line there is - so a bug report for exactly the deep native-load crash this code
+targets must not surface no error at all.
 
-REG-542 [MEDIUM] localm/bugreport.py:483 - _recent_hang_traces attaches the
-newest hang_*.log with no recency or run filter, and nothing ever prunes them.
-The watchdog is on by default, so any transient >10s stall writes one. Weeks
-later an unrelated report ("the model gave a wrong answer") renders that stale
-freeze under "## Server hang trace" with assertive text claiming it is "the
-server froze" - actively sending triage down a false path.
+localm/bugreport.py - _recent_hang_traces attaching the newest hang_*.log with no
+recency or run filter, while nothing ever prunes them. The watchdog is on by
+default, so any transient >10s stall writes one. Weeks later an unrelated report
+("the model gave a wrong answer") renders that stale freeze under "## Server hang
+trace" with assertive text claiming it is "the server froze", sending triage down
+a false path.
 
-REG-605 [MEDIUM] localm/inference/routes/admin.py:219 - the post-update health
-watchdog probes app.state.instance_port, but _restart_argv() re-execs with no
-port token, so the new process re-runs pick_port() and can bind a DIFFERENT port
-(the one the old instance was auto-bumped off). The watchdog then polls a dead
-port, times out at 90s, and auto-rolls back a perfectly healthy update.
+localm/inference/routes/admin.py - the post-update health watchdog probes
+app.state.instance_port, but _restart_argv() re-execs with no port token, so the
+new process re-runs pick_port() and can bind a DIFFERENT port (the one the old
+instance was auto-bumped off). The watchdog then polls a dead port, times out at
+90s, and auto-rolls back a perfectly healthy update.
 """
 
 import os
@@ -119,8 +117,8 @@ def test_newest_oversized_error_wins_over_older_ones():
 # NEGATIVE CASES ------------------------------------------------------------ #
 
 def test_errors_that_fit_are_still_kept_whole():
-    """NEGATIVE CASE: the fix must not start truncating errors that fit. This is
-    the path tests/test_log_digest.py already covers."""
+    """NEGATIVE CASE: the fix must not start truncating errors that fit - the
+    path the log-digest tests already cover."""
     from localm._log_digest import build_digest
 
     raw = "ERROR localm: boom\nValueError: a small error\n"
@@ -204,9 +202,9 @@ def test_hang_trace_from_the_crashed_run_is_attached_on_recovery(tmp_path):
 
 
 def test_a_reused_pid_on_an_old_trace_is_not_mistaken_for_this_run(tmp_path):
-    """NEGATIVE CASE: pids are reused (that is REG-586's whole premise), so a pid
-    match alone cannot prove a trace belongs to this run. An ancient trace
-    carrying our own pid must still be rejected on age."""
+    """NEGATIVE CASE: pids are reused, so a pid match alone cannot prove a trace
+    belongs to this run. An ancient trace carrying our own pid must still be
+    rejected on age."""
     from localm import bugreport
 
     _write_hang(tmp_path, pid=os.getpid(), age_s=30 * 24 * 3600)
@@ -284,8 +282,8 @@ def test_restart_pins_the_port_the_watchdog_will_probe(restart_harness, monkeypa
     times out at 90s, and auto-rolls back a perfectly healthy update.
 
     The restart must therefore hand the new process the port the watchdog is
-    about to probe. _do_restart's own docstring already promises this ("the
-    server comes back on the same port") - it just was not true."""
+    about to probe, which is what _do_restart's own docstring promises ("the
+    server comes back on the same port")."""
     import sys
 
     import localm.inference.http_server as hs
@@ -309,8 +307,8 @@ def test_restarted_process_binds_exactly_the_probed_port(restart_harness, monkey
     actually decides the new process's port - not just the presence of a token.
 
     Reproduces the drift: the default 8642 is free (the other instance closed),
-    so pick_port(None) - what the pre-fix argv produces - returns 8642 while the
-    watchdog probes 8643. They must agree."""
+    so pick_port(None) - what an argv carrying no port token produces - returns
+    8642 while the watchdog probes 8643. They must agree."""
     import sys
 
     from localm.config import PORT_RANGE, pick_port
@@ -373,8 +371,8 @@ def test_plain_restart_without_an_update_also_keeps_its_port(restart_harness,
 
 def test_restart_without_a_known_port_is_unchanged(restart_harness, monkeypatch):
     """NEGATIVE CASE: a bare create_app() harness that never advertised has no
-    instance_port, so there is no port to pin - the restart must proceed exactly
-    as before rather than inventing one."""
+    instance_port, so there is no port to pin - the restart must proceed
+    unchanged rather than inventing one."""
     import sys
 
     import localm.inference.http_server as hs

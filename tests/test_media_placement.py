@@ -1,29 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Per-component GPU PLACEMENT for media generation (the multi-GPU ceiling).
 
-The single-GPU floor (REG-532, tests/test_media_split_gpu_532.py) names ONE preferred
-card without masking. This suite covers the ceiling: on a box ComfyUI sees as 2+ GPUs,
-push the CLIP text-encoder and the VAE onto the second card so it carries real work,
-freeing the compute card for the model. Mechanism: inject ComfyUI core's
-`SelectCLIPDevice` / `SelectVAEDevice` nodes (verified present in the real source at
-git 867404b) located BY CLASS, never by hardcoded id.
+The single-GPU floor names ONE preferred card without masking. This suite covers
+the ceiling: on a box ComfyUI sees as 2+ GPUs, push the CLIP text-encoder and the
+VAE onto the second card so it carries real work, freeing the compute card for the
+model. Mechanism: inject ComfyUI core's `SelectCLIPDevice` / `SelectVAEDevice`
+nodes, located BY CLASS, never by hardcoded id.
 
-Design + scope: dev-notes/media-split-gpu/SPEC-placement.md. These tests exercise the
-REAL shipped workflow JSONs and the REAL helper code paths, not mocks of them.
+These tests exercise the REAL shipped workflow JSONs and the REAL helper code
+paths, not mocks of them.
 
-VERIFIED-ON-DISK constraint this suite must NOT lie about: localm's MANAGED ComfyUI is
-pinned at v0.31.1, which DOES ship the placement nodes (they first appear in tag v0.23.0;
-the file landed 2026-05-25, #7063). Confirmed live against a real provisioned instance's
-/object_info: all three Select*Device classes register. So a decline on the managed
-install is no longer "localm's ComfyUI is too old" - it is upstream's own rule that the
-device combo only offers gpu:N once ComfyUI sees MORE THAN ONE card
-(model_management.get_gpu_device_options), which on a single-GPU box yields
-['default', 'cpu'] and nothing to place onto.
+localm's MANAGED ComfyUI is pinned at v0.31.1, which DOES ship the placement nodes
+(they first appear in tag v0.23.0). A decline on the managed install is therefore
+upstream's own rule that the device combo only offers gpu:N once ComfyUI sees MORE
+THAN ONE card (model_management.get_gpu_device_options), which on a single-GPU box
+yields ['default', 'cpu'] and nothing to place onto.
 
-The capability probe is still what makes this safe, and still has real work to do: a
-ComfyUI of the USER'S OWN may predate the nodes. These tests cover the
-probe/plan/inject/notice plumbing; whether weights actually land on card 1 needs 2 real
-GPUs and is a documented follow-up.
+The capability probe still has real work to do: a ComfyUI of the USER'S OWN may
+predate the nodes. These tests cover the probe/plan/inject/notice plumbing;
+whether weights actually land on card 1 needs 2 real GPUs.
 """
 
 from __future__ import annotations
@@ -41,7 +36,7 @@ import localm.config as cfg
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     """Throwaway LOCALM_HOME wired through both home_dir() and the import-frozen
-    config attrs (see test_media_split_gpu_532.py:home / "Test home isolation")."""
+    config attrs."""
     h = tmp_path / ".localm"
     h.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LOCALM_HOME", str(h))
@@ -63,15 +58,15 @@ GB = 1024 ** 3
 
 def _fake_gpus(monkeypatch, *specs):
     """Patch list_gpus() to report the given (index, free_bytes) devices, and pin
-    non-Vulkan so resolve_gpu_split's membership validation actually runs regardless of
-    how the ambient box is provisioned (same pin/reason as test_media_split_gpu_532.py).
+    non-Vulkan so resolve_gpu_split's membership validation runs regardless of how
+    the ambient box is provisioned.
 
     Honors return_status the same way the real list_gpus() does: a bare list by
     default, (list, GPU_PROBE_OK) when a caller opts in.
-    media_single_device_shortfall() now calls list_gpus(return_status=True) (a
-    freshness gate closing a gap this fix found), so a stand-in that always
-    returns a bare list would make that call's `gpus, status = list_gpus(...)`
-    unpack the device dicts themselves instead of a status."""
+    media_single_device_shortfall() calls list_gpus(return_status=True), so a
+    stand-in that always returned a bare list would make that call's
+    `gpus, status = list_gpus(...)` unpack the device dicts instead of a
+    status."""
     import localm.discover as disc
     gpus = [{"index": i, "name": f"fake{i}", "free": free, "total": free * 2}
             for i, free in specs]
@@ -98,15 +93,13 @@ def _object_info(*, model=True, clip=True, vae=True, gpu_count=2):
     """A fake ComfyUI /object_info map for the Select*Device nodes, in the REAL shape.
 
     The Select*Device nodes are v3 (comfy_api schema) nodes, so their device Combo
-    serializes as ``["COMBO", {"options": [...]}]`` - the io_type string first, choices
-    under ``meta["options"]`` - NOT the classic v1 ``[choices_list, meta]``. This fixture
-    MUST use the v3 shape or it tests a mock the real server never emits (verified against
-    comfy_api/latest/_io.py at ComfyUI git 867404b: add_to_dict_v1 emits
-    ``(get_io_type(), as_dict)`` and Combo.get_io_type() == "COMBO").
+    serializes as ``["COMBO", {"options": [...]}]`` - the io_type string first,
+    choices under ``meta["options"]`` - NOT the classic v1 ``[choices_list, meta]``.
+    This fixture uses the v3 shape, which is what the real server emits.
 
     `gpu_count` controls how many gpu:N options the device combo offers, mirroring
-    get_gpu_device_options (model_management.py:246-257): "default","cpu" always, plus
-    gpu:0..gpu:{n-1} only when the child enumerates >1 device.
+    get_gpu_device_options: "default","cpu" always, plus gpu:0..gpu:{n-1} only when
+    the child enumerates >1 device.
     """
     opts = ["default", "cpu"]
     if gpu_count > 1:
@@ -165,10 +158,10 @@ def test_probe_available_when_nodes_present_and_two_gpus(monkeypatch):
 
 
 def test_probe_unavailable_when_node_absent(monkeypatch):
-    """NEGATIVE: a ComfyUI with NO Select*Device nodes. The probe must say unavailable
-    and NAME why - the thing that keeps placement from injecting a node ComfyUI would
-    reject. Since the managed pin advanced to v0.31.1 this is the USER'S-OWN-ComfyUI
-    case (anything older than tag v0.23.0), not the managed-install case."""
+    """NEGATIVE: a ComfyUI with NO Select*Device nodes. The probe must say
+    unavailable and NAME why, so placement never injects a node ComfyUI would
+    reject. This is the user's-own-ComfyUI case (anything older than tag v0.23.0),
+    not the managed install."""
     from localm.media import comfy_client as cc
     monkeypatch.setattr(cc, "comfy_object_info",
                         lambda url, timeout=10.0: _object_info(model=False, clip=False,
@@ -204,8 +197,8 @@ def test_probe_unavailable_when_server_unreachable(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def _ver(s: str) -> tuple:
-    """'v0.31.1' -> (0, 31, 1). Numeric compare, so v0.9.2 < v0.23.0 (which a plain
-    string compare gets BACKWARDS, and that is exactly the mistake in play here)."""
+    """'v0.31.1' -> (0, 31, 1). Numeric compare, so v0.9.2 < v0.23.0, which a plain
+    string compare gets backwards."""
     return tuple(int(p) for p in s.lstrip("v").split("."))
 
 
@@ -217,9 +210,8 @@ def _placement_help() -> str:
 
 def test_pinned_comfyui_is_new_enough_for_per_component_placement():
     """The shipped pin must be at or after the first upstream tag carrying
-    comfy_extras/nodes_multigpu.py. This is the machine-checkable form of the claim the
-    help text makes in prose; if a future pin ever moves BACK below it, this fails and
-    the text below has to change with it."""
+    comfy_extras/nodes_multigpu.py, which is what the help text below claims in
+    prose."""
     from localm.media.managed_comfy_fresh import (COMFYUI_PINNED_VERSION,
                                                   COMFYUI_PLACEMENT_MIN_VERSION)
     assert _ver(COMFYUI_PINNED_VERSION) >= _ver(COMFYUI_PLACEMENT_MIN_VERSION), (
@@ -253,11 +245,10 @@ def test_placement_help_does_not_call_localms_own_comfyui_too_old():
 
 
 def test_placement_help_still_states_the_two_gpu_precondition():
-    """The other direction, so correcting the staleness above cannot overshoot into
-    promising placement everywhere: two or more GPUs is a REAL precondition. Upstream's
-    get_gpu_device_options only appends gpu:N when it sees MORE THAN ONE card, so on a
-    single-GPU box the combo is ['default', 'cpu'] and there is nothing to place onto
-    (measured live on this box at the current pin)."""
+    """The other direction: two or more GPUs is a REAL precondition. Upstream's
+    get_gpu_device_options only appends gpu:N when it sees MORE THAN ONE card, so on
+    a single-GPU box the combo is ['default', 'cpu'] and there is nothing to place
+    onto."""
     help_text = _placement_help().lower()
     assert "two or more" in help_text or "2+" in help_text, (
         "the help text must keep stating that placement needs 2+ GPUs")
@@ -344,9 +335,9 @@ def test_inject_places_clip_and_vae_by_class(medium):
 
 
 def test_inject_locates_by_class_not_id():
-    """The existing transforms KeyError on a user's arbitrary graph because they hardcode
-    ids ("6","31",...). Injection must locate BY CLASS: renumber every node to a fresh id
-    space and confirm it still finds and rewires the loaders."""
+    """Transforms that hardcode ids ("6","31",...) KeyError on a user's arbitrary
+    graph. Injection must locate BY CLASS: renumber every node to a fresh id space
+    and confirm it still finds and rewires the loaders."""
     from localm.media.comfy_client import inject_device_placement
     wf = _load_workflow(SHIPPED["image"])
     # remap all ids to a disjoint space (1000+), rewriting links too
@@ -380,15 +371,11 @@ def test_inject_skips_missing_component_without_crashing():
 
 
 def test_inject_skips_gguf_clip_loader_with_specific_reason():
-    """A CUSTOM workflow whose CLIP comes from a GGUF loader must NOT be cross-device-moved:
-    GGUF loaders do not register the cached_patcher_init factory that deepclone_multigpu
-    needs (the deferred patch), so wrapping one would trip a ComfyUI RuntimeError. localm
-    skips it here with a SPECIFIC reason (rule 5 - surface WHY, not a generic 'no loader'),
-    matching the deferral's justification that only CORE-loaded components are relocated.
-    This is the low-severity gap the fresh-context grade of #709 flagged.
-
-    MUTATION TEST: remove the _GGUF_LOADERS guard in inject_device_placement and this goes
-    red (a SelectCLIPDevice gets injected onto the GGUF loader)."""
+    """A CUSTOM workflow whose CLIP comes from a GGUF loader must NOT be
+    cross-device-moved: GGUF loaders do not register the cached_patcher_init factory
+    that deepclone_multigpu needs, so wrapping one trips a ComfyUI RuntimeError.
+    localm skips it with a SPECIFIC reason, never a generic 'no loader'. Only
+    CORE-loaded components are relocated."""
     from localm.media.comfy_client import inject_device_placement
     wf = {
         "1": {"class_type": "DualCLIPLoaderGGUF",
@@ -457,12 +444,11 @@ def test_notice_none_without_split_and_no_active_placement(home):
 # --------------------------------------------------------------------------- #
 
 def test_shortfall_refuses_reg532_scenario(home, monkeypatch):
-    """The literal OOM this task exists to prevent, as a test: two cards, 4 GB free EACH
-    (8 GB combined), a 4 GB job. decide_media_swap says "fits" on the 8 GB combined number
-    and keeps the chat model loaded; the per-device check must STILL refuse, because no
-    SINGLE card holds the whole 4 GB model + headroom. Asserted against the WHOLE-model
-    predicate: a proportional/ratio share would wrongly pass this (a 50% card asked for
-    50% of the model, then handed 100%)."""
+    """Two cards, 4 GB free EACH (8 GB combined), a 4 GB job. decide_media_swap says
+    "fits" on the 8 GB combined number and keeps the chat model loaded; the
+    per-device check must STILL refuse, because no SINGLE card holds the whole 4 GB
+    model + headroom. Asserted against the WHOLE-model predicate: a
+    proportional/ratio share would wrongly pass this."""
     from localm.vram import media_single_device_shortfall, decide_media_swap
     _fake_gpus(monkeypatch, (0, 4 * GB), (1, 4 * GB))
     conf = {"gpu_split_indices": [0, 1]}
@@ -502,13 +488,9 @@ def test_shortfall_none_when_policy_not_auto(home, monkeypatch):
 
 def test_shortfall_none_when_probe_did_not_complete_fresh(home, monkeypatch):
     """The OOM scenario, but the probe this call made is TIMEOUT/BUSY, not
-    GPU_PROBE_OK - a served last-known-good list is not a current measurement
-    (AGENTS.md rule 5, same discipline discover.gpu_split_shortfall's own
-    docstring documents). Must return None (cannot check this call), never
-    compute a shortfall - and never a stale one - from it. This is the
-    freshness gap the fix closed: list_gpus() was previously called bare (no
-    return_status), so a served-stale reading was indistinguishable from a
-    fresh one and got used for this decision regardless."""
+    GPU_PROBE_OK - a served last-known-good list is not a current measurement.
+    Must return None (cannot check this call), never compute a shortfall, and
+    never a stale one, from it."""
     from localm.vram import media_single_device_shortfall
     import localm.discover as disc
     gpus = [{"index": 0, "name": "fake0", "free": 4 * GB, "total": 8 * GB},
@@ -538,8 +520,8 @@ def test_shortfall_none_on_single_gpu_box(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_resolve_placement_disabled_by_default_plain_box(home):
-    """The feature is OFF until the 2-GPU proof: with the flag absent AND no split, there
-    is no plan and no notice. It must never activate itself."""
+    """With the flag absent AND no split there is no plan and no notice: the
+    feature never activates itself."""
     from localm.media.comfy_client import resolve_media_placement
     cfg.save_config({})
     plan, notice = resolve_media_placement(cfg.load_config(), "http://x")
@@ -573,9 +555,9 @@ def test_resolve_placement_active_when_enabled_and_capable(home, monkeypatch):
 
 
 def test_resolve_placement_states_reason_when_enabled_but_incapable(home, monkeypatch):
-    """Flag ON but the ComfyUI cannot place (old pin without the nodes, or one GPU): no
-    plan, and the notice must give the HONEST reason. Enabled-but-not-delivered must be
-    SAID, never silent (rule 5)."""
+    """Flag ON but the ComfyUI cannot place (old pin without the nodes, or one GPU):
+    no plan, and the notice must give the HONEST reason. Enabled-but-not-delivered
+    is SAID, never silent."""
     from localm.media import comfy_client as cc
     from localm.media.comfy_client import resolve_media_placement, PlacementCapability
     _fake_gpus(monkeypatch, (0, 6 * GB), (1, 6 * GB))
@@ -590,11 +572,9 @@ def test_resolve_placement_states_reason_when_enabled_but_incapable(home, monkey
 
 
 def test_resolve_placement_declines_without_configured_split(home, monkeypatch):
-    """Gate 2 (maintainer decision 2026-07-16): even with the toggle ON and a fully
-    capable ComfyUI (nodes present, 2 gpu:N options), placement needs a configured 2+
-    card split. No split -> single-card floor, no plan. MUTATION TEST: remove the
-    ``split_device_count(cfg) < 2`` gate in resolve_media_placement and this goes red
-    (it would return the CLIP+VAE plan)."""
+    """Gate 2: even with the toggle ON and a fully capable ComfyUI (nodes present, 2
+    gpu:N options), placement needs a configured 2+ card split. No split ->
+    single-card floor, no plan."""
     from localm.media import comfy_client as cc
     from localm.media.comfy_client import resolve_media_placement, PlacementCapability
     _fake_gpus(monkeypatch, (0, 6 * GB), (1, 6 * GB))
@@ -607,10 +587,8 @@ def test_resolve_placement_declines_without_configured_split(home, monkeypatch):
 
 
 def test_resolve_placement_disabled_ignores_capable_comfyui(home, monkeypatch):
-    """Gate 1: the experimental toggle OFF wins even when everything else is ready (a 2+
-    split configured AND a capable ComfyUI). Default-off must be byte-identical to today -
-    an update never springs placement on a multi-GPU user. MUTATION TEST: drop the
-    ``if not cfg.get("comfy_gpu_placement")`` gate and this returns a plan (red)."""
+    """Gate 1: the experimental toggle OFF wins even when everything else is ready
+    (a 2+ split configured AND a capable ComfyUI)."""
     from localm.media import comfy_client as cc
     from localm.media.comfy_client import resolve_media_placement, PlacementCapability
     _fake_gpus(monkeypatch, (0, 6 * GB), (1, 6 * GB))
@@ -629,10 +607,9 @@ def test_resolve_placement_disabled_ignores_capable_comfyui(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_generate_music_injects_placement_into_submitted_workflow(tmp_path, monkeypatch):
-    """Drive the REAL generate_music to the submit boundary and capture the workflow it
-    would POST. A placement plan passed in must have injected SelectCLIPDevice /
-    SelectVAEDevice by the time of submit. MUTATION TEST: delete the inject_device_placement
-    call in music_gen/comfy.py and this goes red (proving the wiring is live, not dead)."""
+    """Drive the REAL generate_music to the submit boundary and capture the workflow
+    it would POST. A placement plan passed in must have injected SelectCLIPDevice /
+    SelectVAEDevice by the time of submit."""
     from localm.music_gen import comfy as mcomfy
     from localm.media import comfy_client
     captured = {}

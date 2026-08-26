@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""M2 Phase 3 security regressions for the plugin engine and the auth keystore.
+"""Security regressions for the plugin engine and the auth keystore.
 
-SEC-6: PluginManager.uninstall() must honour the protected-plugin guard, so a
-       protected plugin (e.g. chat) cannot be deleted. This used to also cover
-       the legacy loader.remove_plugin()/DELETE /v1/plugins/{name} path, which
-       was dead for every shipped plugin and has been removed (see
-       PATHFINDER-2026-07-11) - PluginManager.uninstall() is now the ONE
-       plugin-removal path, so it is the one this guards.
-SEC-10: the auth keystore had no lock; two concurrent create_key calls could
-        read-modify-write the shared record list and lose one write.
+- PluginManager.uninstall() must honour the protected-plugin guard, so a
+  protected plugin (e.g. chat) cannot be deleted. It is the ONE plugin-removal
+  path, so it is the one this guards.
+- The auth keystore is locked: two concurrent create_key calls must not
+  read-modify-write the shared record list and lose one write.
 """
 
 import threading
@@ -45,7 +42,7 @@ def _manager(tmp_path):
 
 def test_uninstall_refuses_catalog_protected_chat(tmp_path):
     """The catalog marks chat as protected; uninstall() must refuse it and
-    leave its directory on disk (the bug this guards against deleted it)."""
+    leave its directory on disk."""
     mgr = _manager(tmp_path)
     _write_plugin(mgr._installed_root, "chat")
     with pytest.raises(ValueError, match="protected"):

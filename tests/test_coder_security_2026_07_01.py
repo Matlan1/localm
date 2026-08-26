@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 coder-security backlog cluster.
+"""Regression tests for the coder-security backlog cluster.
 
-  AUD-CODERTOOLS - scope allowlist is default-deny (contract test)
-  REC-N1-PROSE   - RULES prose + subagent prompt omit run_shell when disabled
-  R19a           - unattended one-shot gates run_shell (fail-closed, opt-out --yes)
+  scope allowlist is default-deny (contract test)
+  RULES prose + subagent prompt omit run_shell when disabled
+  unattended one-shot gates run_shell (fail-closed, opt-out --yes)
 """
 
 from pathlib import Path

@@ -2,20 +2,17 @@
 """Opt-in MoE expert placement (config ``n_cpu_moe``): keep the EXPERT weights of
 the first N layers in system RAM via llama_model_params.tensor_buft_overrides.
 
-What these pin, and why each matters:
+What these pin:
 
   * ``gguf_expert_count`` reads ``<arch>.expert_count`` from the header pre-load,
-    and refuses to guess. It is deliberately SEPARATE from the KV-size probe:
-    expert weights cost VRAM but contribute nothing to the KV cache, and
-    conflating the two is the bug that probe exists to fix.
+    and refuses to guess. It is SEPARATE from the KV-size probe: expert weights
+    cost VRAM but contribute nothing to the KV cache.
   * The override ARRAY is built to llama.cpp's layout and NULL-terminated, and the
     pattern bytes are kept alive with it - ctypes does not own those strings, so
     losing them would leave the native side reading freed memory at load time.
   * Only the FUSED expert tensors are matched. The router and any shared expert
-    stay put on purpose: they are read for every token and are tiny.
-  * Both refusal paths are LOUD and leave the params untouched. A placement the
-    user asked for that silently becomes a different placement is exactly the
-    kind of false success AGENTS.md rule 5 forbids.
+    stay put: they are read for every token and are tiny.
+  * Both refusal paths are LOUD and leave the params untouched.
 """
 
 import ctypes
@@ -188,11 +185,9 @@ class TestApplyCpuMoe:
             self, tmp_path, monkeypatch):
         """_apply_cpu_moe runs INSIDE the isolated worker child (see its own
         docstring) - it may never console.print (the child's stdout is not
-        the server's own console; see isolated-child-must-not-console-print).
-        Both refusal branches must report the fact via their return value
-        only, never by printing directly - proven by spying on the shared
-        console object itself, not by re-deriving the assertion from reading
-        the source."""
+        the server's own console). Both refusal branches report the fact via
+        their return value only, asserted by spying on the shared console
+        object itself."""
         from localm.console import console as real_console
         calls = []
         monkeypatch.setattr(real_console, "print",
@@ -218,8 +213,8 @@ class TestApplyCpuMoe:
         """Every key _apply_cpu_moe can return through skip_reason must have
         a corresponding entry in MOE_SKIP_MESSAGES - the parent
         (GgufBackend._load_native) looks it up by that exact key, and a
-        missing entry would silently fall back to a generic message instead
-        of the specific, actionable one this whole fix exists to preserve."""
+        missing entry falls back to a generic message instead of the specific
+        one."""
         assert set(llama_mod.MOE_SKIP_MESSAGES) == {"no_experts", "buffer_unresolved"}
         for reason, message in llama_mod.MOE_SKIP_MESSAGES.items():
             assert "n_cpu_moe" in message, reason

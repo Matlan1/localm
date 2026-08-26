@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for sync_models_dir - registry/folder reconciliation and autoprune.
 
-This runs on every launch and can delete registry entries, yet had no coverage.
-Pins: loose-file registration, missing->flagged (default), flag clearing on
-reappear, prune deletion with a registry backup, the all-missing guardrail, and
-that external (out-of-folder) models are never pruned.
+This runs on every launch and can delete registry entries. Pins: loose-file
+registration, missing->flagged (default), flag clearing on reappear, prune
+deletion with a registry backup, the all-missing guardrail, and that external
+(out-of-folder) models are never pruned.
 """
 
 import os
@@ -94,9 +94,9 @@ class TestRegisterLooseFiles:
 
 
 class TestSettlePeriod:
-    """R45: a mid-copy of a *valid* GGUF clears the magic+size floor long
-    before the copy finishes (the floor only needs ~1KiB to have landed), so
-    sync_models_dir must not auto-register it until its mtime has gone quiet."""
+    """A mid-copy of a *valid* GGUF clears the magic+size floor long before the
+    copy finishes (the floor only needs ~1KiB to have landed), so sync_models_dir
+    must not auto-register it until its mtime has gone quiet."""
 
     def test_freshly_written_gguf_is_not_registered_yet(self, fake_registry):
         store, models_dir, _ = fake_registry

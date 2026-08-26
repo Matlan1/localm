@@ -1,21 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """`Detection.recommended` is a LEGACY field, and reaching for it is a real bug.
 
-It only ever holds "vulkan" or "cpu" - it predates the CUDA/ROCm-aware policy and
-cannot express "cuda", "amd-rocm" or "metal". The NAME is the whole problem: it
-answers "which of the two universally-safe backends applies" while every reader
-has heard "the backend this machine should install". Those agree on most hardware
-and diverge exactly on the vendor-optimised paths, where being wrong costs most.
+It only ever holds "vulkan" or "cpu" and cannot express "cuda", "amd-rocm" or
+"metal". It answers "which of the two universally-safe backends applies", not
+"the backend this machine should install". Those agree on most hardware and
+diverge on the vendor-optimised paths.
 
-Three separate sites reached for it and were wrong: `bugreport.py` (#833),
-`updater.py` (where it would have silently swapped a user's ROCm install to
-Vulkan during `localm update`), and the release-verification cold install (which
-was therefore verifying a backend real users never get). All three now call
-`recommended_install_backend()`.
+`recommended_install_backend()` is the answer to the second question, and is
+what every caller uses.
 
-These tests exist so there is no fourth. The first pins the DIVERGENCE, so nobody
-"simplifies" the two into one; the second proves nothing in `localm/` reads the
-field at all, which is the guard that would have caught all three.
+The first test pins the DIVERGENCE, so the two are never collapsed into one;
+the second proves nothing in `localm/` reads the field at all.
 """
 
 from __future__ import annotations
@@ -32,9 +27,8 @@ from localm import hwdetect
 # --------------------------------------------------------------------------- #
 
 def test_the_legacy_field_cannot_express_the_amd_answer(monkeypatch):
-    """MEASURED live on this hardware class (Windows AMD RX 6900 XT, gfx1030):
-    the field says "vulkan" while the policy says "amd-rocm". That is the exact
-    pair that would have downgraded a user's ROCm install during an update."""
+    """On Windows + AMD the field says "vulkan" while the policy says
+    "amd-rocm", so reading the field would downgrade a ROCm install."""
     monkeypatch.setattr(sys, "platform", "win32")
     det = hwdetect.Detection(vendors=["amd"], recommended="vulkan",
                              source="test", gpu_names="amd radeon rx 6900 xt")

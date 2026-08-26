@@ -2,9 +2,8 @@
 """GUI local-admin routes: log export, the ComfyUI launcher writer, the native
 app launcher builder, and the directory picker (browse, create folder, rename).
 
-Extracted verbatim from attach_gui(); behavior unchanged. These are local
-filesystem operations gated on CONFIG_READ / CONFIG_WRITE; none need the shared
-``ctx``.
+These are local filesystem operations gated on CONFIG_READ / CONFIG_WRITE; none
+need the shared ``ctx``.
 """
 
 from __future__ import annotations
@@ -43,11 +42,11 @@ def _norm_path_str(s: str) -> str:
 
 def _network_drives_allowed() -> bool:
     """Whether a mapped network drive (``Z:\\...``) may be treated as an
-    ordinary local folder by the host-filesystem routes below - see
-    config.py's ``allow_network_drives`` comment for the full rationale.
-    Read fresh (one cheap config load) rather than cached, matching every
-    other route in this file that reads config per-request, so a change
-    takes effect on the next call with no restart."""
+    ordinary local folder by the host-filesystem routes below, read from
+    config's ``allow_network_drives``. Read fresh (one cheap config load)
+    rather than cached, matching every other route in this file that reads
+    config per-request, so a change takes effect on the next call with no
+    restart."""
     from localm.config import load_config
     return bool(load_config().get("allow_network_drives", True))
 
@@ -58,11 +57,11 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE)),
                             Depends(require_fs_host)])
     def export_logs(req: LogExportRequest):
-        """R30: copy every log of this running instance into a user-chosen folder
+        """Copy every log of this running instance into a user-chosen folder
         (picked via the GUI's /api/fs/dirs browser). Writes a timestamped
         subfolder so repeated exports never clobber each other. Logs live under
-        <home>/logs; a few (e.g. comfy-launch.log) sit in the home root, so we
-        sweep both. Returns the counts and the destination path.
+        <home>/logs; a few (e.g. comfy-launch.log) sit in the home root, so both
+        are swept. Returns the counts and the destination path.
 
         Plain `def`, NOT `async def`: this stats a caller-supplied directory and
         then runs a whole shutil.copy2 loop, all blocking. Starlette threadpools
@@ -73,7 +72,7 @@ def register(app: FastAPI, ctx) -> None:
         directory that this route mkdir(parents=True)s and writes into, and the
         is_dir check before it makes the 400-vs-200 split a directory-existence
         oracle for the whole disk. It is the same dial the /api/fs/dirs picker
-        that SUPPLIES `dest` already requires, so the two now agree."""
+        that SUPPLIES `dest` requires."""
         import shutil
         import time as _time
         from localm.config import home_dir
@@ -219,30 +218,22 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/app/rebuild-launcher",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     def rebuild_launcher(force: bool = False):
-        """The GUI form of `localm make-launcher` (localm/cli/maintenance.py).
-        Until now this was CLI-only, and its one real use - refreshing the
-        copied interpreter after a Python upgrade, via --force - is precisely
-        the moment the server (and therefore only the GUI) is running. `force`
-        mirrors the CLI flag exactly. make_launcher() already returns a
-        structured LauncherResult and never raises, so this is a thin
-        passthrough.
+        """The GUI form of `localm make-launcher` (localm/cli/maintenance.py):
+        refresh the copied interpreter, with `--force` mirroring the CLI flag
+        exactly. make_launcher() already returns a structured LauncherResult and
+        never raises, so this is a thin passthrough.
 
         Plain `def`, NOT `async def`: make_launcher() copies the interpreter
         (+ DLLs) and spawns a self-check subprocess, all blocking - same
         reasoning as export_logs/create_comfy_launcher above. Starlette
         threadpools a sync handler instead of stalling the event loop.
 
-        _launcher_build_lock: make_launcher() had exactly ONE caller before
-        this route (a human at a terminal, who cannot double-click a CLI
-        invocation mid-run) and no locking of its own
-        (diff-review-discipline.md item 26). A GUI button CAN be
-        double-clicked, and --force's fast path overwrites the launcher exe
-        + DLLs with no coordination of its own - two overlapping copies to the
-        same destination file is a real race the idempotent force=False path
-        never had. This only serializes IN-PROCESS (concurrent GUI requests);
-        it cannot see a concurrent terminal `localm make-launcher`, which is
-        the same residual risk that already existed (two terminals could
-        already race each other)."""
+        _launcher_build_lock: make_launcher() has no locking of its own, and
+        --force's fast path overwrites the launcher exe + DLLs, so two
+        overlapping GUI requests would copy to the same destination file at
+        once. This serializes IN-PROCESS only (concurrent GUI requests); it
+        cannot see a concurrent terminal `localm make-launcher`, and two
+        terminals can still race each other."""
         if not _launcher_build_lock.acquire(blocking=False):
             raise HTTPException(409, "A launcher rebuild is already in progress.")
         try:
@@ -281,8 +272,8 @@ def register(app: FastAPI, ctx) -> None:
         users interoperate with keep their data (``~/.ollama``, ``~/.lmstudio``,
         ``~/.cache/huggingface``), so the GUI picker always passes
         ``include_hidden=true`` and offers its own "Show hidden" toggle
-        client-side (issue #1220) rather than making that data unreachable by
-        browsing. The server-side default stays off for any other caller.
+        client-side rather than making that data unreachable by browsing. The
+        server-side default stays off for any other caller.
 
         Plain `def`, NOT `async def`: is_dir/resolve/iterdir/stat all block, and
         blocking inside an async handler stalls the event loop for every other

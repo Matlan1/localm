@@ -101,8 +101,8 @@ def test_clean_load_logs_no_skip_warning(tmp_path, caplog):
 
 
 def test_save_stamps_format_version(tmp_path):
-    """LM-DA-002: every saved line carries the JSONL format version so a future
-    breaking schema change has a migration hook instead of a silent skip."""
+    """Every saved line carries the JSONL format version so a future breaking
+    schema change has a migration hook instead of a silent skip."""
     s = _store(tmp_path)
     s.add(_rec("alpha"))
     s.add(_rec("beta"))
@@ -618,8 +618,8 @@ def test_a_possessive_naming_another_person_is_not_self_referential():
 
 
 def test_first_person_questions_are_still_self_referential():
-    """REG-590's contract, which the fix above must not break: the user's own
-    profile facts still have to survive a degraded semantic signal."""
+    """The trusted-fact contract, which the semantic gate must not break: the
+    user's own profile facts still have to survive a degraded semantic signal."""
     from localm.memory.store import _is_self_referential as sr
 
     assert sr("what is my name") is True
@@ -642,19 +642,17 @@ def test_a_query_about_the_world_is_still_not_self_referential():
 # A LEXICAL HIT SAYS WHAT THE QUERY IS ABOUT. Do not pad cosine-only records
 # in behind it.
 #
-# No absolute cosine threshold separates the two sets: measured on real
-# bge-small over 16 query/record pairs, the lowest TRUE pair was 0.4480 and the
-# highest FALSE pair 0.5965, and a relative-to-best gate fails too (that false
-# pair is 91% of its query's best). Lexical overlap over the same 16 pairs has
-# no false positives; it only misses paraphrases, which is what cosine is for.
+# No absolute cosine threshold separates the two sets on real bge-small
+# embeddings, and a relative-to-best gate fails too. Lexical overlap has no
+# false positives; it only misses paraphrases, which is what cosine is for.
 
 def _cos_embed(query, cosines):
     """An embed_fn where *query* sits at angle 0 and each record sits at the angle
-    whose cosine to it is the MEASURED value.
+    whose cosine to it is the given value.
 
-    Keyed to ONE query on purpose: cos(a, b) here is the cosine of the angle
-    DIFFERENCE, so a table shared across several queries silently produces
-    similarities nobody chose. Anything unlisted is far away (0.05).
+    Keyed to ONE query: cos(a, b) here is the cosine of the angle DIFFERENCE, so
+    a table shared across several queries silently produces similarities nobody
+    chose. Anything unlisted is far away (0.05).
     """
     import math
 
@@ -670,7 +668,7 @@ def _cos_embed(query, cosines):
     return embed
 
 
-# Cosine values measured on real bge-small for these exact strings.
+# Cosine values from real bge-small embeddings of these exact strings.
 _GREET = "Greet my friend Memo, who is watching right now"
 _GREET_COS = {
     "user has a friend called memo": 0.7586,
@@ -702,7 +700,7 @@ def test_a_marginal_cosine_record_does_not_ride_in_behind_a_lexical_hit(tmp_path
 
 def test_cosine_still_carries_a_paraphrase_when_nothing_matches_lexically(tmp_path):
     """The bar must not become 'lexical only': with NO lexical hit at all the
-    semantic gate still answers, which is REG-590's contract."""
+    semantic gate still answers."""
     q = "what is my name"
     embed = _cos_embed(q, {"user is called sam": 0.6526})
     st = _store_with(tmp_path, ["User is called Sam"], embed)

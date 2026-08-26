@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Install provenance ledger - so uninstall removes ONLY what install recorded.
 
-The lesson of the famous data-loss incidents (Valve's Steam ``rm -rf
-"$STEAMROOT/"*`` wiping ``/`` when the variable was empty; Pop!_OS/apt removing
-the desktop as a "dependency") is the same: an uninstaller must never *derive*,
-*glob*, or *guess* what to delete. It must delete only the exact paths the
-installer wrote down at install time, validate each before touching it, and
-refuse anything it does not have a record for.
+An uninstaller must never *derive*, *glob*, or *guess* what to delete. It must
+delete only the exact paths the installer wrote down at install time, validate
+each before touching it, and refuse anything it does not have a record for.
 
 This module is that record. ``record()`` writes ``.localm-install.json`` listing
 the venv, the provisioned native binaries (by name, inside their dir), the

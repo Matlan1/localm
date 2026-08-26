@@ -65,14 +65,11 @@ class PromptUpsert(BaseModel):
 _CONV_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _CONV_MAX_BYTES = 16 * 1024 * 1024   # data-URI images make these large
 
-# Windows reserved device names: matched regardless of extension, so a
-# conversation id of "nul" would target <home>/chats/nul.json -> the NUL
-# device on Windows, not a real file (writes silently discard; reads fail) -
-# not a path escape (_CONV_ID's charset already confines this to a flat
-# basename inside "chats"), but a genuine data-loss trap. Mirrors
-# rag/store.py's _RESERVED_NAMES (same enumeration, kept local rather than
-# imported - pathsafe.py is the lower-level module other code depends on,
-# never the reverse; see its own WINDOWS_RESERVED_NAME_CHARS docstring).
+# Windows reserved device names, matched regardless of extension: a
+# conversation id of "nul" would target <home>/chats/nul.json -> the NUL device
+# on Windows, not a real file (writes discard, reads fail). Not a path escape -
+# _CONV_ID's charset already confines this to a flat basename inside "chats".
+# Same enumeration as rag/store.py's _RESERVED_NAMES, kept local.
 _RESERVED_NAMES = {"con", "prn", "aux", "nul",
                    *(f"com{i}" for i in range(1, 10)),
                    *(f"lpt{i}" for i in range(1, 10))}
@@ -241,14 +238,10 @@ def _load_prompts() -> dict:
     """The persona library, or ``{}`` when the user genuinely has none.
 
     Raises _PromptsUnreadable when the file EXISTS but cannot be read or
-    parsed. Collapsing that case into ``{}`` (which this used to do) is not a
-    cosmetic loss: every writer below does read-modify-write, so the next save
-    replaced the WHOLE library with the single entry being written. The sharp
-    case is not corruption but a transient OSError (an AV or backup agent's
-    share-lock, a permission blip), where the personas on disk are INTACT and
-    were destroyed anyway while the route answered {"status": "saved"} - a step
-    that failed reporting success (AGENTS.md rule 5). Mirrors conversation_get's
-    absent-vs-unreadable branch above, which this path was the odd one out on.
+    parsed, which must NOT collapse into ``{}``: every writer below does
+    read-modify-write, so the next save would replace the WHOLE library with the
+    single entry being written. Same absent-vs-unreadable split as
+    conversation_get above.
     """
     prompts_file = _prompts_file()
     if not prompts_file.is_file():
@@ -259,8 +252,7 @@ def _load_prompts() -> dict:
         raise _PromptsUnreadable(str(e)) from e
     if not isinstance(data, dict):
         # Well-formed JSON that is not an object (a list, a bare string) parses
-        # cleanly and is still not a library. Treating it as one would TypeError
-        # on the next write, so refuse it with the same honesty as a parse error.
+        # cleanly and is still not a library, so it is refused like a parse error.
         raise _PromptsUnreadable("prompts.json is not a JSON object")
     return data
 
@@ -269,11 +261,9 @@ def _prompts_or_refuse() -> dict:
     """``_load_prompts()``, turning an unreadable library into a 500 that
     REFUSES the request.
 
-    No caller may reach _save_prompts on a failed load: that write is the
-    destructive half this branch exists to prevent, and refusing is recoverable
-    where overwriting is not. The HTTP message is path-free because this is a
-    network surface (the clear_api_key disclosure split); the concrete reason
-    goes to the log."""
+    No caller may reach _save_prompts on a failed load. The HTTP message is
+    path-free because this is a network surface; the concrete reason goes to the
+    log."""
     try:
         return _load_prompts()
     except _PromptsUnreadable as e:

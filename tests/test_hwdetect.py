@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.hwdetect: GPU-vendor detection and the install/runtime backend
 selection policy. hwdetect drives which llama.cpp backend and which PyTorch wheel
-the installers provision, so a silent regression here is exactly the costly kind
-(TEST-2). Everything is mocked - no real GPU, subprocess, or network - so the
-policy is pinned deterministically on any machine, including a GPU-less CI box."""
+the installers provision. Everything is mocked - no real GPU, subprocess, or
+network - so the policy is pinned deterministically on any machine, including a
+GPU-less CI box."""
 
 import subprocess
 
@@ -131,10 +131,9 @@ def test_vendor_found_by_smi_stays_found_despite_a_failed_enumeration(monkeypatc
 
 
 def test_macos_uname_failure_is_unknown_not_intel(monkeypatch):
-    """detect() used to return source="macos intel" whenever uname produced
-    anything other than arm64 - INCLUDING when uname did not run at all. On an
-    Apple Silicon box that asserts the wrong architecture and costs the Metal
-    recommendation."""
+    """uname producing anything other than arm64 must not be read as
+    source="macos intel" when uname did not run at all. On an Apple Silicon box
+    that asserts the wrong architecture and costs the Metal recommendation."""
     monkeypatch.setattr(hwdetect.sys, "platform", "darwin")
     monkeypatch.setattr(hwdetect, "_run_ok", lambda cmd: ("", False))
     d = hwdetect.detect()
@@ -144,7 +143,7 @@ def test_macos_uname_failure_is_unknown_not_intel(monkeypatch):
 
 
 def test_macos_intel_still_reports_none_when_uname_answered(monkeypatch):
-    """The guard on the test above: a real Intel Mac is a MEASURED negative and
+    """The guard on the test above: a real Intel Mac is a genuine negative and
     must keep saying so."""
     monkeypatch.setattr(hwdetect.sys, "platform", "darwin")
     monkeypatch.setattr(hwdetect, "_run_ok", lambda cmd: ("x86_64\n", True))

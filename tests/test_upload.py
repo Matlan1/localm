@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""R37: a phone (or browser) uploads files INTO <home>/uploads/ so models and
-tools can read them, beyond transient chat attachments. The endpoints are
-scope-gated (CONFIG_WRITE to write/delete, CONFIG_READ to list) because writing
-host files is privileged - a restricted shared key must not be able to drop files
-on the host. File names are basename-confined so they cannot traverse out of the
-uploads dir.
+"""A phone (or browser) uploads files INTO <home>/uploads/ so models and tools
+can read them, beyond transient chat attachments. The endpoints are scope-gated
+(CONFIG_WRITE to write/delete, CONFIG_READ to list) because writing host files is
+privileged - a restricted shared key must not be able to drop files on the host.
+File names are basename-confined so they cannot traverse out of the uploads dir.
 """
 
 import os
@@ -231,23 +230,19 @@ class TestConfinedUploadPathAliasSubstitution:
     """DELETE /api/uploads/{name} is the one route in this file that resolves a
     raw, caller-supplied name directly against an EXISTING file (every other
     route either writes through _unique_upload_target's non-clobbering
-    retry-with-counter, or folds the name into an already-unique synthesized
-    one - see share.py). An OS-level alias - an NTFS 8.3 short name is the
-    live-confirmed case (this session; also #1068's own finding against a
-    DIFFERENT validator) - can pass basename/character checks while resolving
-    to a pre-existing, DIFFERENTLY-NAMED real file: 'LONGMO~1.GGU' resolving
-    to 'LongModelNameThatIsVeryLong.gguf'. Before pathsafe.confined_name was
-    wired in here, _confined_upload_path only checked containment
-    (target.is_relative_to(base)), which the alias satisfies (it stays inside
-    uploads/) - so a delete request naming an alias the caller never uploaded
-    would have unlinked someone else's real file.
+    retry-with-counter, or folds the name into an already-unique synthesized one
+    - see share.py). An OS-level alias, such as an NTFS 8.3 short name, can pass
+    basename/character checks while resolving to a pre-existing,
+    DIFFERENTLY-NAMED real file: 'LONGMO~1.GGU' resolving to
+    'LongModelNameThatIsVeryLong.gguf'. A containment-only check
+    (target.is_relative_to(base)) is satisfied by the alias, since it stays
+    inside uploads/, so a delete request naming an alias the caller never
+    uploaded would unlink someone else's real file. pathsafe.confined_name
+    rejects it.
 
-    8dot3 short-name generation is volume/config-dependent (this session
-    measured it enabled on this box's C: and disabled on D:, matching
-    #1068's own test_pull_local_path.py finding), so this simulates the
-    alias condition directly via Path.resolve rather than depending on the
-    OS having actually generated one - deterministic regardless of which
-    volume runs this test."""
+    8dot3 short-name generation is volume/config-dependent, so this simulates the
+    alias condition directly via Path.resolve rather than depending on the OS
+    having generated one - deterministic regardless of which volume runs it."""
 
     def test_alias_name_is_rejected_by_the_validator(self, scoped_app, monkeypatch):
         up = scoped_app.state._home / "uploads"

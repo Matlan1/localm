@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
-Tests for the tools QoL round: read_file offset/limit slicing, explicit
-truncation markers (grep, tree, read_file), edit_file closest-match hints -
-plus coverage holes flagged in the audit: read_env redaction and
+read_file offset/limit slicing, explicit truncation markers (grep, tree,
+read_file), edit_file closest-match hints, read_env redaction and
 edit_notebook_cell.
 """
 

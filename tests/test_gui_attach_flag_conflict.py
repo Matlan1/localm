@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """`localm gui` must not silently discard explicit server-config flags by attaching.
 
-Release-verification defect (2026-07-17): `localm gui --port 8794` (and --mode)
-while an instance was already running for the directory attached to the running
-server and dropped the explicit flags with no mention. These tests drive the real
-`gui` command (CliRunner), stubbing only the instance-discovery seam, and assert
-that a conflicting explicit flag is refused (with the --new way out) while a
-compatible invocation still attaches.
+These tests drive the real `gui` command (CliRunner), stubbing only the
+instance-discovery seam, and assert that a conflicting explicit flag is refused
+(with the --new way out) while a compatible invocation still attaches.
 """
 
 import os

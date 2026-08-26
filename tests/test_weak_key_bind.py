@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-O: a weak owner key must not satisfy the network-bind auth gate.
+"""A weak owner key must not satisfy the network-bind auth gate.
 
 The 8-char floor is enforced only at SET time (auth.set_api_key), so a key
 supplied via the LOCALM_API_KEY env var or a hand-edited auth.key (e.g. "1")
-bypassed it and was served to the whole network with full ADMIN scope. The
+bypasses it and would be served to the whole network with full ADMIN scope. The
 network-bind gate (cli._exposed_bind_warning, used by both `localm serve` and
 `localm gui`) must treat a too-short key like no key at all: refuse the network
 bind (unless --insecure) so a trivially-guessable owner secret is never exposed.

@@ -2,13 +2,13 @@
 """Auto n_gpu_layers partial-offload (GgufBackend._auto_gpu_layers /
 _effective_gpu_layers) and the model_meta layer-count cache.
 
-The audit (explain-is-not-justify, gui-2/docstrings-1) found the "needs partial
-CPU offload" badge promised a fallback the default load path never delivered:
-default n_gpu_layers=99 -> _check_vram charged the FULL weight for any non-zero
-value and refused a too-big model. These tests pin the real mechanism that makes
-the promise true: when n_gpu_layers is left at 99 and auto is on, the loader sizes
-how many layers fit from free VRAM so the model LOADS (some layers on CPU) instead
-of raising, while an explicit -g is always honoured verbatim.
+The "needs partial CPU offload" badge promises a fallback the default load path
+must actually deliver: with default n_gpu_layers=99, _check_vram charging the
+FULL weight for any non-zero value refuses a too-big model. These tests pin the
+mechanism that makes the promise true: when n_gpu_layers is left at 99 and auto
+is on, the loader sizes how many layers fit from free VRAM so the model LOADS
+(some layers on CPU) instead of raising, while an explicit -g is always honoured
+verbatim.
 """
 
 import json
@@ -43,19 +43,15 @@ def _vram(free, total):
     daemon) when torch cannot answer - on a box with a real GPU and a
     provisioned native runtime, that fallback can succeed for real and return
     genuine driver numbers, defeating a test that wants "VRAM is totally
-    unmeasurable" (free=None). Both paths must be patched together, not just
-    the torch one, or `_vram(None, None)` is not actually unmeasurable on a
-    GPU-equipped dev machine.
+    unmeasurable" (free=None). Both paths must be patched together, or
+    `_vram(None, None)` is not actually unmeasurable on a GPU-equipped machine.
 
-    Since #706 there is a THIRD path with the same trap: ``_free_vram_bytes``
-    applies a device-global correction (``_device_global_free_bytes``) on a
-    Windows + ROCm/HIP box, reading the box's REAL adapter usage via ADL/PDH
-    and replacing the faked ``free`` with ``total - real_used`` - which
-    silently defeats both fakes above on exactly that hardware (measured live:
-    a faked 6/16 GB partial-fit scenario came back as ~15 GB free, so
-    _auto_gpu_layers returned 99 and six partial-offload tests went red).
-    Patched to None so the correction reports "not applicable" and the faked
-    reading stands deterministically on every box."""
+    A THIRD path has the same trap: ``_free_vram_bytes`` applies a device-global
+    correction (``_device_global_free_bytes``) on a Windows + ROCm/HIP box,
+    reading the box's REAL adapter usage via ADL/PDH and replacing the faked
+    ``free`` with ``total - real_used``, which defeats both fakes above on
+    exactly that hardware. Patched to None so the correction reports "not
+    applicable" and the faked reading stands deterministically on every box."""
     from contextlib import ExitStack
     from localm.inference.backends.llamacpp import _loader
 
@@ -274,10 +270,10 @@ class TestLoadResolvesGpuLayers:
 
 class TestPostLoadLayerCountCache:
     def test_load_native_caches_true_layer_count(self, tmp_path, monkeypatch):
-        """The real load now happens in the isolated worker (see
-        llamacpp/_runner.py) - it reports n_layers back in the load response,
-        and GgufBackend._load_native persists it exactly as before (this
-        disk write itself stays parent-side)."""
+        """The real load happens in the isolated worker (see
+        llamacpp/_runner.py): it reports n_layers back in the load response and
+        GgufBackend._load_native persists it, with the disk write staying
+        parent-side."""
         import localm.config as cfg
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
 
@@ -393,10 +389,9 @@ class TestVramOverheadConfigResolution:
             self, tmp_path, monkeypatch):
         """End-to-end: a malformed value that only a hand-edited config.json
         (never the validated PATCH/CLI paths) could produce must not brick
-        create_backend() - the exact crash a review caught during this fix's
-        own development (ValueError/TypeError propagating uncaught from
-        engine.py, before switch_engine's own RuntimeError->503 handling
-        even runs, since this isn't a RuntimeError and fires earlier)."""
+        create_backend(). A ValueError/TypeError propagates uncaught from
+        engine.py before switch_engine's own RuntimeError->503 handling runs,
+        since it is not a RuntimeError and fires earlier."""
         from localm.inference.engine import create_backend
         model = tmp_path / "model.gguf"
         model.write_bytes(b"x")
@@ -417,13 +412,13 @@ class TestVramOverheadConfigResolution:
 class TestAutoCtxEmbedderReservation:
     """_auto_ctx_max must hold back room for the CONFIGURED embedder so the
     context window sized at chat-load time does not claim the VRAM the embedder
-    needs when it loads later (first memory/RAG use) - the oversubscription
-    that collapsed generation from ~34 to 5.0 tok/s on a real 16 GB card
-    (WDDM pages the overcommit to system RAM; measured live 2026-07-18).
+    needs when it loads later (first memory/RAG use). Oversubscribing collapses
+    generation on a real 16 GB card, because WDDM pages the overcommit to system
+    RAM.
 
-    _auto_gpu_layers is deliberately NOT reservation-aware: chat weights keep
-    VRAM priority (a partial chat offload to protect the embedder would slow
-    the primary workload); the context window is the flexible resource."""
+    _auto_gpu_layers is NOT reservation-aware: chat weights keep VRAM priority
+    (a partial chat offload to protect the embedder would slow the primary
+    workload); the context window is the flexible resource."""
 
     def test_reservation_shrinks_the_auto_ctx_ceiling(self, tmp_path, monkeypatch):
         from localm.inference.backends.llamacpp import _sizing

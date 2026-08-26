@@ -9,8 +9,8 @@ from __future__ import annotations
 # Tools that mutate files - trigger a project map refresh after they run
 # (execution.py's _refresh_map_for_tool, the only consumer of this set).
 # search_replace is included, but its paths come from ToolResult.changes
-# (post-call, its own dry_run-driven sweep) rather than from set membership
-# alone - see _refresh_map_for_tool's *result* param.
+# (post-call, its own dry_run-driven sweep), not from set membership alone -
+# see _refresh_map_for_tool's *result* param.
 #
 # run_shell has no path-shaped arg at all (a `command` string only), so
 # _call_target_paths() returns [] for it and no per-file refresh_file() call
@@ -40,13 +40,13 @@ _UNDOABLE_TOOLS: frozenset[str] = frozenset({
 })
 
 # Tools patch mode intercepts (capture a diff, never touch disk). Superset of
-# _UNDOABLE_TOOLS: search_replace is patch-mode-eligible via its own dry_run
-# rather than the pre-call snapshot path.
+# _UNDOABLE_TOOLS: search_replace is patch-mode-eligible via its own dry_run,
+# not via the pre-call snapshot path.
 _PATCH_MODE_ELIGIBLE_TOOLS: frozenset[str] = _UNDOABLE_TOOLS | frozenset({
     "search_replace",
 })
 
-# Tools whose target paths are NESTED inside a collection arg rather than a
+# Tools whose target paths are NESTED inside a collection arg instead of a
 # top-level `path` arg. Maps tool name -> (collection arg, key within each item).
 # Every path-consuming site (scope check, undo snapshot, changed-file tracker,
 # map refresh) resolves paths through _call_target_paths(), so a tool listed here
@@ -122,8 +122,8 @@ _SHELL_COMMAND_ARGS: dict[str, tuple[str, ...]] = {
 }
 
 # Which of the args above the tool's own schema DECLARES to be a path, as opposed
-# to a free-form command line. A declared path is checked whole rather than
-# tokenised, since a path may contain spaces. Everything else is a command line
+# to a free-form command line. A declared path is checked whole, not tokenised,
+# since a path may contain spaces. Everything else is a command line
 # whose tokens _shell_paths_outside_scope classifies by syntax alone - it may
 # never ask the filesystem which of them exists.
 _SHELL_DECLARED_PATH_ARGS: dict[str, tuple[str, ...]] = {"run_tests": ("path",)}
@@ -173,23 +173,18 @@ def expand_shell_disable(disabled: frozenset) -> frozenset:
     """Disabling any tool in a capability family disables the whole family.
 
     A caller that passes ``{"run_shell"}`` means "this session must not execute
-    arbitrary commands" (that is exactly how the shareable-key path uses it).
-    Honouring that literally, tool-name by tool-name, would leave
-    ``run_shell_background`` - the same capability minus the wait - enabled, so
-    the safety choice would be silently defeated by a tool added after the
-    caller was written. Expand the intent instead.
+    arbitrary commands" (that is how the shareable-key path uses it). Honouring
+    that tool-name by tool-name would leave ``run_shell_background`` - the same
+    capability minus the wait - enabled.
 
     Two families, expanded INDEPENDENTLY: shell execution, and sub-agent
-    delegation. Keeping them separate matters - a single merged family would make
-    disabling ``spawn_agent`` also disable ``run_shell``, silently removing a
-    capability the caller never asked to lose.
+    delegation. A single merged family would make disabling ``spawn_agent`` also
+    disable ``run_shell``, removing a capability the caller never asked to lose.
 
-    Applied at BOTH boundaries that consume a disabled set: the Agent (which
-    hard-refuses at dispatch) and the prompt builders (which decide what the
-    model is told exists). Applying it in only one leaves the other advertising
-    or accepting a tool the caller meant to switch off. (The name is historical -
-    it predates the second family - but every consuming site already calls it, so
-    extending it here is what keeps both boundaries covered for free.)
+    MUST be applied at BOTH boundaries that consume a disabled set: the Agent
+    (which hard-refuses at dispatch) and the prompt builders (which decide what
+    the model is told exists). Applying it in only one leaves the other
+    advertising or accepting a tool the caller meant to switch off.
     """
     out = frozenset(disabled)
     if out & _SHELL_EXEC_TOOLS:
@@ -260,7 +255,7 @@ _GLOBAL_ERROR_ABORT = 6
 # a different model.
 _MAX_NOCALL_ESCALATIONS = 2
 
-# Imperative verbs that make a request an ACTION rather than a question. Read
+# Imperative verbs that make a request an ACTION instead of a question. Read
 # verbs are included: "show me what is in config.py" needs read_file just as
 # "write config.py" needs write_file.
 _ACTION_VERBS: frozenset[str] = frozenset({
@@ -277,9 +272,9 @@ _ACTION_VERBS: frozenset[str] = frozenset({
     "update", "upgrade", "verify", "write",
 })
 
-# Signals that a request is about THIS project rather than programming in the
-# abstract: an explicit path, a file extension, or a workspace noun. Either a
-# verb OR one of these is enough - see implies_action().
+# Signals that a request is about THIS project, not programming in the abstract:
+# an explicit path, a file extension, or a workspace noun. Either a verb OR one of
+# these is enough - see implies_action().
 _WORKSPACE_HINT = (
     r"(?:[\w./\\-]+\.[A-Za-z0-9]{1,6}\b"          # something.ext
     r"|[~./\\][\w./\\-]+"                          # a path-looking token
@@ -289,7 +284,7 @@ _WORKSPACE_HINT = (
 )
 
 # Two finals at least this similar (difflib ratio) count as the model restating
-# itself rather than progressing.
+# itself instead of progressing.
 _REPEAT_SIMILARITY = 0.85
 
 # How many earlier finals a turn is compared against. Bounded so a long session

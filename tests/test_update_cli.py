@@ -26,9 +26,8 @@ def test_update_check_up_to_date(monkeypatch):
 
 
 def test_update_check_unrecognized_tag_reports_uncertainty_not_up_to_date(monkeypatch):
-    """The honesty fix: when the comparator could not order the tags (info's
-    "comparable" is False), the CLI must say so, never fold that into a false
-    "up to date"."""
+    """When the comparator could not order the tags (info's "comparable" is
+    False), the CLI says so and never reports "up to date"."""
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "check", lambda: {
         "current": "0.1.4", "latest": "nightly", "newer": False, "comparable": False,
@@ -39,9 +38,9 @@ def test_update_check_unrecognized_tag_reports_uncertainty_not_up_to_date(monkey
 
 
 def test_update_check_blocked_by_net_policy(monkeypatch):
-    """A net-policy refusal already flows through the existing 'Could not check
-    for updates' path (same as test_update_apply_failure_is_surfaced's shape) -
-    it must show the short reason, and never claim the update is up to date."""
+    """A net-policy refusal flows through the 'Could not check for updates'
+    path: it shows the short reason and never claims the update is up to
+    date."""
     from localm.bugreport import LocalmError
     monkeypatch.setattr(updater, "available", lambda: True)
 

@@ -41,10 +41,9 @@ def home(tmp_path, monkeypatch):
 
 
 def _install_managed():
-    """Create the on-disk markers is_managed_comfy_installed() checks (main.py +
-    the managed venv interpreter + the completion marker - #621 follow-up: the
-    first two alone mean "still installing"), so the REAL detector reports
-    installed - no mock of the thing under test."""
+    """Create the on-disk markers is_managed_comfy_installed() checks (main.py,
+    the managed venv interpreter, and the completion marker - the first two alone
+    mean "still installing"), so the REAL detector reports installed."""
     from localm.media.managed_comfy import managed_comfy_paths
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     p = managed_comfy_paths()

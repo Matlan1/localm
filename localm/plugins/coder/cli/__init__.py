@@ -1,19 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """localcoder CLI package.
 
-This package replaces the former single-file ``localm/plugins/coder/cli.py``. The
-``main`` Click command lives in ``_main`` (the localcoder entry point
-``localm.plugins.coder.cli:main`` still resolves via this re-export); the
-goal-mode, estimate, and REPL helpers live in sibling modules.
+The ``main`` Click command lives in ``_main`` (the localcoder entry point
+``localm.plugins.coder.cli:main`` resolves via this re-export); the goal-mode,
+estimate, and REPL helpers live in sibling modules.
 
-The names the test suite imports from / monkeypatches on
-``localm.plugins.coder.cli`` are preserved here: ``main`` (entry point + the
-``localm coder`` route in localm/cli/maintenance.py), ``_run_goal_loop`` /
-``_goal_task_wrap`` / ``_warn_sensitive_changes`` (called directly), and the two
-patched helpers ``_run_verify`` (patched in test_goal_loop) and
-``make_localm_backend`` (patched in test_local_backend_auth). The call sites that
-consume a patched name resolve it back from this package at call time
-(``import localm.plugins.coder.cli as _cli; _cli.<name>``) so a patch is seen."""
+The names imported from or monkeypatched on ``localm.plugins.coder.cli`` are
+re-exported here: ``main`` (entry point plus the ``localm coder`` route in
+localm/cli/maintenance.py), ``_run_goal_loop`` / ``_goal_task_wrap`` /
+``_warn_sensitive_changes``, and the patched helpers ``_run_verify`` and
+``make_localm_backend``. The call sites that consume a patched name resolve it
+back from this package at call time (``import localm.plugins.coder.cli as _cli;
+_cli.<name>``), so a patch is seen."""
 
 # Patched + re-exported helper from backends (callers read it live via _cli).
 from ..backends.http import make_localm_backend  # noqa: F401

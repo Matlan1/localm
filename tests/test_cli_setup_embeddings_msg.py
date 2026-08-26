@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""cli-2: `localm setup-embeddings` must not claim existing RAG collections "will
-now use semantic search" - they stay lexical (BM25) until re-embedded. Memory uses
-it now; the message must state the capability and name the RAG re-embed step.
+"""`localm setup-embeddings` must not claim existing RAG collections "will now
+use semantic search" - they stay lexical (BM25) until re-embedded. Memory uses
+it immediately; the message must state that capability and name the RAG
+re-embed step.
 
-The re-embed step itself was `rag add ... --embed` (re-reads the original source
-files) until `rag reembed <name>` existed (works from stored chunk text alone, no
-source files needed) - the message now points at the latter, the actual fix for
-the common case where a source file has moved, been deleted, or arrived only as
-an upload."""
+The step it names is `rag reembed <name>`, which works from stored chunk text
+alone and needs no source files, not `rag add ... --embed`, which re-reads the
+original source files."""
 
 from click.testing import CliRunner
 
@@ -124,9 +123,8 @@ class TestSetupEmbeddingsPreSwitchConfirm:
 
     def test_noninteractive_eof_proceeds_rather_than_aborting(
             self, cli_runner, monkeypatch, tmp_path):
-        # Run from cron/CI/a script with no stdin. Nothing here is destroyed -
-        # a collection's chunk text and existing vectors stay on disk either
-        # way - so EOF proceeds rather than aborts, and says so.
+        # Run from cron/CI/a script with no stdin: EOF proceeds rather than
+        # aborts, and says so.
         from localm.cli.maintenance import setup_embeddings
         from localm.config import load_config
         _stub_install(monkeypatch, tmp_path)

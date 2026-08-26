@@ -2,9 +2,8 @@
 """Wiring tests for main_gpu_index into the native llama.cpp model params, for
 both native-load call sites: the chat backend (LlamaCpp) and the embedder
 (GGUFEmbedder). Both route through localm.discover.apply_main_gpu, but each
-constructs its own ``mp`` via a mocked ctypes API, so we verify each call site
-actually SETS mp.main_gpu end to end (not just that the shared helper works in
-isolation - see test_discover.py's TestApplyMainGpu for that unit coverage)."""
+constructs its own ``mp`` via a mocked ctypes API, so each call site is checked
+end to end for actually SETTING mp.main_gpu."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,9 +13,9 @@ from localm.inference.backends.llamacpp.llama import LlamaCpp
 
 def _mock_llama_api():
     """A MagicMock standing in for the ctypes llama.cpp API. The model-params
-    struct is a SimpleNamespace seeded with the real native default (main_gpu=0,
-    per _structs.py) rather than a bare MagicMock, so an untouched attribute
-    reads back as the true default instead of an auto-generated child mock."""
+    struct is a SimpleNamespace seeded with the real native default (main_gpu=0),
+    so an untouched attribute reads back as that default and not as an
+    auto-generated child mock."""
     mock_api = MagicMock()
     mp = SimpleNamespace(main_gpu=0, n_gpu_layers=0, use_mmap=True)
     mock_api.llama_model_default_params.return_value = mp

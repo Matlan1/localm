@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared HTTP domain-error-to-response translation.
 
-Every HTTP-surfaced feature independently wrote "run a domain call, catch its
-known exception type(s), translate to an HTTPException with a specific status"
-(web/voice routes, GUI discover routes, memory routes, MCP plugin-management
-handlers) - the most-repeated duplication shape in the Pathfinder duplication
-audit (02-duplication-report.md, twelve findings across seven features).
-``route_errors`` is the one small decorator replacing those, and
-``format_localm_error`` is the one formatting idiom (``admin.py`` had it
-copy-pasted four times) they both need.
+``route_errors`` is the decorator every HTTP-surfaced feature uses to run a
+domain call, catch its known exception types and translate them to an
+HTTPException with a specific status (web/voice routes, GUI discover routes,
+memory routes, MCP plugin-management handlers). ``format_localm_error`` is the
+shared formatting idiom they both need.
 """
 
 from __future__ import annotations

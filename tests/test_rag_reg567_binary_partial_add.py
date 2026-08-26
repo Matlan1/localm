@@ -1,29 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-567: a non-secret binary in an explicit add must not fail the WHOLE batch.
+"""A non-secret binary in an explicit add must not fail the WHOLE batch.
 
-BLACKLISTED_SUFFIXES conflated two very different things: SECRET material (.pem,
+BLACKLISTED_SUFFIXES conflates two very different things: SECRET material (.pem,
 .key, id_rsa, .env) and ordinary non-secret binaries (.mp4, .db, .sqlite, .7z,
-.bmp, fonts, model weights). confine_index_path raised the same
-ConfinementError for both, and the rag_add route turns ANY ConfinementError that
-is not `outside_allowed` into an HTTPException(400) for the entire request.
+.bmp, fonts, model weights). confine_index_path raising the same
+ConfinementError for both means the rag_add route turns it into an
+HTTPException(400) for the entire request, since it 400s any ConfinementError
+that is not `outside_allowed`.
 
-So POST /api/rag/collections/kb/add {"paths": ["notes.txt", "clip.mp4"]} indexed
-NOTHING and 400ed. A user multi-selecting from a Downloads folder that happens to
-contain one video now indexes zero files. Pre-#567 clip.mp4 reached extract_text,
-raised ExtractError, landed in result["failed"], and notes.txt indexed fine (200).
+So POST /api/rag/collections/kb/add {"paths": ["notes.txt", "clip.mp4"]} would
+index NOTHING and 400, and a user multi-selecting from a Downloads folder that
+happens to contain one video indexes zero files.
 
-The split restores that: refusing a SECRET stays a loud, whole-request refusal
-(it is a security boundary, and the caller must know). A non-secret binary is not
-a security question at all - it is just "no text in it", so it is reported as an
+The split: refusing a SECRET stays a loud, whole-request refusal (it is a
+security boundary, and the caller must know). A non-secret binary is not a
+security question at all - it is just "no text in it", so it is reported as an
 individual per-file failure like any other unreadable file.
 
-The perf guard that motivated the blacklist (rag-blacklist-model-files: a
-multi-GB .gguf must not be read into RAM and sha256-hashed twice just to be
-rejected) is preserved: the per-file refusal happens BEFORE stat/read_bytes.
-
-Suite miss: the 236 lines of tests added with #567 exercise only SECRET files and
-only assert that the intended block fires. None adds a non-secret binary, and none
-uses a MIXED batch, so the collateral all-or-nothing 400 was invisible.
+The perf guard that motivated the blacklist (a multi-GB .gguf must not be read
+into RAM and sha256-hashed twice just to be rejected) is preserved: the per-file
+refusal happens BEFORE stat/read_bytes.
 """
 
 from __future__ import annotations
@@ -67,9 +63,9 @@ class TestNonSecretBinaryIsNotAConfinementRefusal:
 
 
 class TestSecretRefusalIsUnchanged:
-    """NEGATIVE CASE: the security boundary must survive the split. Without these,
-    'fixing' REG-567 by simply dropping the check would pass everything above
-    while re-opening the AUDIT-MED-18 secret leak."""
+    """NEGATIVE CASE: the security boundary must survive the split. Without
+    these, dropping the check entirely would pass everything above while
+    re-opening the secret leak."""
 
     @pytest.mark.parametrize("name", ["deploy.pem", "tls.key", "vpn.ovpn",
                                       "id_rsa", ".env", "vault.kdbx"])
@@ -153,9 +149,9 @@ class TestMixedBatchIndexesTheGoodFiles:
             "the weight file must be refused BEFORE its bytes are read"
 
     def test_secret_in_a_batch_still_refuses_the_whole_request(self, tmp_path):
-        """Deliberate asymmetry, documented so it is not 'fixed' by accident: a
-        SECRET is a security refusal the caller must notice, so it still raises
-        out of add_paths rather than degrading to a per-file note."""
+        """Deliberate asymmetry: a SECRET is a security refusal the caller must
+        notice, so it still raises out of add_paths rather than degrading to a
+        per-file note."""
         good = tmp_path / "notes.txt"
         good.write_text("ordinary text", encoding="utf-8")
         secret = tmp_path / "id_rsa"

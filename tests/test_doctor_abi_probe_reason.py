@@ -1,20 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""doctor's ABI line: "not verified" must not invent WHY (ADR-0008).
+"""doctor's ABI line: "not verified" must not invent WHY.
 
-The verdict was always honest. The reason was not: the line defaulted to
-"runtime not loadable" whenever the probe result lacked a detail, and
-``abi_report()`` populates detail on every path it can return from
-("runtime not loadable: ...", "loader import failed: ..."). So the default was
-reachable ONLY when ``_run_probe_subprocess`` returned None - the probe timed
-out, crashed, or printed nothing - which is precisely the case where "runtime
-not loadable" is least likely to be true.
-
-The cost is a wrong remedy: a user told the runtime is not loadable re-runs
-'setup-llama --force', which cannot fix a subprocess that timed out.
-
-Same family as the smi fix (a check answering an adjacent question), one level
-smaller: here the pass/fail verdict is right and only the explanation is
-fabricated.
+``abi_report()`` populates detail on every path it can return from ("runtime not
+loadable: ...", "loader import failed: ..."), so the only result with no detail
+is ``_run_probe_subprocess`` returning None - the probe timed out, crashed, or
+printed nothing. That case must not be reported as "runtime not loadable", whose
+remedy ('setup-llama --force') cannot fix a subprocess that timed out.
 """
 
 from __future__ import annotations
@@ -27,16 +18,16 @@ doctor_mod = importlib.import_module("localm.cli.doctor")
 def _probe(monkeypatch, result):
     """Control the ABI probe subprocess. None models 'the probe never ran'.
 
-    Patched on localm.diagnostics, NOT on the doctor module: the probe itself
-    now lives there (doctor's _check_native_abi is a renderer over
+    Patched on localm.diagnostics, NOT on the doctor module: the probe lives
+    there (doctor's _check_native_abi is a renderer over
     diagnostics.check_native_abi), and check_native_abi resolves
     run_probe_subprocess from its own module globals on every call, so the name
-    never exists as a doctor attribute at all - patching doctor_mod raises
-    AttributeError, which is how the equivalent was caught before the move.
+    does not exist as a doctor attribute at all - patching doctor_mod raises
+    AttributeError.
 
-    The assertions below still drive doctor's RENDERED OUTPUT rather than the
-    core's return value, deliberately: the wrong reason this file exists to stop
-    is one a user reads, so the test stays at the layer that prints it."""
+    The assertions below drive doctor's RENDERED OUTPUT rather than the core's
+    return value, since the wrong reason guarded against here is one a user
+    reads."""
     import localm.diagnostics as diagnostics_mod
     monkeypatch.setattr(diagnostics_mod, "run_probe_subprocess",
                         lambda code, prefix, **kw: result)
@@ -44,8 +35,7 @@ def _probe(monkeypatch, result):
 
 def test_a_probe_that_never_ran_does_not_claim_the_runtime_is_unloadable(
         monkeypatch, capsys):
-    """The defect. None means we do not know why, so we must not name a cause -
-    least of all one whose remedy cannot help."""
+    """None means the cause is unknown, so no cause is named."""
     _probe(monkeypatch, None)
 
     doctor_mod._check_native_abi()
@@ -56,8 +46,8 @@ def test_a_probe_that_never_ran_does_not_claim_the_runtime_is_unloadable(
 
 
 def test_a_probe_that_never_ran_says_so(monkeypatch, capsys):
-    """Surface, do not silence: the user should learn the probe itself failed,
-    which is a different thing to investigate."""
+    """The user is told the probe itself failed, which is a different thing to
+    investigate."""
     _probe(monkeypatch, None)
 
     doctor_mod._check_native_abi()
@@ -67,8 +57,7 @@ def test_a_probe_that_never_ran_says_so(monkeypatch, capsys):
 
 
 def test_a_real_reason_from_the_probe_is_preserved(monkeypatch, capsys):
-    """No regression: when the probe DID run and reported why, that reason is
-    what the user needs and must survive verbatim."""
+    """When the probe DID run and reported why, that reason survives verbatim."""
     _probe(monkeypatch, {"status": "unchecked",
                          "detail": "runtime not loadable: OSError(126)"})
 
@@ -81,8 +70,8 @@ def test_a_real_reason_from_the_probe_is_preserved(monkeypatch, capsys):
 
 def test_a_probe_that_ran_but_reported_no_reason_is_not_given_one(
         monkeypatch, capsys):
-    """A ran-but-detail-less result is a third case. It still must not be
-    handed a fabricated cause."""
+    """A ran-but-detail-less result is a third case, and is not handed a
+    fabricated cause either."""
     _probe(monkeypatch, {"status": "unchecked", "detail": ""})
 
     doctor_mod._check_native_abi()
@@ -94,7 +83,7 @@ def test_a_probe_that_ran_but_reported_no_reason_is_not_given_one(
 
 
 def test_the_ok_and_mismatch_verdicts_are_untouched(monkeypatch, capsys):
-    """This change touches only the unverified branch's reason text."""
+    """The ok and mismatch verdicts render their own text unchanged."""
     _probe(monkeypatch, {"status": "ok", "layout": "v2"})
     doctor_mod._check_native_abi()
     out = capsys.readouterr().out

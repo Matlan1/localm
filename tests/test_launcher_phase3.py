@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""BUG-15 (M2 Phase 3): the launcher's Launch action must be cross-platform.
+"""The launcher's Launch action must be cross-platform.
 
-The launcher spawned child processes with
-``creationflags=subprocess.CREATE_NEW_CONSOLE``. That flag (and the
-``CREATE_NEW_CONSOLE`` attribute itself) is Windows-only. On Linux/macOS the
-attribute does not exist, so referencing it raises ``AttributeError`` - which
-the launcher's bare ``except Exception`` swallowed into a silent
-"Launch failed". The setup.sh ``.desktop`` entry was therefore a dead button on
-POSIX.
+``creationflags=subprocess.CREATE_NEW_CONSOLE`` - and the
+``CREATE_NEW_CONSOLE`` attribute itself - is Windows-only. On Linux/macOS the
+attribute does not exist, so referencing it raises ``AttributeError``, which the
+launcher's bare ``except Exception`` turns into a silent "Launch failed" and
+leaves the setup.sh ``.desktop`` entry a dead button.
 
 These tests pin the contract for the extracted spawn helper:
 - on POSIX (``sys.platform != "win32"``) the child is spawned WITHOUT
@@ -18,7 +16,7 @@ These tests pin the contract for the extracted spawn helper:
 
 The launcher lives at the repo root as ``launcher.pyw`` (a ``.pyw`` so a
 double-click runs it without a console). That extension is not importable by
-plain ``import``, so we load it from its file path.
+plain ``import``, so it is loaded from its file path.
 """
 
 from __future__ import annotations
@@ -159,9 +157,9 @@ def _build_fake(launcher_mod, **overrides):
 
 
 def test_gui_expose_drives_network_bind_with_auto_tls(launcher_mod):
-    """NET-1: ticking "Expose on the network" in Web GUI mode must launch
-    `localm gui -H 0.0.0.0` (which turns on built-in HTTPS) - the maintainer's
-    phone flow. No --no-tls: encryption stays on by default."""
+    """Ticking "Expose on the network" in Web GUI mode must launch
+    `localm gui -H 0.0.0.0`, which turns on built-in HTTPS. No --no-tls:
+    encryption stays on by default."""
     fake = _build_fake(launcher_mod, mode="gui", host_lan=True)
     cmd = launcher_mod.Launcher._build_command(fake)
     assert "gui" in cmd
@@ -195,8 +193,8 @@ def test_keep_diagnostics_checkbox_passes_flag(launcher_mod):
 
 
 def test_invalid_numeric_fields(launcher_mod):
-    """The launcher refuses a bad port/ctx/gpu before spawning (a stray letter or
-    an out-of-range port used to crash the child in pick_port)."""
+    """The launcher refuses a bad port/ctx/gpu before spawning; a stray letter or
+    an out-of-range port otherwise crashes the child in pick_port."""
     f = launcher_mod._invalid_numeric_fields
     # all-blank and all-valid -> no error
     assert f("", "", "") is None

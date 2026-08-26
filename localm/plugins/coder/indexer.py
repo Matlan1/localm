@@ -275,8 +275,8 @@ class ProjectMap:
 
         Walks with ``os.walk`` and PRUNES uninteresting directories in place
         (hidden, ``_SKIP_DIRS``, gitignored) so it never descends into
-        ``node_modules`` / ``.git`` or - the bug this fixes (CODER-1) - a huge
-        root like ``C:\\``. Candidates are collected with bounded headroom and
+        ``node_modules`` / ``.git`` or a huge root like ``C:\\``. Candidates are
+        collected with bounded headroom and
         ONLY that bounded subset is sorted, so a giant tree cannot make startup
         hang on a full materialise-and-sort. A wall-clock *deadline_s* (None to
         disable) caps even a pathological walk; *on_progress*, if given, is
@@ -284,19 +284,11 @@ class ProjectMap:
         ``truncated`` so the map (and the model) shows the index is partial.
 
         When *cache_path* is given, this is ALSO the entry point for the
-        cross-session cache (MEASURED 13-25x faster than a full walk - see
-        load_cached_and_reconcile's docstring): a usable cache is reconciled
-        and returned directly, skipping the walk below entirely, and either
-        way (cache hit or full walk) the result is saved back to *cache_path*
-        before returning, ready for the next call to reconcile from. This is
-        folded into build() itself - rather than persistence.py calling
-        load_cached_and_reconcile() and build() as two separate ProjectMap
-        classmethods - so build() stays the ONE call production code makes
-        into ProjectMap. A second, differently-named classmethod call site
-        would need every existing ``patch("...ProjectMap")`` test in the repo
-        (368 of them, measured) to also configure it, or a MagicMock's default
-        truthy auto-return silently short-circuits the very ``build()`` mock
-        those tests already set up.
+        cross-session cache: a usable cache is reconciled and returned directly,
+        skipping the walk below entirely, and either way (cache hit or full
+        walk) the result is saved back to *cache_path* before returning, ready
+        for the next call to reconcile from. build() therefore stays the ONE
+        call production code makes into ProjectMap.
         """
         if cache_path is not None:
             cached = cls.load_cached_and_reconcile(root, cache_path)
@@ -424,7 +416,7 @@ class ProjectMap:
         """Reconstruct a ProjectMap from to_cache_dict()'s shape, or None for
         anything that does not look right - a corrupt/foreign/future-version
         cache file must fall back to a full build(), never raise and never be
-        silently trusted (AGENTS rule 5)."""
+        silently trusted."""
         if not isinstance(data, dict) or data.get("version") != 1:
             return None
         if data.get("root") != str(root):
@@ -475,13 +467,11 @@ class ProjectMap:
     def save_cache(self, cache_path: Path) -> None:
         """Best-effort persist for the NEXT session's load_cached_and_reconcile()
         call. Never raises: a caching failure must not break indexing for the
-        session that hit it (AGENTS rule 5 - and the cost of losing a cache
-        write is one slow session-start next time, not lost data). Written
-        atomically (tmp file + os.replace) so a crash or a second concurrent
-        coder session in the same project (see checkpoint.py's #1051 note -
-        the project-map cache is shared across every session in a project,
-        unlike per-session checkpoints) can never leave a torn/corrupt file
-        for the next reader."""
+        session that hit it. Written atomically (tmp file + os.replace), so a
+        crash or a second concurrent coder session in the same project can never
+        leave a torn/corrupt file for the next reader - the project-map cache is
+        shared across every session in a project, unlike per-session
+        checkpoints."""
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
@@ -560,16 +550,12 @@ class ProjectMap:
              names not already tracked there (created) - exact, unlike a
              coarser dir-mtime heuristic. SKIPPED when files_capped is True:
              on a repo bigger than max_files, a known directory can hold many
-             files that were never candidates at all (measured live: 79 of
-             them on this repo's own tree, a 45ms surprise), and listdir
-             cannot tell those apart from one a shell command genuinely just
-             created - so treating every one as "new" would silently grow the
-             map past max_files, a little more with every dirty read. A file
-             inside a brand-new directory (no previously-tracked file at all)
-             is not discovered this way either, capped or not; only a full
-             reindex() picks up either case. Documented, not hidden - the same
-             trade-off _MAX_FILE_COUNT / the build deadline already make
-             elsewhere in this class.
+             files that were never candidates at all, and listdir cannot tell
+             those apart from one a shell command genuinely just created, so
+             treating every one as "new" would grow the map past max_files on
+             every dirty read. A file inside a brand-new directory (no
+             previously-tracked file at all) is not discovered this way either,
+             capped or not; only a full reindex() picks up either case.
 
         Runs once per dirty period regardless of how many files actually
         changed: bounded by O(tracked files [+ tracked dirs, when pass 2

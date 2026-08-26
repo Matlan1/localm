@@ -4,39 +4,32 @@ lazy-grammar trigger pattern against fixed adversarial probe strings, so a
 pattern that causes catastrophic regex backtracking can never block or take
 down the process asking whether it is safe to use.
 
-Same shape as ``inference/backends/llamacpp/_vram_probe.py`` (read that file's
-docstring for the fuller rationale on why a long-lived daemon, not a fresh
-subprocess per query - the identical cold-start argument applies here: a
-fresh-process-per-check would pay Python startup cost on every validated
-request). Caller side lives in ``inference/gbnf.py``
-(``validate_trigger_patterns``), which owns spawn/timeout/respawn, mirroring
-``_loader.py``'s ``_probe_roundtrip`` for the VRAM daemon.
+Same shape as ``inference/backends/llamacpp/_vram_probe.py``: a long-lived
+daemon rather than a fresh subprocess per query, so Python startup cost is not
+paid on every validated request. The caller side lives in ``inference/gbnf.py``
+(``validate_trigger_patterns``), which owns spawn, timeout and respawn.
 
-Why this needs to be a SEPARATE PROCESS, not a thread or an in-process call
-with a Python-level timeout: this app ships on Windows, where
-``signal.alarm`` (the usual way to bound a blocking call) does not exist. A
-thread-based "stop waiting" does not reclaim the CPU a runaway ``re.search``
-keeps consuming - only killing the process actually does. So the daemon
-process itself is the timeout boundary: if a pattern is genuinely
-catastrophic, THIS process hangs inside ``re.search`` and never gets to
-reply; the caller's read times out, and the caller kills this process
-outright. A fresh daemon spawns for the next check. This process never
-tries to bound its own regex calls - it cannot; nothing inside a single
-thread can interrupt a C-level backtracking match, which is exactly why the
-boundary has to be the whole process, enforced from outside.
+A SEPARATE PROCESS, not a thread or an in-process call with a Python-level
+timeout: this app ships on Windows, where ``signal.alarm`` does not exist, and
+a thread-based "stop waiting" does not reclaim the CPU a runaway ``re.search``
+keeps consuming. The daemon process itself is the timeout boundary: a genuinely
+catastrophic pattern hangs THIS process inside ``re.search`` so it never gets
+to reply; the caller's read times out and the caller kills this process
+outright, and a fresh daemon spawns for the next check. This process never
+tries to bound its own regex calls - nothing inside a single thread can
+interrupt a C-level backtracking match.
 
-Protocol (newline-delimited, line-buffered, over stdin/stdout, JSON payload
-so an arbitrary caller-supplied pattern - which may contain literal
-newlines, quotes, anything - travels safely as one line): the caller writes
-one JSON object per line, ``{"pattern": "<regex source>"}``, and reads one
-reply line. ``OK`` means the pattern compiled and completed against every
-probe string without incident. ``BAD <reason>`` means the pattern is
-rejected for a reason the daemon could determine WITHOUT hanging (invalid
-regex syntax, or a probe raised some other exception) - still safe, no
-process kill needed, the daemon stays alive for the next request. The
-DANGEROUS case - the pattern hangs a probe - never produces a reply line at
-all; the caller's timeout is the only thing that ever detects it, from
-outside.
+Protocol (newline-delimited, line-buffered, over stdin/stdout, JSON payload so
+an arbitrary caller-supplied pattern - which may contain literal newlines,
+quotes, anything - travels safely as one line): the caller writes one JSON
+object per line, ``{"pattern": "<regex source>"}``, and reads one reply line.
+``OK`` means the pattern compiled and completed against every probe string
+without incident. ``BAD <reason>`` means the pattern is rejected for a reason
+the daemon could determine WITHOUT hanging (invalid regex syntax, or a probe
+raised some other exception) - still safe, no process kill needed, and the
+daemon stays alive for the next request. The DANGEROUS case - the pattern hangs
+a probe - never produces a reply line at all; the caller's timeout is the only
+thing that ever detects it, from outside.
 
 Invoked as ``python -m localm.inference._trigger_probe`` by
 ``gbnf._spawn_trigger_probe_daemon()``.
@@ -48,108 +41,63 @@ import json
 import re
 import sys
 
-# Fixed adversarial probe strings, matched against every candidate pattern.
-# Sized and shaped from the REAL #928 defect (see gbnf.TOOL_CALL_TRIGGER's own
-# fix, PR #933): a repeating single character is the classic worst case for a
-# backtracking engine, and a repeating multi-character row mirrors the actual
-# field content (a coder-generated markdown table) that triggered the crash.
-# 60,000 characters is comfortably past where PR #933 measured the OLD
-# TOOL_CALL_TRIGGER pattern taking seconds (22,800 chars -> 4.1s) while
-# costing a SAFE pattern (any pattern shaped like the fixed TOOL_CALL_TRIGGER)
-# a small, near-instant fraction of a millisecond - see gbnf.py's
-# `validate_trigger_patterns` docstring for the calibration evidence.
+# Fixed adversarial probe strings, matched against every candidate pattern. A
+# repeating single character is the classic worst case for a backtracking
+# engine, and a repeating multi-character row mirrors the real field content (a
+# coder-generated markdown table) that triggered the original crash. 60,000
+# characters is comfortably past where a known-dangerous pattern costs seconds,
+# while costing a safe pattern a near-instant fraction of a millisecond.
 _PROBE_REPEAT_CHAR = " " * 60_000
 _PROBE_REPEAT_ROW = ("| localm/inference/backends/llamacpp/_runner.py | 1234 |\n" * 1_100)
 _ADVERSARIAL_PROBES = (_PROBE_REPEAT_CHAR, _PROBE_REPEAT_ROW)
 
-# HONEST COVERAGE STATEMENT (do not let this file's existence read as "regex
-# safety solved" - it is not): a pattern passes this probe if and only if it
-# completes against THESE TWO specific strings. Empirical validation is only
-# as good as the input it validates against - backtracking blowup is highly
-# input-shape-specific, which is exactly why #928 needed repetitive markdown
-# ROWS rather than random text to reproduce at all (see PR #933's own
-# measurements: the same defective pattern that hung for seconds on repeated
-# text can be near-instant on other inputs of the same length). So a pattern
-# that is fast against a single repeated CHARACTER and fast against a
-# repeated multi-character ROW, but catastrophic against some THIRD input
-# shape neither probe resembles, PASSES this check and would still be able
-# to hang or crash a real generation. This is a real, documented blind spot,
-# not a hypothetical one - do not extend the "safe" claim past what these
-# two probes actually establish. Widening this corpus (more repeat units,
-# varied lengths, nested-structure content) narrows the blind spot; it
-# cannot close it, since exhaustive coverage of "every input shape" is not
-# a finite set to enumerate.
+# A pattern passes this probe if and only if it completes against THESE TWO
+# specific strings. Backtracking blowup is highly input-shape-specific, so a
+# pattern that is fast against a single repeated CHARACTER and fast against a
+# repeated multi-character ROW, yet catastrophic against some THIRD input shape
+# neither probe resembles, still passes this check.
 #
-# _pattern_derived_probes below adds probes that narrow one specific,
-# MEASURED instance of that blind spot rather than a hypothetical one: a
-# classic ambiguous-alternation pattern like (a|a)*b is genuinely
-# catastrophic (measured live: 131.9s on just 30 'a' characters) but is
-# NOT caught by either fixed probe above (both complete in under 2ms
-# against it), because ambiguous-alternation danger is keyed to a SPECIFIC
-# character the pattern itself names, and neither fixed probe happens to
-# contain the letter 'a' repeated. No FIXED corpus can guess which
-# character an arbitrary caller-supplied pattern will be keyed to - so
-# instead of guessing, the probe is derived from the pattern's OWN content.
-# This closes the (a|a)*b class specifically; it does not make the corpus
-# exhaustive (a pattern keyed to danger only under a specific ORDER or
-# STRUCTURE of its own characters, not just their repetition, could still
-# pass - the honest limitation above still applies to what remains).
+# _pattern_derived_probes below narrows one specific case: an ambiguous
+# alternation such as (a|a)*b is catastrophic yet completes in under 2ms
+# against both fixed probes, because its danger is keyed to a character the
+# pattern itself names and neither fixed probe repeats that character. No FIXED
+# corpus can guess which character an arbitrary caller-supplied pattern is
+# keyed to, so the probe is derived from the pattern's OWN content.
 
 
 _MAX_DERIVED_PROBE_CHARS = 8  # bounds probe COUNT - a first-line, cheap bound.
-                               # The real guarantee against a pattern naming
-                               # many distinct characters is the internal
-                               # wall-clock budget in _check_one below, which
-                               # bounds the SUM directly; this just keeps the
-                               # common case (a handful of distinct chars)
-                               # from doing more work than it needs to.
+                               # The internal wall-clock budget in _check_one
+                               # below bounds the SUM directly.
 
 
 def _pattern_derived_probes(pattern: str) -> "tuple[str, ...]":
-    """One probe PER distinct alphanumeric character in *pattern* (the
-    _MAX_DERIVED_PROBE_CHARS MOST FREQUENT ones, if there are more distinct
-    characters than that), each that character ALONE repeated 60,000 times
-    - see the module-level comment above _check_one for why this exists
-    (an ambiguous-alternation pattern's danger is keyed to whichever
-    specific character IT names, which a fixed corpus cannot anticipate
-    for an arbitrary caller-supplied pattern). Most-frequent-first, not
-    first-encountered: a character the pattern repeats more often is more
-    likely to be involved in whatever ambiguity the pattern has, and if
-    the count bound below ever discards some candidates, it should discard
-    the least-repeated ones first.
+    """One probe PER distinct character in *pattern* (the
+    _MAX_DERIVED_PROBE_CHARS most frequent ones, if there are more distinct
+    characters than that), each that character ALONE repeated 60,000 times.
+    Returns () for an empty pattern.
+
+    Most-frequent-first, not first-encountered: a character the pattern repeats
+    more often is more likely to be involved in whatever ambiguity the pattern
+    has, so when the count bound discards candidates it discards the
+    least-repeated ones first.
 
     MUST be single-character-per-probe, not all extracted characters
-    concatenated together: a probe interleaving the pattern's OTHER
-    characters (e.g. ``(a|a)*b``'s own literal 'b') in among the repeated
-    'a's acts as a periodic terminator that regularly resets the
-    backtracking search space, defeating the exact ambiguity being probed
-    for. Caught live in this session: an earlier version of this function
-    concatenated all three extracted characters ('a','a','b') into one
-    repeated "aabaabaab..." probe, which completed in 2ms against
-    ``(a|a)*b`` - the SAME pattern that took 131.9s against 30 PURE
-    repeated 'a' characters with no 'b' at all. The bug was checked in,
-    not shipped: caught by testing this function against its own intended
-    target before trusting it.
+    concatenated together: a probe interleaving the pattern's OTHER characters
+    (for ``(a|a)*b``, its own literal 'b') among the repeated 'a's acts as a
+    periodic terminator that regularly resets the backtracking search space,
+    defeating the exact ambiguity being probed for.
 
     Every DISTINCT character in *pattern* is a candidate, not filtered to
-    isalnum(): an ambiguous-alternation pattern's danger is keyed to
-    whichever specific character it names, and that character is exactly
-    as often punctuation (a literal ``.`` or ``,`` in an escape like
-    ``\\.``) as it is a letter or digit - isalnum() silently dropped every
-    such character from consideration, so a pattern keyed to punctuation
-    got no derived probe at all and this whole layer could never catch it.
-    Deliberately over-inclusive rather than a precise literal-only parse:
-    this also picks up a character that is really part of regex syntax (a
-    metacharacter escape like the 'd' in ``\\d``, or a delimiter like
-    ``(``), which is harmless - an extra probe costs microseconds -
-    whereas under-extracting would silently narrow exactly the coverage
-    this exists to add. Bounded to _MAX_DERIVED_PROBE_CHARS distinct
-    characters - a cheap, first-line bound on probe COUNT, unaffected by
-    widening which characters are eligible; _check_one's own internal
-    wall-clock budget is what actually bounds total COST regardless of
-    count, since a caller-controlled property (how many distinct
-    characters a pattern names) must never be able to scale validation
-    cost past a fixed ceiling. Returns () for an empty pattern."""
+    isalnum(): an ambiguous-alternation pattern's danger is keyed to whichever
+    specific character it names, and that character is as often punctuation (a
+    literal dot or comma inside an escape) as it is a letter or digit.
+    Over-inclusive rather than a precise literal-only parse: a character that
+    is really part of regex syntax (the 'd' of a digit-class escape, or a
+    delimiter) also gets a probe, which costs microseconds. Bounded to
+    _MAX_DERIVED_PROBE_CHARS distinct characters, which bounds probe COUNT;
+    _check_one's own internal wall-clock budget is what bounds total COST
+    regardless of count, so a caller-controlled property cannot scale
+    validation cost past a fixed ceiling."""
     counts: "dict[str, int]" = {}
     for ch in pattern:
         counts[ch] = counts.get(ch, 0) + 1
@@ -158,32 +106,25 @@ def _pattern_derived_probes(pattern: str) -> "tuple[str, ...]":
 
 
 # Internal wall-clock budget for the WHOLE probe loop of a SINGLE pattern
-# (fixed probes + all derived ones), checked BETWEEN probes. This is a
-# DIFFERENT thing from the caller's own round-trip timeout in gbnf.py:
-# that one catches a SINGLE probe that hangs forever (nothing can check a
-# deadline while blocked inside one C-level regex call). This one catches
-# the case nothing else does: many probes that are each individually FINITE
-# but not free - a pattern naming many distinct characters costs one probe
-# PER character (see _pattern_derived_probes), and even a merely mildly
-# expensive (not catastrophic) per-probe cost, summed across many, adds up
-# to real time spent holding the single validation lock, for a pattern that
-# may never trip the outer timeout at all - a CHEAPER attack to construct
-# than genuine catastrophic backtracking, because it needs no cleverness,
-# just vocabulary. Bailing out here bounds the SUM directly rather than
-# hoping the count cap (_MAX_DERIVED_PROBE_CHARS) alone keeps it small.
+# (fixed probes plus all derived ones), checked BETWEEN probes. Distinct from
+# the caller's own round-trip timeout in gbnf.py: that one catches a SINGLE
+# probe that hangs forever, since nothing can check a deadline while blocked
+# inside one C-level regex call. This one catches many probes that are each
+# individually FINITE but not free - a pattern naming many distinct characters
+# costs one probe PER character - which sums to real time spent holding the
+# single validation lock for a pattern that may never trip the outer timeout.
 _PROBE_LOOP_BUDGET_SECONDS = 0.5
 
 
 def _check_one(pattern: str) -> str:
     """"OK" or "BAD <reason>" for *pattern* - never raises. A pattern whose
-    FIRST slow probe hangs forever never returns from this function at all
-    - the caller's own round-trip timeout is what detects that case, not
-    this function returning some sentinel (nothing inside one thread can
-    check a deadline while blocked inside a single C-level regex call).
-    A pattern that instead costs a little on EACH of many probes is
-    different: this function CAN and does check its own budget between
-    probes, and bails out rather than let many small costs sum unbounded -
-    see _PROBE_LOOP_BUDGET_SECONDS."""
+    FIRST slow probe hangs forever never returns from this function at all: the
+    caller's own round-trip timeout is what detects that case, since nothing
+    inside one thread can check a deadline while blocked inside a single
+    C-level regex call. A pattern that instead costs a little on EACH of many
+    probes is different: this function checks its own budget between probes and
+    bails out rather than let many small costs sum unbounded - see
+    _PROBE_LOOP_BUDGET_SECONDS."""
     import time
 
     try:
@@ -202,10 +143,9 @@ def _check_one(pattern: str) -> str:
                     "checking; cannot prove this pattern safe in bounded time")
             compiled.search(probe)   # result unused - only completion is being tested
     except Exception as e:
-        # A compiled pattern's .search() should not raise, but this process
-        # exists specifically to not trust caller input - never let an
-        # unexpected exception here escape as an unhandled crash of a
-        # long-lived daemon over one bad request.
+        # A compiled pattern's .search() should not raise, but caller input is
+        # not trusted: an unexpected exception here must not crash a long-lived
+        # daemon over one bad request.
         return f"BAD probe raised {type(e).__name__}: {e}"
     return "OK"
 

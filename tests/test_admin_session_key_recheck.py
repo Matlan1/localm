@@ -4,17 +4,13 @@
 A cookie session is re-validated against the live keystore on every request, so
 revoking or expiring the key that minted it also ends the session. One exemption
 exists, and it is load-bearing: the OWNER KEY is not a keystore entry, and a
-session is deliberately decoupled from the key VALUE, so an owner-key ROLL must
-not log the owner out.
+session is decoupled from the key VALUE, so an owner-key ROLL must not log the
+owner out.
 
-That exemption used to key on the ADMIN SCOPE. The owner can mint ADMIN-scoped
-KEYSTORE keys, which are revocable by design, so those sessions inherited an
-exemption they were never entitled to: revoking such a key did not reliably end
-its cookie, and if the store cleanup also failed the cookie kept working.
-
-It now keys on WHICH CREDENTIAL minted the session, recorded positively at login.
-Removing the exemption outright is NOT the fix and must never be the fix - that
-reintroduces the owner signing themselves out.
+The exemption keys on WHICH CREDENTIAL minted the session, recorded positively at
+login, never on the ADMIN SCOPE: the owner can mint ADMIN-scoped KEYSTORE keys,
+which are revocable by design. Removing the exemption outright is NOT the fix and
+must never be the fix - that signs the owner out on a roll.
 """
 
 from __future__ import annotations
@@ -68,10 +64,9 @@ def _admin_device_session(auth, sessions, **create_kw):
 # --------------------------------------------------------------------------- #
 
 def test_a_revoked_admin_device_keys_session_stops_resolving(home, monkeypatch):
-    """The reported gap. revoke_key also drops the key's sessions as cleanup, but
-    that cleanup can FAIL (it is best-effort and now warns when it does). The
-    per-request re-check is what has to hold when it does, and the ADMIN-scope
-    exemption meant it did not."""
+    """revoke_key also drops the key's sessions as cleanup, but that cleanup can
+    FAIL (it is best-effort and warns when it does). The per-request re-check is
+    what has to hold when it does."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     created, sid = _admin_device_session(auth, sessions)
@@ -111,8 +106,7 @@ def test_an_expired_admin_device_keys_session_stops_resolving(home):
 # --------------------------------------------------------------------------- #
 
 def test_the_owners_session_survives_a_key_roll(home):
-    """The load-bearing negative. Removing the exemption wholesale would pass
-    every test above and reintroduce the owner signing themselves out."""
+    """The load-bearing negative case: the owner's cookie survives a key roll."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     sid = sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(KEY),
@@ -126,7 +120,7 @@ def test_the_owners_session_survives_a_key_roll(home):
 
 
 def test_a_pre_upgrade_owner_session_survives_a_key_roll(home):
-    """The back-compat half, and the one a naive fix breaks silently.
+    """The back-compat half.
 
     A session minted before the stamp existed carries no proof at all. It is
     recognised by key VALUE while the key still matches, and that recognition is
@@ -185,9 +179,9 @@ def test_an_unreadable_keystore_cannot_grant_the_exemption(home, monkeypatch):
 
 
 def test_holding_admin_is_not_enough_on_its_own(home, monkeypatch):
-    """ADMIN is NECESSARY but not SUFFICIENT. This is the whole defect in one
-    assertion: a live ADMIN-scoped keystore key resolves, the same key revoked
-    does not, and nothing about the scope set changed between the two."""
+    """ADMIN is NECESSARY but not SUFFICIENT: a live ADMIN-scoped keystore key
+    resolves, the same key revoked does not, and nothing about the scope set
+    changed between the two."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     created, sid = _admin_device_session(auth, sessions)
@@ -238,8 +232,7 @@ def test_the_backfill_failing_does_not_break_authentication(home, monkeypatch):
 
 
 def test_a_plain_scoped_session_is_still_gated(home, monkeypatch):
-    """Unchanged behaviour, pinned so the rework did not loosen the ordinary
-    case it was already handling correctly."""
+    """An ordinary scoped session stays gated."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     created = auth.create_key("ro", [S.MODELS_READ], allow_privileged=False)

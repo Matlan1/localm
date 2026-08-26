@@ -7,10 +7,9 @@ real isolated worker via that runner's real spawn path, prints the worker PID on
 its first stdout line, then blocks forever. The test then HARD-kills this process
 (the worker's parent) and asserts the worker dies on its own.
 
-The ``if __name__ == "__main__"`` guard is load-bearing: multiprocessing's spawn
-re-imports this module in the worker child, and without the guard the child would
-re-run the spawn at import and crash on ``_check_not_importing_main`` (which looks
-exactly like a reaped worker and would fake a passing test)."""
+The ``if __name__ == "__main__"`` guard is required: multiprocessing's spawn
+re-imports this module in the worker child, and without the guard the child
+re-runs the spawn at import and crashes on ``_check_not_importing_main``."""
 
 from __future__ import annotations
 
@@ -18,9 +17,8 @@ import sys
 import time
 
 # Keep every spawned runner alive for the life of this process. The runner owns the
-# ctx.Queue()s it handed to the child; dropping the last reference garbage-collects
-# them, and their finalizers unlink the POSIX named semaphores the child is still
-# opening.
+# ctx.Queue()s it handed to the child; dropping the last reference collects them and
+# unlinks the POSIX named semaphores the child is still opening.
 _keepalive: list = []
 
 
@@ -50,7 +48,7 @@ def main() -> None:
     # First stdout line = the worker PID the test will watch; flushed so the test
     # reads it immediately.
     print(pid, flush=True)
-    time.sleep(600)   # block; the test hard-kills us well before this elapses
+    time.sleep(600)   # block; the test hard-kills us long before it returns
 
 
 if __name__ == "__main__":

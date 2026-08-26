@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for three issues found by the unowned-surface audit:
+"""Three guarantees on unowned surfaces:
 
 1. setup_llama._safe_extractall_tar - the Python < 3.12 tar fallback must enforce
    the same path-traversal guarantee as the 3.12+ ``filter="data"`` extraction.
 2. setup_llama._repo_runtime_lib - a failed runtime-wheel import must fall back
    (the wheel is legitimately absent pre-install) AND surface the reason at debug
-   level instead of silently swallowing it (rule 5).
+   level, never swallow it.
 3. instances.reap_stale - a malformed entry with a null pid must be reaped (read
    as dead), consistent with find_attachable, not kept forever via a swallowed
    TypeError.

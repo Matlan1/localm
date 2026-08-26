@@ -117,24 +117,17 @@ def test_auto_backend_amd_only_is_rocm_on_windows(monkeypatch):
 def test_every_asset_fragment_resolves_against_the_real_latest_release():
     """Every substring in _ASSET_MATCH must match at least one real asset name
     in the CURRENT live ggml-org/llama.cpp release - not a cached snapshot, not
-    a fixture. Upstream renamed the Windows ROCm/HIP asset from
-    "bin-win-hip-radeon-x64" to "bin-win-rocm-<ver>-x64" at tag b10356
-    (2026-08-11) with no announcement anywhere in this repo; the OLD fragment
-    silently stopped matching anything, and _resolve_backend_asset fell
-    through to a GUESSED url (the "could not verify release asset list"
-    branch) that 404s against the live tag. This test exists so the NEXT
-    upstream rename is caught here, not by a user's failed provision -
-    caught 2026-08-11 while building the AMD ROCm-detection escalation (see
-    dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5).
+    a fixture. An upstream rename makes the old fragment stop matching, and
+    _resolve_backend_asset then falls through to a GUESSED url (the "could not
+    verify release asset list" branch) that 404s against the live tag.
 
     Scoped to _ASSET_MATCH's own generic upstream-repo resolution. TWO
-    combinations are deliberately excluded, both already documented at their
-    OWN call sites in setup_llama.py, not newly discovered here:
-      * linux/cuda - ggml-org publishes no bare Linux CUDA binary at all
-        (dev-notes/ADR-0010); _resolve_backend_asset special-cases this
-        combination and resolves against hybridgroup/llama-cpp-builder
-        instead, BEFORE ever reaching _ASSET_MATCH, so that entry is
-        unreachable dead data rather than a real matcher.
+    combinations are excluded, both documented at their own call sites in
+    setup_llama.py:
+      * linux/cuda - ggml-org publishes no bare Linux CUDA binary at all;
+        _resolve_backend_asset special-cases this combination and resolves
+        against hybridgroup/llama-cpp-builder BEFORE reaching _ASSET_MATCH, so
+        that entry is unreachable data rather than a real matcher.
       * amd-rocm is not in _ASSET_MATCH at all - it resolves against
         lemonade-sdk/llamacpp-rocm via its own special case, checked
         separately."""
@@ -268,9 +261,8 @@ def test_resolve_offline_falls_back_to_pinned_tag(monkeypatch):
 
 
 def test_release_assets_logs_the_swallowed_cause(monkeypatch, caplog):
-    """_release_assets() must not silently swallow the failure (AGENTS.md rule
-    5): the exception must be discoverable at debug level, not just an empty
-    list with no trace of why."""
+    """_release_assets() must not silently swallow the failure: the exception
+    must be discoverable at debug level, not just an empty list."""
     import logging
 
     def _boom(*a, **k):
@@ -386,16 +378,12 @@ def test_offline_resolution_names_a_real_pinned_asset_for_every_backend(
     filename the pinned table actually has - i.e. to a real asset of the pinned
     release, with a checksum.
 
-    This is the test that catches an upstream RENAME, which is not hypothetical:
-    the Windows ROCm asset went from `bin-win-hip-radeon-x64` to
-    `bin-win-rocm-7.14-x64` at b10356, and the Linux one is
-    `bin-ubuntu-rocm-7.14-x64.ZIP` - a .zip off win32, which the old templated
-    guess could not express at all. Both silently produced a 404 URL with no
-    checksum. Driven per (platform, backend) rather than for one representative,
-    because a rename hits exactly one cell of that grid.
+    Catches an upstream RENAME, which a templated guess produces a 404 URL and
+    no checksum for. Driven per (platform, backend) rather than for one
+    representative, since a rename hits exactly one cell of that grid.
 
-    linux/cuda is excluded deliberately: upstream publishes no bare Linux CUDA
-    asset, so it resolves against a third party entirely (ADR-0010)."""
+    linux/cuda is excluded: upstream publishes no bare Linux CUDA asset, so it
+    resolves against a third party entirely."""
     monkeypatch.setattr(sl, "_platform_key", lambda: plat)
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
@@ -411,13 +399,10 @@ def test_offline_resolution_names_a_real_pinned_asset_for_every_backend(
 
 def test_every_pinned_asset_belongs_to_a_pinned_tag():
     """The offline table looks assets up by FILENAME, so an entry for a tag
-    nothing installs can never be hit - while its presence reads as coverage for
-    a build that is actually unsupported. That is how the table came to carry the
-    entire asset list of b9870 long after anything resolved to it.
+    nothing installs can never be hit while its presence reads as coverage.
 
-    Enforced generally rather than for ROCm alone (the narrower version of this
-    check missed the other twenty-odd stale entries sitting beside it), so
-    bumping the pin without refreshing the digests fails here."""
+    Enforced across every backend, not for ROCm alone, so bumping the pin
+    without refreshing the digests fails here."""
     known = {sl._PINNED_TAG, sl._ROCM_TAG}
     stale = [k for k in sl._PINNED_FALLBACK_SHA256
              # cudart bundles carry no tag in their names: upstream re-uploads
@@ -431,8 +416,7 @@ def test_every_pinned_asset_belongs_to_a_pinned_tag():
 
 def test_resolve_amd_rocm_asset_warns_when_release_lookup_fails(monkeypatch, capsys):
     """A failed lemonade-sdk release lookup must be surfaced the same way the
-    general (non-ROCm) fallback already is, not silently skipped (AGENTS.md
-    rule 5)."""
+    general (non-ROCm) fallback is, not silently skipped."""
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
@@ -811,10 +795,9 @@ class TestDownloadTransportDiagnosis:
 
 
 class TestVulkanCpuTerminalGuidance:
-    """The explicit-vulkan/cpu-pick-failed exit used to be bare sys.exit(1) -
-    zero guidance beyond whatever the exception handler printed, unlike every
-    other failure path in this function. A user hitting a blocked download
-    got no hint that --from/--url exist. Confirms the guidance is now there."""
+    """The explicit-vulkan/cpu-pick-failed exit must name the --from/--url
+    escape hatches before exiting, like every other failure path in this
+    function."""
 
     def test_vulkan_not_provisioned_shows_escape_hatches_and_exits(self, monkeypatch, tmp_path, capsys):
         def fake_provision_backend(chosen, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
@@ -886,11 +869,10 @@ class TestIssue827Reproduction:
 
 def test_default_url_tag_and_pin_are_coherent():
     """DEFAULT_URL, _ROCM_TAG, DEFAULT_URL_SHA256 and the pinned table are four
-    places that name the same artifact. Bumping the build while leaving one of
-    them behind yields an offline fallback that downloads one file and verifies
-    it against another's hash - a hard failure for users with no release-API
-    access, and invisible to anyone testing online (where the digest comes off
-    the API instead). Assert they agree rather than trusting the bump."""
+    places that name the same artifact. Leaving one behind on a bump yields an
+    offline fallback that downloads one file and verifies it against another's
+    hash - a hard failure with no release-API access, and invisible online,
+    where the digest comes off the API instead. Asserts they agree."""
     fname = sl.DEFAULT_URL.rsplit("/", 1)[-1]
 
     assert f"/{sl._ROCM_TAG}/" in sl.DEFAULT_URL, (

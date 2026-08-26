@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """_provisioning_lock: cross-process single-flight around setup-llama's own
-provisioning steps (diff-review-discipline.md item 26 - the identical hazard
-that bit managed_comfy_update.py, now reachable here too because the GUI's
-standalone runtime-update button is a SECOND trigger onto the same directory
-that a `localm update` re-provision or a user's own `setup-llama` invocation
-can already be mutating).
+provisioning steps. The GUI's standalone runtime-update button is a SECOND
+trigger onto the same directory that a `localm update` re-provision or a user's
+own `setup-llama` invocation can already be mutating.
 
 Cross-process atomicity is the actual claim, so the load-bearing test spawns a
 REAL second interpreter rather than mocking pid_alive - a unit test that only
-monkeypatches the liveness check cannot demonstrate that mkdir is atomic
-across two processes, only that the Python-level logic branches correctly.
+monkeypatches the liveness check cannot demonstrate that mkdir is atomic across
+two processes, only that the Python-level logic branches correctly.
 """
 
 from __future__ import annotations

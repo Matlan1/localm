@@ -1,20 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""QA 2026-08-20 item 7: two concurrent ``POST /api/rag/embedding`` confirms
-started TWO ``embed-setup`` jobs, and the second then waited - silently, with
-no timeout and no error - on the embedder's bare ``_LOAD_LOCK``/``_LOCK``
-acquires. Field observation: both jobs sat at "Loading and testing the
-model..." for 15+ minutes with no further event, while unrelated reads timed
-out.
+"""Two concurrent ``POST /api/rag/embedding`` confirms must not start TWO
+``embed-setup`` jobs. When they do, the second waits - silently, with no timeout
+and no error - on the embedder's bare ``_LOAD_LOCK``/``_LOCK`` acquires, and both
+jobs sit at "Loading and testing the model..." indefinitely while unrelated reads
+time out.
 
-The fix refuses the second one with 409 at the door, the same shape every
-sibling long job on this server already uses (runtime-update, comfy-setup,
-comfy-update, doctor). These tests pin the refusal AND the normal path, so a
-guard that refuses everything fails just as loudly as one that refuses nothing.
+The second one is refused with 409 at the door, the same shape every sibling long
+job on this server uses (runtime-update, comfy-setup, comfy-update, doctor).
+These tests pin the refusal AND the normal path, so a guard that refuses
+everything fails just as loudly as one that refuses nothing.
 
-Deliberately built on a job that is GENUINELY IN FLIGHT (blocked inside
-``get_embedder``), not on a hand-set status field: the fixture's value space
-has to contain the real concurrent state, or the test cannot fail on the
-defect (diff-review-discipline item 19).
+Built on a job that is GENUINELY IN FLIGHT (blocked inside ``get_embedder``), not
+on a hand-set status field: the fixture's value space has to contain the real
+concurrent state, or the test cannot fail on the defect.
 """
 from __future__ import annotations
 
@@ -202,15 +200,14 @@ class TestConcurrentEmbedSetupIsRefused:
 
 
 class TestTheSetupJobIsNotSilentWhileItLoads:
-    """The other half of QA item 7's report: "no further event and no error".
+    """The stream must not go silent while the job loads.
 
-    ``get_embedder`` has announced coarse stages since ADR-0004 Unit B - the
-    VRAM/eviction wait and the native load each carry their own 300 s window,
-    so this is the one call in the job that can legitimately run for minutes.
-    This route passed no sink, so the stream stopped dead at "Loading and
-    testing the model..." for that entire time, which is indistinguishable
-    from a wedge to whoever is watching. /api/embedding/warmup already
-    consumes the same stages.
+    ``get_embedder`` announces coarse stages - the VRAM/eviction wait and the
+    native load each carry their own 300 s window, so this is the one call in the
+    job that can legitimately run for minutes. A route that passes no sink leaves
+    the stream stopped dead at "Loading and testing the model..." for that entire
+    time, which is indistinguishable from a wedge to whoever is watching.
+    /api/embedding/warmup already consumes the same stages.
     """
 
     def test_the_load_stages_reach_the_job_stream(

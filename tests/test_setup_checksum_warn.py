@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""setup-llama must not silently skip download integrity verification (audit MED-19).
+"""setup-llama must not silently skip download integrity verification.
 
-REC-SETUP-CHECKSUM advertises "default checksum verification", but on the main
-dynamic (latest-release) path the expected sha256 comes from the GitHub asset's
-optional `digest` field, falling back to a small pinned table. When neither is
-available the sha resolves to None and _validate_archive silently skips the
-provenance check with NO warning - inconsistent with the --url path, which warns
-"Custom URL download is unverified". A security step that silently does not run
-is a hidden problem (AGENTS.md rule 5).
+On the main dynamic (latest-release) path the expected sha256 comes from the
+GitHub asset's optional `digest` field, falling back to a small pinned table.
+When neither is available the sha resolves to None and _validate_archive skips
+the provenance check with NO warning - inconsistent with the --url path, which
+warns "Custom URL download is unverified". A security step that silently does
+not run is a hidden problem.
 """
 
 from pathlib import Path

@@ -87,9 +87,9 @@ def test_digest_correct_across_block_boundaries(tmp_path, threaded, size):
 
 
 def test_read_error_reaches_the_caller(tmp_path, threaded, monkeypatch):
-    """A failure inside the reader thread must surface, not vanish. AGENTS.md
-    rule 5: a digest that silently returns the hash of a partial read would
-    report a model as verified when it was never fully read."""
+    """A failure inside the reader thread must surface, never vanish: a digest
+    computed over a partial read would report a model as verified when it was
+    never fully read."""
     p = _write(tmp_path, "m.gguf", b"y" * 4096)
     real_open = open
     calls = {"n": 0}
@@ -135,17 +135,12 @@ def test_abandoning_the_generator_does_not_leak_the_reader(tmp_path, threaded):
 def test_a_reader_that_dies_silently_raises_instead_of_hanging(tmp_path, threaded,
                                                                monkeypatch):
     """If the reader exits without posting eof or an exception, the consumer
-    must FAIL, not block forever.
+    must FAIL, not block forever: a silent forever-hang inside the function that
+    verifies a downloaded model is worse than a loud error.
 
-    This test exists because the failure was observed, not imagined: while
-    fires-controlling `_iter_file_blocks`, replacing the reader's handler with
-    `except BaseException: pass` made a test run hang until it was killed at two
-    minutes, printing nothing. A silent forever-hang inside the function that
-    verifies a downloaded model is strictly worse than a loud error.
-
-    Note the assertion names the EXACT exception type. `pytest.raises(Exception)`
-    would pass on a `queue.Empty` leaking out, or on almost any regression here,
-    and this test is specifically about which failure occurs."""
+    The assertion names the EXACT exception type. `pytest.raises(Exception)` would
+    pass on a `queue.Empty` leaking out, and this test is specifically about which
+    failure occurs."""
     p = _write(tmp_path, "m.gguf", b"v" * 4096)
 
     class _NeverRuns:

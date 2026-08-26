@@ -8,7 +8,7 @@ owns a scope equal to its name (the coder plugin -> "coder"); cross-cutting
 kernel capabilities have explicit scopes ("models:write", "config:write", ...).
 
 This module is the single source of truth shared by the permission system, the
-plugin engine, and the chat control surface, so they never drift.
+plugin engine, and the chat control surface.
 """
 
 from __future__ import annotations
@@ -89,9 +89,9 @@ def is_valid_scope(scope: str, *, extra: set[str] | None = None) -> bool:
 
 
 def grants(held: set[str], required: str) -> bool:
-    """Does a key holding *held* scopes satisfy *required*? ADMIN implies all;
-    coder:full implies the base coder capability (it is the unrestricted coder,
-    so a coder:full key must also pass routes gated on the plain coder scope)."""
+    """Does a key holding *held* scopes satisfy *required*? ADMIN implies every
+    scope; coder:full implies the base coder scope, so a coder:full key passes
+    routes gated on plain coder."""
     if ADMIN in held or required in held:
         return True
     if required == CODER and CODER_FULL in held:

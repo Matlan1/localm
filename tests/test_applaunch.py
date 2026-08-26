@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Phase 3 native app identity (localm/applaunch.py).
+"""Native app identity (localm/applaunch.py).
 
 Covers the pure / guarded logic that is safe to exercise on any platform: the .ico
 -> RT_GROUP_ICON transform, the .desktop text, launcher path resolution, the
 restart-argv identity contract, and the best-effort guards (every entry point must
 be a no-op, never raise, off its platform). The live LocaLM.exe end-to-end
-(process name, tray, restart) is verified by hand on Windows - see
-dev-notes/native-app-identity/WORKLOG.md."""
+(process name, tray, restart) is not covered here."""
 
 import os
 import shutil
@@ -174,28 +173,23 @@ def test_make_launcher_returns_result_without_raising():
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only bug")
 class TestForceRebuildFromRunningLauncher:
-    """Regression test for the follow-up to #621: ``localm make-launcher
-    --force`` run FROM the already-built LocaLM.exe itself (e.g. to refresh
-    the copy after a Python upgrade) used to fail outright.
+    """``localm make-launcher --force`` run FROM the already-built LocaLM.exe
+    itself (e.g. to refresh the copy after a Python upgrade).
 
     ``sys._base_executable`` is computed by CPython as ``<base_prefix>/
-    <basename of the CURRENTLY RUNNING exe>`` - so once running AS the
-    renamed LocaLM.exe copy, it resolves to ``<base_prefix>/LocaLM.exe``, a
-    file that never exists (LocaLM.exe only ever lives under
-    ``<venv>/localm-app/``). ``_base_interpreter()`` returned None and
-    ``make_windows_launcher()`` failed immediately. Fixed by falling back to
-    ``_mp_spawn.real_base_python()``, and then handling the SECOND wrinkle
-    live: once ``base`` correctly resolves to a DIFFERENT file than ``dst``,
-    copying onto ``dst`` needs the running-exe rename fallback because ``dst``
-    IS this process's own executing image (verified live: a direct
-    ``shutil.copy2`` onto it raises WinError 32, a sharing violation).
+    <basename of the CURRENTLY RUNNING exe>``, so once running AS the renamed
+    LocaLM.exe copy it resolves to ``<base_prefix>/LocaLM.exe``, a file that
+    never exists (LocaLM.exe only ever lives under ``<venv>/localm-app/``).
+    ``_base_interpreter()`` must fall back to ``_mp_spawn.real_base_python()``,
+    and once ``base`` resolves to a DIFFERENT file than ``dst``, copying onto
+    ``dst`` needs the running-exe rename fallback, because ``dst`` IS this
+    process's own executing image and a direct ``shutil.copy2`` onto it raises
+    WinError 32.
 
-    Mirrors ``TestRealRenamedLauncherEndToEnd`` in test_mp_spawn_fix.py (an
-    ACTUAL renamed-copy launcher, driven as a real subprocess) but goes one
-    step further: the fake launcher must be named exactly ``LocaLM.exe`` (so
+    The fake launcher must be named exactly ``LocaLM.exe`` (so
     ``windows_launcher_path()`` resolves to ITS OWN path) and it invokes the
-    real ``localm make-launcher --force`` CLI command on itself, not just a
-    bare interpreter round trip.
+    real ``localm make-launcher --force`` CLI command on itself, not a bare
+    interpreter round trip.
     """
 
     @staticmethod

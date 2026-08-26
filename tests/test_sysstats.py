@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """localm.sysstats._vram() - the GUI hardware-monitor's VRAM line.
 
-No dedicated test file existed for this module before AUDIT-GPU-SPLIT-1: the
-maintainer explicitly expected every relevant VRAM-reading function to be
-multi/split-GPU aware, not just the ones that gate a load/refuse decision -
-including this status-bar widget, which previously stayed on vram_info()'s
-single main-GPU number as a deliberate (and, on reflection, unnecessary)
-design choice."""
+Every VRAM-reading function here is multi/split-GPU aware, including this
+status-bar widget."""
 
 import sys
 import threading
@@ -84,7 +80,7 @@ def test_reports_single_gpu_when_no_split_configured(monkeypatch):
 
 
 def test_reports_combined_capacity_with_a_configured_split(monkeypatch):
-    """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, the status bar must
+    """With a configured 2-GPU split, the status bar must
     show the COMBINED total/used, not just the single main GPU's - it now
     goes through discover.vram_capacity(), not vram_info() directly."""
     _reset_vram_cache(monkeypatch)
@@ -136,7 +132,7 @@ def test_exception_from_discover_is_swallowed_not_raised(monkeypatch):
     (matches the module's own documented 'NEVER raises' contract). And the
     failure must NOT be cached as a CONFIRMED empty reading: _vram_last must
     stay None ("could not look"), never collapse to {} ("looked, found
-    nothing") - see _vram_probe's docstring and AGENTS.md rule 5."""
+    nothing") - see _vram_probe's docstring."""
     _reset_vram_cache(monkeypatch)
     with patch("localm.discover.vram_capacity", side_effect=RuntimeError("boom")):
         assert _vram() == {}
@@ -191,12 +187,11 @@ def test_vram_probe_never_blocks_the_polling_thread(monkeypatch):
 
 
 def test_vram_probe_invoked_once_across_n_stats_calls_within_cache_window(monkeypatch):
-    """REQUIRED PROOF: across many stats calls inside one cache window, the
-    expensive vram_capacity() probe must fire exactly ONCE. Asserted from
-    OUTSIDE via a plain call-count list, never by raising inside the code
-    under test - defensive code in this path catches broadly and would
-    swallow an in-body assertion (.claude/rules/diff-review-discipline.md
-    item 13)."""
+    """Across many stats calls inside one cache window, the expensive
+    vram_capacity() probe must fire exactly ONCE. Asserted from OUTSIDE via a
+    plain call-count list, never by raising inside the code under test:
+    defensive code in this path catches broadly and would swallow an in-body
+    assertion."""
     _reset_vram_cache(monkeypatch)
     calls = []
     info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
@@ -218,12 +213,10 @@ def test_vram_probe_invoked_once_across_n_stats_calls_within_cache_window(monkey
 
 
 def test_vram_probe_failure_does_not_overwrite_a_cached_good_reading(monkeypatch):
-    """REQUIRED PROOF: a probe failure must not be cached as a successful
-    empty result. Once a good reading is cached, a LATER probe attempt that
-    raises must leave the cache exactly as it was - never collapse a real
-    prior reading to a fabricated empty one just because this round's probe
-    errored (AGENTS.md rule 5 / diff-review-discipline.md item 3: "could not
-    look" and "nothing there" need different handling)."""
+    """A probe failure must not be cached as a successful empty result. Once a
+    good reading is cached, a LATER probe attempt that raises must leave the
+    cache exactly as it was: "could not look" and "nothing there" need
+    different handling."""
     _reset_vram_cache(monkeypatch)
     info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
     with patch("localm.discover.vram_info", side_effect=_status_aware(info)):
@@ -413,7 +406,7 @@ def test_percent_never_negative():
 
 def test_regressing_field_is_clamped_not_left_to_corrupt_the_percent():
     """A field that goes BACKWARD between two samples (a documented Windows/Linux
-    kernel-counter quirk: psutil issues #392/#645/#1210, e.g. Windows `interrupt`)
+    kernel-counter quirk, e.g. Windows `interrupt`)
     must be trimmed to a zero delta for that field alone, exactly like psutil's own
     _cpu_times_deltas - not left to pull down the aggregate total/busy computed by
     subtracting whole-snapshot sums. WinTimes = (user, system, idle, interrupt, dpc).
@@ -499,8 +492,7 @@ def _reset_gpu_util_cache(monkeypatch):
 def test_gpu_util_probe_never_blocks_the_polling_thread(monkeypatch):
     """A hanging/slow nvidia-smi must never park the calling (poll) thread,
     and concurrent polls while one probe is in flight must not spawn a second
-    nvidia-smi (single-flight). An efficiency/robustness guard, independent of
-    issue #833's loader-lock freeze (see the module-level note above)."""
+    nvidia-smi (single-flight)."""
     _reset_gpu_util_cache(monkeypatch)
     entered = threading.Event()
     release = threading.Event()
@@ -649,12 +641,10 @@ def test_gpu_util_never_raises_and_unlatches_when_thread_creation_fails(monkeypa
 class TestPerDeviceVram:
     """The per-card VRAM breakdown.
 
-    The aggregate is not merely coarser on a multi-GPU board, it is MISLEADING:
-    ``vram_capacity`` either sums a configured split (a full card and an empty one
-    average into a comfortable-looking number) or, with no split configured, falls
-    back to the single main GPU and does not represent the other cards at all.
-    Neither answers "how full is card 1", which is the question the readout exists
-    for once there is more than one card.
+    On a multi-GPU board ``vram_capacity`` either sums a configured split (a
+    full card and an empty one average into one number) or, with no split
+    configured, falls back to the single main GPU and does not represent the
+    other cards at all. Neither answers "how full is card 1".
     """
 
     _GIB = 1024 ** 3
@@ -724,9 +714,8 @@ class TestPerDeviceVramAnyBackend:
 
     ``list_gpus`` enumerates via torch.cuda or nvidia-smi and never the Vulkan
     loader, so on a vulkan build (how Intel Arc and many AMD boards run) it is
-    structurally blind to the very devices the readout is about. Falling back to
-    the ggml runtime's own registry is what makes the stats work on any backend
-    rather than only the maintainer's.
+    structurally blind to the very devices the readout is about. The ggml
+    runtime's own registry is the fallback.
     """
 
     _GIB = 1024 ** 3
@@ -780,12 +769,9 @@ class TestPerDeviceVramAnyBackend:
 
 
 def test_a_process_scoped_card_reports_total_only(monkeypatch):
-    """The bug this gate exists for, measured on a real board.
-
-    On Windows + AMD the raw driver `free` counts only the CALLING process, so a
-    probe holding no VRAM reported 0.2 GB in use where the desktop alone held 1.6.
-    A per-card number is shown so someone can decide whether a model fits; one that
-    silently overstates free by more than a gigabyte is worse than no number.
+    """On Windows + AMD the raw driver `free` counts only the CALLING process,
+    so a probe holding no VRAM reports almost the whole card as available. A
+    process-scoped card therefore reports total only, never a used figure.
     """
     GB = 1024 ** 3
     from localm import discover, sysstats
@@ -813,31 +799,27 @@ def _no_wddm_fallback(monkeypatch):
     nvidia-smi probe path.
 
     Those tests assert `_gpu_util() == {}` to mean "the nvidia reading has not
-    landed, so nothing is fabricated". Once a second, genuinely-different source
-    exists, that empty dict stops being a statement about the nvidia probe and
-    becomes a statement about the whole machine - and on a Windows box with any
-    GPU the fallback correctly returns a real number, so the tests failed while
-    both the code and their intent were fine.
+    landed, so nothing is fabricated". With a second source live, that empty
+    dict would be a statement about the whole machine instead - on a Windows box
+    with any GPU the fallback returns a real number.
 
-    Stubbing it off here keeps each of those tests measuring the one thing it was
-    written for. The tests that ARE about the fallback stub it back on explicitly.
+    The tests that ARE about the fallback stub it back on explicitly.
     """
     from localm import gpu_usage
     monkeypatch.setattr(gpu_usage, "adapter_utilisation", lambda: {})
-    # The AMD source is stubbed for the same reason: it answers from the card's
-    # own sensor with no rate-counter warmup, so on this box it returns a real
-    # percentage on the very first call and every nvidia-probe test would assert
-    # against live hardware. Tests that ARE about the AMD path stub it back on.
+    # The AMD source is stubbed too: it answers from the card's own sensor with
+    # no rate-counter warmup, so it returns a real percentage on the first call
+    # and every nvidia-probe test would otherwise assert against live hardware.
+    # Tests that ARE about the AMD path stub it back on.
     monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: None)
 
 
 class TestVendorNeutralGpuUtilisation:
     """GPU load must not be an NVIDIA-only metric.
 
-    nvidia-smi was the only source, so an AMD or Intel board showed no GPU load at
-    all - which a user reads as "this box reports no GPU utilisation", not as
-    "localm cannot see it", on a readout whose whole job is showing load. Windows
-    publishes it for every vendor through the counters Task Manager itself reads.
+    Windows publishes GPU load for every vendor through the counters Task
+    Manager itself reads, so an AMD or Intel board reports a real figure rather
+    than an omitted field.
     """
 
     def test_falls_back_to_the_wddm_counter_when_nvidia_smi_has_nothing(
@@ -873,8 +855,7 @@ class TestAdapterUtilisationAggregation:
     def test_busiest_engine_not_the_sum_across_engines(self):
         """Summing engine types double-counts concurrent work and exceeds 100%.
 
-        Measured on a real board: 26.1% summed across engine types against 11.0%
-        for the busiest one. Task Manager reports the busiest engine, and so do we.
+        Task Manager reports the busiest engine, and so does this readout.
         """
         from localm.gpu_usage import _luid_of
         # The LUID pair identifies the ADAPTER; pid and engine index do not, which
@@ -898,18 +879,13 @@ _REAL_AMD_ACTIVITY = _gpu_usage_for_capture.amd_whole_gpu_activity
 class TestAmdWholeGpuActivity:
     """The AMD readout must be WHOLE-GPU load, not whichever engine is busiest.
 
-    MEASURED 2026-08-20 on an RX 6900 XT in a controlled idle/load/idle A/B.
     The WDDM ``GPU Engine`` max-over-engine-types fold does not track the card:
-    with the card PARKED at 46W/39MHz and then BOOSTED to 87W/2574MHz it
-    reported 7.1-7.2% in BOTH states, because that number was a screen-streaming
-    process's video encoder. The card's own sensor read 6% and 99% across those
-    same two states, correlating +0.971 with core clock against -0.010 for the
-    fold. That is the reported defect exactly.
+    it can report the same few percent whether the card is parked or boosted,
+    because that number can come from an unrelated process's video encoder. The
+    card's own sensor tracks core clock closely.
 
-    The fold is UNRELIABLE, not dead - under a synthetic 295W pure-compute load
-    it did read 93-100%. Stated because the tidier claim ("this vendor's compute
-    is invisible to it") is false and was measured false, and a test whose
-    premise is wrong outlives the person who wrote it.
+    The fold is UNRELIABLE, not dead - under a synthetic pure-compute load it
+    does read 93-100%.
     """
 
     @staticmethod
@@ -968,10 +944,9 @@ class TestAmdWholeGpuActivity:
 
     def test_an_unsupported_sensor_yields_no_reading_not_zero_percent(
             self, monkeypatch):
-        """AGENTS.md rule 5: a card reported IDLE on a measurement that never
-        happened is a failed reading presented as a successful one. Distinguishing
-        busy from idle is the whole point of the metric, so the idle end of the
-        range is precisely the value we must never invent."""
+        """An unsupported sensor yields NO reading, never 0%: a card reported
+        IDLE on a measurement that never happened is a failed reading presented
+        as a successful one."""
         from localm import gpu_usage
         self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
                        sensors={0: {19: (0, 0)}})

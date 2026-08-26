@@ -1,27 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression pin for #617 and its follow-up: a GGUF model load (or the
-voice/STT worker) must not fail when running under the branded LocaLM.exe
-launcher - neither at spawn time nor on the worker's first real use.
+"""Regression pin: a GGUF model load (or the voice/STT worker) must not fail
+when running under the branded LocaLM.exe launcher - neither at spawn time nor
+on the worker's first real use.
 
-Bug 1 (the original #617): CPython's multiprocessing spawns a Windows child
-via ``sys._base_executable`` whenever it differs from ``sys.executable`` (its
+Bug 1: CPython's multiprocessing spawns a Windows child via
+``sys._base_executable`` whenever it differs from ``sys.executable`` (its
 definition of "running in a venv") - computed as ``<base_prefix>/<basename of
-the running exe>``, which does not exist once the running exe has been
-renamed (LocaLM.exe, see applaunch.py's ``make_windows_launcher``). Spawning a
-child then fails immediately with ``FileNotFoundError: [WinError 2] The
-system cannot find the file specified``.
+the running exe>``, which does not exist once the running exe has been renamed
+(LocaLM.exe, see applaunch.py's ``make_windows_launcher``). Spawning a child
+then fails immediately with ``FileNotFoundError: [WinError 2] The system cannot
+find the file specified``.
 
-Bug 2 (found fixing bug 1, NOT caught by a bare "does spawn succeed" check):
-redirecting to the venv's OWN ``Scripts/python.exe`` fixes the spawn, but that
-file is itself a TRAMPOLINE that re-spawns the real base interpreter as a
-NESTED child. Windows multiprocessing hands a spawned child its Queue/Lock
-semaphore handles via a single ``DuplicateHandle`` call targeting that
-child's OWN process handle (``Popen.duplicate_for_child`` in
-``popen_spawn_win32.py``); the handle lands in the trampoline's process, not
-in the nested worker that actually uses it, so the worker's first
-``Queue.get()``/``Lock`` use fails with ``OSError: [WinError 6] The handle is
-invalid``. See localm/_mp_spawn.py for the full account and why the fix
-redirects straight to the base interpreter (``sys.base_prefix``) instead.
+Bug 2, which a bare "does spawn succeed" check does not catch: redirecting to
+the venv's OWN ``Scripts/python.exe`` fixes the spawn, but that file is itself a
+TRAMPOLINE that re-spawns the real base interpreter as a NESTED child. Windows
+multiprocessing hands a spawned child its Queue/Lock semaphore handles via a
+single ``DuplicateHandle`` call targeting that child's OWN process handle
+(``Popen.duplicate_for_child`` in ``popen_spawn_win32.py``); the handle lands in
+the trampoline's process, not in the nested worker that actually uses it, so the
+worker's first ``Queue.get()``/``Lock`` use fails with ``OSError: [WinError 6]
+The handle is invalid``. localm/_mp_spawn.py therefore redirects straight to the
+base interpreter (``sys.base_prefix``).
 """
 
 from __future__ import annotations
@@ -108,9 +107,8 @@ class TestRealRenamedLauncherEndToEnd:
     make_windows_launcher construction byte-for-byte) and drives a REAL
     multiprocessing.Queue round trip through it - the exact shape
     ModelRunner/voice._spawn_worker use (send a command, get a response back).
-    A bare "does .start() succeed" check is not enough: bug 2 above only
-    surfaces on the child's first actual Queue/Lock use, which is why the
-    original fix verification (spawn success + a print statement) missed it.
+    A bare "does .start() succeed" check is not enough: bug 2 above surfaces
+    only on the child's first actual Queue/Lock use.
     """
 
     @staticmethod
@@ -176,11 +174,10 @@ class TestRealRenamedLauncherEndToEnd:
 class TestInterpreterForLocalmChildren:
     """interpreter_for_localm_children() - the exe for PLAIN subprocess
     children that must import localm and its venv packages (the VRAM-probe
-    daemon). Found live 2026-07-22: inside an mp-spawn worker sys.executable
-    is the BASE interpreter (the deliberate ensure_spawn_uses_venv_python
-    redirect above), so the daemon it Popen'd had no venv context, could not
-    resolve the localm-llama-runtime wheel, and answered ERR to every query -
-    the GGUF worker never had a raw VRAM reading at all."""
+    daemon). Inside an mp-spawn worker sys.executable is the BASE interpreter
+    (the ensure_spawn_uses_venv_python redirect above), so a daemon Popen'd
+    with it would have no venv context, could not resolve the
+    localm-llama-runtime wheel, and would answer ERR to every query."""
 
     def test_in_venv_process_keeps_sys_executable(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))

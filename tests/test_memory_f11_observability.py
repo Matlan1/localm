@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F11 regression suite (memory-audit 2026-07-02 cluster: "no visibility into
-what memory did to a turn").
-
-Memory recall must be OBSERVABLE:
+"""Memory recall must be OBSERVABLE:
 - the store reports WHY semantic recall degraded to lexical (a degrade reason,
   mirroring RAG's lexical fallback), plus record/vector/recall counts;
 - the chat inlet stashes the injected records + degrade reason in ctx.state so a

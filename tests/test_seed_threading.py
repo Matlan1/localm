@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B5: a per-request seed must reach the GGUF sampler.
+"""A per-request seed must reach the GGUF sampler.
 
-The native llama.cpp wrapper dropped the request `seed` into **_ignored and
-always built the sampler with the instance default (LLAMA_DEFAULT_SEED), so
-generation at temperature>0 was non-deterministic and a user seed was silently
-ignored. These tests pin that the seed threads create_chat_completion ->
-_generate -> _build_sampler (llama_sampler_init_dist). The DLL is never loaded.
+A request `seed` that lands in **_ignored leaves the sampler built with the
+instance default (LLAMA_DEFAULT_SEED), so generation at temperature>0 is
+non-deterministic and the user's seed is silently ignored. These tests pin that
+the seed threads create_chat_completion -> _generate -> _build_sampler
+(llama_sampler_init_dist). The DLL is never loaded.
 """
 
 import threading

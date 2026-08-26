@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CSRF / drive-by origin guard for state-changing endpoints (SEC-1).
+"""CSRF / drive-by origin guard for state-changing endpoints.
 
 The default CORS policy admits any localhost:PORT origin, so without this guard a
 malicious local web page could POST to the management endpoints from the user's
@@ -127,13 +127,12 @@ def test_configured_cors_origin_passes_cross_origin_but_still_needs_token(
 
 
 class TestShellTokenMetadataGetOriginGate:
-    """AUD-CORSTOKEN regression (finding 1, 2026-07-09 audit): the default CORS
-    policy trusts any http(s)://localhost:PORT / 127.0.0.1:PORT origin to READ a
-    response, so a hostile local page can steal the open-mode shell token from a
-    plain cross-origin GET / and replay it. The metadata-GET branch of
-    _origin_guard must reject that replay the same way the unsafe-method branch
-    already rejects a cross-origin state change - token possession alone is not
-    a same-origin proof."""
+    """The default CORS policy trusts any http(s)://localhost:PORT /
+    127.0.0.1:PORT origin to READ a response, so a hostile local page can steal
+    the open-mode shell token from a plain cross-origin GET / and replay it. The
+    metadata-GET branch of _origin_guard must reject that replay the same way the
+    unsafe-method branch rejects a cross-origin state change: token possession
+    alone is not a same-origin proof."""
 
     def test_cross_origin_metadata_get_with_stolen_token_refused(self, client):
         token = client.app.state.shell_token
@@ -218,16 +217,13 @@ class TestShellTokenMetadataGetOriginGate:
 
 
 class TestShellTokenNotDisclosedByIndexRoute:
-    """Item 28 (release blocker), dev-notes finding
-    'finding-origin-guard-dns-rebinding-2026-08-05.md' section 6: GET / (the
-    route that carries the shell_token) sits OUTSIDE _CROSS_ORIGIN_GET_REFUSED
-    entirely, and _cross_origin_refused itself short-circuits to "not refused"
-    under "cors_origins": "*" (http_server.py:3355). So neither of those two
-    checks - the ones test_wildcard_cors_metadata_get_with_token_still_allowed
-    above proves for /v1/keys - ever runs for GET /. That test proves the
-    token stays REQUIRED; it never asks whether the token can be OBTAINED, and
-    under wildcard CORS it could be, live, end to end, before this fix. The
-    negative here is the actual regression test for the release blocker."""
+    """GET / (the route that carries the shell_token) sits OUTSIDE
+    _CROSS_ORIGIN_GET_REFUSED entirely, and _cross_origin_refused itself
+    short-circuits to "not refused" under "cors_origins": "*"
+    (http_server.py:3355), so neither check runs for GET /.
+    test_wildcard_cors_metadata_get_with_token_still_allowed above proves the
+    token stays REQUIRED; this asserts the separate property that the token
+    cannot be OBTAINED cross-origin under wildcard CORS."""
 
     def _mounted_app(self, tmp_path, monkeypatch, cors_origins):
         import localm.config as cfg
@@ -315,17 +311,15 @@ class TestShellTokenNotDisclosedByIndexRoute:
 
 
 class TestDnsRebindingNotDisclosedByIndexRoute:
-    """Confirmed by a fresh-context adversarial review of the item-28 fix
-    (2026-08-05): _is_same_origin_document_request's no-Origin branch used to
-    trust ANY no-Origin request unconditionally, which is exactly the header
-    shape a DNS-rebinding attack produces (the browser considers a follow-up
-    navigation same-origin with an attacker's already-open page - Same-Origin
-    Policy is computed from the URL STRING navigated to, never the resolved
-    IP - so it sends no Origin header even though it lands on this real
-    server under the attacker's own domain in Host). This reproduces that
-    exact chain end to end against the full create_app()+mount_gui_surface()
-    wiring, on the DEFAULT cors_origins config (no wildcard needed - this gap
-    does not depend on CORS config at all)."""
+    """_is_same_origin_document_request's no-Origin branch must not trust ANY
+    no-Origin request unconditionally, which is the header shape a DNS-rebinding
+    attack produces: the browser considers a follow-up navigation same-origin
+    with an attacker's already-open page - Same-Origin Policy is computed from
+    the URL STRING navigated to, never the resolved IP - so it sends no Origin
+    header even though it lands on this real server under the attacker's own
+    domain in Host. This reproduces that chain end to end against the full
+    create_app()+mount_gui_surface() wiring, on the DEFAULT cors_origins config;
+    the gap does not depend on CORS config at all."""
 
     def _mounted_app(self, tmp_path, monkeypatch):
         import localm.config as cfg
@@ -387,8 +381,8 @@ class TestDnsRebindingNotDisclosedByIndexRoute:
 
 
 class TestSensitiveGetCrossOriginRefused:
-    """LM-PT-002 (CWE-200): /whoami (root_dir -> the OS username on a loopback
-    bind) and /debug/stacks (thread stacks) are UNAUTHENTICATED GETs. The default
+    """/whoami (root_dir -> the OS username on a loopback bind) and
+    /debug/stacks (thread stacks) are UNAUTHENTICATED GETs. The default
     CORS policy hands an ACAO to any http(s)://localhost:PORT origin, so without an
     explicit refusal a drive-by local page could read them cross-origin. They are
     NOT under /api or /v1, so the metadata-GET gate never covered them; and unlike

@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Standalone helper spawned as a REAL subprocess by
-test_setup_llama_provisioning_lock.py's cross-process test. Not collected by
-pytest (no test_ prefix). Takes <target-dir> <marker-file> <hold-seconds> on
-argv, acquires setup_llama._provisioning_lock on target-dir, writes marker to
-signal it is holding the lock, sleeps for hold-seconds, then releases and
-exits 0. Values arrive as plain argv elements, never templated into source
-text - the calling test builds no dynamic code string at all.
+"""Standalone helper spawned as a REAL subprocess by the cross-process
+provisioning-lock test. Not collected by pytest (no test_ prefix). Takes
+<target-dir> <marker-file> <hold-seconds> on argv, acquires
+setup_llama._provisioning_lock on target-dir, writes marker to signal it is
+holding the lock, sleeps for hold-seconds, then releases and exits 0.
 """
 
 import sys

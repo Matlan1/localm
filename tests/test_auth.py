@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 def _req(token=None, method="GET"):
     """Minimal Starlette Request carrying an optional Bearer token, for unit-
-    calling the request-aware auth dependencies (S2: header-or-cookie auth)."""
+    calling the request-aware auth dependencies (header-or-cookie auth)."""
     from starlette.requests import Request
     headers = [(b"authorization", f"Bearer {token}".encode())] if token else []
     return Request({"type": "http", "method": method, "headers": headers,
@@ -306,19 +306,12 @@ def test_set_api_key_accepts_every_generated_key(auth):
     feeds generate_key() straight into set_api_key(), so a mismatch here would make
     `localm key generate` fail at random.
 
-    A direct check on the charset itself removes any reliance on chance for
-    THAT specific property. The loop below stays real (real set_api_key/
-    get_api_key round trips, not mocked - see hard-won-rules.md), which is
-    what actually exercises the length/charset guards end to end; its count
-    is a statistical-confidence choice, not a correctness requirement: each
-    generated key independently has a ~49%/~48% chance of containing '_'/'-',
-    so 30 samples already puts the odds of missing either character below
-    1e-9 (0.51**30). It intentionally does NOT go anywhere near 200: each
-    call pays a real memory-hard KDF derivation via the owner-KDF path (see
-    _OWNER_KDF_KEEP in auth.py), so 200 fresh keys in a loop cost several
-    minutes on a loaded box, not because anything hangs but because that is
-    what 200 real derivations cost - see
-    dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md."""
+    A direct check on the charset itself covers THAT property without relying
+    on chance. The loop below does real set_api_key/get_api_key round trips,
+    which exercises the length/charset guards end to end; 30 samples puts the
+    odds of missing either character below 1e-9 (0.51**30). The count stays
+    small because each call pays a real memory-hard KDF derivation via the
+    owner-KDF path (see _OWNER_KDF_KEEP in auth.py)."""
     assert auth._KEY_CHARSET.match("-")
     assert auth._KEY_CHARSET.match("_")
     for _ in range(30):
@@ -328,8 +321,8 @@ def test_set_api_key_accepts_every_generated_key(auth):
 
 
 def test_non_ascii_bearer_token_gets_401_not_500(auth, monkeypatch):
-    """End-to-end shape of the bug: an UNAUTHENTICATED caller sending a non-ASCII
-    bearer token to a protected route must get a clean 401, never an unhandled 500.
+    """An UNAUTHENTICATED caller sending a non-ASCII bearer token to a protected
+    route must get a clean 401, never an unhandled 500.
     raise_server_exceptions=False so a server-side raise surfaces as a real 500
     response instead of propagating out of the client call (the house default of
     True would re-raise the TypeError and never yield a status to assert on)."""
@@ -389,14 +382,10 @@ def test_owner_key_grants_every_scope(auth, monkeypatch):
 
 
 def test_require_owner_dependency_rejects_non_owner(auth, monkeypatch):
-    """require_owner() (design-audit LM-DA-020, reaffirming LM-DA-SEC-06):
-    job_owner_ok's per-route ownership check is now Depends()-injectable, the
-    same pattern require_scope already uses, so a new per-owner route cannot
-    omit it by construction. Exercises a route wired via
-    Depends(require_owner(...)) through a real TestClient request - mirroring
-    the existing job_owner_ok route-level coverage in
-    test_jobs_owner_binding.py / test_media_gallery_ownership.py - rather than
-    unit-calling the dependency directly, since require_owner's gate composes
+    """require_owner() makes job_owner_ok's per-route ownership check
+    Depends()-injectable, the same pattern require_scope uses. Exercises a route
+    wired via Depends(require_owner(...)) through a real TestClient request
+    rather than unit-calling the dependency, since require_owner's gate composes
     with a nested path-param-reading resolve() dependency that only a real
     request can drive end to end."""
     from fastapi import Depends, FastAPI
@@ -483,10 +472,9 @@ def test_keys_endpoint_blocks_privilege_self_escalation(auth, monkeypatch):
 
 
 def test_keys_endpoint_wires_fs_access_owner_only(auth, monkeypatch):
-    """POST /v1/keys forwards fs_access from the request body into create_key()
-    (it used to be dropped silently: every key got fs_access='none' regardless
-    of what the body asked for). Granting host reach follows the same owner-
-    only gate as a privileged scope: a non-owner keys:admin caller is refused
+    """POST /v1/keys forwards fs_access from the request body into create_key().
+    Granting host reach follows the same owner-only gate as a privileged scope:
+    a non-owner keys:admin caller is refused
     (403) and nothing is persisted, while the owner key succeeds and the minted
     key actually carries fs_access='host'."""
     from fastapi.testclient import TestClient
@@ -524,10 +512,8 @@ def test_keys_endpoint_wires_fs_access_owner_only(auth, monkeypatch):
 
 
 def test_keys_endpoint_wires_rag_roots_owner_only(auth, monkeypatch):
-    """POST /v1/keys forwards rag_roots from the request body into create_key()
-    (it used to be dropped silently: every GUI/API-minted key was RAG-unconfined
-    regardless of what the body asked for, while GET /v1/keys already returned
-    the field for display). A key-scoped rag_roots list REPLACES the whitelist
+    """POST /v1/keys forwards rag_roots from the request body into create_key().
+    A key-scoped rag_roots list REPLACES the whitelist
     rather than narrowing it (rag/store.py's confine_index_path), so it can point
     a new key at a folder outside the caller's own reach - granting one follows
     the same owner-only gate as fs_access=host: a non-owner keys:admin caller is

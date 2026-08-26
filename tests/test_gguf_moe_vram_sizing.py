@@ -1,20 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""MoE-aware VRAM preflight (n_cpu_moe): the sibling defect to the one
-test_kv_bytes_from_gguf.py pins. _kv_bytes_per_token was made MoE-aware there;
-_check_vram / _auto_gpu_layers / _auto_ctx_max were not - all three called
-self._model_bytes() (the WHOLE file) directly and never looked at
-self.n_cpu_moe, so a model whose routed-expert weights are pinned to system
-RAM (llama.py's _apply_cpu_moe) was still charged for them in VRAM. A model
-that genuinely fits once its experts are pinned was refused outright
-(_check_vram), under-offloaded (_auto_gpu_layers), or under-budgeted for
-context (_auto_ctx_max) on arithmetic blind to a placement the user had
-explicitly configured.
+"""MoE-aware VRAM preflight (n_cpu_moe): _check_vram, _auto_gpu_layers and
+_auto_ctx_max all read self.n_cpu_moe rather than charging VRAM for the WHOLE
+file, so routed-expert weights pinned to system RAM (llama.py's _apply_cpu_moe)
+are not counted against the VRAM budget. Without that a model that fits once its
+experts are pinned is refused outright (_check_vram), under-offloaded
+(_auto_gpu_layers), or under-budgeted for context (_auto_ctx_max).
 
 These tests build REAL GGUF files byte by byte (header + KV block + real
 tensor-info entries + real tensor data, offsets and file size all internally
-consistent) and drive the real parser and the real sizing path - no mock
-stands in for the code under test. Follows test_kv_bytes_from_gguf.py's own
-_gguf/_s/_shape helper conventions where they apply.
+consistent) and drive the real parser and the real sizing path. They follow
+test_kv_bytes_from_gguf.py's _gguf/_s/_shape helper conventions.
 """
 
 import struct
@@ -167,13 +162,12 @@ class TestGgufMoePinnedExpertBytes:
         assert gguf_moe_pinned_expert_bytes(f, n_pinned_layers=5) == 0
 
     def test_reaches_tensor_infos_past_a_large_kv_array(self, tmp_path):
-        """The whole reason this function streams the file instead of
-        reading a bounded prefix (like gguf_kv_bytes_per_token/
-        gguf_expert_count do): a real tokenizer vocab array sits BEFORE the
-        tensor-info section this function needs to reach, and can be several
-        MB for a 100k+-token vocabulary. Build one bigger than
-        _GGUF_META_PROBE_BYTES (4MB) and confirm the tensor-info section is
-        still read correctly on the far side of it."""
+        """This function streams the file rather than reading a bounded prefix
+        (as gguf_kv_bytes_per_token / gguf_expert_count do), because a real
+        tokenizer vocab array sits BEFORE the tensor-info section and can be
+        several MB for a 100k+-token vocabulary. Builds one bigger than
+        _GGUF_META_PROBE_BYTES (4MB) and reads the tensor-info section on the
+        far side of it."""
         big_vocab = [f"tok{i:08d}" for i in range(250_000)]   # ~4.5 MB of strings
         kv = [
             ("general.architecture", _T_STRING, "testmoe"),
@@ -283,15 +277,13 @@ class TestEffectiveModelBytesForVram:
 # --------------------------------------------------------------------------- #
 
 class TestCheckVramHonoursNCpuMoe:
-    """Kept deliberately KB-scale, not the GB-scale a real MoE would be: this
-    repo's own conftest.py refuses to leave files over 100MB in tmp_path (a
-    real-bytes-on-disk guard - truncate() is not sparse on Windows/NTFS, and
-    writing GB-scale tensors here once filled a shared disk for real). The
-    arithmetic under test is pure ratios/sums, so a KB-scale model with a
-    proportionally KB-scale VRAM budget exercises the identical code paths.
-    Every constant below is hand-verified against the real formulas
-    (_kv_bytes_per_token's header shape, _check_vram's need/total compare),
-    not guessed - see the inline arithmetic notes."""
+    """KB-scale, not the GB-scale a real MoE would be: conftest.py refuses to
+    leave files over 100MB in tmp_path, and truncate() is not sparse on
+    Windows/NTFS. The arithmetic under test is pure ratios and sums, so a
+    KB-scale model with a proportionally KB-scale VRAM budget exercises the
+    identical code paths. Every constant below is worked out against the real
+    formulas (_kv_bytes_per_token's header shape, _check_vram's need/total
+    compare) - see the inline arithmetic notes."""
 
     def _backend(self, tmp_path, tensors, *, n_cpu_moe, n_ctx=64, n_gpu_layers=99):
         f = tmp_path / "moe.gguf"
@@ -308,10 +300,10 @@ class TestCheckVramHonoursNCpuMoe:
         return b
 
     def test_refuses_without_n_cpu_moe_but_fits_with_it(self, tmp_path, capsys):
-        """The headline defect: a model whose bulk is expert weights, refused
-        because the check charged the whole file, now fits once n_cpu_moe
-        pins those exact bytes off the VRAM budget - same free VRAM, same
-        model, only the setting differs.
+        """A model whose bulk is expert weights is refused when the check
+        charges the whole file, and fits once n_cpu_moe pins those exact bytes
+        off the VRAM budget - same free VRAM, same model, only the setting
+        differs.
 
         tensors: attn 2,000 B x2 layers, ffn_gate_exps 900,000 B x2 layers ->
         model_bytes = 1,804,000. kv_bytes_per_token=512 (see _backend), n_ctx=64

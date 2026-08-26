@@ -536,9 +536,8 @@ def _extract_zip(data: bytes, filename: str,
                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None,
                  *, _depth: int = 0) -> str:
     """Extract and merge text from a ZIP archive, BOUNDED in total output and
-    member count so a many-member archive cannot amplify into a RAM DoS
-    (AUDIT-HIGH-8). Per-member read failures are logged, not folded into the
-    indexed text (AUDIT-MED-21)."""
+    member count so a many-member archive cannot amplify into a RAM DoS.
+    Per-member read failures are logged, not folded into the indexed text."""
     import io
     texts: list = []
     total = 0
@@ -596,9 +595,8 @@ def _extract_tar_or_stream(data: bytes, filename: str,
                            *, _depth: int = 0) -> str:
     """Extract a tar-family payload. Handles plain and compressed TARBALLS
     (.tar/.tgz/.tbz/.txz/.tar.gz) via tarfile; when the payload is a SINGLE
-    gzip/bzip2/xz-compressed file rather than a tar, decompresses that one stream
-    and extracts its inner content (AUDIT-MED-17: previously a single .gz was
-    mis-routed here and failed, and .tgz/.tbz/.txz had no handler at all).
+    gzip/bzip2/xz-compressed file rather than a tar, decompresses that one
+    stream and extracts its inner content.
 
     The single-stream branch RECURSES into extract_bytes on the decompressed
     bytes, so it passes ``_depth + 1`` - a nested .gz.gz.gz... is bounded by
@@ -728,8 +726,8 @@ def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
     size (zip-bomb guard). The compressed upload is capped upstream, but a
     zip's deflate ratio is ~1000x, so a 1 MB upload can decompress to
     gigabytes; a bounded STREAM read - not trusting the header's self-reported
-    ZipInfo.file_size, which an attacker controls - is what actually prevents
-    the amplification from exhausting RAM (CWE-409)."""
+    ZipInfo.file_size, which an attacker controls - is what prevents the
+    amplification from exhausting RAM."""
     limit = MAX_ARCHIVE_MEMBER_BYTES
     with zf.open(member) as fh:            # ZipExtFile decompresses lazily on read
         raw = fh.read(limit + 1)          # bounded: at most limit+1 decompressed bytes

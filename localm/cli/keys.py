@@ -15,8 +15,9 @@ from .errors import _note_env_override
 # ------------------------------------------------------------------ #
 
 def _mask_key(key: str) -> str:
-    """Show enough of a key to recognise it without leaking the whole secret to
-    a terminal log or screen-share. Short keys are fully masked."""
+    """A key reduced to its first and last four characters, joined by '...'.
+
+    The key is stripped first; one of 8 characters or fewer is masked in full."""
     key = key.strip()
     if len(key) <= 8:
         return "*" * len(key)
@@ -24,9 +25,8 @@ def _mask_key(key: str) -> str:
 
 
 def _fmt_ts(ts) -> str:
-    """A readable local timestamp for a single-line message (the 'key create'
-    confirmation), or '-' when unset. Full precision is fine there - it is one
-    line of prose, not a table column under width pressure."""
+    """A readable local timestamp, ``YYYY-MM-DD HH:MM``, for a single-line
+    message. '-' when *ts* is None or cannot be read as a timestamp."""
     if ts is None:
         return "-"
     try:
@@ -36,10 +36,9 @@ def _fmt_ts(ts) -> str:
 
 
 def _fmt_age(seconds) -> str:
-    """A coarse human duration (Ns / Nm / NhMMm / Nd), mirroring
-    localm.cli.models._fmt_age's granularity for the same reason: this is "how
-    long", not a stopwatch, so a precise-looking figure would overstate what a
-    once-per-list-call reading actually has."""
+    """A coarse human duration: Ns, Nm, NhMMm or Nd, whichever fits *seconds*.
+
+    A negative value clamps to 0."""
     s = int(max(0, seconds))
     if s < 60:
         return f"{s}s"
@@ -51,11 +50,10 @@ def _fmt_age(seconds) -> str:
 
 
 def _fmt_since(ts) -> str:
-    """Compact elapsed-time for a 'key list' table column (Age/Used) - '-' when
-    unset. An absolute timestamp does not fit alongside five other columns at a
-    normal terminal width; see _fmt_ts for the single-line form. No 'ago' suffix
-    - the column header (Age/Used) already supplies that context, and every
-    character here is one Rich has to take from a narrower column elsewhere."""
+    """Elapsed time since *ts* in _fmt_age's form, for a 'key list' table column.
+
+    '-' when *ts* is None or cannot be read as a number. No 'ago' suffix: the
+    column header (Age/Used) supplies that."""
     if ts is None:
         return "-"
     try:
@@ -66,12 +64,10 @@ def _fmt_since(ts) -> str:
 
 
 def _print_wide_table(table) -> None:
-    """Print a Rich table, giving it more room than Rich's 80-column
-    non-terminal fallback when output is piped or redirected - a file, `less`,
-    or a test harness has no real screen width to respect, and an 80-column
-    guess is not enough for the 8 columns `key list` now carries (every column
-    would collapse to an ellipsis). A real, attached terminal's actual width is
-    left untouched - only the no-real-terminal fallback changes."""
+    """Print a Rich table, widened when output is not a terminal.
+
+    Piped or redirected output renders at least 120 columns instead of Rich's
+    80-column fallback. An attached terminal keeps its own real width."""
     if console.is_terminal:
         console.print(table)
         return
@@ -81,8 +77,9 @@ def _print_wide_table(table) -> None:
 
 def _fmt_expires(ts) -> str:
     """Compact expiry for the 'key list' table: 'never' (no deadline), 'in
-    <age>' (still valid), or 'expired' - list_keys() does not filter expired
-    keys out, so without that marker a dead key looks identical to a live one."""
+    <age>' (still valid), 'expired' (past), or '-' when *ts* is unreadable.
+
+    list_keys() does not filter expired keys out of its result."""
     if ts is None:
         return "never"
     try:
@@ -167,10 +164,8 @@ def key_set(key):
         auth.set_api_key(key)
     except ValueError as e:
         # set_api_key rejects a key that is too short or uses characters an HTTP
-        # header cannot carry. That is the user mistyping an argument, so present it
-        # as a clean CLI error - letting the ValueError escape routes it to the
-        # crash/bug-report handler, which asks the user to report their own typo as
-        # a localm bug.
+        # header cannot carry. Re-raised as a CLI error so it does not reach the
+        # crash/bug-report handler.
         raise click.ClickException(str(e)) from e
     console.print(f"[green]✓[/green] API key set "
                   f"[dim]({_mask_key(key)})[/dim]")
@@ -192,22 +187,18 @@ def key_clear(yes):
         console.print("[dim]Cancelled.[/dim]")
         return
     failed = auth.clear_api_key()
-    # A browser owner session carries its own ADMIN scope snapshot and survives a
-    # key roll (sessions are decoupled from the key value by design), so a
-    # leftover owner cookie would keep full access after the key is gone -
-    # defeating the clear (dangerous when require_auth is on). Sign every
-    # browser session out here, mirroring /api/auth/key/clear. Device bearer
-    # KEYS live in the keystore and are untouched.
+    # A browser owner session carries its own ADMIN scope snapshot and survives
+    # a key roll, so a leftover owner cookie would keep full access after the key
+    # is gone. Every browser session is signed out here, mirroring
+    # /api/auth/key/clear. Device bearer KEYS in the keystore are untouched.
     revoked = sessions.revoke_all()
     if failed:
-        # A security step that FAILED must never report success (rule 5). The
-        # underlying warnings go to debuglog only, so without this the user saw a
-        # green tick while the key on disk still granted access.
+        # A security step that FAILED never reports success. The underlying
+        # warnings go to debuglog only, so the failure is named here.
         console.print("[red]x[/red] API key NOT fully cleared - credentials may "
                       "still grant access:")
-        # The CLI is a LOCAL surface: the user owns this machine and needs the
-        # path and the OS error to fix it by hand. The HTTP route deliberately
-        # shows only "what" (see clear_api_key's docstring).
+        # The CLI is a LOCAL surface, so it prints the path and the OS error;
+        # the HTTP route shows only "what".
         for item in failed:
             console.print(f"  [yellow]-[/yellow] {item['what']}: "
                           f"{item['path']} ({item['error']})")
@@ -216,12 +207,10 @@ def key_clear(yes):
     elif revoked is not None:
         console.print("[green]✓[/green] API key cleared - open mode.")
     if revoked is None:
-        # Rule 5, the session half. revoke_all returns None only when the store
-        # could not be written, which means live sessions REMAIN live - a leftover
-        # owner cookie keeps full ADMIN access the moment any key is configured
-        # again, which is precisely what this command exists to prevent. The old
-        # code could not tell this from "there were no sessions" and printed the
-        # green tick regardless. Local surface, so it names the file and the fix.
+        # revoke_all returns None only when the store could not be written,
+        # which means live sessions REMAIN live and a leftover owner cookie keeps
+        # full ADMIN access once any key is configured again. Local surface, so
+        # it names the file and the fix.
         console.print("[red]x[/red] Browser sessions were NOT signed out - a "
                       "signed-in browser may still have access:")
         console.print(f"  [yellow]-[/yellow] {sessions.sessions_file()}")
@@ -242,19 +231,16 @@ def key_recover():
     owner key but still need to manage the server. Existing scoped DEVICE keys are
     untouched, so devices keep working; only the owner credential is rotated. Live
     browser (cookie) sessions are signed out too, so a captured owner cookie cannot
-    outlive the recovery. The local CLI is the trusted recovery path, so this does
-    not require the old key. To instead drop all auth and return to open
-    mode, use 'key clear'."""
+    outlive the recovery. The old key is not required. To instead drop all auth and
+    return to open mode, use 'key clear'."""
     from localm import auth, sessions
     had = auth.get_api_key() is not None
     key = auth.regenerate_key()
-    # regenerate_key deliberately leaves browser sessions alone (by design: a GUI
-    # key roll must not log the browser out), but recovery is the compromise path.
-    # An owner cookie carries its own ADMIN snapshot and is exempt from the
-    # keystore recheck, so it would survive the rotation unless dropped here.
-    # Revoke every session (NOT inside regenerate_key, to keep the GUI's
-    # survive-a-roll behavior intact), mirroring /api/auth/key/clear. Device
-    # bearer KEYS in the keystore are untouched.
+    # regenerate_key leaves browser sessions alone, and an owner cookie carries
+    # its own ADMIN snapshot exempt from the keystore recheck, so it survives the
+    # rotation. Every session is revoked here rather than inside regenerate_key,
+    # mirroring /api/auth/key/clear. Device bearer KEYS in the keystore are
+    # untouched.
     revoked = sessions.revoke_all()
     console.print("[green]Owner access recovered. New owner key (shown once - "
                   "copy it now):[/green]")
@@ -264,20 +250,11 @@ def key_recover():
         console.print("[dim]The previous owner key no longer works; scoped device "
                       "keys are unchanged.[/dim]")
     if revoked is None:
-        # THE SHARPEST INSTANCE of the rule-5 session gap, which is why it is
-        # spelled out here as well as in key_clear. This command's whole purpose
-        # is locking a compromised owner OUT, and unlike 'key clear' it always
-        # configures a NEW key - so a surviving ADMIN cookie is not merely inert
-        # residue, it resolves immediately against the fresh key and keeps full
-        # access. Reporting a completed recovery here would tell a user under
-        # active compromise that they were safe when they were not.
-        #
-        # Reported, not raised, and the exit code stays 0 - matching what the
-        # credential half of `key clear` already does for its own failure, and
-        # what the HTTP route does (200 with cleared:false). The new key is
-        # printed above and IS usable, so failing the command would be its own
-        # kind of lie, and inventing a non-zero exit here would break scripts
-        # for a contract this fix has no business changing.
+        # This command always configures a NEW key, so a surviving ADMIN cookie
+        # resolves immediately against it and keeps full access. That failure is
+        # reported rather than passed over, but it is not raised: the exit code
+        # stays 0, matching the credential half of `key clear` and the HTTP route
+        # (200 with cleared:false), and the new key printed above is usable.
         console.print("[red]x[/red] Browser sessions were NOT signed out, so a "
                       "captured session cookie may still have access:")
         console.print(f"  [yellow]-[/yellow] {sessions.sessions_file()}")
@@ -353,8 +330,7 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     """Mint a named key limited to SCOPES; print the secret once.
 
     Privileged scopes (admin, keys:admin, plugins:admin, config:write,
-    coder:full) are refused unless --allow-privileged is given, so a routine
-    mint can never escalate itself by accident.
+    coder:full) are refused unless --allow-privileged is given.
 
     --fs-access grants host filesystem reach (default none). The owner key always
     has full host access; this is how you let (or deny) a shared device key browse
@@ -391,8 +367,8 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     console.print(f"  [bold]{rec['key']}[/bold]")
     console.print(f"[dim]id {rec['id']}; revoke with: "
                   f"localm key rm {rec['id']}[/dim]")
-    # Catch at grant: if this key unlocks a plugin the host cannot serve yet
-    # (not installed, or missing its pip extras), say so right here.
+    # Warn at grant time when this key unlocks a plugin the host cannot serve
+    # yet: not installed, or missing its pip extras.
     try:
         from localm.plugins.engine import PluginManager
         warns = PluginManager(None).scope_deps_warnings(list(scopes))

@@ -1,22 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ModelRunner load wait: a NON-TERMINAL ``progress`` envelope (P15).
+"""ModelRunner load wait: a NON-TERMINAL ``progress`` envelope.
 
-``spawn_and_load`` returned or raised on the FIRST envelope it received and
-rejected any kind it did not recognise, so the child had no way to say anything
-between "load started" and "loaded or failed". Reporting load progress is
-therefore not a producer-side addition: the consumer has to learn a non-terminal
-envelope first, which is what this covers.
+``spawn_and_load``'s parent-side poll loop must deliver a progress envelope and
+keep waiting, so the terminal envelope behind it is still what decides the load.
 
 These drive the REAL parent-side poll loop over REAL queues, substituting only
-the child process's liveness check - the same approach as
-test_runner_stream_timeouts.py, and for the same reason: mocking
-``spawn_and_load`` itself would leave the loop under test unexercised.
+the child process's liveness check.
 
-The load-deadline test is the load-bearing one. A ``progress`` envelope keeps
-``resp_q.get()`` returning, so a deadline check that only ran on ``queue.Empty``
-would never be reached again once a child started emitting them, and a wedged
-native call could hang a load forever. It is written to FAIL rather than HANG if
-that regresses, because a hanging test reports nothing.
+A ``progress`` envelope keeps ``resp_q.get()`` returning, so a deadline check
+that only ran on ``queue.Empty`` would never be reached again once a child
+started emitting them, and a wedged native call could hang a load forever. The
+load-deadline test is written to FAIL, never HANG, if that regresses.
 """
 
 from __future__ import annotations
@@ -49,8 +43,8 @@ class _AliveProc:
 
 
 def _make_runner():
-    """A runner whose queues are real but whose _spawn is inert - spawn_and_load
-    calls _spawn() first thing, and a real child would defeat the point."""
+    """A runner whose queues are real but whose _spawn is inert; spawn_and_load
+    calls _spawn() first thing."""
     ctx = mp.get_context("spawn")
     r = ModelRunner()
     r._req_q, r._resp_q, r._ctrl_q = ctx.Queue(), ctx.Queue(), ctx.Queue()
@@ -60,8 +54,8 @@ def _make_runner():
 
 
 def test_progress_envelope_does_not_end_the_load():
-    """The whole point: a progress envelope is delivered and the wait CONTINUES,
-    so the terminal envelope behind it is still the one that decides the load."""
+    """A progress envelope is delivered and the wait CONTINUES, so the terminal
+    envelope behind it is still the one that decides the load."""
     r = _make_runner()
     seen = []
     r._resp_q.put(("progress", {"fraction": 0.25}))
@@ -75,9 +69,8 @@ def test_progress_envelope_does_not_end_the_load():
 
 
 def test_progress_payload_is_passed_through_uninterpreted():
-    """The runner guarantees delivery, not meaning - whatever decides what is
-    worth reporting during a load owns the payload's shape. Anything picklable
-    must survive unchanged, so settling that shape needs no protocol change."""
+    """The runner guarantees delivery, not meaning: the producer owns the
+    payload's shape, and anything picklable must survive unchanged."""
     r = _make_runner()
     seen = []
     for payload in (0.5, "loading tensors", None, {"a": [1, 2]}):
@@ -100,8 +93,8 @@ def test_progress_without_a_sink_is_simply_dropped():
 
 
 def test_a_raising_progress_sink_never_fails_the_load():
-    """A reporting callback is not the work. Mirrors embedder._emit_stage: the
-    load succeeded, so it must be reported as succeeded."""
+    """A reporting callback is not the work: the load succeeded, so it is
+    reported as succeeded."""
     r = _make_runner()
 
     def _boom(_payload):
@@ -114,9 +107,8 @@ def test_a_raising_progress_sink_never_fails_the_load():
 
 
 def test_an_unknown_envelope_kind_is_still_a_loud_error():
-    """Adding one non-terminal kind must not soften the strict check. Tolerating
-    unknown kinds would turn a protocol mismatch into a silent hang, which is
-    exactly what the strictness is for."""
+    """Adding one non-terminal kind must not soften the strict check: an
+    unrecognised kind is still a loud error."""
     r = _make_runner()
     r._resp_q.put(("surprise", 1))
 
@@ -125,14 +117,11 @@ def test_an_unknown_envelope_kind_is_still_a_loud_error():
 
 
 def test_a_non_tuple_envelope_is_not_re_read_as_progress():
-    """What the isinstance guard actually buys. A non-tuple cannot be indexed for
-    a kind, so it must go down the TERMINAL path and fail loudly rather than be
-    mistaken for progress - which would convert a broken protocol into an
-    unbounded wait, the worst of both outcomes.
+    """A non-tuple cannot be indexed for a kind, so it goes down the TERMINAL
+    path and fails loudly instead of being mistaken for progress.
 
-    Note the bare string is deliberately "progress": the substring is present,
-    so anything matching loosely rather than on the tuple's own shape would let
-    it through."""
+    The bare string is "progress": the substring is present, so anything matching
+    loosely rather than on the tuple's own shape would let it through."""
     r = _make_runner()
     r._resp_q.put("progress")
 
@@ -142,10 +131,8 @@ def test_a_non_tuple_envelope_is_not_re_read_as_progress():
 
 def test_progress_without_a_payload_is_delivered_as_none():
     """A payload-less ``("progress",)`` is a well-formed KIND with a missing
-    value, not a malformed envelope, and is deliberately delivered as None
-    instead of failing the load. A producer bug in a purely advisory field must
-    not be able to kill a load that is otherwise going fine, and the deadline
-    still bounds the wait either way."""
+    value, not a malformed envelope: it is delivered as None and does not fail
+    the load. The deadline still bounds the wait."""
     r = _make_runner()
     seen = []
     r._resp_q.put(("progress",))
@@ -157,14 +144,13 @@ def test_progress_without_a_payload_is_delivered_as_none():
 
 
 def test_progress_does_not_extend_the_load_deadline():
-    """A child emitting progress in a tight loop must NOT keep a hung load alive.
-    The deadline still bounds the WHOLE load, exactly as before this envelope
-    existed - it is the only guard between a wedged native call and a server that
-    never answers.
+    """A child emitting progress in a tight loop must NOT keep a hung load alive:
+    the deadline bounds the WHOLE load, and it is the only guard between a wedged
+    native call and a server that never answers.
 
-    Asserted via a watchdog rather than by letting the call block, so the
-    regression (a deadline checked only on queue.Empty, which a steady progress
-    stream starves) FAILS this test instead of hanging the suite forever."""
+    Asserted via a watchdog, so a deadline checked only on queue.Empty - which a
+    steady progress stream starves - FAILS this test instead of hanging the
+    suite."""
     r = _make_runner()
     stop = threading.Event()
 

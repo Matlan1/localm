@@ -2,10 +2,10 @@
 """Config update validation (localm.settings_schema.validate_update) and its two
 consumers: the `localm config` CLI command and PATCH /v1/config.
 
-Before the shared validator, both call sites wrote any key/any type with no
-checking: `localm config bogus x` persisted an unknown key, a scalar clobbered a
-list key (plugins_enabled / net_allow), and PATCH {net_deny: null} silently wiped
-the SSRF deny-list (P0-6 / SEC-2 / BUG-3).
+Without the shared validator both call sites write any key of any type with no
+checking: `localm config bogus x` persists an unknown key, a scalar clobbers a
+list key (plugins_enabled / net_allow), and PATCH {net_deny: null} silently wipes
+the SSRF deny-list.
 """
 
 from unittest.mock import patch
@@ -444,8 +444,8 @@ class TestGpusCli:
     def test_timeout_reports_retry_not_no_torch(self, cli_runner, monkeypatch):
         """A GPU probe that overruns the deadline (a cold ROCm/CUDA driver init)
         must be reported as a TIMEOUT with a retry hint, NOT as 'no torch / no
-        GPU'. Misattributing a slow cold probe to 'no torch' is exactly the
-        rule-5 bug this fixes (torch IS installed; a warm retry works)."""
+        GPU'. torch IS installed and a warm retry works, so 'no torch' is a false
+        claim."""
         import threading
         from localm.cli import main
 

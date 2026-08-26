@@ -91,10 +91,9 @@ def test_store_is_per_project(home, tmp_path):
 def test_store_evicts_by_value_not_arrival_order(home, tmp_path, monkeypatch):
     """At the cap the LEAST VALUABLE episode goes, not simply the oldest.
 
-    Replaces the old FIFO pin (`test_store_caps_to_newest`). Under that behavior
-    the rich failure lesson below - added FIRST - was always the first thing
-    discarded, however much it had to teach; that is finding 39 in one line.
-    Ages are staggered so plain recency cannot be what saves it."""
+    A FIFO cap discards the rich failure lesson below - added FIRST - however
+    much it has to teach. Ages are staggered so plain recency cannot be what
+    saves it."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 3)
     store = ep_mod.EpisodeStore(tmp_path)
@@ -157,10 +156,10 @@ def test_dedup_collapses_near_identical_without_losing_a_distinct_one(home, tmp_
 
 def test_merge_keeps_a_failed_predecessors_warning(home, tmp_path):
     """When a task that once FAILED is done again successfully, the restatement
-    absorbs the older record - and must carry its what_failed forward. Dropping it
-    would delete the most valuable half of the lesson (audit cluster 11) at exactly
-    the moment the merge looks harmless. The outcome, though, is the newer run's:
-    it really did finish this time."""
+    absorbs the older record - and must carry its what_failed forward. Dropping
+    it would delete the most valuable half of the lesson at exactly the moment
+    the merge looks harmless. The outcome, though, is the newer run's: it really
+    did finish this time."""
     store = EpisodeStore(tmp_path)
     store.add(Episode(task="migrate the users table to uuid keys",
                       outcome="incomplete",
@@ -201,7 +200,7 @@ def test_evicted_episode_is_recoverable_from_the_archive(home, tmp_path, monkeyp
 
     # Gone from recall...
     assert doomed.id not in {e.id for e in store.all()}
-    # ...but archived with the reason, and restorable.
+    # ...but archived with its drop reason, and restorable.
     arch = store.forgotten()
     assert [r["id"] for r in arch] == [doomed.id]
     assert arch[0]["reason"] == "cap" and arch[0]["lesson"] == "thin lesson"
@@ -365,11 +364,11 @@ def test_all_skips_malformed_lines(home, tmp_path):
 
 def test_add_load_save_round_trip_preserves_a_u0085_bearing_episode(home, tmp_path):
     """str.splitlines() splits on U+0085 (NEL) as well as LINE FEED, and
-    json.dumps(ensure_ascii=False) writes U+0085 RAW - so a lesson containing one
-    used to be torn into two unparseable fragments and silently dropped, first on
-    load and then for good on the next save (add() rewrites the whole file from
-    whatever all() returned). Measured in the wild against a real RAG collection
-    (localm/jsonl.py); same defect, same fix (split_jsonl/dumps_lines) here."""
+    json.dumps(ensure_ascii=False) writes U+0085 RAW, so a lesson containing one
+    is torn into two unparseable fragments and silently dropped, first on load
+    and then for good on the next save (add() rewrites the whole file from
+    whatever all() returned). Same defect and same fix (split_jsonl/dumps_lines)
+    as localm/jsonl.py."""
     sep = "\x85"
     store = EpisodeStore(tmp_path)
     store.add(Episode(task="t1", lesson=f"before{sep}after", files=["a.py"]))
@@ -630,10 +629,9 @@ def test_unreadable_archive_is_flagged_not_reported_as_empty(home, tmp_path,
 
 
 def test_absent_archive_reports_ok_not_a_read_failure(home, tmp_path):
-    """The fires-control for the above: a genuinely ABSENT archive is normal and
-    must NOT set the failure flag, or the CLI would cry wolf on every fresh
-    project. Without this, a store that hardcoded last_forgotten_ok = False would
-    pass the test above."""
+    """A genuinely ABSENT archive is normal and must NOT set the failure flag, or
+    the CLI cries wolf on every fresh project. Without this case, a store that
+    hardcoded last_forgotten_ok = False would pass the test above."""
     store = EpisodeStore(tmp_path)
     assert not store.archive_path.is_file()
     assert store.forgotten() == []
@@ -657,9 +655,8 @@ def test_restore_does_not_wipe_the_archive_when_the_reread_fails(home, tmp_path,
                                                                  monkeypatch, caplog):
     """restore() re-reads the archive after add() and rewrites it minus the
     restored id. If that re-read FAILS, the empty stand-in must NOT be written
-    over the file - that turns a transient read error into permanent loss of every
-    remaining recovery copy (the trap memory/store.py's propose_corrections
-    guards)."""
+    over the file - that turns a transient read error into permanent loss of
+    every remaining recovery copy."""
     import logging
     from pathlib import Path
 
@@ -702,9 +699,9 @@ def test_restore_does_not_wipe_the_archive_when_the_reread_fails(home, tmp_path,
 
 
 def test_cli_says_the_archive_is_unreadable_not_empty(home, tmp_path, monkeypatch):
-    """The user-facing half of finding 1: --episodes-archive and --restore-episode
-    must not print a clean "nothing here" while the archive exists and could not be
-    read. That is the exact absent-vs-unreadable collapse rule 5 forbids."""
+    """--episodes-archive and --restore-episode must not print a clean "nothing
+    here" while the archive exists and could not be read: that collapses absent
+    into unreadable."""
     from click.testing import CliRunner
 
     from localm.plugins.engine import PluginManager
@@ -751,15 +748,14 @@ def test_cli_still_says_empty_when_the_archive_really_is_empty(home, tmp_path,
 def no_dedup(monkeypatch):
     """Make the near-duplicate MERGE unreachable for the concurrency tests.
 
-    This is load-bearing, not tidiness. A merge is a LEGITIMATE, archived drop, so
-    a merged-away episode still satisfies "live or archived" and the clobber
-    assertion can never fire. Programmatically generated task text is exactly what
-    trips the merge: measured, "alpha unrelated subject number 0" vs "... number 1"
-    scores 0.957 against the 0.90 _DEDUP_RATIO, so an earlier version of these
-    tests collapsed nearly every episode into one and passed vacuously - it would
-    have gone green against the UNLOCKED code too. Raising the ratio above 1.0
-    leaves the real dedup code path running (it is still compared against every
-    episode) but makes a match impossible, so every episode that goes missing is a
+    A merge is a LEGITIMATE, archived drop, so a merged-away episode still
+    satisfies "live or archived" and the clobber assertion can never fire.
+    Programmatically generated task text is exactly what trips the merge:
+    "alpha unrelated subject number 0" vs "... number 1" scores 0.957 against
+    the 0.90 _DEDUP_RATIO, which would collapse nearly every episode into one
+    and let these tests pass vacuously. Raising the ratio above 1.0 leaves the
+    real dedup code path running - it is still compared against every episode -
+    while making a match impossible, so every episode that goes missing is a
     genuine lost update rather than a merge."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_DEDUP_RATIO", 1.01)
@@ -822,10 +818,10 @@ def test_concurrent_writers_never_lose_an_episode_without_an_archive_copy(
 
 def test_concurrent_forget_and_add_do_not_resurrect_or_clobber(home, tmp_path,
                                                                no_dedup):
-    """The other writer-vs-writer shape from the finding: a --forget-episode CLI
-    run racing a session-close reflection add(). The forgotten episode must stay
-    forgotten (not resurrected by a stale snapshot write) and the concurrently
-    added ones must not be clobbered."""
+    """The other writer-vs-writer shape: a --forget-episode CLI run racing a
+    session-close reflection add(). The forgotten episode must stay forgotten
+    (not resurrected by a stale snapshot write) and the concurrently added ones
+    must not be clobbered."""
     import threading
 
     seed_store = EpisodeStore(tmp_path)
@@ -1236,9 +1232,8 @@ def test_render_for_prompt():
 
 
 def test_what_worked_is_load_bearing(home, tmp_path):
-    """It used to be written and then never read by anything - not searched, not
-    rendered, not weighed (audit finding 39, "what_worked is a dead field"). All
-    three now consume it."""
+    """what_worked must be consumed, not merely written: it is searched, rendered
+    and weighed."""
     import localm.plugins.coder.episodes as em
 
     # 1. rendered on recall
@@ -1424,10 +1419,10 @@ def test_with_episodes_noop_when_no_relevant_history(home, tmp_path):
 
 
 def test_recalled_lesson_ids_are_recorded_for_the_run(home, tmp_path):
-    """Retrieval used to render the lessons and throw the Episode objects away, so
-    a lesson that steered a run badly was invisible afterwards and there was no
-    handle to forget it by. The run now records id + text, emits it, and audits
-    it - and the id it reports is the one targeted forget takes."""
+    """Retrieval must keep the Episode objects, not just their rendered text: the
+    run records id + text, emits it, and audits it, and the id it reports is the
+    one targeted forget takes. Rendering alone leaves a lesson that steered a run
+    badly invisible afterwards, with no handle to forget it by."""
     seeded = EpisodeStore(tmp_path).add(Episode(
         task="add retry logic to the http client",
         lesson="exponential backoff capped at 30s"))

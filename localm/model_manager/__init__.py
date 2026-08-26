@@ -21,9 +21,9 @@ keep resolving (both patch the global module singleton).
 import shutil  # noqa: F401  (re-exported so localm.model_manager.shutil resolves for tests)
 import sys  # noqa: F401  (re-exported so localm.model_manager.sys resolves for tests)
 
-# Config-derived runtime values are re-exported as package attributes so that
-# tests which patch e.g. localm.model_manager.MODELS_DIR / load_registry still
-# work; remove_model reads these through the package for the same reason.
+# Config-derived runtime values are re-exported as package attributes, and
+# remove_model reads them through the package, so a patched
+# localm.model_manager.MODELS_DIR / load_registry takes effect at call time.
 from ..config import (
     HOME_DIR,
     MODELS_DIR,

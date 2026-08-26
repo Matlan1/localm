@@ -1,33 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """One global gate on how many child agents may run at once.
 
-WHY THIS IS SHARED, AND WHY IT IS GLOBAL RATHER THAN PER-MECHANISM
-------------------------------------------------------------------
-Two different features spawn concurrent children: worktree-isolated parallel
-dispatch (``tools/parallel.py``) and, separately, background sub-agent jobs. If
-each enforced its own private cap of 2, a model could hold 2 of one plus 2 of the
-other and run 4 children at once. Both features would be individually correct and
-jointly wrong, and neither feature's tests would catch it.
+ONE BUDGET, SHARED BY EVERY CHILD-SPAWNING PATH
+-----------------------------------------------
+Worktree-isolated parallel dispatch (``tools/parallel.py``) and background
+sub-agent jobs both draw from this single budget rather than each holding a
+private cap. A full 2-child parallel dispatch therefore SATURATES it, and a
+background job requested while that runs is rejected.
 
-The ceiling is a property of the BOX, not of the dispatch mechanism: the practical
-resident-model limit on a single consumer GPU is about two. A per-mechanism cap
-therefore enforces the wrong noun. So there is exactly one budget here and every
-child-spawning path draws from it.
-
-The deliberate consequence: a full 2-child parallel dispatch SATURATES the budget,
-so a background job requested while it runs is rejected. That is honest - the
-hardware genuinely cannot do more - and rejecting loudly beats admitting four
-children and thrashing VRAM.
-
-WHY THERE IS NO BLOCKING ACQUIRE
---------------------------------
-Only ``try_acquire`` exists, and it never blocks. A blocking
-``Semaphore(2).acquire()`` would turn "no free slot" into an invisible wait, which
-is exactly the silent queue a caller must not have: a background-spawn tool that
-blocks has defeated its own purpose, and a caller that wanted to report "rejected,
-these two are running" instead hangs. Not exposing a blocking acquire at all means
-neither caller can reintroduce that failure by accident. A caller that genuinely
-wants to wait must do so explicitly, in its own code, where the waiting is visible.
+NO BLOCKING ACQUIRE
+-------------------
+Only ``try_acquire`` exists and it never blocks: "no free slot" is returned as
+None, never queued. A caller that wants to wait does so explicitly in its own
+code.
 """
 
 from __future__ import annotations
@@ -37,9 +22,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-# The practical resident-model ceiling on a single consumer GPU. Deliberately a
-# design constraint, not a tunable to grow: raising it does not buy parallelism the
-# hardware can deliver, it buys VRAM thrash.
+# The practical resident-model ceiling on a single consumer GPU. A design
+# constraint, not a tunable.
 MAX_CONCURRENT_CHILDREN = 2
 
 
@@ -76,9 +60,8 @@ class ChildLimit:
         """Take a slot, or return None immediately if the budget is full.
 
         Never blocks. The capacity check and the insert happen under one lock
-        hold: doing them separately would let two near-simultaneous spawns both
-        observe the same single free slot and both admit, which is the whole
-        failure this gate exists to prevent.
+        hold, so two near-simultaneous spawns can never both admit on the same
+        free slot.
         """
         with self._lock:
             if len(self._holders) >= self._max:
@@ -92,12 +75,8 @@ class ChildLimit:
     def release(self, token: Optional[Token]) -> None:
         """Give a slot back. Idempotent and safe from any thread.
 
-        Idempotent on purpose: the caller releases in a ``finally``, and an error
-        path may well have released already. A double release must not corrupt the
-        budget (a decrement-based counter would drift negative and silently widen
-        the cap), and a release of an unknown/stale token must not raise inside
-        somebody's cleanup handler. Tolerating None keeps caller cleanup free of
-        null-checks when the acquire itself failed.
+        A double release, a release of an unknown or stale token, and a None
+        token are all no-ops: none corrupts the budget and none raises.
         """
         if token is None:
             return
@@ -105,7 +84,7 @@ class ChildLimit:
             self._holders.pop(token.id, None)
 
     def holders(self) -> list[Holder]:
-        """Snapshot of the running children, so a rejection can NAME them."""
+        """Snapshot of the running children."""
         with self._lock:
             return list(self._holders.values())
 

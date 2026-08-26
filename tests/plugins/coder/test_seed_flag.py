@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """`localm coder --seed N`: the seed reaches the request body.
 
-Whether a fixed seed actually reproduces output is a property of the runtime, not
-of this wiring - it was measured against a real model and server rather than
-asserted here (see the CHANGELOG entry and docs/cli.md for the numbers and the
-scope they were measured in). What these tests pin down is that the flag is not
-cosmetic: it survives the CLI, the project config, the Agent's gen kwargs, and
-the backend body build, and that the one provider without a seed parameter says
-so instead of silently dropping it.
+Whether a fixed seed actually reproduces output is a property of the runtime,
+not of this wiring, and is not asserted here. What these tests pin is that the
+flag survives the CLI, the project config, the Agent's gen kwargs and the
+backend body build, and that the one provider without a seed parameter says so
+instead of dropping it silently.
 """
 
 from __future__ import annotations

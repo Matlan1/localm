@@ -46,7 +46,6 @@ class FakeEngine:
 
 @pytest.fixture
 def setup_multi_model(monkeypatch):
-    # Mock registry
     fake_registry = {
         "model-a": {"path": "Z:/models/model-a.gguf", "source": "local"},
         "model-b": {"path": "Z:/models/model-b.gguf", "source": "local"},
@@ -56,11 +55,9 @@ def setup_multi_model(monkeypatch):
     monkeypatch.setattr("localm.model_manager.get_model_info", lambda name: (f"Z:/models/{name}.gguf", "hint"))
     monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
     
-    # Setup VRAM to have plenty of space initially (10 GB free)
     monkeypatch.setattr("localm.discover.vram_info",
                         probe_double({"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3}))
     
-    # Set engine factory to return FakeEngines
     monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
     
     # Clear active server state
@@ -75,7 +72,6 @@ def setup_multi_model(monkeypatch):
 
 
 def test_concurrent_loading_and_routing(setup_multi_model):
-    # Build app with no startup model
     app = hs.create_app(None)
     client = TestClient(app)
     
@@ -115,7 +111,6 @@ def test_list_models_status(setup_multi_model):
         "messages": [{"role": "user", "content": "hi"}],
     })
     
-    # List models
     r = client.get("/v1/models")
     assert r.status_code == 200
     data = r.json()["data"]
@@ -180,14 +175,10 @@ def test_active_requests_protection_from_eviction(setup_multi_model, monkeypatch
     # Simulate active requests on model-a
     hs._engines["model-a"].active_requests = 1
 
-    # model-a stays resident (busy, cannot be evicted) - prove THAT part of the
-    # protection holds regardless of how model-b's own load turns out.
-    # switch_engine does not hard-refuse on its own crude whole-model estimate
-    # once local+cooperative eviction is exhausted: it falls through and lets the
-    # backend's own sizing decide (partial GPU-layer offload / system-RAM
-    # spillover can still make it fit). Simulate the backend genuinely being
-    # unable to fit it (0 GPU layers included) so this keeps covering the case
-    # where eviction protection is the ONLY thing between the request and a 503.
+    # switch_engine falls through to the backend's own sizing once local and
+    # cooperative eviction are exhausted, so model-b's engine is made to fail its
+    # load outright: eviction protection is then the only thing between the
+    # request and a 503.
     def _failing_engine_factory(name):
         engine = FakeEngine(name)
         engine.load = lambda: (_ for _ in ()).throw(
@@ -203,7 +194,6 @@ def test_active_requests_protection_from_eviction(setup_multi_model, monkeypatch
     assert "VRAM exhausted" in r.text
     assert hs._engines["model-a"].loaded, "the busy model-a must not be evicted"
 
-    # Clear request lock
     hs._engines["model-a"].active_requests = 0
 
 

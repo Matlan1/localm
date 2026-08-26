@@ -125,7 +125,7 @@ def test_loaded_but_no_device_reports_false(tmp_path, monkeypatch):
     """A non-null ggml_backend_load handle does NOT prove a usable device. When
     the plugin loads "succeed" but the device registry still reports 0, the
     registration is a FAILURE - the authoritative device count wins over the raw
-    load signal, so setup does not report a broken build as a success (rule 5)."""
+    load signal, so setup does not report a broken build as a success."""
     monkeypatch.setattr(sys, "platform", "win32")
     _touch(tmp_path, ["ggml-base.dll", "ggml-cpu.dll", "ggml-vulkan.dll", "llama.dll"])
     lib = _FakeLib(with_loader=True, dev_count=0)   # loads return truthy, 0 devices

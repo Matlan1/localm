@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 server-control backlog cluster.
+"""Server-control regression tests.
 
-  NEW-G - restart re-exec marks fds non-inheritable (no fd 3/4 leak)
-
-(SRV-CTRLC is deferred: it needs a portmux/serve refactor and a live Windows
-Ctrl+C to verify. REC-OPEN-GET-GATE was reverted: a broad network-bind GET gate
-broke legitimate discovery endpoints like /whoami, and a correct public-GET
-allowlist needs the maintainer's route knowledge + live verification.)
+Covers: the restart re-exec marks fds non-inheritable, so no fd 3/4 leaks
+across os.execv.
 """
 
 import os

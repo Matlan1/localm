@@ -72,10 +72,10 @@ def test_events_remote_is_forbidden(app_mgr, monkeypatch):
 
 
 def test_network_bind_denies_even_from_loopback_peer(app_mgr, monkeypatch):
-    """REGRESSION: the GUI runs behind portmux, so request.client.host is always
-    127.0.0.1 (a loopback peer) even for a genuinely remote client. The gate MUST
-    key off the bind host, not the peer - a network bind is refused regardless of
-    the (loopback-looking) peer the TestClient presents."""
+    """The GUI runs behind portmux, so request.client.host is always 127.0.0.1
+    (a loopback peer) even for a genuinely remote client. The gate MUST key off
+    the bind host, not the peer - a network bind is refused regardless of the
+    (loopback-looking) peer the TestClient presents."""
     app, mgr = app_mgr
     _set_bind(app, "0.0.0.0")                    # network bind; TestClient peer is loopback
     _fake_install(monkeypatch)                  # would run if the gate were wrong
@@ -203,8 +203,7 @@ def test_start_dep_install_idempotent_while_running(app_mgr, monkeypatch):
     # WAIT for the worker before returning: monkeypatch undoes the `blocking`
     # stub at teardown, and run_dep_install resolves deps.install_plugin_extras
     # at CALL time, so a thread still in flight would reach the real installer.
-    # start_dep_install keeps the TASK, not the thread, so poll the task's own
-    # status instead of joining.
+    # start_dep_install keeps the TASK, not the thread, so poll the task's status.
     deadline = time.time() + 10
     while t1.status == "running" and time.time() < deadline:
         time.sleep(0.01)

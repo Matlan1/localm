@@ -3,9 +3,9 @@
 this machine, so ggml's directory-scan loaders (and localm's own RTLD_GLOBAL
 preload) can never simultaneously map two tiers whose identically-named global
 symbols would otherwise collide. See the module's own docstring for the full
-mechanism and the live reproduction that found it.
+mechanism.
 
-Real .so files can't be fabricated here, so `_probe_score` (the isolated
+Real .so files cannot be fabricated here, so `_probe_score` (the isolated
 subprocess that calls a real candidate's own `ggml_backend_score()`) is
 monkeypatched to canned per-candidate verdicts; everything downstream of that
 - file layout, marker contents, locking, fast-path behaviour - is exercised for

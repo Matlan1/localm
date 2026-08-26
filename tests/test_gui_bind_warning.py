@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The GUI must warn before binding past loopback without auth.
-
-Regression guard for the audit finding that `localm gui` (unlike `localm serve`)
-served the shell-capable coder agent on a LAN address with no warning.
+"""The GUI must warn before binding past loopback without auth: `localm gui`
+serves the shell-capable coder agent, so a LAN bind without a key is warned
+about the same way `localm serve` warns.
 """
 
 from unittest.mock import patch

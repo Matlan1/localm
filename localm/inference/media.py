@@ -11,16 +11,15 @@ from typing import TYPE_CHECKING, Tuple
 if TYPE_CHECKING:
     # numpy is referenced ONLY by decode_audio's return annotation, and this
     # module has `from __future__ import annotations`, so that annotation is
-    # never evaluated at runtime. Importing numpy at module scope made the whole
-    # module unimportable without it - including decode_image_url, which needs
-    # only Pillow. numpy is not a core dependency (it arrives transitively via
-    # the voice extra), so on an install without it, attaching an image failed
-    # on `import numpy` in a function that never touches an array.
+    # never evaluated at runtime. A module-scope import would make the whole
+    # module unimportable without numpy - including decode_image_url, which needs
+    # only Pillow - and numpy is not a core dependency (it arrives transitively
+    # via the voice extra).
     import numpy as np
 
 
 # A vision image can be several MB; cap the network fetch generously but
-# bounded (the previous raw requests.get read the whole body with no limit).
+# bounded.
 _IMAGE_MAX_BYTES = 25_000_000
 
 
@@ -41,11 +40,9 @@ def decode_image_url(url: str):
         # it failed to install or was removed. Report THAT, rather than letting an
         # ImportError escape: on the GGUF path this call runs inside the worker
         # process, whose dispatch loop treats any escaping exception as a native
-        # fault and kills the process - so a missing pure-Python library used to
-        # be reported as "Native inference fault (worker exit 1) ... see the debug
-        # log for the native stack trace" and evict the model. Every clause of
-        # that was false. ImageDecodeUnavailable is an UnsupportedInputError, so
-        # the worker reports it per-request and keeps serving (_runner.py).
+        # fault and kills the process, evicting the model.
+        # ImageDecodeUnavailable is an UnsupportedInputError, so the worker
+        # reports it per-request and keeps serving (_runner.py).
         from localm.inference.backends.base import ImageDecodeUnavailable
         raise ImageDecodeUnavailable(
             "Cannot decode the attached image: the Pillow imaging library is not "

@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#957 follow-up: FOUR different call sites build the inference Engine for a
-named model, and only pass it a vision projector (mmproj_path) if the caller
-explicitly names one with --mmproj. Two already fell back to the registry's
-own get_model_mmproj() (VIS-1); two did not, so a model pulled with an
-auto-detected mmproj (see model_manager/pull.py) still could not see an image
-once actually served or run - the registry field was written and never read.
+"""FOUR different call sites build the inference Engine for a named model, and a
+site that only passes a vision projector (mmproj_path) when the caller names one
+with --mmproj leaves a model pulled with an auto-detected mmproj (see
+model_manager/pull.py) unable to see an image once actually served or run - the
+registry field written and never read.
 
 This pins all four so a fifth new engine-construction site cannot ship the
 same gap silently:
-  - localm/inference/http_server.py:_default_engine_factory   (was correct)
-  - localm/inference/http_server.py:mount_gui_surface's _build_engine (was correct)
-  - localm/plugins/gui/cli.py's _make_engine                  (fixed here)
-  - localm/cli/chat.py's `run` command's Engine construction  (fixed here)
+  - localm/inference/http_server.py:_default_engine_factory
+  - localm/inference/http_server.py:mount_gui_surface's _build_engine
+  - localm/plugins/gui/cli.py's _make_engine
+  - localm/cli/chat.py's `run` command's Engine construction
 """
 
 import asyncio
@@ -52,10 +51,10 @@ class _FakeEngine:
 @pytest.fixture()
 def registry_with_mmproj(tmp_path, monkeypatch):
     """A registry with one 'llm' entry whose 'mmproj' field is set - the exact
-    shape model_manager/pull.py's auto-fetch (#957) now writes. get_model_mmproj
-    only trusts a RECORDED mmproj that still exists on disk (else it falls
-    through to sibling auto-detect), so the projector must be a real file, not
-    just a string. Returns (model_path, mmproj_path) as strings."""
+    shape model_manager/pull.py's auto-fetch writes. get_model_mmproj only trusts
+    a RECORDED mmproj that still exists on disk (else it falls through to sibling
+    auto-detect), so the projector must be a real file, not just a string.
+    Returns (model_path, mmproj_path) as strings."""
     model_path = tmp_path / "vision-model.gguf"
     model_path.write_bytes(b"GGUF" + b"\x00" * 64)
     mmproj_path = tmp_path / "mmproj-vision-f16.gguf"
@@ -74,8 +73,8 @@ def registry_with_mmproj(tmp_path, monkeypatch):
 
 
 class TestHttpServerFactoriesAlreadyCorrect:
-    """Control cases: these two already called get_model_mmproj before #957's
-    follow-up - pinned so a future edit cannot silently drop it."""
+    """Control cases: these two already call get_model_mmproj - pinned so a
+    future edit cannot silently drop it."""
 
     def test_default_engine_factory_threads_mmproj(self, registry_with_mmproj, monkeypatch):
         _model_path, mmproj_path = registry_with_mmproj
@@ -127,7 +126,7 @@ class TestHttpServerFactoriesAlreadyCorrect:
 
 
 class TestPreviouslyBrokenFactoriesNowFixed:
-    """Regression coverage for the two sites #957's follow-up fixed."""
+    """Regression coverage for the two sites that did not consult get_model_mmproj."""
 
     def test_gui_cli_make_engine_threads_mmproj(
             self, registry_with_mmproj, tmp_path, monkeypatch):

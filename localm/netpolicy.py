@@ -33,7 +33,7 @@ and online coder providers (OpenAI/Anthropic opt-ins) are explicit user
 choices outside this policy.
 
 SSRF guard: the hostname is resolved and validated once, then the socket is
-pinned to that IP (SSRF-REBIND, see netpin.py), so the connection cannot
+pinned to that IP (see netpin.py), so the connection cannot
 re-resolve to a rebound address and an unresolvable host fails closed.
 Redirects are re-validated hop by hop.
 """
@@ -71,7 +71,7 @@ class NetworkPolicyError(Exception):
 def network_mode() -> str:
     """Resolve the active mode: LOCALM_NET_MODE env > config > "ask".
 
-    On a config-read failure we resolve to "off", NOT "ask" (HON-2): returning
+    On a config-read failure the mode resolves to "off", NOT "ask": returning
     "ask" would silently RE-ENABLE network access for a user who set
     net_mode="off" as a kill switch - the exact fail-open a safety toggle must
     never do. Failing closed (and warning) keeps the switch honest; a transiently
@@ -110,7 +110,7 @@ def _config() -> dict:
     """Best-effort config read for callers OTHER than check_url.
 
     check_url reads the config itself, once, up front, and refuses outright
-    on a read failure (LM-DA-046) - it must never reach this fallback. The
+    on a read failure - it must never reach this fallback. The
     remaining callers are _resolve_pinned (net_allow_private) and web_search
     (net_search_url); neither reads net_deny/net_allow, so an unreadable
     config here only means those two settings fall back to their safe
@@ -132,13 +132,12 @@ def check_url(url: str) -> None:
     Checks, in order: mode, malformed-authority, scheme, deny list, allow list,
     resolved-IP class.
 
-    Reads the config exactly ONCE, up front (LM-DA-046): net_mode and the
+    Reads the config exactly ONCE, up front: net_mode and the
     net_deny/net_allow lists must come from the same snapshot, so a read
     failure has exactly one outcome - refuse - no matter what LOCALM_NET_MODE
-    says. Resolving mode and lists from two separate reads (as network_mode()
-    and the old _config() helper did) let an env override reach past a
-    transient config-read failure and silently drop the user's explicit deny
-    list while still letting the request through.
+    says. Resolving mode and lists from two separate reads would let an env
+    override reach past a transient config-read failure and silently drop the
+    user's explicit deny list while still letting the request through.
     """
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     try:
@@ -212,7 +211,7 @@ def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
     ``not ip.is_global`` is the primary predicate. It rejects loopback, RFC1918
     private, link-local (incl. 169.254.169.254 cloud metadata), the CGNAT shared
     space 100.64.0.0/10 (RFC 6598, which the stdlib does NOT mark is_private on
-    every version, so the old explicit list let it through), benchmarking,
+    every version), benchmarking,
     documentation and other special-use ranges in one shot, and it stays correct
     as the stdlib adds new reserved ranges.
 
@@ -239,8 +238,8 @@ def _literal_ipv4(host: str) -> Optional[ipaddress.IPv4Address]:
     ipaddress.ip_address() refuses the dotless / hex / octal / short forms, and
     socket.getaddrinfo may raise for them, so without this an attacker can hand
     '2130706433' (== 127.0.0.1) to the policy and slip past the public-address
-    check (SEC-5). socket.inet_aton parses the historical IPv4 forms; we then
-    classify the canonical address it yields. Normal hostnames contain letters
+    check. socket.inet_aton parses the historical IPv4 forms; the canonical
+    address it yields is then classified. Normal hostnames contain letters
     or dots-with-letters and make inet_aton raise, so they fall through."""
     try:
         packed = socket.inet_aton(host)
@@ -287,7 +286,7 @@ def _check_public_address(host: str) -> None:
 
 def _resolve_pinned(host: str) -> Optional[str]:
     """Resolve *host* to ONE IP to pin the connection to, closing the
-    check-and-connect DNS-rebinding TOCTOU (SSRF-REBIND). ``check_url`` resolves
+    check-and-connect DNS-rebinding TOCTOU. ``check_url`` resolves
     and validates the host, but ``requests`` re-resolves at connect time, so a
     TTL-0 attacker can answer 'public' for the check and 'internal' for the
     connect. Here we resolve ONCE, validate the address(es), and return the exact
@@ -356,7 +355,7 @@ def _host_header(parsed) -> str:
 
 def _session_for(url: str):
     """A ``requests.Session`` whose socket is pinned to *url*'s pre-validated IP
-    (SSRF-REBIND). ``check_url`` MUST already have passed on *url*. This is the
+    ``check_url`` MUST already have passed on *url*. This is the
     single network-transport seam: production pins here, tests double it here.
     The caller sends ``_host_header(url)`` as the Host header and closes the
     session (use it as a context manager).
@@ -378,7 +377,7 @@ def _session_for(url: str):
 
 
 def pinned_request(method: str, url: str, **kwargs):
-    """A single policy-pinned HTTP request (SSRF-REBIND) for callers that manage
+    """A single policy-pinned HTTP request for callers that manage
     their own response (streamed downloads, HEAD probes) instead of going through
     safe_fetch_bytes. ``check_url`` MUST already have passed on *url*.
 
@@ -422,7 +421,7 @@ def safe_fetch_bytes(
     for _ in range(_MAX_REDIRECTS + 1):
         check_url(current)
         parsed = urllib.parse.urlparse(current)
-        # Pin the socket to the just-validated IP for this hop (SSRF-REBIND);
+        # Pin the socket to the just-validated IP for this hop;
         # each redirect target is independently re-checked and re-pinned.
         with _session_for(current) as session:
             resp = session.get(
@@ -598,7 +597,7 @@ def _searxng_search(base: str, query: str, max_results: int) -> list[dict]:
     url = f"{base}/search?{urllib.parse.urlencode({'q': query, 'format': 'json'})}"
     check_url(url)
     parsed = urllib.parse.urlparse(url)
-    with _session_for(url) as session:   # pinned to the validated IP (SSRF-REBIND)
+    with _session_for(url) as session:   # pinned to the validated IP
         resp = session.get(url, timeout=_DEFAULT_TIMEOUT, allow_redirects=False,
                            headers={"User-Agent": _USER_AGENT,
                                     "Host": _host_header(parsed)})
@@ -675,7 +674,7 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
     url = "https://html.duckduckgo.com/html/"
     check_url(url)
     parsed = urllib.parse.urlparse(url)
-    with _session_for(url) as session:   # pinned to the validated IP (SSRF-REBIND)
+    with _session_for(url) as session:   # pinned to the validated IP
         resp = session.post(   # the HTML endpoint prefers POST for queries
             url,
             data={"q": query},

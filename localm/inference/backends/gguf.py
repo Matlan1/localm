@@ -5,15 +5,13 @@ isolated worker PROCESS (see llamacpp/_runner.py and llamacpp/_worker.py).
 The model's whole lifecycle (load, generate, tokenize, grammar-check, unload)
 runs in a disposable child process, not here: llama_load_model_from_file (and
 every later context-grow, which hits the same native call class) can
-hard-abort the WHOLE PROCESS on a native CUDA/HIP driver failure - no Python
-try/except can catch that. Isolating just the load call is not enough (a
-model must go on to serve many later requests, and context growth is just as
-abort-prone as the initial load), and isolating just a native handle back to
-this process is not possible (a ctypes.c_void_p model/context pointer is
-meaningless outside the process that created it) - so the isolation boundary
-wraps the model's entire lifecycle. A crash in the child kills only the
-child; this process reports it as a clean, catchable error and the backend
-reloads fresh on the next request, exactly like today's in-process contract.
+hard-abort the WHOLE PROCESS on a native CUDA/HIP driver failure, and no Python
+try/except can catch that. The isolation boundary wraps the model's ENTIRE
+lifecycle, not just the load call: a model goes on to serve many later
+requests, context growth is as abort-prone as the initial load, and a
+ctypes.c_void_p model/context pointer is meaningless outside the process that
+created it. A crash in the child kills only the child; this process reports it
+as a clean, catchable error and the backend reloads fresh on the next request.
 
 This class itself (GgufBackend) stays a thin, parent-side proxy: preflight
 VRAM sizing (VramSizingMixin, shared with the child) still runs here, before
@@ -43,7 +41,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     Drives our own ctypes binding to llama.dll inside an isolated worker
     process (see the module docstring) - this class never imports LlamaCpp or
     touches a native pointer itself. If the native runtime cannot be loaded,
-    load() raises rather than degrading to a slower, lower-fidelity path.
+    load() raises; there is no degraded fallback path.
     """
 
     def __init__(
@@ -187,11 +185,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     def _load_native(self) -> None:
         """Load by spawning an isolated worker process and handing it the
-        already-resolved parameters (see the module docstring for why this
-        runs out-of-process). Preflight sizing (ctx_max/gpu_layers) stays
-        here, exactly as when the native call was made in-process - none of
-        it touches the abort-prone call, so it can safely run before a child
-        even exists."""
+        already-resolved parameters (see the module docstring). Preflight sizing
+        (ctx_max/gpu_layers) stays here: none of it touches the abort-prone
+        native call, so it can safely run before a child even exists."""
         from localm.inference.backends.llamacpp._runner import ModelRunner
         from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
@@ -380,11 +376,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         """Model-load timeout, from config (``gguf_load_timeout_s``) or the
         generous built-in default. Unlike the VRAM-probe daemon's short
         bounded wait (which has a safe "unmeasurable, skip" fallback), a
-        stalled model load has no safe default - see ModelRunner.spawn_and_load
-        for why this always raises rather than silently reporting not-loaded.
+        stalled model load has no safe default - see ModelRunner.spawn_and_load,
+        which always raises rather than silently reporting not-loaded.
         Configurable because a multi-GB model on a slow disk can legitimately
-        take minutes, and that varies far more by install than a fixed
-        constant could ever cover."""
+        take minutes, and that varies far more by install than a fixed constant
+        could cover."""
         from localm.inference.backends.llamacpp._runner import LOAD_TIMEOUT_DEFAULT
         from localm.config import load_config
         raw = load_config().get("gguf_load_timeout_s")
@@ -404,9 +400,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         (``gguf_first_token_timeout_s``) or the generous built-in default.
         Configurable for the same reason as the load timeout above: it covers
         prompt PREFILL, whose duration varies enormously by install (CPU vs GPU,
-        partial offload, prompt length) - far more than a fixed constant could
-        cover. See FIRST_TOKEN_TIMEOUT_DEFAULT for why this is not the per-token
-        ceiling."""
+        partial offload, prompt length). This is not the per-token ceiling - see
+        FIRST_TOKEN_TIMEOUT_DEFAULT."""
         from localm.inference.backends.llamacpp._runner import FIRST_TOKEN_TIMEOUT_DEFAULT
         from localm.config import load_config
         raw = load_config().get("gguf_first_token_timeout_s")
@@ -458,26 +453,24 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         _grammar_unsupported and silently strip grammar from later requests. No-op
         when not loaded (no vocab to parse against) or when *grammar* is empty.
 
-        *lazy* is ACCEPTED AND IGNORED, and both halves are deliberate. Accepted
-        because the chat routes now pass it by keyword on every grammar request:
-        without it in this signature, overriding the base method would turn every
-        GGUF grammar request into a TypeError. Ignored because this backend has no
-        honest answer to give from here. ``_api.has_lazy_grammar()`` is the only
-        probe available and it cannot be called in the server parent (it raises
-        RuntimeError when no runtime is provisioned, and loads llama.dll into this
-        process when one is - see ``BaseBackend.validate_grammar`` for the
-        measurement). Answering "supported" here to look complete would be the
-        worse of the two, because a capability claim is something callers act on.
+        *lazy* is ACCEPTED AND IGNORED. Accepted because the chat routes pass it
+        by keyword on every grammar request, and without it in this signature
+        overriding the base method would turn every GGUF grammar request into a
+        TypeError. Ignored because this backend has no honest answer to give from
+        here: ``_api.has_lazy_grammar()`` is the only probe available and it
+        cannot be called in the server parent (it raises RuntimeError when no
+        runtime is provisioned, and loads llama.dll into this process when one
+        is - see ``BaseBackend.validate_grammar``). A capability claim is
+        something callers act on, so answering "supported" here is not an option.
 
-        What silence here costs is now only EARLINESS. A GGUF build lacking the
-        native lazy export used to DROP the grammar at generation time behind a
-        DEBUG line and answer with unconstrained text; ``_build_sampler`` in
-        ``llamacpp/llama.py`` now RAISES :class:`GrammarUnsupportedError` there
-        instead, and ``_runner.py`` carries that type across the worker IPC as a
-        tagged envelope, so the caller gets the same clean 400 it would have got
-        from an up-front check - one request later, and never a reply that
-        silently does not match the grammar. Evidence:
-        ``dev-notes/lazy-grammar-silent-unconstrained-2026-08-12.md``."""
+        What silence here costs is EARLINESS only. On a GGUF build lacking the
+        native lazy export, ``_build_sampler`` in ``llamacpp/llama.py`` RAISES
+        :class:`GrammarUnsupportedError` at generation time instead of dropping
+        the grammar and answering with unconstrained text, and ``_runner.py``
+        carries that type across the worker IPC as a tagged envelope, so the
+        caller gets the same clean 400 an up-front check would have given - one
+        request later, and never a reply that silently does not match the
+        grammar."""
         if grammar and self.loaded and self._runner is not None:   # the loaded property, not the raw flag
             try:
                 self._runner.check_grammar(grammar)

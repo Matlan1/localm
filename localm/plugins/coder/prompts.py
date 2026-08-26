@@ -130,9 +130,9 @@ def _full_tool_docs(disabled: frozenset = frozenset()) -> str:
     signal), a concrete example call, and the optional params. Tools in
     *disabled* are omitted (e.g. run_shell for a restricted, shareable key).
 
-    Disabling a shell-execution tool expands to the whole family here, not just
-    in the callers: this is the boundary that decides what the model is TOLD
-    exists, and it is called directly (not only via build_system_prompt)."""
+    Disabling a shell-execution tool expands to the whole family here, not only
+    in the callers, because this function is also called directly rather than
+    only via build_system_prompt."""
     from .agent.constants import expand_shell_disable
     from .tools import TOOL_REGISTRY
     disabled = expand_shell_disable(disabled)
@@ -348,8 +348,8 @@ RULES
 
 def _display_cwd(cwd) -> str:
     """The working directory as shown to the model: home-anchored (``~/proj/app``)
-    when under the user's home, else just the project folder name. Hides the OS
-    username and absolute machine layout from the prompt (REC-CODER-GUI-PATH)."""
+    when under the user's home, else just the project folder name. Keeps the OS
+    username and absolute machine layout out of the prompt."""
     try:
         p = Path(cwd).resolve()
     except Exception:
@@ -366,28 +366,15 @@ def _prependable_leaf(shown_cwd: str) -> str | None:
     taken from the string the model was SHOWN, or None when that string holds
     no plain folder name to warn about.
 
-    Why the clause exists at all: any project outside the user's home directory
-    (an entirely ordinary setup - a separate drive, /opt, /srv, an external
-    mount) hits _display_cwd's fallback and is shown as JUST a bare name, with
-    no leading path context. Measured live: qwen2.5-coder-1.5b-instruct AND
-    qwen2.5-coder-7b-instruct BOTH, independently, read a bare "Working
-    directory: proj" and then wrote tool-call paths like
-    "proj/strings_utils.py" - which resolves to ".../proj/proj/strings_utils.py"
-    and does not exist. Every read_file / edit_file against the real file then
-    fails on that doubled path, repeatedly, until the circuit breaker stops the
-    run - not a model-capability gap, a prompt ambiguity reproduced identically
-    across two very different model sizes.
+    A project outside the user's home directory (a separate drive, /opt, /srv,
+    an external mount) hits _display_cwd's fallback and is shown as JUST a bare
+    name, with no leading path context, and a model then writes tool-call paths
+    like "proj/strings_utils.py" that resolve to ".../proj/proj/strings_utils.py".
 
-    Why it derives from *shown_cwd* rather than resolving the cwd a SECOND
-    time: the clause's whole job is "do not repeat the name I JUST SHOWED YOU",
-    so any independently-derived name is answering an adjacent question - and
-    the two diverge exactly where it hurts. For cwd == the user's home
-    directory, _display_cwd yields "~/." (the account name withheld on purpose,
-    REC-CODER-GUI-PATH) while Path(cwd).resolve().name yields the ACCOUNT NAME
-    itself, so the clause meant to clarify the path would have printed the
-    username into every prompt - defeating the one thing _display_cwd exists to
-    do. Deriving from the shown string makes that divergence unrepresentable
-    rather than merely fixed.
+    The name is taken from *shown_cwd*, never from a second resolution of the
+    cwd. For cwd == the user's home directory, _display_cwd yields "~/." (the
+    account name withheld) while Path(cwd).resolve().name yields the ACCOUNT NAME
+    itself, so a second derivation would print the username into every prompt.
     """
     leaf = shown_cwd.rsplit("/", 1)[-1]
     # "~/." (the home directory itself), a bare drive root, or anything that is
@@ -525,23 +512,18 @@ def build_subagent_system_prompt(
 ) -> str:
     """The ROLE BRIEF injected into a spawned sub-agent's system prompt.
 
-    This is a section of the child's prompt, not a replacement for it. It used to
-    return a whole standalone 500-character prompt and had no callers at all,
-    which was lucky: a child built from it would have lost the RULES, the
-    untrusted-content provenance framing (the indirect-prompt-injection defence,
-    and a sub-agent is exactly who fetches web content), the project map and the
-    memory that ``build_system_prompt`` supplies. The child keeps the full prompt
-    and gains this brief, so a role only ever ADDS focus, never removes safety.
+    This is a SECTION of the child's prompt, never a replacement for it. The
+    child keeps the full prompt - the RULES, the untrusted-content provenance
+    framing, the project map and the memory ``build_system_prompt`` supplies -
+    and gains this brief, so a role only ever ADDS focus.
 
-    The cwd is HOME-ANCHORED for the same reason as the identity line at the top
-    of ``build_system_prompt``: the raw path carries the OS username and machine
-    layout into the prompt, and from there into anything the model echoes back
-    (AGENTS.md rule 2). The old body interpolated ``{cwd}`` directly.
+    The cwd is HOME-ANCHORED, as in the identity line at the top of
+    ``build_system_prompt``: the raw path carries the OS username and machine
+    layout into the prompt, and from there into anything the model echoes back.
 
-    ``model_name`` is accepted so callers can pass the family id uniformly, but the
-    brief is deliberately family-neutral: the per-family thinking hint and
-    tool-call syntax already come from ``build_system_prompt``, and repeating them
-    here would state the call format twice in one prompt.
+    ``model_name`` is accepted so callers can pass the family id uniformly, but
+    the brief is family-neutral: the per-family thinking hint and tool-call
+    syntax come from ``build_system_prompt``.
     """
     # Lazy import: agent/ imports this module, so a top-level import would cycle.
     # Disabling one shell-execution tool disables the whole family.

@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""FIX4: a collection built the ORDINARY way (add_paths/add_uploads/resync) must
-record which embedding model built it, not only a collection that went through
-reembed(). Before this, ``self._meta["embedding_model"]`` had exactly one writer
-in the whole file (reembed()), so the "built with X" clause in the dimension-
-mismatch message (_dim_mismatch_message) was empty for every collection made
-the common way - the one this backlog entry names as the actual gap.
+"""A collection built the ORDINARY way (add_paths/add_uploads/resync) records which
+embedding model built it, not only one that went through reembed(). That value
+is what fills the "built with X" clause in the dimension-mismatch message
+(_dim_mismatch_message).
 
 No mocks of the thing under test: every case drives Collection.add_paths /
 add_uploads / resync against a tmp_path collection dir and reloads from disk to

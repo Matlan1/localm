@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The 2026-07-22 drain-review fixes (X1, X2, X3, X9, X10, X11, X15).
+"""The drain-review fixes.
 
-THE LOAD-BEARING TEST IS THE FIRST ONE. `dispatch_parallel` shipped through two
-PRs unable to run at all: the dispatcher injects the hidden ``_parent_agent``
-argument for a hardcoded list of tool names, the tool was never added to it, and
-its first statement is ``if _parent_agent is None: return error``. So the model
-was told the tool existed, the user was shown a confirmation card, and every call
-failed. A 525-line test file missed it because every one of its calls invoked
-``tool_dispatch_parallel(...)`` DIRECTLY with ``_parent_agent=parent`` supplied by
-hand, which is the one thing the product never does.
+THE LOAD-BEARING TEST IS THE FIRST ONE. `dispatch_parallel` could not run at
+all: the dispatcher injects the hidden ``_parent_agent`` argument for a
+hardcoded list of tool names, the tool was not in it, and its first statement is
+``if _parent_agent is None: return error``. So the model was told the tool
+existed, the user was shown a confirmation card, and every call failed. A test
+file that invokes ``tool_dispatch_parallel(...)`` DIRECTLY with
+``_parent_agent=parent`` supplied by hand cannot see that, because supplying it
+by hand is the one thing the product never does.
 
 ``test_every_registry_tool_receives_its_hidden_args_through_the_real_dispatcher``
-is the test whose absence hid that: it walks the WHOLE registry, dispatches each
-tool through the real ``Agent._execute_tool``, and asserts the tool function
-actually received every hidden parameter its signature declares. It is derived
-from signatures rather than a hand-kept list, so a tool added tomorrow with a new
+is the test that catches it: it walks the WHOLE registry, dispatches each tool
+through the real ``Agent._execute_tool``, and asserts the tool function actually
+received every hidden parameter its signature declares. It is derived from
+signatures rather than a hand-kept list, so a tool added tomorrow with a new
 hidden argument is covered without anyone remembering to update this file.
 """
 
@@ -197,7 +197,7 @@ def test_the_parent_agent_injection_set_matches_the_registry(tmp_path):
 
 
 def test_dispatch_parallel_gets_past_its_parent_agent_guard(tmp_path):
-    """The live reproduction from the review, as a regression test.
+    """The live reproduction, as a regression test.
 
     An EMPTY repo is the cheap probe: reaching "no commits yet" proves the call
     got past the ``_parent_agent`` guard, past task normalisation, past the
@@ -247,15 +247,14 @@ def test_a_malformed_model_value_is_rejected_cleanly(repo):
 
 def test_the_child_budget_is_returned_when_the_acquire_loop_itself_raises(
         repo, monkeypatch):
-    """The STRUCTURAL half of X2, with an oracle that can actually tell.
+    """The STRUCTURAL half, with an oracle that can actually tell.
 
-    The window the fix closed is between the FIRST successful acquire and the
-    `try`. Raising from anything further in (say the first `_git` call) does NOT
-    discriminate: that call was already inside the try before the fix, and the
-    old `finally` already released. So this raises from the acquire LOOP itself,
-    on the second slot, which is only covered once the loop moved inside the
-    try/finally. Hoist the acquire back out and this goes red; the sibling
-    malformed-model test would not.
+    The window is between the FIRST successful acquire and the `try`. Raising
+    from anything further in (say the first `_git` call) does NOT discriminate:
+    that call is already inside the try, and the `finally` already releases. So
+    this raises from the acquire LOOP itself, on the second slot, which is only
+    covered once the loop moved inside the try/finally. Hoist the acquire back
+    out and this goes red; the sibling malformed-model test would not.
     """
     before = child_limit.available()
     assert before >= 2, "this test needs at least two free slots to be meaningful"
@@ -327,7 +326,7 @@ def test_a_failed_childs_error_trace_reaches_the_parent(repo, monkeypatch):
 
 
 def test_a_failed_background_child_is_not_absorbed_as_ok(tmp_path):
-    """X3's live-today half: #796's background path (persistence.py)."""
+    """The background path (persistence.py)."""
     from localm.plugins.coder import delegated as _delegated
 
     agent = _agent(tmp_path)
@@ -451,7 +450,7 @@ def test_synchronous_spawn_agent_does_not_report_a_failed_child_as_finished(
 
 
 def test_the_scoped_prune_probe_forces_english_git_messages(repo, monkeypatch):
-    """D2: the line we parse is gettext-translated.
+    """The line we parse is gettext-translated.
 
     On a git build shipping message catalogs, a localized line fails the regex,
     the fail-closed branch reports OUR OWN records as foreign, and cleanup is
@@ -479,11 +478,11 @@ def test_the_scoped_prune_probe_forces_english_git_messages(repo, monkeypatch):
 
 def test_a_queued_child_that_never_started_says_so_and_leaves_no_worktree(
         repo, slow_child):
-    """X9: one slot, two tasks, deadline burned by the first child.
+    """One slot, two tasks, deadline burned by the first child.
 
     The second child never runs. Calling that a 600s timeout whose 'worktree is
-    still held by the running thread' was false in every clause, and the teardown
-    skipped its worktree on that basis, leaking it with no reaper.
+    still held by the running thread' is false in every clause, and the teardown
+    skips its worktree on that basis, leaking it with no reaper.
     """
     # Take one of the two slots so the dispatch can only get one.
     outsider = child_limit.try_acquire("test", "outsider")
@@ -540,9 +539,9 @@ def _register_worktree(repo: Path, path: Path, branch: str) -> None:
 def test_a_foreign_worktree_record_survives_the_coder_prune(repo, tmp_path):
     """A user worktree on a drive that is not mounted looks 'missing' to git.
 
-    `git worktree prune` takes no pathspec, so the coder's teardown used to drop
-    that record too. Recovery needs `git worktree repair`, and the coder never
-    locks the worktrees it does not own.
+    `git worktree prune` takes no pathspec, so an unscoped prune in the coder's
+    teardown drops that record too. Recovery needs `git worktree repair`, and
+    the coder never locks the worktrees it does not own.
     """
     foreign = tmp_path / "user-work"
     _register_worktree(repo, foreign, "user/feature")
@@ -583,7 +582,7 @@ def test_the_scoped_prune_still_reaps_our_own_records(repo, tmp_path):
 
 
 def test_the_background_finalizer_uses_the_scoped_prune(repo, tmp_path):
-    """X11's LIVE-TODAY site: #796's background teardown ran the same bare prune."""
+    """The background teardown must use the scoped prune, not a bare one."""
     from localm.plugins.coder.tools.agents import _finalize_isolated_child
 
     foreign = tmp_path / "user-work"
@@ -614,8 +613,9 @@ def test_a_destructive_tool_does_not_run_beside_an_abandoned_peer(tmp_path,
     """run_tests is non-destructive and a real suite outlives the batch deadline.
 
     The timeout path cancels (a no-op on a running future) and shuts the pool down
-    without joining, so the destructive segment used to start while the peer was
-    still executing - the exact stacked concurrency destructive=True prevents.
+    without joining, so without this gate the destructive segment starts while the
+    peer is still executing - the exact stacked concurrency destructive=True
+    prevents.
     """
     agent = _agent(tmp_path)
     monkeypatch.setattr(type(agent), "_PARALLEL_BATCH_TIMEOUT_S", 0.2)
@@ -652,10 +652,10 @@ def test_a_destructive_tool_does_not_run_beside_an_abandoned_peer(tmp_path,
 def test_the_destructive_gate_survives_into_the_next_turn(tmp_path, monkeypatch):
     """The refusal tells the model to wait, so the NEXT turn must gate too.
 
-    _execute_tools runs once per turn. When the abandoned list lived in that call
-    frame it was empty again immediately, so a model that did what the refusal
-    said walked into an ungated dispatch while the peer was still running - the
-    fix's own advice routing it into the hole the fix exists to close.
+    _execute_tools runs once per turn. An abandoned list living in that call
+    frame is empty again immediately, so a model that did what the refusal said
+    walks into an ungated dispatch while the peer is still running - the fix's
+    own advice routing it into the hole the fix exists to close.
     """
     agent = _agent(tmp_path)
     monkeypatch.setattr(type(agent), "_PARALLEL_BATCH_TIMEOUT_S", 0.2)

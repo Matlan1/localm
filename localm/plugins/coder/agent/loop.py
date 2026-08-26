@@ -26,27 +26,23 @@ _RE_WORKSPACE = None      # compiled on first use
 
 
 def implies_action(text: str) -> bool:
-    """True when *text* asks for something that needs a TOOL rather than an
+    """True when *text* asks for something that needs a TOOL, not an
     explanation - the precondition for escalating a turn that produced no tool
-    call (NEW-CODER-NO-TOOLCALL-SILENT).
+    call.
 
     Two independent signals, either of which is enough: an imperative action
     verb (``_ACTION_VERBS``), or a reference to this workspace - a path, a
     filename with an extension, or a project noun (``_WORKSPACE_HINT``). Read
     verbs count: "show me what is in config.py" needs read_file exactly as much
-    as "write config.py" needs write_file, and a model answering either from
-    imagination is the same defect.
+    as "write config.py" needs write_file.
 
-    THE BAR IS DELIBERATELY LOW, and that is a judgement about relative cost,
-    not sloppiness. A false POSITIVE costs one extra turn whose re-prompt says
-    in as many words that a plain answer is acceptable if no tool is needed, so
-    the model can decline and the loop finishes normally. A false NEGATIVE is
-    the defect this whole ladder exists to remove: the request is silently
-    answered with prose and nothing happens. Those are not symmetric, so this
-    leans toward firing.
+    THE BAR IS LOW, and leans toward firing. A false POSITIVE costs one extra
+    turn whose re-prompt states that a plain answer is acceptable if no tool is
+    needed, so the model can decline and the loop finishes normally. A false
+    NEGATIVE silently answers the request with prose and does nothing.
 
-    Pure and module-level so it can be tested directly on the request strings
-    that matter, without constructing an Agent."""
+    Pure and module-level, so it can be tested directly on request strings
+    without constructing an Agent."""
     global _RE_WORKSPACE
     if not text:
         return False
@@ -125,9 +121,8 @@ class _LoopMixin:
         Best-effort: a retrieval failure just returns the task unchanged.
 
         Also RECORDS which lessons were injected (id + text), on the agent, on the
-        event stream, and in the audit trail. Retrieval used to render the lessons
-        and throw the Episode objects away, so a lesson that steered a run badly
-        was invisible after the fact and there was no handle to forget it by."""
+        event stream, and in the audit trail, so a lesson that steered a run badly
+        is identifiable afterwards and can be forgotten by id."""
         if not self._episodic or self._episode_store is None:
             return task
         try:
@@ -316,8 +311,8 @@ class _LoopMixin:
                 # ---- repeated-scaffold breaker ---------------------------
                 # Counts a turn whose response is SIMILAR (not identical) to any
                 # turn in a bounded history AND whose tool-call signature matches
-                # that turn's. Both conditions must hold. Matching against a
-                # history rather than only the previous turn also catches an
+                # that turn's. Both conditions must hold. Matching against the
+                # whole history, not just the previous turn, also catches an
                 # A-B-A-B alternation.
                 fp = (response or "").strip()
                 sig = " | ".join(
@@ -669,7 +664,7 @@ class _LoopMixin:
 
     def _escalate_no_tool_attempt(self, response, interactive, st):
         """Escalate a turn that produced NO tool call and no attempt at one, on a
-        request that needs a tool (NEW-CODER-NO-TOOLCALL-SILENT).
+        request that needs a tool.
 
         Returns None to fall through to the remaining gates, or the same
         ``(should_break, final_response)`` pair the caller propagates.
@@ -768,21 +763,10 @@ class _LoopMixin:
         record, appended UNCONDITIONALLY - never gated on what the response
         text itself claims.
 
-        The literature calls a model's own completion claim going unchecked
-        "false success" / "silent failure": up to 75.8% of failures in
-        agentic coding trajectories that emit an explicit completion signal
-        turn out to contradict the real environment state, and verifiability
-        of the environment - not the model's phrasing - is what predicts it.
-        Every approach that actually closes this gap grounds on the
-        observable artifact instead of the model's self-report (a diff, a
-        test exit code), never on parsing the claim itself - a keyword-gated
-        caveat would inherit the same unreliability being guarded against.
-
-        This reuses the exact facts loop.py already tracks for the self-
-        verify nudge and the exit-code oracle (changed_files(),
-        _last_verify_state) rather than re-deriving anything or reading the
-        response text, so it cannot be gamed by phrasing: it never looks at
-        what the model said, only at what the harness actually recorded.
+        Built from the facts loop.py already tracks for the self-verify nudge
+        and the exit-code oracle (changed_files(), _last_verify_state), never
+        from the response text, so it cannot be gamed by phrasing: it reports
+        only what the harness recorded.
         """
         changed = self.changed_files()
         if changed:
@@ -798,14 +782,11 @@ class _LoopMixin:
         """Run the pre-done review over *diff* and return the feedback to feed
         back (``""`` when the answer stands).
 
-        Fail-OPEN is kept exactly as it was: a reviewer that crashes or emits
-        garbage never blocks the agent. What changes is that such a review is no
-        longer SILENT. ReviewResult.ok=False used to have zero readers anywhere,
-        so ``review_feedback()`` handed back the same "" for "approved" and for
-        "the reviewer threw an exception" - a verification step that failed
-        reported as success (AGENTS.md rule 5). It is now surfaced as a warning +
-        an audit entry, distinct from an approval, so the user knows the diff went
-        out unchecked. Visibility only: control flow is unchanged.
+        Fail-OPEN: a reviewer that crashes or emits garbage never blocks the
+        agent. It is not silent either - ``ReviewResult.ok=False`` is surfaced as
+        a warning plus an audit entry, distinct from an approval, so the user
+        knows the diff went out unchecked. Visibility only; control flow is the
+        same in both cases.
         """
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
         result = self._reviewer.review(diff, self._review_task)
@@ -1100,8 +1081,8 @@ class _LoopMixin:
         """Wait a bounded grace for abandoned non-destructive peers to end.
 
         Returns the ones STILL running, so the caller can refuse to start a
-        destructive tool beside them. Bounded, because an unbounded join here would
-        reintroduce the very hang the batch deadline exists to avoid.
+        destructive tool beside them. The wait is bounded: an unbounded join here
+        would defeat the batch deadline.
         """
         deadline = time.monotonic() + self._ABANDONED_PEER_GRACE_S
         for fut, _name in abandoned:

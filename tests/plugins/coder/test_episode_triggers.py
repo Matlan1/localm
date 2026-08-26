@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Coder episode TRIGGERS + reflection evidence (audit clusters 11 and 13).
+"""Coder episode TRIGGERS + reflection evidence.
 
 These drive the REAL Agent dispatch / close path (not mocks of the unit under
 test): the tool-failure trace is captured through the real _execute_tool, git
@@ -125,9 +125,9 @@ def test_failed_no_change_session_stores_thin_failure_episode(home, tmp_path):
 
 def test_cli_close_reflection_is_bounded_not_unbounded(home, tmp_path, monkeypatch):
     """A no-file-change FAILED session (max_turns / a circuit breaker / a failed
-    verify oracle - REG-594's exact trigger) must not block CLI exit for the
-    full duration of a slow or wedged model call. Patches the deadline down so
-    the test itself stays fast while still proving the bound is real."""
+    verify oracle) must not block CLI exit for the full duration of a slow or
+    wedged model call. Patches the deadline down so the test itself stays fast
+    while still proving the bound is real."""
     import threading
     import time
 
@@ -167,9 +167,9 @@ def test_cli_close_reflection_is_bounded_not_unbounded(home, tmp_path, monkeypat
 def test_cli_close_reflection_stores_the_full_episode_within_deadline(
         home, tmp_path, monkeypatch):
     """Negative for the bound: a normal-speed reflection must not be truncated
-    or downgraded to the thin fallback just because it is now wrapped in a
-    deadline - REG-594's fix must not change what gets stored in the common
-    case, only cap the worst case."""
+    or downgraded to the thin fallback just because it is wrapped in a deadline.
+    The bound must change only the worst case, not what gets stored in the
+    common one."""
     import localm.plugins.coder.agent.session as _session_mod
     monkeypatch.setattr(_session_mod, "_CLI_REFLECTION_DEADLINE_S", 5.0)
 
@@ -188,7 +188,7 @@ def test_cli_close_reflection_stores_the_full_episode_within_deadline(
 
 def test_cli_close_prints_a_reflecting_notice_before_the_synchronous_call(
         home, tmp_path, monkeypatch):
-    """The synchronous wait must be visible, not a silent hang (REG-594)."""
+    """The synchronous wait must be visible, not a silent hang."""
     import localm.plugins.coder.agent.session as _session_mod
     printed: list = []
     monkeypatch.setattr(_session_mod, "print_info", printed.append)

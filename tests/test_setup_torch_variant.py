@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SETUP-1: the PyTorch variant (for the HuggingFace/transformers backend) must
-follow the user's chosen llama.cpp BACKEND, not just the detected GPU vendor.
+"""The PyTorch variant (for the HuggingFace/transformers backend) follows the
+user's chosen llama.cpp BACKEND, not just the detected GPU vendor.
 
-The reported bug: an AMD box where the user explicitly picked ``[2] vulkan`` for
-the native runtime STILL got the AMD ROCm torch stack, because both installers
-chose torch from the DETECTED vendor and ignored the backend pick. On Windows the
-ROCm extra hard-pins the gfx103X wheel (pyproject ``[tool.uv.sources]``), so this
-is not merely surprising - it forces a vendor stack the user stepped off.
+Choosing torch from the DETECTED vendor alone gives an AMD box whose user picked
+``[2] vulkan`` the AMD ROCm torch stack, and on Windows the ROCm extra hard-pins
+the gfx103X wheel (pyproject ``[tool.uv.sources]``).
 
 `recommended_torch_variant(backend, det)` is the single shared policy both
-setup.bat and setup.sh call (via ``python -m localm.hwdetect torch <backend>``)
-so the two installers can never drift. Returns one of "cuda" | "rocm" | "xpu" | "none".
+setup.bat and setup.sh call (via ``python -m localm.hwdetect torch <backend>``).
+Returns one of "cuda" | "rocm" | "xpu" | "none".
 """
 
 from __future__ import annotations
@@ -82,15 +80,14 @@ def test_own_backend_follows_vendor_but_never_forces_rocm():
 @pytest.mark.parametrize("det", [AMD, NVIDIA, INTEL, NOGPU, MIXED])
 @pytest.mark.parametrize("vendor_neutral", ["vulkan", "cpu"])
 def test_vendor_neutral_pick_never_yields_rocm(vendor_neutral, det):
-    """The whole point: a vendor-neutral / no-GPU runtime pick must never drag in
-    the ROCm stack, no matter what hardware is detected."""
+    """A vendor-neutral or no-GPU runtime pick must never drag in the ROCm
+    stack, whatever hardware is detected."""
     assert tv(vendor_neutral, det) != "rocm"
 
 
 def test_old_naive_vendor_gate_would_have_been_wrong():
-    """Document why the fix matters: the OLD logic keyed torch on the detected
-    vendor alone, so AMD always meant rocm regardless of the backend pick. The
-    new policy diverges from that for a vulkan pick - which is the bug fix."""
+    """A vendor-only gate answers rocm for an AMD box regardless of the backend
+    pick; the policy answers none for a vulkan pick on the same box."""
     naive_vendor_gate = "rocm" if "amd" in AMD.vendors else "none"
     assert naive_vendor_gate == "rocm"               # the naive result
     assert tv("vulkan", AMD) == "none"               # what tv() returns

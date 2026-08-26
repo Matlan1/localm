@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.plugins.coder.tools.base.run_subprocess - the canonical
-subprocess-execution primitive (CODER-2) shared by tools/shell.py, tools/git.py,
-and cli/goal.py. Each caller's own behavior is covered by its own test file
-(test_tools_shell.py, test_git_tools.py, test_tools_timeout_partial.py); this
-file tests run_subprocess itself, directly."""
+subprocess-execution primitive shared by tools/shell.py, tools/git.py and
+cli/goal.py. Each caller's own behaviour is covered where that caller is tested;
+this file drives run_subprocess itself, directly."""
 
 import subprocess
 from unittest.mock import MagicMock, patch

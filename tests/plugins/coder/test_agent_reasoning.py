@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""AUD-HIGH-17-3: the coder agent's HTTP backend must surface a thinking
-model's H4 reasoning_content instead of silently dropping it (the bug fixed
-for localm run's default attach mode in AUD-HIGH-17 / AUD-HIGH-17-2, but NOT
-a drop-in port of that fix - context.py has no ThinkSplitter downstream, so
-reasoning must flow through a SEPARATE channel, never inline <think> tags, in
-all three _call_llm dispatch branches: event-sink, interactive terminal, and
-silent (non-interactive/sub-agent)."""
+"""The coder agent's HTTP backend must surface a thinking model's reasoning_content
+instead of silently dropping it. context.py has no ThinkSplitter downstream, so
+reasoning must flow through a SEPARATE channel, never inline <think> tags, in all
+three _call_llm dispatch branches: event-sink, interactive terminal, and silent
+(non-interactive/sub-agent)."""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -123,9 +121,8 @@ class TestCallLLMInteractive:
     def test_interrupted_stream_still_records_partial_text(self, tmp_path):
         """A KeyboardInterrupt mid-stream (Ctrl-C at the terminal) must still
         record and return whatever text streamed before the interrupt, not
-        lose it - the original inline code did this via a bare try/except
-        wrapping the whole consume+record sequence; _stream_and_record must
-        preserve that exact behaviour."""
+        lose it: _stream_and_record wraps the whole consume+record sequence in
+        a try/except for exactly that."""
         agent = _make_agent(tmp_path)
 
         def fake_chat_stream(messages, on_reasoning=None, **kw):
@@ -146,12 +143,10 @@ class TestCallLLMInteractive:
         agent._audit.llm.assert_called_once()
 
     def test_event_sink_and_interactive_share_one_streaming_implementation(self, tmp_path):
-        """CODER-3 regression guard: a comment in this module's history records
-        that the interactive branch once silently missed a fix (the lazy
-        tool-call grammar) the event-sink branch got, because the two branches
-        duplicated the whole consume-and-record loop. Both must now call the
-        SAME _stream_and_record method, so a future fix can never land in only
-        one of them again."""
+        """Both branches must call the SAME _stream_and_record method. When the
+        event-sink and interactive branches each carry their own copy of the
+        consume-and-record loop, a fix lands in only one of them - which is how
+        the interactive branch missed the lazy tool-call grammar."""
         from localm.plugins.coder.agent.context import _ContextMixin
 
         agent = _make_agent(tmp_path, on_event=lambda e: None)

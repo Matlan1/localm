@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A PATH conflict must be REAL, and the user decides what happens about it.
 
-Reported live from a real Windows install, at the "Make 'localm' runnable from
-any terminal?" step:
+At the "Make 'localm' runnable from any terminal?" step, setup could report:
 
     [!] A 'localm' command already exists at .\\localm.BAT. This clone's command
         was still added (lower precedence); the existing one takes priority
@@ -11,13 +10,12 @@ any terminal?" step:
 
 Two faults, and the second is worse than the first.
 
-FALSE POSITIVE. There was no other localm. ``shutil.which`` on Windows searches
+FALSE POSITIVE. There is no other localm. ``shutil.which`` on Windows searches
 the CURRENT DIRECTORY before PATH, setup runs with the cwd set to the clone, and
-the clone SHIPS its own localm.bat - so it found OUR OWN file. Reproduced
-exactly: with the cwd inside a clone, ``shutil.which("localm")`` returns
-``.\\localm.BAT``. Passing ``path=`` does NOT suppress that search (the
-current-directory insert happens whether or not a search path was supplied), so
-the fix has to filter the RESULT.
+the clone SHIPS its own localm.bat - so it finds OUR OWN file: with the cwd
+inside a clone, ``shutil.which("localm")`` returns ``.\\localm.BAT``. Passing
+``path=`` does NOT suppress that search (the current-directory insert happens
+whether or not a search path was supplied), so the fix has to filter the RESULT.
 
 DECIDED FOR THE USER. On the back of that phantom it demoted this install to
 lower precedence and reported it as done - while the remedy it named (reorder

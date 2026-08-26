@@ -33,9 +33,8 @@ from localm.pathsafe import confined_under, is_unc_or_device_path
 #
 #  A ComfyUI workflow is a dict of {node_id: {"class_type": str, "inputs": {...}}}.
 #  An input value is either a literal or a LINK [source_node_id, output_index].
-#  Node ids are arbitrary, so nodes are resolved by ROLE: find the sampler by
-#  class_type, then follow its positive / negative / latent edges to their source
-#  nodes. A graph that wires those roles works whatever its ids are.
+#  Nodes are resolved by ROLE: find the sampler by class_type, then follow its
+#  positive / negative / latent edges to their source nodes.
 
 # Sampler node classes that carry the seed / steps / cfg knobs and the
 # positive / negative / latent_image edges we trace the other roles from.
@@ -101,7 +100,7 @@ def resolve_sampler_roles(workflow: dict) -> dict:
 def set_seed_on(node: dict, seed: int) -> None:
     """Set whichever seed field a sampler node actually has (KSampler uses ``seed``;
     a RandomNoise / KSamplerAdvanced uses ``noise_seed``). Never invents a field the
-    node does not declare, which ComfyUI would reject."""
+    node does not declare."""
     inputs = node.get("inputs")
     if not isinstance(inputs, dict):
         return
@@ -113,10 +112,9 @@ def set_seed_on(node: dict, seed: int) -> None:
 
 def set_seed_on_all(workflow: dict, seed: int) -> int:
     """Set the seed on EVERY sampler/noise node in the graph and return how many were
-    set. A multi-sampler graph (a two-stage Wan high/low-noise split, an SDXL refiner)
-    must get the seed on each stage, or a later stage stays on the template's fixed
-    seed - making "random" output partially deterministic. Only touches nodes that
-    actually declare a seed field (set_seed_on is a no-op otherwise)."""
+    set, so a multi-sampler graph (a two-stage Wan high/low-noise split, an SDXL
+    refiner) gets the seed on each stage. Only touches nodes that actually declare a
+    seed field (set_seed_on is a no-op otherwise)."""
     n = 0
     for node in workflow.values():
         if not isinstance(node, dict):
@@ -132,8 +130,8 @@ def set_seed_on_all(workflow: dict, seed: int) -> int:
 
 def next_node_id(workflow: dict) -> str:
     """A node id not already used by *workflow* (max numeric id + 1, else a stable
-    name). Injected helper nodes (e.g. a LoadImage for img2img/img2video) use this
-    instead of a hardcoded id, which could clobber a node in a user's own graph."""
+    name). Injected helper nodes (e.g. a LoadImage for img2img/img2video) take
+    their id from here."""
     numeric = [int(k) for k in workflow if str(k).isdigit()]
     if numeric:
         return str(max(numeric) + 1)
@@ -150,12 +148,11 @@ def next_node_id(workflow: dict) -> str:
 #  On a box ComfyUI sees as 2+ GPUs, ComfyUI core's SelectModelDevice /
 #  SelectCLIPDevice / SelectVAEDevice nodes rehome a component onto another card
 #  (deepclone_multigpu -> the loader's cached_patcher_init factory -> independent
-#  weights on the target). These are injected so the second card carries work.
+#  weights on the target).
 #
-#  Loaders are located BY CLASS, never by id, so a user's arbitrary exported graph
-#  works. One loader may emit several components (CheckpointLoaderSimple:
-#  model=slot0, clip=slot1, vae=slot2); a dedicated loader emits its one component
-#  at slot 0.
+#  Loaders are located BY CLASS, never by id. One loader may emit several
+#  components (CheckpointLoaderSimple: model=slot0, clip=slot1, vae=slot2); a
+#  dedicated loader emits its one component at slot 0.
 
 # Component -> ordered (loader class_type, output slot) candidates. The first
 # match in the graph wins, so a checkpoint's own clip/vae outputs are preferred
@@ -176,16 +173,16 @@ _SELECT_NODE = {"model": "SelectModelDevice", "clip": "SelectCLIPDevice",
 # (ComfyUI-GGUF calls ``load_diffusion_model_state_dict`` /
 # ``load_text_encoder_state_dicts`` directly, bypassing the path-based wrappers
 # that set it). Cross-device placement re-invokes that factory via
-# ``deepclone_multigpu``, so a GGUF-loaded component is SKIPPED with a specific
-# reason rather than given a node ComfyUI would reject.
+# ``deepclone_multigpu``, so a GGUF-loaded component is SKIPPED with a stated
+# reason.
 _GGUF_LOADERS = frozenset({
     "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced", "DualCLIPLoaderGGUF", "CLIPLoaderGGUF",
 })
 
 
 def find_component_producer(workflow: dict, component: str):
-    """The ``(node_id, output_slot)`` producing *component*'s output, located BY CLASS
-    (so a user's arbitrary graph works), or ``None`` when no such loader is present."""
+    """The ``(node_id, output_slot)`` producing *component*'s output, located BY CLASS,
+    or ``None`` when no such loader is present."""
     for class_type, slot in _COMPONENT_LOADERS.get(component, ()):  # noqa: E501
         nid, _node = find_node_by_class(workflow, class_type)
         if nid is not None:
@@ -196,9 +193,9 @@ def find_component_producer(workflow: dict, component: str):
 def _reroute_output(workflow: dict, producer_id, slot: int, new_producer_id: str) -> None:
     """Repoint every input wired to ``[producer_id, slot]`` onto ``[new_producer_id, 0]``.
 
-    Called BEFORE the new node is inserted, so the new node's own input (which will read
-    from the loader) is never itself rewired. Id comparison is str-tolerant because a
-    link source id may be int or str across hand-written vs exported graphs."""
+    Must be called BEFORE the new node is inserted, so the new node's own input (which
+    will read from the loader) is never itself rewired. Id comparison is str-tolerant:
+    a link source id may be int or str."""
     for node in workflow.values():
         if not isinstance(node, dict):
             continue
@@ -214,9 +211,8 @@ def inject_device_placement(workflow: dict, plan: Optional[dict]) -> list:
     *plan* is ``{"model": "gpu:N"|None, "clip": ..., "vae": ...}``
     (:func:`localm.discover.plan_media_placement`); a ``None``/empty target keeps that
     component on its loader default (no injection). Returns human-readable notes: a
-    component that could NOT be placed (no matching loader in this graph) is surfaced in
-    the notes, never silently dropped (AGENTS rule 5). The caller pushes these to the
-    user so a requested-but-skipped placement is visible."""
+    component that could NOT be placed (no matching loader in this graph) is named in
+    the notes, never silently dropped."""
     notes = []
     for component, target in (plan or {}).items():
         if not target:
@@ -232,9 +228,7 @@ def inject_device_placement(workflow: dict, plan: Optional[dict]) -> list:
         pid, slot = producer
         producer_class = workflow.get(pid, {}).get("class_type", "")
         if producer_class in _GGUF_LOADERS:
-            # A GGUF loader has no cross-device factory (see _GGUF_LOADERS), so it
-            # is skipped with a specific reason rather than given a node ComfyUI
-            # cannot honor.
+            # A GGUF loader has no cross-device factory (see _GGUF_LOADERS).
             notes.append(f"could not place {component} on {target}: this workflow's "
                          f"{component} uses a GGUF loader ({producer_class}), which cannot "
                          "yet be moved across cards (a pending follow-up); left on the "
@@ -253,23 +247,19 @@ def inject_device_placement(workflow: dict, plan: Optional[dict]) -> list:
 def resolve_media_placement(config: Optional[dict], api_url: str):
     """Decide per-component GPU placement for one media job: ``(plan, notice)``.
 
-    The single DRY entry point the image/music/video plugins share (their VRAM/placement
-    preamble is otherwise byte-identical). ``plan`` is passed to ``generate_*`` to inject
-    the ``Select*Device`` nodes; ``notice`` is the user-facing line the plugin pushes.
+    The single entry point the image/music/video plugins share. ``plan`` is passed to
+    ``generate_*`` to inject the ``Select*Device`` nodes; ``notice`` is the user-facing
+    line the plugin pushes.
 
-    Three outcomes, all honest (rule 5 - a requested capability that is not delivered is
-    stated, never silently dropped):
+    Three outcomes:
 
-    - **Placement disabled** (the default until the 2-GPU mechanism is proven on real
-      hardware - the experimental ``comfy_gpu_placement`` toggle is off, or no 2+ card
-      split is configured): returns ``(None, <legacy notice>)`` - behaviour is exactly as
-      before, the single-card notice on a configured split and nothing on a plain box.
+    - **Placement disabled** (the experimental ``comfy_gpu_placement`` toggle is off,
+      or no 2+ card split is configured): returns ``(None, <legacy notice>)`` - the
+      single-card notice on a configured split, nothing on a plain box.
     - **Enabled and the running ComfyUI can place** (probe finds the Select*Device nodes
-      and 2+ GPUs): returns ``(plan, <placement notice>)`` - the second card carries the
-      text encoder + VAE.
-    - **Enabled but the running ComfyUI cannot** (an old ComfyUI of the USER'S OWN,
-      predating the nodes - or only one GPU visible): returns ``(None, <honest
-      reason notice>)`` so the user learns WHY placement did not happen.
+      and 2+ GPUs): returns ``(plan, <placement notice>)``.
+    - **Enabled but the running ComfyUI cannot** (an old ComfyUI predating the nodes, or
+      only one GPU visible): returns ``(None, <reason notice>)``.
 
     Best-effort and never raises: the probe swallows its own errors and any doubt yields
     no plan (single-card floor). ``api_url`` must point at a ComfyUI already confirmed
@@ -284,15 +274,13 @@ def resolve_media_placement(config: Optional[dict], api_url: str):
     # Gate 2 - only when a 2+ card split is actually applied; a cheap pre-check
     # before the /object_info probe. Uses applied_split_device_count, the
     # loader-truth count that mirrors apply_gpu_split's own gate, NOT
-    # split_device_count: the latter filters against a list_gpus() that is blind to
-    # Vulkan-only devices, so on the vulkan build a live 2-way split would collapse
-    # to <2 and wrongly decline placement.
+    # split_device_count, which is blind to Vulkan-only devices.
     from localm.discover import applied_split_device_count, plan_media_placement
     if applied_split_device_count(cfg) < 2:
         return None, media_split_notice(cfg)
     # Gate 3 - the running ComfyUI must offer the Select*Device nodes AND enumerate
     # 2+ GPUs (probe /object_info). An older ComfyUI, or a single visible card,
-    # declines with a stated reason rather than producing a graph ComfyUI rejects.
+    # declines with a stated reason.
     cap = probe_placement_capability(api_url)
     plan = plan_media_placement(cfg, gpu_options=cap.gpu_options) if cap.available else None
     return plan, media_split_notice(cfg, placement=plan, capability=cap)
@@ -339,12 +327,7 @@ def _combo_options(spec: dict, input_name: str) -> Optional[list]:
       input's first element is a type-name string ("INT", "MODEL", ...), not a list.
     - **v3 nodes** (the ``comfy_api`` schema, e.g. the Select*Device multigpu nodes):
       ``["COMBO", {"options": choices_list, ...}]`` - the first element is the io_type
-      string "COMBO" and the choices live under ``meta["options"]``. Verified against
-      the real serialization: server.py serves ``INPUT_TYPES()`` -> ``get_v1_info`` ->
-      ``add_to_dict_v1`` emits ``(input.get_io_type(), input.as_dict())`` and
-      ``Combo.get_io_type()`` is "COMBO" with the choices inside ``as_dict()``
-      (comfy_api/latest/_io.py, ComfyUI git 867404b). Missing this shape is why a
-      naive reader silently finds zero options on a v3 node and declines placement.
+      string "COMBO" and the choices live under ``meta["options"]``.
 
     A non-combo input (v1 or v3) returns None either way: its meta dict has no
     ``options`` list."""
@@ -375,8 +358,8 @@ def _combo_options(spec: dict, input_name: str) -> Optional[list]:
 class PlacementCapability:
     """Whether the RUNNING ComfyUI can do per-component GPU placement, and onto which
     positions. ``gpu_options`` are the live ``gpu:N`` strings the ``SelectModelDevice``
-    device combo offers (ComfyUI's OWN index space); ``reason`` is set (and human-
-    readable) whenever ``available`` is False, so a decline is never a silent mystery."""
+    device combo offers (ComfyUI's OWN index space); ``reason`` is set, and human
+    readable, whenever ``available`` is False."""
     available: bool
     gpu_options: list
     reason: str = ""
@@ -390,24 +373,15 @@ _PLACEMENT_NODES = ("SelectModelDevice", "SelectCLIPDevice", "SelectVAEDevice")
 def probe_placement_capability(api_url: str, *,
                                timeout: float = 10.0) -> PlacementCapability:
     """Ask the LIVE ComfyUI (``/object_info``) whether it offers per-component placement
-    and how many GPUs it enumerates. This is what makes placement SAFE by construction:
+    and how many GPUs it enumerates.
 
-    - It is the guard for a ComfyUI that PREDATES the multigpu nodes (first added
-      upstream 2026-05-25, tag v0.23.0). There the probe returns unavailable and
-      placement declines cleanly, rather than injecting a node ComfyUI would reject.
-      That is now only ever a ComfyUI of the user's OWN: localm's managed pin is
-      v0.31.1 and DOES offer the nodes (verified live against ``/object_info``; see
-      ``COMFYUI_PLACEMENT_MIN_VERSION`` next to the pin itself).
-    - It reads ComfyUI's OWN device enumeration (the ``gpu:N`` combo), which is
-      authoritative about how many cards ComfyUI actually sees. (The caller's Gate 2
-      uses ``applied_split_device_count`` as a cheap Vulkan-sound pre-filter; this probe
-      is the authoritative device count either way.)
+    Reads ComfyUI's OWN device enumeration (the ``gpu:N`` combo), which is the
+    authoritative count of how many cards ComfyUI sees.
 
     Unavailable (with a named reason) when: ``/object_info`` cannot be read; any of the
-    three ``Select*Device`` nodes is missing (old ComfyUI); or the device combo offers
-    fewer than two ``gpu:N`` options (ComfyUI sees one card - nothing to place onto).
-    Best-effort: on any doubt it returns unavailable, and the caller falls back to the
-    single-card floor."""
+    three ``Select*Device`` nodes is missing (a ComfyUI predating the multigpu nodes);
+    or the device combo offers fewer than two ``gpu:N`` options. Best-effort: on any
+    doubt it returns unavailable, and the caller falls back to the single-card floor."""
     info = comfy_object_info(api_url, timeout=timeout)
     if not isinstance(info, dict):
         return PlacementCapability(False, [], "could not read ComfyUI /object_info")
@@ -430,25 +404,14 @@ def _looks_like_model_files(options: list, current: Optional[str] = None) -> boo
     """True when a combo's options look like model files (a mismatch is then a
     missing-model error we can name), not an enum like sampler_name / scheduler.
 
-    With 2+ live options this is decided from *options* ALONE, exactly as
-    before *current* existed as a parameter: a real enum (sampler_name,
-    scheduler, ...) always has several live choices, and none of them can
-    ever look like a filename, so blending an unrelated *current* value into
-    that vote could only ever wrongly flip a genuine enum - it never helps.
+    With 2+ live options the answer is decided from *options* ALONE: at least half
+    of them must end in a model-file extension.
 
-    With 0 or 1 live options there is not enough of a sample to judge alone:
-    that is exactly what "ComfyUI has NOTHING of this file type installed"
-    (an empty list) or "this loader's only live choice is a non-file
-    sentinel" (e.g. a VAE loader offering just its built-in pixel-space
-    passthrough when no external VAE is installed) looks like. There *current*
-    - the node's value already in the workflow JSON, a concrete filename
-    regardless of whether ComfyUI has it installed - is the fallback signal,
-    so the slot still surfaces as "install this" instead of silently
-    vanishing from the picker (and from preflight_models(), which walks the
-    same slots). A single-option enum whose lone value is itself a stray
-    extension-like string is the residual false-positive this cannot rule
-    out, but that requires a hand-crafted/corrupted workflow - implausible
-    from ComfyUI's own UI - and this validation is best-effort by design."""
+    With 0 or 1 live options ("ComfyUI has NOTHING of this file type installed", or
+    a loader whose only live choice is a non-file sentinel) *current* - the node's
+    value already in the workflow JSON - is the fallback signal, so the slot still
+    surfaces as "install this". Best-effort: a single-option enum whose lone value
+    is itself an extension-like string is a residual false positive."""
     opts = options or []
     if len(opts) > 1:
         hits = sum(1 for o in opts if o.lower().endswith(_MODEL_FILE_EXTS))
@@ -463,31 +426,19 @@ def model_type_for_node(class_type: str) -> str:
     holds, or ``"unknown"`` when the node name carries no usable signal.
 
     ONE derivation, shared by every caller: the ComfyUI-folder scanner
-    (``model_manager/scan.py``, which reconciles its folder walk against
-    ``/object_info``) and the media plugins' model-role wiring both key off this.
-    A second copy of the heuristic elsewhere would drift, and the two would then
-    disagree about the same file.
+    (``model_manager/scan.py``) and the media plugins' model-role wiring both key
+    off this.
 
-    Node-NAME based on purpose, not the input name: ComfyUI's ecosystem renames
-    inputs freely across custom nodes (``unet_name`` / ``model_name`` /
-    ``ckpt_name``) while the class name keeps the loader's role legible
-    (``UNETLoader``, ``UnetLoaderGGUFAdvanced``, ``DualCLIPLoader``,
-    ``VAELoader``, ``LoraLoader``). Order matters: a checkpoint loader is checked
-    LAST of the positive cases so a name carrying both signals resolves to the
-    more specific one.
+    Keyed on the node NAME, not the input name (``UNETLoader``,
+    ``UnetLoaderGGUFAdvanced``, ``DualCLIPLoader``, ``VAELoader``, ``LoraLoader``).
+    Order matters: a checkpoint loader is checked LAST of the positive cases, so a
+    name carrying both signals resolves to the more specific one.
 
-    ``checkpoint`` maps to ``diffusion-unet`` deliberately, matching
-    ``scan.SUBFOLDER_MAPPING["checkpoints"]``: an all-in-one checkpoint bundles
-    UNet + text encoder + VAE, and the registry already files it under the UNet
-    type from its folder. Without this case the scanner's ``/object_info`` pass
-    stayed silent on checkpoints (it only ever overwrites with a KNOWN type), and
-    the music plugin - whose shipped ACE workflow's only model slot is a
-    ``CheckpointLoaderSimple`` - could never match its own declared
-    ``music-unet`` role.
+    ``checkpoint`` maps to ``diffusion-unet``, matching
+    ``scan.SUBFOLDER_MAPPING["checkpoints"]``.
 
-    A node this cannot classify returns ``"unknown"`` rather than a guess: that
-    is a real answer ("we could not tell"), and callers must not collapse it into
-    "there is nothing here"."""
+    A node this cannot classify returns ``"unknown"`` rather than a guess; callers
+    must not collapse that into "there is nothing here"."""
     name = (class_type or "").lower()
     if "unet" in name or "diffusion" in name:
         return "diffusion-unet"
@@ -509,11 +460,9 @@ def _normalize_model_base(name: str) -> str:
     precision / quant markers (fp16/fp8/bf16/e4m3fn/scaled/qN...), keeping everything
     else.
 
-    Crucially it does NOT drop bare digits or lone single letters: those are version
-    / variant discriminators (``wan2.1`` vs ``wan2.2``, ``model_s`` vs ``model_m``,
-    ``vae_1`` vs ``vae_2``) and collapsing them would merge genuinely different models
-    into one base and trigger a WRONG auto-substitution - the opposite of "a single
-    unambiguous precision variant"."""
+    It does NOT drop bare digits or lone single letters (``wan2.1`` vs ``wan2.2``,
+    ``model_s`` vs ``model_m``, ``vae_1`` vs ``vae_2``), which keeps genuinely
+    different models in different bases."""
     import re as _re
     n = name.lower().rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     for ext in _MODEL_FILE_EXTS:
@@ -565,8 +514,7 @@ def workflow_model_slots(workflow: dict, api_url: str) -> Optional[list]:
     """Every model-file combo slot in *workflow*, resolved against ComfyUI's live
     ``/object_info``: ``[{"node_id", "class_type", "input_name", "current",
     "options"}, ...]``. This is the node/input walk ``preflight_models()`` uses to
-    validate a workflow's model choices, exposed here for a model-picker UI too -
-    one shared walk, not two independently-maintained ones.
+    validate a workflow's model choices, exposed here for a model-picker UI too.
 
     None when ``/object_info`` cannot be fetched (ComfyUI unreachable) - distinct
     from ``[]`` (reachable, but this workflow genuinely has no model-file inputs),
@@ -668,9 +616,8 @@ def describe_missing_models(workflow: dict, api_url: str) -> list:
     otherwise mutating *workflow*. Used by a pre-check (e.g. before a user
     clicks Generate) that must not have side effects on the caller's workflow
     dict. Built on the same ``workflow_model_slots()`` walk ``preflight_models``
-    uses - one shared walk, not a third independently-maintained one. Returns
-    ``[]`` when /object_info is unavailable (same best-effort behavior as
-    ``preflight_models``) or nothing is missing."""
+    uses. Returns ``[]`` when /object_info is unavailable (same best-effort
+    behavior as ``preflight_models``) or nothing is missing."""
     slots = workflow_model_slots(workflow, api_url)
     if slots is None:
         return []
@@ -684,15 +631,11 @@ def slot_is_satisfied(slot: dict) -> bool:
     either the exact filename is among the live options, or a single unambiguous
     precision/quant variant of it is (which ``preflight_models`` substitutes in).
 
-    Split out of ``describe_missing_models`` so the model-picker/role surfaces
-    report "installed" by the SAME rule preflight uses to decide "missing" -
-    two rules would eventually disagree, and a picker calling a slot fine while
-    generation refuses it is the worst version of that.
+    The shared rule for both the model-picker/role surfaces ("installed") and
+    preflight ("missing").
 
-    A non-string ``current`` is unsatisfied rather than an exception. It cannot
-    arise from ``workflow_model_slots`` (which only emits string-valued inputs),
-    so this changes no reachable behaviour; it only keeps a hand-built slot dict
-    from raising deep inside the filename normaliser."""
+    A non-string ``current`` is unsatisfied rather than an exception; it cannot
+    arise from ``workflow_model_slots``, which only emits string-valued inputs."""
     value = slot.get("current")
     options = slot.get("options") or []
     if not isinstance(value, str):
@@ -717,17 +660,12 @@ def _localm_unload(localm_url: Optional[str] = None,
     else the persisted ``auth.key`` - or, in open/keyless mode, *instance_token*).
     The ``/v1/models/unload`` endpoint requires the models-write scope, so an
     UNAUTHENTICATED POST is rejected with 401 and the chat model stays resident
-    in VRAM - the media model then loads on top of it, exceeds total VRAM and
-    hangs the GPU driver (the AMD TDR the user hit). For the same reason the
-    built-in TLS cert of a loopback ``https`` self-call must be trusted, exactly
-    as the media-job model reload does (``localm.tls.requests_verify``); plain
-    ``urllib`` would reject the self-signed cert and silently skip the unload.
+    in VRAM. The built-in TLS cert of a loopback ``https`` self-call is trusted
+    via ``localm.tls.requests_verify``.
 
-    *instance_token*: this is a FALLBACK path, reached only when the primary,
-    already-authenticated ``vram.unload_chat_for_media`` call (which threads
-    the same instance token) reported failure. A genuinely open (keyless)
-    server still needs a credential here for the same reason it needs one on
-    the primary path - see ``selfclient.self_request``'s docstring.
+    *instance_token* is used on this FALLBACK path, reached only when the
+    primary, already-authenticated ``vram.unload_chat_for_media`` call reported
+    failure. A genuinely open (keyless) server still needs a credential here.
 
     Silent no-op when the URL is unset. Returns the server's JSON result
     (``status``, plus ``vram_freed`` / ``vram_before_bytes`` /
@@ -765,19 +703,14 @@ def _localm_unload(localm_url: Optional[str] = None,
 
 class ComfyRedirectRefused(Exception):
     """A ComfyUI HTTP call tried to redirect and localm refused it. See
-    _RefuseRedirect (CHK-COMFY-REDIRECT)."""
+    _RefuseRedirect."""
 
 
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
-    """LM-DA-045: sanitize_comfy_url (CHK-COMFY-APIURL, below) screens only the
-    CONFIGURED comfy_api_url, at resolution time. A redirect target is chosen by
-    the remote ComfyUI AFTER that check has already run, and urllib's default
-    opener follows up to 10 such redirects with no validation at all - so a
-    hostile or compromised ComfyUI (SECURITY.md: it "may be another machine,
-    over plain http") could answer any request with a 3xx straight past the
-    guard, e.g. to a cloud-metadata address. ComfyUI's HTTP API has no
-    legitimate reason to redirect, so every hop is refused outright here rather
-    than re-validated per hop (CHK-COMFY-REDIRECT)."""
+    """Refuses every redirect hop from a ComfyUI HTTP call, raising
+    ComfyRedirectRefused instead of following it. ``sanitize_comfy_url`` screens
+    only the CONFIGURED comfy_api_url, at resolution time; a redirect target is
+    chosen by the remote ComfyUI afterwards and is never policy-checked."""
 
     def redirect_request(self, req, fp, code, msg, hdrs, newurl):
         raise ComfyRedirectRefused(
@@ -787,7 +720,7 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
 
 def _comfy_urlopen(req_or_url, *, timeout=None):
     """Every ComfyUI HTTP call in this module goes through this, never a bare
-    urllib.request.urlopen - see _RefuseRedirect / CHK-COMFY-REDIRECT."""
+    urllib.request.urlopen. Redirects are refused (see _RefuseRedirect)."""
     return verified_urlopen(req_or_url, timeout=timeout, handlers=(_RefuseRedirect,))
 
 
@@ -796,8 +729,7 @@ _COMFY_LOOPBACK_DEFAULT = "http://127.0.0.1:8188"
 
 def _host_is_link_local(host: str) -> bool:
     """True if *host* is (or resolves to) a link-local / cloud-metadata address
-    (169.254.0.0/16, fe80::/10). A ComfyUI never lives there; loopback / LAN /
-    public do, and are allowed."""
+    (169.254.0.0/16, fe80::/10). Loopback, LAN and public addresses are not."""
     import ipaddress
     import socket
     if not host:
@@ -821,10 +753,7 @@ def _host_is_link_local(host: str) -> bool:
 def sanitize_comfy_url(url: str) -> str:
     """Return *url* unless its host is link-local / cloud-metadata (or the guard
     itself cannot validate it), in which case warn and fall back to the loopback
-    default. Defense-in-depth so an ADMIN-set comfy_api_url cannot turn the comfy
-    control calls (free / interrupt / stop) into an SSRF probe of cloud metadata
-    (CHK-COMFY-APIURL). Loopback + LAN + public are allowed - a real ComfyUI runs
-    on any of those."""
+    default. Loopback, LAN and public addresses are all allowed."""
     try:
         if _host_is_link_local(urllib.parse.urlparse(url).hostname or ""):
             from localm.debuglog import logger
@@ -833,9 +762,8 @@ def sanitize_comfy_url(url: str) -> str:
                 "it and using the loopback default (CHK-COMFY-APIURL)", url)
             return _COMFY_LOOPBACK_DEFAULT
     except Exception as e:
-        # FAIL CLOSED: when the guard itself cannot parse or verify the URL (e.g.
-        # urlparse raising "Invalid IPv6 URL"), fall back to the loopback default
-        # instead of returning the URL unchecked.
+        # Fail closed: a URL the guard cannot parse or verify falls back to the
+        # loopback default instead of being returned unchecked.
         from localm.debuglog import logger
         logger.warning(
             "comfy_api_url %r could not be validated (%s); ignoring it and "
@@ -846,15 +774,13 @@ def sanitize_comfy_url(url: str) -> str:
 
 def default_api_url() -> str:
     """ComfyUI base URL: FLUX_API_URL env override, then a localm-MANAGED
-    instance when one is installed and selected (coexistence, decision 6), then
-    the ``comfy_api_url`` config key, else the ComfyUI default port. A link-local
-    / cloud-metadata target is refused and falls back to loopback
-    (CHK-COMFY-APIURL).
+    instance when one is installed and selected, then the ``comfy_api_url``
+    config key, else the ComfyUI default port. A link-local / cloud-metadata
+    target is refused and falls back to loopback.
 
-    The managed-ComfyUI hook is the ONLY managed touch in this module and is
-    confined to TARGET RESOLUTION (never the launch/spawn path): it returns None
-    - byte-identical to before - until a managed instance actually exists on
-    disk, so nothing changes for a user who has not opted in."""
+    The managed-ComfyUI hook is confined to TARGET RESOLUTION (never the
+    launch/spawn path) and returns None until a managed instance exists on
+    disk."""
     env = os.environ.get("FLUX_API_URL")
     if env:
         return sanitize_comfy_url(env.rstrip("/"))
@@ -881,12 +807,9 @@ def free_comfy_vram(api_url: Optional[str] = None) -> bool:
     """
     Ask ComfyUI to unload its models and free VRAM (POST /free).
 
-    Returns True when ComfyUI accepted the request. Used after generation
-    so the chat model can be reloaded immediately instead of spilling into
-    system RAM next to a resident FLUX. Both an HTTP error (older ComfyUI
-    builds without /free) and a network error return False, but each is now
-    logged at debug level so --debug-discoverable can tell the two apart;
-    callers then leave the LLM reload lazy.
+    Returns True when ComfyUI accepted the request. Both an HTTP error (older
+    ComfyUI builds without /free) and a network error return False, each logged
+    at debug level so the two can be told apart.
     """
     url = (api_url or default_api_url()).rstrip("/")
     try:
@@ -898,9 +821,8 @@ def free_comfy_vram(api_url: Optional[str] = None) -> bool:
         with _comfy_urlopen(req, timeout=30):
             return True
     except urllib.error.HTTPError as e:
-        # Distinguish the documented older-build case (no /free endpoint) from a
-        # real network failure below, so a missing endpoint is not mistaken for
-        # ComfyUI being unreachable.
+        # The older-build case (no /free endpoint), distinct from the network
+        # failure handled below.
         from localm.debuglog import logger
         logger.debug("free_comfy_vram: ComfyUI /free returned HTTP %s (%s) at %s; "
                      "likely an older build without /free", e.code, e.reason, url)
@@ -933,22 +855,17 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
 #  back to back (once at the route-handler layer via ensure_available, once at the
 #  top of the generator function).
 #
-#  It is remembered for a few SECONDS, not for the process lifetime: ComfyUI can
-#  die mid-session (an OOM on a large render, a ZLUDA/ROCm torch crash, the user
-#  closing its window, VRAM eviction), and a permanent entry would report a dead
-#  ComfyUI as running, disabling both recovery paths (auto-launch from
-#  comfy_workdir, and the actionable "not reachable" message).
+#  It is remembered for a few SECONDS, not for the process lifetime.
 #
 #  mark_comfy_dead() (from stop_comfy(), and internally when ensure_comfy() can no
 #  longer reach it) clears the entry outright.
 # ---------------------------------------------------------------------------
 
-# How long a confirmed-reachable result stays trusted. Sized for the back-to-back
-# double-ping this cache exists to collapse, NOT for "ComfyUI stays up".
+# How long a confirmed-reachable result stays trusted.
 _CONFIRM_TTL_SECONDS = 5.0
 
 # api_url -> time.monotonic() when it was last confirmed reachable. monotonic, so
-# a wall-clock change (NTP, DST) cannot make an entry look fresh or ancient.
+# a wall-clock change cannot make an entry look fresh or ancient.
 _confirmed_alive: dict[str, float] = {}
 
 
@@ -964,8 +881,8 @@ def is_comfy_confirmed(api_url: Optional[str] = None) -> bool:
     """True when *api_url* was confirmed reachable within the last
     ``_CONFIRM_TTL_SECONDS`` and nothing has invalidated it since.
 
-    Deliberately time-bounded: a confirmation is evidence that ComfyUI was up a
-    moment ago, never a promise that it still is (see the section comment above).
+    A confirmation is evidence that ComfyUI was up a moment ago, never a promise
+    that it still is.
     """
     seen = _confirmed_alive.get((api_url or default_api_url()).rstrip("/"))
     return seen is not None and (time.monotonic() - seen) < _CONFIRM_TTL_SECONDS
@@ -974,8 +891,7 @@ def is_comfy_confirmed(api_url: Optional[str] = None) -> bool:
 def warm_comfy_status_async(api_url: Optional[str] = None) -> None:
     """Fire-and-forget readiness check for the "on app start" trigger: primes
     the cache without blocking plugin registration and without attempting to
-    launch ComfyUI (an app boot should not decide FOR the user that this
-    session needs ComfyUI running - only the on-demand triggers do that)."""
+    launch ComfyUI (only the on-demand triggers do that)."""
     import threading
 
     url = (api_url or default_api_url()).rstrip("/")
@@ -994,10 +910,7 @@ def history_execution_error(entry: dict) -> Optional[str]:
     When a node crashes mid-render (a missing model, an ACE-Step/ComfyUI version
     mismatch, an OOM) ComfyUI still records the prompt in ``/history`` but with
     ``status.status_str == "error"`` and an ``("execution_error", {...})`` message
-    carrying the node type and exception text. The poll loops otherwise only look
-    for an output artifact and, finding none, blame a generic "no output" - so the
-    real cause was hidden and the user was told to read the ComfyUI console (issue
-    I2). Surfacing it here turns that into the actual reason."""
+    carrying the node type and exception text; that text is what is returned."""
     status = entry.get("status") or {}
     for m in (status.get("messages") or []):
         if isinstance(m, (list, tuple)) and len(m) >= 2 and m[0] == "execution_error":
@@ -1026,9 +939,8 @@ def history_execution_error(entry: dict) -> Optional[str]:
 
 def is_known_comfy_func_regression(detail) -> bool:
     """True when a ComfyUI execution-error detail is the known upstream
-    make_locked_method_func __func__ regression (Comfy-Org/ComfyUI #12116,
-    patientx/ComfyUI-Zluda #424). ONLY this specific error should trigger the
-    reactive offer; every other execution error is unrelated and behaves as before."""
+    make_locked_method_func __func__ regression. ONLY this specific error triggers
+    the reactive offer."""
     if not detail:
         return False
     text = str(detail)
@@ -1037,11 +949,9 @@ def is_known_comfy_func_regression(detail) -> bool:
 
 
 def comfy_exec_error_message(payload, api_url: Optional[str] = None) -> str:
-    """Build the message for a ComfyUI POLL_EXEC_ERROR. For an unrelated error this
-    is the plain wording every generator used before. For the known __func__
-    regression it is a richer, actionable message: what it is, that the fix is
-    localm-side and in-memory (writes NOTHING into the user's ComfyUI install and
-    self-expires once ComfyUI is fixed), and how to apply it."""
+    """Build the message for a ComfyUI POLL_EXEC_ERROR. An unrelated error gets the
+    plain wording; the known __func__ regression gets a richer message naming the
+    localm-side in-memory shim and how to apply it."""
     detail = "" if payload is None else str(payload)
     if not is_known_comfy_func_regression(detail):
         return f"ComfyUI execution failed: {detail}"
@@ -1070,8 +980,7 @@ def comfy_exec_error_message(payload, api_url: Optional[str] = None) -> str:
 #  The shim above fixes THIS run in memory. The same crash also offers localm's own
 #  managed, patched ComfyUI (`localm comfy setup`) - at most ONCE (a persisted
 #  flag), never when a managed instance already exists, and never for an unrelated
-#  error. This is a decision plus a message; the CLI offer point (cli/media.py)
-#  presents it alongside the shim offer.
+#  error. The CLI offer point (cli/media.py) presents it alongside the shim offer.
 
 _MANAGED_SETUP_OFFERED_KEY = "comfy_managed_setup_offered"
 
@@ -1080,13 +989,10 @@ def should_offer_managed_comfy_setup(detail, cfg: Optional[dict] = None) -> bool
     """True when the ONE-TIME durable-fix offer (set up localm's own managed,
     patched ComfyUI) should be surfaced for a media error.
 
-    Gated on all three (design decisions 1 + 8): the error is the known upstream
-    ``__func__`` regression, NO managed ComfyUI is installed yet (else the offer is
-    moot - localm already routes to the patched managed instance, decision 6), and
-    localm has not already made this offer (the persisted
-    ``comfy_managed_setup_offered`` flag). Any one false -> no offer, so it never
-    nags. A managed-install check that itself errors fails SAFE toward not offering
-    (never surface something the user may already have)."""
+    Gated on all three: the error is the known upstream ``__func__`` regression, NO
+    managed ComfyUI is installed yet, and localm has not already made this offer
+    (the persisted ``comfy_managed_setup_offered`` flag). Any one false -> no offer.
+    A managed-install check that itself errors resolves to no offer."""
     if not is_known_comfy_func_regression(detail):
         return False
     try:
@@ -1114,7 +1020,7 @@ def managed_comfy_setup_offer_message() -> str:
     """The one-time durable-fix offer text: set up localm's OWN managed, patched
     ComfyUI so the recurring upstream regression cannot recur. Points at the
     explicit opt-in command (`localm comfy setup`); the user's own ComfyUI is left
-    untouched. Framed as the fix-for-good next to the shim's fix-this-run."""
+    untouched."""
     return (
         "This is a recurring upstream ComfyUI bug. For a durable fix - not just a "
         "patch for this run - localm can set up its OWN managed, patched ComfyUI so "
@@ -1124,10 +1030,9 @@ def managed_comfy_setup_offer_message() -> str:
 
 def mark_managed_comfy_setup_offered() -> None:
     """Persist ``comfy_managed_setup_offered=True`` so the durable-fix offer is made
-    at most ONCE (it never nags). Written directly (like the shim's
-    ``comfy_func_shim``), not through the settings form. Best-effort: a failure to
-    persist must not break the media error path (worst case the offer reappears next
-    time - annoying, not harmful), so it is logged at debug, never muted blind."""
+    at most ONCE. Written directly, not through the settings form. Best-effort: a
+    failure to persist is logged at debug and does not raise, so the offer may
+    reappear next time."""
     try:
         from localm.config import update_config
         update_config(lambda cfg: cfg.__setitem__(_MANAGED_SETUP_OFFERED_KEY, True))
@@ -1138,11 +1043,9 @@ def mark_managed_comfy_setup_offered() -> None:
 
 
 def _derive_workdir_from_cmd(launch_cmd: str) -> Optional[str]:
-    """The folder of the launcher script, so a .bat / .sh that references paths
-    relative to its own location (the ComfyUI + ZLUDA convention, e.g. a copied
-    ``launch-comfyui.bat`` next to ``python_embeded`` / ``venv``) runs from the
-    right place even when ``comfy_workdir`` was not set. Best-effort: returns the
-    parent of the first token that is an existing file, else None."""
+    """The folder of the launcher script, used as the working directory when
+    ``comfy_workdir`` is not set. Best-effort: returns the parent of the first
+    token that is an existing file, else None."""
     import shlex
     try:
         tokens = shlex.split(launch_cmd, posix=(os.name != "nt"))
@@ -1218,10 +1121,9 @@ def _amd_rocm_launch_env() -> Optional[dict]:
     """Child env for the ComfyUI launch with ROCm's bin on PATH, or None to inherit.
 
     ZLUDA's ``cublas64_11.dll`` / ``cusparse64_11.dll`` shims load rocBLAS / rocSPARSE
-    from ``%HIP_PATH%\\bin`` at ``import torch`` time. A localm process spawned from a
-    context that has only HIP_PATH set (not ROCm\\bin on PATH) would otherwise make a
-    ZLUDA ComfyUI die importing torch (WinError 126 on cublas64_11.dll). No-op off
-    Windows, without HIP_PATH, when the bin is missing, or when it is already on PATH.
+    from ``%HIP_PATH%\\bin`` at ``import torch`` time, so that directory is prepended
+    to the child's PATH. No-op off Windows, without HIP_PATH, when the bin is
+    missing, or when it is already on PATH.
     """
     import sys as _sys
     if _sys.platform != "win32":
@@ -1297,32 +1199,22 @@ def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
       (preserving any pre-existing PYTHONPATH).
     - ONLY for a USER'S OWN ComfyUI, ORDERS ``CUDA_VISIBLE_DEVICES``/
       ``HIP_VISIBLE_DEVICES`` so the preferred card leads and EVERY OTHER CARD STAYS
-      VISIBLE (REG-532).
+      VISIBLE.
 
-    ORDER, NEVER MASK. This shipped wrong once (f094d3d0) as a bare
-    ``CUDA_VISIBLE_DEVICES=<one id>``, which deletes the other cards from torch's view
-    and silently disables ComfyUI core's per-component placement nodes
-    (``SelectModelDevice``/``SelectCLIPDevice``/``SelectVAEDevice``,
-    ``comfy_extras/nodes_multigpu.py``, registered ``nodes.py:2440``): a ``gpu:1`` that
-    no longer exists is a no-op. So we emit the full ordered list ("1,0,2"), exactly
-    what ComfyUI's own ``--default-device`` writes at ``main.py:69-76``, rather than
-    the single id ``--cuda-device`` writes at ``main.py:78-81``.
+    ORDER, NEVER MASK: the full ordered list ("1,0,2") is emitted, the same shape
+    ComfyUI's own ``--default-device`` writes, never a single id. A masked-away card
+    would make ComfyUI core's per-component placement nodes
+    (``SelectModelDevice``/``SelectCLIPDevice``/``SelectVAEDevice``) a no-op.
 
-    Why the ENV here and the ARGV for the managed instance: for a managed ComfyUI
-    localm builds the command itself, so it passes ``--default-device`` (see
-    ``managed_comfy_launch_cmd``). A user's own ComfyUI is started by THEIR launcher -
-    often a .bat, possibly ZLUDA-wrapped - which localm must not rewrite, so the child
-    env is the only lever. Both routes end in the same place: those two env vars.
-    Setting both mirrors ComfyUI itself, which matters on the ZLUDA/ROCm path where
-    CUDA is emulated over HIP. Deliberately NOT set for the managed instance, so its
-    device has exactly ONE source of truth (the argv) rather than two that could
-    disagree.
+    Both ``CUDA_VISIBLE_DEVICES`` and ``HIP_VISIBLE_DEVICES`` are set, mirroring
+    ComfyUI itself, which matters on the ZLUDA/ROCm path where CUDA is emulated over
+    HIP. Neither is set for the MANAGED instance: there localm builds the command
+    itself and passes ``--default-device`` (see ``managed_comfy_launch_cmd``), so the
+    device has exactly one source of truth.
 
     Nothing is set when the user configured no split and no main GPU, or when no
-    torch-visible device can be named honestly: ``visible_device_order()`` returns None
-    and a plain box spawns exactly as it does today, rather than being pinned to an
-    invented card (which would also hide a second GPU the user later adds). Never
-    writes anything to disk."""
+    torch-visible device can be named: ``visible_device_order()`` returns None and the
+    box spawns with the inherited env. Never writes anything to disk."""
     base = _amd_rocm_launch_env()
 
     order = None
@@ -1332,9 +1224,7 @@ def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
             from localm.discover import visible_device_order
             order = visible_device_order(cfg)
     except Exception as e:
-        # Warn rather than spawning silently with no device order, and continue: a
-        # hard failure here would break a working single-GPU setup. Without an
-        # order, the media VRAM check may not match the card ComfyUI uses.
+        # Warn and continue without a device order rather than raising.
         from localm.debuglog import logger
         logger.warning("could not resolve a GPU device order for the ComfyUI child env "
                        "(%s); launching without one. On a multi-GPU box the media VRAM "
@@ -1402,18 +1292,13 @@ def spawned_pid(api_url: Optional[str] = None) -> Optional[int]:
 #  Only one caller per api_url ever reaches the spawn step at a time: a second
 #  caller blocks until the first's whole attempt resolves (success or timeout),
 #  then re-checks aliveness under the lock before considering a launch of its own.
-#  Without it, two callers that both find ComfyUI down each spawn a process with no
-#  --port/--database-url override, collide on the same default port and database
-#  lock, and BOTH launches fail. The readiness cache (_CONFIRM_TTL_SECONDS above)
-#  de-duplicates only a CONFIRMED-ALIVE result, so it does not apply while both
-#  callers are still mid-launch.
+#  The readiness cache (_CONFIRM_TTL_SECONDS above) de-duplicates only a
+#  CONFIRMED-ALIVE result, so it does not apply while both callers are mid-launch.
 #
-#  KNOWN TRADE-OFF: a caller reached via run_in_threadpool_bounded budgets about
+#  A caller reached via run_in_threadpool_bounded budgets about
 #  comfy_launch_wait_seconds()+30s for its OWN attempt, not for queueing behind
-#  someone else's. If caller A's launch is slow and then fails, caller B can spend
-#  nearly all of its budget waiting on this lock and be ThreadCallTimeout'd shortly
-#  after acquiring it, while its own launch attempt keeps running to completion on
-#  the abandoned worker thread and may still succeed.
+#  someone else's, so it can be ThreadCallTimeout'd shortly after acquiring this
+#  lock while its own launch keeps running on the abandoned worker thread.
 # ---------------------------------------------------------------------------
 
 _launch_locks: dict = {}
@@ -1422,9 +1307,7 @@ _launch_locks_guard = _threading.Lock()
 
 def _launch_lock_for(api_url: str) -> "_threading.Lock":
     """The per-api_url lock serializing ensure_comfy()'s launch decision.
-    Created on first use; never removed (one lock per distinct api_url this
-    process ever launches for - unbounded only in the sense that the set of
-    distinct api_urls a single process targets is itself small and stable)."""
+    Created on first use; never removed."""
     with _launch_locks_guard:
         lock = _launch_locks.get(api_url)
         if lock is None:
@@ -1445,8 +1328,8 @@ def _launch_lock_for(api_url: str) -> "_threading.Lock":
 #  process (spawned_pid() is not None); a remote or already-running instance has no
 #  process here to read from.
 #
-#  The table below is NOT exhaustive - a fork, a newer ComfyUI release, or a custom
-#  node can log differently. Extend it as new cases are found.
+#  The table below is NOT exhaustive: a fork, a newer ComfyUI release, or a custom
+#  node can log differently.
 _COMFY_SILENT_PARTIAL_APPLY_PATTERNS = (
     ("lora key not loaded",
      "a LoRA patch key did not match the model and was skipped"),
@@ -1484,14 +1367,12 @@ def comfy_launch_log_path(api_url: str) -> Path:
     MUST be per-instance, not one shared path: image/video/music each resolve
     their OWN per-plugin comfy.api_url/workdir/launch_cmd (localm/plugins/
     media_config.py), so two independently self-launched ComfyUI instances can
-    be alive at once. ensure_comfy() truncates this file on every fresh
-    launch (open(..., "w")) - a single shared path would let one instance's
-    launch truncate/interleave-corrupt another still-running instance's
-    console log out from under it, and let comfy_console_warnings_since()
-    silently misattribute one instance's real warning onto the other's
-    generation record. A plain deterministic path (not tied to any one
-    process handle), so a caller can locate it without having launched
-    ComfyUI itself in this call - same api_url always maps to the same path."""
+    be alive at once, and ensure_comfy() truncates this file on every fresh
+    launch (open(..., "w")).
+
+    A deterministic path, not tied to any one process handle: the same api_url
+    always maps to the same path, so a caller can locate it without having
+    launched ComfyUI itself in this call."""
     from localm.config import home_dir
     import hashlib
     api_url = api_url.rstrip("/")
@@ -1501,10 +1382,8 @@ def comfy_launch_log_path(api_url: str) -> Path:
 
 def _launch_log_tail(log_path: Optional[Path], limit: int = 600) -> str:
     """The last *limit* chars of a self-launched ComfyUI's captured console
-    output at *log_path*, so a launch-failure message can show WHY instead of
-    just naming the file for the user to go open by hand. "" (nothing to add)
-    when there is no log path, the file is empty, or it cannot be read -
-    never raises: this only enriches an already-failing launch's message."""
+    output at *log_path*. Returns "" when there is no log path, the file is
+    empty, or it cannot be read. Never raises."""
     if log_path is None:
         return ""
     try:
@@ -1520,11 +1399,10 @@ def _launch_log_tail(log_path: Optional[Path], limit: int = 600) -> str:
 class ComfyConsoleTail:
     """Opaque token from comfy_console_tail_start, passed to
     comfy_console_warnings_since. Carries the spawned PID alongside the byte
-    offset so the later read can verify it is still looking at the SAME
-    process's log, not a same-api_url process that died and was relaunched
-    in between (which truncates the log via ensure_comfy's "w" open and
-    re-registers a NEW pid under the same _spawned_procs[api_url] key -
-    checking liveness alone cannot tell those apart)."""
+    offset, so the later read can verify it is still looking at the SAME
+    process's log and not a same-api_url process that died and was relaunched
+    in between (a relaunch truncates the log and re-registers a NEW pid under
+    the same _spawned_procs[api_url] key)."""
     offset: int
     pid: int
 
@@ -1533,8 +1411,7 @@ def comfy_console_tail_start(api_url: str) -> Optional[ComfyConsoleTail]:
     """Marks 'now' in the self-launched ComfyUI's console log, so a caller can
     later read only what it printed during one generation (see
     comfy_console_warnings_since). None when localm did not launch this
-    ComfyUI itself, or the log does not exist - there is nothing to tail, and
-    no offset would be meaningful."""
+    ComfyUI itself, or the log does not exist."""
     pid = spawned_pid(api_url)
     if pid is None:
         return None
@@ -1555,22 +1432,18 @@ def comfy_console_warnings_since(api_url: str,
     (x152)").
 
     Returns (checked, warnings). ``checked`` is True ONLY when localm actually
-    performed a real read of ComfyUI's console covering *tail*'s window - the
-    caller should derive any "did we actually check" signal (e.g. a sidecar's
-    comfy_console_checked field) from THIS, not from whether tail_start
-    returned non-None earlier, because the process can die or be replaced for
-    the same api_url in between the two calls. ``warnings`` is [] both when
-    checked is True and nothing matched (a genuine clean read) and whenever
-    checked is False (nothing to report). See NEW-COMFY-SILENT-PARTIAL-APPLY
-    in issues.txt: for a remote or pre-existing ComfyUI, checked is always
-    False, because there is no local process to read from at all."""
+    performed a real read of ComfyUI's console covering *tail*'s window. A
+    caller's "did we actually check" signal (e.g. a sidecar's
+    comfy_console_checked field) must come from THIS, not from whether
+    tail_start returned non-None earlier: the process can die or be replaced
+    for the same api_url in between the two calls. ``warnings`` is [] both when
+    checked is True and nothing matched, and whenever checked is False. For a
+    remote or pre-existing ComfyUI, checked is always False."""
     if tail is None:
         return False, []
     if spawned_pid(api_url) != tail.pid:
-        # Not merely "not alive" - not the SAME process any more, whether it died
-        # outright or was replaced by a relaunch (which truncates the log at
-        # tail.offset and hands the api_url key to a new pid). The bytes at
-        # tail.offset are not attributable to the generation being asked about.
+        # Not the SAME process any more, so the bytes at tail.offset are not
+        # attributable to the generation being asked about.
         return False, []
     try:
         with open(comfy_launch_log_path(api_url), "rb") as f:
@@ -1581,13 +1454,9 @@ def comfy_console_warnings_since(api_url: str,
     lines = new_bytes.decode("utf-8", errors="replace").splitlines()
     matches = []
     for substring, label in _COMFY_SILENT_PARTIAL_APPLY_PATTERNS:
-        # Per-line, not a whole-buffer substring count: a pattern must occur WITHIN
-        # one console line to count, so it cannot straddle two unrelated lines a
-        # byte-offset read butted together. A match does not prove the line came from
-        # logging.warning() rather than, say, ComfyUI echoing a filename containing
-        # the substring; the emitted label is always the fixed catalogue string,
-        # never the matched content, so a false match is a wrong label, not injected
-        # text.
+        # Per-line, not a whole-buffer substring count: a pattern must occur
+        # WITHIN one console line to count. The emitted label is always the fixed
+        # catalogue string, never the matched content.
         count = sum(line.count(substring) for line in lines)
         if count:
             matches.append(f"{label} (x{count})" if count > 1 else label)
@@ -1643,10 +1512,10 @@ def _kill_process_tree(proc) -> None:
 
 
 def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
-    """Stop ComfyUI (NEW-STOPCOMFY). Always aborts the in-flight render + clears
-    the queue and frees VRAM first (graceful). Then, IF localm launched this
-    ComfyUI, terminates the process tree we spawned; if localm did NOT launch it,
-    the process is left alone (we only kill our own) and the caller is told so."""
+    """Stop ComfyUI. Always aborts the in-flight render, clears the queue and
+    frees VRAM first (graceful). Then, IF localm launched this ComfyUI,
+    terminates the process tree it spawned; if localm did NOT launch it, the
+    process is left alone and the caller is told so."""
     api_url = (api_url or default_api_url()).rstrip("/")
     mark_comfy_dead(api_url)   # about to stop it either way - the next check must be real
     interrupt_comfy(api_url)                       # abort render + clear queue
@@ -1674,8 +1543,8 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
                   wait_seconds: Optional[int] = None,
                   launch_cmd: Optional[str] = None,
                   workdir: Optional[str] = None) -> tuple[bool, str]:
-    """Stop the ComfyUI localm launched (if any), then launch a fresh one
-    (NEW-STOPCOMFY). Only meaningful when localm has a launch command configured."""
+    """Stop the ComfyUI localm launched (if any), then launch a fresh one. Only
+    meaningful when localm has a launch command configured."""
     stop_comfy(api_url)
     return ensure_comfy(api_url=api_url, on_progress=on_progress,
                         wait_seconds=wait_seconds, launch_cmd=launch_cmd,
@@ -1687,15 +1556,10 @@ def comfy_launch_wait_seconds(cfg: Optional[dict] = None) -> int:
     configured ``comfy_launch_timeout`` (a ZLUDA/ROCm cold start compiles GPU
     kernels and can take minutes), falling back to 300s, floored at 30s.
 
-    Extracted out of ``ensure_comfy`` so a CALLER that needs to know this
-    budget ahead of time - a route wrapping ``ensure_available``/
-    ``restart_comfy`` in ``run_in_threadpool_bounded`` needs a timeout at
-    least this large, or it would abort a launch that is still legitimately
-    progressing - reads the exact same number ``ensure_comfy`` will actually
-    wait, rather than a second, independently-maintained guess that could
-    silently drift smaller than a user's own configured timeout. Pass an
-    already-loaded *cfg* to avoid a second ``load_config()`` disk read when
-    the caller already has one."""
+    This is the exact number ``ensure_comfy`` waits, so a caller that must size
+    its own timeout around a launch (e.g. a route wrapping ``ensure_available``/
+    ``restart_comfy`` in ``run_in_threadpool_bounded``) reads it here. Pass an
+    already-loaded *cfg* to avoid a second ``load_config()`` disk read."""
     if cfg is None:
         from localm.config import load_config
         cfg = load_config()
@@ -1720,16 +1584,14 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
 
     *launch_cmd* / *workdir* let a caller pass per-plugin config; when not given
     they fall back to the global ``comfy_launch_cmd`` / ``comfy_workdir`` config
-    keys (kept for callers not yet migrated to per-plugin config).
+    keys.
 
     Returns (ok, message); the message explains what to configure when
     nothing could be launched.
 
     The whole decide-then-launch sequence is serialized per api_url via
-    _launch_lock_for() (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK) - see that
-    lock's own module-level comment for why. The cheap aliveness checks below
-    run BEFORE acquiring it, so a caller that finds ComfyUI already up never
-    waits on anything.
+    _launch_lock_for(). The cheap aliveness checks below run BEFORE acquiring
+    it, so a caller that finds ComfyUI already up never waits on anything.
     """
     def _say(text: str) -> None:
         if on_progress:
@@ -1747,9 +1609,8 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     mark_comfy_dead(api_url)
 
     with _launch_lock_for(api_url):
-        # Re-check under the lock: another caller may have finished an entire launch
-        # (or be mid-launch and about to succeed) while this one waited above, so a
-        # redundant second launch is skipped.
+        # Re-check under the lock: another caller may have finished an entire
+        # launch while this one waited above.
         if is_comfy_confirmed(api_url) or _comfy_alive(api_url):
             mark_comfy_alive(api_url)
             return True, "ComfyUI is running."
@@ -1760,10 +1621,9 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
 def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
                      workdir: Optional[str], wait_seconds: Optional[int],
                      _say) -> tuple[bool, str]:
-    """The actual decide-config / spawn / poll-until-up body of ensure_comfy(),
-    split out so the lock in ensure_comfy() wraps it without needing to
-    re-indent it. Always called with _launch_lock_for(api_url) already held -
-    not meant to be called directly."""
+    """The decide-config / spawn / poll-until-up body of ensure_comfy(). Must be
+    called with _launch_lock_for(api_url) already held; not meant to be called
+    directly."""
     import shlex
     import subprocess
     import sys as _sys
@@ -1783,11 +1643,7 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
             from localm.media.managed_comfy import (
                 managed_comfy_active, managed_comfy_launch_cmd, managed_comfy_workdir)
             if managed_comfy_active(cfg):
-                # Atomic: adopt the managed workdir only if BOTH calls succeed. A
-                # raise from the second would otherwise leave `workdir` on the
-                # managed folder with no matching launch_cmd, and the code below
-                # would run global-config/discovery against that folder instead of
-                # taking the clean "not managed" path.
+                # Adopt the managed workdir only if BOTH calls succeed.
                 managed_workdir = managed_comfy_workdir()
                 managed_launch_cmd = managed_comfy_launch_cmd()
                 workdir = managed_workdir
@@ -1849,8 +1705,7 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     # paths survive instead of being re-quoted by subprocess.
     if not workdir:
         # No configured ComfyUI folder: fall back to the launcher file's own
-        # folder so a .bat/.sh that uses paths relative to itself (ComfyUI +
-        # ZLUDA) still works when the user gave an absolute launcher path.
+        # folder.
         workdir = _derive_workdir_from_cmd(launch_cmd)
         if workdir:
             _say(f"Running the launcher from {workdir}")
@@ -1898,10 +1753,8 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     except Exception as e:
         return False, f"Could not launch ComfyUI ({launch_cmd}): {e}"
     finally:
-        # Close the PARENT's copy of the log handle on every path: the child
-        # inherited its own dup'd descriptor, so leaving this open would leak a
-        # file handle per launch (and on Windows hold a write lock the next
-        # launch's re-open would contend with). DEVNULL is a sentinel, not a file.
+        # Close the PARENT's copy of the log handle on every path; the child
+        # inherited its own dup'd descriptor. DEVNULL is a sentinel, not a file.
         if hasattr(launch_out, "close"):
             launch_out.close()
 
@@ -1916,8 +1769,7 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
             _say(f"Waiting for ComfyUI… ({int(elapsed)}s)")
             last_said = elapsed
         _t.sleep(2)
-    # Point the user at the captured launcher log, when one was opened: a ComfyUI
-    # that died on startup wrote its error there, not to the window.
+    # Point the user at the captured launcher log, when one was opened.
     tail = _launch_log_tail(launch_log_path)
     if launch_log_path and tail:
         log_hint = f" The launcher's own output ({launch_log_path}):\n{tail}"
@@ -1993,7 +1845,7 @@ def _image_dimensions(path: Path) -> tuple[int, int]:
 
 # Magic-byte signatures of the raster formats ComfyUI's LoadImage node reads.
 # ((offset, bytes), ...) per format; WEBP and the RIFF family need a second
-# window, hence the tuple-of-windows shape rather than a flat prefix list.
+# window, so each entry is a tuple of windows rather than a flat prefix.
 _IMAGE_SIGNATURES: tuple[tuple[tuple[int, bytes], ...], ...] = (
     ((0, b"\x89PNG\r\n\x1a\n"),),                  # PNG
     ((0, b"\xff\xd8\xff"),),                       # JPEG
@@ -2021,21 +1873,15 @@ def _upload_image(image_path: Path, api_url: str) -> str:
     Returns the filename ComfyUI assigned (used in the LoadImage node).
     Raises on failure.
 
-    Sniffs the magic bytes FIRST, before reading the body or opening the socket.
-    This upload TRANSMITS the file, and sanitize_comfy_url deliberately permits
-    api_url to be a LAN or public host over plaintext http, so "whatever bytes
-    the caller named" must never leave the machine. media/paths.py confines
-    WHERE an HTTP caller's input_image may live; this is the choke point that
-    also covers the CLI and the coder tool, for which that path policy does not
-    apply. Both gates are needed: neither subsumes the other.
+    Sniffs the magic bytes FIRST, before reading the body or opening the socket,
+    and raises ValueError when they do not match a supported raster format. This
+    is the choke point for every caller (HTTP, CLI, the coder tool).
     """
     with open(image_path, "rb") as f:
         head = f.read(16)
     if not looks_like_image(head):
-        # The allowlist is narrower than "image": formats localm accepts elsewhere
-        # (.heic/.heif, an ordinary iPhone photo) are refused here because the
-        # backend's loader cannot be assumed to read them. The message names the
-        # supported set rather than claiming the file is not an image.
+        # The allowlist is narrower than "image": formats localm accepts
+        # elsewhere (.heic/.heif) are refused here.
         raise ValueError(
             f"{image_path.name} is not in a format this upload supports "
             f"(PNG, JPEG, GIF, BMP, WebP or TIFF - detected from the file's "
@@ -2084,19 +1930,11 @@ def _comfy_output_root(comfy_output_dir: Optional[str] = None) -> Optional[Path]
     Order: explicit arg, COMFY_OUTPUT_DIR env, the ``comfy_output_dir`` config
     key, then a derived ``<comfy_workdir>/output`` when that exists.
 
-    ``comfy_output_dir`` (the arg, env var, and config key alike) is settable
-    by a caller holding only the config:write scope - privileged, but NOT
-    ADMIN (inference/routes/config.py's set_media_config ADMIN-gates
-    launch_cmd/api_url/workdir but deliberately not this key). This is the
-    READ-TIME choke point every caller of this function goes through, so the
-    UNC/device guard belongs HERE rather than at each call site or only at
-    the config-write boundary: confined_under() (used downstream by
-    contain_comfy_artifacts) validates the RELATIVE path handed to it, never
-    the base it is confined under, so a UNC-shaped base reaches its
-    .resolve() call - the SMB dial - before any containment check can refuse
-    it. A write-side check alone would also leave an ALREADY-PERSISTED config
-    value from before this fix unguarded, which is why read time is
-    authoritative here, not a backup for a config-write-side check."""
+    A UNC or device path is REFUSED here (warn, return None) rather than
+    returned. This is the read-time choke point every caller goes through:
+    ``confined_under()`` downstream validates the RELATIVE path handed to it,
+    never the base it is confined under, so a UNC-shaped base would reach its
+    ``.resolve()`` call before any containment check could refuse it."""
     cand = comfy_output_dir or os.environ.get("COMFY_OUTPUT_DIR")
     if not cand:
         try:
@@ -2114,9 +1952,7 @@ def _comfy_output_root(comfy_output_dir: Optional[str] = None) -> Optional[Path]
     if not cand:
         return None
     if is_unc_or_device_path(cand):
-        # Fail safe, like the "cannot be resolved" case above, but WARN: the
-        # caller's own "set the ComfyUI output dir" message would otherwise read as
-        # nothing being configured when something dangerous was.
+        # Fail safe, like the "cannot be resolved" case above, but WARN.
         from localm.debuglog import logger
         logger.warning(
             "comfy_output_dir is a UNC or device path (%r) - refusing to use "
@@ -2169,20 +2005,15 @@ def contain_comfy_artifacts(
 
     warnings: list = []
     # Remove the uploaded img2img source from ComfyUI's input/ dir (sibling of
-    # output/), warning on failure rather than silently leaving a stray copy of the
-    # user's input.
+    # output/), warning on failure rather than leaving a stray copy silently.
     #
-    # `uploaded_input` is ComfyUI's OWN reply (result["name"] from /upload/image),
-    # i.e. remote data driving an unlink(), so it is confined under the input dir:
-    # plain pathlib would let an absolute component REPLACE the base outright and a
-    # "../.." walk out of it, which on a LAN or public api_url would hand a hostile
-    # ComfyUI arbitrary file deletion with localm's privileges.
+    # `uploaded_input` is ComfyUI's OWN reply (result["name"] from
+    # /upload/image), i.e. remote data driving an unlink(), so it is confined
+    # under the input dir.
     if uploaded_input and root is not None:
         try:
             inp = confined_under(root.parent / "input", uploaded_input)
         except ValueError:
-            # NOT silently skipped: containment was requested and did not happen, so
-            # the user is told.
             warnings.append(
                 f"ComfyUI returned an out-of-bounds input filename "
                 f"({uploaded_input!r}); its copy in ComfyUI's input folder was "
@@ -2233,9 +2064,8 @@ def interrupt_comfy(api_url: str) -> bool:
     """Abort ComfyUI's currently running prompt and clear its queue (POST
     ``/interrupt`` + POST ``/queue {"clear": true}``).
 
-    Best-effort, used to honour a user's Stop so a long media gen actually stops
-    instead of running to completion. Shared by image, music, and video. Returns
-    True when the interrupt was accepted."""
+    Best-effort. Shared by image, music, and video. Returns True when the
+    interrupt was accepted."""
     ok = False
     try:
         req = urllib.request.Request(f"{api_url}/interrupt", data=b"", method="POST")
@@ -2271,8 +2101,8 @@ def _with_warning(message: str, warning: str) -> str:
 #  output keys to read, the wording of each error, how progress is shown) stay in
 #  each generator and are passed into the shared loop below as parameters.
 
-# Sentinel "kind" values returned by comfy_submit_prompt so the caller can build
-# its own medium-specific error text without this helper hardcoding any.
+# Sentinel "kind" values returned by comfy_submit_prompt; the caller builds its
+# own medium-specific error text from them.
 SUBMIT_OK = "ok"
 SUBMIT_NO_ID = "no_prompt_id"
 SUBMIT_HTTP_ERROR = "http_error"
@@ -2290,9 +2120,8 @@ def comfy_submit_prompt(api_url: str, workflow: dict, *, timeout: float = 10.0):
       - ``SUBMIT_URL_ERROR`` -> value is the ``urllib.error.URLError``
       - ``SUBMIT_ERROR``     -> value is the ``Exception``
 
-    The caller maps each kind to its own (unchanged) message text. This mirrors
-    the per-module try/except exactly: an HTTPError, a URLError, then a catch-all
-    Exception, in that order."""
+    The caller maps each kind to its own message text. Exceptions are classified
+    in order: HTTPError, then URLError, then a catch-all Exception."""
     try:
         req = urllib.request.Request(
             f"{api_url}/prompt",
@@ -2341,8 +2170,8 @@ def comfy_poll_until_done(
 
     ``on_tick(elapsed_seconds)`` is called once per iteration BEFORE the /history
     request (``elapsed_seconds`` is ``time.time() - start_time``), so the caller can
-    drive its own progress UI. Retry cadence, the in-loop exception swallow + retry,
-    and the timeout-with-last-error semantics match the per-module originals."""
+    drive its own progress UI. A failed poll is swallowed and retried within the
+    loop; the last such exception is what ``POLL_TIMEOUT`` carries."""
     import time
     start_time = time.time()
     last_poll_err: Optional[Exception] = None
@@ -2364,9 +2193,8 @@ def comfy_poll_until_done(
                     return POLL_EXEC_ERROR, err
                 return POLL_FINISHED, entry
         except Exception as e:
-            # Keep retrying within the loop (ComfyUI may just be busy), but
-            # remember the last failure so a crashed/unreachable ComfyUI is
-            # distinguishable from a merely slow one if we time out below.
+            # Keep retrying within the loop, remembering the last failure for the
+            # timeout return below.
             last_poll_err = e
         time.sleep(sleep_seconds)
     return POLL_TIMEOUT, last_poll_err
@@ -2380,7 +2208,7 @@ def select_output_info(entry: dict, output_keys) -> Optional[dict]:
     ``output_keys`` is the medium's save-node output keys, e.g. ``("images",)``
     for image, ``("videos", "gifs", "images")`` for video, ``("audio",)`` for
     music. The first key (in the given order) that a node has a non-empty list
-    for wins, matching the per-module poll loops."""
+    for wins."""
     for node_output in entry.get("outputs", {}).values():
         for key in output_keys:
             if node_output.get(key):

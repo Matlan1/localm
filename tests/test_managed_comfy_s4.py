@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """STAGE S4 (version-pin lifecycle + localm patch set + `localm comfy update`).
 
-Design decision 7 (dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md): localm
-pins a known-good ComfyUI commit and carries a small set of localm-owned patches on
-top of it (direct core edits, since this is localm's OWN ComfyUI). The pin advances
-only DELIBERATELY, via `localm comfy update`, which re-applies the patch set.
+localm pins a known-good ComfyUI commit and carries a small set of localm-owned
+patches on top of it (direct core edits, since this is localm's OWN ComfyUI). The
+pin advances only via `localm comfy update`, which re-applies the patch set.
 
 Three oracles, each with a built-in negative case so it fails on known-bad work:
 
@@ -308,10 +307,9 @@ def _commit_all(workdir: Path, msg: str) -> str:
 
 def _make_fake_venv(root: Path) -> None:
     """A placeholder venv interpreter + completion marker so
-    is_managed_comfy_installed() reads True (S4's update never rebuilds the
-    venv; it only moves the git source + patches). The marker is included
-    because #621's fix made it load-bearing - main.py + venv alone now reads
-    as "still installing", not "installed"."""
+    is_managed_comfy_installed() reads True (S4's update never rebuilds the venv;
+    it only moves the git source + patches). The marker is load-bearing: main.py
+    plus a venv alone reads as "still installing", not "installed"."""
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
@@ -441,12 +439,11 @@ def test_update_rolls_back_on_failure(home, tmp_path):
 
 @pytest.mark.skipif(not _git_available(), reason="git not on PATH")
 def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypatch):
-    """MEDIUM honesty fix: when a mid-update failure triggers rollback and the git
-    source IS restored but the localm patch set cannot be re-applied on it, update must
-    NOT report a clean rollback - the failed re-apply is surfaced in the returned
-    message (rule 5: a safety step that fails never claims success). Before the fix the
-    rollback's apply_patches outcomes were discarded, so the user was told the prior
-    install was restored 'exactly as it was' while it was actually left UNPATCHED (the
+    """When a mid-update failure triggers rollback and the git source IS restored
+    but the localm patch set cannot be re-applied on it, update must NOT report a
+    clean rollback: the failed re-apply is surfaced in the returned message.
+    Discarding the rollback's apply_patches outcomes would tell the user the prior
+    install was restored 'exactly as it was' while it was left UNPATCHED (the
     __func__ fix gone, ACE-Step music broken)."""
     from localm.media import managed_comfy_update as upd
     from localm.media import comfy_patches as cp

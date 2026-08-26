@@ -68,8 +68,7 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
     from click import get_current_context
     from ..plugins.gui.cli import main as gui_main
 
-    # The gui plugin is the single source of truth for starting a localm server.
-    # The 'serve' command is effectively 'localm gui --api-mode --no-browser'.
+    # Invokes the gui plugin's command as 'localm gui --api-mode --no-browser'.
     get_current_context().invoke(
         gui_main,
         model=model,

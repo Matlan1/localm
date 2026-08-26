@@ -8,18 +8,18 @@ an OPTIONAL aligned vector sidecar ``<ns>.vec.json`` (``{"dim", "vectors": {id:
 vec}}``). Keying vectors by record id (not position) keeps them correct across
 edits and deletes.
 
-Design mirrors ``localm/rag/store.py`` (home-scale JSON, atomic tmp+replace, BM25
-always-available, embeddings OPTIONAL, and - CHK-MEM-LOCK - a per-namespace lock so
+The shape mirrors ``localm/rag/store.py``: home-scale JSON, atomic tmp+replace,
+BM25 always available, embeddings OPTIONAL, and a per-namespace lock so
 concurrent writers cannot silently clobber each other, exactly like rag's
-per-collection lock). It deliberately stays SMALL: consolidation + decay + the
-``N_MAX`` cap keep a namespace to a few hundred distilled records, never a
-transcript, so whole-file rewrites are cheap.
+per-collection lock. A namespace stays SMALL - consolidation, decay and the
+``N_MAX`` cap keep it to a few hundred distilled records, never a transcript -
+so whole-file rewrites are cheap.
 
-Retrieval blends the Generative-Agents signals (Park et al. 2023): relevance
-(lexical BM25, optionally 50/50 with embedding cosine when an embedder is present),
-recency (exponential decay since last use), and importance (write-time salience).
-This store imports no session/audit state; the privacy gate lives with the caller
-(see ``gating.writes_allowed`` and the ``reinforce`` flag on ``recall``).
+Retrieval blends three signals: relevance (lexical BM25, optionally 50/50 with
+embedding cosine when an embedder is present), recency (exponential decay since
+last use), and importance (write-time salience). This store imports no
+session/audit state; the privacy gate lives with the caller (see
+``gating.writes_allowed`` and the ``reinforce`` flag on ``recall``).
 """
 
 from __future__ import annotations
@@ -194,8 +194,8 @@ _EXTENDED_UNC_PREFIX = "\\\\?\\UNC\\"
 def _strip_extended_prefix(path: Path) -> Path:
     """Strip Windows' \\?\\ (or \\?\\UNC\\) extended-length-path prefix, if
     present, so two resolutions of the identical location compare equal
-    regardless of which one the OS chose. See CHK-MEM-WINRESOLVE above; a
-    no-op on POSIX and on any path that never had the prefix."""
+    regardless of which one the OS chose. A no-op on POSIX and on any path that
+    never had the prefix."""
     s = str(path)
     if s.startswith(_EXTENDED_UNC_PREFIX):
         return Path("\\\\" + s[len(_EXTENDED_UNC_PREFIX):])
@@ -264,19 +264,18 @@ def _namespace_write_lock(ns_hash: str, store_file: Path, op: str,
 
     Reentrant on both halves. The in-process half is an RLock already; the
     cross-process half is NOT (collection_write_lock turns a nested acquisition
-    into an error on purpose), and nesting here is normal rather than exotic -
-    prune() calls replace(), and store.lock() is public precisely so a caller can
-    batch several save=False mutations. So the file lock is taken by the OUTERMOST
-    acquisition only, tracked per thread and per namespace.
+    into an error), and nesting here is normal rather than exotic - prune() calls
+    replace(), and store.lock() is public precisely so a caller can batch several
+    save=False mutations. So the file lock is taken by the OUTERMOST acquisition
+    only, tracked per thread and per namespace.
 
-    READS deliberately do NOT take the FILE lock. _save() writes through
+    READS do NOT take the FILE lock. _save() writes through
     storekit.atomic_write (tmp + os.replace), so a concurrent reader sees the old
-    file or the new one, never a mix - the read side was already safe across
-    processes, and making every _load() contend for a file lock would put the chat
-    inlet behind whatever a background consolidation is doing. Reads DO take the
-    namespace RLock (MemoryStore.__init__ does, to _load()), which is why the
-    ordering below matters: hold that RLock across the file-lock wait and every
-    read in this process waits with you.
+    file or the new one, never a mix, and making every _load() contend for a file
+    lock would put the chat inlet behind whatever a background consolidation is
+    doing. Reads DO take the namespace RLock (MemoryStore.__init__ does, to
+    _load()), which is why the ordering below matters: hold that RLock across the
+    file-lock wait and every read in this process waits with you.
 
     Never returns without the lock: a refusal raises CollectionLockedError rather
     than proceeding unprotected, because an unserialised write is the exact lost
@@ -371,9 +370,9 @@ class MemoryStore:
         whose principal is a bearer-key hash that cannot be reconstructed from
         disk.
 
-        Deliberately not a general constructor: it does no path-safety derivation
-        because it takes an already-resolved file the caller enumerated from the
-        memory root itself.
+        Not a general constructor: it does no path-safety derivation, because it
+        takes an already-resolved file the caller enumerated from the memory root
+        itself.
         """
         obj = cls.__new__(cls)
         obj.principal = ""
@@ -400,16 +399,16 @@ class MemoryStore:
         return self._file
 
     def lock(self):
-        """This namespace's RLock (CHK-MEM-LOCK). Every mutating method below
-        acquires it internally for its own single call; exposed so a caller that
-        needs to batch several ``save=False`` mutations under ONE reload + save
-        (e.g. plug.py's ``_migrate_legacy``) can hold it across the whole batch,
+        """This namespace's RLock. Every mutating method below acquires it
+        internally for its own single call; exposed so a caller that needs to
+        batch several ``save=False`` mutations under ONE reload + save (e.g.
+        plug.py's ``_migrate_legacy``) can hold it across the whole batch,
         mirroring how rag's ``_add_paths_locked`` reloads once before its loop
         rather than once per file.
 
-        This is the WRITE lock (CHK-MEM-XPROC): every documented use of it is a
-        batch of MUTATIONS, so it takes the cross-process lock too. Returns a
-        FRESH context manager per call - do not stash one and reuse it."""
+        This is the WRITE lock: every documented use of it is a batch of
+        MUTATIONS, so it takes the cross-process lock too. Returns a FRESH
+        context manager per call - do not stash one and reuse it."""
         return self._wlock("a batch")
 
     def _wlock(self, op: str, timeout: Optional[float] = None):
@@ -509,10 +508,9 @@ class MemoryStore:
     def _embed_one(self, text: str, embed_fn: Optional[EmbedFn]) -> Optional[list]:
         """Embed *text*, honouring the single-dimensionality invariant. A vector
         of a different dim than the store's (a switched embedding model) is
-        dropped, not stored, so cosine never mixes dims (best-effort, never
-        raises - memory writes must not crash on an embedder hiccup, but a
-        real failure is still surfaced at debug level, not swallowed silently -
-        rule 5).
+        dropped, not stored, so cosine never mixes dims. Best-effort and never
+        raises - a memory write must not crash on an embedder hiccup - but a real
+        failure is still surfaced at debug level, not swallowed silently.
 
         The failure log is CONTENT-GATED: *text* is a memory record (chat-derived),
         so the snippet is only written when debug_content_enabled() allows it. The
@@ -604,21 +602,16 @@ class MemoryStore:
     def clear(self, *, include_forgotten: bool = False) -> None:
         """Erase this namespace's live records.
 
-        MEASURED, because it is not what the name suggests: the forgotten sidecar
-        is a SEPARATE file and a plain clear() does not touch it, so after one,
-        every record that prune eviction or an accepted correction ever archived is
-        still readable on disk. Cleared three facts, evicted two beforehand, and
-        both evicted texts survived the clear.
+        The forgotten sidecar is a SEPARATE file and a plain clear() does not
+        touch it, so after one, every record that prune eviction or an accepted
+        correction ever archived is still readable on disk.
 
         ``include_forgotten`` takes the archive too, which is what any user-facing
         "erase what you remember about me" must pass: leaving the text in a sidecar
         while reporting the memory cleared is a privacy claim that is not true. The
-        coder's episode store already draws exactly this line and says so in its own
-        clear(); this brings the two into agreement.
+        coder's episode store draws exactly this line in its own clear().
 
-        The default stays False so this is not a behaviour change for anything that
-        existed before - and at the time of writing nothing else called clear() at
-        all, so the only caller is the CLI, which passes True.
+        The default is False; the CLI is the only caller, and it passes True.
         """
         with self._wlock('a clear'):
             self._records = []
@@ -633,8 +626,7 @@ class MemoryStore:
         them. Needed when record TEXT is mutated outside :meth:`update` (the
         consolidation batch): ``replace`` only embeds ids WITHOUT a vector, so
         a text change would otherwise keep serving the old text's vector
-        forever (memory-audit 2026-07-02). No save here; the caller's
-        replace/save persists the result."""
+        forever. No save here; the caller's replace/save persists the result."""
         for mem_id in ids:
             self._vectors.pop(mem_id, None)
 
@@ -645,8 +637,8 @@ class MemoryStore:
         mismatch. Used by consolidation to catch PARAPHRASED contradictions that
         share few tokens ('lives in Berlin' vs 'moved to Munich'), which the
         lexical matcher misses, so they reach the ADD/UPDATE/DELETE decision
-        instead of blind-accumulating (memory-audit 2026-07-02 F9). Compares
-        against THIS store's cached vectors keyed by record id."""
+        instead of blind-accumulating. Compares against THIS store's cached
+        vectors keyed by record id."""
         if embed_fn is None or not self._vectors:
             return -1, 0.0
         try:
@@ -674,22 +666,17 @@ class MemoryStore:
 
         This is how semantic recall turns on RETROACTIVELY: a user who chats
         before installing an embedding model has memories with no vectors, and
-        nothing re-embedded them, so recall stayed lexical forever even after
-        'localm setup-embeddings' (memory-audit 2026-07-02 F8).
+        nothing else re-embeds them, so recall would stay lexical forever even
+        after 'localm setup-embeddings'.
 
-        BOUNDED per call on purpose, so a large store never stalls one caller.
-        That means a single call does NOT get coverage up on its own - drive it
-        to completion with ``memory.backfill.backfill_all``, which is what
-        setup-embeddings uses. An earlier version of this docstring claimed "a
-        regular background pass calls this so coverage climbs"; there was no
-        such pass, the consolidation hook was the only caller, and on an install
-        where auto-consolidation never ran coverage stayed at zero forever - the
-        2026-08-14 low_coverage report. Best-effort: an embed failure for one
-        record is skipped, not fatal.
+        BOUNDED per call, so a large store never stalls one caller. That means a
+        single call does NOT get coverage up on its own - drive it to completion
+        with ``memory.backfill.backfill_all``, which is what setup-embeddings
+        uses. Best-effort: an embed failure for one record is skipped, not fatal.
 
-        CHK-MEM-LOCK: locked and re-loaded like the other mutating methods, so a
-        backfill pass started from a stale snapshot cannot silently clobber a
-        concurrent add/update/delete's save."""
+        Locked and re-loaded like the other mutating methods, so a backfill pass
+        started from a stale snapshot cannot silently clobber a concurrent
+        add/update/delete's save."""
         if embed_fn is None:
             return 0
         with self._wlock('a vector backfill'):
@@ -715,20 +702,20 @@ class MemoryStore:
         consolidation batch and prune, so a crash leaves the pre-change store
         intact - never a half-consolidated state).
 
-        CHK-MEM-LOCK: locked AND re-loaded like every other mutating method, so a
-        standalone caller (e.g. the PUT /api/memory bulk-edit route) cannot
-        silently clobber a concurrent add/update/delete's already-persisted
-        vector. *records* (the caller's list) always overwrites ``self._records``
-        regardless - that is the point of a full replace - but reloading first
-        means the ``keep_ids`` filter below preserves a FRESH on-disk vector for
-        any surviving id instead of a stale in-memory one.
+        Locked AND re-loaded like every other mutating method, so a standalone
+        caller (e.g. the PUT /api/memory bulk-edit route) cannot silently clobber a
+        concurrent add/update/delete's already-persisted vector. *records* (the
+        caller's list) always overwrites ``self._records`` regardless - that is the
+        point of a full replace - but reloading first means the ``keep_ids`` filter
+        below preserves a FRESH on-disk vector for any surviving id instead of a
+        stale in-memory one.
 
         *invalidate_ids*: ids whose cached vector must be dropped so the
         embed-if-missing loop below re-embeds them with new text (consolidation's
-        UPDATE decisions). This must be applied AFTER the reload above, or a
-        reload would silently restore the stale vector straight from disk and
-        undo the caller's invalidation - so it is a parameter here, not a
-        separate ``invalidate_vectors()`` call the caller makes beforehand."""
+        UPDATE decisions). This must be applied AFTER the reload above, or the
+        reload would restore the stale vector straight from disk and undo the
+        caller's invalidation - so it is a parameter here, not a separate
+        ``invalidate_vectors()`` call the caller makes beforehand."""
         with self._wlock('a replace'):
             self._load()
             if invalidate_ids:
@@ -813,13 +800,13 @@ class MemoryStore:
         return _maxnorm(out)
 
     def _eligible(self, query: str, embed_fn: Optional[EmbedFn]) -> list[bool]:
-        """Per-record ABSOLUTE relevance eligibility for the recall precision gate
-        (memory-audit [10]): a record is eligible for injection only when the query
-        shares a CONTENT word with it (lexical) OR its raw cosine to the query clears
-        REL_COS_MIN (semantic, when vectors are usable). A record failing BOTH is
-        dropped, so recall stays SILENT when nothing is relevant. The query is
-        embedded once here - a single short-string embed against the cached embedder
-        singleton, negligible next to the turn's own inference."""
+        """Per-record ABSOLUTE relevance eligibility for the recall precision gate:
+        a record is eligible for injection only when the query shares a CONTENT
+        word with it (lexical) OR its raw cosine to the query clears REL_COS_MIN
+        (semantic, when vectors are usable). A record failing BOTH is dropped, so
+        recall stays SILENT when nothing is relevant. The query is embedded once
+        here - a single short-string embed against the cached embedder singleton,
+        negligible next to the turn's own inference."""
         q_tokens = _content_tokens(query)
         usable, _reason = self._vector_status(embed_fn)
         cos = None
@@ -862,7 +849,7 @@ class MemoryStore:
         recall's observability (``degrade_reason`` - why the semantic/cosine signal
         was not used, or None when it was; ``n_records``/``n_vectors``/
         ``n_recalled``) so a caller can surface "used N memories" + the degrade
-        reason. Default None keeps the call side-effect-free (no behaviour change)."""
+        reason. Default None keeps the call side-effect-free."""
         if not (query or "").strip() or not self._records:
             if diagnostics is not None:
                 diagnostics.update({"degrade_reason": None,
@@ -982,13 +969,12 @@ class MemoryStore:
 
     def _archive_forgotten(self, records: list[MemoryRecord]) -> bool:
         """Append evicted records to a ``.forgotten.jsonl`` sidecar so forgetting
-        is RECOVERABLE, not a silent hard delete (memory-audit 2026-07-02: the
-        size cap could evict user-typed facts irreversibly). Returns True when the
-        archive is persisted (or there was nothing to archive), False when it
-        failed. prune() treats archival as best-effort (it logs and proceeds), but
-        an interactive accept of a supersession must NOT destroy the trusted record
-        when this returns False (rule 5: a recover-ability step that fails must not
-        be treated as success). The archive is capped so it cannot grow unbounded."""
+        is RECOVERABLE, not a silent hard delete. Returns True when the archive is
+        persisted (or there was nothing to archive), False when it failed. prune()
+        treats archival as best-effort (it logs and proceeds), but an interactive
+        accept of a supersession must NOT destroy the trusted record when this
+        returns False - a recoverability step that failed must not be treated as
+        success. The archive is capped so it cannot grow unbounded."""
         if not records:
             return True
         try:
@@ -1064,18 +1050,16 @@ class MemoryStore:
 
     def forgotten(self) -> list[dict]:
         """Archived (forgotten) records for THIS namespace, newest-forgotten-first,
-        each an on-disk snapshot (record fields + ``forgotten_at``). LM-DA-024: the
-        read half of ``_archive_forgotten``'s recoverable-not-deleted contract - until
-        now nothing read this sidecar back, so recovery was filesystem-only despite
-        the archive step itself being correct. Used by the recovery route to show
-        what can be restored."""
+        each an on-disk snapshot (record fields + ``forgotten_at``). The read half
+        of ``_archive_forgotten``'s recoverable-not-deleted contract, used by the
+        recovery route to show what can be restored."""
         with _namespace_lock(self._ns_hash):
             return list(reversed(self._load_forgotten()))
 
     def restore_forgotten(self, mem_id: str, *,
                           embed_fn: Optional[EmbedFn] = None) -> Optional[MemoryRecord]:
-        """Recover one archived snapshot for *mem_id* back into the live store
-        (LM-DA-024). Two archive shapes exist, both handled here:
+        """Recover one archived snapshot for *mem_id* back into the live store.
+        Two archive shapes exist, both handled here:
 
           EVICTED - no live record with this id (prune's size cap, or an accepted
           DELETE correction fully removed it): the snapshot is re-added as a live
@@ -1084,15 +1068,12 @@ class MemoryStore:
           SUPERSEDED - a live record with this id already exists: an accepted
           UPDATE correction (see ``resolve_correction``) archives the PRE-CHANGE
           snapshot under the SAME id as the record it then mutates in place, so
-          the id never actually frees up. Refusing to restore whenever the id is
-          still live (an earlier version of this method did exactly that) made
-          every such entry permanently unrestorable - listed by ``forgotten()``
-          forever, 404ing on every restore attempt - which defeats
-          ``resolve_correction``'s own "recoverable, never a silent hard delete"
-          contract for its single most common path. So this case instead REVERTS
-          the live record's text to the archived snapshot in place (undoing
-          whatever changed it), matching exactly what an accepted UPDATE
-          correction could have altered.
+          the id never actually frees up. This case REVERTS the live record's
+          text to the archived snapshot in place (undoing whatever changed it),
+          matching exactly what an accepted UPDATE correction could have altered.
+          Refusing to restore whenever the id is still live would make every such
+          entry permanently unrestorable - listed by ``forgotten()`` forever,
+          404ing on every restore attempt.
 
         When a record has more than one archive entry (forgotten/superseded more
         than once), the MOST RECENT one is applied, so repeated restores step back
@@ -1100,11 +1081,11 @@ class MemoryStore:
         corrected Berlin -> Munich -> Ghent first undoes to Munich, then Berlin.
         Returns None when no archive entry matches *mem_id* at all.
 
-        CHK-MEM-LOCK: locked and reloaded like every other mutating method, so a
-        concurrent add/delete/restore cannot race the read-decide-write sequence
-        below. The applied entry is removed from the archive on success (the
-        archive is a recovery queue, not an immutable audit log - mirrors
-        ``resolve_correction`` clearing a resolved pending entry)."""
+        Locked and reloaded like every other mutating method, so a concurrent
+        add/delete/restore cannot race the read-decide-write sequence below. The
+        applied entry is removed from the archive on success: the archive is a
+        recovery queue, not an immutable audit log, mirroring
+        ``resolve_correction`` clearing a resolved pending entry."""
         with self._wlock('a restore'):
             self._load()
             entries = self._load_forgotten()
@@ -1191,14 +1172,14 @@ class MemoryStore:
         (best-effort, like the record loader) - including a line that is not valid
         UTF-8, so a torn multibyte write corrupts only that line, not the whole file;
         an ABSENT file is simply empty; a present-but-UNREADABLE file (I/O error)
-        RAISES (rule 5: missing != unreadable). Collapsing an unreadable file to []
-        would let propose_corrections rewrite the sidecar with only the freshly
-        proposed entries and permanently wipe every pending correction, while telling
-        the caller it succeeded. Mirrors sessions.py:_load (re-raise so the caller
-        fails closed) and _load_dismissed (read_bytes, so only a real I/O error counts
-        as unreadable); the save-bearing callers here (propose_corrections /
-        corrections / resolve_correction) catch the OSError, warn, and abort the save
-        rather than crash."""
+        RAISES, because missing and unreadable are not the same state. Collapsing an
+        unreadable file to [] would let propose_corrections rewrite the sidecar with
+        only the freshly proposed entries and permanently wipe every pending
+        correction, while telling the caller it succeeded. Mirrors sessions.py:_load
+        (re-raise so the caller fails closed) and _load_dismissed (read_bytes, so
+        only a real I/O error counts as unreadable); the save-bearing callers here
+        (propose_corrections / corrections / resolve_correction) catch the OSError,
+        warn, and abort the save rather than crash."""
         cf = self._corrections_file()
         if not cf.is_file():
             return []
@@ -1246,24 +1227,11 @@ class MemoryStore:
     def _load_dismissed(self) -> set:
         """The set of correction dedup keys the user REJECTED. Consolidation skips
         re-proposing these, so a dismissed supersession does not reappear every pass
-        while the contradicting session is still in the recent window (the reject
-        route otherwise only cleared the pending entry, and the next consolidation
-        re-created it). A corrupt/absent file is treated as empty.
+        while the contradicting session is still in the recent window. A
+        corrupt/absent file is treated as empty.
 
-        LM-DA-025: current files are ``{"v": FORMAT_VERSION, "keys": [...]}``; a
-        pre-stamp file (a bare JSON array) still loads unchanged, same forward-
-        tolerant approach as the main store's "v" rollout.
-
-        Known asymmetry: this is the one sidecar of the three LM-DA-025 touches
-        whose top-level SHAPE changed (array -> object), not just an added key
-        inside an already-dict-shaped line. A build OLDER than this change reading
-        a file written by this version sees a dict, falls through its own
-        ``isinstance(data, list)`` check, and silently treats it as an empty
-        dismissed set - so a downgrade or auto-rollback (see updater.py) after a
-        dismissal was saved would re-surface corrections the user already
-        rejected. Not data loss and self-heals on the next dismissal; accepted as
-        a documented tradeoff (not hidden) rather than engineered around, since
-        old code cannot be patched retroactively and the failure mode is bounded."""
+        Current files are ``{"v": FORMAT_VERSION, "keys": [...]}``; a file holding
+        a bare JSON array still loads unchanged."""
         df = self._dismissed_file()
         if not df.is_file():
             return set()
@@ -1307,8 +1275,8 @@ class MemoryStore:
         run does not stack or re-nag. Newest are kept when the cap is exceeded.
         Returns the number newly recorded.
 
-        CHK-MEM-LOCK: locked and re-read like the record methods so a proposal from
-        a consolidation pass cannot clobber a concurrent accept/reject."""
+        Locked and re-read like the record methods, so a proposal from a
+        consolidation pass cannot clobber a concurrent accept/reject."""
         if not proposals:
             return 0
         with self._wlock('a correction proposal'):
@@ -1344,12 +1312,11 @@ class MemoryStore:
         target was deleted/evicted meanwhile is stale and dropped (and pruned from
         the sidecar) so the modal never shows an un-actionable suggestion.
 
-        CHK-MEM-XPROC: this READS but may also prune, so it wants the write lock -
-        yet it backs GET /api/memory and `localm memory corrections`, and a read
-        must not start failing because someone else holds the namespace. So the
-        lock is bounded and OPTIONAL: on contention the answer is still returned,
-        just without the opportunistic cleanup (which the next caller redoes).
-        Never silent (rule 5)."""
+        This READS but may also prune, so it wants the write lock - yet it backs
+        GET /api/memory and `localm memory corrections`, and a read must not start
+        failing because someone else holds the namespace. So the lock is bounded
+        and OPTIONAL: on contention the answer is still returned, just without the
+        opportunistic cleanup (which the next caller redoes). Never silent."""
         try:
             with self._wlock("a stale-correction prune",
                              timeout=_REINFORCE_LOCK_WAIT):

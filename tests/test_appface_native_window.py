@@ -1,29 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""appface.native_window_available / run_native_window (ADR-0011): `localm
-gui` prefers a native OS webview window over a browser tab when the
-optional `localm[desktop]` extra (pywebview) is installed, falling back to
+"""appface.native_window_available / run_native_window: `localm gui` prefers a
+native OS webview window over a browser tab when the optional
+`localm[desktop]` extra (pywebview) is installed, falling back to
 webbrowser.open otherwise.
 
 run_native_window must NEVER raise, and must report False (triggering the
 fallback) whenever a real, loaded window cannot be confirmed - not merely
-whenever pywebview is absent. It also MUST run on the caller's own thread
-and block until every window closes - pywebview's own hard requirement
-(webview/__init__.py: "pywebview must be run on a main thread.", verified
-live against the installed 6.2.1 source when the first cut of this feature
-tried a background thread and failed outright on a real launch) - so
-gui/cli.py inverts which thread runs the server specifically so this
-function can be handed the process's real main thread. That inversion
-(want_native / _serve in gui/cli.py) is verified by actually launching
-`localm gui`, not by a unit test here - mocking hs.run_advertised plus real
-threading plus the socket-poll loop would not meaningfully increase
-confidence over just running it for real.
+whenever pywebview is absent. It also MUST run on the caller's own thread and
+block until every window closes, which is pywebview's own hard requirement
+(webview/__init__.py: "pywebview must be run on a main thread."), so gui/cli.py
+inverts which thread runs the server specifically so this function can be handed
+the process's real main thread. That inversion (want_native / _serve in
+gui/cli.py) is verified by actually launching `localm gui`, not by a unit test
+here - mocking hs.run_advertised plus real threading plus the socket-poll loop
+would not meaningfully increase confidence over running it for real.
 
-The pytest-guard tests use monkeypatch.delitem(sys.modules, "pytest", ...)
-to lift start_app_face's own "never spin up real UI inside the suite" guard
-for exactly one call, the same established pattern test_hang_watchdog.py
-uses for its own pytest-gated code path - nothing in run_native_window
-itself imports pytest, and every faked "webview" module below is a plain
-MagicMock, never a real window.
+The pytest-guard tests use monkeypatch.delitem(sys.modules, "pytest", ...) to
+lift start_app_face's own "never spin up real UI inside the suite" guard for
+exactly one call. Nothing in run_native_window itself imports pytest, and every
+faked "webview" module below is a plain MagicMock, never a real window.
 """
 
 import sys
@@ -119,9 +114,9 @@ def test_run_native_window_returns_false_when_pywebview_not_installed(monkeypatc
 
 class _ClosingEvent:
     """Fake for window.events.closing: captures whatever handler
-    run_native_window registers via `+=` so a test can invoke it directly,
-    the same shape the real pywebview Event class supports (confirmed
-    against the installed source: __iadd__ appends to a callback list)."""
+    run_native_window registers via `+=` so a test can invoke it directly, the
+    same shape the real pywebview Event class supports (``__iadd__`` appends to a
+    callback list)."""
 
     def __init__(self):
         self.handlers = []
@@ -168,11 +163,10 @@ def test_run_native_window_returns_true_when_the_window_actually_loads(monkeypat
 
 
 def test_run_native_window_forces_qt_backend_on_linux(monkeypatch):
-    """pywebview's default Linux order tries GTK first (webview/guilib.py),
-    which this project deliberately never installs (see pyproject.toml's
-    desktop extra comment) - forcing gui="qt" skips a guaranteed GTK-import
-    failure and goes straight to the backend the extra actually installs
-    there (verified live: pywebview[qt], pip-only, no system packages)."""
+    """pywebview's default Linux order tries GTK first (webview/guilib.py), which
+    this project never installs (see pyproject.toml's desktop extra) - forcing
+    gui="qt" skips a guaranteed GTK-import failure and goes straight to the
+    backend the extra installs there."""
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     fake, _ = _fake_webview(loaded=True)
     monkeypatch.setitem(sys.modules, "webview", fake)
@@ -326,9 +320,7 @@ def test_show_and_close_native_window_reach_the_active_window(monkeypatch):
 
 @pytest.fixture
 def running(monkeypatch):
-    """Pretend a full-mode localm is already serving this directory - the
-    same shape test_gui_attach_flag_conflict.py's own `running` fixture
-    uses, kept local here so this file stays self-contained."""
+    """Pretend a full-mode localm is already serving this directory."""
     entry = {
         "pid": 26164, "port": 8793, "host": "127.0.0.1", "scheme": "http",
         "mode": "full", "token": "tok", "root_dir": "/proj",

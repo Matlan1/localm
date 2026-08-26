@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""TLS wiring in the CLIs (NET-1 unit 2): the _resolve_tls decision and that the
+"""TLS wiring in the CLIs: the _resolve_tls decision, and that the
 serve/http_server entry points thread ssl params to uvicorn.
 
 LOCALM_HOME is pinned per-test by the autouse conftest fixture, so the local CA
@@ -51,9 +51,9 @@ def test_half_specified_pair_is_a_usage_error(tmp_path):
 
 def test_http_server_serve_passes_ssl_to_runner(monkeypatch):
     """serve() must forward ssl_certfile/ssl_keyfile to the server runner. The
-    runner is now portmux.run_server (it serves HTTPS and catches a plain-http
-    request on the same port with an https redirect); patch it so we assert the
-    threading without starting a real server."""
+    runner is portmux.run_server (it serves HTTPS and catches a plain-http
+    request on the same port with an https redirect); it is patched here so the
+    threading is asserted without starting a real server."""
     from localm import portmux
     from localm.inference import http_server
 

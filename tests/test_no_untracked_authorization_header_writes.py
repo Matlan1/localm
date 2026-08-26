@@ -1,94 +1,69 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""No SIXTH site independently re-derives the owner-key-else-instance-token
+"""No unreviewed site independently re-derives the owner-key-else-instance-token
 precedence for calling localm's own gated HTTP routes.
 
-Four sites did exactly that, one at a time: `selfclient.read_activity`
-(#953/#1094), `selfclient.self_request` (#1114), `cli/models.py`'s
-`unload_cmd`/`stop_cmd` (#1121), and `media/comfy_client.py`'s
-`_localm_unload` (this change). Each was a separate incident because the bug
-lives in how each site ASSEMBLES its credential, not because the precedence
-rule itself was ever wrong - so a test on the shared helper
-(`auth.resolve_bearer_headers`, and `tests/test_selfclient.py`'s pinned
-precedence) verifies the RULE beautifully and is structurally incapable of
-noticing a caller that never invokes it. This test sits one layer further
-out: it finds every place in the tree that BUILDS an ``Authorization`` header
-at all, and asserts the set is exactly the reviewed one below - so a genuinely
-new (unreviewed) site fails loudly here instead of shipping as a silent sixth
-instance of the same class.
+A test on the shared helper (`auth.resolve_bearer_headers`, plus
+`tests/test_selfclient.py`'s pinned precedence) verifies the RULE and is
+structurally incapable of noticing a caller that never invokes it. This test
+sits one layer further out: it finds every place in the tree that BUILDS an
+``Authorization`` header at all, and asserts the set is exactly the reviewed one
+below.
 
-Deliberately NOT "every site must call get_api_key()" - two of the reviewed
-sites below never call it (nor resolve_bearer_headers) and are still correct,
-because the credential precedence only applies to routes _origin_guard
-actually gates (an unsafe method, or a metadata GET, not listed in
-_CROSS_ORIGIN_OK). The property is "resolves through the shared precedence
-where the route needs it", not "calls one named function" - asserting the
-latter would flag these two as violations:
+The property is "resolves through the shared precedence where the route needs
+it", not "calls get_api_key()". The credential precedence only applies to routes
+_origin_guard actually gates (an unsafe method, or a metadata GET, not listed in
+_CROSS_ORIGIN_OK), so several reviewed sites correctly call neither:
 
   localm/auth.py:251            the canonical implementation itself
                                  (resolve_bearer_headers, wrapping the raw-
                                  token precedence in resolve_bearer_token).
 
   localm/cli/rag.py:443         POSTs /v1/embeddings, which IS listed in
-                                 http_server.py's _CROSS_ORIGIN_OK - the
-                                 open-mode gate never applies, so get_api_key()
-                                 alone (no instance_token fallback) is correct,
+                                 http_server.py's _CROSS_ORIGIN_OK, so the
+                                 open-mode gate never applies and get_api_key()
+                                 alone (no instance_token fallback) is correct -
                                  the same classification as coder/plug.py and
-                                 jobs/runner.py's chat/completions calls (see
-                                 dev-notes/FIX-2026-08-05-cli-unload-stop-open-
-                                 mode-auth.md).
+                                 jobs/runner.py's chat/completions calls.
 
   localm/inference/http_engine.py:108,203
                                  HttpEngine/remote_model_status route the
                                  `localm run`/`chat` ATTACH flow. These two
                                  lines are a generic HTTP client: they send
-                                 whatever *token* the caller passes in, so
-                                 they never need to call resolve_bearer_*
-                                 themselves. RESOLVING the right token is the
-                                 CALLER's job - cli/chat.py's `run()` and
-                                 coder/cli/_main.py's `_build_backend()` now
-                                 both call auth.resolve_bearer_token(target
-                                 ["token"]) before constructing HttpEngine /
-                                 HTTPBackend, so a keyed self-attach sends the
-                                 owner key (checkup 2026-08-11 item 12 fixed
-                                 this - it was flagged here as a known,
-                                 unfixed, low-severity gap by the original
-                                 2026-08-05 credential-resolution-helper PR;
-                                 that flag turned out to be the "primary
-                                 function hard-breaks in the default
-                                 configuration" shape after all, contrary to
-                                 its own "not a hard-block" reasoning at the
-                                 time - see dev-notes/FIX-2026-08-05-
-                                 credential-resolution-helper.md for the
-                                 original, since-corrected rationale). The raw
-                                 instance token remains the correct value to
-                                 pass in for the open-mode fallback.
+                                 whatever *token* the caller passes in.
+                                 Resolving the right token is the CALLER's job -
+                                 cli/chat.py's `run()` and coder/cli/_main.py's
+                                 `_build_backend()` both call
+                                 auth.resolve_bearer_token(target["token"])
+                                 before constructing HttpEngine / HTTPBackend,
+                                 so a keyed self-attach sends the owner key. The
+                                 raw instance token is the correct value to pass
+                                 in for the open-mode fallback.
 
   localm/plugins/coder/backends/http.py:353
                                  (the dict literal's opening line - the
-                                 "Authorization" key text itself is on 354,
-                                 one line down; ast.Dict.lineno points at the
+                                 "Authorization" key text itself is on 354, one
+                                 line down; ast.Dict.lineno points at the
                                  literal's start, not each key) the standalone
-                                 coder CLI's own HTTP backend,
-                                 targeting an arbitrary (possibly remote,
-                                 possibly a different install's) server via
+                                 coder CLI's own HTTP backend, targeting an
+                                 arbitrary (possibly remote, possibly a
+                                 different install's) server via
                                  --api-key/$LOCALM_API_KEY/a placeholder.
-                                 Legitimately env/flag-scoped, not a self-call
-                                 to THIS install.
+                                 Env/flag-scoped, not a self-call to THIS
+                                 install.
 
   localm/plugins/gui/cli.py:125 `_mount_remote_gui` asks a SIBLING localm
                                  instance (found via discovery, "api" mode) to
                                  mount its own GUI, using THAT instance's own
-                                 registry attach token - the route
+                                 registry attach token. The route
                                  (/v1/surfaces/) is itself listed in
                                  _CROSS_ORIGIN_OK and does its own strict auth
-                                 server-side; this process's own
-                                 get_api_key() would not even be the right
-                                 credential for a different instance's home.
+                                 server-side, and this process's own
+                                 get_api_key() is not the right credential for a
+                                 different instance's home.
 
-If you land a new site here, EITHER route it through
-``auth.resolve_bearer_headers`` (the common case) OR add it to the allowlist
-below with a review comment matching the rigor above - never widen the scan
-to stop noticing it.
+A new site either routes through ``auth.resolve_bearer_headers`` (the common
+case) or is added to the allowlist below with a review comment matching the
+rigor above. Never widen the scan to stop noticing it.
 """
 
 from __future__ import annotations
@@ -101,12 +76,12 @@ from localm import auth as _auth
 # (relative-to-repo-root path, line number) for every reviewed site. Paths use
 # forward slashes regardless of host OS so the assertion is platform-stable.
 _REVIEWED_SITES = {
-    ("localm/auth.py", 251),
-    ("localm/cli/rag.py", 443),
+    ("localm/auth.py", 193),
+    ("localm/cli/rag.py", 454),
     ("localm/inference/http_engine.py", 108),
     ("localm/inference/http_engine.py", 203),
-    ("localm/plugins/coder/backends/http.py", 353),
-    ("localm/plugins/gui/cli.py", 125),
+    ("localm/plugins/coder/backends/http.py", 363),
+    ("localm/plugins/gui/cli.py", 142),
 }
 
 

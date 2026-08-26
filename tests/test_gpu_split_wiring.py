@@ -2,23 +2,20 @@
 """Wiring tests for gpu_split_indices/gpu_split_ratios into the native
 llama.cpp model params, for both native-load call sites: the chat backend
 (LlamaCpp) and the embedder (GGUFEmbedder). Both route through
-localm.discover.apply_gpu_split (called right after apply_main_gpu - see
-llama.py and embedder.py), but each constructs its own ``mp`` via a mocked
-ctypes API, so we verify each call site actually sets mp.split_mode /
-mp.tensor_split / mp.main_gpu end to end.
+localm.discover.apply_gpu_split (called right after apply_main_gpu), but each
+constructs its own ``mp`` via a mocked ctypes API, so each call site is checked
+end to end for mp.split_mode / mp.tensor_split / mp.main_gpu.
 
-Mirrors tests/test_main_gpu_wiring.py's structure and mocking style exactly:
-only the ctypes ``api``/``_api`` module and localm.discover.list_gpus /
-localm.config.load_config are mocked. apply_gpu_split (and apply_main_gpu)
-themselves run for REAL - this proves the actual wiring, not a mock of the
-function under test. apply_gpu_split's tensor_split-capacity probe
+Only the ctypes ``api``/``_api`` module and localm.discover.list_gpus /
+localm.config.load_config are mocked; apply_gpu_split and apply_main_gpu
+themselves run for REAL. apply_gpu_split's tensor_split-capacity probe
 (discover._tensor_split_capacity) calls the real
-localm.inference.backends.llamacpp._api.has_max_devices(), which is NOT
-touched by patching the "api" name inside llama.py's module namespace (that
-only rebinds the name llama.py itself uses); it either succeeds against a
-provisioned native runtime or raises, which _tensor_split_capacity already
-catches and falls back to its documented constant - so this test is safe on a
-box with no native llama.cpp runtime provisioned too."""
+localm.inference.backends.llamacpp._api.has_max_devices(), which patching the
+"api" name inside llama.py's module namespace does NOT touch (that only rebinds
+the name llama.py itself uses); it either succeeds against a provisioned native
+runtime or raises, and _tensor_split_capacity catches that and falls back to its
+constant, so these tests also run on a box with no native llama.cpp runtime
+provisioned."""
 
 import ctypes
 from types import SimpleNamespace
@@ -34,10 +31,9 @@ from localm.inference.backends.llamacpp.llama import LlamaCpp
 _LLAMA_SPLIT_MODE_LAYER = 1
 
 # Sentinel standing in for the native default tensor_split pointer. It must be a
-# real, safely-dereferenceable address rather than a bogus int: a test below
-# dereferences mp.tensor_split via ctypes after construction, and an untouched
-# sentinel is dereferenced too. Backing it with a permanently kept-alive ctypes
-# buffer makes that read back zeros and fail a normal assertion.
+# real, safely-dereferenceable address: a test below dereferences
+# mp.tensor_split via ctypes after construction, and an untouched sentinel is
+# dereferenced too. The backing buffer is kept alive for the process lifetime.
 _NATIVE_DEFAULT_TENSOR_SPLIT_BUF = (ctypes.c_float * 16)()
 _NATIVE_DEFAULT_TENSOR_SPLIT = ctypes.cast(
     _NATIVE_DEFAULT_TENSOR_SPLIT_BUF, ctypes.c_void_p).value
@@ -45,9 +41,8 @@ _NATIVE_DEFAULT_TENSOR_SPLIT = ctypes.cast(
 
 def _seeded_mp() -> SimpleNamespace:
     """A model-params SimpleNamespace seeded with the real native defaults for
-    every field these tests care about (main_gpu, split_mode, tensor_split),
-    same rationale as test_main_gpu_wiring.py's _mock_llama_api(): an
-    untouched attribute must read back as the true native default, not an
+    every field these tests care about (main_gpu, split_mode, tensor_split), so
+    an untouched attribute reads back as the true native default rather than an
     auto-generated child MagicMock."""
     return SimpleNamespace(
         main_gpu=0,
@@ -74,8 +69,8 @@ def _mock_embed_api():
 
 
 def _tensor_split_values(mp, count: int):
-    """Read *count* floats back out of mp.tensor_split the same way the task
-    spec describes: cast the raw pointer to POINTER(c_float) and index in."""
+    """Read *count* floats back out of mp.tensor_split: cast the raw pointer to
+    POINTER(c_float) and index in."""
     ptr = ctypes.cast(mp.tensor_split, ctypes.POINTER(ctypes.c_float))
     return [ptr[i] for i in range(count)]
 
@@ -149,8 +144,8 @@ class TestLlamaCppGpuSplitWiring:
 
         # main_gpu_index=0 was explicitly configured and resolves cleanly on
         # its own (apply_main_gpu sets mp.main_gpu = 0), but it is not one of
-        # the split devices [1, 2] - apply_gpu_split must correct it to the
-        # first split device, not leave the originally configured value.
+        # the split devices [1, 2], so apply_gpu_split corrects it to the first
+        # split device.
         assert mp.main_gpu == 1
         assert mp.main_gpu != 0
         assert mp.split_mode == _LLAMA_SPLIT_MODE_LAYER
@@ -237,13 +232,11 @@ class TestGgufEmbedderGpuSplitWiring:
 
 
 class TestIsolatedEmbedderGpuSplitPreflight:
-    """IsolatedEmbedder._preflight_vram (localm/inference/embedder.py) - the
-    parent-side gate that now runs BEFORE a child is ever spawned, moved out
-    of GGUFEmbedder.__init__ (which is the RAW native loader, constructed
-    only inside the isolated child process - see _embedder_runner.py and
-    PR #606's containment pattern this mirrors). Real gpu_split_shortfall()/
-    list_gpus() computation runs for real, same philosophy as the rest of
-    this file; only EmbedderRunner is stubbed so no real subprocess spawns."""
+    """IsolatedEmbedder._preflight_vram (localm/inference/embedder.py): the
+    parent-side gate, which runs BEFORE a child is ever spawned. GGUFEmbedder
+    .__init__ is the RAW native loader and is constructed only inside the
+    isolated child process. gpu_split_shortfall() and list_gpus() computation
+    run for real; only EmbedderRunner is stubbed, so no subprocess spawns."""
 
     class _StubRunner:
         spawned = False
@@ -260,16 +253,12 @@ class TestIsolatedEmbedderGpuSplitPreflight:
         return IsolatedEmbedder(str(model_file))
 
     def test_split_configured_but_one_device_short_refuses(self, monkeypatch, tmp_path):
-        """AUDIT-GPU-SPLIT-2: the embedder is a SECOND, independent GGUF/
-        llama.cpp load path with no capacity gate of its own until this fix -
-        it must also refuse (never spawn a child that could hard-abort) when
-        a configured split device's own proportional share is short, even
-        though embedding models are typically small (this module's own
-        docstring: 24-90 MB) - a tight-enough split device can still be short
-        of even a few MB. Ratios PINNED equal: unset, the auto free-VRAM-
-        proportional split gives the tight device a near-zero share and this
-        load correctly proceeds instead (the auto-split feature; see
-        tests/test_gpu_split_auto_ratios.py)."""
+        """The embedder is a second, independent GGUF/llama.cpp load path, and
+        it refuses - without spawning a child that could hard-abort - when a
+        configured split device's own proportional share is short, small as
+        embedding models are. Ratios are PINNED equal here: left unset, the auto
+        free-VRAM-proportional split gives the tight device a near-zero share
+        and the load proceeds instead."""
         model_file = tmp_path / "embed.gguf"
         model_file.write_bytes(b"\0" * (2 * 1024 * 1024))   # 2 MB, realistic size
         monkeypatch.setattr(
@@ -286,9 +275,8 @@ class TestIsolatedEmbedderGpuSplitPreflight:
         assert self._StubRunner.spawned is False
 
     def test_split_configured_with_enough_room_loads_normally(self, monkeypatch, tmp_path):
-        """Guard: the gate must not over-correct into refusing every
-        split-configured embedder load - a real (non-zero-size) file that
-        genuinely fits each device's free VRAM must still proceed to spawn."""
+        """A split-configured embedder load whose file fits each device's free
+        VRAM still proceeds to spawn."""
         model_file = tmp_path / "embed.gguf"
         model_file.write_bytes(b"\0" * (2 * 1024 * 1024))
         monkeypatch.setattr(

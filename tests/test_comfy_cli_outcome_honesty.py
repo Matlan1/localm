@@ -1,22 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Board item #27: cli/comfy.py's comfy_setup / comfy_update are the two
-call sites that go through jobs.py's start_cli with no post-success-print
-guard at all - pull.py already has #1111's _report_success, and remove has no
-risky post-success print to begin with (see
-dev-notes/ROOTCAUSE-pull-success-reported-as-failed-2026-08-05.md).
+"""cli/comfy.py's comfy_setup / comfy_update are the two call sites that go
+through jobs.py's start_cli with no post-success-print guard of their own -
+pull.py already has _report_success, and remove has no risky post-success print
+to begin with.
 
-Proves the PRODUCER side of the fix: the CLI emits the {"type":"outcome"}
-sentinel frame at the right moment and gated correctly (jobs.py's consumer
-side - the part that actually decides job.status - is tested directly in
-test_job_outcome_honesty.py, with a fake subprocess).
+Proves the PRODUCER side: the CLI emits the {"type":"outcome"} sentinel frame at
+the right moment and gated correctly. The consumer side - the part of jobs.py
+that actually decides job.status - is tested separately against a fake
+subprocess.
 
-Also proves the independent markup-injection fix: result.message is partly
-built from raw subprocess tail() output (managed_comfy_fresh.py /
+Also proves the independent markup-injection fix: result.message is partly built
+from raw subprocess tail() output (managed_comfy_fresh.py /
 managed_comfy_update.py's f"...{_tail(out)}"), so it can contain '[' / ']' -
-e.g. a Python traceback embedding a type hint like List[int], or a Windows
-path. Unescaped, that either raises rich.errors.MarkupError (turning a real
-failure message into a WORSE, less informative crash) or gets silently
-parsed as a style tag and vanishes.
+e.g. a Python traceback embedding a type hint like List[int], or a Windows path.
+Unescaped, that either raises rich.errors.MarkupError (turning a real failure
+message into a WORSE, less informative crash) or gets silently parsed as a style
+tag and vanishes.
 """
 
 from __future__ import annotations
@@ -76,13 +75,13 @@ class TestComfySetupEmitsAnOutcomeFrame:
 
     def test_done_frame_reaches_stdout_even_though_the_success_print_then_crashes(
             self, cli_runner, monkeypatch):
-        """The exact scenario the whole mechanism exists for: real work is
-        done (setup_managed_comfy returned ok=True), the frame is written,
-        and ONLY THEN does the trailing status print raise. Proves the frame
-        is not lost to the crash - the CLI's own exit code is still allowed
-        to go non-zero here; the fix is that jobs.py can see the truth
-        despite that, not that this print becomes crash-proof (that is
-        deliberately NOT this fix's job - see the comfy_setup docstring)."""
+        """The scenario the whole mechanism exists for: real work is done
+        (setup_managed_comfy returned ok=True), the frame is written, and
+        ONLY THEN does the trailing status print raise. Proves the frame is
+        not lost to the crash. The CLI's own exit code is still allowed to go
+        non-zero here; what the frame buys is that jobs.py can see the truth
+        despite that, not that this print becomes crash-proof - see the
+        comfy_setup docstring."""
         monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
         monkeypatch.setattr(prov_mod, "discover_user_comfy", lambda cfg: None)
         monkeypatch.setattr(fresh_mod, "setup_managed_comfy",
@@ -182,11 +181,10 @@ class TestMessageMarkupIsEscaped:
         assert success_lines and "\\[str, int]" in success_lines[0]
 
     def test_an_unmatched_close_tag_does_not_crash_the_command(self, cli_runner, monkeypatch):
-        """The sharper case, EMPIRICALLY VERIFIED against this exact rich
-        version before writing this test (an ordinary stray '[' with no
-        close-tag shape, e.g. a bare Windows path fragment, does NOT raise -
-        it is merely silently swallowed, which the escaped-content assertions
-        above already cover). A bracket pair shaped like a CLOSE tag with no
+        """The sharper case: an ordinary stray '[' with no close-tag shape
+        (e.g. a bare Windows path fragment) does NOT raise - it is merely
+        silently swallowed, which the escaped-content assertions above
+        already cover. A bracket pair shaped like a CLOSE tag with no
         matching open ('[/b]', matching _warn_if_repo_ships_code's own
         documented crash in pull.py) is a genuine rich markup SYNTAX error:
 
@@ -194,7 +192,7 @@ class TestMessageMarkupIsEscaped:
             rich.errors.MarkupError: closing tag '[/b]' at position 12
             doesn't match any open tag
 
-        A subprocess tail() a Python traceback easily produces this shape
+        A subprocess tail() of a Python traceback easily produces this shape
         (e.g. a raised exception whose message itself contains bracketed
         text). Confirms the fix prevents a REAL crash, not merely that some
         escaping call was made against a pattern that was never going to

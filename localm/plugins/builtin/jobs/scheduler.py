@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The job scheduler and a self-contained 5-field cron matcher.
 
-The matcher and the due/tick logic are deliberately PURE and clock-injectable so
-they unit-test without real time or a running event loop:
+The matcher and the due/tick logic are PURE and clock-injectable, so they run
+without real time or a running event loop:
 
   - ``cron_match(expr, when)``    -> bool   (no I/O, no global state)
   - ``JobScheduler.due(job, now)``-> bool   (interval vs cron, given a clock)
@@ -24,8 +24,7 @@ from localm.plugins.builtin.jobs.store import Job, JobStore
 DEFAULT_POLL_SECONDS = 30
 
 # How far back a restarted server will catch up a missed cron slot. A slot
-# older than this is considered too stale to be worth back-firing (a machine
-# off for a week should not suddenly run last Monday's briefing). One day.
+# older than this is not back-fired. One day.
 _CATCHUP_WINDOW_SECONDS = 24 * 60 * 60
 
 
@@ -153,9 +152,9 @@ class JobScheduler:
     """Runs enabled + due jobs on a periodic asyncio loop.
 
     The decision logic is pure and clock-injectable (``due`` / ``tick`` take a
-    ``now``), so it is testable without real time. ``start`` spawns the loop on
-    the running event loop; ``stop`` cancels it. A disabled or not-due job is
-    never run; a job that errors is recorded and never crashes the tick.
+    ``now``). ``start`` spawns the loop on the running event loop; ``stop``
+    cancels it. A disabled or not-due job is never run; a job that errors is
+    recorded and never crashes the tick.
     """
 
     def __init__(self, store: Optional[JobStore] = None, *,
@@ -163,7 +162,7 @@ class JobScheduler:
                  engine: Optional[Callable] = None,
                  poll_seconds: int = DEFAULT_POLL_SECONDS) -> None:
         self.store = store or JobStore()
-        # run_job is injectable for tests; defaults to the real runner.
+        # run_job is injectable; defaults to the real runner.
         self._run_job = run_job
         # engine resolver: a zero-arg callable returning the inference engine
         # (or None to let the runner load one via the model manager).
@@ -176,18 +175,14 @@ class JobScheduler:
         # not run a cron job twice in its matching minute: job id -> last fired
         # cron-minute epoch (floor to 60s).
         self._cron_fired: dict = {}
-        # Log-once/on-change state for a FAILING tick. A persistent tick failure
-        # (e.g. an unreadable jobs.json makes store.list() raise every tick, which
-        # silently stops ALL scheduled jobs) must be discoverable (AGENTS.md rule
-        # 5), but the ~30s poll must not spam the log. Holds the signature of the
-        # last logged failure so an identical one is not re-logged every poll.
+        # Log-once/on-change state for a FAILING tick: the signature of the last
+        # logged failure, so an identical one is not re-logged every poll.
         self._last_tick_error: Optional[str] = None
 
     # ---- pure decision logic ----------------------------------------------
     def due(self, job: Job, now: float) -> bool:
         """True if *job* should run at *now* (epoch seconds). Does NOT consider
-        ``enabled`` - the caller filters that - so the interval/cron logic stays
-        easy to test in isolation."""
+        ``enabled``; the caller filters that."""
         if job.schedule_kind == "interval":
             try:
                 interval = int(job.schedule)
@@ -207,14 +202,12 @@ class JobScheduler:
                 # Avoid double-firing within the same matching minute on a
                 # sub-minute poll: only fire once per cron-minute per job.
                 return not already
-            # Catch-up: a slot that came due while the server was DOWN must run
-            # on the next tick, which the docs promise but cron silently skipped
-            # (memory-audit 2026-07-02). Fire ONCE for any missed matching minute
-            # strictly after last_run. Only for jobs that have run before (a
-            # freshly-created cron job waits for its next real slot, never
-            # back-fires history), and bounded so a long downtime cannot make the
-            # scan expensive. record_result stamps last_run, so the caught-up
-            # slot is not re-fired next tick.
+            # Catch-up: a slot that came due while the server was DOWN fires
+            # ONCE on the next tick, for any missed matching minute strictly
+            # after last_run. Only for jobs that have run before, so a
+            # freshly-created cron job never back-fires history, and bounded by
+            # _CATCHUP_WINDOW_SECONDS. record_result stamps last_run, so the
+            # caught-up slot is not re-fired next tick.
             if job.last_run is None or already:
                 return False
             return self._missed_cron_slot(job, now)
@@ -248,16 +241,15 @@ class JobScheduler:
         job ids that ran this tick. Never raises out (a per-job error is caught
         and recorded).
 
-        Overlap guard (U-4): if a previous run (this scheduler or a GUI "run now")
-        is still in flight, the tick SKIPS its due jobs rather than starting runs
-        that would stack a second model load and OOM the GPU. Skipped jobs are due
-        again next tick - an interval job runs as soon as the slow run finishes, a
-        cron job is not marked fired so its minute is not consumed."""
+        Overlap guard: if a previous run (this scheduler or a GUI "run now") is
+        still in flight, the tick SKIPS its due jobs rather than stacking a second
+        model load. Skipped jobs are due again next tick - an interval job runs as
+        soon as the slow run finishes, and a cron job is not marked fired, so its
+        minute is not consumed."""
         if now is None:
             now = time.time()
         current = self.store.list()
-        # Prune _cron_fired for jobs that no longer exist, so a long-running server
-        # with churny cron jobs does not leak dict entries forever (CHK-JOBS-CRONLEAK).
+        # Prune _cron_fired for jobs that no longer exist.
         if self._cron_fired:
             live = {j.id for j in current}
             for jid in [k for k in self._cron_fired if k not in live]:
@@ -290,9 +282,8 @@ class JobScheduler:
                 try:
                     self.store.record_result(job.id, result)
                 except Exception as e:
-                    # Recording must never crash the scheduler loop, but a
-                    # persistence failure should be discoverable, not silent
-                    # (AGENTS.md rule 5: prefer a debug line over total silence).
+                    # Recording must never crash the scheduler loop; the
+                    # persistence failure is logged at debug instead.
                     from localm.debuglog import logger
                     logger.debug(
                         "jobs scheduler: could not record result for %s: %s",
@@ -302,11 +293,10 @@ class JobScheduler:
 
     # ---- async loop --------------------------------------------------------
     def _note_tick_error(self, exc: BaseException) -> None:
-        """Log a failing tick ONCE per distinct error (not every poll). A tick
-        must never kill the loop, but it must not fail SILENTLY either: an
-        unreadable jobs.json makes ``store.list()`` raise every tick and halts all
-        scheduled jobs, which was invisible behind the old ``except: pass``
-        (AGENTS.md rule 5). Log-once/on-change keeps the ~30s poll from spamming."""
+        """Log a failing tick ONCE per distinct error, not every poll. A
+        persistent failure (an unreadable jobs.json makes ``store.list()`` raise
+        every tick and halts all scheduled jobs) is logged at WARNING the first
+        time and on every change of signature."""
         signature = f"{type(exc).__name__}: {exc}"
         if signature == self._last_tick_error:
             return
@@ -334,8 +324,8 @@ class JobScheduler:
                 # never stalls the loop or the server.
                 await asyncio.get_running_loop().run_in_executor(None, self.tick)
             except Exception as e:
-                # A tick must never kill the loop, but the failure must be
-                # surfaced, not swallowed (AGENTS.md rule 5). Log-once/on-change.
+                # A tick must never kill the loop; the failure is logged
+                # once/on-change instead.
                 self._note_tick_error(e)
             else:
                 self._note_tick_ok()

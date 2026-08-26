@@ -1,4 +1,4 @@
-"""H10: the `localm key` CLI group (advertised in auth.py but previously missing).
+"""The `localm key` CLI group.
 
 show / generate / set / clear / list / create / rm over the owner key and the
 scoped named-key store. Secrets are masked by default and shown in full only
@@ -309,7 +309,7 @@ class TestTimestampFormatting:
 
     def test_fmt_ts_formats_a_real_epoch(self):
         from localm.cli.keys import _fmt_ts
-        # 2026-01-01 00:00:00 UTC-ish; only checking it renders the year/date
+        # A fixed epoch timestamp; only checking it renders the year/date
         # shape, not a specific timezone-dependent clock reading.
         out = _fmt_ts(1767225600)
         assert out != "-"

@@ -2,35 +2,27 @@
 """The shared outbound-HTTPS opener (localm/http_ssl.py) and a regression guard
 that every outbound client actually goes through it.
 
-Background: setup-llama, `localm update` (proxy check + release-CDN download), the
-issues list, and the bug-report upload all did raw urllib HTTPS with no explicit SSL
-context, so they verified against whatever the machine's OS cert store happened to
-have cached. Python's OpenSSL on Windows does not keep that store current, so a
-fresh box failed every call with CERTIFICATE_VERIFY_FAILED (#765). The fix then
-hardcoded a certifi-only context - which verifies fine on a fresh box, but a
-corporate/security-product TLS-intercepting proxy's re-signed certificate is not in
-certifi's public root list either, so that DIDN'T help a managed machine behind one
-(#825 - confirmed live: uv's own equivalent bundled-root default fails identically
-on such a network with "invalid peer certificate: UnknownIssuer").
+setup-llama, `localm update` (proxy check + release-CDN download), the issues list,
+and the bug-report upload all reach HTTPS through verified_urlopen(). It tries the
+platform's NATIVE certificate store first (the same trust a browser, or an
+IT-provisioned proxy root, already has) and falls back to certifi ONLY on a
+certificate-verification failure specifically. A raw urllib call with no explicit
+SSL context verifies against whatever the machine's OS cert store happens to have
+cached, and Python's OpenSSL on Windows does not keep that store current; a
+certifi-only context has the opposite gap, since a corporate TLS-intercepting
+proxy's re-signed certificate is not in certifi's public root list.
 
-verified_urlopen() tries the platform's NATIVE certificate store first (the same
-trust a browser, or an IT-provisioned proxy root, already has - so a managed
-machine behind a proxy like that verifies on the very first attempt, nothing ever
-shown) and falls back to certifi ONLY on a certificate-verification failure
-specifically (rescuing the original #765 fresh-Windows case). These tests lock in
-that ordering, that a non-certificate failure never triggers the fallback, and that
-a certificate failure surviving both attempts is never silently swallowed.
-(setup-llama's own two call sites are guarded in tests/test_setup_llama_backends.py.)
+These tests lock in that ordering, that a non-certificate failure never triggers
+the fallback, and that a certificate failure surviving both attempts is never
+swallowed.
 
-They also lock the WIRING of the redirect guard - that HttpsOnlyRedirect is
-installed even when the caller passes no handlers, and that a caller's own
-redirect policy replaces it rather than joining it. What the guard DOES is
-proven over real sockets in tests/test_https_downgrade_redirect.py; asserting it
-here would only re-test the class, not the fact that anything installs it.
+They also lock the WIRING of the redirect guard: HttpsOnlyRedirect is installed
+even when the caller passes no handlers, and a caller's own redirect policy
+REPLACES it instead of joining it.
 
-NOTE THE SEAM: verified_urlopen no longer calls urllib.request.urlopen (it has to
-build an opener to install a handler), so patching urlopen no longer intercepts
-anything and lets the real network through. Use patch_https_transport.
+NOTE THE SEAM: verified_urlopen does not call urllib.request.urlopen (it builds an
+opener to install a handler), so patching urlopen intercepts nothing and lets the
+real network through. Use patch_https_transport.
 """
 from __future__ import annotations
 
@@ -118,7 +110,7 @@ def test_verified_urlopen_falls_back_to_certifi_on_cert_failure(monkeypatch):
 
 def test_verified_urlopen_never_downgrades_to_unverified_when_certifi_missing(monkeypatch):
     # If certifi is unavailable at the moment the fallback would run, the
-    # ORIGINAL certificate failure propagates rather than downgrading to an
+    # ORIGINAL certificate failure propagates; there is no downgrade to an
     # unverified handshake.
     def fake_urlopen(req, timeout=None, context=None):
         raise _cert_error()
@@ -198,8 +190,8 @@ def test_verified_urlopen_threads_extra_handlers_through(monkeypatch):
 
 
 def test_verified_urlopen_installs_the_downgrade_guard_by_default(monkeypatch):
-    # A caller that passes no handlers at all still gets HttpsOnlyRedirect
-    # rather than urllib's permissive default.
+    # A caller that passes no handlers at all still gets HttpsOnlyRedirect, not
+    # urllib's permissive default.
     seen = patch_https_transport(
         monkeypatch, lambda req, timeout=None, context=None: _Resp(200, b"ok"))
     req = urllib.request.Request("https://example.com/")

@@ -1,57 +1,50 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Windows multiprocessing-spawn fix for the branded LocaLM.exe launcher (#617).
+"""Windows multiprocessing-spawn fix for the branded LocaLM.exe launcher.
 
-``real_base_python()`` below is also reused by managed_comfy_fresh.py (#621): any
-code that needs to hand a subprocess a plain, correctly-self-named interpreter -
-not just multiprocessing's own internal spawn - hits the same class of bug for the
-same reason (see its docstring). One resolver, reused, rather than a third
-divergent attempt at this fix.
+``real_base_python()`` below is also reused by managed_comfy_fresh.py: any code
+that needs to hand a subprocess a plain, correctly-self-named interpreter - not
+just multiprocessing's own internal spawn - hits the same class of bug for the
+same reason. One resolver, reused.
 
-CPython's multiprocessing has a Windows-only optimization (bpo-35797):
-whenever it detects the running interpreter differs from ``sys._base_executable``
-(its own definition of "running inside a venv"), a spawned child is launched via
+CPython's multiprocessing has a Windows-only optimization (bpo-35797): whenever
+it detects the running interpreter differs from ``sys._base_executable`` (its
+own definition of "running inside a venv"), a spawned child is launched via
 ``sys._base_executable`` instead of ``sys.executable`` - see
 ``multiprocessing/popen_spawn_win32.py``'s ``WINENV`` check. CPython computes
-``sys._base_executable`` as ``<base_prefix>/<basename of the running executable>``;
-it does not look up what the base install's binary is actually named.
+``sys._base_executable`` as ``<base_prefix>/<basename of the running
+executable>``; it does not look up what the base install's binary is actually
+named.
 
-localm's branded launcher (``localm make-launcher`` -> ``<venv>/localm-app/
-LocaLM.exe``, see applaunch.py) is a COPY of the base interpreter renamed to
-LocaLM.exe. Running under that renamed copy, ``sys._base_executable`` becomes
-``<base_prefix>/LocaLM.exe`` - a file that does not exist (the base install's
-real file is named python.exe/python3) - so every
+localm's branded launcher (``localm make-launcher`` ->
+``<venv>/localm-app/LocaLM.exe``, see applaunch.py) is a COPY of the base
+interpreter renamed to LocaLM.exe. Running under that renamed copy,
+``sys._base_executable`` becomes ``<base_prefix>/LocaLM.exe`` - a file that does
+not exist (the base install's real file is named python.exe/python3) - so every
 ``multiprocessing.get_context("spawn")`` child (a GGUF model load, the voice/STT
 worker) fails with ``FileNotFoundError: [WinError 2] The system cannot find the
 file specified``. The GGUF loader (gguf.py) reports that as a misleading "Native
 llama runtime failed to load" error that has nothing to do with the actual
-llama.cpp runtime - confirmed live via GitHub issue #617.
+llama.cpp runtime.
 
-FIRST FIX ATTEMPT (WRONG, do not repeat): redirect to the venv's own
-``<prefix>/Scripts/python.exe``. That resolves the FileNotFoundError (spawn
-succeeds), but breaks a SECOND, subtler thing: under a uv-managed Python,
-``<prefix>/Scripts/python.exe`` is itself a TRAMPOLINE that re-spawns the real
-base interpreter as ANOTHER, nested child process. Windows multiprocessing hands
-a spawned child its Queue/Lock semaphore handles via a DIRECT
-``DuplicateHandle`` call targeting that child's own process handle
-(``Popen.duplicate_for_child``, in ``popen_spawn_win32.py`` - see
+DO NOT redirect to the venv's own ``<prefix>/Scripts/python.exe``. That resolves
+the FileNotFoundError, but under a uv-managed Python that file is itself a
+TRAMPOLINE that re-spawns the real base interpreter as ANOTHER, nested child
+process. Windows multiprocessing hands a spawned child its Queue/Lock semaphore
+handles via a DIRECT ``DuplicateHandle`` call targeting that child's own process
+handle (``Popen.duplicate_for_child``, in ``popen_spawn_win32.py`` - see
 ``synchronize.py``'s ``SemLock.__getstate__``). That handle is injected into the
 TRAMPOLINE's process, not into the base interpreter it then spawns as its own
-child - so the real worker process receives a handle that was never duplicated
+child, so the real worker process receives a handle that was never duplicated
 into ITS OWN table, and its first ``Queue.get()``/``Lock`` use fails with
-``OSError: [WinError 6] The handle is invalid``. Reproduced live: redirecting to
-the trampoline fails this way; redirecting to the base interpreter directly does
-not (confirmed with a real ``multiprocessing.Queue`` round trip, not just a bare
-spawn-and-exit check - the earlier verification of the first fix only checked
-that spawning succeeded, which is why this second bug was missed).
+``OSError: [WinError 6] The handle is invalid``.
 
-FIX: redirect straight to the base interpreter (``<sys.base_prefix>/python.exe``)
-instead of the venv trampoline - a single hop, no nested re-spawn, so the
+The redirect therefore goes straight to the base interpreter
+(``<sys.base_prefix>/python.exe``) - a single hop, no nested re-spawn, so the
 directly-duplicated handle lands in the same process that actually uses it.
-``sys.base_prefix`` (a directory) is unaffected by the renamed-executable bug
-above - only ``sys._base_executable`` (which also assumes a basename) is wrong -
-so this sidesteps that bug too without needing to touch the broken attribute at
-all. Calling this when NOT running under a renamed launcher is a harmless no-op
-(it just repoints at the interpreter that is already running, one hop earlier).
+``sys.base_prefix`` is a directory and is unaffected by the renamed-executable
+bug above; only ``sys._base_executable`` (which also assumes a basename) is
+wrong. Calling this when NOT running under a renamed launcher is a harmless
+no-op: it repoints at the interpreter that is already running, one hop earlier.
 """
 
 from __future__ import annotations
@@ -126,21 +119,15 @@ def describe_exit_code(code, *, posix: Optional[bool] = None) -> str:
     """Render a dead child's exit *code* so a reader can act on it, e.g.
     ``"-4 (killed by signal SIGILL)"`` instead of ``"-4"``.
 
-    WHY THIS EXISTS: on the one crash that most needed diagnosing (issues
-    1222/1223) the product reported ``worker exit -4`` and nothing else. That
-    number is the single most discriminating fact available about a native death
-    - it separates an illegal instruction from a segfault from an abort, which
-    are different families of cause - and it had to be decoded by hand before the
-    investigation could even choose a direction. Throwing it away on every native
-    death is a diagnostic the product could give for free and did not.
+    The number is the most discriminating fact available about a native death:
+    it separates an illegal instruction from a segfault from an abort, which are
+    different families of cause.
 
     *posix* selects which OS convention the code follows, defaulting to this
     process's own. It is an explicit parameter rather than a bare ``os.name``
     read because the two conventions are mutually exclusive and each is
-    unreachable from the other platform: without it, the POSIX branch (the one
-    the field crash is on) could never be exercised by a test running on Windows,
-    which is item-19 fixture blindness - the platform under test can never
-    produce the value that matters.
+    unreachable from the other platform, so without it the POSIX branch could
+    never be exercised by a test running on Windows.
 
     Never raises: this decorates an error message on a path that is already
     failing, so an unrecognised code degrades to the bare number.
@@ -175,23 +162,9 @@ def death_was_a_native_fault(code, *, trace_captured: bool = False,
     """Whether a dead child's *code* ESTABLISHES that it died from a native
     fault, as opposed to exiting with an ordinary status.
 
-    WHY THIS EXISTS. Every runner reported ANY worker death detected via
-    ``is_alive()`` as a "Native inference fault", including an ordinary uncaught
-    Python exception - and this codebase already knew better in two places:
-
-    * ``llamacpp/_runner.py``'s own docstring: "worker exit 1 ... is
-      multiprocessing's own signature for exactly this case (an uncaught PYTHON
-      exception), not a genuine native abort".
-    * ``tests/test_image_decode_without_pillow.py``, whose whole subject is a
-      missing Pillow surfacing as "Native inference fault (worker exit 1)" with
-      a plain ``ModuleNotFoundError`` in the log: "Every clause of that was
-      false. ... there was no native fault and no native stack trace, and the
-      model was fine."
-
-    That was fixed PER CAUSE (Pillow became a core dependency and the ImportError
-    is guarded). The MISCLASSIFICATION survived for every other Python exception,
-    because it lives one layer up - at the site that words the message - and a
-    per-cause fix cannot reach it (diff-review-discipline item 23).
+    An uncaught Python exception in a worker exits 1, which is
+    multiprocessing's own signature for that case rather than a genuine native
+    abort, so it must not be worded as one.
 
     EVIDENCE USED, strongest first:
 
@@ -199,14 +172,13 @@ def death_was_a_native_fault(code, *, trace_captured: bool = False,
       only fires on SIGSEGV/SIGFPE/SIGABRT/SIGBUS/SIGILL, so a trace means a
       native signal, on either platform.
     * a NEGATIVE code under the POSIX convention: death by signal.
-    * a Windows NTSTATUS-shaped code we recognise as a crash status.
+    * a Windows NTSTATUS-shaped code recognised as a crash status.
 
-    Everything else answers FALSE - deliberately including codes we cannot
-    classify. This is a "has it been ESTABLISHED" predicate, not a guess: exit 1
-    is an uncaught Python exception, and a Windows abort under an ARMED
-    faulthandler exits 3 (measured), which is indistinguishable from an ordinary
-    exit 3 on the code alone. In that case the trace is what settles it, which is
-    why *trace_captured* leads rather than being a tiebreak.
+    Everything else answers FALSE, including codes that cannot be classified.
+    This is a "has it been ESTABLISHED" predicate, not a guess: a Windows abort
+    under an ARMED faulthandler exits 3, which is indistinguishable from an
+    ordinary exit 3 on the code alone, and the trace is what settles it - which
+    is why *trace_captured* leads rather than being a tiebreak.
 
     Never raises - it decorates a message on an already-failing path."""
     if trace_captured:
@@ -258,30 +230,26 @@ def interpreter_for_localm_children() -> str:
     ``sys.executable`` is correct for a process launched via the venv (or the
     branded launcher living inside it): the exe sits next to ``pyvenv.cfg``, so
     a child running the same exe re-discovers the venv on its own. It is WRONG
-    inside a Windows multiprocessing-spawn worker: ``ensure_spawn_uses_venv_python``
-    above deliberately spawns workers via the BASE interpreter (see the module
-    docstring for why neither the renamed launcher nor the venv trampoline can
-    be used THERE), and multiprocessing hands the worker the venv's ``sys.path``
-    as spawn-prep data rather than via the exe - so inside the worker,
-    ``sys.executable`` is a bare base python whose own children get no venv
-    paths at all. Found live (2026-07-22): the GGUF worker's VRAM-probe daemon
-    could not resolve the ``localm-llama-runtime`` wheel (nor ``localm`` itself
-    on a non-dev install) and answered ERR on every query, silently costing the
-    worker its only raw VRAM reading - which made every mid-generation
-    context-grow KV-placement check unmeasurable.
+    inside a Windows multiprocessing-spawn worker:
+    ``ensure_spawn_uses_venv_python`` above spawns workers via the BASE
+    interpreter (see the module docstring), and multiprocessing hands the worker
+    the venv's ``sys.path`` as spawn-prep data rather than via the exe - so
+    inside the worker ``sys.executable`` is a bare base python whose own
+    children get no venv paths at all, and the GGUF worker's VRAM-probe daemon
+    can then resolve neither the ``localm-llama-runtime`` wheel nor ``localm``
+    itself on a non-dev install, answering ERR on every query.
 
     Resolution: a process already running inside the venv (``sys.prefix !=
-    sys.base_prefix``) keeps ``sys.executable``, today's working behavior.
-    Otherwise the venv is found via the site-packages entries multiprocessing
-    injected into ``sys.path`` (the ancestor holding ``pyvenv.cfg``) and its
-    ``Scripts/python.exe`` (``bin/python`` elsewhere) is returned. The venv
-    trampoline is safe for THESE children: the WinError 6 failure that rules it
-    out for multiprocessing workers is specific to mp's cross-process SEMAPHORE
-    handle injection (``DuplicateHandle`` into the trampoline, not the real
-    child - see module docstring); plain stdio pipes are standard handles,
-    which the trampoline forwards to its child (verified live with a pipe
-    round-trip). Falls back to ``sys.executable`` when no venv is found (a
-    system-python setup with localm on ``PYTHONPATH`` keeps today's behavior)."""
+    sys.base_prefix``) keeps ``sys.executable``. Otherwise the venv is found via
+    the site-packages entries multiprocessing injected into ``sys.path`` (the
+    ancestor holding ``pyvenv.cfg``) and its ``Scripts/python.exe``
+    (``bin/python`` elsewhere) is returned. The venv trampoline is safe for
+    THESE children: the WinError 6 failure that rules it out for multiprocessing
+    workers is specific to mp's cross-process SEMAPHORE handle injection
+    (``DuplicateHandle`` into the trampoline, not the real child - see the
+    module docstring), while plain stdio pipes are standard handles, which the
+    trampoline forwards to its child. Falls back to ``sys.executable`` when no
+    venv is found (a system-python setup with localm on ``PYTHONPATH``)."""
     if sys.prefix != sys.base_prefix:
         return sys.executable
     for entry in sys.path:
@@ -304,37 +272,38 @@ def install_parent_death_watchdog() -> bool:
     parent died, including an uncatchable hard kill (Windows TerminateProcess /
     Task Manager "End Task", POSIX SIGKILL) where NO parent-side code runs.
 
-    Call at the very top of a worker's process-main. Returns True if the watchdog
-    thread was installed, False if there is nothing to watch (the main process) or
-    the mechanism is unavailable.
+    Call at the very top of a worker's process-main. Returns True if the
+    watchdog thread was installed, False if there is nothing to watch (the main
+    process) or the mechanism is unavailable.
 
-    WHY this is needed even though every worker is spawned ``daemon=True``:
+    Needed even though every worker is spawned ``daemon=True``:
     multiprocessing's daemon-child reclamation is an atexit hook
-    (``multiprocessing.util._exit_function``), and atexit never runs under a hard
-    kill. Every localm reclamation path (``ModelRunner.shutdown()`` on unload,
-    ``embedder.release_for_exit()`` on stop/restart) is parent-side Python, which by
-    definition does not run when the parent is force-killed. So without this, a
-    force-closed / End-Task'd server leaves its model worker alive, holding its
-    model resident in VRAM indefinitely, and the next start plans against a card
-    that is mostly full (reproduced in the real product 2026-07-16).
+    (``multiprocessing.util._exit_function``), and atexit never runs under a
+    hard kill. Every localm reclamation path (``ModelRunner.shutdown()`` on
+    unload, ``embedder.release_for_exit()`` on stop/restart) is parent-side
+    Python, which by definition does not run when the parent is force-killed.
+    Without this, a force-closed or End-Task'd server leaves its model worker
+    alive, holding its model resident in VRAM indefinitely, and the next start
+    plans against a card that is mostly full.
 
-    HOW: multiprocessing ALREADY hands a spawned child a waitable parent sentinel
-    (Windows: an ``OpenProcess(SYNCHRONIZE)`` handle; POSIX: a dup'd pipe fd),
-    exposed as ``multiprocessing.parent_process().join()`` - which blocks until the
-    parent terminates, signalled by the kernel no matter how the parent died. A
-    tiny daemon thread waits on it and, the instant it fires, ``os._exit(0)``s.
+    HOW: multiprocessing ALREADY hands a spawned child a waitable parent
+    sentinel (Windows: an ``OpenProcess(SYNCHRONIZE)`` handle; POSIX: a dup'd
+    pipe fd), exposed as ``multiprocessing.parent_process().join()``, which
+    blocks until the parent terminates, signalled by the kernel no matter how
+    the parent died. A tiny daemon thread waits on it and, the instant it fires,
+    ``os._exit(0)``s.
 
-    ``os._exit`` (not ``worker.close()`` / ``sys.exit``) is deliberate: a model's
-    ``close()`` takes the generation lock that is held during a native decode, so a
-    polite close mid-generation would deadlock - and the parent is already gone, so
-    an immediate process exit is both sufficient (it frees the VRAM) and the only
-    thing that cannot hang. The native binding is a ctypes ``CDLL`` (verified),
-    which releases the GIL during ``llama_decode``, so this thread still gets the
-    GIL to run even while the worker is mid-token.
+    ``os._exit``, not ``worker.close()`` or ``sys.exit``: a model's ``close()``
+    takes the generation lock that is held during a native decode, so a polite
+    close mid-generation would deadlock - and the parent is already gone, so an
+    immediate process exit both frees the VRAM and cannot hang. The native
+    binding is a ctypes ``CDLL``, which releases the GIL during
+    ``llama_decode``, so this thread still gets the GIL to run even while the
+    worker is mid-token.
 
-    Fully guarded and idempotent: a no-op in the main process (``parent_process()``
-    is None there) and if anything is unavailable, so it can never block a normal
-    worker start."""
+    Fully guarded and idempotent: a no-op in the main process
+    (``parent_process()`` is None there) and if anything is unavailable, so it
+    can never block a normal worker start."""
     global _parent_death_watchdog_installed
     if _parent_death_watchdog_installed:
         return True
@@ -373,28 +342,23 @@ def suppress_native_error_dialogs() -> bool:
     codebase already assumes and handles (e.g.
     VramSizingMixin._free_total_vram_bytes).
 
-    WHY this is needed even though the failure is already caught in Python:
     ctypes wraps a native DLL load in Windows SEH, so a bad DLL DOES raise a
-    catchable exception rather than crashing the interpreter - but by default
+    catchable exception rather than crashing the interpreter, but by default
     Windows' own critical-error handler shows its blocking dialog FIRST, before
-    that exception ever reaches Python. Confirmed live: a worker still finished
-    loading and replying after the box was manually dismissed - the code's
-    "catch and log" handling was working exactly as designed, it just was not
-    preventing the OS from ALSO blocking on a dialog nobody meant to show.
+    that exception ever reaches Python.
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) makes the
-    failing call return an error to its caller instead of ever presenting UI,
-    which is what lets the existing try/except actually behave as intended.
+    failing call return an error to its caller instead of ever presenting UI.
 
     Call at the very top of a worker's process-main, alongside
-    install_parent_death_watchdog() - a worker process's whole reason to exist
-    is running native code, so suppressing the OS's error UI for its entire
-    lifetime is always correct there, unlike the main process (which stays
-    interactive and may want the standard OS UI for genuine hardware issues
-    unrelated to this codebase's own native bindings).
+    install_parent_death_watchdog(). A worker process's whole reason to exist is
+    running native code, so suppressing the OS's error UI for its entire
+    lifetime is correct there, unlike the main process, which stays interactive
+    and may want the standard OS UI for genuine hardware issues unrelated to
+    this codebase's own native bindings.
 
     Windows-only; a no-op elsewhere. Idempotent (a second call in the same
-    process is a cheap no-op, matching install_parent_death_watchdog's shape).
-    Best-effort: never raises, so it can never block a normal worker start."""
+    process is a cheap no-op). Best-effort: never raises, so it can never block
+    a normal worker start."""
     global _native_error_dialogs_suppressed
     if _native_error_dialogs_suppressed:
         return True

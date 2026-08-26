@@ -2,13 +2,12 @@
 """The changed-files tracker (GUI "files changed" / session_diff) must survive
 a checkpoint save/resume cycle.
 
-Before this fix, save_checkpoint() never wrote _changed_files at all: a
-server restart or GUI reconnect mid-session lost every prior write's record
-even though the writes themselves were still on disk and the conversation
-resumed intact - the diff view would silently go blank for work that
-genuinely happened. Modelled on test_todos.py's real-dispatch pattern: drive
-the REAL Agent._execute_tool (so write_file's own snapshot/tracking code
-runs), the REAL checkpoint file, and a genuinely fresh Agent for the resume.
+save_checkpoint() must write _changed_files, or a server restart or GUI
+reconnect mid-session loses every prior write's record even though the writes
+themselves are still on disk and the conversation resumes intact, and the diff
+view goes blank for work that genuinely happened. Driven through the REAL
+Agent._execute_tool (so write_file's own snapshot/tracking code runs), the REAL
+checkpoint file, and a genuinely fresh Agent for the resume.
 """
 
 from unittest.mock import patch
@@ -83,9 +82,8 @@ def test_changed_files_survive_a_real_checkpoint_resume_cycle(tmp_path, monkeypa
 
 def test_older_checkpoint_without_changed_files_key_resumes_with_empty_tracker(
         tmp_path, monkeypatch):
-    """A checkpoint saved before this fix existed has no "changed_files" key
-    at all - resuming it must not crash, and leaves the tracker empty (the
-    same lossy behaviour it already had, not a new failure mode)."""
+    """A checkpoint with no "changed_files" key at all must resume without
+    crashing, leaving the tracker empty."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"

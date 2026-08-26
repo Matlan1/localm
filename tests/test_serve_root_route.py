@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A bare `localm serve` (api mode) should not 404 at /.
 
-create_app builds the inference app with no root route, so GET / returned 404
-in api mode (the GUI's own "/" handler is only added when the GUI surface is
-attached, which `serve` never does). With api_landing=True the root redirects
-to the auto-generated /docs.
+create_app builds the inference app with no root route; the GUI's own "/"
+handler is only added when the GUI surface is attached, which `serve` never
+does. With api_landing=True the root redirects to the auto-generated /docs.
 """
 
 import unittest
@@ -26,8 +25,8 @@ class TestApiLandingRoute(unittest.TestCase):
         self.assertEqual(client.get("/docs").status_code, 200)
 
     def test_root_is_404_without_api_landing(self):
-        # Default construction (e.g. when mounted under the GUI) must NOT add the
-        # redirect, so the GUI's own "/" shell can own the root path.
+        # Default construction (e.g. when mounted under the GUI) must NOT add
+        # the redirect; the GUI's own "/" shell owns the root path.
         app = create_app(_make_mock_engine(loaded=True))
         client = TestClient(app)
         self.assertEqual(client.get("/", follow_redirects=False).status_code, 404)

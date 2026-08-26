@@ -3,14 +3,7 @@
 
 Rule 9 says a setting's help states what the control does and what changes if
 you alter it; rationale, threat models and history live in a code comment or the
-docs. A character count is the only part of that which a machine can check, and
-it is fully objective - so it cannot generate the false positives that get a
-gate switched off, and it binds every field added from now on rather than
-decaying the moment this cleanup ships.
-
-Measured before the cleanup that added this file: 30 of 116 fields were over
-200 characters, 3,205 characters over budget in total, with the worst single
-field at 559. Median was 136, so most of the page was already fine.
+docs. A character count is the part of that a machine can check.
 """
 
 import re
@@ -54,13 +47,11 @@ def test_every_help_string_is_within_the_budget():
 
 
 def test_the_budget_covers_hidden_fields_too():
-    """A HIDDEN field renders no control today, so it is tempting to exempt it.
+    """A HIDDEN field is NOT exempt from the budget.
 
-    It is not exempt, deliberately: HIDDEN is a rendering decision that gets
-    reversed (gpu_split_indices and main_gpu_index are HIDDEN only because a
-    dedicated Live-tuning control renders them instead), and a field that
-    becomes visible must not bring a wall of text in with it. This test states
-    that the coverage above is total rather than leaving it to be inferred.
+    HIDDEN is a rendering decision that gets reversed: gpu_split_indices and
+    main_gpu_index are HIDDEN only because a dedicated Live-tuning control
+    renders them instead.
     """
     hidden = [f for _, f in _all_fields() if f.widget == ss.Widget.HIDDEN]
     assert hidden, "no HIDDEN fields left - this test has lost its subject"
@@ -72,13 +63,12 @@ def test_the_budget_covers_hidden_fields_too():
 def test_pending_signoff_list_is_exact():
     """The ratchet. Every exemption must still be earning its place.
 
-    Three ways this goes red, and each is the correct outcome:
+    Three ways this goes red:
       - a key here no longer exists in the schema (renamed or removed);
-      - a key here is no longer admin_only, so D8's trust-boundary reasoning
-        does not apply to it and it should just be trimmed;
-      - a key here is ALREADY within budget, i.e. someone did the rewrite and
-        left the exemption behind. That is exactly how an exemption list decays
-        into a permanent carve-out, so it fails loudly.
+      - a key here is no longer admin_only, so the trust-boundary reasoning does
+        not apply to it and it should be trimmed;
+      - a key here is ALREADY within budget, so the rewrite happened and the
+        exemption was left behind.
     """
     by_key = {f.key: f for _, f in _all_fields()}
 
@@ -125,13 +115,10 @@ def test_pending_signoff_fields_are_admin_only_and_over_budget(key):
 
 
 def test_pending_signoff_count_is_tracked():
-    """A count, so adding an exemption is a visible, deliberate act.
+    """A count, so adding an exemption is a visible act.
 
-    All seven fields that once lived in PENDING_SIGNOFF were signed off and
-    rewritten 2026-08-13 (dev-notes/settings-ia-2026-08-13/09-ADMIN-COPY-
-    PROPOSALS.md), so the tracked count is now 0. Anyone adding a new
-    trust-boundary exemption must bump this assertion in the same diff and
-    say why in the PENDING_SIGNOFF comment above - a silent bump is exactly
-    what this test exists to prevent.
+    The tracked count is 0. Adding a trust-boundary exemption means bumping this
+    assertion in the same diff and saying why in the PENDING_SIGNOFF comment
+    above.
     """
     assert len(PENDING_SIGNOFF) == 0

@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""BUG-2: a large GGUF that fills VRAM must keep generating, not crash.
+"""A large GGUF that fills VRAM must keep generating, not crash.
 
-A model whose weights nearly fill the card was loaded with its KV cache in VRAM,
-leaving no room for the first decode's compute buffers; on the Vulkan backend that
-faults with a native C++ crash (0xe06d7363) instead of spilling to RAM (as ROCm
-does). Root cause: a file-size KV heuristic under-counted the real KV cache ~2.6x,
-so the load "fit" per the estimate yet overflowed VRAM for real.
+A model whose weights nearly fill the card, loaded with its KV cache in VRAM,
+leaves no room for the first decode's compute buffers; on the Vulkan backend that
+faults with a native C++ crash (0xe06d7363) instead of spilling to RAM as ROCm
+does. A file-size KV heuristic under-counts the real KV cache by roughly 2.6x, so
+such a load "fits" per the estimate and overflows VRAM for real.
 
-These tests cover the fix, WITHOUT the native DLL (the api module / metadata are
-mocked): the architecture-accurate per-token KV size, the load-time offload_kqv
+These tests run WITHOUT the native DLL (the api module and metadata are mocked)
+and cover the architecture-accurate per-token KV size, the load-time offload_kqv
 decision (keep KV in system RAM when it will not fit alongside compute), that the
-placement is sticky across a grow, and that the grow check now reasons with the
-accurate size. The real-runtime symbol export + real generation are covered by the
-@integration tests at the bottom and by the on-hardware Vulkan run.
+placement is sticky across a grow, and that the grow check reasons with the
+accurate size. The real-runtime symbol export and real generation are covered by
+the @integration tests at the bottom.
 """
 
 from __future__ import annotations
@@ -181,15 +181,9 @@ class TestForceVulkanDedicatedVram:
             self, tmp_path, monkeypatch, preset):
         """An opt-out must reach GGML, not merely survive in os.environ.
 
-        This assertion used to be `== "0"`, which is a true statement about
-        Python and disconnected from the effect. ggml reads
-        `getenv(...) != nullptr`, so "0" disables host-visible vidmem exactly as
-        "1" does - the UMA/iGPU user this opt-out exists for got the OPPOSITE of
-        what they asked for, and the old test could never have failed on it
-        because it stopped at the Python boundary.
-
-        ABSENCE is therefore the property, and it is the only value of this
-        variable that ggml reads as "off".
+        ggml reads `getenv(...) != nullptr`, so "0" disables host-visible
+        vidmem exactly as "1" does. ABSENCE is the property: it is the only
+        value of this variable that ggml reads as "off".
         """
         assert self._run(tmp_path, monkeypatch, platform="win32",
                          files=["llama.dll", "ggml-vulkan.dll"],
@@ -260,12 +254,12 @@ class TestGrowCheckUsesAccurateKv:
 
 
 class TestRamResidentKvChargesFullTarget:
-    """Once a prior grow placed the KV cache in SYSTEM RAM (offload_kqv=False), the
-    GPU holds no KV, so free VRAM reads large. The delta-only charge then wrongly
-    says a further grow 'fits VRAM', offload_kqv flips back to True, and the FULL
-    target KV overflows VRAM -> llama_init_from_model NULLs -> _prefill_fresh_context
-    raises and truncates a reply that was generating fine (defeats #554). When the
-    resident KV is already in RAM, the FULL target must be charged, not the delta."""
+    """Once a prior grow placed the KV cache in SYSTEM RAM (offload_kqv=False),
+    the GPU holds no KV, so free VRAM reads large. A delta-only charge would then
+    say a further grow fits VRAM, offload_kqv would flip back to True, and the
+    FULL target KV would overflow VRAM -> llama_init_from_model NULLs ->
+    _prefill_fresh_context raises and truncates a reply that was generating fine.
+    When the resident KV is already in RAM, the FULL target is charged."""
 
     def test_ram_resident_kv_charges_full_target_stays_ram(self, tmp_path):
         b = _gguf_backend(tmp_path, size_bytes=2_000_000_000, n_ctx=4096)
@@ -299,11 +293,9 @@ class TestRamResidentKvChargesFullTarget:
 
 
 class TestRamOffloadHintFiresOnce:
-    """The RAM-offload notice is documented (and #554's commit) as a 'one-time
-    hint', so a conversation that keeps growing past free VRAM must explain the
-    slowdown ONCE, not spam the debug log on every grow. A card-filling model with
-    the default grow step overflows on EVERY grow, so without a guard the warning
-    repeats indefinitely."""
+    """The RAM-offload notice is a one-time hint: a conversation that keeps
+    growing past free VRAM explains the slowdown ONCE rather than on every grow.
+    A card-filling model with the default grow step overflows on EVERY grow."""
 
     def test_hint_fires_once_across_repeated_ram_grows(self, tmp_path, caplog):
         import logging
@@ -372,15 +364,11 @@ class TestGpuMemory:
 
 
 class TestFreeVramBytesPrefersBackend:
-    """_free_vram_bytes()'s source-of-truth for the KV-placement decision this
-    file covers (BUG-2): torch.cuda is now ALWAYS preferred when it can answer,
-    and the direct native loader.gpu_memory() call is never made from here at
-    all (only its crash-safe, subprocess-isolated wrapper gpu_memory_isolated()
-    is used, as a fallback, when torch cannot answer) - see
-    tests/test_vram_preflight.py::TestFreeVramBytesUsesIsolatedNativeFallback
-    for the full behavior + the native-abort root cause this order is built
-    around. Updated from the original "prefers the native backend over torch"
-    expectation, which that fix intentionally reversed."""
+    """_free_vram_bytes()'s source of truth for the KV-placement decision this
+    file covers: torch.cuda is ALWAYS preferred when it can answer, and the
+    direct native loader.gpu_memory() call is never made from here at all - only
+    its crash-safe, subprocess-isolated wrapper gpu_memory_isolated(), as a
+    fallback when torch cannot answer."""
 
     def test_prefers_torch_over_isolated_fallback(self, monkeypatch):
         from localm.inference.backends.llamacpp import _loader

@@ -2,13 +2,12 @@
 """
 _confirm_timeout() (localm/plugins/coder/sessions.py) reads the
 "coder_confirm_timeout" config key, documented in settings_schema.py as
-"0 = wait forever". Regression coverage for two related bugs:
+"0 = wait forever".
 
-  - `x or default` treats a configured 0 as falsy and silently substitutes
-    the 600s default instead of the user's explicit choice.
-  - Even once 0 round-trips, `threading.Event.wait(timeout=0)` does NOT
-    block - it's a non-blocking poll - so "wait forever" must be signaled
-    as timeout=None, not timeout=0.0.
+A configured 0 must survive rather than being replaced by the 600s default
+(`x or default` treats 0 as falsy), and "wait forever" must reach
+`threading.Event.wait` as timeout=None: wait(timeout=0) is a non-blocking
+poll, not an indefinite wait.
 """
 
 from localm.plugins.coder.sessions import _CONFIRM_TIMEOUT_S, _confirm_timeout

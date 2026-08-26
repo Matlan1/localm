@@ -65,8 +65,7 @@ def test_resolve_empty_returns_none(monkeypatch):
 
 
 def test_resolve_unknown_records_last_error(monkeypatch):
-    """A spec matching nothing at all must not just return None - last_error()
-    is the GUI's only channel for this (#949), so it must name the spec."""
+    """A spec matching nothing at all sets last_error(), naming the spec."""
     _cfg(monkeypatch, embedding_model="not-a-real-model-xyz")
     assert emb.resolve_embedding_model_path() is None
     err = emb.last_error() or ""
@@ -74,13 +73,8 @@ def test_resolve_unknown_records_last_error(monkeypatch):
 
 
 def test_resolve_bad_path_spec_does_not_leak_the_account_name(tmp_path, monkeypatch):
-    """Regression (2026-08-04): the 'not a path, a registered model, or a known
-    key' message used to build the spec into last_error() with {spec!r}. repr()
-    doubles backslashes in a Windows path, so pathscrub's literal-prefix match
-    (and its regex backstop, which requires exactly one separator right after
-    the drive letter) never recognised the escaped form - the account name
-    survived scrubbing untouched. A spec that IS an absolute path under the
-    user's home, but resolves to nothing, must not leak that account name."""
+    """A spec that IS an absolute path under the user's home but resolves to
+    nothing must not leak the account name through last_error()."""
     fake_home = tmp_path / "home" / "someaccount"
     fake_home.mkdir(parents=True)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
@@ -94,12 +88,9 @@ def test_resolve_bad_path_spec_does_not_leak_the_account_name(tmp_path, monkeypa
 
 
 def test_resolve_registered_directory_is_reported_as_hf_not_gguf(tmp_path, monkeypatch):
-    """localm's own model pull can register a HuggingFace-format embedding model
-    as a DIRECTORY of shards (get_model_info's contract is 'exists', not 'is a
-    loadable GGUF'). #949: this used to fall through to the generic 'not a path,
-    a registered model, or a known key' message - indistinguishable from a name
-    that was never found at all, even though the model genuinely was found. Must
-    now say specifically it is a directory, not a GGUF, via last_error()."""
+    """A registered HuggingFace-format embedding model (a DIRECTORY of shards)
+    is reported through last_error() as a directory rather than a GGUF, not with
+    the generic 'not a path, a registered model, or a known key' message."""
     hf_dir = tmp_path / "bge-large-en-v1.5"
     hf_dir.mkdir()
     (hf_dir / "config.json").write_text("{}")
@@ -116,21 +107,13 @@ def test_resolve_registered_directory_is_reported_as_hf_not_gguf(tmp_path, monke
 
 
 def test_resolve_registered_unc_path_is_never_statted(monkeypatch):
-    """A registered entry whose stored path is UNC/device-shaped (a hand-edited
-    registry, never a legitimate `localm pull`/`add`) must be refused the same
-    way step 0 refuses a UNC embedding_model spec directly - BEFORE any
-    filesystem call, never after. A real stat reaches the Windows SMB
-    redirector and can block for minutes on an unroutable host or
-    auto-authenticate against a reachable one.
+    """A registered entry whose stored path is UNC/device-shaped is refused
+    BEFORE any filesystem call, exactly as a UNC embedding_model spec is.
 
-    Uses a side-effect counter, NOT a raise, to detect a regression: the
-    registry-lookup block this guard sits in is wrapped in a broad
-    'except Exception: pass' (to tolerate a broken registry), which would
-    silently swallow an AssertionError raised from inside is_file()/is_dir()
-    and make the test pass whether or not the guard actually fired - proven by
-    running this exact scenario against the pre-fix code before adding the
-    guard, which showed exactly that false pass. The spy never touches the
-    real filesystem/network either way, so the test cannot hang."""
+    Detects a regression with a side-effect counter rather than a raise: the
+    registry-lookup block this guard sits in catches Exception broadly and would
+    swallow an AssertionError raised from inside is_file()/is_dir(). The spy
+    never touches the real filesystem or network."""
     _cfg(monkeypatch, embedding_model="sneaky-entry")
 
     unc = r"\\attacker-host\share\fake.gguf"
@@ -175,14 +158,10 @@ def test_resolve_success_clears_prior_last_error(tmp_path, monkeypatch):
 
 
 def test_load_failure_survives_a_later_resolve_success_probe(tmp_path, monkeypatch):
-    """Regression: GET /api/rag/embedding's status handler calls
-    resolve_embedding_model_path() directly (the same call get_embedder() makes)
-    purely to compute 'installed'. A file that resolves fine at the path level
-    but is NOT actually a usable embedding model (the real #949-adjacent case:
-    wrong pooling, corrupt file, or - as here - a build that lacks the
-    embeddings API) must not have its LOAD failure explanation wiped by that
-    later resolve-only probe just because the path itself still exists. Only
-    reset_embedder() may clear a latched load failure."""
+    """A file that resolves fine at the path level but is NOT a usable embedding
+    model keeps its LOAD failure explanation when a later resolve-only probe
+    runs (the status handler's 'installed' check). Only reset_embedder() clears
+    a latched load failure."""
     f = tmp_path / "not-an-embedder.gguf"
     f.write_bytes(b"GGUF stub")
     _cfg(monkeypatch, embedding_model=str(f))
@@ -203,9 +182,8 @@ def test_load_failure_survives_a_later_resolve_success_probe(tmp_path, monkeypat
 
 def test_download_gated_by_net_policy_records_last_error(monkeypatch):
     """A known key that is not yet downloaded, with auto-download blocked by
-    policy (net_mode off), still explains itself via last_error() - INFO-level
-    in the log (an expected state, not a defect: see _download_known), but not
-    silent to the GUI status endpoint that reads last_error()."""
+    policy (net_mode off), still explains itself via last_error(); the log line
+    is INFO-level."""
     _cfg(monkeypatch, embedding_model="bge-small-en-v1.5", net_mode="off")
     assert emb.resolve_embedding_model_path() is None
     err = emb.last_error() or ""
@@ -213,16 +191,9 @@ def test_download_gated_by_net_policy_records_last_error(monkeypatch):
 
 
 def test_policy_declined_download_does_not_clobber_a_real_load_failure(monkeypatch):
-    """Regression (found live via tests/test_disclosure.py's own scrub test,
-    which poisons _LAST_ERROR + _LOAD_FAILED_SPEC to simulate a genuine load
-    failure): the SAME latched protection given to _record_resolve_success()
-    must also cover _download_known's two policy-decline branches. A "not
-    auto-downloading" verdict fires only when the known-key file is ALSO
-    absent from disk - a state that cannot coexist with a REAL load failure
-    for the SAME spec (loading requires the file to have been found first) -
-    so while a load failure is latched for the CURRENTLY CONFIGURED spec, a
-    policy decline for that same spec is not new evidence and must leave
-    last_error() alone, exactly like a bare resolve success already does."""
+    """While a load failure is latched for the CURRENTLY CONFIGURED spec, a
+    policy decline for that same spec leaves last_error() alone, exactly as a
+    bare resolve success does."""
     _cfg(monkeypatch, embedding_model="bge-small-en-v1.5", net_mode="ask")
     monkeypatch.setattr(emb, "_LOAD_FAILED_SPEC", "bge-small-en-v1.5")
     monkeypatch.setattr(
@@ -237,20 +208,9 @@ def test_policy_declined_download_does_not_clobber_a_real_load_failure(monkeypat
 
 def test_resolve_failure_for_the_same_spec_does_not_clobber_a_real_load_failure(
         monkeypatch):
-    """The unified choke point (_set_resolve_outcome) means the SAME guard now
-    covers _record_resolve_failure too, not just _record_resolve_success and
-    _download_known's policy branches - added after the coordinator's review
-    named this as the third, still-unguarded write site sharing the identical
-    "same reason, sibling path, guard not carried across" shape. A resolve
-    FAILURE for the SAME spec that already has a latched load failure is
-    suppressed - it CAN happen (the file can vanish between the load and the
-    next poll, verified live 2026-08-05; it is not the contradiction an
-    earlier version of this guard's own docstring claimed - see
-    test_resolve_failure_for_a_different_spec_is_not_suppressed below for the
-    case that IS live information and must NOT be suppressed), but a caller
-    who already knows this exact spec failed to load learns nothing new from
-    "and now it cannot even be found", so the more specific load-failure
-    reason wins."""
+    """A resolve FAILURE for the SAME spec that already carries a latched load
+    failure is suppressed by _set_resolve_outcome: the more specific
+    load-failure reason wins."""
     _cfg(monkeypatch, embedding_model="totally-unrelated-typo-xyz")
     monkeypatch.setattr(emb, "_LOAD_FAILED_SPEC", "totally-unrelated-typo-xyz")
     monkeypatch.setattr(
@@ -263,18 +223,8 @@ def test_resolve_failure_for_the_same_spec_does_not_clobber_a_real_load_failure(
 
 
 def test_resolve_failure_for_a_different_spec_is_not_suppressed(monkeypatch):
-    """Regression for the #1026 over-guard (coordinator's audit, 2026-08-04/05):
-    the previous bare-bool ``_LOAD_FAILED`` choke point suppressed ANY
-    resolve-side write while ANY load failure was latched, with no spec
-    identity - so a currently-configured, ACTIVELY REFUSED spec (e.g. a UNC
-    path just typed into embedding_model, or - as tested here - any other
-    live resolve failure) had its own outcome silently swallowed, and
-    last_error() kept reporting an old, unrelated reason instead. Confirmed
-    live before this fix: resolve_embedding_model_path() DID call
-    _record_resolve_failure for the new spec (proven via call-count
-    instrumentation, not just the suppressed value), but last_error() never
-    changed. A latched failure for spec A must never suppress a live resolve
-    outcome for a DIFFERENT, currently-configured spec B."""
+    """A latched failure for spec A must never suppress a live resolve outcome
+    for a DIFFERENT, currently-configured spec B."""
     _cfg(monkeypatch, embedding_model="totally-unrelated-typo-xyz")
     monkeypatch.setattr(emb, "_LOAD_FAILED_SPEC", "an-old-abandoned-spec.gguf")
     monkeypatch.setattr(
@@ -291,9 +241,8 @@ def test_resolve_failure_for_a_different_spec_is_not_suppressed(monkeypatch):
 
 def test_resolve_failure_warns_once_then_quiets(monkeypatch, caplog):
     """resolve_embedding_model_path re-runs on every embed_texts() call while no
-    embedder is loaded (get_embedder never caches a missing-model result). An
-    UNCHANGED misconfiguration must warn once, not flood the log on every call -
-    but last_error() must still carry the reason every time (checked above)."""
+    embedder is loaded. An UNCHANGED misconfiguration warns once and logs at
+    debug thereafter, rather than warning on every call."""
     _cfg(monkeypatch, embedding_model="not-a-real-model-xyz")
     caplog.set_level(logging.DEBUG, logger="localm")
 
@@ -383,14 +332,8 @@ class _LoadTimeCapabilityBackend:
 
 
 def test_engine_embed_rechecks_can_embed_after_load(monkeypatch):
-    """A chat decoder must NOT self-embed, even though it looked capable before load.
-
-    The HF backend cannot know whether its model is a genuine embedder until the
-    model is loaded (a causal LM's mean-pooled hidden states are not embeddings -
-    see HFBackend.can_embed). Engine.embed therefore has to re-check can_embed
-    AFTER the load. Checking only BEFORE it (the old behaviour) let a loaded chat
-    decoder fall through to backend.embed() and silently return unusable vectors
-    to /v1/embeddings and RAG.
+    """A chat decoder must NOT self-embed, even though it looked capable before
+    load: Engine.embed re-checks can_embed AFTER the load.
     """
     backend = _LoadTimeCapabilityBackend(embeds_for_real=False)
     monkeypatch.setattr(emb, "embed_texts", lambda texts: [[0.5]] * len(texts))
@@ -415,10 +358,8 @@ def test_engine_embed_uses_backend_that_can_embed_after_load(monkeypatch):
 
 
 def test_engine_embed_chat_decoder_without_embedder_raises(monkeypatch):
-    """No dedicated embedder + a chat decoder -> the actionable error, NOT the chat
-    model's own vectors. Silently returning unusable vectors is the defect (rule 5);
-    this is the same path the GGUF backend already takes, and RAG catches it and
-    degrades to lexical-only with a warning."""
+    """No dedicated embedder plus a chat decoder raises the actionable error
+    rather than returning the chat model's own vectors."""
     backend = _LoadTimeCapabilityBackend(embeds_for_real=False)
     monkeypatch.setattr(emb, "embed_texts", lambda texts: None)
     engine = _engine_with_backend(monkeypatch, backend)
@@ -432,27 +373,21 @@ def test_engine_embed_chat_decoder_without_embedder_raises(monkeypatch):
 #  HFWorker.can_embed - honest capability reporting                            #
 # --------------------------------------------------------------------------- #
 # Tests HFWorker (_hf_worker.py), not the HFBackend proxy (hf.py): the can_embed
-# COMPUTATION below runs only in the isolated child process, while
-# HFBackend.can_embed returns the value that logic computed once at load time
-# and cached.
+# computation runs only in the isolated child process, while HFBackend.can_embed
+# returns the value that logic computed once at load time and cached.
 
 def _hf_backend(model=None):
     from localm.inference.backends._hf_worker import HFWorker
-    # Safe ONLY because __init__ and can_embed have zero torch/transformers
-    # imports. _hf_worker.py's load/embed/chat_stream methods DO have unguarded
-    # function-local torch/transformers imports and rely on process isolation
-    # (HFWorker only ever runs in a spawned child), not a runtime check. A helper
-    # that starts calling one of THOSE needs the same native_lib_loaded() guard.
+    # Safe only because __init__ and can_embed import neither torch nor
+    # transformers. load/embed/chat_stream do, and only ever run in a spawned
+    # child; a helper that calls one of those needs a native_lib_loaded() guard.
     be = HFWorker("does-not-need-to-exist")
     be._model = model
     return be
 
 
 def test_hf_can_embed_false_for_generative_decoder():
-    """A causal/chat LM reports can_embed=False: mean-pooling its last hidden
-    states yields vectors that cannot separate related from unrelated text
-    (measured 2026-07-15: Qwen2.5-0.5B max-unrelated cosine 0.7523 EXCEEDS its
-    min-related 0.7518), so they must never stand in for a real embedder."""
+    """A causal/chat LM reports can_embed=False."""
     assert _hf_backend(types.SimpleNamespace(can_generate=lambda: True)).can_embed is False
 
 
@@ -467,16 +402,8 @@ def test_hf_can_embed_true_for_encoder():
 
 def test_hf_can_embed_trusts_the_declared_arch_over_the_loaded_class():
     """A REAL encoder checkpoint answers can_generate() True, so the declared
-    architecture - not the loaded class - has to decide.
-
-    load() tries AutoModelForCausalLM BEFORE AutoModel, and transformers registers
-    the encoder families as causal LMs (5.12.1: bert -> BertLMHeadModel, roberta,
-    xlm-roberta, electra). So bge-small / all-MiniLM / e5, which declare
-    ["BertModel"], load as BertLMHeadModel and report can_generate() True while
-    being perfectly good embedders. Reading can_generate() alone therefore
-    misroutes localm's OWN default embedding model to the dedicated embedder (or
-    to a 422 when none is installed). Pins the real shape: can_generate() True but
-    a non-generative DECLARED architecture -> still an embedder.
+    architecture - not the loaded class - decides: can_generate() True with a
+    non-generative DECLARED architecture is still an embedder.
     """
     model = types.SimpleNamespace(
         can_generate=lambda: True,                       # what BertLMHeadModel says
@@ -504,8 +431,7 @@ def test_hf_can_embed_falls_back_when_nothing_is_declared():
 
 def test_hf_can_embed_covers_the_generative_head_names():
     """Every generative task head transformers names is caught, and the bare
-    encoder ``*Model`` names are not. (The suffix list itself is pinned against
-    transformers' own GenerationMixin by the integration test.)"""
+    encoder ``*Model`` names are not."""
     def _embeds(arch):
         return _hf_backend(types.SimpleNamespace(
             can_generate=lambda: True,
@@ -520,14 +446,9 @@ def test_hf_can_embed_covers_the_generative_head_names():
 
 
 def test_hf_can_embed_never_imports_transformers(monkeypatch):
-    """can_embed must not drag in transformers (hence torch).
-
-    Importing torch in a process that already loaded the bundled llama.dll dies
-    with OSError [WinError 127] (rocm_sdk.preload_libraries; reproduced
-    2026-07-15) - and an import guard would swallow that and answer WRONGLY,
-    which is how the encoder case regressed. It never needs the import: it only
-    runs on an already-loaded model. Fails the import outright to prove the
-    property never reaches for it.
+    """can_embed must not import transformers, and so must not import torch: it
+    only ever runs on an already-loaded model. The import is made to fail
+    outright, so a reach for it shows up as a failure.
     """
     import builtins
     real_import = builtins.__import__
@@ -560,8 +481,8 @@ def test_hf_can_embed_unknown_before_load_is_true():
 
 def test_hf_can_embed_false_when_capability_unprovable():
     """An exotic model object that does not answer can_generate() is NOT proof of
-    an embedder. Fail towards the dedicated embedder rather than silently pooling
-    something that may be a chat decoder (rule 5: never assume 'probably fine')."""
+    an embedder: the answer falls towards the dedicated embedder rather than
+    pooling something that may be a chat decoder."""
     class _Odd:
         def can_generate(self):
             raise RuntimeError("no idea")
@@ -593,16 +514,8 @@ def test_pooling_setting_defaults_to_unset():
 
 
 def test_default_pooling_is_mean_not_the_declared_type():
-    """Guards the deliberate choice NOT to unconditionally follow the model by
-    default.
-
-    bge-small (the default embedder) declares CLS, yet every existing index was
-    built with MEAN at the same 384 dims. Following the declaration by default
-    would silently invalidate those indexes with no dim guard to catch it, so
-    MEAN stays the default for CLS/unspecified declarations - only a model
-    declaring LAST specifically (see test_unset_default_resolves_last_for_a_
-    last_declaring_model) gets the correction, since there is no existing
-    mean-built index of THAT shape to protect."""
+    """With embedding_pooling unset, a CLS or unspecified declaration resolves to
+    MEAN rather than following the model."""
     assert emb.resolve_pooling_setting(
         emb_config_default("embedding_pooling")) == emb._POOLING_UNSET
     assert emb._effective_pooling(emb._POOLING_UNSET, emb._POOLING_CLS) == emb._POOLING_MEAN
@@ -610,10 +523,8 @@ def test_default_pooling_is_mean_not_the_declared_type():
 
 
 def test_unset_default_resolves_last_for_a_last_declaring_model():
-    """The fix: nothing configured (the common case - no one manually sets
-    embedding_pooling) + a model that declares LAST (a decoder-based embedder
-    like Qwen3-Embedding) now correctly resolves to LAST, not MEAN - so it
-    works out of the box with no setting to discover."""
+    """With embedding_pooling unset, a model that declares LAST resolves to
+    LAST, not MEAN."""
     assert emb._effective_pooling(emb._POOLING_UNSET, emb._POOLING_LAST) == emb._POOLING_LAST
 
 
@@ -623,8 +534,7 @@ def emb_config_default(key):
 
 
 def test_auto_honours_the_declared_pooling():
-    """auto = use what the GGUF declares. Qwen3-Embedding declares LAST (verified
-    2026-07-15: qwen3.pooling_type=3); forcing MEAN on it is the defect."""
+    """auto = use whatever pooling the GGUF declares."""
     assert emb._effective_pooling(emb.POOLING_AUTO, emb._POOLING_LAST) == emb._POOLING_LAST
     assert emb._effective_pooling(emb.POOLING_AUTO, emb._POOLING_CLS) == emb._POOLING_CLS
     assert emb._effective_pooling(emb.POOLING_AUTO, emb._POOLING_MEAN) == emb._POOLING_MEAN
@@ -668,16 +578,14 @@ def test_declared_pooling_survives_a_stripped_or_broken_dll():
 
 
 def test_auto_falls_back_to_mean_when_nothing_usable_is_declared():
-    """A model declaring nothing (gte-Qwen2, chat GGUFs) or NONE must not be left
-    NONE-pooled: llama_get_embeddings_seq then returns NULL and every embed call
-    fails. MEAN is the rescue that made it the historical default."""
+    """Under auto, a model declaring nothing or NONE resolves to MEAN, never
+    NONE."""
     assert emb._effective_pooling(emb.POOLING_AUTO, None) == emb._POOLING_MEAN
     assert emb._effective_pooling(emb.POOLING_AUTO, emb._POOLING_NONE) == emb._POOLING_MEAN
 
 
 def test_explicit_pooling_is_never_overridden_by_the_model():
-    """An explicit user choice wins over the declaration - never silently
-    'corrected' (hard-won rule: do not override an explicit selection)."""
+    """An explicit user choice wins over the model's declaration."""
     assert emb._effective_pooling(emb._POOLING_MEAN, emb._POOLING_LAST) == emb._POOLING_MEAN
     assert emb._effective_pooling(emb._POOLING_LAST, emb._POOLING_CLS) == emb._POOLING_LAST
 
@@ -697,9 +605,8 @@ def _mispool_probe(monkeypatch, declared, effective):
 
 
 def test_warns_when_a_last_pooling_model_is_mean_pooled(monkeypatch):
-    """THE defect-2 surfacing: a decoder-based embedder pooled against its own
-    training still returns healthy normalised vectors, so nothing else would ever
-    tell the user. Warn, name the model, and name the fix (rule 5)."""
+    """A model declaring LAST that is pooled MEAN warns once, naming the model
+    and the setting that fixes it."""
     warnings = _mispool_probe(monkeypatch, emb._POOLING_LAST, emb._POOLING_MEAN)
     assert len(warnings) == 1
     text = warnings[0]
@@ -713,9 +620,8 @@ def test_no_warning_when_the_model_gets_the_pooling_it_declares(monkeypatch):
 
 
 def test_no_warning_for_the_default_bge_setup(monkeypatch):
-    """bge declares CLS and is pooled MEAN, which measures fine (+0.29 margin)
-    and matches every existing index. Warning on the DEFAULT setup would be noise
-    on every user's box, not signal - so this stays quiet (debug only)."""
+    """A CLS-declaring or undeclared model pooled MEAN emits no warning; that
+    combination is logged at debug only."""
     assert _mispool_probe(monkeypatch, emb._POOLING_CLS, emb._POOLING_MEAN) == []
     assert _mispool_probe(monkeypatch, None, emb._POOLING_MEAN) == []
 
@@ -748,9 +654,8 @@ def test_embed_texts_none_when_no_model(monkeypatch):
 
 def test_get_embedder_picks_up_model_installed_mid_session(monkeypatch):
     """A model installed into a RUNNING server (``localm setup-embeddings``) is
-    picked up on the NEXT call, without a restart. Regression: get_embedder latched
-    the 'no model' result for the whole process lifetime, so embeddings stayed dead
-    (RAG/memory 422 -> lexical) until a restart even right after setup."""
+    picked up on the NEXT call, without a restart: the 'no model' result is not
+    latched for the process lifetime."""
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "ask"})
@@ -778,10 +683,8 @@ def test_get_embedder_picks_up_model_installed_mid_session(monkeypatch):
 
 
 def test_get_embedder_on_progress_announces_stages_on_success(monkeypatch):
-    """ADR-0004 Unit B: on_progress (used by the 'warm up now' job) receives
-    coarse stage announcements around the existing load steps - purely additive,
-    the isolated child's own IPC protocol is untouched (this test only fakes the
-    PARENT-side IsolatedEmbedder construction)."""
+    """on_progress receives coarse stage announcements around the load steps.
+    Only the PARENT-side IsolatedEmbedder construction is faked here."""
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "off"})
@@ -831,16 +734,10 @@ def _stated_minutes(msg):
 
 
 def test_get_embedder_progress_states_the_real_load_bound(monkeypatch):
-    """The 'loading' stage quotes a ceiling, and it must be the ceiling this stage
-    genuinely runs under: _embedder_runner.LOAD_TIMEOUT_DEFAULT, which applies
-    because _reload's spawn_and_load() passes no override. It used to promise "up
-    to a minute" against a 300s deadline, so a slow-but-perfectly-healthy first
-    load looked hung to anyone watching it.
-
-    Pinned to the CONSTANT, never to a literal sentence, so raising the timeout
-    without touching the copy fails HERE rather than misinforming a user. The
-    sibling stage test above only asserts a 'loading' line exists at all, which
-    is exactly why the wrong figure survived in it."""
+    """The 'loading' stage quotes the ceiling it genuinely runs under:
+    _embedder_runner.LOAD_TIMEOUT_DEFAULT, which applies because _reload's
+    spawn_and_load() passes no override. Pinned to the CONSTANT, never to a
+    literal sentence."""
     from localm.inference._embedder_runner import LOAD_TIMEOUT_DEFAULT
 
     _cfg(monkeypatch)
@@ -902,19 +799,9 @@ def test_get_embedder_on_progress_reports_load_failure(monkeypatch):
 
 
 def test_get_embedder_recovers_after_the_config_changes_to_a_good_spec(monkeypatch):
-    """Regression for the permanent-breakage bug (coordinator's audit,
-    2026-08-04/05): the previous bare-bool ``_LOAD_FAILED`` short-circuited at
-    the TOP of get_embedder(), before even calling
-    resolve_embedding_model_path() again - so once ANY load failed, EVERY
-    later call returned None immediately, forever, regardless of the user
-    fixing ``embedding_model`` to point at a perfectly good model, until an
-    explicit reset_embedder(). Confirmed live via call-count instrumentation
-    before this fix: resolve_embedding_model_path was never even called on
-    the second attempt, no matter what embedding_model was changed to.
-
-    ``_LOAD_FAILED_SPEC`` must be compared against the CURRENT config value,
-    so a genuinely different spec clears the stale latch and gets a real
-    attempt - not just a correctly-worded decline."""
+    """``_LOAD_FAILED_SPEC`` is compared against the CURRENT config value, so a
+    genuinely different spec clears the stale latch and gets a real load
+    attempt."""
     cfg = {"embedding_model": "broken-model.gguf", "n_gpu_layers": 99,
            "net_mode": "off"}
     monkeypatch.setattr("localm.config.load_config", lambda: dict(cfg))
@@ -954,11 +841,8 @@ def test_get_embedder_recovers_after_the_config_changes_to_a_good_spec(monkeypat
 
 def test_get_embedder_does_not_retry_the_load_for_the_same_still_broken_spec(
         monkeypatch):
-    """The optimization this replaces the bare bool for is still real: a
-    genuinely UNCHANGED spec that already failed to load must not pay for
-    a second (expensive, native) load attempt on every call - only the
-    permanent-breakage bug (a config CHANGE being ignored) was wrong, not
-    the original "stop retrying a known-broken spec" behavior."""
+    """A genuinely UNCHANGED spec that already failed to load is attempted
+    once, not on every call."""
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"embedding_model": "broken-model.gguf",
                                  "n_gpu_layers": 99, "net_mode": "off"})
@@ -983,9 +867,8 @@ def test_get_embedder_does_not_retry_the_load_for_the_same_still_broken_spec(
 
 
 def test_get_embedder_on_progress_raising_sink_does_not_abort_load(monkeypatch):
-    """The '_emit never aborts a load' contract (mirrors
-    managed_comfy_provision._emit): a broken progress sink must not turn a
-    successful load into a failure."""
+    """A broken progress sink must not turn a successful load into a
+    failure."""
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "off"})
@@ -1011,9 +894,8 @@ def test_get_embedder_on_progress_raising_sink_does_not_abort_load(monkeypatch):
 
 
 def test_loaded_dim_and_last_error_track_state(monkeypatch):
-    """loaded_dim()/last_error() power the GUI picker: a load FAILURE records why
-    (so the user learns a wrong pick is not an embedding model) and reports no dim;
-    a success clears the error and reports the dimension."""
+    """A load FAILURE records the reason in last_error() and reports no dim; a
+    success clears the error and reports the dimension."""
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"embedding_model": "x", "n_gpu_layers": 99,
                                  "net_mode": "off"})
@@ -1048,12 +930,7 @@ def test_loaded_dim_and_last_error_track_state(monkeypatch):
 
 def test_reset_embedder_force_semantics():
     """Direct test against the REAL reset_embedder(force=...), not a test
-    double standing in for it. The shape of bug a review caught DURING this
-    function's own development - an early "if _EMBEDDER is None: return
-    False" that accidentally skipped clearing the negative-cache flags - had
-    no test against the real function; every force=False test elsewhere
-    (http_server.py's unload paths) monkeypatches reset_embedder itself with
-    a fake, which by construction cannot catch a bug INSIDE reset_embedder."""
+    double standing in for it."""
     class _Fake:
         def __init__(self):
             self.active_requests = 0
@@ -1144,8 +1021,7 @@ def _reset_stub_runner():
 
 def _isolated_embedder(monkeypatch, *, split_devices=0, check_vram=None, n_gpu_layers=99):
     monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
-    # The embedder gates on applied_split_device_count (loader truth), not the
-    # detected/labelling split_device_count.
+    # The embedder gates on applied_split_device_count, not split_device_count.
     monkeypatch.setattr("localm.discover.applied_split_device_count", lambda cfg: split_devices)
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     monkeypatch.setattr(emb.IsolatedEmbedder, "_check_vram",
@@ -1154,9 +1030,8 @@ def _isolated_embedder(monkeypatch, *, split_devices=0, check_vram=None, n_gpu_l
 
 
 def test_isolated_embedder_single_gpu_runs_check_vram_preflight(monkeypatch):
-    """The single-GPU case (no split configured) must run the SAME
-    VramSizingMixin._check_vram() preflight the chat backend uses - the gap
-    this refactor closes (gpu_split_shortfall alone was a no-op here)."""
+    """The single-GPU case (no split configured) runs the same
+    VramSizingMixin._check_vram() preflight the chat backend uses."""
     calls = {"n": 0}
 
     def _check_vram(self):
@@ -1168,9 +1043,7 @@ def test_isolated_embedder_single_gpu_runs_check_vram_preflight(monkeypatch):
 
 
 def test_isolated_embedder_single_gpu_preflight_refusal_skips_spawn(monkeypatch):
-    """A _check_vram() refusal must raise BEFORE a child is ever spawned - no
-    process-spawn cost paid for a load that can never fit (mirrors
-    GgufBackend.load()'s fail-fast-before-spawn contract)."""
+    """A _check_vram() refusal raises BEFORE a child is ever spawned."""
     def _check_vram(self):
         raise RuntimeError("Context too large for available VRAM")
 
@@ -1207,21 +1080,14 @@ def test_isolated_embedder_multi_gpu_uses_split_shortfall_not_check_vram(monkeyp
 
 def test_isolated_embedder_vulkan_split_skips_per_device_and_still_loads(
         monkeypatch, tmp_path, caplog):
-    """On the vulkan build a CONFIGURED 2-way split must (a) route through the
-    split branch - applied_split_device_count is loader-truth so it does NOT
-    collapse the way split_device_count does when list_gpus() is Vulkan-blind
-    (GPU-SPLIT-VKINDEX) - and (b) SKIP the per-device VRAM preflight HONESTLY
-    (gpu_split_shortfall self-skips on vulkan, logging at INFO) instead of running
-    the wrong-index-space check or falling back to the single-GPU _check_vram().
+    """On the vulkan build a CONFIGURED 2-way split (a) routes through the split
+    branch, since applied_split_device_count does not collapse the way
+    split_device_count does when list_gpus() is Vulkan-blind, and (b) SKIPs the
+    per-device VRAM preflight, logging that skip at INFO, rather than running the
+    wrong-index-space check or falling back to the single-GPU _check_vram().
 
-    Drives REAL discover (only _native_backend_has_vulkan / list_gpus / load_config
-    are stubbed), so it exercises the actual fix end to end, not a mock of it.
-
-    MUTATION A: revert the embedder gate to split_device_count -> the Vulkan-blind
-    list_gpus collapses it to < 2 -> the single-GPU _check_vram() branch runs ->
-    calls["check_vram"] != 0 -> RED.
-    MUTATION B: revert gpu_split_shortfall's vulkan guard -> the one tiny-free
-    device it CAN see is flagged -> RuntimeError -> the no-raise / dim==5 line RED."""
+    Drives the real discover module; only _native_backend_has_vulkan, list_gpus
+    and load_config are stubbed."""
     f = tmp_path / "m.gguf"
     f.write_bytes(b"x" * 100_000)
     calls = {"check_vram": 0}
@@ -1230,8 +1096,7 @@ def test_isolated_embedder_vulkan_split_skips_per_device_and_still_loads(
         calls["check_vram"] += 1
 
     # Vulkan-blind: list_gpus (torch/nvidia-smi) sees only ONE tiny-free device;
-    # the second split device is Vulkan-only and invisible to it. This single
-    # detected-but-starved device is what makes BOTH mutations above fire.
+    # the second split device is Vulkan-only and invisible to it.
     blind = [{"index": 0, "total": 16_000_000_000, "free": 100}]
     monkeypatch.setattr(emb.IsolatedEmbedder, "_check_vram", _check_vram)
     monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
@@ -1249,13 +1114,10 @@ def test_isolated_embedder_vulkan_split_skips_per_device_and_still_loads(
 
 
 def test_isolated_embedder_split_preflight_admits_on_stale_probe(monkeypatch, tmp_path):
-    """Consumer-level oracle, no consumer edit: the embedder split preflight is
-    gpu_split_shortfall's OTHER figure-quoting caller. This drives the REAL
-    gpu_split_shortfall (list_gpus patched, not the function stubbed) with a TIMEOUT
-    probe whose frozen reading reads too small. The source fix returns [] instead of
-    fabricating a shortfall, so _preflight_vram must NOT raise a 'Not enough VRAM ...
-    {stale MB} free' RuntimeError, and the child spawns. Reverting the discover.py
-    fix makes the real gpu_split_shortfall refuse from the stale reading -> RED."""
+    """Drives the REAL gpu_split_shortfall (list_gpus patched, the function
+    itself not stubbed) with a TIMEOUT probe whose frozen reading reads too
+    small. gpu_split_shortfall returns [] rather than fabricating a shortfall,
+    so _preflight_vram does not raise and the child spawns."""
     from localm.discover import GPU_PROBE_TIMEOUT
     f = tmp_path / "m.gguf"
     f.write_bytes(b"x" * 4000)          # needed = int(4800 * ratio) per device
@@ -1268,10 +1130,9 @@ def test_isolated_embedder_split_preflight_admits_on_stale_probe(monkeypatch, tm
         return (stale, GPU_PROBE_TIMEOUT) if return_status else stale
 
     monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
-    # The embedder gates on applied_split_device_count (loader truth); pin it to
-    # 2 to enter the split branch, and pin non-vulkan so the REAL
-    # gpu_split_shortfall reaches the stale-probe path rather than the vulkan
-    # honest-unknown skip.
+    # applied_split_device_count is pinned to 2 to enter the split branch, and
+    # non-vulkan so gpu_split_shortfall reaches the stale-probe path rather than
+    # the vulkan skip.
     monkeypatch.setattr("localm.discover.applied_split_device_count", lambda cfg: 2)
     monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
     monkeypatch.setattr("localm.discover.list_gpus", _list_gpus)
@@ -1285,10 +1146,8 @@ def test_isolated_embedder_split_preflight_admits_on_stale_probe(monkeypatch, tm
 
 
 def test_isolated_embedder_embed_respawns_after_prior_crash(monkeypatch):
-    """A crash on a PRIOR embed() call must not permanently disable the
-    embedder: the NEXT call transparently respawns + reloads (so one
-    transient native fault does not disable embeddings for the process's
-    whole remaining life)."""
+    """A crash on a PRIOR embed() call does not permanently disable the
+    embedder: the NEXT call transparently respawns and reloads."""
     e = _isolated_embedder(monkeypatch)
     runner1 = _StubRunner.instances[-1]
     runner1.alive = False                       # simulate: died since last call
@@ -1300,24 +1159,17 @@ def test_isolated_embedder_embed_respawns_after_prior_crash(monkeypatch):
 
 
 def test_isolated_embedder_embed_crash_clears_runner_for_next_call(monkeypatch):
-    """A crash DURING this call still raises to the caller (never silently
-    swallowed, rule 5) - but clears the runner so the NEXT call auto-reloads
-    instead of repeatedly hitting the same dead child.
+    """A crash DURING this call still raises to the caller, and clears the
+    runner so the NEXT call auto-reloads instead of hitting the same dead child.
 
-    n_gpu_layers=0: this is the generic dead-worker/drop-and-reload contract,
-    kept CPU-configured so the separate GPU-crash-fallback path (which retries
-    INLINE rather than waiting for the next call - see
-    test_isolated_embedder_gpu_crash_falls_back_to_cpu_inline below) never
-    engages here."""
+    n_gpu_layers=0 keeps this on the generic dead-worker path, so the separate
+    GPU-crash inline fallback never engages here."""
     e = _isolated_embedder(monkeypatch, n_gpu_layers=0)
     runner1 = _StubRunner.instances[-1]
 
     def _boom(texts, timeout=None):
-        # A real crash is DETECTED by the child being gone: _wait raises this
-        # exact error only after proc.is_alive() came back False. The double must
-        # model that, or it is a LIVE worker returning a clean error - and
-        # discarding one of those orphans it, leaving the model resident in VRAM
-        # with nothing able to reach it.
+        # _wait raises this error only after proc.is_alive() came back False, so
+        # the double marks the runner dead before raising.
         runner1.alive = False
         raise RuntimeError("The embedding worker process crashed (exit code -6)")
     runner1.embed = _boom
@@ -1332,10 +1184,9 @@ def test_isolated_embedder_embed_crash_clears_runner_for_next_call(monkeypatch):
 
 
 def test_isolated_embedder_gpu_crash_falls_back_to_cpu_inline(monkeypatch):
-    """A GPU-offloaded worker crash retries INLINE on CPU within the SAME
-    call - unlike the generic case above, the caller gets a real result, not
-    an exception, so a batch already in progress does not go lexical-only for
-    the rest of its run. Falls back only ONCE per embedder instance."""
+    """A GPU-offloaded worker crash retries INLINE on CPU within the SAME call,
+    so the caller gets a result rather than an exception. Falls back only ONCE
+    per embedder instance."""
     e = _isolated_embedder(monkeypatch, n_gpu_layers=99)
     assert e.gpu_fallback_reason is None
     runner1 = _StubRunner.instances[-1]
@@ -1351,14 +1202,12 @@ def test_isolated_embedder_gpu_crash_falls_back_to_cpu_inline(monkeypatch):
     assert e.n_gpu_layers == 0                   # dropped to CPU
     assert e.gpu_fallback_reason is not None
     assert "CPU" in e.gpu_fallback_reason
-    # n_gpu_layers=0 alone does not guarantee no GPU backend involvement (a large
-    # enough model's matmul can still dispatch to a REGISTERED vendor backend),
-    # so the respawned child is told to hide GPU devices from the runtime
-    # entirely, not just skip weight offload.
+    # The respawned child is told to hide GPU devices from the runtime entirely,
+    # not just to skip weight offload.
     assert _StubRunner.instances[-1].loaded_params.get("cpu_only") is True
 
-    # A SECOND crash (now already on CPU) must NOT try to fall back again -
-    # it propagates normally, matching the generic dead-worker contract.
+    # A SECOND crash (now already on CPU) does not fall back again; it
+    # propagates normally.
     runner2 = _StubRunner.instances[-1]
 
     def _boom_again(texts, timeout=None):
@@ -1422,10 +1271,8 @@ def test_real_gguf_embeddings_are_semantic():
                     reason="set LOCALM_TEST_EMBED_MODEL to a real embedding GGUF")
 def test_real_gguf_embeddings_via_isolated_embedder(monkeypatch):
     """The isolation-wrapped path (IsolatedEmbedder / get_embedder(), running
-    the real native load in a CHILD process) must produce the same real,
-    semantically-correct embeddings as the raw GGUFEmbedder class above -
-    proving the subprocess boundary does not silently corrupt or degrade
-    output."""
+    the real native load in a CHILD process) produces the same real,
+    semantically-correct embeddings as the raw GGUFEmbedder class above."""
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"embedding_model": _EMBED_MODEL, "n_gpu_layers": 99,
                                  "net_mode": "off"})
@@ -1444,10 +1291,10 @@ def test_real_gguf_embeddings_via_isolated_embedder(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 class _OverflowApi:
-    """Stub reproducing the REAL llama.dll overflow contract (probe-verified in
-    the audit): llama_tokenize returns -(needed) and writes NOTHING when the
-    buffer is too small; a full-size buffer gets the tokens. One token per
-    input byte keeps token sequences content-dependent."""
+    """Stub reproducing the REAL llama.dll overflow contract: llama_tokenize
+    returns -(needed) and writes NOTHING when the buffer is too small; a
+    full-size buffer gets the tokens. One token per input byte keeps token
+    sequences content-dependent."""
 
     def __init__(self):
         self.decoded_tokens = None
@@ -1491,27 +1338,19 @@ def _stub_embedder(n_ctx=8, n_seq_max=emb._EMBED_BATCH_TARGET):
     e._ctx = object()                        # truthy: "loaded"
     e.dim = 4
     e.model_path = "<stub>"
-    # A real GGUFEmbedder always has this set by __init__ (see _choose_n_seq_max)
-    # - matched here so a stub-based test that embeds MORE than one text at once
-    # behaves like the real thing. A single-item call's grouping loop never
-    # dereferences it, since Python's `and` short-circuits on the first,
-    # empty-`current` iteration.
+    # A real GGUFEmbedder always has this set by __init__; matched here so a
+    # stub-based test that embeds more than one text at once behaves the same.
     e._n_seq_max = n_seq_max
     return e
 
 
 class TestGGUFEmbedderLoadStderrWrapping:
     """The isolated child's native model-load calls (llama_load_model_from_file /
-    llama_init_from_model) must run inside debuglog.dedup_native_stderr(), not
-    with the child's raw inherited fd 2 left unmanaged - the exact gap #951's
-    embedder-load spew came from (create_tensor/load_tensors/sched_reserve/
-    graph_reserve landing raw, ungrouped, with no live view and no repeat
-    collapsing at all, unlike every load path in llamacpp/llama.py).
+    llama_init_from_model) run inside debuglog.dedup_native_stderr(), not with
+    the child's raw inherited fd 2 left unmanaged.
 
-    Mocked at the _api boundary rather than a real GGUF, mirroring
-    test_lazy_grammar.py's pattern for the equivalent llama.py decision - the
-    real load path itself is covered by the @real_gguf tests elsewhere in
-    this file."""
+    Mocked at the _api boundary rather than against a real GGUF; the real load
+    path is covered by the @real_gguf tests elsewhere in this file."""
 
     def _patch_native_calls(self, monkeypatch, events):
         import localm.inference.backends.llamacpp._api as api_module
@@ -1537,12 +1376,8 @@ class TestGGUFEmbedderLoadStderrWrapping:
                             lambda: types.SimpleNamespace())
         monkeypatch.setattr(api_module, "llama_init_from_model", _init)
         monkeypatch.setattr(api_module, "has_memory_api", lambda: False)
-        # close()/__del__ safety net: the fake pointers above are plain strings,
-        # not real ctypes handles, so the REAL native free functions must never
-        # see them - a GGUFEmbedder garbage-collected after this test's
-        # monkeypatch teardown would otherwise pass them into the actual native
-        # free() and crash the interpreter. The test also closes explicitly
-        # below, while these are still active.
+        # The fake pointers above are plain strings, not real ctypes handles, so
+        # the REAL native free functions must never see them.
         monkeypatch.setattr(api_module, "llama_free", lambda ctx: None)
         monkeypatch.setattr(api_module, "llama_free_model", lambda model: None)
         monkeypatch.setattr("localm.discover.apply_main_gpu", lambda *a, **k: None)
@@ -1564,23 +1399,18 @@ class TestGGUFEmbedderLoadStderrWrapping:
 
         embedder = emb.GGUFEmbedder("<stub-path>", n_gpu_layers=0)
         try:
-            # ONE contiguous scope covering BOTH native calls: re-entering
-            # dedup_native_stderr per call pays its background-thread cost twice
-            # for one load.
+            # ONE contiguous scope covering BOTH native calls.
             assert events == ["enter", "load", "init", "exit"], events
         finally:
-            # Clear the fake pointers while llama_free/llama_free_model are still
-            # mocked (see _patch_native_calls), so a later __del__, after
-            # monkeypatch has reverted to the real native functions, finds
-            # nothing left to free.
+            # Clear the fake pointers while llama_free/llama_free_model are
+            # still mocked, so a later __del__ finds nothing left to free.
             embedder.close()
 
 
 class TestResolveEmbedCtx:
     """The embedding window auto-sizing decision (_resolve_embed_ctx), in
     isolation from the native load path: a model's own declared training
-    context is honoured up to a ceiling, never a flat guess (see the
-    constants' own docstrings in embedder.py)."""
+    context is honoured up to a ceiling."""
 
     def test_native_window_under_ceiling_is_used_as_is(self):
         assert emb._resolve_embed_ctx(512) == 512
@@ -1592,10 +1422,8 @@ class TestResolveEmbedCtx:
         assert emb._resolve_embed_ctx(emb._EMBED_CTX_CEILING) == emb._EMBED_CTX_CEILING
 
     def test_zero_native_window_falls_back(self):
-        """A model that does not usefully declare its own window (a build too
-        old for llama_model_n_ctx_train, or genuinely absent metadata) still
-        gets exactly the flat default that shipped before this fix, not a
-        broken (0-sized) or arbitrary window."""
+        """A model that does not usefully declare its own window gets
+        _EMBED_CTX_FALLBACK."""
         assert emb._resolve_embed_ctx(0) == emb._EMBED_CTX_FALLBACK
 
     def test_negative_native_window_falls_back(self):
@@ -1605,17 +1433,14 @@ class TestResolveEmbedCtx:
 class TestChooseNSeqMax:
     """The n_seq_max sizing decision, in isolation from the native load path.
 
-    Root cause (measured 2026-08-05 via subprocess-isolated bisection across
-    two models of different dim, three n_ctx values, CPU and GPU - see
-    dev-notes/FINDING-embedder-serial-batching-2026-08-04.md): n_seq_max must
-    evenly divide n_ubatch or llama_init_from_model hard-crashes
-    (uncatchable native GGML_ASSERT abort()) during its own internal
-    graph-reserve warmup. This is a property of the (n_seq_max, n_ubatch)
-    PAIR, not of the model, so the fix is a search, not a constant."""
+    n_seq_max must evenly divide n_ubatch, or llama_init_from_model aborts
+    natively (an uncatchable GGML_ASSERT) during its own graph-reserve warmup.
+    That is a property of the (n_seq_max, n_ubatch) PAIR, not of the model, so
+    the value is searched for rather than fixed."""
 
     def test_real_ctx_ceiling_lands_on_the_target(self):
         # 2048 (_EMBED_CTX_CEILING) is a power of two, so the search finds
-        # the target on the first try - the common case for most real models.
+        # the target on the first try.
         assert emb._choose_n_seq_max(2048) == emb._EMBED_BATCH_TARGET
 
     def test_real_ctx_fallback_lands_on_the_target(self):
@@ -1633,10 +1458,8 @@ class TestChooseNSeqMax:
         assert emb._choose_n_seq_max(513) == 1
 
     def test_result_always_evenly_divides_the_input(self):
-        """The actual safety property, checked directly rather than via a
-        handful of examples: for a wide range of n_ubatch values, the chosen
-        n_seq_max must be a genuine divisor - the property a hardcoded
-        constant could never guarantee for an arbitrary future model."""
+        """For a wide range of n_ubatch values, the chosen n_seq_max is a
+        genuine divisor of it."""
         for n_ubatch in range(1, 4096):
             n_seq_max = emb._choose_n_seq_max(n_ubatch)
             assert n_ubatch % n_seq_max == 0, (
@@ -1654,8 +1477,7 @@ class TestChooseNSeqMax:
 
 
 def test_overlong_inputs_do_not_collide():
-    """Two DIFFERENT over-long texts must not embed identically (pre-fix they
-    all decoded the zero-filled buffer and returned one constant vector)."""
+    """Two DIFFERENT over-long texts must not embed identically."""
     e = _stub_embedder(n_ctx=8)
     v1 = e.embed(["alpha beta gamma delta epsilon zeta"])[0]
     v2 = e.embed(["one two three four five six seven eight nine"])[0]
@@ -1683,11 +1505,10 @@ def test_short_input_unchanged_by_overflow_fix():
 
 class TestEmbedBatchDispatch:
     """embed()'s own grouping/dispatch logic - which of _decode_single vs
-    _decode_batch gets called, for which group sizes - tested in isolation
-    from native decode correctness (covered separately by the @real_gguf
-    tests below) by spying on both methods on a stub embedder. _OverflowApi
-    tokenizes roughly one token per input byte (see its own docstring), so a
-    text's token count is easy to control by its length."""
+    _decode_batch gets called, for which group sizes - tested in isolation from
+    native decode correctness by spying on both methods on a stub embedder.
+    _OverflowApi tokenizes roughly one token per input byte, so a text's token
+    count follows its length."""
 
     def _spied(self, monkeypatch, n_ctx=64, n_seq_max=4):
         e = _stub_embedder(n_ctx=n_ctx, n_seq_max=n_seq_max)
@@ -1706,12 +1527,8 @@ class TestEmbedBatchDispatch:
         return e, calls
 
     def test_single_text_uses_the_fast_path(self, monkeypatch):
-        """Measured (GPU, real model): a batched call for exactly ONE
-        sequence is SLOWER than the single-sequence path (0.60x) - the
-        multi-sequence batch machinery's own setup cost loses when there is
-        nothing to amortize it across. A lone embed (a chat memory query,
-        most /v1/embeddings calls in practice) must keep using the cheap
-        path, not the new one."""
+        """A single text goes down the single-sequence path, not the batched
+        one."""
         e, calls = self._spied(monkeypatch)
         out = e.embed(["hello"])
         assert len(out) == 1
@@ -1735,12 +1552,9 @@ class TestEmbedBatchDispatch:
         assert sum(len(g) for g in calls["batch"]) + len(calls["single"]) == 10
 
     def test_group_shrinks_to_respect_the_token_budget(self, monkeypatch):
-        """A group's SUMMED token count must never exceed n_ctx (n_ubatch) -
-        llama.cpp's own hard 'encoder requires n_ubatch >= n_tokens'
-        constraint for this non-causal architecture (it cannot chunk one
-        micro-batch across multiple internal passes the way causal
-        generation can). Long texts must pack FEWER per group even when
-        n_seq_max would allow more by count alone."""
+        """A group's SUMMED token count never exceeds n_ctx (n_ubatch), which
+        llama.cpp requires for this non-causal architecture. Long texts pack
+        FEWER per group even when n_seq_max would allow more by count alone."""
         e, calls = self._spied(monkeypatch, n_ctx=20, n_seq_max=8)
         texts = ["abcdefgh"] * 8   # 8 tokens each (1/byte) - token-bound, not count-bound
         out = e.embed(texts)
@@ -1752,12 +1566,9 @@ class TestEmbedBatchDispatch:
             assert total <= 20, f"group exceeded the n_ctx token budget: {total}"
 
     def test_a_text_too_long_to_share_a_group_gets_its_own(self, monkeypatch):
-        """Two texts that are each individually within n_ctx but together
-        exceed it must NOT be forced into one batched group - they fall back
-        to two single-sequence groups, exactly the pre-batching behavior for
-        this case (this is also exercised for real in
-        test_real_gguf_overlong_texts_not_identical below, with an actual
-        model instead of a spy)."""
+        """Two texts that are each individually within n_ctx but together exceed
+        it are NOT forced into one batched group; each gets its own
+        single-sequence group."""
         e, calls = self._spied(monkeypatch, n_ctx=10, n_seq_max=8)
         texts = ["abcdefghij", "klmnopqrst"]      # 10 tokens each = n_ctx exactly
         out = e.embed(texts)
@@ -1769,11 +1580,8 @@ class TestEmbedBatchDispatch:
         assert len(calls["single"]) == 2
 
     def test_a_text_that_fails_to_tokenize_needs_no_native_call(self, monkeypatch):
-        """The pre-existing zero-token fallback (a text that could not be
-        tokenized at all, per _tokenize's own docstring) must stay a pure
-        Python short-circuit - it never had a native call to make even
-        before batching existed, and grouping must not accidentally route it
-        into either decode path."""
+        """A text that could not be tokenized at all short-circuits in Python:
+        grouping routes it into neither decode path."""
         e, calls = self._spied(monkeypatch)
         monkeypatch.setattr(e, "_tokenize", lambda text: [])
         out = e.embed(["anything"])
@@ -1786,12 +1594,11 @@ class TestEmbedBatchDispatch:
 @pytest.mark.skipif(not _EMBED_MODEL,
                     reason="set LOCALM_TEST_EMBED_MODEL to a real embedding GGUF")
 class TestBatchedDecodeFailureGranularity:
-    """AGENTS.md rule 5: a partial batch failure must NEVER report as
-    success. Faults injected at the native-call boundary (llama_decode /
+    """A partial batch failure must NEVER report as success. Faults are
+    injected at the native-call boundary (llama_decode /
     llama_get_embeddings_seq) on a REAL loaded model and a REAL
-    llama_batch_init-built batch - only the OUTCOME of the native call is
-    faked, not the batch-construction machinery itself, so this exercises
-    the actual ctypes cast/pack code the measurement unit proved correct."""
+    llama_batch_init-built batch: only the OUTCOME of the native call is faked,
+    not the batch-construction machinery itself."""
 
     def test_a_nonzero_decode_return_raises_and_returns_nothing(self, monkeypatch):
         e = emb.GGUFEmbedder(_EMBED_MODEL)
@@ -1806,11 +1613,9 @@ class TestBatchedDecodeFailureGranularity:
             e.close()
 
     def test_one_null_sequence_in_an_otherwise_ok_batch_raises(self, monkeypatch):
-        """The genuinely dangerous partial-success shape: llama_decode
-        returns 0 (the call as a whole 'succeeded') but ONE sequence's
-        pooled output comes back NULL. Must still raise - a caller must
-        never receive a fabricated or all-zero vector for the sequence that
-        actually failed while believing the whole batch succeeded."""
+        """llama_decode returns 0 while ONE sequence's pooled output comes back
+        NULL: embed() still raises rather than returning a fabricated or
+        all-zero vector for that sequence."""
         e = emb.GGUFEmbedder(_EMBED_MODEL)
         try:
             real_get = e._api.llama_get_embeddings_seq
@@ -1827,12 +1632,8 @@ class TestBatchedDecodeFailureGranularity:
             e.close()
 
     def test_a_group_failure_does_not_leak_partial_results(self, monkeypatch):
-        """embed() must not return SOME real vectors and silently drop
-        others when a later group in the same call fails - the whole call
-        raises, exactly like today's pre-existing single-text serial loop
-        already does when any one text fails (Python's list-comprehension
-        exception propagation - no caller anywhere expects a partial
-        list)."""
+        """When a later group in the same call fails, the whole call raises;
+        embed() never returns a partial list."""
         e = emb.GGUFEmbedder(_EMBED_MODEL, n_ctx=16)
         try:
             # n_ctx=16, n_seq_max chosen from that - force at least 2 groups
@@ -1863,8 +1664,8 @@ class TestBatchedDecodeFailureGranularity:
 @pytest.mark.skipif(not _EMBED_MODEL,
                     reason="set LOCALM_TEST_EMBED_MODEL to a real embedding GGUF")
 def test_real_gguf_overlong_texts_not_identical():
-    """Audit repro against the real DLL: two different multi-thousand-token
-    texts had cosine 1.0 pre-fix."""
+    """Two different multi-thousand-token texts must not embed to cosine 1.0
+    against the real DLL."""
     e = emb.GGUFEmbedder(_EMBED_MODEL)
     try:
         long_a = ("the greenhouse controller regulates temperature and "
@@ -1881,25 +1682,15 @@ def test_real_gguf_overlong_texts_not_identical():
 # --------------------------------------------------------------------------
 # THE EMBEDDING CONTEXT MUST USE ONE SHARED KV CACHE.
 #
-# llama.cpp's default carves n_ctx into n_seq_max private slices, so at
-# n_ctx=2048 / n_seq_max=32 each sequence gets 64 tokens (padded to 256 cells).
-# _pack_groups bounds a group by its SUMMED tokens against n_ctx, which is the
-# right budget for a SHARED cache and far too generous for a sliced one, so an
-# ordinary RAG chunk (300-650 tokens) overflows its own slice while the group
-# still looks legal.
+# llama.cpp's default carves n_ctx into n_seq_max private slices, while
+# _pack_groups bounds a group by its SUMMED tokens against the whole n_ctx.
 #
 # Asserted on the context PARAMS rather than by embedding: the bundled default
 # (bge-small) is a BERT-style ENCODER, which llama.cpp routes through encode(),
-# which has no KV cache, so the slicing cannot bite there. Driving the failure
-# for real needs a DECODER-based embedding model, a 531 MB download.
+# which has no KV cache.
 
 def test_embedding_context_requests_a_shared_kv_cache():
     """Drives the pure params function, so it needs NO native runtime.
-
-    The first version of this test drove the whole GGUFEmbedder and passed on a
-    machine with llama.cpp provisioned while failing on CI, where __init__ raised
-    before it ever reached context creation and the pytest.raises() around it hid
-    that. A parameter check must not depend on whether a GPU runtime exists.
     """
     from localm.inference.embedder import configure_embed_context
 
@@ -2054,21 +1845,15 @@ os._exit(0 if ok else 3)
 
 
 def test_get_embedder_lock_order_cannot_deadlock_a_concurrent_engine_load(tmp_path):
-    """Regression for the 2026-08-18 whole-server hang: get_embedder() used to
-    acquire engine._LOAD_LOCK while holding embedder._LOCK (#313), while the
-    chat-load path holds _LOAD_LOCK and calls loaded_path() - which takes
-    _LOCK - from its ctx sizing (#767). A model preload racing a first embed
-    (the memory plugin's startup migration, in the live incident) deadlocked
-    both threads permanently, and every other _LOCK caller wedged behind
-    them until the GUI's whole connection pool was dead. Neither acquire has
-    a timeout, so the wedge held for over an hour at 0% CPU until the
-    process was killed.
+    """get_embedder() must never acquire engine._LOAD_LOCK while holding
+    embedder._LOCK: the chat-load path holds _LOAD_LOCK and calls loaded_path(),
+    which takes _LOCK, from its ctx sizing. _LOAD_LOCK is the outer lock and
+    _LOCK the inner one, and neither acquire has a timeout.
 
-    Reconstructs that exact geometry with the REAL locks and the real
-    get_embedder()/loaded_path() control flow (externals stubbed), in a
-    SUBPROCESS: the pre-fix failure mode is a genuine permanent deadlock
-    holding module-level locks, which in-process would wedge this suite's
-    own teardown (reset_embedder takes _LOCK) instead of failing cleanly.
+    Reconstructs that geometry with the REAL locks and the real
+    get_embedder()/loaded_path() control flow (externals stubbed) in a
+    SUBPROCESS, so a deadlock cannot wedge this suite's own teardown
+    (reset_embedder takes _LOCK).
     """
     import subprocess
     import sys as _sys

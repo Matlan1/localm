@@ -72,10 +72,8 @@ def main(model, no_images, no_coder, print_config):
         )
         return
 
-    # The MCP server is an optional plugin (Phase 3). It ships disabled, so a
-    # client that launches `localm mcp` gets a clear refusal until the user opts
-    # in - rather than silently exposing the models. --print-config above is
-    # exempt so users can set up the client first, then enable.
+    # The MCP server plugin ships disabled, so `localm mcp` refuses to serve
+    # until the user opts in. --print-config above is exempt.
     from localm.plugins.engine import PluginManager
     if not PluginManager(None).is_active("mcp"):     # installed (on disk) AND enabled
         click.echo(

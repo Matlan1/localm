@@ -1,23 +1,16 @@
-"""NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED: a dropped lazy grammar must reach the caller.
+"""A dropped lazy grammar must reach the caller.
 
-#1215 fixed the UP-FRONT grammar path. The LAZY path still soft-degraded: a caller
-that asked for CONSTRAINED output got UNCONSTRAINED output and a normal 200, with
-the only trace a DEBUG line written inside an isolated worker CHILD - which reaches
-nobody. The acceptance criterion these tests encode is:
+The acceptance criterion these tests encode:
 
     a caller that requested lazy grammar and received unconstrained output can tell
     FROM THE RESPONSE ALONE, without parsing the content.
 
-WHAT THE FIXTURES HERE HAVE TO BE ABLE TO EXPRESS, because the obvious fixture
-cannot (and would pass for the wrong reason):
-
 xgrammar is NOT installed in this venv, so ``HFBackend.supports_grammar`` is False
 and the BASE class refuses every grammar with GRAMMAR_UNSUPPORTED_MESSAGE before the
-lazy branch is ever reached. A test that merely asserted "a lazy request is refused"
-would therefore go green on an install where the lazy fix does not exist at all. So
-every fixture below forces ``supports_grammar`` True to reach the lazy arm, and the
-assertions check WHICH refusal fired - the lazy message present AND the blanket one
-absent - rather than that some refusal happened.
+lazy branch is ever reached. Every fixture below therefore forces
+``supports_grammar`` True to reach the lazy arm, and the assertions check WHICH
+refusal fired - the lazy message present AND the blanket one absent - never merely
+that some refusal happened.
 """
 
 from __future__ import annotations
@@ -53,11 +46,9 @@ class _RecordingBackend(BaseBackend):
     """Records whether generation actually ran.
 
     ``chat_stream_calls == []`` is the load-bearing assertion in the route tests:
-    the defect is not "the status code is wrong", it is "unconstrained text was
-    generated and returned as though it satisfied the grammar". An empty list is
-    the proof that no such text exists, and it is asserted BEFORE the status code
-    so a failure reports the LOSS rather than a number (a number invites you to
-    adjust it).
+    an empty list proves no unconstrained text was generated and returned as
+    though it satisfied the grammar. It is asserted BEFORE the status code, so a
+    failure reports the LOSS rather than a number.
     """
 
     supports_grammar = True
@@ -80,12 +71,9 @@ class _RecordingBackend(BaseBackend):
 class _HFLikeBackend(HFBackend):
     """The REAL ``HFBackend.validate_grammar``, with only the model half stubbed.
 
-    Subclassing rather than re-implementing the refusal in a fake: a fake would
-    test this file's idea of the contract instead of the shipped one, which is the
-    extraction trap (a test sited one layer away from where the defect can return).
-    ``supports_grammar`` is a class attribute here, which shadows HFBackend's
-    ``find_spec("xgrammar")`` property - see the module docstring for why that is
-    required rather than convenient.
+    Subclasses rather than re-implementing the refusal, so the shipped contract
+    is what runs. ``supports_grammar`` is a class attribute here, shadowing
+    HFBackend's ``find_spec("xgrammar")`` property - see the module docstring.
     """
 
     supports_grammar = True
@@ -118,7 +106,7 @@ class _HFLikeRecording(_HFLikeBackend):
 
 class _EngineWithBackend(Engine):
     """A real Engine (real ``validate_grammar`` delegation) over a hand-built
-    backend. Subclassed rather than constructed because ``Engine.__init__`` calls
+    backend. Subclassed, not constructed: ``Engine.__init__`` calls
     ``create_backend`` and would resolve a real model file."""
 
     def __init__(self, backend: BaseBackend) -> None:
@@ -154,12 +142,10 @@ def _lazy_payload(**over) -> dict:
 # --------------------------------------------------------------------------- #
 
 def test_lazy_refusal_reaches_the_caller_and_nothing_is_generated():
-    """The whole defect in one test: ask for lazy, get told, generate nothing.
+    """Ask for lazy, get told, generate nothing.
 
     Drives the REAL HFBackend.validate_grammar through the REAL Engine through the
-    REAL route, because the bug lived in the ARRANGEMENT of those three (the route
-    validated, the engine delegated, and the backend had nothing to say about lazy)
-    rather than inside any one of them.
+    REAL route, so the ARRANGEMENT of those three is what is exercised.
     """
     backend = _HFLikeRecording()
     r = _post(_EngineWithBackend(backend), _lazy_payload())
@@ -190,10 +176,9 @@ def test_lazy_refusal_is_identical_on_the_streaming_path():
 def test_a_backend_that_can_do_lazy_is_still_served():
     """The control, and the no-regression guard for the GGUF path.
 
-    The refusal must be targeted at backends that PROVED they cannot do lazy, not
-    applied to every lazy request. A backend that declares grammar support and does
-    not override validate_grammar (the GGUF shape) must generate normally. Without
-    this, a fix that simply refused all lazy grammar would pass every test above.
+    The refusal is targeted at backends that PROVED they cannot do lazy, never
+    applied to every lazy request. A backend that declares grammar support and
+    does not override validate_grammar (the GGUF shape) generates normally.
     """
     backend = _RecordingBackend()
     r = _post(_EngineWithBackend(backend), _lazy_payload())
@@ -242,10 +227,9 @@ def test_hf_chat_stream_refuses_lazy_even_when_validate_grammar_was_skipped():
 
 
 def test_every_validate_grammar_override_accepts_the_lazy_keyword():
-    """The routes now call ``validate_grammar(g, lazy=...)`` by keyword. An override
-    that kept the old ``(self, grammar)`` signature turns EVERY grammar request on
-    that backend into a TypeError - a total outage of the feature, on the backend
-    that works, introduced by the fix for the backend that does not."""
+    """The routes call ``validate_grammar(g, lazy=...)`` by keyword, so an
+    override with a ``(self, grammar)`` signature turns EVERY grammar request on
+    that backend into a TypeError."""
     from localm.inference.backends.gguf import GgufBackend
 
     for cls in (BaseBackend, GgufBackend, HFBackend, Engine):
@@ -324,11 +308,8 @@ def test_grammar_processor_raises_invalid_grammar_when_compilation_fails(monkeyp
 def test_hf_worker_chat_stream_refuses_lazy_rather_than_dropping_it():
     """Third line of defence, for a caller driving HFWorker directly.
 
-    Fires-controlled: restoring the old ``grammar = None`` drop turns this red with
-    ``AttributeError: 'HFWorker' object has no attribute '_tokenizer'`` - execution
-    running on past the guard into the generation body, which is exactly the defect.
-    The red's wording is incidental to the minimal stub; what it proves is that this
-    test cannot pass unless the refusal happens BEFORE any generation setup.
+    ``_runner``/``_tokenizer`` are absent on this minimal stub, so the test can
+    only pass if the refusal happens BEFORE any generation setup.
     """
     from localm.inference.backends._hf_worker import HFWorker
 
@@ -346,10 +327,9 @@ def test_hf_worker_chat_stream_refuses_lazy_rather_than_dropping_it():
 
 def test_the_two_refusal_messages_cannot_be_confused():
     """``coder/agent/context.py`` routes its recovery by SUBSTRING-matching these
-    two messages, and the lazy one is tested first. If either ever became a
-    substring of the other, a lazy refusal would silently take the blanket branch
-    and disable the forced tool-call grammar too. Cheap guard on a real fragility:
-    matching a thing by a string it shares with another thing."""
+    two messages, and the lazy one is tested first. If either became a substring
+    of the other, a lazy refusal would take the blanket branch and disable the
+    forced tool-call grammar too."""
     assert GRAMMAR_LAZY_UNSUPPORTED_MESSAGE not in GRAMMAR_UNSUPPORTED_MESSAGE
     assert GRAMMAR_UNSUPPORTED_MESSAGE not in GRAMMAR_LAZY_UNSUPPORTED_MESSAGE
     assert "lazy" in GRAMMAR_LAZY_UNSUPPORTED_MESSAGE.lower()

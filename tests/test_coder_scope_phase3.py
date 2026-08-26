@@ -1,24 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
-M2 Phase 3 regression tests for the coder plugin.
+Three properties of the coder plugin:
 
-Covers three fixes:
+- Scope globbing is path-aware. ``*`` must not cross ``/`` (so ``src/*.py``
+  rejects ``src/a/b/c.py``), ``**`` may cross ``/``, and an absolute path that
+  lives inside cwd and matches the scope must be allowed.
 
-BUG-6  Scope globbing is path-aware. ``*`` must not cross ``/`` (so
-       ``src/*.py`` rejects ``src/a/b/c.py``), ``**`` may cross ``/``,
-       and an absolute path that lives inside cwd and matches the scope
-       must be allowed.
+- ``--scope`` enforcement covers grep, search_files, search_replace, read_env,
+  edit_notebook_cell and generate_image. ``run_shell`` stays unscoped. The
+  check keys on the ``path`` arg and, for tools whose primary target is
+  ``glob`` or ``output_path``, on that arg too.
 
-FAC-8  ``--scope`` enforcement covers the additional file-reading/writing
-       tools: grep, search_files, search_replace, read_env,
-       edit_notebook_cell, generate_image. ``run_shell`` stays unscoped.
-       The check keys on the ``path`` arg and, for tools whose primary
-       target is ``glob`` or ``output_path``, on that arg too.
-
-FAC-7  ``make_anthropic_backend`` speaks the Anthropic Messages API:
-       it posts to ``/v1/messages`` with an ``x-api-key`` header and an
-       ``anthropic-version`` header (NOT a Bearer ``Authorization``
-       header against ``/chat/completions``).
+- ``make_anthropic_backend`` speaks the Anthropic Messages API: it posts to
+  ``/v1/messages`` with an ``x-api-key`` header and an ``anthropic-version``
+  header, NOT a Bearer ``Authorization`` header against ``/chat/completions``.
 """
 
 from __future__ import annotations

@@ -4,17 +4,16 @@
 Drives an isolated child process (see ``_hf_runner.py``'s module docstring)
 that owns one real ``HFWorker`` (``_hf_worker.py``) for its whole lifetime -
 this class never imports torch/transformers or touches a model handle
-itself. Mirrors ``backends/gguf.py``'s ``GgufBackend`` (PR #606) applied to
-the one backend that was still fully in-process: every HF native call
+itself. Mirrors ``backends/gguf.py``'s ``GgufBackend``. Every HF native call
 (tokenizer regex, a torch forward pass, ``model.generate()``) is
-uninterruptible from Python, so a hang used to burn a slot in the server's
-shared thread pool PERMANENTLY (see ``dev-notes/decisions-2026-07-30-release-
-gate.md``, Q2, and ``_hf_runner.py``'s module docstring for the full
-mechanism). Isolating it is what makes a hang killable without a restart.
+uninterruptible from Python, so a hang in this process would burn a slot in
+the server's shared thread pool PERMANENTLY (see ``_hf_runner.py``'s module
+docstring for the full mechanism). Isolating it is what makes a hang killable
+without a restart.
 
 ``create_backend()`` (``engine.py``) needs no changes: this class keeps the
-exact same import path, class name, and constructor signature the in-process
-version had - the whole ``BaseBackend`` public contract is preserved.
+import path, class name and constructor signature that function expects - the
+whole ``BaseBackend`` public contract is preserved.
 """
 
 from __future__ import annotations
@@ -47,12 +46,11 @@ def _trust_remote_code_enabled() -> bool:
     """Whether transformers may import and execute a model directory's own .py.
 
     Config-driven and DEFAULT OFF (config key ``hf_trust_remote_code``,
-    owner-only to set) - see ``_check_custom_code_allowed`` below for the
-    full history/rationale. A second, independent copy of this exact
-    function lives in ``_hf_worker.py``, needed there for the
-    ``trust_remote_code=`` kwarg every ``from_pretrained`` call takes - see
-    that copy's docstring for why this is deliberately duplicated rather
-    than cross-imported between the parent and child modules."""
+    owner-only to set) - see ``_check_custom_code_allowed`` below for the full
+    contract. A second, independent copy of this exact function lives in
+    ``_hf_worker.py``, needed there for the ``trust_remote_code=`` kwarg every
+    ``from_pretrained`` call takes; see that copy's docstring for the
+    duplication contract between the parent and child modules."""
     try:
         from localm.config import load_config
         return bool(load_config().get("hf_trust_remote_code", False))
@@ -99,14 +97,11 @@ def _check_custom_code_allowed(model_path: str) -> None:
     """Refuse, with an actionable message, a model that needs custom code when
     ``hf_trust_remote_code`` is off. No-op for an ordinary model.
 
-    Called at the TOP of load(), deliberately BEFORE spawning a child (and,
-    when this ran in-process, before ``_require_torch()`` - a torch-less
-    GGUF-only build must refuse identically, not differ by build). Now runs
-    in the PARENT rather than inside the isolated worker: this needs no
-    torch/transformers and nothing only the child can see, so gatekeeping it
-    here means a refused model never pays the cost of spawning a child at
-    all - the same reasoning as ``validate_tokenizer_json`` right below it in
-    ``load()``.
+    Called at the TOP of load(), BEFORE spawning a child, so a refused model
+    never pays the cost of spawning one. It needs no torch/transformers and
+    nothing only the child can see, so it runs in the PARENT - the same
+    placement as ``validate_tokenizer_json`` right below it in ``load()``. A
+    torch-less GGUF-only build refuses identically.
     """
     if not _declares_custom_code(model_path):
         return
@@ -156,14 +151,14 @@ class HFBackend(BaseBackend):
     @property
     def loaded(self) -> bool:
         """A backend whose isolated worker is GONE is not loaded, whatever
-        ``_loaded`` says - mirrors ``GgufBackend.loaded`` exactly (REG-606):
-        the worker can die out from under this object on a timeout or a
-        crash without any exception ever reaching a caller that would clear
-        ``_loaded`` (a killed ``chat_stream`` generator raises
-        ``GeneratorExit``, not a catchable error). Reporting the truth here
-        is what makes ``Engine.chat_stream``/``Engine.embed``'s ``if not
-        self._backend.loaded: self._backend.load()`` auto-reload actually
-        fire, instead of calling straight into a dead runner."""
+        ``_loaded`` says - mirrors ``GgufBackend.loaded`` exactly: the worker
+        can die out from under this object on a timeout or a crash without any
+        exception ever reaching a caller that would clear ``_loaded`` (a killed
+        ``chat_stream`` generator raises ``GeneratorExit``, not a catchable
+        error). Reporting the truth here is what makes
+        ``Engine.chat_stream``/``Engine.embed``'s ``if not
+        self._backend.loaded: self._backend.load()`` auto-reload actually fire,
+        instead of calling straight into a dead runner."""
         if not self._loaded:
             return False
         is_alive = getattr(self._runner, "is_alive", None)
@@ -173,14 +168,13 @@ class HFBackend(BaseBackend):
     def supports_images(self) -> bool:
         """True once loaded with a working multimodal processor.
 
-        Cached from the child's load response (self._supports_images) rather
-        than read live off a real HFWorker instance - that instance now
-        lives in the isolated worker process, not here. Gated on ``loaded``
-        (a live worker check, mirroring ``GgufBackend.supports_images``): a
-        dead worker safely reports no vision rather than a stale cached
-        True - the caller (routes/chat.py) already reloads-then-rechecks
-        when `not engine.loaded and engine.can_be_multimodal`, so this never
-        strands a genuinely multimodal model, it only ever costs one extra
+        Cached from the child's load response (self._supports_images): the real
+        HFWorker instance lives in the isolated worker process, not here. Gated
+        on ``loaded`` (a live worker check, mirroring
+        ``GgufBackend.supports_images``), so a dead worker reports no vision
+        rather than a stale cached True. The caller (routes/chat.py) reloads and
+        rechecks when `not engine.loaded and engine.can_be_multimodal`, so this
+        never strands a genuinely multimodal model and costs at most one extra
         reload."""
         return bool(self.loaded and self._supports_images)
 
@@ -188,23 +182,15 @@ class HFBackend(BaseBackend):
     def can_embed(self) -> bool:
         """True only when the LOADED model is a GENUINE embedding model (an
         architectural fact about the checkpoint, computed once by the child
-        right after load - see HFWorker.can_embed for the full reasoning
-        and the measurements behind it).
+        right after load - see HFWorker.can_embed).
 
-        Deliberately NOT gated on current liveness, unlike supports_images
-        above - this is a real behavioral difference, not an oversight.
-        Engine.embed()'s flow is: check can_embed -> reload if not loaded ->
-        check can_embed again -> embed(). If this gated on liveness, a
-        confirmed real HF embedder whose worker merely crashed between calls
-        would report can_embed=False at the FIRST check (before the reload
-        attempt ever runs) and get silently, permanently rerouted to the
-        dedicated on-device embedder instead of ever being reloaded - a
-        worse outcome than the transient crash itself, since the user's
-        actually-configured embedding model would stop being used. The
-        underlying architectural fact (does this checkpoint's structure
-        support embedding) does not change when the worker dies, so the
-        cached value stays valid across a crash; Engine.embed()'s own
-        `not self._backend.loaded` check is what triggers the reload."""
+        NOT gated on current liveness, unlike supports_images above. The
+        architectural fact does not change when the worker dies, so the cached
+        value stays valid across a crash, and Engine.embed()'s own
+        `not self._backend.loaded` check is what triggers the reload. Gating
+        this on liveness would report False at Engine.embed()'s FIRST check -
+        before the reload attempt ever runs - and permanently reroute a
+        confirmed HF embedder to the dedicated on-device embedder."""
         return self._can_embed
 
     @property
@@ -215,12 +201,12 @@ class HFBackend(BaseBackend):
         Without it ``_grammar_processor`` in the worker logs a warning and
         returns no logits processor, so generation runs UNCONSTRAINED while the
         caller still gets a normal 200. Reporting True here regardless of the
-        extra would keep that silent degrade alive behind an honest-looking
-        capability flag, which is worse than the original bug.
+        extra would hide that silent degrade behind an honest-looking capability
+        flag.
 
-        Deliberately NOT gated on ``loaded``, unlike ``supports_images`` above:
-        this is a fact about the INSTALL, not about the checkpoint or the worker,
-        and the up-front request check in the chat routes runs before a model is
+        NOT gated on ``loaded``, unlike ``supports_images`` above: this is a
+        fact about the INSTALL, not about the checkpoint or the worker, and the
+        up-front request check in the chat routes runs before a model is
         necessarily loaded. Gating it on liveness would refuse a grammar request
         that the backend can serve perfectly well after the auto-reload.
 
@@ -245,15 +231,14 @@ class HFBackend(BaseBackend):
         matcher masks logits from the first token or not at all, so there is
         nothing to feed a trigger pattern to. That is a static fact about the
         library, not about the checkpoint, the install or the worker, so it is
-        knowable HERE, in the parent, with no probe and no side effect. That is
-        exactly what the GGUF backend cannot do for its own lazy support (see
-        ``BaseBackend.validate_grammar`` for the measurement), which is why this
-        refusal lives at the one site that can prove its answer.
+        knowable HERE, in the parent, with no probe and no side effect - which is
+        what the GGUF backend cannot do for its own lazy support (see
+        ``BaseBackend.validate_grammar``).
 
-        Refusing beats the alternative it replaces. The worker used to drop the
-        grammar and generate UNCONSTRAINED text behind a DEBUG line, so a caller
-        that asked for constrained output got a normal 200 it could not tell from
-        a grammar-conformant answer. Raising here happens before a byte of either
+        Without this refusal the worker drops the grammar and generates
+        UNCONSTRAINED text behind a DEBUG line, so a caller that asked for
+        constrained output gets a normal 200 it cannot tell from a
+        grammar-conformant answer. Raising here happens before a byte of either
         the streaming or the non-streaming response is committed, so both paths
         get the identical status and the identical reason.
 
@@ -301,11 +286,11 @@ class HFBackend(BaseBackend):
     def _load_timeout_seconds() -> float:
         """Model-load timeout, from config (``hf_load_timeout_s``) or the
         generous built-in default. Mirrors ``GgufBackend._load_timeout_seconds``
-        exactly - a stalled load has no safe "unmeasurable" fallback, so this
+        exactly: a stalled load has no safe "unmeasurable" fallback, so this
         always raises rather than silently reporting not-loaded. Configurable
         because HF loads read full-precision safetensors from disk (no
         quantized-mmap fast path), so a large checkpoint on slow storage can
-        legitimately need longer than the generous default."""
+        legitimately need longer than the built-in default."""
         from localm.config import load_config
         raw = load_config().get("hf_load_timeout_s")
         try:
@@ -354,7 +339,7 @@ class HFBackend(BaseBackend):
     def _embed_max_texts() -> int:
         """Max texts accepted in one embed() call, from config
         (``hf_embed_max_texts``) or the built-in default - see
-        ``_hf_runner.EMBED_MAX_TEXTS_DEFAULT`` for why this exists."""
+        ``_hf_runner.EMBED_MAX_TEXTS_DEFAULT``."""
         from localm.config import load_config
         raw = load_config().get("hf_embed_max_texts")
         try:
@@ -431,9 +416,8 @@ class HFBackend(BaseBackend):
         """
         Return embedding vectors for *texts* via the isolated worker.
         Callers must gate on ``can_embed`` above: this is NOT a valid
-        embedding path for a chat decoder (see HFWorker.embed's docstring
-        for the measurements) - Engine.embed routes those to the dedicated
-        on-device embedder instead.
+        embedding path for a chat decoder (see HFWorker.embed's docstring) -
+        Engine.embed routes those to the dedicated on-device embedder instead.
         """
         if self._runner is None or not self.loaded:
             raise RuntimeError("Model not loaded - call load() first")

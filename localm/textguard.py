@@ -11,14 +11,9 @@ the literal token no longer exists while the text stays human-readable:
      ``<start_of_turn>`` ...) - stops ROLE forgery via the model's own
      delimiters, which both backends parse as special tokens.
 
-This was originally the coder's indirect-prompt-injection defense
-(``localm/plugins/coder/provenance.py``). It is HOISTED here because more than
-one KERNEL consumer needs it now: the agent-memory layer (``localm/memory``)
-neutralises every recalled memory before injecting it as trusted context, and a
-kernel library importing from a *plugin* (coder) would be backwards - a plugin
-may be disabled, and coder will later depend on memory, not the reverse. Coder
-re-exports ``neutralise`` from here so its existing call sites and tests are
-unchanged; the escaping is byte-for-byte identical to the original.
+The agent-memory layer (``localm/memory``) neutralises every recalled memory
+before injecting it as trusted context. Coder re-exports ``neutralise`` from
+here.
 
 It BLOCKS nothing and adds no policy - it only hardens a text boundary. Apply it
 ONLY to untrusted / laundering-path content (fetched pages, tool output, stored

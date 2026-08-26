@@ -80,9 +80,9 @@ def test_goal_loop_stops_at_once_when_the_check_could_not_run(tmp_path,
     reach it. Iterating burns the whole budget asking the model to fix a
     condition it cannot touch.
 
-    The launch fact rides on the outcome, so build a real VerifyOutcome rather
-    than a bare tuple - a bare tuple means "it ran", which is the point of the
-    companion test below."""
+    The launch fact rides on the outcome, so this builds a real VerifyOutcome
+    rather than a bare tuple; a bare tuple means "it ran", which the companion
+    test below covers."""
     from localm.plugins.coder.verify import VerifyOutcome
     calls = []
 
@@ -101,12 +101,10 @@ def test_goal_loop_stops_at_once_when_the_check_could_not_run(tmp_path,
 
 def test_goal_loop_still_retries_a_command_not_found_that_ran(tmp_path,
                                                               monkeypatch):
-    """FIRES-CONTROL, and the correction that matters. Exit 127 from a check
-    that DID start (a shell whose script is missing, npm whose test binary is
-    missing) is fixable by the model - it has a shell and can create the script,
-    chmod +x, or install the dependency. Short-circuiting on the exit code would
-    throw the entire iteration budget away on exactly the failures goal mode
-    exists to fix."""
+    """The control for the test above. Exit 127 from a check that DID start (a
+    shell whose script is missing, npm whose test binary is missing) is fixable
+    by the model - it has a shell and can create the script, chmod +x, or
+    install the dependency - so the loop must still retry it."""
     monkeypatch.setattr(cli, "_run_verify",
                         lambda cmd, wd: (127, "sh: ./check.sh: not found"))
     agent = _FakeAgent()

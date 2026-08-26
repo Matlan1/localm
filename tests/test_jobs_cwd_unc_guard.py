@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A coder job's ``cwd`` reached Path.expanduser()/.is_dir()/.resolve() in
+"""A coder job's ``cwd`` reaches Path.expanduser()/.is_dir()/.resolve() in
 runner._run_coder with only a non-empty check in front of it (store.py's "coder
 jobs require a cwd"). is_dir()/.resolve() are not read-only: on Windows a UNC
 target dials outbound SMB and auto-authenticates with the host's net-NTLMv2
@@ -8,19 +8,18 @@ credential, before any status or error is chosen.
 Reachability is what makes this worth a dedicated test file rather than a note:
 the plain ``jobs`` scope reaches it via POST /api/jobs/{id}/run (that route only
 re-checks the caller when allow_shell=true), and the scheduler auto-tick runs it
-UNATTENDED roughly every 30s with no caller at all - so a hostile cwd stored once
+UNATTENDED roughly every 30s with no caller at all, so a hostile cwd stored once
 keeps firing on a timer without anyone touching the API again.
 
-Fix mirrors the model-name gate already in this same plugin (see
-test_model_name_gate.py, and PR #893's identical fix for the MCP server's
-pull_model/run_coder_task/generate_image tools - run_coder_task's own ``cwd``
-got the exact same guard there):
+The gate has two halves, mirroring the model-name gate already in this same
+plugin:
 
   * write-time (plug.py's _check_cwd for POST/PUT, and the CLI's own check) -
     early rejection, so a NEW or edited job's bad cwd never persists.
   * run-time (runner.py's _run_coder) - the AUTHORITATIVE check, because it
-    covers a row persisted before this fix shipped, or written straight to the
-    store, which is exactly the scenario the scheduler tick tests below drive.
+    covers a row persisted before the write-time check existed, or written
+    straight to the store, which is exactly the scenario the scheduler tick
+    tests below drive.
 """
 
 from __future__ import annotations
@@ -31,8 +30,8 @@ import pytest
 
 from localm.pathsafe import is_unc_or_device_path
 
-# A UNC path at a non-routable RFC5737 documentation address (TEST-NET-1), so it
-# never routes anywhere and cannot reach a real host.
+# A UNC path at a non-routable RFC 5737 documentation address, so it never
+# routes anywhere and cannot reach a real host.
 UNC = r"\\192.0.2.1\share"
 UNC_FWD = "//192.0.2.1/share"
 DEVICE = r"\\.\PhysicalDrive0"
@@ -45,19 +44,18 @@ _FS_METHODS = ("resolve", "is_dir", "is_file", "exists", "stat", "iterdir")
 @pytest.fixture
 def fs_spy(monkeypatch):
     """Record every path string that reaches a filesystem call, and hard-fail
-    the call when it is UNC/device syntax.
+    the call when it is UNC or device syntax.
 
-    Kept as a local copy of tests/test_admin_fs_routes.py's fixture (same
-    design, same rationale) rather than imported across test modules - pytest
-    fixtures do not share cleanly across unrelated files without a conftest
-    entry, and this file's UNC contract is judged by the same predicate
-    (pathsafe.is_unc_or_device_path) the product itself uses, so the two
-    cannot drift apart.
+    A local copy rather than an import across test modules: pytest fixtures do
+    not share cleanly across unrelated files without a conftest entry, and this
+    file's UNC contract is judged by the same predicate
+    (pathsafe.is_unc_or_device_path) the product itself uses, so the two cannot
+    drift apart.
 
-    Recording AND raising is deliberate: a raise alone could be swallowed by a
-    caller's broad except-and-record-error handling (run_job never lets an
-    exception escape); the recorded list is checked independently below and
-    cannot be swallowed that way."""
+    Recording AND raising: a raise alone could be swallowed by a caller's broad
+    except-and-record-error handling (run_job never lets an exception escape),
+    while the recorded list is checked independently below and cannot be
+    swallowed that way."""
     seen: list = []
     reals = {m: getattr(Path, m) for m in _FS_METHODS}
 
@@ -108,9 +106,8 @@ def _make_job(**kw):
 
 
 def _fake_agent_capture(monkeypatch):
-    """Patch the coder backend + Agent so _run_coder runs for real up through
-    the cwd guard, without needing a real coder backend or LLM. Mirrors
-    test_jobs_shell_key_liveness.py's identical helper."""
+    """Patch the coder backend and Agent so _run_coder runs for real up through
+    the cwd guard, without needing a real coder backend or LLM."""
     from localm.plugins.builtin.jobs import runner
     captured: dict = {}
 
@@ -338,10 +335,9 @@ def test_run_now_ordinary_cwd_still_works(home, tmp_path, monkeypatch):
 @pytest.mark.parametrize("bad", [UNC, UNC_FWD, DEVICE])
 def test_scheduler_tick_refuses_a_persisted_bad_cwd_without_touching_filesystem(
         home, monkeypatch, fs_spy, bad):
-    """Drives the REAL scheduler tick -> real runner.run_job -> _run_coder
-    (only the coder Agent/backend are faked), exactly like
-    test_jobs_shell_key_liveness.py's scheduler test - so this exercises the
-    actual autonomous path with no request/caller in sight."""
+    """Drives the REAL scheduler tick, real runner.run_job, real _run_coder
+    (only the coder Agent and backend are faked), so this exercises the actual
+    autonomous path with no request or caller in sight."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     from localm.plugins.builtin.jobs.store import JobStore
 

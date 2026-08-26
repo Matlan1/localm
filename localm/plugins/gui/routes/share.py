@@ -3,12 +3,11 @@
 
 The phone shares an image (or text/link) from any app INTO localm via the OS
 share sheet (manifest "share_target"). The browser POSTs it to /share-target; we
-stash it in a transient server inbox and bounce back to the app, which ingests the
-images as chat attachments and clears the inbox. This makes phone content actually
-reach the model, not just "open a link".
+stash it in a transient server inbox and bounce back to the app, which ingests
+the images as chat attachments and clears the inbox.
 
-Extracted verbatim from attach_gui(); behavior unchanged. The multipart parser and
-the transient inbox helper stay in ``web.py`` and are imported by name.
+The multipart parser and the transient inbox helper stay in ``web.py`` and are
+imported by name.
 """
 
 from __future__ import annotations
@@ -51,11 +50,9 @@ def register(app: FastAPI, ctx) -> None:
             # "photo:stream.png" intact, which on NTFS writes into an alternate
             # data stream that /api/share/pending cannot list, and leaves an
             # embedded NUL intact, which raises ValueError out of write_bytes as
-            # a bare 500. Reuse /api/upload's guard rather than restating its
-            # character set - a second copy of a security constant is how the two
-            # drift apart. This one refuses where /api/upload skips: that route
-            # reports which files it saved, this returns only a redirect carrying
-            # a count, so a silent skip here would be invisible to the caller.
+            # a bare 500. Reuses /api/upload's guard. This route REFUSES where
+            # /api/upload skips: it returns only a redirect carrying a count, so
+            # a silent skip would be invisible to the caller.
             if not _web._name_is_safe(safe):
                 raise HTTPException(400, "Invalid file name.")
             accepted.append((safe, data))
@@ -79,10 +76,9 @@ def register(app: FastAPI, ctx) -> None:
         attachments. Does not delete - the app calls /api/share/clear after it
         has the data, so a failed fetch does not lose the share.
 
-        Scoped to the caller's own shares (an admin/owner sees all; an entry
-        with no recorded owner - open mode, or left over from before ownership
-        was tracked - stays visible to everyone), so one key cannot read
-        another key's shared content."""
+        Scoped to the caller's own shares: an admin/owner sees all, and an
+        entry with no recorded owner (open mode) stays visible to everyone, so
+        one key cannot read another key's shared content."""
         import base64
         import mimetypes as _mt
         inbox = _web._share_inbox()
@@ -123,24 +119,15 @@ def register(app: FastAPI, ctx) -> None:
                     p.unlink()
                     removed += 1
                 except OSError as e:
-                    # RULE 5: a delete that FAILED must not be indistinguishable
-                    # from an entry the caller never asked about. Before this,
-                    # both simply left `removed` unchanged, so a locked or
-                    # permission-denied file reported exactly like a clean sweep
-                    # on a PRIVACY-adjacent store - the user believes shared
-                    # content is gone from the server and it is still there.
-                    #
-                    # Non-fatal rather than a 500, deliberately, and NOT the
-                    # sibling shape: chat's conversation_delete unlinks bare so
-                    # an OSError becomes a 500, which is right there because the
-                    # deletion IS the request's whole outcome. Here the clear is
-                    # cleanup riding on a share INGEST that has already
-                    # succeeded client-side, and the client re-sends the same ids
-                    # on the next ingest, so this self-heals; raising would fail
-                    # an operation that actually worked.
+                    # A delete that FAILED is reported distinctly from an entry
+                    # the caller never asked about: on a privacy-adjacent store
+                    # a locked or permission-denied file must not read like a
+                    # clean sweep. Non-fatal rather than a 500 - the clear is
+                    # cleanup riding on a share ingest that has already
+                    # succeeded client-side, and the client re-sends the same
+                    # ids on the next ingest, so it self-heals.
                     failed += 1
                     logger.warning("share-inbox clear could not delete %s: %s", p.name, e)
-        # `failed` is not decoration: chat.js already reads it, logs it and
-        # toasts the user (see the share-clear handler there, which documents
-        # this exact contract and defaults to 0 for a server that omits it).
+        # chat.js reads `failed`, logs it and toasts the user; its share-clear
+        # handler defaults it to 0 for a server that omits it.
         return {"removed": removed, "failed": failed}

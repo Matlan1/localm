@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Longitudinal memory verification harness (memory fix campaign, P2: the
-campaign's own DONE oracle - see dev-notes/memory-fix-campaign/PLAN.md section 4).
+"""Longitudinal memory verification harness.
 
 An N-session SCRIPTED SIMULATION that replays real chat sessions through the REAL
 memory pipeline - real MemoryStore, real run_consolidation/synthesize_memory
@@ -19,17 +18,17 @@ sessions rather than in a single shot:
      paraphrase recalls with the semantic signal active;
   5. per-session episodic capture: one episode per session, watermarked so
      a re-run with no new session adds zero;
-  6. no '<think' substring ever reaches the store (C1 regression guard).
+  6. no '<think' substring ever reaches the store.
 
 No mocks of the pipeline under test - only the OUTER HTTP/CLI plumbing is
 skipped (session files are written directly in the exact on-disk shape
 AuditLog produces, which is what a real second server run would create).
 
-@integration + @real_gguf (same precedent as test_gguf_smoke_integration.py) so
-the default `pytest -m "not integration"` full-suite run is unaffected; run this
-explicitly with `pytest -m real_gguf tests/test_memory_longitudinal_harness.py -v`
-(the GPU is a shared resource, so serialise this against any other GPU
-workload on the same machine before running it). Skips cleanly (never fails) when the native runtime or
+@integration + @real_gguf, so the default `pytest -m "not integration"` run is
+unaffected; run this explicitly with
+`pytest -m real_gguf tests/test_memory_longitudinal_harness.py -v`. The GPU is a
+shared resource, so serialise this against any other GPU workload on the same
+machine before running it. Skips cleanly (never fails) when the native runtime or
 network is unavailable.
 """
 

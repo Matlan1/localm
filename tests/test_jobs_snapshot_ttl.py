@@ -2,19 +2,19 @@
 """JobManager must be able to say what is running, and must keep a job that
 just finished.
 
-Two defects, both from ADR-0008:
+Two defects:
 
-1. The registry recorded every job but exposed no way to ENUMERATE them. The
-   only public reads were get(job_id) and has_running(kind), and a job id was
-   handed out exactly once - in the body of the POST that started the job - so
-   a second client, or the same browser tab after a reload, could not learn
-   that a model pull was in flight even though the server knew.
+1. The registry records every job but exposes no way to ENUMERATE them. With
+   only get(job_id) and has_running(kind) public, and a job id handed out
+   exactly once - in the body of the POST that started the job - a second
+   client, or the same browser tab after a reload, cannot learn that a model
+   pull is in flight even though the server knows.
 
-2. The TTL sweep keyed on created_at while the class docstring promised
-   "finished jobs stay queryable for an hour". Those disagree for any job that
-   RAN for longer than the TTL: a two-hour pull was already past the cutoff the
-   moment it succeeded, so it was evicted by the very next started job instead
-   of staying queryable. finished_at makes the code match the promise.
+2. A TTL sweep keyed on created_at contradicts the class docstring's promise
+   that "finished jobs stay queryable for an hour", for any job that RAN for
+   longer than the TTL: a two-hour pull is already past the cutoff the moment it
+   succeeds, so it is evicted by the very next started job instead of staying
+   queryable. finished_at makes the code match the promise.
 """
 
 from __future__ import annotations
@@ -86,8 +86,8 @@ def test_mark_finished_is_idempotent():
 # ------------------------------------------------------------------------ _gc
 
 def test_gc_keeps_a_long_job_that_finished_a_moment_ago():
-    """THE REGRESSION. Keyed on created_at this job is two hours old and gets
-    swept; keyed on finished_at it finished one second ago and must survive."""
+    """Keyed on created_at this job is two hours old and gets swept; keyed on
+    finished_at it finished one second ago and must survive."""
     mgr = JobManager()
     job = _finished(mgr, age_s=1.0, ran_for_s=2 * 60 * 60)
     assert job.created_at < time.time() - mgr._TTL_S, "precondition: older than the TTL"
@@ -104,8 +104,8 @@ def test_gc_evicts_a_job_that_finished_long_ago():
 
 
 def test_gc_never_evicts_a_running_job_at_any_age():
-    """Deliberate, not an oversight: evicting a live job would strand its SSE
-    subscribers and lose the record while the work carries on."""
+    """Evicting a live job would strand its SSE subscribers and lose the record
+    while the work carries on."""
     mgr = JobManager()
     job = Job(id="old", kind="pull", argv=[])
     job.created_at = time.time() - 10 * mgr._TTL_S
@@ -167,8 +167,8 @@ def test_snapshot_never_leaks_argv_or_owner():
 # -------------------------------------------------------------------- summary
 
 def test_summary_omits_pct_entirely_when_nothing_reported_progress():
-    """ADR-0008 R1: a pull that has not yet read a byte count is at an UNKNOWN
-    percentage, not at 0 percent. Absent, never a fabricated zero."""
+    """A pull that has not yet read a byte count is at an UNKNOWN percentage,
+    not at 0 percent. Absent, never a fabricated zero."""
     job = Job(id="a", kind="pull", argv=[])
     row = job.summary()
     assert "pct" not in row

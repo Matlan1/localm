@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """/v1/embeddings must route to the dedicated embedder for the model named by the
 ``embedding_model`` config key, not only for a registry entry whose NAME happens
-to match that key exactly (PR #703 follow-up).
+to match that key exactly.
 
 `localm setup-embeddings` registers a freshly downloaded known-key model (the
-default "bge-small-en-v1.5") under a PREFIXED alias ("embedding-bge-small-en-v1.5",
-cli/maintenance.py L139), while `embedding_model` in config stays the raw known-key
-string. `_make_self_embed` (rag/plug.py) always sends that raw config value as
-`model`. A registry-name-only routing check therefore never matches the default
-setup flow and falls through to get_engine(), which 404s ("not registered") since
-"bge-small-en-v1.5" is not itself a registry key - breaking indexing/query even
-when a chat model IS loaded (worse than before the routing fix existed, since the
-old can_embed=False engine fallback used to cover that case)."""
+default "bge-small-en-v1.5") under a PREFIXED alias
+("embedding-bge-small-en-v1.5", cli/maintenance.py), while `embedding_model` in
+config stays the raw known-key string. `_make_self_embed` (rag/plug.py) sends that
+raw config value as `model`. A registry-name-only routing check therefore never
+matches the default setup flow and falls through to get_engine(), which 404s ("not
+registered") since "bge-small-en-v1.5" is not itself a registry key, breaking
+indexing/query even when a chat model IS loaded."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -62,10 +61,8 @@ def test_default_embedding_model_routes_despite_prefixed_registry_alias(app_clie
 
 def test_default_embedding_model_routes_even_with_a_chat_model_active(app_client, monkeypatch):
     """Same as above, but with a chat model resident - must still route via the
-    dedicated embedder, not attempt to resolve "bge-small-en-v1.5" as a chat
-    engine (the pre-fix regression: this used to work via the loaded engine's
-    can_embed=False fallback, then 404'd once the routing fix's registry-only
-    check missed the prefixed alias)."""
+    dedicated embedder, never attempt to resolve "bge-small-en-v1.5" as a chat
+    engine."""
     registry = {
         "embedding-bge-small-en-v1.5": {
             "path": "models/embeddings/bge-small-en-v1.5-q4_k_m.gguf",
@@ -88,9 +85,9 @@ def test_default_embedding_model_routes_even_with_a_chat_model_active(app_client
 
 
 def test_explicitly_registered_embedding_model_still_routes_by_exact_name(app_client, monkeypatch):
-    """Regression guard for the original PR #703 intent: a model the user picked
-    "from your models" (config stores the exact registered name) still routes via
-    the registry model_type=="embedding" check."""
+    """A model the user picked "from your models" (config stores the exact
+    registered name) still routes via the registry model_type=="embedding"
+    check."""
     registry = {
         "Qwen3-Embedding-4B-Q8_0": {
             "path": "models/Qwen3-Embedding-4B-Q8_0.gguf",

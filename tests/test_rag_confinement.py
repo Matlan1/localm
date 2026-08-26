@@ -1,29 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""C2 confinement: the RAG indexing API must not be trickable into reading and
-serving back files outside the allowed roots (an OS file elsewhere on the disk)
-or THIRD-PARTY credential folders (.ssh, .aws, ...) that a caller other than the
-owner should never be able to reach through the API.
+"""The RAG indexing API must not be trickable into reading and serving back files
+outside the allowed roots (an OS file elsewhere on the disk) or THIRD-PARTY
+credential folders (.ssh, .aws, ...) that a caller other than the owner should
+never be able to reach through the API.
 
 Note on targets: every "outside the allowed roots" path in this file is a real
 but DISPOSABLE file the test creates under its own tmp_path, never an actual
 system path. confine_index_path() resolve()s what it is handed BEFORE it decides
-anything - it has to, or a symlink into a credential folder would slip past - so
-handing it a real OS file would make the test suite itself reach out and touch
-one. There is no benign version of that: at the access point a legitimate test,
-a command gone wrong, and a live injection attempt look identical. An
-outside-the-roots temp file exercises the identical code path.
+anything, so handing it a real OS file would make the test suite itself touch
+one. An outside-the-roots temp file exercises the identical code path.
 
 The confinement is MODE-based (whitelist / blacklist) with an always-on HARD
 FLOOR of well-known third-party credential folders, refused in every mode. The
-localm data directory (LOCALM_HOME) is deliberately NOT part of that hard floor:
-localm does not block the owner from indexing their own files, including its own
-config/registry/keystore, if they explicitly choose to - it is their machine.
-LOCALM_HOME is subject to the SAME whitelist/blacklist rules as any other
-location, no special case. The CLI stays unconfined except the credential-folder
-hard floor - a local user can already read their own files - so the mode
-confinement engages only when a policy is passed, which the HTTP route always
-does and the CLI never does. A whitelist MISS is offered back to the owner as
-'add and continue' (409), not a dead-end error.
+localm data directory (LOCALM_HOME) is NOT part of that hard floor and is
+subject to the SAME whitelist/blacklist rules as any other location. The CLI
+stays unconfined except the credential-folder hard floor: the mode confinement
+engages only when a policy is passed, which the HTTP route always does and the
+CLI never does. A whitelist MISS is offered back to the owner as 'add and
+continue' (409), not a dead-end error.
 """
 
 import os
@@ -93,15 +87,13 @@ class TestWhitelist:
 
     def test_absolute_string_outside_allowed_rejected(self, home_env,
                                                       tmp_path_factory):
-        """The out-of-roots refusal that protects an OS file elsewhere on the
-        disk, exercised against a disposable stand-in for one.
+        """The out-of-roots refusal, exercised against a disposable stand-in for
+        an OS file elsewhere on the disk.
 
-        Distinct from test_outside_rejected_with_reason above in the two ways
-        that matter: the target is passed as a plain str (not a Path, which is
-        what an API caller sends), and it sits in a temp tree of its own rather
-        than under the same tmp_path as the home folder. The refusal is by root
-        containment, so what the file happens to be is irrelevant - which is
-        exactly why it never has to be a real system file."""
+        Distinct from test_outside_rejected_with_reason above in two ways: the
+        target is passed as a plain str (what an API caller sends, not a Path),
+        and it sits in a temp tree of its own rather than under the same tmp_path
+        as the home folder. The refusal is by root containment."""
         outside = tmp_path_factory.mktemp("outside_roots") / "notes.txt"
         outside.write_text("stand-in for a file outside every allowed root\n",
                            encoding="utf-8")
@@ -156,8 +148,8 @@ class TestBlacklist:
 
 
     def test_string_policy_entries_are_coerced(self, home_env, tmp_path):
-        # Robustness: a policy carrying str (not Path) entries must not crash
-        # (indexing_policy() returns Paths, but confine must not trust that).
+        # A policy carrying str (not Path) entries does not crash;
+        # indexing_policy() returns Paths, but confine does not rely on that.
         outside = tmp_path / "z"
         outside.mkdir()
         f = outside / "a.txt"
@@ -246,11 +238,9 @@ def _is_unc_or_device(s: str) -> bool:
 
 
 class TestUncDeviceGuard:
-    """confine_index_path()'s first statement used to be
-    Path(p).expanduser().resolve() with no lexical check at all - every
-    credential/policy check in this function runs AFTER resolve(), so none of
-    them could have prevented the SMB dial. Same defect class as pull_model's
-    `repo` (PR #893), just a different sink."""
+    """confine_index_path() applies a LEXICAL UNC/device check before
+    ``expanduser().resolve()``. Every credential/policy check in that function
+    runs after resolve(), so none of them can prevent an SMB dial."""
 
     @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
     def test_rejected_without_touching_the_filesystem(self, home_env, monkeypatch, bad):
@@ -289,9 +279,8 @@ class TestUncDeviceGuard:
         assert ei2.value.reason == "unc_or_device"
 
     def test_ordinary_path_still_resolves(self, home_env):
-        """Control: an ordinary local path (not UNC/device syntax) must still
-        reach resolve() and be confined normally - the guard must not
-        over-reject."""
+        """Control: an ordinary local path (not UNC/device syntax) still reaches
+        resolve() and is confined normally."""
         home, _ = home_env
         f = home / "docs" / "a.txt"
         f.write_text("hi", encoding="utf-8")
@@ -305,16 +294,12 @@ class TestUncDeviceGuard:
                "this mechanism is Windows-specific")
     def test_rejects_a_path_that_expands_into_unc_via_userprofile(
             self, home_env, monkeypatch):
-        """Regression pin for the expanduser-then-check ORDERING, not just
-        the guard's existence: a raw `~`-prefixed path is not UNC-shaped as
-        written, so a guard checking the raw string (rather than the
-        expanded one) would pass it straight through - only AFTER
-        expanduser() runs (resolving ~ against the server's own USERPROFILE)
-        does it become a UNC string. Real, if unusual, Windows config (a
-        roaming profile pointing the home directory at a network share), not
-        attacker input. Every other UNC test in this class uses an
-        already-UNC-shaped raw string, so none of them would catch this
-        ordering being reverted - this one is designed to."""
+        """The UNC check runs on the EXPANDED path, not the raw string: a
+        `~`-prefixed path is not UNC-shaped as written and only becomes one
+        after expanduser() resolves ~ against the server's own USERPROFILE
+        (a roaming profile pointing the home directory at a network share).
+        Every other UNC test in this class uses an already-UNC-shaped raw
+        string."""
         monkeypatch.setenv("USERPROFILE", _UNC)
         monkeypatch.delenv("HOMEDRIVE", raising=False)
         monkeypatch.delenv("HOMEPATH", raising=False)
@@ -371,9 +356,8 @@ class TestIndexingPolicy:
         assert indexing_policy()["mode"] == "whitelist"
 
     def test_allow_network_drives_defaults_true(self, home_env):
-        """Matches config.py's DEFAULT_CONFIG: preserves the pre-existing
-        behaviour (a mapped drive already worked like a local one) unless a
-        caller explicitly turns it off."""
+        """Matches config.py's DEFAULT_CONFIG: a mapped drive works like a local
+        one unless a caller explicitly turns it off."""
         assert indexing_policy()["allow_network_drives"] is True
 
     def test_allow_network_drives_reads_config(self, home_env, monkeypatch):
@@ -414,8 +398,8 @@ class TestNetworkDriveGuard:
     @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
     def test_allowed_by_default_even_on_a_network_drive(
             self, home_env, tmp_path, monkeypatch):
-        """The default (allow_network_drives unset -> True) must reproduce the
-        exact pre-existing behaviour: a mapped drive indexes normally."""
+        """The default (allow_network_drives unset -> True): a mapped drive
+        indexes normally."""
         import ctypes
         monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
                             lambda root: 4)
@@ -428,9 +412,8 @@ class TestNetworkDriveGuard:
     def test_ordinary_local_drive_never_rejected_even_when_disallowed(
             self, home_env, tmp_path):
         """Control: this box's real tmp_path drive is NOT a network share, so
-        turning allow_network_drives off must not reject it - proves the
-        guard is keyed on GetDriveTypeW's real answer, not merely on the
-        config flag."""
+        turning allow_network_drives off does not reject it. The guard is keyed
+        on GetDriveTypeW's answer, not on the config flag alone."""
         f = tmp_path / "a.txt"
         f.write_text("x", encoding="utf-8")
         pol = {**_wl(tmp_path), "allow_network_drives": False}
@@ -440,8 +423,7 @@ class TestNetworkDriveGuard:
     def test_policy_none_reads_config_fresh(self, home_env, tmp_path, monkeypatch):
         """policy=None (the CLI / settings_schema.py's own save-time
         validation) has no indexing_policy() dict to read the flag off, so it
-        must fall back to a fresh config read rather than silently skipping
-        the check."""
+        falls back to a fresh config read rather than skipping the check."""
         import ctypes
         import localm.config as cfg
         monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
@@ -460,11 +442,8 @@ class TestNetworkDriveGuard:
             self, home_env, tmp_path, monkeypatch):
         """indexing_policy(key_roots=...) replaces the whitelist SET for a
         per-key-scoped caller, but allow_network_drives is a WHOLE-MACHINE
-        preference, not a per-key one - a scoped key must not be able to
-        reach a network drive the owner disallowed just because its early
-        return never read config. Regression for a real gap the per-key
-        rag_roots feature's merge introduced: that branch used to build its
-        policy dict without ever loading cfg at all."""
+        preference, not a per-key one: a scoped key cannot reach a network
+        drive the owner disallowed."""
         import ctypes
         import localm.config as cfg
         monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
@@ -784,11 +763,10 @@ class TestRagAddRoute:
     @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
     def test_unc_and_device_path_rejected_without_touching_the_filesystem(
             self, rag_route_app, monkeypatch, bad):
-        """H3 (2026-07-29 sweep): POST /api/rag/collections/{name}/add's
-        `paths` field reaches confine_index_path()'s Path.resolve() call with
-        no lexical check, up to 50 entries per request, synchronously inside
-        an async handler - the reachable HTTP surface for the store.py-level
-        finding above."""
+        """The HTTP surface for the store.py-level guard above: POST
+        /api/rag/collections/{name}/add's `paths` field reaches
+        confine_index_path(), up to 50 entries per request, synchronously
+        inside an async handler."""
         app, _ = rag_route_app
         real_resolve = Path.resolve
         seen: list = []

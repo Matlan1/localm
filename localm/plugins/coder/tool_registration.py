@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Shared TOOL_REGISTRY insertion helper for the two foreign-tool adapters
-(CF-7): mcp.py's ``register_mcp_tools`` (subprocess JSON-RPC servers) and
+"""Shared TOOL_REGISTRY insertion helper for the two foreign-tool adapters:
+mcp.py's ``register_mcp_tools`` (subprocess JSON-RPC servers) and
 plugin_tools.py's ``register_plugin_tools`` (in-process plugin-exported
-functions). The two adapters genuinely need different transports and stay
-separate; only the namespacing/collision-handling/description-neutralisation/
-insertion steps they both hand-copied are shared here.
+functions). The two adapters need different transports and stay separate; only
+the namespacing, collision handling, description neutralisation and insertion
+steps are shared here.
 """
 
 from __future__ import annotations

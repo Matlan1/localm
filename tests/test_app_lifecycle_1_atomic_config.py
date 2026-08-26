@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""APP-LIFECYCLE-1 (correctness, race): cli/models.py's config_cmd() and
-inference/routes/config.py's patch_config() used to do a raw
-load_config()/mutate/save_config() sequence instead of the atomic
-update_config(mutator) helper config.py already provides for exactly this
-reason. load_config() and save_config() each take config._io_lock only for
-their OWN call, so the window between them is unlocked: a concurrent config
-write racing either call site (or racing each other) can be silently lost.
+"""cli/models.py's config_cmd() and inference/routes/config.py's
+patch_config() must go through the atomic update_config(mutator) helper, which
+holds config._io_lock across the whole read-modify-write.
 
-Regression: both call sites now go through update_config(), which holds the
-lock across the whole read-modify-write, so a concurrent writer's change is
-never silently dropped.
+A raw load_config()/mutate/save_config() sequence takes the lock only for each
+of its own calls, so the window between them is unlocked and a concurrent
+config write racing either call site can be silently lost.
 """
 
 import threading
@@ -132,18 +128,10 @@ def _install_slow_merge(monkeypatch, delay=0.15):
         block (config.py) - so in the FIXED call-site shape this delay widens
         a window that IS held under the lock.
 
-    A previous version of this helper patched _atomic_write_json instead. That
-    point is inside the lock in BOTH the old and the new shape (bare
-    save_config() also takes _io_lock around its own _atomic_write_json call),
-    so delaying it only ever widened an already-locked window and could not
-    tell the two call-site shapes apart - both "pass" whether or not the call
-    site actually routes through update_config(). That made
-    test_cli_config_cmd_survives_a_concurrent_writer and
-    test_http_patch_config_survives_a_concurrent_writer pass identically on
-    pre-fix code (see PR #584 follow-up verification). Patching
-    _merge_stored_config fixes that: it is genuinely unlocked in the old shape
-    and genuinely locked in the new one, so only the correct (update_config-
-    routed) call site can survive a concurrent writer landing in that window."""
+    _atomic_write_json is NOT a usable patch point here: it sits inside the
+    lock in BOTH shapes (bare save_config() also takes _io_lock around its own
+    call), so delaying it widens an already-locked window and cannot tell the
+    two call-site shapes apart."""
     real = cfg._merge_stored_config
 
     def slow(cfgd, stored):

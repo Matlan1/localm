@@ -22,12 +22,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# os / urllib.request are no longer used directly here (the transport moved to
-# localm.media.comfy_client), but tests patch them as module attributes -
-# patch.object(comfy.urllib.request, "urlopen", ...) and patch.dict(comfy.os.environ, ...)
-# - and resolving comfy.os / comfy.urllib.request needs the names bound in this
-# namespace. The shared client calls the SAME (global) module objects, so the
-# patch still bites. Kept deliberately for that contract.
+# Bound in this namespace so localm.image_gen.comfy.os and
+# localm.image_gen.comfy.urllib.request resolve; the shared client in
+# localm.media.comfy_client calls the SAME module objects.
 import os  # noqa: F401
 import urllib.request  # noqa: F401
 
@@ -94,10 +91,8 @@ from localm.media.comfy_client import (
 # inside ensure_comfy. Re-export it here so that attribute exists.
 from localm.config import load_config  # noqa: F401
 
-# Re-export the shared ComfyUI helpers as part of this module's surface. They are
-# imported above purely to be reachable as localm.image_gen.comfy.<name> (tests
-# patch several of them, and other callers import them from here historically);
-# listing them in __all__ marks the imports as intentional re-exports, not dead.
+# Re-export the shared ComfyUI helpers as part of this module's surface, so they
+# are reachable and patchable as localm.image_gen.comfy.<name>.
 __all__ = [
     "generate_image", "apply_fast_dequant", "is_safe_lora_name",
     "_amd_rocm_launch_env", "_combo_options", "_comfy_alive",
@@ -131,8 +126,8 @@ _WORKFLOW_EXAMPLE_PATH = Path(__file__).parent / "flux_workflow.example.json"
 
 def workflow_path() -> Path:
     # Resolution order: 1. a workflow the user selected for the image plugin
-    # (uploaded + picked on the Image page), 2. the legacy personal
-    # flux_workflow.json, 3. the committed example. Selection is purely additive.
+    # (uploaded + picked on the Image page), 2. the personal
+    # flux_workflow.json, 3. the committed example.
     try:
         from localm.media_workflows import active_workflow_path
         selected = active_workflow_path("image")
@@ -147,8 +142,7 @@ def workflow_path() -> Path:
 # weights are unpacked for compute.
 _GGUF_UNET_LOADERS = ("UnetLoaderGGUF", "UnetLoaderGGUFAdvanced")
 
-# Common NTFS/ext4 filename-component limit - a real LoRA filename is never
-# longer than this, so it is a cheap, safe upper bound.
+# Common NTFS/ext4 filename-component limit.
 _MAX_LORA_NAME_LEN = 255
 
 
@@ -157,34 +151,14 @@ def is_safe_lora_name(name: str) -> bool:
     value.
 
     A LoRA name is never a local filesystem path - ComfyUI resolves it against
-    its OWN models directory, not localm's - so there is no base directory to
-    confine it under the way ``pathsafe.confined_name``/``confined_under`` do
-    for a real local path. This is instead a pure lexical predicate (no
-    filesystem call): reject empty, a NUL byte, an implausibly long value, any
-    path separator, a bare "." / ".." component, or a ':' anywhere in the name.
+    its OWN models directory, not localm's - so this is a pure lexical
+    predicate with no filesystem call: reject empty, a NUL byte, a value longer
+    than _MAX_LORA_NAME_LEN, any path separator, a bare "." / ".." component,
+    or a ':' anywhere in the name (a colon anywhere opens an NTFS Alternate
+    Data Stream on a Windows-hosted ComfyUI).
 
-    The ':' check used to be ``not ntpath.splitdrive(name)[0]`` - it only
-    recognises a drive designator at POSITION 0, so ``"foo.safetensors:hidden"``
-    passed it (measured: ``ntpath.splitdrive("foo.safetensors:hidden") ==
-    ("", ...)``, no drive detected). A colon anywhere opens an NTFS Alternate
-    Data Stream on a Windows-hosted ComfyUI the same way it does for localm's
-    own local writes (see ``pathsafe.WINDOWS_RESERVED_NAME_CHARS``'s
-    docstring) - this function's own stated purpose is to be the backstop for
-    WHATEVER receives ``lora_name``, local or remote, so the rejection does not
-    depend on which one it turns out to be. Rejecting ':' anywhere ALSO
-    subsumes every case ``splitdrive`` could ever have caught here (a drive
-    letter is always ':'-qualified, and a forward-slash UNC-style prefix is
-    already rejected by the separator check above it never reaches) - so
-    ``ntpath`` is no longer imported for a check it cannot uniquely provide.
-    No real LoRA filename (the ``.safetensors`` convention this repo and
-    Civitai/HuggingFace both use) legitimately contains a colon.
-
-    Called from EVERY entry point that can supply ``lora_name`` - not just the
-    HTTP image route, which only protects browser-originated requests. The
-    coder agent's ``generate_image`` tool (and any future MCP wiring) calls
-    straight into ``generate_image``/``_build_image_workflow`` below, so this
-    also runs there as the backstop no caller can bypass, regardless of where
-    the value entered."""
+    Called from EVERY entry point that can supply ``lora_name``, including the
+    coder agent's ``generate_image`` tool, not only the HTTP image route."""
     if not name or len(name) > _MAX_LORA_NAME_LEN or "\x00" in name:
         return False
     if "/" in name or "\\" in name or name in (".", ".."):
@@ -195,13 +169,10 @@ def is_safe_lora_name(name: str) -> bool:
 def apply_fast_dequant(workflow: dict) -> int:
     """Rewrite a slow ``dequant_dtype: "float32"`` to the loader's fast default.
 
-    A float32 dequant unpacks a Q8 Flux UNet to roughly twice the size of the
-    fp16 path, which on a VRAM-limited card (e.g. a 16 GB 6900 XT) spills several
-    GB to system RAM and drags iterations from ~6-7 s to ~36 s. "default" lets
-    ComfyUI-GGUF dequant to the model's own compute dtype (fp16/bf16), which is
-    what a fast Flux config uses. Only the known-slow "float32" value is touched;
-    an explicit "float16"/"bfloat16"/"target" choice is left alone. Mutates
-    *workflow* in place and returns how many loader nodes were changed."""
+    "default" lets ComfyUI-GGUF dequant to the model's own compute dtype
+    (fp16/bf16). Only the "float32" value is touched; an explicit
+    "float16"/"bfloat16"/"target" choice is left alone. Mutates *workflow* in
+    place and returns how many loader nodes were changed."""
     changed = 0
     for node in workflow.values():
         if not isinstance(node, dict):
@@ -243,12 +214,10 @@ def _build_image_workflow(
     Returns ``(ok, message, uploaded_name)``: ``ok=False`` with an error message
     when the workflow cannot be driven (bad input image, no text-prompt node);
     ``uploaded_name`` is the ComfyUI-side filename of an uploaded img2img source
-    (for later containment) or None. Pure workflow shaping; no network I/O beyond
-    the img2img upload that the original did at this same point."""
-    # 2a. Perf: a float32 GGUF dequant unpacks Flux to ~2x size and forces CPU
-    # offload on a VRAM-limited card (the ~36 s/it vs ~6-7 s/it slowdown). Rewrite
-    # it to the loader's fast default unless the caller opted out. Applies to both
-    # the shipped example and a personal flux_workflow.json exported from ComfyUI.
+    (for later containment) or None. Pure workflow shaping; the only network I/O
+    is the img2img upload."""
+    # 2a. Rewrite a float32 GGUF dequant to the loader's fast default unless the
+    # caller opted out.
     if fast_dequant:
         if apply_fast_dequant(workflow):
             con.print("[dim]Using fast fp16 GGUF dequant (was float32) for speed; "
@@ -288,8 +257,8 @@ def _build_image_workflow(
         w, h = _image_dimensions(input_image)
 
         # LoadImage node - ComfyUI loads from its own input/ dir by filename.
-        # Allocate fresh ids (not a hardcoded "40"/"41") so the injected nodes can
-        # never clobber a node a user's own exported graph already uses.
+        # Fresh ids, so an injected node cannot clobber one a user's own
+        # exported graph already uses.
         load_id = next_node_id(workflow)
         workflow[load_id] = {
             "inputs": {"image": uploaded_name, "upload": "image"},
@@ -360,17 +329,10 @@ def _build_image_workflow(
         if "6" in workflow:
             workflow["6"]["inputs"]["clip"] = [lora_id, 1]
 
-    # 8. Inject negative prompt via real classifier-free guidance.
-    #    A negative prompt only works if the model sees a SEPARATE negative
-    #    conditioning and subtracts it (cfg > 1). The default workflow uses a
-    #    BasicGuider, which has only a positive `conditioning` input and runs
-    #    at an implicit cfg of 1 - it has no way to express a negative. We swap
-    #    it for a CFGGuider (model, positive, negative, cfg) and build a
-    #    dedicated negative branch.
-    #
-    #    Do NOT use ConditioningConcat here: it APPENDS the negative tokens to
-    #    the positive prompt, which makes the model draw those things *more* -
-    #    the exact opposite of a negative prompt.
+    # 8. Inject negative prompt via real classifier-free guidance: the default
+    #    workflow's BasicGuider has only a positive `conditioning` input and
+    #    runs at an implicit cfg of 1, so it is swapped for a CFGGuider
+    #    (model, positive, negative, cfg) with a dedicated negative branch.
     if negative_prompt:
         neg_cfg = cfg if cfg is not None else 3.5
         guide_scale = guidance if guidance is not None else 3.5
@@ -416,9 +378,8 @@ def _build_image_workflow(
 def _strip_png_metadata(output_path: Path) -> str:
     """Strip PNG metadata/EXIF for privacy (pure-Python, zero deps), in place.
 
-    A failure here must NOT be silent: ComfyUI PNGs embed the full
-    prompt/workflow, so a strip that did not run means the saved file still
-    carries that data. Returns a warning string on failure, else ""."""
+    Returns a warning string when the strip did not run (the file is not a PNG,
+    or the rewrite failed), else ""."""
     try:
         png_bytes = output_path.read_bytes()
         if png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -433,12 +394,9 @@ def _strip_png_metadata(output_path: Path) -> str:
                 pos += total_len
             output_path.write_bytes(bytes(clean))
         else:
-            # Not a PNG. A custom workflow save node can emit WebP/JPEG to the
-            # hardcoded .png path; we only know how to strip PNG chunks. Do NOT
-            # touch bytes we cannot parse, and do NOT report success: surface
-            # that the retained copy may still carry the prompt/EXIF, so the
-            # caller's "Image saved" line stops implying a clean strip (rule 5:
-            # a strip that did not run must never read as clean).
+            # Not a PNG (a custom workflow save node can emit WebP/JPEG to the
+            # hardcoded .png path). The bytes are left untouched and the caller
+            # gets a warning instead of a clean-strip result.
             return ("WARNING: generated file is not a PNG; image metadata could "
                     "not be stripped and may still contain prompt/EXIF data.")
     except (OSError, ValueError) as e:
@@ -468,19 +426,13 @@ def _write_image_sidecar(
 ) -> str:
     """Write the ``<output>.json`` reproducibility sidecar next to the image.
 
-    A write failure is surfaced (not silent): the success message promises the
-    reproducibility the sidecar provides. Returns a warning string on failure,
-    else "".
+    Returns a warning string on a write failure, else "".
 
     ``lora_name``/``lora_strength_model``/``lora_strength_clip`` record what
-    was REQUESTED, not confirmed applied - ComfyUI can silently skip a
-    mismatched LoRA (or checkpoint/VAE/CLIP weights) and still report success
-    (NEW-COMFY-SILENT-PARTIAL-APPLY). ``comfy_console_warning`` and
-    ``comfy_console_checked`` together avoid collapsing "checked, found
-    nothing" into the same silence as "could not check at all" - a reader
-    who only sees comfy_console_warning's absence has no way to tell those
-    apart, and would reasonably (and wrongly) read an unchecked generation as
-    confirmed-clean:
+    was REQUESTED, not confirmed applied: ComfyUI can silently skip a
+    mismatched LoRA (or checkpoint/VAE/CLIP weights) and still report success.
+    ``comfy_console_warning`` and ``comfy_console_checked`` together
+    distinguish three states:
       - checked=True,  warning present  -> localm SAW ComfyUI report a
         mismatch during this generation.
       - checked=True,  warning absent   -> localm read ComfyUI's console and
@@ -644,17 +596,15 @@ def generate_image(
 
     _con = Console()
 
-    # 0. Make sure ComfyUI is up (auto-launching when configured) - BEFORE
-    # unloading the LLM, so a dead image server doesn't cost the user a
-    # pointless model unload + reload
+    # 0. Make sure ComfyUI is up (auto-launching when configured), before the
+    # LLM unload below.
     ok, msg = ensure_comfy(api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"),
                            launch_cmd=launch_cmd, workdir=workdir)
     if not ok:
         return False, msg
 
-    # The LLM unload (the expensive VRAM handoff) is deferred to AFTER the
-    # workflow is built and the model preflight passes, so a missing model file
-    # fails before it costs the user a pointless unload + reload (see step 9b).
+    # The LLM unload (the VRAM handoff) runs only after the workflow is built
+    # and the model preflight passes - see step 9b.
 
     # 2. Load workflow template (personal flux_workflow.json if present,
     # else the committed example)
@@ -690,23 +640,20 @@ def generate_image(
     if not ok:
         return False, msg
 
-    # 9a. Pre-submit model validation against ComfyUI /object_info. Confirms each
-    # loader's model file exists (auto-substituting an unambiguous precision variant)
-    # and fails EARLY with the exact missing filename - BEFORE the LLM unload below -
-    # rather than after a pointless unload + a late HTTP 400. Best-effort (a no-op
-    # when /object_info is unreachable).
+    # 9a. Pre-submit model validation against ComfyUI /object_info: confirm each
+    # loader's model file exists (auto-substituting an unambiguous precision
+    # variant) and fail with the exact missing filename, before the LLM unload
+    # below. Best-effort: a no-op when /object_info is unreachable.
     pf_ok, pf_msg = preflight_models(
         workflow, api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"))
     if not pf_ok:
         return False, pf_msg
 
-    # 8c. Per-component GPU placement (opt-in, multi-GPU only). The plan was decided by
-    # comfy_client.resolve_media_placement() after the capability probe; here we apply it
-    # to the built graph by injecting the core Select*Device nodes. Injected AFTER
-    # preflight (the Select nodes carry no model-file inputs, so validation is unaffected)
-    # and just before submit, so it is the last mutation. A component whose loader is
-    # absent from this graph is surfaced to the user, never silently dropped (rule 5); the
-    # happy-path summary already went out via the placement notice.
+    # 8c. Per-component GPU placement (opt-in, multi-GPU only): apply the plan
+    # from comfy_client.resolve_media_placement() to the built graph by
+    # injecting the core Select*Device nodes, after preflight and just before
+    # submit. A component whose loader is absent from this graph is reported to
+    # the caller rather than dropped.
     if placement:
         for _note in inject_device_placement(workflow, placement):
             if on_progress and "could not place" in _note:
@@ -719,11 +666,10 @@ def generate_image(
         _localm_unload(localm_url, instance_token)
 
     # 9. Queue the prompt in ComfyUI. Mark 'now' in ComfyUI's own console log
-    # FIRST (comfy_console_tail_start), so any silent partial-apply warning it
-    # prints while running THIS prompt (a LoRA key mismatch, missing VAE/UNet
-    # keys, ...) can be attributed to this generation and not an earlier one -
-    # see NEW-COMFY-SILENT-PARTIAL-APPLY. None when localm did not launch this
-    # ComfyUI itself; comfy_console_warnings_since() then always reports [].
+    # FIRST (comfy_console_tail_start), so a partial-apply warning printed while
+    # THIS prompt runs is attributable to this generation. None when localm did
+    # not launch this ComfyUI itself, in which case
+    # comfy_console_warnings_since() always reports [].
     console_tail_start = comfy_console_tail_start(api_url)
     kind, value = comfy_submit_prompt(api_url, workflow)
     if kind == SUBMIT_NO_ID:
@@ -748,13 +694,8 @@ def generate_image(
         return False, f"Error queuing prompt in ComfyUI: {value}"
     prompt_id = value
 
-    # 10. Poll /history with a visible progress spinner (CLI console only) AND a
-    # heartbeat on the job stream throttled to once every 15s, matching
-    # generate_music/generate_video's _tick (ADR-0009 P8). Without the second
-    # half, the spinner below only ever reaches this function's own local
-    # Console - never a caller's on_progress/job feed - so a GUI-triggered
-    # render was silent on the wire for up to max_poll_seconds even though the
-    # CLI looked alive the whole time.
+    # 10. Poll /history with a visible progress spinner (CLI console only) and a
+    # heartbeat on the job stream throttled to once every 15s.
     start_time = time.time()
     filename = None
     subfolder = ""
@@ -799,18 +740,11 @@ def generate_image(
         return False, (f"Image generation timed out after "
                        f"{max_poll_seconds // 60} minutes{err_note}.")
 
-    # status == POLL_FINISHED means ComfyUI reported no execution_error - but a
-    # node whose weights only partly matched (a LoRA key mismatch, missing
-    # VAE/UNet keys, ...) is not an execution_error to ComfyUI, only a console
-    # warning, and the run still "succeeds" with that component silently
-    # under-applied. Check for any KNOWN warning of that shape printed while
-    # THIS prompt ran (see NEW-COMFY-SILENT-PARTIAL-APPLY). console_checked
-    # reflects whether a real read actually happened just now - NOT whether
-    # console_tail_start found a process before the prompt was even submitted
-    # - because the process can die/be replaced for the same api_url in
-    # between, which comfy_console_warnings_since detects and refuses to read
-    # past. Only console_checked, not console_tail_start's mere presence, may
-    # drive the sidecar's comfy_console_checked below.
+    # status == POLL_FINISHED means ComfyUI reported no execution_error; a node
+    # whose weights only partly matched is only a console warning there, and the
+    # run still succeeds. Check for a KNOWN warning of that shape printed while
+    # THIS prompt ran. console_checked reflects whether a read actually happened
+    # just now, and is what drives the sidecar's comfy_console_checked below.
     console_checked, comfy_console_warnings = comfy_console_warnings_since(
         api_url, console_tail_start)
 
@@ -835,9 +769,8 @@ def generate_image(
         info = {"filename": filename, "subfolder": subfolder, "type": img_type}
         comfy_fetch_output(api_url, info, output_path, timeout=10)
 
-        # Strip PNG metadata/EXIF for privacy (pure-Python, zero deps). A failure
-        # here must NOT be silent: ComfyUI PNGs embed the full prompt/workflow, so
-        # a strip that did not run means the saved file still carries that data.
+        # Strip PNG metadata/EXIF for privacy; a strip that did not run returns
+        # a warning rather than an empty string.
         strip_warning = _strip_png_metadata(output_path)
 
         # Output containment (opt-in): clear ComfyUI's history entry and delete its
@@ -851,11 +784,9 @@ def generate_image(
             delete_outputs=delete_outputs,
         )
 
-        # Sidecar JSON: everything needed to reproduce or tweak this image. Saved
-        # as <output>.json next to the image. Skipped in privacy mode
-        # (write_sidecar=False) - the prompt then never touches disk. A write
-        # failure is surfaced (not silent): the success message promises the
-        # reproducibility the sidecar provides.
+        # Sidecar JSON: everything needed to reproduce or tweak this image,
+        # saved as <output>.json next to it. Skipped when write_sidecar is
+        # False; a write failure returns a warning.
         comfy_console_warning_text = ("; ".join(comfy_console_warnings)
                                       if comfy_console_warnings else None)
 

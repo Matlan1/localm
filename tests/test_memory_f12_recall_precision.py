@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F12 regression suite (memory-audit 2026-07-02): recall precision.
+"""Recall precision.
 
-- [10] Absolute relevance gate: recall must inject NOTHING when no stored memory
-  relates to the query, instead of the old "always surface the top-k" behavior
-  (FLOOR=0.05 was arithmetically dead - user/import were recency-pinned at 1.0 and
-  min synth importance cleared it, so recall never fell silent). Mirrors the coder
-  episode gate: a memory is eligible only on a lexical content-word hit OR an
-  absolute cosine match.
-- [52] Injected facts render in full (up to the block budget), not hard-sliced at
-  150 chars mid-word; an over-cap line truncates at a word boundary with an ellipsis.
-- [58] The recall query windows the recent user turns, so an anaphoric follow-up
+- Absolute relevance gate: recall injects NOTHING when no stored memory relates
+  to the query, rather than always surfacing the top-k. A memory is eligible
+  only on a lexical content-word hit OR an absolute cosine match, mirroring the
+  coder episode gate.
+- Injected facts render in full (up to the block budget), not hard-sliced at
+  150 chars mid-word; an over-cap line truncates at a word boundary with an
+  ellipsis.
+- The recall query windows the recent user turns, so an anaphoric follow-up
   ("yes, do that") still carries the prior turn's topic.
 """
 
@@ -29,8 +28,8 @@ def _measure_embed(texts):
     """3-axis one-hot topic stub (measurement / editor / other), so distinct topics
     are ORTHOGONAL - a paraphrased measurement query cosine-matches a metric fact
     (no shared token) but an editor query and generic fillers do NOT (each on its
-    own axis). A real embedder spreads distinct texts likewise; a coarser 2-class
-    stub would wrongly make every non-measurement text cosine-identical."""
+    own axis). A coarser 2-class stub would make every non-measurement text
+    cosine-identical."""
     meas = ("metric", "unit", "units", "measure", "measurement", "measurements",
             "system")
     editor = ("vim", "editor", "keybinding", "keybindings", "tutorial")

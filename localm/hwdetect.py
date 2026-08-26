@@ -5,50 +5,31 @@ Pure stdlib, and NEVER raises: detection is advisory, so a probe that fails just
 contributes nothing. ``detect()`` reports which GPU vendors are present and the
 recommended llama.cpp backend.
 
-Backend-selection policy (maintainer's own words: "the best performing one is
-always our suggestion; vulkan is a fallback" - "amd for amd, detect hardware,
-use best version for that hardware; cuda for nvidia; for intel their
-solution; vulkan as a ONE catch all"): recommend the best-performing backend
-this hardware actually has, checking what can genuinely be provisioned or is
-already present - self-contained bundle, an already-installed vendor
-toolkit, or a real prebuilt binary this machine can run - before ever
-falling back to vulkan. "We do not ship that" is the START of an
-investigation, never a permanent excuse to default to the lesser path
-(global CLAUDE.md: "make it work; do not declare it impossible and
-soft-degrade"). Where no real vendor path can be confirmed runnable today,
-that is named as a genuine gap for the backlog, not silently routed around.
+Backend-selection policy - the best-performing backend this hardware actually
+has, checked against what can genuinely be provisioned or is already present (a
+self-contained bundle, an already-installed vendor toolkit, or a real prebuilt
+binary this machine can run), before falling back to vulkan:
   * NVIDIA, any OS -> ``cuda``: llama.cpp ships a self-contained cudart bundle
     for both Windows and Linux (setup-llama fetches the CUDA runtime libraries
     itself, no Toolkit needed - see ``_provision_backend``'s cuda branch and
     ``NvidiaInfo.cuda_line`` for the architecture-aware build-line pick), so
-    CUDA is out-of-the-box AND the fastest path on NVIDIA regardless of
-    platform. Was Windows-only until 2026-08-11: the Linux self-contained path
-    was new and unconfirmed on real NVIDIA Linux hardware, so vulkan stayed the
-    default there as a matter of caution. Real hardware (RTX PRO 4000
-    Blackwell) has since confirmed CUDA works and outperforms vulkan on that
-    box, and the setup-llama load-test + vulkan fallback (``_provision_with_
-    fallback``) already covers a bad guess on any platform - see
-    dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.
+    CUDA is out-of-the-box and the fastest path on NVIDIA regardless of
+    platform. setup-llama's load-test plus vulkan fallback
+    (``_provision_with_fallback``) covers a bad guess on any platform.
   * AMD, any OS -> ``hip`` when a working system ROCm/HIP toolkit is DETECTED
     present (``_rocm_toolkit_present`` - the same ``rocminfo``/``rocm-smi``/
-    ``/opt/rocm`` signal ``detect()`` already probes for vendor identification,
-    now acted on instead of discarded), else ``vulkan``. ``hip`` is a real
-    downloadable prebuilt binary on both platforms (``setup_llama.
-    _BACKEND_ASSETS``) - "we do not ship a Linux/gfx110X ROCm path" was never
-    true; the toolkit-presence signal was simply never escalated into the
-    recommendation until 2026-08-11 (see dev-notes/BLACKWELL-FIELD-FIXES-
-    fix_plan.md, U5). gfx103X on Windows keeps the self-contained ``amd-rocm``
-    bundle regardless, since it needs no system toolkit at all and so beats
-    ``hip`` even when both are viable.
+    ``/opt/rocm`` signal ``detect()`` probes for vendor identification), else
+    ``vulkan``. ``hip`` is a real downloadable prebuilt binary on both platforms
+    (``setup_llama._BACKEND_ASSETS``). gfx103X on Windows keeps the
+    self-contained ``amd-rocm`` bundle regardless, since it needs no system
+    toolkit at all and so beats ``hip`` even when both are viable.
   * ``vulkan`` is the ONE catch-all for a GPU with no better path detected as
     actually runnable here (Intel - no toolkit-presence probe exists yet for
-    oneAPI, a genuine gap tracked separately; AMD with no ROCm/HIP toolkit
-    found; any mixed/unrecognised box) - never a stand-in for "we have not
-    built that yet" (AGENTS.md rule 5 / "make it work, do not soft-degrade").
+    oneAPI; AMD with no ROCm/HIP toolkit found; any mixed/unrecognised box).
   * ``cpu`` when no GPU is detected.
 
-Detection is intentionally conservative: a missing tool or an unparseable name
-means "unknown", never a crash and never a wrong-vendor claim.
+Detection is conservative: a missing tool or an unparseable name means
+"unknown", never a crash and never a wrong-vendor claim.
 """
 
 from __future__ import annotations
@@ -87,29 +68,24 @@ class Detection:
         module can genuinely distinguish, kept apart because they need different
         responses.
 
-        ``has_gpu`` is a BOOLEAN and therefore cannot express the third: it reads
-        False both for a box with no GPU and for a box we could not ask, so every
-        caller that branches on it silently treats an unanswered probe as proof of
-        absent hardware. That collapse is the reason this property exists; prefer
-        it over ``has_gpu`` anywhere the answer is shown to a user or recorded in
-        a diagnostic.
+        ``has_gpu`` is a BOOLEAN and cannot express the third: it reads False
+        both for a box with no GPU and for a box that could not be asked, so a
+        caller branching on it treats an unanswered probe as proof of absent
+        hardware. Prefer this property over ``has_gpu`` anywhere the answer is
+        shown to a user or recorded in a diagnostic.
 
         A vendor found by a tool that DID answer (nvidia-smi / rocm-smi /
         rocminfo on PATH) is positive proof and stays ``"found"`` even when the
-        adapter-name enumeration failed: a failed probe cannot retract evidence
-        another probe supplied.
+        adapter-name enumeration failed.
 
-        NOT the same thing as ``discover.GPU_PROBE_OK`` / ``_TIMEOUT`` / ``_BUSY``
-        / ``_INCONCLUSIVE``, and deliberately not shared with it. That vocabulary
-        describes the RUNTIME torch/nvidia-smi device enumeration (an outcome per
-        probe attempt); this describes the INSTALL-TIME adapter-name detection (a
-        conclusion about the machine), and the two run at different moments off
-        different tools. They also cannot be unified even if someone wanted to:
-        this module is pure stdlib on purpose because ``setup.sh`` and
-        ``setup.bat`` invoke it via ``python -m localm.hwdetect``, while
-        ``discover`` imports ``localm.vram`` and ``model_manager``. The shared
-        idea is only the rule both obey - AGENTS.md rule 5, an empty result must
-        say whether anyone actually looked."""
+        NOT the same vocabulary as ``discover.GPU_PROBE_OK`` / ``_TIMEOUT`` /
+        ``_BUSY`` / ``_INCONCLUSIVE``, and not shared with it: that one describes
+        the RUNTIME torch/nvidia-smi device enumeration (an outcome per probe
+        attempt), this one the INSTALL-TIME adapter-name detection (a conclusion
+        about the machine). They cannot be unified: this module is pure stdlib,
+        because ``setup.sh`` and ``setup.bat`` invoke it via
+        ``python -m localm.hwdetect``, while ``discover`` imports ``localm.vram``
+        and ``model_manager``."""
         if self.vendors:
             return "found"
         return "none" if self.probe_ok else "unknown"
@@ -119,13 +95,10 @@ def _run_ok(cmd: list) -> "tuple[str, bool]":
     """Run *cmd*; return (combined stdout+stderr, ran_to_completion).
 
     The flag reports exactly one thing: the process STARTED, did not time out,
-    and exited 0. It is deliberately not a claim that the OUTPUT is trustworthy -
-    powershell in particular can exit 0 having written a cmdlet error to stderr,
-    which this function still returns as text (unchanged, long-standing
-    behaviour that ``detect``'s substring matching tolerates).
-
-    The text half is byte-identical to what ``_run`` has always returned, so this
-    is purely additive for every existing caller."""
+    and exited 0. It is not a claim that the OUTPUT is trustworthy - powershell
+    in particular can exit 0 having written a cmdlet error to stderr, which this
+    function still returns as text, and ``detect``'s substring matching
+    tolerates that."""
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
     except Exception:
@@ -136,9 +109,7 @@ def _run_ok(cmd: list) -> "tuple[str, bool]":
 def _run(cmd: list) -> str:
     """Run *cmd* and return combined stdout+stderr, or "" on any failure.
 
-    A thin wrapper over ``_run_ok`` rather than a second implementation: two
-    derivations of the same subprocess result drift, and the drift lands exactly
-    on the failure path this module now has to report."""
+    A thin wrapper over ``_run_ok``, so both share one subprocess result."""
     return _run_ok(cmd)[0]
 
 
@@ -244,18 +215,13 @@ def _amd_known_non_gfx103x(names: str) -> bool:
 
 def _rocm_toolkit_present() -> bool:
     """Whether a working system ROCm/HIP toolkit is installed on THIS machine,
-    independent of GPU-name matching - the SAME signal ``detect()`` already
-    probes (``rocminfo``/``rocm-smi`` on both platforms, ``/opt/rocm`` on
-    Linux) to help decide "is amd present", factored out here so
-    ``recommended_install_backend()`` can act on it directly instead of
-    letting the vendor-detection OR-chain discard the answer. The `hip`
-    llama.cpp backend is a real downloadable prebuilt binary on both
-    platforms (see ``setup_llama._BACKEND_ASSETS``) that NEEDS exactly this
-    toolkit present to load - so this is the difference between "we do not
-    ship a Linux/gfx110X ROCm path" (false; we do) and "we never checked
-    whether the one we ship could actually run here" (true, until now).
-    Best-effort like the rest of this module - False on any failure, never
-    raises."""
+    independent of GPU-name matching - the SAME signal ``detect()`` probes
+    (``rocminfo``/``rocm-smi`` on both platforms, ``/opt/rocm`` on Linux) to
+    decide "is amd present", factored out so ``recommended_install_backend()``
+    can act on it directly. The ``hip`` llama.cpp backend is a real downloadable
+    prebuilt binary on both platforms (see ``setup_llama._BACKEND_ASSETS``) that
+    NEEDS this toolkit present to load. Best-effort like the rest of this module
+    - False on any failure, never raises."""
     try:
         if shutil.which("rocminfo") or shutil.which("rocm-smi"):
             return True
@@ -287,37 +253,29 @@ def amd_gfx_family(names: str) -> str:
 
 def recommended_install_backend(det: "Detection | None" = None) -> str:
     """The backend the INSTALLER should provision by default - the ONE policy both
-    setup.bat and setup.sh call, so the two detectors can never drift:
+    setup.bat and setup.sh call:
       * Apple Silicon                         -> metal
       * no GPU                                -> cpu
-      * NVIDIA, any OS                        -> cuda      (peak performance; llama.cpp
-        ships a self-contained cudart bundle on both Windows and Linux, so it is
+      * NVIDIA, any OS                        -> cuda      (llama.cpp ships a
+        self-contained cudart bundle on both Windows and Linux, so it is
         out-of-the-box with no CUDA Toolkit on either, and setup-llama's driver
         preflight + load-test fall back to vulkan if the driver is too old or the
-        build fails to load - never strands a box on a runtime it cannot load. Was
-        Windows-only until 2026-08-11 field testing on real NVIDIA Linux hardware
-        (RTX PRO 4000 Blackwell) confirmed CUDA works and outperforms vulkan there -
-        maintainer's ruling: "the best performing one is always our suggestion;
-        vulkan is a fallback". See dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.)
+        build fails to load)
       * AMD, Windows, RX 6000 / unknown       -> amd-rocm  (self-contained gfx103X
         build; needs no system toolkit at all, so it wins even when a system ROCm
         install is ALSO present)
       * AMD, any OS, elsewhere, WITH a working system ROCm/HIP toolkit detected
-        (see ``_rocm_toolkit_present``)       -> hip        (a real downloadable
+        (see ``_rocm_toolkit_present``)       -> hip       (a real downloadable
         prebuilt binary on both platforms - see ``setup_llama._BACKEND_ASSETS`` -
-        that genuinely needs this toolkit to load. This covers Linux AMD and
-        Windows gfx110X/gfx120X, where no SELF-CONTAINED build exists but the
-        vendor path is not actually unavailable if the user already has ROCm/HIP
-        installed - see dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.)
+        that needs this toolkit to load; covers Linux AMD and Windows
+        gfx110X/gfx120X, where no SELF-CONTAINED build exists)
       * AMD, any OS, elsewhere, WITHOUT a detected toolkit -> vulkan (the vendor
-        path genuinely cannot run here - THIS is what "vulkan as a fallback"
-        means, not "we have not built that yet")
-      * Intel, any OS                         -> vulkan    (``sycl`` is Intel's
-        own solution and a real downloadable binary too, but localm has no
-        toolkit-presence probe for it at all yet - see the same dev-note, "Intel
-        costing" - so it stays opt-in until that detection exists)
-    The self-contained ROCm bundle is gfx103X + Windows only; self-contained CUDA is
-    now both-OS, hence only the AMD gfx103X case is still narrowed to Windows."""
+        path cannot run here)
+      * Intel, any OS                         -> vulkan    (``sycl`` is a real
+        downloadable binary too, but there is no toolkit-presence probe for
+        oneAPI yet, so it stays opt-in)
+    The self-contained ROCm bundle is gfx103X + Windows only; self-contained CUDA
+    is both-OS, so only the AMD gfx103X case is narrowed to Windows."""
     d = det or detect()
     if "apple" in d.vendors:
         return "metal"
@@ -340,10 +298,9 @@ def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> s
     setup.sh call this (via ``python -m localm.hwdetect torch <backend>``) AFTER the
     backend pick, so the GGUF runtime choice and the HF torch choice stay coherent.
 
-    Why the BACKEND drives this and not the detected vendor alone (the SETUP-1 bug):
-    a user who explicitly picks the vendor-neutral ``vulkan`` runtime on an AMD box
-    has stepped OFF the ROCm path - which on Windows is the gfx103X-pinned ``.[gpu]``
-    stack - so forcing ROCm torch on them is exactly the reported surprise. Policy:
+    The chosen BACKEND drives this, not the detected vendor alone: a user who
+    picks the vendor-neutral ``vulkan`` runtime on an AMD box has stepped OFF the
+    ROCm path, so ROCm torch is never forced on them. Policy:
 
       * ``cuda`` backend           -> cuda   (the user asked for the NVIDIA path)
       * ``amd-rocm`` / ``hip``     -> rocm   (the user asked for the AMD path)
@@ -356,8 +313,7 @@ def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> s
                                        vendor-neutral pick.
 
     "none" means the installer SKIPS the heavy torch stack and tells the user how to add
-    CPU / CUDA / ROCm / Intel-XPU torch themselves: honest, no surprise download, and no
-    wrong-vendor stack installed behind their back."""
+    CPU / CUDA / ROCm / Intel-XPU torch themselves."""
     b = (backend or "").strip().lower()
     if b == "cuda":
         return "cuda"
@@ -400,13 +356,11 @@ _CUDA_BLACKWELL_MIN_CAP = (10, 0)
 def _cuda_compute_capabilities() -> list:
     """Every NVIDIA GPU's compute capability on this machine, as comparable
     tuples (one per card; multi-GPU boxes report one line per device).
-    Best-effort like the rest of this module - [] on any failure, never
-    raises. A small local probe (mirrors setup_llama.nvidia_preflight's own
-    nvidia-smi query) rather than an import from setup_llama: this module is
-    called standalone via `python -m localm.hwdetect torch-args <backend>`,
-    a SEPARATE process from `localm setup-llama` (see setup.sh), so there is
-    no in-process NvidiaInfo to reuse across that process boundary anyway,
-    and hwdetect.py is deliberately dependency-free."""
+    Best-effort like the rest of this module - [] on any failure, never raises.
+    A small local probe (mirroring setup_llama.nvidia_preflight's own nvidia-smi
+    query) rather than an import from setup_llama: this module runs standalone
+    via ``python -m localm.hwdetect torch-args <backend>``, a SEPARATE process
+    from ``localm setup-llama``, and stays dependency-free."""
     exe = shutil.which("nvidia-smi") or "nvidia-smi"
     out = _run([exe, "--query-gpu=compute_cap", "--format=csv,noheader"])
     caps = []
@@ -421,18 +375,16 @@ def _cuda_compute_capabilities() -> list:
 
 def pytorch_index_url(variant: str) -> "str | None":
     """The PyTorch wheel index URL for a torch *variant* key ("cuda" | "xpu" |
-    "rocm-linux" | "rocm-win" | "cpu"), or None if unknown. Public accessor so other
-    callers (the managed-ComfyUI fresh install picks the ComfyUI torch here) share
-    this ONE index table instead of duplicating the URLs and drifting from it.
+    "rocm-linux" | "rocm-win" | "cpu"), or None if unknown. Public accessor, so
+    other callers (the managed-ComfyUI fresh install picks the ComfyUI torch
+    here) share this ONE index table.
 
     For "cuda" specifically, this ALSO detects whether any installed NVIDIA GPU
     needs the Blackwell-and-newer wheel line and returns that instead of the
-    cu126 default - self-contained here (not requiring every caller to pass
-    compute-capability info through) so ComfyUI's torch install gets the same
-    fix as the HF backend's, both of which used to hand back a flat cu126
-    regardless of hardware and silently run CPU-only on Blackwell (found live,
-    2026-08-11, on a real 3x-Blackwell box: torch loaded but warned every GPU
-    had no matching kernels)."""
+    cu126 default. Self-contained here rather than requiring every caller to pass
+    compute-capability info through, so ComfyUI's torch install and the HF
+    backend's get the same line; a flat cu126 on Blackwell loads but has no
+    matching kernels and runs CPU-only."""
     if variant == "cuda":
         caps = _cuda_compute_capabilities()
         if any(cap >= _CUDA_BLACKWELL_MIN_CAP for cap in caps):
@@ -446,8 +398,7 @@ def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
     exists and the installer should skip and guide the user. SINGLE source of truth
     for the torch wheel SOURCE (setup.bat and setup.sh both consult it via
     ``python -m localm.hwdetect torch-args <backend>``), so the gfx-specific
-    AMD-on-Windows routing lives in one tested place and the two installers cannot
-    drift.
+    AMD-on-Windows routing lives in one place.
 
       * cuda            -> CUDA wheels (cu126, or the Blackwell-and-newer line
                            when this machine has one - see pytorch_index_url);
@@ -461,10 +412,7 @@ def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
       * rocm, Windows, other / unknown AMD       -> "" (no verified prebuilt; the
                            installer skips and prints how to add torch by hand)
       * none            -> ""
-
-    Routing is unit-tested. Actual EXECUTION of the RX 7000/9000 Windows wheels is
-    pending real RDNA3/RDNA4 hardware (this dev box is gfx1030); the gfx103X path is
-    the verified one."""
+    """
     variant = recommended_torch_variant(backend, det)
     if variant == "cuda":
         # Routes through pytorch_index_url so the Blackwell detection lives in
@@ -486,16 +434,14 @@ def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
 
 def main(argv=None) -> int:
     """``python -m localm.hwdetect`` -> prints '<primary-vendor-or-none> <install-backend>'
-    on one line, so the shell installers (setup.bat / setup.sh) share this single
-    tested detector + policy instead of each rolling their own.
+    on one line, for the shell installers (setup.bat / setup.sh).
 
     ``python -m localm.hwdetect torch <backend>`` -> prints the HF torch variant
     ("cuda" | "rocm" | "xpu" | "none") for that backend on this machine.
 
     ``python -m localm.hwdetect torch-args <backend>`` -> prints the exact
     ``uv pip install`` arguments for the torch wheel SOURCE on this machine
-    (resolving AMD-on-Windows per gfx family), or "" to skip. The installers use
-    this so the torch stack matches the user's runtime choice + hardware (SETUP-1)."""
+    (resolving AMD-on-Windows per gfx family), or "" to skip."""
     args = [] if argv is None else list(argv)
     if args and args[0] == "torch-args":
         backend = args[1] if len(args) > 1 else ""

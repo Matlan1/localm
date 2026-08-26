@@ -285,10 +285,10 @@ class TestCollection:
         assert "gpu.md" in c2.query("ROCm runtime", k=1)[0]["source"]
 
     def test_concurrent_add_paths_no_data_loss(self, tmp_path):
-        """CHK-RAG-LOCK: two concurrent add_paths() to ONE collection must BOTH
-        persist. Pre-fix, each Collection instance _load()s the same state, adds a
-        different doc, and _save()s with no per-collection coordination -> the
-        last writer overwrote the other and one doc was silently lost."""
+        """Two concurrent add_paths() to ONE collection must BOTH persist. With
+        no per-collection coordination each Collection instance _load()s the
+        same state, adds a different doc, and _save()s, so the last writer
+        overwrites the other and one doc is silently lost."""
         import threading
         base = tmp_path / "rag"
         Collection("kb", base=base).create()
@@ -317,12 +317,12 @@ class TestCollection:
         assert len(docs) == 2, f"data loss: expected both docs, got {docs}"
 
     def test_atomic_write_retries_transient_permission_error(self, tmp_path, monkeypatch):
-        """CHK-RAG-RETRY: on Windows, Path.replace() (MoveFileEx) can transiently
-        raise PermissionError(13, 'Access is denied') if another process (AV
+        """On Windows, Path.replace() (MoveFileEx) can transiently raise
+        PermissionError(13, 'Access is denied') if another process (AV
         real-time scan, Search Indexer) briefly has the destination or temp file
-        open. _atomic_write must retry a bounded number of times, mirroring the
-        established fix in localm.plugins.coder.episodes.EpisodeStore.add,
-        instead of letting a spurious OS-level rename failure propagate."""
+        open. _atomic_write must retry a bounded number of times, mirroring
+        localm.plugins.coder.episodes.EpisodeStore.add, instead of letting a
+        spurious OS-level rename failure propagate."""
         import pathlib
 
         base = tmp_path / "rag"
@@ -449,7 +449,7 @@ class TestCollection:
 
     def test_absent_vectors_is_not_a_degrade(self, tmp_path, docs_dir):
         """The benign case: no embeddings indexed -> no vectors.json, no degrade
-        reason. 'Absent' must not be conflated with 'corrupt' (rule 5)."""
+        reason. 'Absent' must not be conflated with 'corrupt'."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir])                       # no embed_fn -> no vectors.json
@@ -657,12 +657,12 @@ class TestCollection:
         assert "gpu.md" in hits[0]["source"]
 
     def test_stopword_only_hit_does_not_outrank_semantic_match(self, tmp_path):
-        """Regression: a query overlapping a doc ONLY on a stopword must not let
-        that doc win the lexical half and, via the 50/50 blend, outrank the true
-        semantic match when vectors are present (the reported RAG-embedding
-        nuance). Four one-sentence docs; the query shares only the stopword "and"
-        with vehicles.txt, while animals.txt is the semantic match (cat~feline,
-        sleep~nap) with NO shared content word."""
+        """A query overlapping a doc ONLY on a stopword must not let that doc
+        win the lexical half and, via the 50/50 blend, outrank the true
+        semantic match when vectors are present. Four one-sentence docs; the
+        query shares only the stopword "and" with vehicles.txt, while
+        animals.txt is the semantic match (cat~feline, sleep~nap) with NO
+        shared content word."""
         base = tmp_path / "rag"
         d = tmp_path / "docs"
         d.mkdir()

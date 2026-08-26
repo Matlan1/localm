@@ -227,8 +227,8 @@ def test_capping_keeps_whole_lines(tmp_path):
 
 
 def test_unreadable_memory_file_is_reported_not_swallowed(tmp_path):
-    """A file that EXISTS but cannot be read must not look like "no memory"
-    (AGENTS.md rule 5: do not collapse absent and corrupt into one silent path)."""
+    """A file that EXISTS but cannot be read must not look like "no memory":
+    absent and corrupt must not collapse into one silent path."""
     (tmp_path / "LOCALCODER.md").write_text("- something important\n", encoding="utf-8")
 
     def boom(*a, **kw):

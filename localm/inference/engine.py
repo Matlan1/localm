@@ -62,15 +62,13 @@ def _is_gguf(path: str) -> bool:
 
 
 def _resolve_vram_overhead_bytes(cfg: dict) -> int:
-    """``vram_overhead_mb`` (MB) from config, in bytes, or the built-in
-    default on a missing/unparseable value. Same rule-5 reasoning as
-    GgufBackend's own ``_load_timeout_seconds``/``_first_token_timeout_seconds``
-    (gguf.py): normal writes (PATCH /v1/config, ``localm config``) already
-    enforce a valid int via settings_schema.validate_update, but a
-    hand-edited config.json is not type-checked on load (config.py's
-    ``load_config`` just merges the stored dict) - a present-but-unparseable
-    value is a real misconfiguration, not the benign missing case, so it is
-    surfaced under --debug rather than silently bricking every later load."""
+    """``vram_overhead_mb`` (MB) from config, in bytes, or the built-in default on
+    a missing/unparseable value. Normal writes (PATCH /v1/config, ``localm
+    config``) already enforce a valid int via settings_schema.validate_update, but
+    a hand-edited config.json is not type-checked on load (config.py's
+    ``load_config`` just merges the stored dict), so a present-but-unparseable
+    value is a real misconfiguration rather than the benign missing case and is
+    surfaced under --debug instead of bricking every later load."""
     from localm.vram import VRAM_OVERHEAD_BYTES
     raw = cfg.get("vram_overhead_mb")
     if raw is None:
@@ -149,9 +147,8 @@ def model_display_name(model_path: str) -> str:
 
     For an HF directory this prefers the model's own ``_name_or_path``, but only
     after checking its shape: the directory may be one an untrusted caller named,
-    and this string is handed straight back to API and GUI callers (CodeQL 65-68).
-    A value that does not look like a model name is dropped in favour of the
-    directory name.
+    and this string is handed straight back to API and GUI callers. A value that
+    does not look like a model name is dropped in favour of the directory name.
     """
     p = Path(model_path)
     if p.is_dir():
@@ -263,11 +260,10 @@ class Engine:
 
         ``degraded`` is True whenever fewer than the full layer count landed
         on the GPU, whatever the reason (VRAM-constrained auto-sizing, or an
-        explicit partial n_gpu_layers) - a caller of /v1/models/load has no
+        explicit partial n_gpu_layers): a caller of /v1/models/load has no
         visibility into the server's own config either way, so this is
-        reported unconditionally rather than only for the auto-sized case.
-        Exists so a load response can tell a full GPU load from a silent CPU
-        fallback (AGENTS.md rule 5) instead of a bare "loaded" that hides it."""
+        reported unconditionally rather than only for the auto-sized case, and
+        a load response can tell a full GPU load from a silent CPU fallback."""
         offloaded = getattr(self._backend, "gpu_layers_offloaded", None)
         total = getattr(self._backend, "gpu_layers_total", None)
         if offloaded is None or not total:
@@ -321,12 +317,8 @@ class Engine:
         """Maximum token capacity of the loaded model's context window.
 
         Prefers the RESOLVED ceiling from the last load (VRAM-derived under
-        ctx_auto), then the configured ceiling, then the base window. The old
-        implementation read attributes the GGUF backend does not have
-        (``_n_ctx_max`` / ``_llm.n_ctx()``), so it ALWAYS returned None and the
-        server-side compaction safety net, the CLI budget, and the coder's fill
-        gauge all fell back to wrong ceilings (memory-audit 2026-07-02 F10).
-        Returns None only when nothing is loaded / resolvable."""
+        ctx_auto), then the configured ceiling, then the base window. Returns None
+        only when nothing is loaded or resolvable."""
         b = self._backend
         eff = getattr(b, "effective_ctx_max", None)
         if isinstance(eff, int) and eff > 0:
@@ -345,10 +337,9 @@ class Engine:
     def _embed_via_dedicated(self, texts: List[str]) -> List[List[float]]:
         """Embed with the small DEDICATED on-device embedding model
         (:mod:`localm.inference.embedder`), or raise with the one command that
-        fixes it. Raising (rather than returning the chat model's own vectors)
-        is the point: RAG catches this and degrades to lexical-only BM25 with a
-        warning, which measurably beats blending unusable vectors into its
-        50/50 lexical+vector score."""
+        fixes it. Raises rather than returning the chat model's own vectors: RAG
+        catches this and degrades to lexical-only BM25 with a warning, which beats
+        blending unusable vectors into its 50/50 lexical+vector score."""
         from localm.inference.embedder import embed_texts
         vecs = embed_texts(list(texts))
         if vecs is not None:
@@ -359,8 +350,7 @@ class Engine:
             "lexical BM25 until then.")
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        """
-        Return embedding vectors for a list of texts.
+        """Return embedding vectors for a list of texts.
 
         A backend that can genuinely embed its own loaded model (a HuggingFace
         encoder / sentence-transformer) is used directly. Anything that cannot is
@@ -373,15 +363,14 @@ class Engine:
           is known up front, so the large chat model is not loaded just to fail;
         - the HF backend can only tell once the weights are LOADED, because it
           depends on what the checkpoint is: an encoder can embed, a chat decoder
-          cannot (see ``HFBackend.can_embed`` for the measurements).
+          cannot (see ``HFBackend.can_embed``).
 
-        Hence the capability is checked TWICE, before and after the load. Checking
-        only before it meant an HF chat decoder - which reports the "unknown" True
-        while unloaded - fell straight through to ``backend.embed()`` and silently
-        returned mean-pooled chat vectors that cannot separate related from
-        unrelated text, to both /v1/embeddings and RAG, even with a real embedding
-        model installed. Raises ``NotImplementedError`` only when no embedding path
-        is available at all.
+        So the capability is checked TWICE, before AND after the load. An HF chat
+        decoder reports the "unknown" True while unloaded, and checking only
+        before the load would send it straight to ``backend.embed()``, returning
+        mean-pooled chat vectors that cannot separate related from unrelated text
+        to both /v1/embeddings and RAG. Raises ``NotImplementedError`` only when
+        no embedding path is available at all.
         """
         if getattr(self._backend, "can_embed", True) is False:
             return self._embed_via_dedicated(texts)
@@ -418,20 +407,9 @@ class Engine:
         whether it can honour trigger-gated enforcement, and only some backends
         can answer that honestly at all (see ``BaseBackend.validate_grammar``).
 
-        Called unconditionally, NOT probed with ``getattr``. It used to be:
-
-            fn = getattr(self._backend, "validate_grammar", None)
-            if callable(fn):
-                fn(grammar)
-
-        which asked "does this backend have a validator" and acted on the answer
-        as though it had asked "can this backend apply a grammar". Only the GGUF
-        backend defined the method, so every grammar sent to an HF-backed model
-        skipped validation AND, when the optional ``[grammar]`` extra is absent,
-        was then dropped by the worker - a 200 full of unconstrained text with
-        nothing anywhere telling the caller the grammar had been ignored. The
-        method now lives on ``BaseBackend`` and denies by default, so an absent
-        capability answers the question it was actually asked."""
+        Called unconditionally, never probed with ``getattr``: the method lives on
+        ``BaseBackend`` and denies by default, so a backend with no grammar
+        support refuses rather than skipping validation."""
         self._backend.validate_grammar(grammar, lazy=lazy)
 
     def chat_stream(

@@ -6,8 +6,8 @@ its progress over SSE, so a multi-minute install never blocks the request. The
 task keeps a full line buffer so a viewer that connects late (or reconnects)
 replays the whole log, and it keeps running even if the viewer navigates away.
 
-``is_local_request`` is the security boundary: only the local operator (a
-loopback request) may trigger a server-side pip. A remote client is refused.
+``host_pip_allowed`` is the security boundary: only the local operator (a
+loopback bind) may trigger a server-side pip. A remote client is refused.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class DepInstallTask:
 def run_dep_install(manager, name: str, task: DepInstallTask) -> None:
     """Body of the background thread: install *name*'s extras, feeding progress
     into *task*. Any unexpected error is captured as a failed result rather than
-    crashing the worker thread (AGENTS: surface, do not hide)."""
+    crashing the worker thread."""
     from localm.plugins import deps
     try:
         result = manager.install_plugin_deps(name, on_progress=task.emit)
@@ -72,15 +72,12 @@ def run_dep_install(manager, name: str, task: DepInstallTask) -> None:
 def host_pip_allowed(app) -> bool:
     """Whether the HTTP dependency-install path may run pip on this host.
 
-    We decide from the server's BIND host, never the request peer. The GUI runs
+    Decided from the server's BIND host, never the request peer: the GUI runs
     behind portmux, which relays every connection through an internal loopback
     socket, so ``request.client.host`` reads as 127.0.0.1 even for a genuinely
-    REMOTE client (see localm/portmux.py, and gui/web.py which makes the same
-    decision for open-mode key seeding). Only a loopback BIND means every client
-    is truly on this machine. On a network bind (e.g. -H 0.0.0.0) we cannot tell
-    a local operator from a remote client, so we fail closed: the pip path is
-    refused and the operator installs on the host via the CLI. Unknown bind host
-    -> deny."""
+    REMOTE client. Only a loopback BIND means every client is truly on this
+    machine. A network bind (e.g. -H 0.0.0.0) is refused, and an unknown bind
+    host is denied."""
     state = getattr(app, "state", None)
     bind_host = getattr(state, "bind_host", None)
     return is_loopback_host(bind_host or "")

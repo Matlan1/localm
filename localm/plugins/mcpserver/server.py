@@ -64,15 +64,11 @@ def _child_identity_env() -> dict:
     Both are otherwise re-resolved from ambient state at every process
     boundary: the data home falls back to a contained default derived from the
     running code's location when nothing is configured, and ``-m`` puts the
-    child's cwd first on ``sys.path``, where a ``localm/`` directory in that
-    cwd (any other checkout) silently swaps which CODE runs. run_coder_task
-    deliberately runs its child in the TASK's directory (see its cwd comment),
-    so a server whose own home came from ITS location - exactly the documented
-    "run ``localm mcp`` from a source checkout" setup - handed the coder chain
-    a DIFFERENT, empty home: a model registered moments earlier via pull_model
-    did not exist there, and the coder's auto-started server died with "Model
-    not found" (exit 1) into a console window an MCP client never sees
-    (reproduced live 2026-07-21).
+    child's cwd first on ``sys.path``, where a ``localm/`` directory in that cwd
+    (any other checkout) silently swaps which CODE runs. run_coder_task runs its
+    child in the TASK's directory (see its cwd comment), so without this pin a
+    server whose own home came from ITS location would hand the coder chain a
+    DIFFERENT, empty home.
 
     LOCALM_HOME pins the data home; PYTHONSAFEPATH stops ``-m`` from putting
     the child's cwd on ``sys.path``; the PYTHONPATH entry keeps this server's
@@ -121,17 +117,16 @@ class EngineCache:
     Lazy, per-model engine cache. Multi-resident, on the shared policy.
 
     Models stay loaded ALONGSIDE each other whenever free VRAM provably allows
-    it, matching the HTTP server rather than the single-model cache this used to
-    be. Both servers ask the same module (``inference.residency``) the same two
-    questions - may this load with zero eviction, and if not who is the safe
-    victim - so the two cannot drift apart again.
+    it, the same as the HTTP server. Both servers ask the same module
+    (``inference.residency``) the same two questions: may this load with zero
+    eviction, and if not who is the safe victim.
 
-    The conservative half is unchanged and load-bearing: stacking needs a fresh,
-    measurable reading that clears the requirement plus headroom with no split
-    shortfall. On a box that cannot measure VRAM, on an inconclusive probe, or
-    for a model whose footprint cannot be read, this falls straight back to the
-    old single-resident behaviour (evict, wait for the free to land, then load).
-    A wrong PERMIT here is a native OOM or a driver hang, not a tidy error.
+    Stacking needs a fresh, measurable reading that clears the requirement plus
+    headroom with no split shortfall. On a box that cannot measure VRAM, on an
+    inconclusive probe, or for a model whose footprint cannot be read, this falls
+    back to single-resident behaviour (evict, wait for the free to land, then
+    load). A wrong PERMIT here is a native OOM or a driver hang, not a tidy
+    error.
     """
 
     def __init__(self, default_model: Optional[str] = None,
@@ -317,7 +312,7 @@ class EngineCache:
 
         Returns as soon as the model may load alongside what is already there,
         which on a measurable box with headroom is immediately and with zero
-        eviction - the whole point of the parity fix.
+        eviction.
         """
         from localm.config import load_config
         from localm.inference import residency
@@ -416,17 +411,16 @@ def _text_result(text: str, is_error: bool = False) -> dict:
 
 @contextlib.contextmanager
 def _quiet_stdout():
-    """MCP-1: redirect stdout to stderr for the duration of the block, so a
-    downstream call's stray prints never corrupt the JSON-RPC frame stream on
-    stdout. Eight tool handlers below repeated this identical guard."""
+    """Redirect stdout to stderr for the duration of the block, so a downstream
+    call's stray prints never corrupt the JSON-RPC frame stream on stdout."""
     with contextlib.redirect_stdout(sys.stderr):
         yield
 
 
 def _run_mgr_action(mgr, fn, *, plugin: str):
-    """MCP-2: call fn(mgr) inside the stdout-quieting guard, mapping
-    KeyError/ValueError the same way install/enable/disable/uninstall_plugin
-    all did. Returns the mapped error _text_result, or None on success."""
+    """Call fn(mgr) inside the stdout-quieting guard, mapping KeyError/ValueError
+    the way install/enable/disable/uninstall_plugin all do. Returns the mapped
+    error _text_result, or None on success."""
     with _quiet_stdout():
         try:
             fn(mgr)
@@ -525,15 +519,13 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         """What any running localm server on this machine is doing.
 
         This MCP server is a SEPARATE PROCESS from the HTTP/GUI server and
-        shares no memory with it, so the only way to answer is to find the
-        running instances on disk and ask each one over HTTP. That is why this
-        tool exists at all: a pull started from the browser is invisible here
-        otherwise, and an agent that cannot see it will happily start a second.
+        shares no memory with it, so it finds the running instances on disk and
+        asks each one over HTTP.
 
-        The states are kept apart deliberately. "No server is running" is not
-        "nothing is running" - there is nothing to ask. "Could not reach it" is
-        not "it is idle". Only a server that actually answered can report an
-        empty list, and only that case says nothing is running.
+        The states are kept apart. "No server is running" is not "nothing is
+        running" - there is nothing to ask. "Could not reach it" is not "it is
+        idle". Only a server that actually answered can report an empty list,
+        and only that case says nothing is running.
         """
         from localm import instances
         from localm.config import home_dir
@@ -755,23 +747,18 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         def _confine(raw: str, label: str):
             """Keep an MCP OUTPUT path inside the localm data dir - this tool is
             driven by an LLM client, so an arbitrary output_path could overwrite
-            anything on disk (SEC-7).
+            anything on disk.
 
-            WRITE targets only. ``input_image`` deliberately does NOT use this:
-            confining a READ to the data dir is far too wide, because the data
-            dir is the credential store (auth.key is the plaintext owner key,
-            plus auth.json, sessions.json, rag/, coder/). See below.
+            WRITE targets only. ``input_image`` does NOT use this: confining a
+            READ to the data dir is far too wide, because the data dir is the
+            credential store (auth.key is the plaintext owner key, plus
+            auth.json, sessions.json, rag/, coder/). See below.
 
-            Delegates to ``pathsafe.confined_absolute_or_under`` (the same
-            primitive coder/tools/base.py's ``_confine`` now uses - this
-            closure and that function were two independent copies of the
-            same shape) rather than a hand-rolled resolve()+is_relative_to().
-            The UNC/device guard this closure already carried is now inside
-            the shared primitive; it additionally closes an NTFS Alternate
-            Data Stream / short-name-alias gap this closure never had.
-            Every rejection reason is folded into the SAME message (never
-            echoing the client-supplied string back - matching this
-            closure's existing convention for the plain out-of-home case)."""
+            Delegates to ``pathsafe.confined_absolute_or_under``, the same
+            primitive coder/tools/base.py's ``_confine`` uses, which carries the
+            UNC/device guard and the NTFS Alternate Data Stream /
+            short-name-alias guard. Every rejection reason is folded into the
+            SAME message, never echoing the client-supplied string back."""
             expanded = str(Path(raw).expanduser())
             try:
                 return pathsafe.confined_absolute_or_under(home, expanded)

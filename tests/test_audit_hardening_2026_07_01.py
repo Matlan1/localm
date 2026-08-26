@@ -1,19 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 issue-backlog audit-hardening batch.
+"""Regression tests for a batch of audit-hardening fixes. Each test pins one
+concrete property:
 
-Each test pins a concrete defect from issues/issues.txt that was verified open
-against master 4f2869e and fixed in the same pass:
-
-  AUD-DOCXBOMB   - .docx zip-bomb decompression DoS
-  AUD-DOCXREDOS  - quadratic paragraph regex on malformed docx XML
-  AUD-IPYNB500   - malformed .ipynb shapes -> unhandled 500
-  AUD-CHUNKLOOP  - chunk_text(chunk_chars<=0) infinite loop
-  AUD-SCRUBHOME  - bug-report home scrub misses forward-slash / case variants
-  AUD-CLIENTSCRUB- bug-report client/log fields not token/cred scrubbed
-  AUD-CFGFALLBACK- config._read_json crashes instead of falling back
-  AUD-CORSWILD   - cors_origins:"*" disabled the open-mode shell-token gate
-  AUD-CLICKVER   - doctor read click.__version__ (DeprecationWarning) first
-  NEW-COMFY-STATUS-IMPORT - GET /v1/comfy/status 500'd on a stale import
+  - a .docx zip bomb is refused, never decompressed into RAM
+  - malformed docx XML does not trigger a quadratic paragraph regex
+  - malformed .ipynb shapes raise ExtractError, never an unhandled 500
+  - chunk_text(chunk_chars<=0) fails fast instead of looping forever
+  - the bug-report home scrub covers forward-slash and case variants
+  - bug-report client/log fields are token/credential scrubbed
+  - config._read_json falls back instead of crashing
+  - cors_origins:"*" does not waive the open-mode shell-token gate
+  - doctor does not read click.__version__ (DeprecationWarning)
+  - GET /v1/comfy/status does not 500 on a stale import
 """
 
 import json

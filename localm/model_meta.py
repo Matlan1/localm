@@ -13,8 +13,7 @@ class of data as ``registry.json`` already keeps - NOT chat or session content -
 so it is ordinary data-home state and is NOT gated by privacy mode. It lives at
 ``<LOCALM_HOME>/model_meta.json``. Writes are best-effort: a failure only means a
 later load re-estimates the layer count (correct, just less precise), so it is
-logged at debug level rather than raised (AGENTS.md rule 5: surface, don't hide,
-but at the right altitude - a metadata-cache miss is not a hard failure).
+logged at debug level and never raised.
 """
 
 from __future__ import annotations
@@ -78,8 +77,8 @@ def cached_n_layers(model_path: str) -> Optional[int]:
 
 
 def store_n_layers(model_path: str, n_layers: int) -> None:
-    """Remember *n_layers* for *model_path*. Best-effort: on any failure the next
-    load just re-estimates, so log at debug rather than raising."""
+    """Remember *n_layers* for *model_path*. Best-effort: any failure is logged at
+    debug and never raised; the next load re-estimates."""
     if not isinstance(n_layers, int) or n_layers <= 0:
         return
     key = _model_key(model_path)

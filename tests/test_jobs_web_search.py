@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Scheduled chat jobs get the web-search tool (U-3).
+"""Scheduled chat jobs get the web-search tool.
 
-Before, a chat job ran its prompt with no tools and answered "I have no real-time
-access". These pin the server-side tool loop in webtool: the protocol parser, the
-net_mode gating (web only when not "off"), the search round-trip, and the loop cap.
+These pin the server-side tool loop in webtool: the protocol parser, the
+net_mode gating (web only when not "off"), the search round-trip, and the loop
+cap.
 """
 
 from __future__ import annotations

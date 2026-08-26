@@ -9,13 +9,12 @@ Routes (mounted by the engine, auto-scoped to the ``music`` capability):
   POST   /api/music/file/{name}/move      - move a track to a folder
 
 Generation runs as a background job streamed through the kernel's /api/jobs/*
-SSE endpoint. It no longer requires the GUI: since ADR-0008 the job registry is
-created by ``attach_engine``, so a headless ``localm serve`` can generate too.
-It still needs this server's own address for the chat/media VRAM handover (see
+SSE endpoint. It does not require the GUI: the job registry is created by
+``attach_engine``, so a headless ``localm serve`` can generate too. It still
+needs this server's own address for the chat/media VRAM handover (see
 ``resolve_self_url``), and 503s with that specific reason if it cannot be
-determined. The backend is selected per-plugin (default
-ComfyUI ACE-Step) and reads this plugin's own config (see backend.py). Ships
-DISABLED by default.
+determined. The backend is selected per-plugin (default ComfyUI ACE-Step) and
+reads this plugin's own config (see backend.py). Ships DISABLED by default.
 """
 
 from __future__ import annotations
@@ -74,9 +73,8 @@ async def music(req: MusicRequest, request: Request):
     if req.duration_seconds <= 0 or req.duration_seconds > 3600:
         raise HTTPException(400, "Duration must be between 1 and 3600 seconds")
 
-    # See the image plugin: the job registry is kernel-level since ADR-0008, so
-    # the real precondition is knowing this server's own address for the VRAM
-    # handover, not the GUI being attached.
+    # The job registry is kernel-level, so the real precondition is knowing this
+    # server's own address for the VRAM handover, not the GUI being attached.
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
         raise HTTPException(503, "Music generation needs this server's "
@@ -123,12 +121,11 @@ async def music(req: MusicRequest, request: Request):
         if notice:
             job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
-        # REG-532: the gate reads COMBINED free VRAM across a configured GPU split, but
-        # each media model component loads WHOLE onto ONE card (localm ORDERS the cards
-        # via --default-device, never masks - the model still lands on one), so a job that
-        # "fits" in 2x4 GB combined can still OOM on one 4 GB card. When the chosen card
-        # cannot hold it, swap anyway: unloading the chat model frees VRAM on every split
-        # card, including that one.
+        # The gate reads COMBINED free VRAM across a configured GPU split, but each
+        # media model component loads WHOLE onto ONE card (localm ORDERS the cards via
+        # --default-device, never masks), so a job that "fits" in 2x4 GB combined can
+        # still OOM on one 4 GB card. When the chosen card cannot hold it, swap anyway:
+        # unloading the chat model frees VRAM on every split card, including that one.
         shortfall = media_single_device_shortfall(s)
         if shortfall and not swap:
             swap = True
@@ -181,17 +178,14 @@ async def music(req: MusicRequest, request: Request):
             gallery.stamp_owner("music", out_path.name, owner)
         # The real deliverable is decided right here - mark it before the VRAM
         # handover below, which is best-effort cleanup that can itself raise
-        # (e.g. a non-comfy backend's free_vram()) and must never be able to
-        # turn a genuinely successful generation into a reported failure (jobs.py
-        # start_fn's mark_outcome contract - the in-process sibling of #1126's
-        # CLI-side outcome sentinel).
+        # (e.g. a non-comfy backend's free_vram()) and must never turn a genuinely
+        # successful generation into a reported failure.
         job.mark_outcome("done" if ok else "failed")
-        # Restore VRAM on EVERY exit path once we have unloaded the chat model -
-        # success, failure, OR cancel. Mirrors image/plug.py: the old code reloaded
-        # only on success, so a failed or cancelled generation left the chat model
-        # unloaded AND the music backend resident in VRAM (GPU hang).
-        # reload_chat_after_media frees the backend's VRAM first, then reloads
-        # the chat model.
+        # Restore VRAM on EVERY exit path once the chat model has been unloaded -
+        # success, failure, OR cancel - so a failed or cancelled generation never
+        # leaves the chat model unloaded AND the music backend resident in VRAM.
+        # reload_chat_after_media frees the backend's VRAM first, then reloads the
+        # chat model.
         if swap:
             from localm.vram import reload_chat_after_media
             reload_chat_after_media(job, self_url, s, _backend, "music", instance_token)
@@ -305,7 +299,7 @@ async def music_history(request: Request):
 async def music_comfy_models(request: Request):
     """Model-file slots the active music workflow exposes (for the Workflow
     panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
-    about unreachability (rule 5) - never a silently-empty picker.
+    about unreachability - never a silently-empty picker.
 
     Each slot also carries the localm ``model_type`` its loader node holds, the
     declared role it fills (``role_id``/``role_label`` from
@@ -314,17 +308,15 @@ async def music_comfy_models(request: Request):
     that generation then refuses. ``roles`` reports every declared role including
     ones this workflow has no slot for, and ``registry_models`` lists this box's
     own registered component models by type. Both are answered from the registry,
-    so they are returned even when ComfyUI is unreachable - "we could not ask
-    ComfyUI" is a different answer from "you have nothing" (rule 5), and the
-    panel is no longer a dead end when ComfyUI is down.
+    so they are returned even when ComfyUI is unreachable: "we could not ask
+    ComfyUI" is a different answer from "you have nothing".
 
     Resolution is a blocking urlopen of ComfyUI's multi-MB /object_info (10s
-    timeout), so it runs OFF the event loop: inline it stalled every concurrent
-    request server-wide while ComfyUI was slow (REG-638).
+    timeout), so it runs OFF the event loop; inline it stalls every concurrent
+    request server-wide while ComfyUI is slow.
 
-    Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
-    urlopen timeout, which now also covers the registry read the role join
-    needs - see the image plugin's identical route for the full rationale."""
+    Bounded at a bit over comfy_object_info's own 10s urlopen timeout, which also
+    covers the registry read the role join needs."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
@@ -351,9 +343,8 @@ async def music_comfy_launch():
     """Start (or confirm) ComfyUI is up for the music plugin, without running a
     generation - backs the Workflow panel's "Launch ComfyUI" button.
 
-    Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
-    itself will honour, plus a buffer - see the image plugin's identical
-    route for the full rationale."""
+    Bounded at the SAME comfy_launch_timeout ensure_comfy itself honours, plus a
+    buffer."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,

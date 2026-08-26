@@ -14,19 +14,15 @@ There are three, and folding any two together is the bug:
   3. numpy present but
      otherwise UNUSABLE - genuinely unexpected.
 
-Regression under test: state 1 was reported with state 3's message, because the
-callers signal absence by raising ImportError("numpy is not installed") and that
-landed in the "present but unusable" arm. The emitted line contradicted itself:
+Callers signal absence by raising ImportError("numpy is not installed"), which
+must land in state 1's arm and not state 3's, or the emitted line contradicts
+itself:
 
     numpy is present but unusable (ImportError: numpy is not installed)
 
-Every numpy-less user saw that on their first query, with nothing wrong. It is the
-same missing-vs-corrupt collapse the STUB discriminator was added to prevent - the
-precise new branch went in for the hard case while the easy one stayed wrong.
-
 Each test asserts BOTH that the right message appears AND that the other two do
-not, because a single assertion on one substring passes just as happily when every
-state prints the same thing, which is exactly what the bug was.
+not: a single assertion on one substring passes just as happily when every state
+prints the same thing.
 """
 
 from __future__ import annotations
@@ -69,8 +65,8 @@ def test_absent_numpy_is_not_reported_as_a_broken_install(monkeypatch, caplog):
 
 
 def test_a_namespace_stub_is_still_reported_loudly(monkeypatch, caplog):
-    """State 2 must keep its loud, specific message - the fix for state 1 must not
-    quieten the case that actually indicates a broken environment."""
+    """State 2 keeps its loud, specific message: it indicates a broken
+    environment, unlike state 1."""
     fake = types.ModuleType("numpy")          # no __file__ -> looks like a stub
     fake.__path__ = ["/somewhere/stray/numpy"]
     monkeypatch.setattr(store, "_numpy", fake)
@@ -106,10 +102,8 @@ def test_a_real_but_unusable_numpy_still_says_so(monkeypatch, caplog):
 
 
 def test_the_three_states_do_not_share_a_message(monkeypatch, caplog):
-    """The whole point, asserted directly: three states, three DISTINCT messages.
-
-    Without this, a future edit could collapse any two of them again and every
-    single-substring test above would still pass."""
+    """Three states, three DISTINCT messages, asserted directly rather than one
+    substring at a time."""
     seen = []
     fake_stub = types.ModuleType("numpy")
     fake_stub.__path__ = ["/stray/numpy"]

@@ -1,29 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Item #25: a genuinely successful pull was reported as FAILED, because the
-final status print - a bare console.print of a green checkmark - crashed AFTER
-the download, checksum verification and registry write were already done. Two
-independent, unrelated exceptions have hit this exact line in practice (a
-ModuleNotFoundError from rich's cell-width lookup, a UnicodeEncodeError from a
-legacy Windows console write path) - see
-dev-notes/ROOTCAUSE-pull-success-reported-as-failed-2026-08-05.md.
+"""A genuinely successful pull must not be reported as FAILED when the final
+status print - a bare console.print of a green checkmark - crashes AFTER the
+download, checksum verification and registry write are already done. Two
+independent, unrelated exceptions hit that exact line in practice: a
+ModuleNotFoundError from rich's cell-width lookup, and a UnicodeEncodeError from
+a legacy Windows console write path.
 
 The GUI runs `localm pull` as a subprocess (localm/plugins/gui/jobs.py) and
 reduces the whole operation to `status = "done" if returncode == 0 else
 "failed"`. So the return value of pull_model()/_pull_url()/_pull_hf_snapshot()
-alone is one link short of the real bug: what actually decides the user-visible
-outcome is the CLI PROCESS'S EXIT CODE, which is why the last test below drives
-the real `pull` click command through CliRunner rather than stopping at the
-Python-level return value.
+alone is one link short: what decides the user-visible outcome is the CLI
+PROCESS'S EXIT CODE, so the last test below drives the real `pull` click command
+through CliRunner rather than stopping at the Python-level return value.
 
-The classes near the bottom of this file cover the SAME shape at three more
-call sites (S4): the mid-function "SHA256 verified" checkmark in
-pull_model()'s local-path branch, in _pull_gguf_file(), and in _pull_url() -
-each one printed BEFORE the function's own trailing _report_success()-guarded
-message, but still AFTER the real work (hashing, and in two of the three
-cases the registry write) is done. Unlike the trailing checkmark, these sit
-in the MIDDLE of their function, so the regression is not just "does the
-return value survive" but "does execution reach the registration code that
-follows the print at all".
+The classes near the bottom of this file cover the SAME shape at three more call
+sites: the mid-function "SHA256 verified" checkmark in pull_model()'s local-path
+branch, in _pull_gguf_file(), and in _pull_url() - each printed BEFORE the
+function's own trailing _report_success()-guarded message, but still AFTER the
+real work (hashing, and in two of the three cases the registry write) is done.
+Unlike the trailing checkmark, these sit in the MIDDLE of their function, so the
+property is not just "does the return value survive" but "does execution reach
+the registration code that follows the print at all".
 """
 
 from __future__ import annotations
@@ -224,9 +221,9 @@ class TestLocalPathSurvivesACrashingVerifiedPrint:
 
 
 class TestPullGgufFileSurvivesACrashingVerifiedPrint:
-    """_pull_gguf_file()'s FAC-5 --sha256 branch: the checkmark sits between
-    the real digest check on the freshly-downloaded bytes and the metadata
-    probe + _register() call that follows it."""
+    """_pull_gguf_file()'s --sha256 branch: the checkmark sits between the real
+    digest check on the freshly-downloaded bytes and the metadata probe +
+    _register() call that follows it."""
 
     def test_pull_gguf_file_still_registers_when_the_verified_print_raises(
             self, tmp_path, monkeypatch):

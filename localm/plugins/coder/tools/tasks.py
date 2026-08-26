@@ -2,11 +2,9 @@
 """The model-owned task list: a small, deterministic state store the model writes
 its own plan into.
 
-Why it exists: the conversation is the only place a long task could hold its
-plan, and the conversation is exactly what gets compacted (agent/context.py
-summarises everything but the last 4 messages at 90% fill), so the plan is the
-first thing lost. The list lives on the Agent, OUTSIDE ``_messages``, so
-compaction cannot touch it, and it rides along in the existing resume checkpoint
+The list lives on the Agent, OUTSIDE ``_messages``, so compaction
+(agent/context.py summarises everything but the last 4 messages at 90% fill)
+cannot touch it, and it rides along in the resume checkpoint
 (HOME/checkpoints/<digest>.json) so it also survives a pause/resume.
 
 This is a state store, not a planner: it holds exactly what the model wrote, in
@@ -20,11 +18,10 @@ JSON:
     "[>] fix the parser"          in progress
     "[x] run the suite"           done
 
-Parsing is deliberately forgiving about the shapes a model actually emits (a
-``- `` bullet, ``1. `` numbering, ``[X]``/``[*]``, a newline-joined string
-instead of an array, or the ``{"text": ..., "status": ...}`` dict form) and
-deliberately strict about the result: every item ends up as
-``{"text": str, "status": one of _STATUSES}``.
+Parsing is forgiving about the shapes a model emits (a ``- `` bullet, ``1. ``
+numbering, ``[X]``/``[*]``, a newline-joined string instead of an array, or the
+``{"text": ..., "status": ...}`` dict form) and strict about the result: every
+item ends up as ``{"text": str, "status": one of _STATUSES}``.
 """
 
 from __future__ import annotations
@@ -56,9 +53,8 @@ _STATUS_WORDS = {
     "done": DONE, "completed": DONE, "complete": DONE, "finished": DONE,
 }
 
-# Bounds. The list is a plan, not a data store: a runaway model must not be able
-# to grow it without limit (it is written into every checkpoint and, once
-# compaction has run, into the session summary).
+# Bounds on the list, which is written into every checkpoint and, once
+# compaction has run, into the session summary.
 MAX_ITEMS = 40
 MAX_TEXT  = 200
 
@@ -75,7 +71,7 @@ def _parse_line(raw: str) -> dict | None:
     """Parse one ``[m] text`` line into a todo dict, or None if it has no text.
 
     Strips a leading list bullet (``- ``, ``* ``, ``1. ``) before reading the
-    status marker, because a model asked for a list very often writes one.
+    status marker.
     """
     line = str(raw).strip()
     if not line:
@@ -167,10 +163,10 @@ def todos_summary(todos: list[dict]) -> str:
 def _session_todos(_session):
     """The agent whose task list this call operates on, or an error result.
 
-    There is no module-level fallback store on purpose: a set_todos that wrote
-    into a scratch dict nobody reads would report success while losing the plan
-    (AGENTS.md rule 5). The dispatcher injects the session for these tools
-    (agent/execution.py), so this only fires on direct misuse.
+    There is no module-level fallback store: a set_todos with nowhere to write
+    returns an error rather than reporting success. The dispatcher injects the
+    session for these tools (agent/execution.py), so this only fires on direct
+    misuse.
     """
     if _session is None or not hasattr(_session, "get_todos"):
         return ToolResult.error(
@@ -183,8 +179,8 @@ def tool_set_todos(cwd: Path, items=None, _session=None) -> ToolResult:
     """
     Replace the session task list with *items*.
 
-    Whole-list replace (not append) so the model's latest call is always the
-    complete truth and there is no partial-update state to reason about.
+    Whole-list replace, not append: the model's latest call is the complete
+    list.
     """
     err = _session_todos(_session)
     if err is not None:
@@ -211,7 +207,7 @@ def tool_set_todos(cwd: Path, items=None, _session=None) -> ToolResult:
     output = render_todos(todos)
     dropped = supplied - len(todos)
     if dropped > 0:
-        # Do not hide a partly-rejected write: say what was kept (rule 5).
+        # Report what was kept from a partly-rejected write.
         output += (f"\n\n[{dropped} of {supplied} items had no task text (or the "
                    f"{MAX_ITEMS}-item cap was hit) and were not recorded.]")
     return ToolResult.success(output, summary=f"todos: {todos_summary(todos)}")

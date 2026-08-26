@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SRV-2: a single global exception handler so an unexpected error in any route
-returns a clean JSON 500 (no traceback / no exception detail leaked) instead of a
-bare error, and the server stays responsive."""
+"""A single global exception handler: an unexpected error in any route returns a
+clean JSON 500 carrying no traceback and no exception detail, and the server
+stays responsive."""
 
 from fastapi.testclient import TestClient
 
@@ -40,5 +40,4 @@ def test_server_stays_up_after_an_error():
     client = TestClient(app, raise_server_exceptions=False)
 
     assert client.get("/_boom_test").status_code == 500
-    # /healthz (or any always-on route) still answers afterwards
     assert client.get("/_boom_test").status_code == 500

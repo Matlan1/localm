@@ -40,16 +40,13 @@ def _looks_like_drive_path(tok: str) -> bool:
     """True for a Windows drive-qualified token: ``C:``, ``C:\\x``, ``d:/x``.
 
     The drive letter must be a single ASCII letter followed by a separator or the
-    end of the token. Testing only for a colon in position 1 made every ``a:b``
-    token a path, so ``5:30`` and ``4:3`` (an ffmpeg offset, an aspect ratio) and
-    ``s:old:new:`` (a sed delimiter) were all reported as out-of-scope paths.
-    ``C:foo``, drive-relative with no separator, is given up deliberately: it is
-    rare and cannot be told apart from an ordinary key:value argument.
+    end of the token, so ``5:30`` and ``4:3`` (an ffmpeg offset, an aspect ratio)
+    and ``s:old:new:`` (a sed delimiter) are not paths. ``C:foo``, drive-relative
+    with no separator, is not recognised: it cannot be told apart from an
+    ordinary key:value argument.
 
-    A real drive-qualified path carries exactly ONE colon, so requiring that
-    also rejects ``s:/usr/local:/opt:g``. That is the COMMON sed form (a colon
-    delimiter is chosen precisely because the pattern contains slashes), and the
-    separator rule alone would still have read it as a drive path.
+    A real drive-qualified path carries exactly ONE colon, so requiring that also
+    rejects ``s:/usr/local:/opt:g``, the common sed form.
     """
     if len(tok) < 2 or tok[1] != ":" or tok.count(":") != 1:
         return False
@@ -63,8 +60,8 @@ def _is_path_like(tok: str) -> bool:
 
     Absolute, drive-qualified (``C:\\x``, bare ``E:``), explicitly relative
     (``./``, ``../``, ``~/``), or carrying a ``/../`` segment. Everything else is
-    treated as not-a-path: see ``_shell_paths_outside_scope`` for why this may
-    never fall back to asking the filesystem, and what that costs.
+    treated as not-a-path, and this never falls back to asking the filesystem -
+    see ``_shell_paths_outside_scope``.
     """
     norm = tok.replace("\\", "/")
     return (norm.startswith(("./", "../", "~/", "/"))
@@ -79,44 +76,26 @@ class _ExecutionMixin:
         matching, or return None if it escapes cwd.
 
         Relative paths are joined onto cwd; absolute paths are accepted only
-        when they live inside cwd (an in-cwd absolute path that matches the
-        scope must pass - BUG-6). Glob metacharacters in *value* (e.g.
-        ``**/*.py`` for grep/search_replace) survive resolution: they are kept
-        verbatim in the relative string and matched against the scope as-is.
+        when they live inside cwd, so an in-cwd absolute path that matches the
+        scope passes. Glob metacharacters in *value* (e.g. ``**/*.py`` for
+        grep/search_replace) survive resolution: they are kept verbatim in the
+        relative string and matched against the scope as-is.
 
-        The VALUE is never touched on disk, not even to refuse it. This gate ran
-        ``Path(raw).resolve()`` on an absolute path that was not lexically under
-        cwd, so a ``--scope`` session where the model emitted an absolute path
-        anywhere on the machine stat-ed precisely that path (realpath + stat,
-        measured) in order to decide it was out of scope. A stat is an access:
-        at the access point a legitimate gate-check, a command gone wrong and a
-        live injection attempt are indistinguishable, so the gate must not have
-        the capability rather than try to use it carefully. Same defect class the
-        shell WARNING path was cleared of (see :meth:`_scope_rel_lexical`), which
-        deliberately left this one; this closes it.
+        The VALUE is never touched on disk, not even to refuse it. A stat is an
+        access, and at the access point a legitimate gate-check, a command gone
+        wrong and a live injection attempt are indistinguishable, so the gate
+        does not have the capability at all. See :meth:`_scope_rel_lexical`.
 
-        The cwd ANCHOR still resolves, and that is a different thing: it is not a
-        model-supplied value but the owner's own working directory, which this
-        process is already running in. It is kept exactly as it was so this change
-        has one behavioural delta and one only.
+        The cwd ANCHOR does resolve: it is not a model-supplied value but the
+        owner's own working directory, which this process is already running in.
 
-        That delta is strictly in the fail-CLOSED direction, which a confinement
-        gate requires. With R = ``self.cwd.resolve()``, a path was allowed when R
-        prefixed it OR R prefixed its resolved form; it is now allowed only when R
-        prefixes it. The new set is a strict subset of the old one, so refusal can
-        only widen, never narrow. Nor can dropping the fallback open an escape:
-        the escape direction (a path lexically INSIDE cwd that symlinks OUT)
-        satisfies the FIRST ``relative_to`` and never reached the fallback at all.
-        Real escapes are caught by ``tools/base.py::_confine``, which resolves at
-        actual execution time (where the tool is about to open the file anyway,
-        so the stat is inherent) and is untouched.
-
-        Cost, accepted: an absolute path that is lexically OUTSIDE cwd but reaches
-        INSIDE through a symlink now reads as outside. The fallback was added
-        speculatively ("for symlinks etc.") rather than for a reported case, no
-        scope or confinement test covers it, and the variant where cwd ITSELF is
-        symlinked cannot arise - every Agent construction site passes an
-        already-resolved cwd.
+        With R = ``self.cwd.resolve()``, a path is allowed only when R prefixes
+        it, so an absolute path that is lexically OUTSIDE cwd but reaches INSIDE
+        through a symlink reads as outside. The escape direction (a path
+        lexically INSIDE cwd that symlinks OUT) satisfies the ``relative_to``
+        here and is caught by ``tools/base.py::_confine``, which resolves at
+        actual execution time. Every Agent construction site passes an
+        already-resolved cwd, so cwd itself is never symlinked here.
         """
         raw = str(value).replace("\\", "/")
         p = Path(raw)
@@ -148,26 +127,19 @@ class _ExecutionMixin:
     def _scope_rel_lexical(self, value: str) -> Optional[str]:
         """Filesystem-free twin of :meth:`_scope_rel`, for the shell WARNING only.
 
-        Same contract (cwd-relative POSIX string, or None if it escapes cwd). The
-        two no longer differ in how they treat the model-supplied VALUE: neither
-        resolves it, because neither may stat what it is deciding about. What is
-        left is the cwd ANCHOR, and that difference is deliberate.
+        Same contract (cwd-relative POSIX string, or None if it escapes cwd).
+        Neither this nor :meth:`_scope_rel` resolves the model-supplied VALUE.
+        The one difference is the cwd ANCHOR.
 
         ``os.path.abspath`` rather than ``resolve()`` for cwd here: it normalises
         and anchors without a symlink lookup, so no part of this call stats
-        ANYTHING at all. That total property is what a warning needs, because it
-        runs over a command the model has merely PROPOSED, before any confirmation
-        and before anything executes. :meth:`_scope_rel` keeps ``resolve()`` for
-        its anchor instead, because it is a hard gate whose refusal set must not
-        widen or narrow by accident, and swapping the anchor would change which
-        paths match (in the cwd-is-symlinked case, in the more permissive
-        direction). Statting the owner's own working directory is not the exposure
-        this rule is about; statting a value the model named is.
+        ANYTHING at all, which is what a warning needs - it runs over a command
+        the model has merely PROPOSED, before any confirmation and before
+        anything executes. :meth:`_scope_rel` keeps ``resolve()`` for its anchor,
+        so its refusal set does not shift in the cwd-is-symlinked case.
 
-        Cost, shared with the enforcement twin: a path that reaches cwd only
-        through a symlink reads as outside. For a best-effort warning that is the
-        safe direction (it can over-report a link, never miss a real escape), and
-        it is the only one that keeps the check from touching what it inspects.
+        A path that reaches cwd only through a symlink reads as outside, so this
+        can over-report a link and never misses a real escape.
         """
         raw = str(value).replace("\\", "/")
         p = Path(raw)
@@ -228,33 +200,22 @@ class _ExecutionMixin:
         active scope. Empty when nothing suspicious was found OR when the check
         simply could not tell - it is a heuristic, never a gate.
 
-        PURELY LEXICAL, and that is the point: a model-supplied token is never
-        stat-ed, resolved, or ``.exists()``-ed. This runs over a command the model
-        has merely PROPOSED, before any confirmation and before anything executes,
-        so a filesystem probe here reaches out of the workspace on the model's say
-        so alone. ``(self.cwd / tok)`` drops cwd entirely for a drive-anchored
-        token, so the old exists-under-cwd guess stat-ed precisely whatever the
-        model named, anywhere on the machine. There is no safe stat at this point:
-        a legitimate probe, a command gone wrong, and a live injection attempt are
-        indistinguishable at the access point, so the check must not have the
-        capability at all rather than try to use it carefully.
+        PURELY LEXICAL: a model-supplied token is never stat-ed, resolved, or
+        ``.exists()``-ed. This runs over a command the model has merely PROPOSED,
+        before any confirmation and before anything executes, so a filesystem
+        probe here would reach out of the workspace on the model's say so alone.
+        A legitimate probe, a command gone wrong, and a live injection attempt
+        are indistinguishable at the access point.
 
-        A token therefore counts as path-like only by SYNTAX (``_is_path_like``).
-        An arg the tool's own schema DECLARES to be a path (run_tests' ``path``)
-        needs no heuristic and is checked whole, spaces and all.
+        A token counts as path-like only by SYNTAX (``_is_path_like``). An arg
+        the tool's own schema DECLARES to be a path (run_tests' ``path``) needs
+        no heuristic and is checked whole, spaces and all.
 
-        Trade-off, accepted: a bare-relative path that merely exists
-        (``cat secrets.txt``, ``git -C docs``) is no longer flagged, because
-        telling it apart from ``npm test`` in a repo that has a ``test/`` folder
-        is exactly what the removed probe did. A separator rule is not a
-        replacement - it re-flags ``sed s/foo/bar/``, ``sed s:/usr/local:/opt:g``
-        and a quoted ``-m 'fix a/b handling'``, the false positives that cost this
-        check its credibility once already. What survives is the high-signal case
-        with no false positives: a command reaching OUT of the workspace. And the
-        trade weakens no boundary, because this was never one: it is a warning
-        that never blocked anything, while hard confinement (the disabled-tool
-        gate, and ``_scope_violation`` for file tools) is enforced elsewhere and
-        is unchanged by this.
+        A bare-relative path that merely exists (``cat secrets.txt``, ``git -C
+        docs``) is therefore not flagged. What is flagged is the case with no
+        false positives: a command reaching OUT of the workspace. This warning
+        blocks nothing; hard confinement (the disabled-tool gate, and
+        ``_scope_violation`` for file tools) is enforced elsewhere.
         """
         flagged: list[str] = []
         for arg in _SHELL_COMMAND_ARGS.get(call.name, ()):
@@ -721,23 +682,17 @@ class _ExecutionMixin:
     def current_patch(self) -> str:
         """The accumulated unified diff so far, WITHOUT clearing the buffer.
 
-        Split out of :meth:`flush_patch` for readers that only want to LOOK:
-        a GUI "show me the patch" request, a status poll, a preview. Reaching
-        for ``flush_patch`` there would destroy the very thing it was asked to
-        display, and the destruction is invisible at the call site because the
-        RESULT looks identical the first time.
+        For readers that only want to LOOK: a GUI "show me the patch" request, a
+        status poll, a preview. :meth:`flush_patch` clears the buffer.
         """
         return "\n".join(c for c in self._patch_chunks if c)
 
     def has_patch(self) -> bool:
         """Is there anything in the patch buffer? Cheap, and exactly equivalent
-        to ``bool(self.current_patch())``.
+        to ``bool(self.current_patch())`` without joining the diff.
 
-        Separate from ``current_patch`` because ``CoderSession.info()`` needs
-        only the boolean and is called once PER SESSION by the session-list
-        route: joining every session's whole diff to throw the string away
-        would put an O(patch size) allocation on whatever timer that endpoint
-        ends up being polled on.
+        ``CoderSession.info()`` needs only the boolean and is called once per
+        session by the session-list route.
         """
         return any(c for c in self._patch_chunks)
 
@@ -760,19 +715,15 @@ class _ExecutionMixin:
         ``parent`` is set only when this Agent IS a sub-agent, so it - not the name,
         which every Agent has - is what distinguishes "a child is asking on the
         human's shared confirmation channel" from "the session the human started is
-        asking for itself". The top-level agent deliberately gets None so its own
-        prompts are worded exactly as they always were.
+        asking for itself". The top-level agent gets None.
 
         This is the ONE place a child's identity enters the confirm chain, so every
         delegation path (worktree-isolated parallel dispatch, spawn_agent, background
-        sub-agents) is attributed by construction rather than each re-implementing it.
+        sub-agents) is attributed by construction.
 
-        A child with a falsy name still gets a label. ``spawn_agent``'s ``name`` comes
-        straight from the model's tool-call arguments, and an empty one would collapse
-        to "no label" - making a delegated request look exactly like the human's own,
-        which is the confusion this whole path exists to prevent. Being unable to say
-        WHICH child is asking is tolerable; letting a child's prompt pass for the
-        user's own is not.
+        A child with a falsy name still gets a label: ``spawn_agent``'s ``name``
+        comes straight from the model's tool-call arguments, and an empty one would
+        collapse to "no label", making a delegated request look like the human's own.
         """
         if self.parent is None:
             return None
@@ -848,13 +799,11 @@ class _ExecutionMixin:
 
         run_shell is a step further: it has no `path`-shaped arg AT ALL (only
         a free-form `command` string), so there is no path to resolve even
-        post-call. Mark the whole map dirty instead and return - deliberately
-        NOT calling _rebuild_system_prompt() here, unlike every other branch
-        below. That rebuild is what actually reconciles the map (see
-        ProjectMap._rescan_if_dirty via context._build_messages, called once
-        per turn), so triggering it eagerly on every run_shell call would scan
-        on every call instead of once for however many run_shell calls happen
-        before the map is next actually read.
+        post-call. It marks the whole map dirty and returns, without calling
+        _rebuild_system_prompt() as every other branch below does. That rebuild
+        is what reconciles the map (see ProjectMap._rescan_if_dirty via
+        context._build_messages, called once per turn), so it runs once before
+        the map is next read rather than once per run_shell call.
         """
         if call.name == "run_shell":
             self._project_map.mark_dirty()

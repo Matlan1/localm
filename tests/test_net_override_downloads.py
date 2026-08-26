@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F1: permission-gated, NON-PERSISTENT network-policy override for the two
+"""Permission-gated, NON-PERSISTENT network-policy override for the two
 prerequisite model downloads (the embedding model and the Whisper STT model).
 
 The properties pinned here, most important first:
@@ -11,7 +11,7 @@ The properties pinned here, most important first:
 2. The one-time authorization cannot persist BY CONSTRUCTION: the whole
    download flow leaves config.json byte-identical and never calls
    update_config. Asserted on the DATA (the file, the spy) before any status
-   code, per diff-review item 24.
+   code.
 3. bypass-ask: allow_download=True downloads under net_mode=ask, while the
    IMPLICIT paths do not - the transcribe worker is dispatched with
    local_files_only=True whenever the policy did not authorize a download, so

@@ -125,8 +125,8 @@ def set_console_title(title: str) -> bool:
 
     Windows uses SetConsoleTitleW; other platforms emit an OSC title escape, but
     ONLY when stdout is a real terminal (never into a redirected file, a pipe, or
-    a service log). Best-effort and fully guarded: the title is purely cosmetic,
-    so a failure never blocks startup. Returns True if a title was set.
+    a service log). Best-effort and fully guarded: a failure never raises and
+    never blocks startup. Returns True if a title was set.
     """
     text = _sanitize_title(title)
     try:

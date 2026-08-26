@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""COMFY_MODEL_SOURCES: the curated filename -> HuggingFace source table used to
-offer a download when ComfyUI preflight detects a missing workflow model. Exact-
-filename lookup only (no fuzzy matching) - a different keyspace from
+"""COMFY_MODEL_SOURCES: the curated filename -> HuggingFace source table that
+offers a download when ComfyUI preflight detects a missing workflow model.
+Exact-filename lookup only (no fuzzy matching) - a different keyspace from
 MODEL_SHORTCUTS (a user-typed alias for `localm pull <alias>`, not an installed
 filename ComfyUI reports)."""
 

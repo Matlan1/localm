@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A CLI `--mmproj` override never persisted to the registry, unlike every
-other mmproj-discovery path (pull.py's auto-attach, the registry's own
-recorded field). So vision_input_guidance()'s own "switch to it" suggestion
-(`localm run <model>`) lost the projector again the moment --mmproj was left
-off. persist_cli_mmproj() closes that, but ONLY once the caller has confirmed
-the projector genuinely loaded (supports_images=True for this run) - it must
-never record a broken association, or vision_capable_models() would list a
-model whose vision does not actually work: a new false-positive surface in
-the area PR #1073 just fixed.
+"""A CLI `--mmproj` override is persisted to the registry, like every other
+mmproj-discovery path (pull.py's auto-attach, the registry's own recorded
+field), so vision_input_guidance()'s "switch to it" suggestion
+(`localm run <model>`) keeps the projector when --mmproj is left off.
+
+persist_cli_mmproj() records it ONLY once the caller has confirmed the
+projector genuinely loaded (supports_images=True for this run): a broken
+association would make vision_capable_models() list a model whose vision does
+not work.
 """
 
 from unittest.mock import MagicMock

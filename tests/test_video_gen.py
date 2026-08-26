@@ -116,11 +116,8 @@ class TestGenerateVideo:
     def test_instance_token_reaches_localm_unload(self, tmp_path):
         """The video route's instance_token (its own attach token, for
         keyless-mode auth on the localm_url unload call) must reach
-        _localm_unload, not be silently dropped somewhere between the
-        plug.py route and comfy.py's call site - the fifth site of the
-        credential-precedence class fixed alongside cli/models.py (#1121)
-        and self_request (#1114): generate_video did not even accept an
-        instance_token parameter before this fix."""
+        _localm_unload, never be dropped between the plug.py route and
+        comfy.py's call site."""
         captured = {}
         fake = _fake_comfy(captured)
         unload_spy = MagicMock(return_value=None)
@@ -238,9 +235,9 @@ class TestGenerateVideo:
 
 class TestWorkflowTemplate:
     def test_committed_template_has_expected_nodes(self):
-        """Sanity-check the committed template is well-formed. Injection is now by
-        ROLE (resolve_sampler_roles + find_node_by_class), so a local override no
-        longer has to preserve these ids - but the shipped template still should."""
+        """Sanity-check the committed template is well-formed. Injection is by
+        ROLE (resolve_sampler_roles + find_node_by_class), so a local override
+        need not preserve these ids; the shipped template does."""
         wf = json.loads(
             (comfy._WORKFLOW_PATH).read_text(encoding="utf-8"))
         assert wf["4"]["class_type"] == "CLIPTextEncode"      # positive

@@ -13,8 +13,7 @@ task_kind "chat":  the prompt is run against the inference engine. A passed-in
     job's ``model`` (or the active/first registered model).
 task_kind "coder": a coder Agent runs the prompt in the job's ``cwd`` with the
     job's ``scope`` and the current privacy mode. The coder path is best-effort:
-    a full agentic run needs the coder extra installed and a working backend; it
-    is unit-tested with the agent/backend mocked.
+    a full agentic run needs the coder extra installed and a working backend.
 task_kind "rag":   the job's ``collection`` is re-synced against the folders it
     was indexed from (``Collection.resync``), picking up files added or changed
     since and flagging ones that vanished. Loads no chat model.
@@ -36,15 +35,15 @@ from localm.debuglog import logger
 from localm.plugins.builtin.jobs.store import Job, JobStore
 
 # Upper bound on how long the runner blocks its worker thread waiting for the server
-# loop to complete a guarded shared-engine unload. Generous: unload_one_model's own
-# VRAM-release wait tops out at ~5s, so hitting this means the loop is wedged, and
-# the caller degrades to loading alongside rather than hanging.
+# loop to complete a guarded shared-engine unload. Must stay above unload_one_model's
+# own vram.wait_for_vram_release window, so reaching this bound means the server loop
+# is wedged rather than an unload merely running long. On timeout the caller degrades
+# to loading alongside rather than hanging.
 _EVICT_TIMEOUT_S = 60.0
 
-# Shared between the log line and the job's own output note (below) so the two copies
-# cannot drift. Hedged rather than asserted, because this re-check cannot tell a
-# revoked or expired key apart from an owner key that was simply rolled since the job
-# was created, and it points at the repair path.
+# Shared between the log line and the job's own output note below. Hedged, because
+# this re-check cannot tell a revoked or expired key apart from an owner key that was
+# rolled since the job was created.
 _SHELL_DOWNGRADE_REASON = (
     "its authorization could not be re-confirmed at run time (the owning key "
     "may have been revoked or expired, or - if it was originally the owner "
@@ -55,12 +54,11 @@ def run_job(job: Job, *, engine=None) -> dict:
     """Run *job* and return a result record. Dispatches on task_kind and never
     raises.
 
-    When no *engine* is passed for a chat/memory job, the runner loads one itself and
-    UNLOADS it again afterwards, so a sequence of headless runs (a scheduler tick with
-    no host model, or a CLI run) does not stack model loads in VRAM (U-4). A shared
-    engine is NEVER unloaded here - neither one passed in by the live server, nor the
-    live server's shared engine that _load_engine may REUSE even for an engine=None
-    call (see the ownership guard below); only a genuinely fresh, runner-loaded engine
+    When no *engine* is passed for a chat/memory job, the runner loads one itself
+    and UNLOADS it again afterwards, so a sequence of headless runs does not stack
+    model loads in VRAM. A shared engine is NEVER unloaded here - neither one passed
+    in by the live server, nor the live server's shared engine that _load_engine may
+    REUSE even for an engine=None call; only a genuinely fresh, runner-loaded engine
     is freed in the finally."""
     started = time.time()
     owned_engine = None
@@ -70,10 +68,8 @@ def run_job(job: Job, *, engine=None) -> dict:
             # _load_engine reports whether it REUSED the live server's shared engine
             # (http_server._engine) or loaded a FRESH one. Only a fresh engine is
             # owned (and unloaded in the finally); a reused shared engine belongs to
-            # the host and is treated exactly like a passed-in one. A reuse can happen
-            # even for a job that started with engine=None, when _live transitions
-            # unloaded->loaded in the gap before _load_engine's re-check, so the
-            # verdict is taken from _load_engine rather than re-read from _engine.
+            # the host. The verdict is taken from _load_engine rather than re-read
+            # from _engine.
             eng, reused = _load_engine(job.model)   # may raise (model not found) -> caught below
             if eng is not None and not reused:
                 owned_engine = eng          # we loaded it, so we unload it after the run
@@ -121,22 +117,21 @@ def _evict_shared_engine_for_media(live) -> str:
     worker thread is unsafe two ways:
       * it ignores the in-flight-request PIN (``active_requests``): a chat may be
         generating on it right now, and unloading frees VRAM out from under that
-        request while racing the native free (AUDIT-CRIT-1); and
+        request while racing the native free; and
       * it runs OFF the event loop, so a concurrent request's ``get_engine()`` fast
-        path can hand the being-freed engine back and pin it (pin-during-unload -
-        the gguf backend clears ``.loaded`` only AFTER ``_llm.close()``, so the
-        engine still reads loaded mid-free).
+        path can hand the being-freed engine back and pin it (the gguf backend
+        clears ``.loaded`` only AFTER ``_llm.close()``, so the engine still reads
+        loaded mid-free).
     ``unload_one_model`` closes both: it SKIPS a pinned engine (``active_requests``
     > 0 -> ``"in_use"``) and, run ON the loop, serializes with ``get_engine`` and
-    the synchronous ``_pin`` (the loop is the mutex). So submit it to the server
-    loop via ``run_coroutine_threadsafe`` and block this thread on the result. It
-    also does its own VRAM-release wait on the loop, so no separate wait here.
+    the synchronous ``_pin``. So it is submitted to the server loop via
+    ``run_coroutine_threadsafe`` and this thread blocks on the result. It also does
+    its own VRAM-release wait on the loop, so no separate wait here.
 
     Returns the unload status (``"unloaded"`` / ``"in_use"`` / ``"already_unloaded"``),
-    or ``"skipped"`` when the server loop is unreachable - in which case we
-    deliberately do NOT raw-unload the shared engine (that reintroduces the race)
-    and leave it resident: the job model loads alongside it (possibly tight on VRAM,
-    but never a use-after-free). Rule 5: every degrade is logged, not silent."""
+    or ``"skipped"`` when the server loop is unreachable - in which case the shared
+    engine is NOT raw-unloaded and is left resident: the job model loads alongside
+    it. Every degrade is logged, not silent."""
     from localm.debuglog import logger as _dbg
     from localm.inference import http_server as _hs
 
@@ -184,19 +179,18 @@ def _unload_engine(eng) -> None:
 def _run_chat(job: Job, *, engine=None) -> str:
     """Run the prompt through the inference engine and return the reply text.
 
-    Scheduled chat jobs get the same web-search tool the interactive chat has, so a
-    web-lookup job no longer answers "I have no real-time access" (U-3); the bounded
-    tool loop and the net_mode gating live in :mod:`webtool`. The chat path leaves no
-    session trace of its own (no audit/transcript writes here), so it is privacy-safe
-    regardless of mode; the explicit result is saved by the store like any other
-    generated artifact."""
+    Scheduled chat jobs get the same web-search tool the interactive chat has; the
+    bounded tool loop and the net_mode gating live in :mod:`webtool`. The chat path
+    leaves no session trace of its own (no audit or transcript writes here), so it
+    is privacy-safe regardless of mode; the explicit result is saved by the store
+    like any other generated artifact."""
     eng = engine
     if eng is None:
         raise RuntimeError(
             "no inference engine available (pass one, or register a model)")
     from localm.plugins.builtin.jobs import webtool
     # Pin for the WHOLE tool-calling loop (run_chat_with_web can drive several
-    # rounds), not per-round, so the pin spans the entire task.
+    # rounds), not per-round.
     from localm.inference.http_server import driving_engine
     with driving_engine(eng):
         return webtool.run_chat_with_web(eng, job.prompt)
@@ -207,11 +201,9 @@ def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
     model). Returns ``(engine, reused)``:
 
       * ``reused=True`` only when the returned engine IS the live server's shared
-        engine (``http_server._engine``), which the runner must never unload. This
-        fact is decided HERE, at the reuse branch, so ``run_job`` never has to
-        re-derive ownership with a second, racy read of ``_engine`` (a concurrent
-        model switch could otherwise reassign it in the gap and trick the finally
-        into freeing the still-registered shared engine).
+        engine (``http_server._engine``), which the runner must never unload. The
+        fact is decided HERE, at the reuse branch, so ``run_job`` never re-derives
+        ownership with a second, racy read of ``_engine``.
       * ``reused=False`` for a genuinely fresh engine the runner loaded itself (safe
         to unload after the run) - it is never registered in the server's engine
         table, so nothing else can reach or pin it.
@@ -223,13 +215,12 @@ def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
     name = model
 
     # Re-check the job's model name at RUN time, not only at the API write: rows
-    # persisted by a build that predates the create/update gate are still on disk, and
-    # the scheduler runs them unattended.
+    # persisted by an older build are still on disk, and the scheduler runs them
+    # unattended.
     #
-    # This runs FIRST, ahead of the live-engine reuse and VRAM branch below. That
-    # branch can call _evict_shared_engine_for_media and unload the live chat engine
-    # before any name is resolved, so validating later would let an unregistered name
-    # cost the user their loaded model.
+    # Runs FIRST, ahead of the live-engine reuse and VRAM branch below, which can
+    # call _evict_shared_engine_for_media and unload the live chat engine before any
+    # name is resolved.
     _bad = unregistered_model_error(name)
     if _bad:
         raise RuntimeError(_bad)
@@ -243,9 +234,7 @@ def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
             # VRAM gate: unload the live engine if VRAM is tight. Uses
             # vram_capacity() (combined free across a configured multi-GPU split,
             # else the single-GPU vram_info() number), the same ceiling
-            # switch_engine's eviction gate uses, so a split-configured machine does
-            # not evict the live chat engine when the combined capacity already
-            # covers the media job.
+            # switch_engine's eviction gate uses.
             from localm import vram as _vram
             from localm.discover import vram_capacity
             free = vram_capacity().get("free")
@@ -253,16 +242,12 @@ def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
             if _vram.should_swap_for_media(free, est):
                 # Route the eviction through the guarded server-loop path instead of
                 # a raw _live.unload() on this worker thread: unload_one_model honors
-                # the in-flight pin and serializes with get_engine, so the shared
-                # engine is never freed out from under a live request. It also does
-                # its own VRAM-release wait on the loop, so no separate
-                # wait_for_vram_release is needed here.
+                # the in-flight pin and serializes with get_engine, and does its own
+                # VRAM-release wait on the loop.
                 _evict_shared_engine_for_media(_live)
     except Exception as e:
-        # Best-effort live-engine reuse plus VRAM gate. Any failure here
-        # (http_server not importable in this context, vram_info unavailable on this
-        # platform) falls through to loading a fresh engine below. The cause is
-        # logged rather than swallowed.
+        # Best-effort live-engine reuse plus VRAM gate. Any failure here falls
+        # through to loading a fresh engine below, with the cause logged.
         from localm.debuglog import logger as _dbg
         _dbg.debug("jobs: live-engine reuse / VRAM gate skipped (%s); "
                    "loading a fresh engine instead", e)
@@ -273,9 +258,8 @@ def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
     if not name:
         from localm.model_manager import is_auto_chat_eligible
         reg = load_registry()
-        # Auto-pick the first chat-eligible model; skip a type='unknown' model so a
-        # background chat/memory job never silently loads one. It stays runnable when
-        # a job explicitly configures default_model/model above.
+        # Auto-pick the first chat-eligible model; skip a type='unknown' model. It
+        # stays runnable when a job explicitly configures default_model/model above.
         name = next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
     if not name:
         return None, False
@@ -297,12 +281,12 @@ def _run_memory(job: Job, *, engine=None) -> str:
     file, using the model. The privacy gate lives inside synthesize_memory (it
     skips with a clear status in privacy mode, never a silent success). Returns a
     human-readable summary saved as the job result."""
-    # Import the memory plugin's synthesizer directly. This resolves the bundled-store
-    # source even when the memory plugin is not installed or enabled; the privacy and
-    # write gates inside synthesize_memory still apply. Valid only while
-    # synthesize_memory stays module-level-stateless (fresh store per call, shared
-    # state on disk/config). Guarded so a memory module that cannot import degrades to
-    # a clear job result instead of crashing the runner.
+    # Import the memory plugin's synthesizer directly, which resolves the
+    # bundled-store source even when the memory plugin is not installed or enabled;
+    # the privacy and write gates inside synthesize_memory still apply. Valid only
+    # while synthesize_memory stays module-level-stateless (fresh store per call,
+    # shared state on disk/config). Guarded, so a memory module that cannot import
+    # degrades to a clear job result.
     try:
         from localm.plugins.builtin.memory.plug import synthesize_memory
     except Exception as e:
@@ -314,8 +298,8 @@ def _run_memory(job: Job, *, engine=None) -> str:
 
     from localm.textnorm import strip_think
 
-    # Track when a reply was ALL reasoning (empty after the strip), so "no facts
-    # found" carries a caveat instead of reading as a clean no-op.
+    # Track when a reply was ALL reasoning (empty after the strip), so the no-facts
+    # result carries a caveat instead of reading as a clean no-op.
     state = {"empty_replies": 0}
 
     def complete(prompt: str) -> str:
@@ -328,17 +312,16 @@ def _run_memory(job: Job, *, engine=None) -> str:
         return text
 
     # Pin the engine busy and touch its activity clock for the WHOLE synthesis pass
-    # (synthesize_memory can call complete() several times), not just the instant it
-    # was resolved above, so idle-unload cannot unload it mid-run.
+    # (synthesize_memory can call complete() several times), so idle-unload cannot
+    # unload it mid-run.
     from localm.inference.http_server import driving_engine
     with driving_engine(eng):
         result = synthesize_memory(complete)
     if result.get("status") == "skipped":
         return f"memory synthesis skipped ({result.get('reason')})"
-    # A contradiction to a saved (user-typed) fact is surfaced, never silently applied
-    # or dropped: it waits as a suggested correction to review in the memory panel.
-    # Reports the TOTAL pending, not just this run's new ones, so a run whose
-    # proposals dedup to zero still flags outstanding earlier suggestions.
+    # A contradiction to a saved (user-typed) fact waits as a suggested correction to
+    # review in the memory panel, never silently applied or dropped. Reports the TOTAL
+    # pending, not just this run's new ones.
     pending = result.get("pending", result.get("proposed", 0))
     suffix = ("\n%d suggested correction(s) to your saved facts await review in the "
               "memory panel" % pending) if pending else ""
@@ -363,13 +346,13 @@ def _rag_embed_fn():
     model is available (the collection then indexes lexical-only, exactly like
     ``rag add`` without ``--embed``).
 
-    Resolved in-process from the shared embedder singleton - the same handle the
-    memory plugin uses - rather than over HTTP, so a re-sync works under
-    ``localm job run`` with no server up. ``embed_texts`` is deliberately NOT used:
-    it returns None when unavailable, and ``add_paths`` cannot consume that.
+    Resolved in-process from the shared embedder singleton rather than over HTTP,
+    so a re-sync works under ``localm job run`` with no server up. ``embed_texts``
+    is NOT used: it returns None when unavailable, and ``add_paths`` cannot consume
+    that.
 
-    This runs on the runner's worker thread, never the event loop: resolving the
-    embedder can trigger a VRAM swap, which must not block the loop (BUG #648)."""
+    Runs on the runner's worker thread, never the event loop: resolving the
+    embedder can trigger a VRAM swap, which must not block the loop."""
     try:
         from localm.inference.embedder import get_embedder
         emb = get_embedder()
@@ -388,22 +371,17 @@ def _run_rag(job: Job) -> str:
     costs a hash and nothing else, and reports what the run actually did.
 
     No CHAT model is loaded: a re-sync needs neither the format tie-break nor
-    image description (both are optional refinements of an interactive add), so
-    unlike a chat/memory job this never loads or unloads one. It does resolve the
-    shared EMBEDDER, which on a tight card can itself evict a resident chat model
-    (embedder._maybe_swap_for_embedder -> vram.evict_chat_for_embedder) - the
-    same swap an interactive index or a memory write already performs, and the
-    reason this must run off the event loop (BUG #648).
+    image description. It does resolve the shared EMBEDDER, which on a tight card
+    can itself evict a resident chat model (embedder._maybe_swap_for_embedder ->
+    vram.evict_chat_for_embedder), so this must run off the event loop.
 
-    Confinement: the run always passes ``indexing_policy()``. A scheduled job is
-    not the local CLI operator - it can be created through the API by a
-    jobs-scoped key - so it must never index a path an interactive add would
-    refuse, including a root that has since fallen outside the owner's allowed
-    folders. Deletion is non-destructive by design (see ``Collection.resync``).
+    Confinement: the run always passes ``indexing_policy()``, so it never indexes a
+    path an interactive add would refuse, including a root that has since fallen
+    outside the owner's allowed folders. Deletion is non-destructive by design (see
+    ``Collection.resync``).
 
     Privacy: a collection is explicit user data and is written in every session
-    mode (the localm.rag docstring), exactly as an interactive add is; this path
-    adds no session trace of its own."""
+    mode; this path adds no session trace of its own."""
     from localm.rag import Collection, CollectionLockedError
     from localm.rag.store import indexing_policy
 
@@ -435,10 +413,9 @@ def _run_rag(job: Job) -> str:
                              on_progress=lines.append)
     except CollectionLockedError as e:
         # Another localm process (or a hand-run `localm rag add|resync`) holds this
-        # collection. The scheduled tick waits a bounded time and then stands down
-        # rather than interleaving, recorded as an error rather than a quiet success,
-        # because the job history is the only place an unattended run is seen. The
-        # next tick re-walks the same folders.
+        # collection. The scheduled tick waits a bounded time and then stands down,
+        # recorded as an error rather than a quiet success. The next tick re-walks the
+        # same folders.
         raise RuntimeError(f"{e} The next scheduled run will pick this up.") from e
     return _format_rag_result(name, result, lines,
                               embedded=embed_fn is not None,
@@ -449,12 +426,10 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
                        embedded: bool, had_vectors: bool) -> str:
     """Render a re-sync result as the job's output.
 
-    Every degrade is stated, not implied (AGENTS.md rule 5): a skipped root, a
-    flagged-missing document, a per-file failure, a vectors.json the store found
-    corrupt or stale (this result is the ONLY place an unattended run is seen, so
-    a _log.warning nobody reads is not enough), and - the easy one to hide - new
-    documents indexed WITHOUT embeddings into a collection that had semantic
-    search, which silently pushes vector coverage down and can drop the whole
+    Every degrade is stated, not implied: a skipped root, a flagged-missing
+    document, a per-file failure, a vectors.json the store found corrupt or stale,
+    and new documents indexed WITHOUT embeddings into a collection that had
+    semantic search, which pushes vector coverage down and can drop the whole
     collection to BM25."""
     out = [f"re-synced '{name}': {result['added']} added, "
            f"{result['updated']} updated, {result['skipped']} unchanged - "
@@ -499,32 +474,27 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
 
 def _shell_still_authorized(job: Job) -> bool:
     """Re-validate a shell-opt-in job's authorization at RUN time, so a revoked or
-    expired key cannot keep an unattended scheduled job running with shell access
-    forever (LM-DA-014: the runner used to just trust the stored ``allow_shell``
-    flag - its own comment said so).
+    expired key cannot keep an unattended scheduled job running with elevated access
+    forever.
 
     ``job.owner`` is the sha256 key hash ``principal_id()`` stamps at creation
     (store.py) - the same value ``auth.key_hash_live()`` checks for a cookie
-    session. Two cases need no re-check: a job with no owner (``allow_shell``
-    needed no privileged key when ``any_key_configured()`` was False at creation,
-    so there is no key whose liveness matters), and a job created by the OWNER key
-    itself (the owner key is not a keystore entry and is not revocable/expirable
-    the way a scoped key is - mirrors ``key_hash_live``'s own "owner sessions are
-    not gated on this" contract). Any other owner hash must still resolve to a
-    live (unrevoked, unexpired) keystore key, or the run is downgraded to
-    restricted rather than trusting a stale grant.
+    session. Two cases need no re-check: a job with no owner (no privileged key was
+    needed at creation, so there is no key whose liveness matters), and a job
+    created by the OWNER key itself (the owner key is not a keystore entry and is
+    not revocable or expirable the way a scoped key is). Any other owner hash must
+    still resolve to a live (unrevoked, unexpired) keystore key, or the run is
+    downgraded to restricted.
 
     The owner case is decided by the ``owner_is_owner_key`` flag STAMPED AT
-    CREATION, not by comparing key values here: the owner key is not a keystore
-    entry, so once the owner ROTATES it (keys regenerate / GUI roll / key clear)
-    a value comparison against the new key fails and ``key_hash_live`` of the old
-    hash says "not live" - silently and permanently stripping shell from the
-    owner's OWN scheduled jobs (REG-509). The distinction cannot be recovered at
-    run time: revocation deletes the keystore record, so a revoked scoped key and
-    a rotated-away owner key both hash to nothing. The key-value comparison is
-    kept only as the back-compat path for jobs persisted before the flag existed
-    (they load with it False), where it still authorizes correctly as long as the
-    owner has not rotated."""
+    CREATION, not by comparing key values here: once the owner ROTATES the key, a
+    value comparison against the new key fails and ``key_hash_live`` of the old hash
+    says "not live", which would strip elevated access from the owner's own
+    scheduled jobs. The distinction cannot be recovered at run time: revocation
+    deletes the keystore record, so a revoked scoped key and a rotated-away owner
+    key both hash to nothing. The key-value comparison is kept only as the
+    back-compat path for jobs persisted before the flag existed (they load with it
+    False)."""
     if job.owner is None:
         return True
     if getattr(job, "owner_is_owner_key", False):
@@ -532,17 +502,15 @@ def _shell_still_authorized(job: Job) -> bool:
     from localm.auth import _hash_key, _legacy_owner_identity, get_api_key, key_hash_live
     owner_key = get_api_key()
     # Both the CURRENT derived identity and the LEGACY unsalted digest count as a
-    # match, so a job stamped before the owner key's identity moved to a salted KDF
-    # derivation does not lose shell. This is an IDENTITY comparison against an
-    # already-resolved owner key, not an authentication step: the owner key itself is
-    # verified by plaintext compare against auth.key. A match stamps
-    # owner_is_owner_key below, so each job pays this once.
+    # match. This is an IDENTITY comparison against an already-resolved owner key, not
+    # an authentication step: the owner key itself is verified by plaintext compare
+    # against auth.key. A match stamps owner_is_owner_key below, so each job pays this
+    # once.
     if owner_key and job.owner in (_hash_key(owner_key),
                                    _legacy_owner_identity(owner_key)):
-        # This run proves the job is the owner's, because the owner key still holds
-        # the value it was stamped with. Recorded now, so the job does not lose shell
-        # on the owner's next roll. After this the flag short-circuits above, making
-        # it a one-time write per job.
+        # The owner key still holds the value the job was stamped with, so this run
+        # proves the job is the owner's. Recorded now; after this the flag
+        # short-circuits above, making it a one-time write per job.
         _remember_owner_key_job(job)
         return True
     return key_hash_live(job.owner)
@@ -553,27 +521,16 @@ def _cwd_trusted(job: Job) -> bool:
     directory, i.e. the owner (or a ``coder:full`` / ADMIN key) rather than a plain
     ``jobs``-scoped key.
 
-    The coder ROUTE already draws this line deliberately (builtin/coder/plug.py: a
-    restricted caller is "forced into the project root, ignoring req.cwd, so a
-    scoped key cannot point the (confined) file tools at arbitrary paths"). The
-    scheduler did not: ``cwd`` was validated only for UNC/device SHAPE, never for
-    who chose it, so a ``jobs``-only key got read plus confined-write anywhere on
-    the server by scheduling a job there.
-
-    Re-derived at RUN time rather than stamped, which is deliberate and is the
-    opposite choice from ``owner_is_owner_key`` next door - because unlike that
-    one, this question IS still answerable later, and re-deriving is strictly
-    better: a key whose scopes are narrowed, or which is revoked or expires, loses
-    its arbitrary-cwd freedom on the very next tick instead of keeping a grant
-    stamped months ago. Four positives, in cost order:
+    Re-derived at RUN time rather than stamped, so a key whose scopes are narrowed,
+    or which is revoked or expires, loses its arbitrary-cwd freedom on the next
+    tick. Four positives, in cost order:
 
     - no owner at all: a tokenless / open-mode creation, which IS the loopback
       owner (``_caller_can_allow_shell`` returns True with no key configured), so
       there is no lesser principal to confine;
-    - the REG-509 stamp: the owner key or an owner session created it. This is the
-      one case re-derivation cannot reach, because after a key ROLL the recorded
-      hash matches nothing, which is exactly why that stamp exists. Reused here
-      rather than adding a second field that would need its own back-fill;
+    - the ``owner_is_owner_key`` stamp: the owner key or an owner session created
+      it. This is the one case re-derivation cannot reach, because after a key roll
+      the recorded hash matches nothing;
     - the recorded principal still IS the owner key by value (covers a job created
       before the stamp existed, while the key has not rolled);
     - the recorded principal is a live keystore key holding ADMIN or coder:full.
@@ -598,13 +555,13 @@ def _cwd_trusted(job: Job) -> bool:
 
 
 def _remember_owner_key_job(job: Job) -> None:
-    """Persist ``owner_is_owner_key`` on a legacy job we just proved is the
-    owner's (best-effort).
+    """Persist ``owner_is_owner_key`` on a legacy job just proven to be the owner's
+    (best-effort).
 
     Failing to persist is not fatal - this run is authorized either way, and the
-    next run re-proves it the same way - so it must not break the job. But it is
-    not silenced either: if it keeps failing, the job stays exposed to REG-509 on
-    the next key roll, and that has to be discoverable (AGENTS.md rule 5).
+    next run re-proves it the same way - so it must not break the job. It is not
+    silenced either: a job that keeps failing to persist stays exposed on the next
+    key roll, and that has to be discoverable.
     """
     job.owner_is_owner_key = True
     try:
@@ -626,27 +583,23 @@ def _run_coder(job: Job, *, engine=None) -> str:
     from localm.plugins.builtin.jobs.store import cwd_unc_error
 
     # AUTHORITATIVE check, re-validated at RUN time and not only at the write: a row
-    # persisted by a build that predates the write-time gates is still on disk, and
-    # the autonomous scheduler tick runs it unattended with no caller to have gated
-    # it. Shares cwd_unc_error's wording with the write-time checks, the same way
-    # _load_engine's model-name re-check reuses unregistered_model_error. Checked on
-    # the RAW string, before any Path object is built: Path.is_dir()/.resolve() below
-    # dial SMB and auto-authenticate for a UNC target on Windows, before any status
-    # or error is chosen.
+    # persisted by an older build is still on disk, and the autonomous scheduler tick
+    # runs it unattended. Shares cwd_unc_error's wording with the write-time checks.
+    # Checked on the RAW string, before any Path object is built: Path.is_dir() and
+    # .resolve() below dial SMB and auto-authenticate for a UNC target on Windows.
     _bad_cwd = cwd_unc_error(job.cwd)
     if _bad_cwd:
         raise RuntimeError(_bad_cwd)
 
     # WHO chose this cwd, not just what SHAPE it is. cwd_unc_error above rejects
-    # UNC/device syntax for everyone and says nothing about authority, so a plain
-    # jobs-scoped key could otherwise name any local directory and get read plus
-    # confined write there. As in the coder route for a restricted caller, the
-    # requested cwd is ignored and the project root forced.
+    # UNC/device syntax for everyone and says nothing about authority. As in the coder
+    # route for a restricted caller, the requested cwd is ignored and the project root
+    # forced.
     cwd_confined = not _cwd_trusted(job)
     if cwd_confined:
         from localm.instances import resolve_root_dir
         # The same project root the coder route uses via app.state.root_dir; the
-        # runner has no request/app to read it from, so it resolves it the same way
+        # runner has no request or app to read it from, so it resolves it the same way
         # that value was produced.
         requested, job_cwd = job.cwd, resolve_root_dir()
     else:
@@ -656,9 +609,8 @@ def _run_coder(job: Job, *, engine=None) -> str:
     if not cwd.is_dir():
         raise RuntimeError(f"coder cwd is not a directory: {job_cwd}")
     if cwd_confined and requested and Path(requested).expanduser() != cwd:
-        # Never a silent degrade, same as the shell downgrade below: the job asked to
-        # run somewhere it is not allowed to, so the substitution is logged. The job's
-        # own output carries it too.
+        # Never a silent degrade: the job asked to run somewhere it is not allowed to,
+        # so the substitution is logged and carried in the job's own output.
         logger.warning(
             "job %r (%s) requested a working directory its creating key is not "
             "allowed to choose; running in the project root instead. Re-create "
@@ -671,19 +623,16 @@ def _run_coder(job: Job, *, engine=None) -> str:
     # Safe-by-default: an unattended scheduled run has nobody to approve a destructive
     # tool, so it runs RESTRICTED (read plus confined edit, no run_shell, no network,
     # no sub-agents) unless the owner explicitly opted this job into the full
-    # shell-capable coder. Restricted hard-refuses run_shell/fetch_url at dispatch.
-    # The allow_shell opt-in is gated to owner / coder:full at the creation route, and
-    # a stored True is not trusted forever: the autonomous scheduler tick has no
-    # request or caller to re-check, so the runner re-validates the OWNING key's live
-    # state on every run.
+    # shell-capable coder. Restricted hard-refuses run_shell and fetch_url at
+    # dispatch. A stored allow_shell flag is re-validated against the OWNING key's
+    # live state on every run.
     allow_shell = bool(getattr(job, "allow_shell", False))
     downgraded = allow_shell and not _shell_still_authorized(job)
     restricted = not allow_shell or downgraded
     if downgraded:
-        # Never a silent degrade: the job asked for shell and is not getting it, so
-        # the downgrade is reported in the log AND in the run's own output. The run
-        # still proceeds restricted, the same default a no-opt-in coder job gets; a
-        # downgrade does not fail the whole job.
+        # Never a silent degrade: the downgrade is reported in the log AND in the
+        # run's own output. The run still proceeds restricted; a downgrade does not
+        # fail the whole job.
         logger.warning(
             "job %r (%s) opted into shell, but %s; running RESTRICTED (no "
             "run_shell). Trigger a manual run or any edit as the owner to "
@@ -709,10 +658,9 @@ def _run_coder(job: Job, *, engine=None) -> str:
                          f"owner to repair it automatically, or re-create it "
                          f"with a live key.")
         if cwd_confined and requested:
-            # Reported the same way as the shell note above: the run did something
-            # narrower than configured, and the job output is where a user looks. The
-            # requested path is echoed back only in this job's own result, to the
-            # job's owner, never onto a shared surface.
+            # Reported the same way as the note above. The requested path is echoed
+            # back only in this job's own result, to the job's owner, never onto a
+            # shared surface.
             notes.append("[jobs] This job requested a working directory its "
                          "creating key is not allowed to choose, so it ran in "
                          "the project root instead. Re-create it with the owner "
@@ -727,10 +675,8 @@ def _run_coder(job: Job, *, engine=None) -> str:
             try:
                 close()
             except Exception as e:
-                # Surface, rather than silence, a failed cleanup: a hung subprocess or
-                # leaked handle would otherwise accumulate across scheduled runs while
-                # the job still reports success. Best-effort: the job result is
-                # unaffected.
+                # Surface, rather than silence, a failed cleanup. Best-effort: the job
+                # result is unaffected.
                 logger.warning("coder agent cleanup failed: %s", e)
 
 
@@ -739,12 +685,10 @@ def _coder_backend(job: Job):
     localm server.
 
     URL resolution, most-authoritative first: LOCALM_SELF_URL (the live server
-    publishes its OWN bind coordinates here at scheduler start, so an
-    auto-bumped port is honoured), else the configured port. The old hardcoded
-    :8080 was simply wrong - the default server binds 8642 - so a shipped coder
-    job never reached the server on a stock install (memory-audit 2026-07-02).
-    In open mode any api_key is accepted; in keyed mode the launcher injects
-    LOCALM_API_KEY, so that is preferred over the open-mode placeholder."""
+    publishes its OWN bind coordinates here at scheduler start, so an auto-bumped
+    port is honoured), else the configured port. In open mode any api_key is
+    accepted; in keyed mode the launcher injects LOCALM_API_KEY, so that is
+    preferred over the open-mode placeholder."""
     import os
 
     from localm.plugins.coder.backends.http import HTTPBackend

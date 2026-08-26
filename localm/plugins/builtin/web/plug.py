@@ -15,17 +15,15 @@ explicit ``/search-web`` command, the per-conversation toggle, or a
 GUI-approved model request); these endpoints do not re-prompt. Domain rules and
 the private-address guard always apply.
 
-Search results and fetched page text are UNTRUSTED content (LM-DA-014): the
-caller only approved the REQUEST, never the bytes a remote page chooses to
-return, and both callers here (the GUI chat and the scheduled-job web tool,
-``jobs/webtool.py``) splice this text straight into the model's message list.
-Both backends tokenise with special-token parsing on, so a literal chat-
-template control token in a page/snippet is parsed as a REAL role delimiter and
-can forge a turn. ``neutralise()`` defangs that here, at the boundary, so every
-consumer gets defanged content by construction - the same fix already applied
-to RAG's retrieved chunks (``rag/plug.py._neutralise_hits``, LM-DA-SEC-03).
-Note ``jobs/webtool.py`` calls ``localm.netpolicy`` directly rather than these
-HTTP endpoints, so it neutralises its own copy at that boundary instead.
+Search results and fetched page text are UNTRUSTED content: the caller approved
+the REQUEST, never the bytes a remote page returns, and both callers here (the
+GUI chat and the scheduled-job web tool, ``jobs/webtool.py``) splice this text
+straight into the model's message list. Both backends tokenise with
+special-token parsing on, so a literal chat-template control token in a
+page/snippet is parsed as a REAL role delimiter and can forge a turn.
+``neutralise()`` defangs that here, at the boundary, so every consumer gets
+defanged content. ``jobs/webtool.py`` calls ``localm.netpolicy`` directly rather
+than these HTTP endpoints, so it neutralises its own copy at that boundary.
 """
 
 from __future__ import annotations
@@ -45,14 +43,11 @@ _router = APIRouter()
 
 def _neutralise_results(results: list) -> list:
     """Defang chat control / frame tokens in each search result's title/snippet
-    before it leaves this boundary (LM-DA-014, indirect prompt injection - the
-    same bug class LM-DA-SEC-03 fixed for RAG's retrieved chunks, mirrored here
-    via ``rag/plug.py._neutralise_hits``). A search result is UNTRUSTED content:
-    a page author who wants their result to poison the chat can embed a control
-    token (``<|im_start|>system ...``) or a frame marker in the title/snippet,
-    which both backends' tokenizers parse as a real role delimiter once spliced
-    into the prompt. ``url`` is a locator, not prose, and is left untouched -
-    like RAG's source/pos/score metadata."""
+    before it leaves this boundary. A search result is UNTRUSTED content: a page
+    author can embed a control token (``<|im_start|>system ...``) or a frame
+    marker in the title/snippet, which both backends' tokenizers parse as a real
+    role delimiter once spliced into the prompt. ``url`` is a locator, not prose,
+    and is left untouched."""
     for r in results:
         if isinstance(r, dict):
             if isinstance(r.get("title"), str):
@@ -82,9 +77,8 @@ async def web_search_endpoint(req: WebSearchRequest):
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     loop = asyncio.get_running_loop()
-    # Defanging runs INSIDE the executor with the search itself. It is pure CPU
-    # over remote-controlled text, so on the event loop it is a whole-server
-    # stall, not a slow request - see the fetch handler below.
+    # Defanging runs INSIDE the executor with the search itself: it is unbounded
+    # CPU over remote-controlled text and must not run on the event loop.
     results = await loop.run_in_executor(
         get_plugin_executor(),
         lambda: _neutralise_results(
@@ -102,11 +96,9 @@ async def web_fetch_endpoint(req: WebFetchRequest):
     max_chars = max(500, min(req.max_chars, 60_000))
 
     def _fetch_and_defang():
-        # neutralise() belongs in the SAME executor call as the fetch. Both the
-        # URL and the bytes are attacker-controlled (under net_mode=allow the
-        # model picks the URL, so a poisoned page can chain into a fetch of the
-        # attacker's own), and defanging is unbounded CPU over that text - on the
-        # event loop it stalls every other request, not just this one.
+        # neutralise() runs in the SAME executor call as the fetch: both the URL
+        # and the bytes are attacker-controlled, and defanging is unbounded CPU
+        # over that text.
         final_url, text = fetch_text(req.url)
         return final_url, neutralise(text[:max_chars]), len(text) > max_chars
 

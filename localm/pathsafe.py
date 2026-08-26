@@ -2,11 +2,10 @@
 """Filesystem path-confinement helpers shared by the kernel GUI and plugins.
 
 These guarantee a user-supplied name stays directly inside a known base
-directory. They are backend-agnostic (no media/ComfyUI knowledge) - the kernel's
-session-log browser and the media plugins (image/music/video) all use them, so
-they live here rather than being duplicated per caller.
+directory. They are backend-agnostic (no media/ComfyUI knowledge): the kernel's
+session-log browser and the media plugins (image/music/video) all use them.
 
-Four shapes, deliberately distinct:
+Four distinct shapes:
 
 * ``confined_name`` - one flat basename, HTTP call sites. Raises HTTPException.
 * ``confined_under`` - a possibly NESTED relative path, non-HTTP call sites
@@ -41,15 +40,14 @@ def confined_name(base: Path, name: str) -> Path:
 
     Blocklisting separators is not enough on Windows: a drive-relative name like
     ``C:evil`` joins to ``C:evil`` (outside *base*), and an absolute name
-    replaces the join entirely. We verify the *resolved* path's parent is *base*
-    and the basename is unchanged, which also rejects ``..`` and nested subpaths
-    AND, as a side effect, an OS-level alias substitution (an NTFS 8.3 short
-    name resolving to a pre-existing, differently-named file: the resolved
+    replaces the join entirely. This verifies the *resolved* path's parent is
+    *base* and the basename is unchanged, which also rejects ``..`` and nested
+    subpaths AND, as a side effect, an OS-level alias substitution (an NTFS 8.3
+    short name resolving to a pre-existing, differently-named file: the resolved
     name differs from the requested one, so this check catches it without any
-    dedicated alias-detection logic - narrower than
+    dedicated alias-detection logic). It is narrower than
     model_manager/gguf.py's ``_safe_models_filename``, which additionally
-    accepts a case-only variant of an existing name; this function does not,
-    which is a minor strictness difference, not a security gap).
+    accepts a case-only variant of an existing name; this function does not.
 
     Reserved characters (``WINDOWS_RESERVED_NAME_CHARS`` above) are rejected
     LEXICALLY, before any filesystem call - ':' is the one with a live
@@ -57,9 +55,7 @@ def confined_name(base: Path, name: str) -> Path:
 
     Windows reserved device names (``con``, ``nul``, ``com1`` ...) are NOT
     specially rejected: they pass as ordinary basenames and resolve directly
-    inside *base*, so confinement still holds for them. Blocking device names is
-    deliberately not done here - it is not required for confinement and would
-    reject otherwise-legitimate names."""
+    inside *base*, so confinement still holds for them."""
     if name != Path(name).name or name in ("", ".", ".."):
         raise HTTPException(400, "Invalid file name")
     if set(name) & WINDOWS_RESERVED_NAME_CHARS:
@@ -85,21 +81,19 @@ def confined_under(base: Path, relpath: str) -> Path:
     """Join *relpath* under *base* and guarantee the result stays strictly inside
     it, raising ``ValueError`` when it would not.
 
-    Two deliberate differences from :func:`confined_name`, both required by the
-    callers this exists for:
+    Two differences from :func:`confined_name`:
 
     * NESTING IS ALLOWED. ``sub/dir/file.png`` is fine, because ComfyUI's own
       ``subfolder`` field legitimately nests an output one level down. Only
       escape is rejected, not depth.
     * It raises ``ValueError``, not ``fastapi.HTTPException``, so non-HTTP call
       sites (the media clients, CLI and updater code) can use it without
-      pretending a filesystem decision is an HTTP one.
+      turning a filesystem decision into an HTTP one.
 
     The lexical rejections run BEFORE any filesystem call, so a hostile
     component never reaches a syscall. Backslash is treated as a separator on
     every platform, matching ``_apply_update._unsafe_member``: a POSIX filename
-    may legally contain one, but splitting it can only ever confine further, and
-    a uniform rule beats a platform-conditional one.
+    may legally contain one, but splitting it can only ever confine further.
 
     Rejected: an empty result, an absolute component (which would REPLACE the
     base entirely under pathlib's join), a drive-qualified component (``C:evil``
@@ -112,8 +106,8 @@ def confined_under(base: Path, relpath: str) -> Path:
     the last one - a resolved name that does not match the requested one (an
     OS-level alias substitution: an NTFS 8.3 short name resolving to a
     pre-existing, differently-named sibling stays strictly under *base*, so
-    containment alone would not catch it; matches :func:`confined_name`'s own
-    ``resolved.name != name`` check, generalised to every nesting level since a
+    containment alone would not catch it; the same check
+    :func:`confined_name` makes, generalised to every nesting level since a
     subfolder component can be aliased too).
 
     CONTRACT: *base* itself must ALREADY be trusted before it reaches this
@@ -171,17 +165,15 @@ def confined_absolute_or_under(base: Path, raw: str) -> Path:
     rejected as an escape attempt, as long as it resolves inside *base* - for
     callers where an absolute path naming a file already inside the confined
     root is a legitimate, expected input (an LLM coding-agent tool call
-    naming a file by its full path; an MCP ``output_path``), not merely
-    tolerated the way :func:`confined_name`/:func:`confined_under`'s callers
-    treat one. A RELATIVE *raw* is joined onto *base* first, exactly like
-    ``confined_under`` (nesting permitted, only escape rejected).
+    naming a file by its full path; an MCP ``output_path``). A RELATIVE *raw*
+    is joined onto *base* first, exactly like ``confined_under`` (nesting
+    permitted, only escape rejected).
 
     Rejected, in order, before any filesystem call the string would drive: an
-    empty or collapsing result, a UNC or device path (the syscall that would
-    resolve one dials SMB and can hang for minutes - same reasoning as
-    :func:`reject_unsafe_path_string`, judged unconditionally via
-    :func:`is_unc_or_device_path` since *raw* here is caller-supplied, not
-    something the user themselves typed into a folder picker), and a reserved
+    empty or collapsing result, a UNC or device path (judged unconditionally
+    via :func:`is_unc_or_device_path`, since the syscall that would resolve
+    one dials SMB and can hang for minutes, and *raw* here is caller-supplied
+    rather than typed by the user into a folder picker), and a reserved
     character (``WINDOWS_RESERVED_NAME_CHARS``). After resolving: anything
     outside *base*, and - per component, walking back from the resolved leaf,
     exactly like ``confined_under`` - a resolved name that does not match the
@@ -226,13 +218,12 @@ def is_unc_or_device_path(raw: str) -> bool:
     """True if *raw* is Windows UNC or device-namespace syntax: ``\\\\host\\share``,
     ``\\\\.\\PhysicalDrive0``, ``\\\\?\\C:\\``, or the ``//host/share`` spelling.
 
-    Judged by WINDOWS rules on EVERY host, deliberately, and NOT gated on
-    ``os.name``. This is a question about what the string MEANS, not about where
-    it is being evaluated: a name that arrives from a remote source (a HuggingFace
-    ``rfilename``, a ComfyUI filename) should be judged by what it would do on the
-    worst platform, not the running one. It also means a Linux CI run exercises
-    exactly the branch Windows does, instead of the rule going untested until it
-    reaches a Windows box.
+    Judged by WINDOWS rules on EVERY host, and NOT gated on ``os.name``. This is
+    a question about what the string MEANS, not about where it is being
+    evaluated: a name that arrives from a remote source (a HuggingFace
+    ``rfilename``, a ComfyUI filename) is judged by what it would do on the worst
+    platform, not the running one. It also means a Linux run exercises exactly
+    the branch Windows does.
 
     This is the PREDICATE. Whether a given call site should REFUSE such a path is
     a policy question with a different answer per route - see
@@ -244,12 +235,10 @@ def is_unc_or_device_path(raw: str) -> bool:
     UNC prefix, so ``\\/host\\share`` and ``/\\host/share`` are UNC to the OS even
     though neither starts with a doubled separator of one kind. Both
     ``PureWindowsPath(...).drive`` and ``ntpath.splitdrive`` report a UNC drive
-    for them (measured). An earlier revision tested only ``startswith("\\\\\\\\")``
-    or ``startswith("//")`` and returned False for both spellings - a live bypass
-    in precisely the position this predicate exists to guard, since its documented
-    use is remote-supplied values. Reported by the WS7 and WS2 lanes.
+    for them, while a bare ``startswith("\\\\\\\\")`` or ``startswith("//")``
+    test returns False for both spellings.
 
-    ``ntpath`` is used rather than ``os.path`` on purpose: it is the Windows
+    ``ntpath`` is used rather than ``os.path``: it is the Windows
     implementation on every host, which is what "judge by Windows rules
     everywhere" requires, and it is authoritative for spellings not enumerated
     here."""
@@ -270,24 +259,20 @@ def is_mapped_network_drive(raw: str) -> bool:
     per a real ``GetDriveTypeW`` call.
 
     This is NOT a syntax predicate like :func:`is_unc_or_device_path` - a
-    mapped drive is syntactically an ordinary "X:" local path (that function
-    correctly returns False for it: "Z:" IS the local-drive form its own
-    docstring describes), so telling the two apart requires asking the
-    RUNNING MACHINE what "Z:" actually is. That means this function only
-    means anything for a path being evaluated on the host that mapped the
-    drive - it is not a question a remote-supplied string can answer in the
-    abstract the way :func:`is_unc_or_device_path` can, so callers combine
-    the two rather than expecting either to cover both cases.
+    mapped drive is syntactically an ordinary "X:" local path, and that
+    function correctly returns False for it - so telling the two apart
+    requires asking the RUNNING MACHINE what "Z:" actually is. It therefore
+    only means anything for a path being evaluated on the host that mapped the
+    drive, and callers combine the two predicates rather than expecting either
+    to cover both cases.
 
     Windows-only: on any other platform, and for *raw* with no drive-letter
     prefix at all (a UNC path, a relative path, a POSIX path), this always
     returns False without any Win32 call - :func:`is_unc_or_device_path`
     already owns the UNC/device shape.
 
-    Never raises: a Win32 call failure or a drive letter that does not exist
-    on this machine both return False - an absent/inaccessible drive is a
-    plain "not a directory" error for the caller's own next filesystem call,
-    not something this predicate needs to distinguish."""
+    Never raises: a Win32 call failure, or a drive letter that does not exist
+    on this machine, both return False."""
     if os.name != "nt":
         return False
     drive = ntpath.splitdrive(raw)[0]
@@ -304,27 +289,24 @@ def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False,
                                reject_network_drives: bool = False) -> None:
     """Reject a caller-supplied path string LEXICALLY, before any filesystem call.
 
-    This exists because the syscall itself is the vulnerability. ``Path.resolve``
-    on Windows calls ``_getfinalpathname`` (CreateFileW) plus a stat, so a UNC
-    path pointed at an attacker's SMB server makes an outbound connection that
-    Windows AUTO-AUTHENTICATES, surrendering the host's net-NTLMv2 credential -
-    and it completes before any allowlist check downstream can reject the path.
-    It also blocks: measured on a Windows box, a UNC path to a non-routable
-    RFC5737 address stalled 271 seconds before WinError 64, and an unresolvable
-    UNC hostname 9.9 seconds. Inside an ``async def`` that is the whole event
-    loop, per request. So the check has to be pure string work, and it is.
+    The syscall itself is the vulnerability. ``Path.resolve`` on Windows calls
+    ``_getfinalpathname`` (CreateFileW) plus a stat, so a UNC path pointed at an
+    attacker's SMB server makes an outbound connection that Windows
+    AUTO-AUTHENTICATES, surrendering the host's net-NTLMv2 credential - and it
+    completes before any allowlist check downstream can reject the path. It also
+    blocks: a UNC path to a non-routable address stalls for minutes before
+    failing. Inside an ``async def`` that is the whole event loop, per request.
+    So the check is pure string work and performs no syscall of its own.
 
     ``\\\\``-prefixed input is rejected on EVERY platform, not just Windows: it
     covers UNC (``\\\\host\\share``) and the device namespaces (``\\\\.\\PhysicalDrive0``,
     ``\\\\?\\C:\\``), and a leading backslash pair is not a meaningful prefix for
-    any local path a picker or a config value would carry on POSIX either. A
-    platform-conditional security check is one that rots.
+    any local path a picker or a config value would carry on POSIX either.
 
     ``//``-prefixed input is rejected on Windows ONLY, where it is an equivalent
     spelling of UNC. On POSIX a leading ``//`` is a legal path prefix equivalent
-    to ``/`` (POSIX leaves exactly-two-slashes implementation-defined), so
-    rejecting it here would break a legitimate local folder for no security gain:
-    this function's input is a path the USER named (a folder picker, a configured
+    to ``/`` (POSIX leaves exactly-two-slashes implementation-defined), and this
+    function's input is a path the USER named (a folder picker, a configured
     directory), not remote data.
 
     That platform split is the POLICY for a local path, not the syntax rule. A
@@ -332,10 +314,9 @@ def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False,
     :func:`is_unc_or_device_path` directly and refuse unconditionally, or
     :func:`confined_under`, which rejects any leading ``/`` on every platform.
 
-    *reject_network_drives*, OFF by default (matches every existing caller and
-    every pre-existing test byte for byte - an ordinary drive letter like
-    ``Q:\\ordinary`` must keep being accepted unless a caller opts in): when
-    True, also refuse *raw* if it names a Windows drive letter that
+    *reject_network_drives*, OFF by default (an ordinary drive letter like
+    ``Q:\\ordinary`` is accepted unless a caller opts in): when True, also refuse
+    *raw* if it names a Windows drive letter that
     :func:`is_mapped_network_drive` reports is actually mapped to a network
     share. This is a POLICY choice, not the SMB-dial-and-hang safety property
     the rest of this function guards - a mapped drive is already connected

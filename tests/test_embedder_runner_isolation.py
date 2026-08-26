@@ -12,7 +12,7 @@ server itself stays up.
 These tests prove the containment property with REAL, uncatchable faults (a
 hard process exit, a genuine abort, and a hang) injected into the worker via
 the LOCALM_EMBEDDER_FAULT_FOR_TEST hook - the same code path a real driver
-abort would take. Modeled directly on tests/test_gguf_runner_isolation.py.
+abort would take.
 """
 
 import logging
@@ -199,15 +199,15 @@ class TestEmbedCrashContainment:
             r.shutdown(grace=0)
 
     def test_embed_dispatch_catches_ordinary_exceptions_without_crashing(self):
-        """Unlike the chat backend's chat_stream (which deliberately lets any
-        OTHER fault propagate uncaught, since generation leaves the model in
-        an unknown state - see llamacpp/_runner.py), the embedder's dispatch
-        loop catches ordinary Python exceptions during 'embed' and reports
-        them as a clean error WITHOUT killing the worker: embedding is
-        stateless per call, so one bad request should not take down a worker
-        that could otherwise keep serving. Reproduced without a real model by
-        sending 'embed' before any 'load' (embedder is None -> AttributeError,
-        caught by the dispatch loop's own except Exception)."""
+        """Unlike the chat backend's chat_stream (which lets any OTHER fault
+        propagate uncaught, since generation leaves the model in an unknown
+        state - see llamacpp/_runner.py), the embedder's dispatch loop catches
+        ordinary Python exceptions during 'embed' and reports them as a clean
+        error WITHOUT killing the worker: embedding is stateless per call, so
+        one bad request must not take down a worker that could otherwise keep
+        serving. Reproduced without a real model by sending 'embed' before any
+        'load' (embedder is None -> AttributeError, caught by the dispatch
+        loop's own except Exception)."""
         r = EmbedderRunner()
         r._spawn()
         try:
@@ -232,9 +232,9 @@ def _vec_for(text: str):
 class _AliveProc:
     """Stands in for the worker process's liveness check ONLY. _wait() polls
     proc.is_alive() whenever a resp_q poll times out (which the deliberate
-    overlap window below guarantees). The correlation-free transport that
-    REG-643 is about - the real mp.Queue pair and the real parent-side
-    put/get - is NOT substituted."""
+    overlap window below guarantees). The correlation-free transport under
+    test - the real mp.Queue pair and the real parent-side put/get - is NOT
+    substituted."""
 
     def is_alive(self):
         return True
@@ -288,11 +288,11 @@ class TestCleanEmbedErrorKeepsTheWorker:
     and keeps serving (embedding is stateless per call - see
     test_embed_dispatch_catches_ordinary_exceptions_without_crashing above). The
     parent sees the SAME RuntimeError for that as for a real crash, so dropping
-    self._runner unconditionally left a LIVE child blocked on req_q.get() with
+    self._runner unconditionally leaves a LIVE child blocked on req_q.get() with
     the model still resident in VRAM: EmbedderRunner has no __del__, GC never
     terminates an mp.Process, and close()/reset_embedder()/release_for_exit() all
-    only reach the CURRENT runner - so the orphan was unreachable, survived even
-    the os._exit/os.execv restart path, and the next call spawned a second worker
+    only reach the CURRENT runner - so the orphan is unreachable, survives even
+    the os._exit/os.execv restart path, and the next call spawns a second worker
     beside it. One leaked worker per clean embed error (24 MB for the default
     bge-small, up to 7.49 GB for a configured Qwen3-Embedding-8B).
     """
@@ -371,12 +371,12 @@ class TestCpuOnlyHidesGpuDevices:
     """cpu_only must hide GPU devices from the runtime BEFORE anything native
     loads - n_gpu_layers=0 alone only controls weight placement, and a large
     enough model's matmul still dispatches to a REGISTERED vendor backend
-    regardless (confirmed live on real ROCm hardware: bge-small never crosses
-    that threshold either way, but Qwen3-Embedding-4B does, and hits the
-    identical rocBLAS/Tensile crash even at n_gpu_layers=0 - issue #749).
-    Runs _runner_main's own dispatch loop directly (no real subprocess - the
-    env-var mechanism needs no GPU hardware to verify, only that it engages
-    before GGUFEmbedder is constructed and is popped before reaching it)."""
+    regardless (bge-small never crosses that threshold either way, but
+    Qwen3-Embedding-4B does, and hits the identical rocBLAS/Tensile crash even
+    at n_gpu_layers=0). Runs _runner_main's own dispatch loop directly (no real
+    subprocess - the env-var mechanism needs no GPU hardware to verify, only
+    that it engages before GGUFEmbedder is constructed and is popped before
+    reaching it)."""
 
     def test_cpu_only_sets_env_before_construction_and_is_popped(self, monkeypatch):
         import queue as _q
@@ -449,15 +449,13 @@ class TestEmbedStderrWrapping:
     """The isolated child's native EMBED-time llama_decode calls must run
     inside ONE dedup_native_stderr() scope spanning the child's whole run of
     "embed" commands, not one scope per call and not around "load" (which
-    already has its own scope inside GGUFEmbedder.__init__ - #993).
+    already has its own scope inside GGUFEmbedder.__init__).
 
-    #963's adversarial follow-up measured live that wrapping each embed()
-    call individually (the first version of this fix, reverted - see
-    embedder.py's embed() docstring) collapses nothing: a typical call (one
-    RAG query, one memory fact) feeds dedup_native_stderr's grouper exactly
-    one line, which flushes RAW the instant that call's own scope closes.
-    The repetition #963 cares about is ACROSS separate embed() RPCs - many
-    small calls in a row emitting the identical native line - so only a
+    Wrapping each embed() call individually collapses nothing: a typical call
+    (one RAG query, one memory fact) feeds dedup_native_stderr's grouper
+    exactly one line, which flushes RAW the instant that call's own scope
+    closes. The repetition worth collapsing is ACROSS separate embed() RPCs -
+    many small calls in a row emitting the identical native line - so only a
     scope spanning MULTIPLE calls lets the grouper actually see the repeat.
 
     Drives _runner_main's own dispatch loop directly (same pattern as
@@ -583,8 +581,8 @@ class TestConcurrentEmbedSerialization:
     the same resp_q.get() and the queue hands each whichever response arrives
     first - the caller can get vectors belonging to a DIFFERENT text (wrong
     length, wrong content), silently corrupting what lands in the semantic-memory
-    and RAG vector stores. The pre-#643 in-process GGUFEmbedder.embed() held an
-    RLock that made this impossible; IsolatedEmbedder.embed() must restore it.
+    and RAG vector stores. The in-process GGUFEmbedder.embed() holds an RLock
+    that makes this impossible; IsolatedEmbedder.embed() must do the same.
 
     Concurrency here is not hypothetical: the singleton is shared by the memory
     inlet (event-loop thread) and background consolidation (a daemon thread),
@@ -652,34 +650,31 @@ class TestConcurrentEmbedSerialization:
 
 class TestNativeSignalCrashDiagnosticsReachDebugLog:
     """The crash-containment tests above prove the parent SURVIVES a native
-    abort and reports it. They say nothing about whether the report is USEFUL,
-    and before this fix it was not: the message told the user to see the debug
-    log for the native stack trace, while a death by native signal
-    (SIGILL/SIGSEGV/SIGABRT inside llama.dll's own load, or the torch/ROCm
-    conflict this worker's VRAM checks are known to hit) never returns to
-    Python at all, so no ``except`` clause in this child could ever write one.
+    abort and reports it. They say nothing about whether the report is USEFUL.
 
-    That is EXACTLY the shape reported in issues 1222 / 1223: ``worker exit
-    -4``, which on Linux is SIGILL (``multiprocessing`` reports ``-N`` for
+    A message telling the user to see the debug log for the native stack trace
+    is wrong for a death by native signal (SIGILL/SIGSEGV/SIGABRT inside
+    llama.dll's own load, or the torch/ROCm conflict this worker's VRAM checks
+    are known to hit): that never returns to Python at all, so no ``except``
+    clause in this child could ever write one. The observable shape is ``worker
+    exit -4``, which on Linux is SIGILL (``multiprocessing`` reports ``-N`` for
     death by signal N), with no trace in either field log.
 
-    MEASURED on this box (not assumed) before writing these tests, because they
-    all depend on it: with faulthandler armed, ``os.abort()`` in a real spawned
-    child writes 686 bytes beginning "Fatal Python error: Aborted" plus the
-    Python frame that entered native code; with it DISARMED the destination file
-    is 0 bytes. That negative control is what makes a pass here evidence of this
-    arming rather than of something else having written the file.
-
-    Ported from tests/test_gguf_runner_isolation.py's class of the same name.
+    Every test here depends on faulthandler arming: with it armed, ``os.abort()``
+    in a real spawned child writes a trace beginning "Fatal Python error:
+    Aborted" plus the Python frame that entered native code; with it DISARMED
+    the destination file is 0 bytes. That negative control is what makes a pass
+    here evidence of this arming rather than of something else having written
+    the file.
     """
 
     def _fault_during_embed(self, monkeypatch):
         """Drive a real worker to a real native abort while it dispatches an
         'embed'. Returns ``(message, trace_path)``.
 
-        The fault env var is set BEFORE ``_spawn()`` deliberately: the child
-        reads it from its OWN ``os.environ``, a snapshot taken at spawn time, so
-        setting it afterwards could never reach the running child."""
+        The fault env var is set BEFORE ``_spawn()``: the child reads it from
+        its OWN ``os.environ``, a snapshot taken at spawn time, so setting it
+        afterwards could never reach the running child."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
         r = EmbedderRunner()
         r._spawn()   # embed() assumes a prior spawn_and_load(); spawn directly
@@ -699,9 +694,9 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         caller must be told WHAT faulted, not merely that something did.
 
         Asserts on the TRACE CONTENT rather than on the exit code or the word
-        "crashed" - both of those were already true BEFORE this fix and are
-        exactly what the field logs show. The trace text is the only thing that
-        distinguishes a captured fault from an uncharacterised one."""
+        "crashed": both of those are equally true of an uncharacterised fault,
+        so the trace text is the only thing that distinguishes a captured fault
+        from one that was not."""
         with caplog.at_level(logging.ERROR, logger="localm"):
             message, _ = self._fault_during_embed(monkeypatch)
 
@@ -740,10 +735,10 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
     def test_no_trace_captured_is_stated_not_implied(self, monkeypatch):
         """When nothing was captured the message must SAY so.
 
-        The pre-fix message asserted a trace was in the debug log whether or not
-        anything had written one, which is what sent the reporter looking for a
-        trace that was never going to be there. Silence about a failed capture
-        is the rule-5 violation; an explicit "none was captured" is not.
+        A message asserting a trace is in the debug log whether or not anything
+        wrote one is what sends the reporter looking for a trace that was never
+        going to be there. Silence about a failed capture is the defect; an
+        explicit "none was captured" is not.
 
         Arming-INDEPENDENT by design (it drops the path the parent would read),
         so unlike its siblings it stays green under the fires-control - it

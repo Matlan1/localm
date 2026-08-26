@@ -373,21 +373,18 @@ class Agent(
     # ------------------------------------------------------------------ #
     #
     # A sub-agent has no user of its own, no confirmation channel of its own,
-    # and nothing can address it from outside; the session that spawned it is
-    # the only thing a human can steer. The two settings a human revokes
-    # MID-RUN are therefore read through the parent at every dispatch rather
-    # than copied into the child once, so a revoke stops a run already under
-    # way.
+    # and nothing can address it from outside. The two settings a human revokes
+    # MID-RUN are read through the parent at every dispatch rather than copied
+    # into the child once, so a revoke reaches a run already under way.
 
     @property
     def auto_approve(self) -> bool:
         """Whether destructive tools skip confirmation.
 
         A child can only ever be NARROWER than its parent: once the parent's
-        approval is revoked the child's own True stops counting. It cannot work
-        the other way round - a parent turning auto-approve back ON does not
-        silently re-approve a child that was deliberately spawned without it,
-        because the child's own value still has to be True as well.
+        approval is revoked the child's own True stops counting, and a parent
+        turning auto-approve back ON does not re-approve a child spawned
+        without it, because the child's own value still has to be True.
         """
         if not self._auto_approve:
             return False
@@ -408,13 +405,11 @@ class Agent(
 
         A child that INHERITED its scope follows the parent's, live - so
         tightening a scope mid-run reaches work already in flight. A child given
-        an EXPLICIT scope keeps it: an explicit child scope is a deliberate
-        narrowing (see inherited_child_kwargs), and following the parent over it
-        would widen the child, the one direction that must never happen.
+        an EXPLICIT scope keeps it (see inherited_child_kwargs).
 
         The inherited copy in ``_scope`` is the floor and is never discarded, so
         a child whose parent reference is gone still confines itself to whatever
-        it inherited rather than silently becoming unscoped.
+        it inherited rather than becoming unscoped.
         """
         if self._scope_inherited:
             parent = getattr(self, "parent", None)
@@ -559,14 +554,9 @@ class Agent(
         """Once per session: say plainly that an active scope does not confine the
         shell tools, when any of them is actually enabled.
 
-        ``--scope`` reads as "this session can only touch these files", and for
-        every file tool it is exactly that. run_shell / run_tests execute a
-        process, which no path-arg check can confine, so they are deliberately
-        left out (_INTENTIONALLY_UNSCOPED). That decision is sound and stays; what
-        was wrong is that it lived only in a source comment, so a user running
-        under --scope got no runtime signal and could reasonably believe a
-        confinement they did not have. Silence about a safety property that does
-        not hold is the failure mode AGENTS.md rule 5 exists to prevent."""
+        ``--scope`` confines every file tool. run_shell / run_tests execute a
+        process, which no path-arg check can confine, so they are left out
+        (_INTENTIONALLY_UNSCOPED) and this says so at runtime."""
         print_warning = _agent.print_warning
         if not self.scope:
             return
@@ -603,14 +593,12 @@ class Agent(
         The new disabled set is a UNION with what is already disabled, never an
         assignment, so a role can only ever REMOVE capability: it cannot hand back
         a tool the parent disabled, nor one a restricted (shareable, non-owner)
-        session forbids. That ordering matters - this runs after
-        _apply_restricted_toolset, so restricted-then-role composes to the
-        intersection of both allowlists rather than whichever ran last.
+        session forbids. Runs AFTER _apply_restricted_toolset, so
+        restricted-then-role composes to the intersection of both allowlists.
 
-        Subtracting from the LIVE registry (like the restricted path above, and
-        for the same reason) means every dynamically registered MCP / plugin /
-        skill tool is denied to a role by default: an allowlist cannot be
-        outflanked by a tool that did not exist when the preset was written.
+        Subtracts from the LIVE registry (like the restricted path above), so
+        every dynamically registered MCP / plugin / skill tool is denied to a
+        role by default.
         """
         TOOL_REGISTRY = _agent.TOOL_REGISTRY
         assert self._role_preset is not None  # guarded at the call site
@@ -627,13 +615,12 @@ class Agent(
     def _apply_inherited_skill_toolset(self) -> None:
         """Carry a spawning parent's active skill restriction into this child.
 
-        Without it, ``allowed-tools: read_file, spawn_agent`` would be a one-line
-        bypass of the whole gate: the skill delegates, and the child - a fresh
-        Agent with no active skill - writes files the skill never declared. Same
-        shape as the scope hole and the role hole ``inherited_child_kwargs``
-        already guards against, so it is applied the same way and in the same
-        place: STRICTLY SUBTRACTIVE, a union with what is already disabled,
-        after every dynamic tool has registered.
+        Without it a child spawned under ``allowed-tools: read_file,
+        spawn_agent`` would be a fresh Agent with no active skill, free to write
+        files the skill never declared. Applied the same way as the scope and
+        role inheritance ``inherited_child_kwargs`` handles: STRICTLY
+        SUBTRACTIVE, a union with what is already disabled, after every dynamic
+        tool has registered.
 
         The skill's own two tools stay reachable so a child can still read the
         skill's bundled files (see SKILL_META_TOOLS).
@@ -648,9 +635,9 @@ class Agent(
     def active_skill_tools(self) -> Optional[frozenset]:
         """The live allowed-tools intersection, or None when nothing is active.
 
-        Public because the spawn path (tools/agents.py) has to read it off the
-        parent to hand it to a child. Expires the same way every other read does,
-        so a stale restriction from an earlier turn is never inherited.
+        Public because the spawn path (tools/agents.py) reads it off the parent
+        to hand it to a child. Expires the same way every other read does, so a
+        stale restriction from an earlier turn is never inherited.
         """
         with self._skill_lock:
             self._expire_active_skill_locked()
@@ -663,13 +650,11 @@ class Agent(
         A property, rather than a plain attribute, so the SETTER can count user
         requests - that count is what retires an active skill's restriction (see
         _activate_skill). loop.py assigns this at exactly the three user entry
-        points (run_task / continue_task / chat) and nowhere else, so observing
-        the assignment gives the turn boundary exactly, with no cooperation
-        needed from loop.py and no hook inside the agentic loop to keep in step.
+        points (run_task / continue_task / chat) and nowhere else, so the
+        assignment marks the turn boundary.
 
-        Observing the ASSIGNMENT and not the VALUE is the point: a user who
-        repeats a request verbatim still starts a new turn, and comparing the
-        strings would silently miss it.
+        The ASSIGNMENT is what counts, not the VALUE: a user who repeats a
+        request verbatim still starts a new turn.
         """
         return self.__dict__.get("_last_user_request_text", "")
 
@@ -687,26 +672,17 @@ class Agent(
         already active, and the dispatch gate is checked on top of (never
         instead of) ``disabled_tools``, so the tools that can actually run are
         ``(registry - disabled_tools) & every active skill's allowed-tools``.
-        That is the same strictly-subtractive invariant roles.py states for role
-        presets, and it exists here for the same reason: a narrowing mechanism
-        that can hand capability BACK is a privilege escalation wearing the
-        clothes of a restriction.
+        Same strictly-subtractive invariant roles.py states for role presets.
 
-        WHY THERE IS NO RELEASE THE MODEL CAN CALL, and why a second use_skill
+        THERE IS NO RELEASE THE MODEL CAN CALL, and a second use_skill
         intersects rather than replaces: a SKILL.md body is UNTRUSTED content
-        (skills.py), so the threat this gate answers is a skill's own
-        instructions steering the model. Any widening the model can reach is
-        therefore a one-line bypass - "release the restriction, then write_file",
-        or "load this other skill that declares nothing, then write_file". The
-        only sound boundary is one the model cannot reach, which is the human's
-        next request: hence the sequence check below.
+        (skills.py). The restriction is retired only by the human's next
+        request, which is what the sequence check below reads.
 
-        An absent or empty allowed-tools arms NOTHING. That is deliberate and
-        backward compatible - the field is optional in the format and most
-        skills omit it, so treating absent as deny-all would break every one of
-        them. It also closes the bypass above rather than opening it: an
-        unrestricted skill contributes no set to intersect, so loading one while
-        a restricted skill is active leaves the restriction exactly as it was.
+        An absent or empty allowed-tools arms NOTHING: the field is optional in
+        the format and most skills omit it. An unrestricted skill contributes no
+        set to intersect, so loading one while a restricted skill is active
+        leaves the restriction exactly as it was.
         """
         allowed = frozenset(t for t in (allowed_tools or ()) if t)
         if not allowed:
@@ -723,9 +699,8 @@ class Agent(
     def _expire_active_skill_locked(self) -> None:
         """Drop the restriction if it belongs to an earlier user request.
 
-        Lazy rather than cleared at a turn boundary: the boundary lives in
-        loop.py's ``_loop``, and expiring on READ needs nothing there at all.
-        Caller must hold ``_skill_lock``.
+        Expires on READ rather than being cleared at a turn boundary. Caller
+        must hold ``_skill_lock``.
         """
         if self._active_skill_seq != self._user_request_seq:
             self._active_skill_tools = None
@@ -735,9 +710,8 @@ class Agent(
     def _skill_gate_denial(self, tool_name: str) -> Optional[str]:
         """The refusal message when an active skill forbids ``tool_name``, else None.
 
-        The enforcement half of ``allowed-tools``. Kept beside the state it reads
-        rather than in the dispatcher so the whole lifetime lives in one place;
-        the dispatcher owns only the branch that acts on the answer.
+        The enforcement half of ``allowed-tools``; the dispatcher owns only the
+        branch that acts on the answer.
         """
         from ..skills import SKILL_META_TOOLS
         with self._skill_lock:

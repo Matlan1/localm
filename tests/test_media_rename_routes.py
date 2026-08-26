@@ -1,21 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Rename routes for the music and video galleries.
 
-Image has had ``/api/imagine/file/{name}/rename`` since the gallery was built;
-music and video did not, so the Studio detail view could not offer the action
-without a backend half. These routes mirror image's exactly, which means they
-inherit its two guards, and BOTH are asserted here rather than assumed from the
-shared shape:
+``/api/music/file/{name}/rename`` and ``/api/video/file/{name}/rename`` mirror
+the image gallery's rename route, including its two guards, both asserted here:
 
   * ``gallery.require_owner`` on the SOURCE - another principal gets 404, the
     same code a missing file returns (no existence oracle).
-  * ``confined_name`` on the CALLER-SUPPLIED DESTINATION - owning the source
-    proves nothing about where it may be written, so traversal is rejected.
+  * ``confined_name`` on the CALLER-SUPPLIED DESTINATION - a traversing
+    destination is rejected even when the caller owns the source.
 
-Every assertion reads the FILESYSTEM before the status code. A rename bug's
-symptom is a file in the wrong place or gone; the status code is a proxy, and
-leading with the proxy is how "409 != 200" gets "fixed" by editing the
-assertion instead of the code.
+Every assertion reads the FILESYSTEM before the status code.
 """
 
 import json

@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Real coverage for LlamaCpp._create_batch's native fill loop (Antigravity-audit).
+"""Real coverage for LlamaCpp._create_batch's native fill loop.
 
-The production _create_batch used to detect a mocked api and short-circuit to a
-decoy call, so the ctypes fill loop - the memory-safety-critical code that writes
-token ids, per-token positions, seq ids and logits flags into native memory - had
-ZERO unit coverage; a regression in it (e.g. positions off by one, or a forgotten
-n_tokens) would stay green under the whole suite. The facade is gone; this asserts
-the real layout the native decoder sees, against a real ctypes-backed batch.
+The fill loop writes token ids, per-token positions, seq ids and logits flags
+into native memory through ctypes. These assert the real layout the native
+decoder sees, against a real ctypes-backed batch.
 """
 
 from unittest.mock import MagicMock, patch
@@ -43,8 +40,8 @@ def test_fill_logits_on_every_token_when_not_last_only():
 
 
 def test_batch_freed_when_mid_generation_growth_raises():
-    """AUDIT LOW: llama_batch_init allocates native arrays; if the mid-generation
-    context-growth re-prefill raises, the batch must still be freed (not leaked)."""
+    """llama_batch_init allocates native arrays; when the mid-generation
+    context-growth re-prefill raises, the batch must still be freed."""
     llm = _bare_llama()
     llm._cached_tokens = [1, 2, 3]
     llm._ctx_capacity = 10

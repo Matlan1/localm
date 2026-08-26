@@ -5,26 +5,26 @@ switch_engine picks an idle victim, then `await`s its unload (an executor call -
 an event-loop yield). During that yield a CONCURRENT remover (another API load
 that picked the SAME idle victim - get_engine loads with preempt=False so they
 coexist - or an idle/explicit unload) may have already dropped the victim from
-`_engines`/`_engines_lru`. The removal step then used a bare
-`del _engines[evict_name]` / `_engines_lru.remove(evict_name)`, which raises
-KeyError/ValueError and surfaces as an HTTP 500 with a traceback (plus a leaked
-`_inference_sems` entry). This pins the guarded removal.
+`_engines`/`_engines_lru`. A bare `del _engines[evict_name]` /
+`_engines_lru.remove(evict_name)` then raises KeyError/ValueError and surfaces
+as an HTTP 500 with a traceback (plus a leaked `_inference_sems` entry). This
+pins the guarded removal.
 
 The concurrent removal is simulated deterministically by the victim's own
 unload() dropping itself from the registry (exactly what a racing remover does
 during the same await window) and freeing enough VRAM for the incoming load.
 
-The GatedEngine tests further down pin the deeper BUG-9b follow-up: the
+The GatedEngine tests further down pin the deeper case: the
 pin-arrives-during-the-native-unload-await window itself, on every evict/unload
 path. A request pins its engine lock-free (active_requests += 1) AFTER
-get_engine's active_requests==0 check has passed (AUDIT-CRIT-1 keeps the pin
-synchronous), so a QUEUED request could pin the victim DURING the unload await and
-get it freed out from under it, then silently auto-reloaded (VRAM
-over-subscription / a tight-box 500). The fix detaches the eviction victim from
-the live registry BEFORE the free and flags the kept-registered unload paths
-`unloading`, so get_engine/switch_engine's fast paths refuse an engine that is
-being freed - WITHOUT taking the victim's own semaphore (which would reintroduce
-the two-switch lock-ordering deadlock AUDIT-CRIT-1 warns about).
+get_engine's active_requests==0 check has passed (the pin is synchronous), so a
+QUEUED request can pin the victim DURING the unload await and get it freed out
+from under it, then silently auto-reloaded (VRAM over-subscription / a tight-box
+500). The eviction victim is detached from the live registry BEFORE the free,
+and the kept-registered unload paths are flagged `unloading`, so
+get_engine/switch_engine's fast paths refuse an engine that is being freed -
+WITHOUT taking the victim's own semaphore, which would reintroduce a two-switch
+lock-ordering deadlock.
 """
 
 import asyncio

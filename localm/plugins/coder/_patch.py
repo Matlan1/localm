@@ -169,7 +169,7 @@ def apply_diff(original_text: str, diff_text: str) -> str:
 
     orig = original_text.splitlines()
     result: List[str] = list(orig)
-    offset = 0  # cumulative line-count delta from previously applied hunks
+    offset = 0  # cumulative line-count delta from hunks already applied
 
     for idx, hunk in enumerate(hunks):
         hint_with_offset = hunk.old_start - 1 + offset

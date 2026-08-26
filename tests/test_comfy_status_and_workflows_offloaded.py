@@ -1,26 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GET /v1/comfy/status and GET/POST/DELETE /api/{media}/workflows ran
-synchronous blocking I/O directly on the event-loop thread - the same REG-638
-class already fixed for the /comfy-models pickers (see
-test_comfy_models_offloaded_638.py's docstring for the mechanism).
+"""GET /v1/comfy/status and GET/POST/DELETE /api/{media}/workflows must not run
+synchronous blocking I/O on the event-loop thread.
 
-get_comfy_status called _comfy_alive(url, timeout=1.0) - a synchronous
-urllib.request.urlopen - inline. Reachable live: bind a real TCP listener that
-accepts a connection and never answers, point comfy_api_url at it, and a
-concurrent unrelated request stalls for the same ~1s the probe waits out
-(verified live against this exact mechanism before writing this test).
+get_comfy_status calls _comfy_alive(url, timeout=1.0) - a synchronous
+urllib.request.urlopen. Run inline, a real TCP listener that accepts a
+connection and never answers stalls every concurrent unrelated request for the
+same ~1s the probe waits out.
 
-The workflows routes called list_workflows()/selected_name() inline: an
-uncached directory glob + a stat() per file, plus a config.json read (on
-Windows, load_config can hit a documented ~1s antivirus/indexer retry -
-config.py's _replace_atomic docstring). selected_name() was ALSO called
-twice per request (once inside list_workflows, once again in the route),
-doubling that cost.
+The workflows routes call list_workflows()/selected_name(): an uncached
+directory glob plus a stat() per file, plus a config.json read (on Windows,
+load_config can hit a ~1s antivirus/indexer retry - config.py's
+_replace_atomic docstring). selected_name() was ALSO called twice per request
+(once inside list_workflows, once again in the route), doubling that cost.
 
-Oracle (same as test_comfy_models_offloaded_638.py): asyncio.get_running_loop()
-succeeds only on the event-loop thread and raises RuntimeError in a
-threadpool worker. A probe planted at the blocking call site records which
-thread the real work actually ran on - deterministic, no timing, no sleeps.
+Oracle: asyncio.get_running_loop() succeeds only on the event-loop thread and
+raises RuntimeError in a threadpool worker. A probe planted at the blocking call
+site records which thread the real work ran on - deterministic, no timing, no
+sleeps.
 """
 
 from __future__ import annotations
@@ -146,18 +142,13 @@ def test_list_workflows_route_does_not_read_on_the_event_loop(tmp_path, monkeypa
 
 
 def test_list_workflows_route_only_loads_config_once(tmp_path, monkeypatch):
-    """The double load_config() this fix removed, proven directly: exactly
-    one selected_name() call (and so one load_config() call THROUGH THIS
-    MODULE) for a GET, not two.
+    """A GET makes exactly one selected_name() call (and so one load_config()
+    call THROUGH THIS MODULE), not two.
 
     Counts calls to media_workflows.selected_name specifically, not a global
-    load_config() total - auth (require_auth_enabled), the plugin engine
-    (_enabled_set), and comfy's own default_api_url all call load_config()
-    independently of this fix on the same request (measured: 3 such calls on
-    a fresh app), and asserting a global count would make this test fail on
-    any unrelated future change to those, not just a regression in the
-    property this test actually exists to pin - the single load inside
-    _list_and_selected."""
+    load_config() total: auth (require_auth_enabled), the plugin engine
+    (_enabled_set) and comfy's own default_api_url each call load_config() on
+    the same request."""
     import localm.media_workflows as mw
 
     calls = []
@@ -257,16 +248,15 @@ def test_upload_workflow_route_does_not_write_on_the_event_loop(tmp_path, monkey
 
 
 def test_routes_serialize_concurrent_delete_and_list_via_real_http(tmp_path, monkeypatch):
-    """The exact scenario an adversarial review confirmed live (2026-08-05): a
-    concurrent DELETE racing a GET's listing raised an unhandled
-    FileNotFoundError -> 500, because run_in_threadpool let the two requests'
-    bodies genuinely interleave on separate OS threads where before they were
-    atomic relative to each other on the single event loop.
+    """A concurrent DELETE racing a GET's listing raises an unhandled
+    FileNotFoundError -> 500 when run_in_threadpool lets the two requests'
+    bodies genuinely interleave on separate OS threads, where on the single
+    event loop they were atomic relative to each other.
 
-    Drives the REAL router through REAL concurrent HTTP requests (real
-    threads hitting the same TestClient), not a scripted single-threaded
-    interleaving - proving the routes themselves acquire _lock_for, not just
-    that the helper function does when used correctly in isolation."""
+    Drives the REAL router through REAL concurrent HTTP requests (real threads
+    hitting the same TestClient), not a scripted single-threaded interleaving,
+    so it proves the routes themselves acquire _lock_for and not just that the
+    helper function does when used correctly in isolation."""
     import threading
 
     import localm.media_workflows as mw

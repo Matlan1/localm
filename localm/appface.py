@@ -3,10 +3,8 @@
 address, View logs, Restart, Stop - presented natively per OS so the localm
 server reads as a real background app instead of a python.exe console.
 
-Now: a Windows tray icon via the Win32 API through ctypes (NO dependency - the
-llama.cpp-binding ethos: bind thinly to a shipped system API, do not import an
-unknown wrapper). Later: a small styled Tk control window on Linux (bundled
-stdlib Tk), so Linux gets a nice server app too.
+Now: a Windows tray icon via the Win32 API through ctypes, with no dependency.
+Later: a small styled Tk control window on Linux (bundled stdlib Tk).
 
 Everything here is best-effort and fully guarded: the control surface is a
 convenience layered on the server, so a failure to show it must NEVER stop the
@@ -62,10 +60,10 @@ def copy_to_clipboard(text: str) -> bool:
 
 def _native_window_allowed_by_preference() -> bool:
     """Has the user explicitly turned the app window off (config key
-    desktop_window_mode == "browser")? Defaults to True (allowed) on any
-    read failure - a config problem must never silently disable a feature
-    the user did not ask to disable, same posture run_native_window's own
-    desktop_window_quit_on_close read already uses. Never raises."""
+    desktop_window_mode == "browser")? Defaults to True (allowed) on any read
+    failure, so a config problem never silently disables a feature the user did
+    not ask to disable - the same posture run_native_window's own
+    desktop_window_quit_on_close read uses. Never raises."""
     try:
         from localm.config import load_config
         return load_config().get("desktop_window_mode", "auto") != "browser"
@@ -109,47 +107,39 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     """Open *url* in a native OS webview window, BLOCKING the calling thread
     for the lifetime of the app.
 
-    MUST be called from the process's actual main thread. This is not a
-    convention this codebase chose - it is pywebview's own hard requirement,
-    confirmed against the installed 6.2.1 source (webview/__init__.py):
-    ``if threading.current_thread().name != 'MainThread': raise
-    WebViewException(...)``, unconditional, no override flag. A caller that
-    wants this AND has something else already occupying the main thread (the
-    server, in gui/cli.py's fresh-launch path) must move that something else
-    to its own background thread first - see that call site's comment for
-    how localm does it.
+    MUST be called from the process's actual main thread: pywebview raises
+    ``WebViewException`` unconditionally otherwise
+    (``if threading.current_thread().name != 'MainThread'`` in
+    webview/__init__.py, with no override flag). A caller that wants this AND has
+    something else already occupying the main thread (the server, in gui/cli.py's
+    fresh-launch path) must move that something else to its own background thread
+    first.
 
     *hide_on_close* (default True - the fresh-launch, this-process-owns-the-
-    server case): the window's own close button HIDES it instead of
-    destroying it - matching this module's existing _StatusWindow/_WinTray
-    precedent ("closing the window never stops the server: hide to tray...
-    Stop is the deliberate quit") - so a later show_native_window() (the
-    tray/status "Open" action) can bring the SAME window back, rather than
-    needing a second webview.start() call this codebase has no free main
-    thread to run (the caller of show_native_window is the tray/Tk thread,
-    never the main thread). The user's own "quit when the app window is
-    closed" preference (config key desktop_window_quit_on_close, off by
-    default) overrides this per close: when on, the window closes for real
-    and *on_quit* (if given - the same action the tray's Stop button
-    triggers) is invoked. Pass False for a window that owns no server of its
-    own to keep alive (gui/cli.py's attach-to-an-already-running-instance
-    path) - it then just closes normally on its own close button, no
-    hiding, no setting lookup, no on_quit: closing it is that process's
-    entire purpose. This function only actually returns once the window is
-    genuinely destroyed - via close_native_window() (normally the server's
-    own shutdown path, once it has genuinely stopped), the user's own close
-    with the quit preference on, or hide_on_close=False's plain close - or
-    the window fails to load at all.
+    server case): the window's own close button HIDES it instead of destroying
+    it, matching this module's _StatusWindow/_WinTray behaviour, so a later
+    show_native_window() (the tray/status "Open" action) can bring the SAME
+    window back rather than needing a second webview.start() call, which has no
+    free main thread to run on (the caller of show_native_window is the tray/Tk
+    thread, never the main thread). The user's own "quit when the app window is
+    closed" preference (config key desktop_window_quit_on_close, off by default)
+    overrides this per close: when on, the window closes for real and *on_quit*
+    (if given - the same action the tray's Stop button triggers) is invoked. Pass
+    False for a window that owns no server of its own to keep alive (gui/cli.py's
+    attach-to-an-already-running-instance path); it then closes normally on its
+    own close button, with no hiding, no setting lookup and no on_quit. This
+    function returns only once the window is genuinely destroyed - via
+    close_native_window() (normally the server's own shutdown path, once it has
+    genuinely stopped), the user's own close with the quit preference on, or
+    hide_on_close=False's plain close - or the window fails to load at all.
 
-    Returns True only once the window actually LOADED the page (via
-    pywebview's own ``window.events.loaded``, confirmed against the real
-    installed API to wrap a plain threading.Event with .wait(timeout) - not
-    merely "pywebview imported and create_window() didn't raise"), watched
-    from a short-lived helper thread since the calling thread itself is busy
-    inside the blocking webview.start() call by the time loading happens.
-    Returns False whenever a real, loaded window cannot be confirmed (extra
-    absent, WebView2/WebKitGTK missing or broken, window never loaded) so the
-    caller can fall back to webbrowser.open. NEVER raises.
+    Returns True only once the window actually LOADED the page, via pywebview's
+    ``window.events.loaded`` (a plain threading.Event with .wait(timeout)),
+    watched from a short-lived helper thread since the calling thread is busy
+    inside the blocking webview.start() call by then. Returns False whenever a
+    real, loaded window cannot be confirmed (extra absent, WebView2/WebKitGTK
+    missing or broken, window never loaded) so the caller can fall back to
+    webbrowser.open. NEVER raises.
     """
     global _native_window
     if "pytest" in sys.modules:
@@ -613,7 +603,7 @@ def start_app_face(*, name: str = "LocaLM", url: str, logfile=None,
         return _AppFaceHandle(window if win_ok else None, tray if tray_ok else None)
     except Exception:
         # Best-effort: no control surface just means the server runs headless. Log
-        # the reason so a missing tray/window is diagnosable, not silent.
+        # the failure so a missing tray/window is diagnosable, not silent.
         logger.debug("appface: control surface unavailable (start failed)",
                      exc_info=True)
         return None

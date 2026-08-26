@@ -3,10 +3,10 @@
 
 The lazy grammar leaves generation unconstrained until the output matches a
 trigger pattern (e.g. <tool_call>), then the GBNF grammar enforces from that
-point - so thinking models think freely and a started tool call must be valid
-(REC-CODER-GRAMMAR, decided + live-verified 2026-07-02). These tests pin the
-sampler-chain selection, the never-silently-strict fallbacks, and the server
-API contract; the @integration test proves activation on a real model."""
+point, so thinking models think freely and a started tool call must be valid.
+These tests pin the sampler-chain selection, the never-silently-strict
+fallbacks, and the server API contract; the @integration test proves activation
+on a real model."""
 
 from unittest.mock import MagicMock, patch
 

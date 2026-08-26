@@ -1,72 +1,51 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Thread-pool saturation detectability - the third part of the
-thread-pool-exhaustion fix (dev-notes/decisions-2026-07-30-release-gate.md,
-Q2): subprocess-isolating HFBackend (see backends/_hf_runner.py) closes the
-one KNOWN cause of a permanently-leaked ``run_in_executor(None, ...)``
-thread, but a pool can still fill up under ordinary load (a burst of
-legitimate work, or a future native call this fix did not anticipate) with
-no signal to an operator beyond "the server mysteriously got slow, then
-stopped responding". This module makes that state visible rather than
-silent (AGENTS.md rule 5) - a WARNING once saturation has held for a
-sustained window, plus the live numbers on ``GET /debug/stacks`` - without
-inventing a hard gate that could reject legitimate load: this is an
-observability signal, not a new failure mode.
+"""Thread-pool saturation detectability.
 
-**THIS MODULE BUYS OBSERVABILITY, NOT RECOVERY - state this explicitly so it
-is never assumed.** A wedged worker in the ``default``/``plugin`` pools below
-still hangs FOREVER after this module reports it: nothing here cancels the
-stuck call, nothing frees the token/slot it holds, and the one HTTP request
-depending on it never returns. Neither pool has any timeout/cancellation
-mechanism as of this writing - that remains a genuinely separate, unresolved
-design question for them (per-site or global, what happens to a
-half-finished write).
+A pool can fill up under ordinary load (a burst of legitimate work, or a native
+call that blocks) with no signal to an operator beyond "the server got slow,
+then stopped responding". This module makes that state visible: a WARNING once
+saturation has held for a sustained window, plus the live numbers on
+``GET /debug/stacks``. It is an observability signal, not a gate - nothing here
+rejects load.
 
-**UPDATE (follow-up to this module's own original anyio gap): the anyio pool
-specifically is now PARTIALLY covered.** All ~21 ``run_in_threadpool`` call
-sites (config updates, media workflow management, comfy management, coder
-session deletion) now go through
-``localm.inference._threadpool_timeout.run_in_threadpool_bounded`` instead of
-calling ``fastapi.concurrency.run_in_threadpool`` directly, which bounds how
-long the HTTP request depending on a wedged call waits - see that module's
-docstring for the mechanism (calling ``anyio.to_thread.run_sync`` directly
-with ``abandon_on_cancel=True``, since wrapping ``run_in_threadpool`` itself
-in a deadline does nothing - confirmed by direct test, starlette never sets
-that flag). uvicorn is still started with no ``timeout_keep_alive``/
-request-level timeout of its own, and the hang watchdog remains scoped by
-design to a STALLED EVENT LOOP - a genuinely different failure mode, since a
-hung anyio worker does NOT stall the loop - so ``run_in_threadpool_bounded``
-is still the only thing standing between a wedged anyio worker and a
-permanently-hung request, just no longer an absent one.
+**THIS MODULE BUYS OBSERVABILITY, NOT RECOVERY.** A wedged worker in the
+``default``/``plugin`` pools below still hangs FOREVER after this module reports
+it: nothing here cancels the stuck call, frees the token/slot it holds, or
+returns the HTTP request depending on it. Neither pool has any
+timeout/cancellation mechanism.
 
-**This interacts with the saturation watch below in a way worth stating
-explicitly, confirmed by direct test:** abandoning a call via
-``run_in_threadpool_bounded`` releases its anyio ``CapacityLimiter`` token
-IMMEDIATELY, not when the real (still-running) worker thread eventually
-returns - so a single wedged call bounded by that module will never hold
-``anyio_pool_health()``'s ``borrowed_tokens`` at the ceiling long enough to
-trip this module's own sustained-streak WARNING once ITS OWN timeout has
-fired. The two mechanisms are complementary, not redundant: this module
-still catches genuine concurrent BURSTS (many legitimate slow calls at once)
-and anything ``run_in_threadpool_bounded`` does not wrap; the residual,
-truly unrecoverable leak after a bounded call abandons is one permanently-
-stuck OS thread (Python cannot forcibly stop a thread), not a permanently-
-reduced pool capacity - "anyio pool monitored" must still never be read as
-"anyio pool fully protected", but it is no longer "anyio pool unprotected"
-either.
+The anyio pool is PARTIALLY covered elsewhere: every ``run_in_threadpool`` call
+site (config updates, media workflow management, comfy management, coder session
+deletion) goes through
+``localm.inference._threadpool_timeout.run_in_threadpool_bounded``, which bounds
+how long the HTTP request depending on a wedged call waits (it calls
+``anyio.to_thread.run_sync`` directly with ``abandon_on_cancel=True``; wrapping
+``run_in_threadpool`` itself in a deadline does nothing, because starlette never
+sets that flag). uvicorn is started with no ``timeout_keep_alive`` or
+request-level timeout of its own, and the hang watchdog is scoped to a STALLED
+EVENT LOOP, which a hung anyio worker does not cause.
 
-THREE pools are watched, symmetrically, for the same blast-radius reason
-``localm/executor.py``'s own docstring already gives for splitting the first
-two: the asyncio loop's TRUE default executor (every ``run_in_executor(None,
-...)`` call site - GPU/VRAM probes, model load/unload, embeddings,
-count_tokens, and the isolated HF/GGUF runner RPCs), the separate
-``get_plugin_executor()`` pool (RAG/web/voice/coder tool calls), and anyio's
-default worker-thread pool - the ONE FastAPI's own ``run_in_threadpool``
-always uses (confirmed by reading its source: it calls
-``anyio.to_thread.run_sync(func)`` with no per-call limiter override, so
-every one of this codebase's ~21 ``run_in_threadpool`` call sites - config
-updates, media workflow management, comfy management, coder session
-deletion - shares this single pool). Exhaustion in one says nothing about
-the others, so all three are tracked as independent streaks.
+Abandoning a call via ``run_in_threadpool_bounded`` releases its anyio
+``CapacityLimiter`` token IMMEDIATELY, not when the real (still-running) worker
+thread eventually returns, so a single bounded wedged call never holds
+``anyio_pool_health()``'s ``borrowed_tokens`` at the ceiling long enough to trip
+the sustained-streak WARNING below once its own timeout has fired. The two
+mechanisms are complementary: this module still catches genuine concurrent
+BURSTS (many legitimate slow calls at once) and anything
+``run_in_threadpool_bounded`` does not wrap. The residual leak after a bounded
+call abandons is one permanently-stuck OS thread (Python cannot forcibly stop a
+thread), not permanently-reduced pool capacity, so "anyio pool monitored" must
+never be read as "anyio pool fully protected".
+
+THREE pools are watched, symmetrically: the asyncio loop's TRUE default executor
+(every ``run_in_executor(None, ...)`` call site - GPU/VRAM probes, model
+load/unload, embeddings, count_tokens, and the isolated HF/GGUF runner RPCs),
+the separate ``get_plugin_executor()`` pool (RAG/web/voice/coder tool calls),
+and anyio's default worker-thread pool - the ONE FastAPI's own
+``run_in_threadpool`` always uses (it calls ``anyio.to_thread.run_sync(func)``
+with no per-call limiter override, so every ``run_in_threadpool`` call site in
+this codebase shares this single pool). Exhaustion in one says nothing about the
+others, so all three are tracked as independent streaks.
 
 **anyio's pool is NOT a ``concurrent.futures.ThreadPoolExecutor``** - it has
 no ``_threads``/``_work_queue``/``_max_workers`` for ``pool_health()`` to
@@ -77,14 +56,13 @@ read. It exposes a different, PUBLIC introspection surface instead
 
 **And unlike the other two, the anyio limiter cannot be resolved from just
 anywhere.** ``anyio.to_thread.current_default_thread_limiter()`` raises
-``NoEventLoopError`` unless called from INSIDE a running async event loop -
-confirmed by direct test, not assumed. The saturation-watch thread below is
-a plain (non-async) daemon thread, so it cannot fetch the limiter itself; the
-CAPTURED reference must be obtained once from async code (see
-``http_server.py``'s startup, next to where this watch is started) and
-passed in as ``anyio_limiter``. The captured *object* stays valid and live-
-readable from any thread afterward (also confirmed by direct test) - only
-the initial *lookup* needs the running loop, not each later read.
+``NoEventLoopError`` unless called from INSIDE a running async event loop. The
+saturation-watch thread below is a plain (non-async) daemon thread, so it cannot
+fetch the limiter itself; the CAPTURED reference must be obtained once from
+async code (see ``http_server.py``'s startup, next to where this watch is
+started) and passed in as ``anyio_limiter``. The captured *object* stays valid
+and live-readable from any thread afterward - only the initial *lookup* needs
+the running loop, not each later read.
 """
 
 from __future__ import annotations
@@ -104,12 +82,8 @@ def pool_health(executor) -> dict:
     Reads ``_threads``/``_work_queue``/``_max_workers`` - private but
     long-stable ``concurrent.futures.ThreadPoolExecutor`` attributes;
     ``concurrent.futures`` exposes no public equivalent for "how many
-    workers exist and how many items are queued behind them", and this
-    codebase already tolerates the same class of introspection elsewhere
-    (e.g. reading a live GGUF worker's queues for diagnostics). Best-effort:
-    never raises, degrades to a "cannot report" shape instead - a
-    monitoring helper must never be the thing that crashes the server it is
-    watching.
+    workers exist and how many items are queued behind them". Best-effort:
+    never raises, degrades to a "cannot report" shape instead.
 
     ``saturated`` means every worker the pool is allowed to grow to has
     been spawned AND something is still waiting in the queue - i.e. no
@@ -127,11 +101,10 @@ def pool_health(executor) -> dict:
         queued = executor._work_queue.qsize()
     except Exception as e:
         # Collapsing "could not introspect" into the same shape as "genuinely
-        # idle" would let this whole feature go silently blind if a future
-        # Python/uvloop release ever renames these attributes - never trust
-        # in silence (rule 5). A debug line, not a warning: this is a
-        # best-effort diagnostic helper, not a correctness path, so a broken
-        # assumption here should be discoverable, not escalated into noise.
+        # idle" would let this feature go silently blind if a future
+        # Python/uvloop release renamed these attributes. A debug line, not a
+        # warning: this is a best-effort diagnostic helper, not a correctness
+        # path.
         from localm.debuglog import logger as _dbg
         _dbg.debug("pool_health: could not introspect %r (%s: %s)",
                    executor, type(e).__name__, e)
@@ -158,12 +131,10 @@ def anyio_pool_health(limiter) -> dict:
     saturation watch below) cannot fetch one itself, so unlike
     ``default_executor_ref()``'s lazy "not created yet" None, this None means
     "cannot observe this pool AT ALL from here", not "legitimately idle".
-    Both degrade to the same reported shape (never saturated, no counts) -
-    rule 5 is satisfied by the STARTUP capture attempt logging its own
-    failure (see ``http_server.py``), not by this function inventing a
-    different silent shape here; a caller wanting to know WHY a given
-    None-shaped pool is unobservable reads the startup log, not this
-    function's return value.
+    Both degrade to the same reported shape (never saturated, no counts). The
+    STARTUP capture attempt logs its own failure (see ``http_server.py``), so a
+    caller wanting to know WHY a given None-shaped pool is unobservable reads
+    the startup log, not this function's return value.
 
     Same ``{max_workers, threads_spawned, queued, saturated}`` shape as
     ``pool_health()`` (``max_workers`` <- ``total_tokens``, ``threads_spawned``
@@ -208,8 +179,7 @@ def executors_snapshot(loop, anyio_limiter=None) -> dict:
     """``{"default": pool_health(...), "plugin": pool_health(...), "anyio":
     anyio_pool_health(...)}`` - the live payload both the saturation watch
     below and ``GET /debug/stacks`` report, kept as one function so the three
-    can never drift out of sync about which pools exist or what "saturated"
-    means.
+    cannot drift apart about which pools exist or what "saturated" means.
 
     *anyio_limiter* is passed straight to ``anyio_pool_health()`` - None
     (the default) reports anyio's pool as unobservable from here, which is
@@ -224,13 +194,10 @@ def executors_snapshot(loop, anyio_limiter=None) -> dict:
     }
 
 
-# How long a pool must be CONTINUOUSLY saturated before the first WARNING -
+# How long a pool must be CONTINUOUSLY saturated before the first WARNING:
 # long enough that a legitimate burst (several concurrent embed calls, a
-# handful of tool invocations) recovering on its own stays quiet, short
-# enough to warn well before a systemic exhaustion (16 hangs on this box's
-# default pool size) could ever accumulate. A best-effort observability
-# threshold, not a measured/tuned constant - revisit if it proves noisy or
-# too slow to fire in practice.
+# handful of tool invocations) recovering on its own stays quiet, short enough
+# to warn before a systemic exhaustion accumulates.
 _DEFAULT_SATURATION_THRESHOLD = 30.0
 
 
@@ -240,11 +207,9 @@ def start_executor_saturation_watch(loop, *, threshold: float = _DEFAULT_SATURAT
     three pools via ``executors_snapshot`` and warns once a pool has been
     continuously saturated for *threshold* seconds - then drops to DEBUG for
     as long as it stays saturated, so a genuinely stuck pool logs one line
-    every *poll* interval instead of flooding (the log-once-then-throttle
-    lesson this codebase already learned the hard way for the VRAM-probe
-    daemon - see .claude/rules/hard-won-rules.md). Recovering (saturated
-    goes false) resets the streak, so a LATER re-saturation warns again
-    rather than staying silent forever after the first incident.
+    every *poll* interval instead of flooding. Recovering (saturated goes
+    false) resets the streak, so a LATER re-saturation warns again rather than
+    staying silent forever after the first incident.
 
     *anyio_limiter* must be captured from ASYNC code before this call (see
     the module docstring - this thread cannot fetch it itself) and passed
@@ -253,12 +218,9 @@ def start_executor_saturation_watch(loop, *, threshold: float = _DEFAULT_SATURAT
     anyio's pool reports as unobservable for the life of this watch, same as
     if it were never wired in at all - best-effort, never a hard requirement.
 
-    Runs on its own thread (not folded into the existing hang-watchdog
-    poller) because it answers a different question on a different natural
-    cadence - a stalled EVENT LOOP vs a saturated THREAD POOL are
-    independent failure modes with independent detectors, matching how
-    GET /debug/stacks already documents itself as complementing, not
-    replacing, the hang watchdog's file-based capture.
+    Runs on its own thread, not folded into the hang-watchdog poller: a
+    stalled EVENT LOOP and a saturated THREAD POOL are independent failure
+    modes with independent detectors and different natural cadences.
 
     Returns ``(stop_event, thread)`` for teardown, mirroring
     ``_start_hang_watchdog``'s exact shape."""

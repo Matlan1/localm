@@ -1,32 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Model roles for the media plugins: the consumer side of two registry APIs.
 
-Two Phase-1 APIs existed with nothing reading them:
+It joins two registry APIs:
 
-* ``Host.register_model_role(ModelRoleDescriptor)`` (``plugins/engine.py``) let a
-  plugin declare WHICH model types it needs and what to call them. The image,
-  music and video plugins all declare theirs, and the only reader was a GUI
-  route (``GET /api/models/roles``) that listed them for nobody.
+* ``Host.register_model_role(ModelRoleDescriptor)`` (``plugins/engine.py``), by
+  which a plugin declares WHICH model types it needs and what to call them. The
+  image, music and video plugins all declare theirs.
 * the registry's ``model_type`` slice - 'diffusion-unet' / 'text-encoder' /
   'vae' / 'lora' - which the Import-from-ComfyUI scan fills in
-  (``model_manager/scan.py``), and which the media backends never read at all:
-  they resolve models purely from whatever ComfyUI's live ``/object_info``
-  reports.
+  (``model_manager/scan.py``).
 
-This module joins the two. It maps each model-file slot of the active workflow
-to the localm ``model_type`` it holds, pairs those with the plugin's declared
-roles, and looks up the registry's own models of that type. That answers three
-questions the model picker could not answer before:
+Each model-file slot of the active workflow is mapped to the localm
+``model_type`` it holds, paired with the plugin's declared roles, and matched
+against the registry's own models of that type. That answers three questions for
+the model picker:
 
 * what IS this dropdown - "Diffusion model (UNet)" rather than ``unet_name``;
 * is a declared REQUIRED role missing from this workflow entirely;
 * does this box already have a model of the right type registered that ComfyUI
   is not offering (i.e. it lives outside ComfyUI's model folders).
 
-Rule 5 runs through all of it: "ComfyUI could not be asked" is never collapsed
-into "there is nothing here". ``slots=None`` (unreachable) yields ``None`` for
-every ComfyUI-derived answer, while the registry answers - which need no
-ComfyUI - are still returned.
+"ComfyUI could not be asked" is never collapsed into "there is nothing here":
+``slots=None`` (unreachable) yields ``None`` for every ComfyUI-derived answer,
+while the registry answers - which need no ComfyUI - are still returned.
 """
 
 from __future__ import annotations
@@ -54,9 +50,7 @@ def plugin_model_roles(app, plugin: str) -> list:
     manager = getattr(getattr(app, "state", None), "plugin_manager", None)
     if manager is None:
         # "no manager attached" and "this plugin declared none" both yield an
-        # empty list, and only one of them is normal. Say which happened rather
-        # than letting a missing manager read as a plugin that declares nothing
-        # (the same reason http_server carries a sentinel for this state).
+        # empty list, so the log line says which happened.
         from localm.debuglog import logger
         logger.debug("no plugin manager on app.state; model roles for %r "
                      "cannot be read", plugin)
@@ -64,8 +58,8 @@ def plugin_model_roles(app, plugin: str) -> list:
     try:
         roles = manager.get_all_model_roles()
     except Exception:
-        # A broken plugin's descriptor must not take the model picker down with
-        # it; the picker still works from the slots alone. Surfaced, not hidden.
+        # A broken plugin's descriptor does not take the model picker down; it
+        # still works from the slots alone.
         from localm.debuglog import logger
         logger.warning("could not read model roles for plugin %r", plugin,
                        exc_info=True)
@@ -77,18 +71,15 @@ def registry_models_of_type(model_type: str, registry: Optional[dict] = None) ->
     """Registered models of *model_type*, as ``[{"name", "filename"}, ...]``.
 
     ``filename`` is the BASENAME of the registered path, because that is the
-    name ComfyUI reports in an ``/object_info`` combo - it is what makes the two
-    lists comparable. The full path is deliberately NOT returned: ``/api/models``
-    does not expose registry paths either, and nothing on this surface needs
-    one."""
+    name ComfyUI reports in an ``/object_info`` combo, which is what makes the two
+    lists comparable. The full path is NOT returned."""
     from localm.model_manager import _entry_path
     from localm.model_manager.registry import models_of_type
     out = []
     for name, entry in sorted(models_of_type(model_type, registry).items()):
         epath = _entry_path(entry)
         if epath is None:
-            # A malformed entry is skipped rather than crashing the picker, the
-            # same way every other registry consumer routes through _entry_path.
+            # A malformed entry is skipped rather than crashing the picker.
             continue
         out.append({
             "name": name,
@@ -100,8 +91,7 @@ def registry_models_of_type(model_type: str, registry: Optional[dict] = None) ->
 def registry_models_by_type(registry: Optional[dict] = None) -> dict:
     """``{model_type: [{"name", "filename"}, ...]}`` for every component type.
 
-    One registry read for all four types - the caller is a request handler, and
-    four independent loads of the same file is three too many."""
+    One registry read covers all four types."""
     from localm.config import load_registry
     reg = load_registry() if registry is None else registry
     return {t: registry_models_of_type(t, reg) for t in COMPONENT_TYPES}
@@ -111,21 +101,17 @@ def _pair_roles_to_slots(slots: list, roles: list) -> dict:
     """``{slot index: role}`` pairing each slot with a declared role of the SAME
     model_type, positionally within that type.
 
-    Keyed by INDEX rather than ``id(slot)``: identity would silently give the
-    second occurrence the first one's role if a list ever held the same dict
-    twice, and an index cannot alias.
+    Keyed by INDEX rather than ``id(slot)``, so a list holding the same dict
+    twice cannot alias.
 
-    Positional is all that is available: ComfyUI's graph carries no role names,
-    so a plugin declaring two text-encoder roles ('CLIP-L', 'T5/CLIP-G') against
-    a ``DualCLIPLoader``'s two combo inputs can only be matched by order. That is
-    right for the shipped workflows and it is a GUESS for a user's own re-exported
-    graph, which is exactly why the pairing is only ever used to ADD a friendly
-    label: every caller keeps the raw ``input_name`` alongside it, so a wrong
-    guess is a slightly-off caption and never hides what the field really is.
+    The match is POSITIONAL within a model_type: ComfyUI's graph carries no role
+    names, so a plugin declaring two text-encoder roles ('CLIP-L', 'T5/CLIP-G')
+    against a ``DualCLIPLoader``'s two combo inputs is matched by order. The
+    pairing is only ever used to ADD a friendly label; every caller keeps the raw
+    ``input_name`` alongside it.
 
     Surplus slots of a type stay unpaired (role stays None) and surplus roles get
-    no slot; neither is an error - a workflow is free to use more or fewer
-    components than the plugin declares."""
+    no slot; neither is an error."""
     by_type: dict = {}
     for role in roles:
         by_type.setdefault(role.get("model_type"), []).append(role)
@@ -148,23 +134,19 @@ def annotate_slots(slots: Optional[list], roles: list) -> Optional[list]:
     added to each entry. ``None`` in, ``None`` out - "ComfyUI could not be asked"
     survives the annotation instead of turning into an empty list.
 
-    The originals are not mutated: ``workflow_model_slots`` is shared with
-    ``preflight_models``, and a display concern must not edit what generation
-    reads.
+    The originals are NOT mutated; ``workflow_model_slots`` is shared with
+    ``preflight_models``.
 
-    ``installed`` uses ``comfy_client.slot_is_satisfied`` - the SAME rule
-    preflight uses to decide a model is missing - so the picker can never call a
-    slot fine that generation will then refuse."""
+    ``installed`` uses ``comfy_client.slot_is_satisfied``, the same rule
+    preflight uses to decide a model is missing."""
     if slots is None:
         return None
     paired = _pair_roles_to_slots(slots, roles)
     out = []
     for index, slot in enumerate(slots):
         if not isinstance(slot, dict):
-            # A backend broke workflow_model_slots' documented shape. Pass the
-            # entry through rather than 500-ing the whole picker, but SAY so -
-            # an un-annotated row that nobody logged is the hidden-problem shape
-            # rule 5 forbids.
+            # A backend broke workflow_model_slots' documented shape: the entry
+            # is passed through unannotated and a warning is logged.
             from localm.debuglog import logger
             logger.warning(
                 "model-slot entry is %s, not the documented dict shape - "
@@ -192,20 +174,14 @@ def describe_roles(roles: list, slots: Optional[list],
     * ``slot``   - ``{"node_id", "input_name"}`` of the paired slot, else None.
     * ``in_workflow`` - True / False / **None**. None means ComfyUI could not be
       reached, so the active workflow's slots are unknown; False means it was
-      read and this role has no slot in it. Collapsing those two would report a
-      confidently wrong "this workflow does not use a VAE" every time ComfyUI is
-      simply down.
+      read and this role has no slot in it.
     * ``installed`` - whether ComfyUI actually has the file the slot names, or
       None when there is no slot to ask about.
     * ``registry_models`` - this box's registered models of the role's type.
       Independent of ComfyUI, so it is populated even when ComfyUI is down.
     * ``registry_only`` - registered models of this type that ComfyUI is NOT
-      offering for the slot, and ONLY when the slot is unsatisfied. That is the
-      one state where the registry can help: ComfyUI cannot serve what the
-      workflow asks for, and localm knows about models of the right kind sitting
-      outside ComfyUI's model folders. On a slot ComfyUI serves fine there is
-      nothing to say, and saying it anyway (measured: every same-type model you
-      own, under every working slot) drowns the case that matters."""
+      offering for the slot, and ONLY when the slot is unsatisfied. On a slot
+      ComfyUI serves fine this is always empty."""
     from localm.config import load_registry
     reg = load_registry() if registry is None else registry
     paired = _pair_roles_to_slots(slots, roles) if slots is not None else {}
@@ -223,11 +199,8 @@ def describe_roles(roles: list, slots: Optional[list],
         known = registry_models_of_type(mtype, reg) if mtype else []
         installed = None if slot is None else slot_is_satisfied(slot)
         if installed is not False:
-            # Only where ComfyUI has FAILED to serve the slot. MEASURED against a
-            # live server before this gate existed: every same-type model you own
-            # was listed under every satisfied slot too, so the video page
-            # advertised a flux UNet and a music checkpoint as things to go
-            # install. True, useless, and it buried the one case that is neither.
+            # registry_only is populated only where ComfyUI has FAILED to serve
+            # the slot.
             registry_only = []
         else:
             options = {str(o).replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -258,15 +231,12 @@ def resolve_model_roles(slots: Optional[list], roles: list,
     """The whole model-picker payload for one media plugin, in one pass.
 
     ``{"reachable", "slots", "roles", "registry_models"}``. Each media backend
-    exposes a thin binding onto this (``_comfy_model_roles``) so the registry
-    slice is read through the SAME seam the backend already owns, and a future
-    non-ComfyUI backend inherits the shape by implementing one function.
+    exposes a thin binding onto this (``_comfy_model_roles``), so the registry
+    slice is read through the seam the backend already owns.
 
     ``reachable`` is False exactly when *slots* is None (ComfyUI could not be
     asked). ``registry_models`` is returned in BOTH cases: it comes from this
-    box's own registry and needs no ComfyUI at all, so an unreachable ComfyUI
-    still leaves the user with "here is what you have" instead of a blank
-    panel."""
+    box's own registry and needs no ComfyUI at all."""
     reg = registry
     if reg is None:
         from localm.config import load_registry

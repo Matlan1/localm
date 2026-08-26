@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Branch A: deterministic model type-detection, the 'unknown' sentinel, and the
+"""Deterministic model type-detection, the 'unknown' sentinel, and the
 lone-.safetensors parent-dir scan.
 
-Each of these fails on pre-Branch-A master (it is the negative that proves the
-change is real):
-  * pull's HF classifier matches tags EXACTLY, never by substring (MED-15: a tag
-    that merely CONTAINS 'lora'/'vae' no longer misclassifies), and returns
-    'unknown' - not a silent 'llm' - when no hard signal resolves;
+  * pull's HF classifier matches tags EXACTLY, never by substring (a tag that
+    merely CONTAINS 'lora'/'vae' must not misclassify), and returns 'unknown' -
+    not a silent 'llm' - when no hard signal resolves;
   * add_local records a deterministically-detected type, and 'unknown' (not 'llm')
     for an HF dir with no hard signal in config.json;
   * a lone .safetensors beside a config.json + tokenizer registers the DIRECTORY as
@@ -31,10 +29,10 @@ from localm.model_manager.pull import _hf_pipeline_tag_to_type
 
 
 def _backdate(path, seconds=60):
-    """Set path's mtime `seconds` in the past, so sync_models_dir's R45
-    settle check (localm.model_manager.gguf._gguf_recently_written) reads it
-    as settled rather than possibly still mid-copy - these tests are about
-    type detection, not the settle window, and would otherwise flake on the
+    """Set path's mtime `seconds` in the past, so sync_models_dir's settle
+    check (localm.model_manager.gguf._gguf_recently_written) reads it as
+    settled rather than possibly still mid-copy - these tests are about type
+    detection, not the settle window, and would otherwise flake on the
     write-then-immediately-sync timing."""
     old = time.time() - seconds
     os.utime(path, (old, old))
@@ -819,8 +817,8 @@ class TestAddLocalPersistsArchAndExpertCount:
 
 class TestSyncModelsDirBackfillsArchAndExpertCount:
     def test_sync_backfills_a_pre_existing_entry_missing_the_fields(self, isolated_home):
-        # Simulates an entry registered before this feature existed: written
-        # directly via _register with no architecture/expert_count kwargs.
+        # A registry entry lacking architecture/expert_count, written directly
+        # via _register with neither kwarg.
         dest = isolated_home / "models" / "legacy-moe.gguf"
         dest.write_bytes(_build_gguf_bytes_with_expert_count("qwen3moe", 8))
         mm._register("legacy-moe", dest, "local", model_type="llm")

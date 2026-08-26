@@ -5,11 +5,10 @@ This is the un-gameable core of goal mode. The HARNESS runs the command in a
 subprocess and judges success solely by its exit code, so the model cannot
 declare a premature success no matter what it claims in prose.
 
-The primitives live here rather than in ``cli/goal.py`` because the oracle is no
-longer CLI-only: the agent loop runs the same check at its pre-done boundary in
-interactive REPL and GUI sessions (``agent/loop.py``). ``cli/goal.py`` imports
-and re-exports these names, so ``cli._run_verify`` / ``cli._goal_feedback`` stay
-exactly where the CLI and its tests expect them.
+The agent loop runs the same check at its pre-done boundary in interactive REPL
+and GUI sessions (``agent/loop.py``). ``cli/goal.py`` imports and re-exports
+these names, so ``cli._run_verify`` / ``cli._goal_feedback`` stay exactly where
+the CLI and its tests expect them.
 """
 
 from __future__ import annotations
@@ -30,19 +29,15 @@ VERIFY_TIMEOUT_S = 600
 
 
 class VerifyOutcome(tuple):
-    """``(exit_code, output)``, plus the one fact an exit code cannot carry.
+    """``(exit_code, output)``, plus ``launch_failed``.
 
-    Every caller keeps unpacking this as the 2-tuple it has always been. What is
-    added is ``launch_failed``: the command never STARTED, which :func:`run_verify`
-    knows directly (it caught the OSError) and which NO exit code can be trusted
-    to encode. That distinction has to travel out of band because the obvious
-    shortcut is wrong in the dangerous direction: npm returns 127 when a test
-    script's binary is missing, a check that very much RAN and FAILED, and
-    `npm test` is exactly what auto-detection produces. Reading 127 as "could not
-    run" would report a real failure as "nothing was verified" - the mirror image
-    of the bug this module was fixed for.
+    Callers unpack it as a 2-tuple. ``launch_failed`` says the command never
+    STARTED, which :func:`run_verify` knows directly (it caught the OSError) and
+    which no exit code carries: npm returns 127 when a test script's binary is
+    missing, a check that very much RAN and FAILED, and `npm test` is exactly
+    what auto-detection produces.
 
-    A plain tuple (a test double patching ``cli._run_verify``) simply has no such
+    A plain tuple (a test double patching ``cli._run_verify``) has no such
     attribute, and :func:`launch_failed` reads it as False."""
 
     def __new__(cls, code: int, output: str, launch_failed: bool = False):
@@ -67,8 +62,7 @@ def run_verify(command: VerifyCommand, work_dir: Path,
     them into a shell string would break on an interpreter path containing
     spaces. Either way the harness - not the model - runs it, so its exit code is
     an un-gameable judge of success. On a timeout, any output the command
-    produced before the kill is preserved (CODER-2) - this used to be silently
-    dropped, unlike the run_shell tool's own timeout handling."""
+    produced before the kill is preserved."""
     result = run_subprocess(command, work_dir, timeout=timeout,
                             shell_wrap=isinstance(command, str))
     if result.timed_out:
@@ -77,8 +71,8 @@ def run_verify(command: VerifyCommand, work_dir: Path,
             % (timeout, _partial_on_timeout(result))))
     if result.not_found or result.error is not None:
         # The launch itself raised, so this is the ONE place that knows, first
-        # hand, that nothing ran. Say so on the outcome; 125 remains only a
-        # display code, never the evidence (see VerifyOutcome).
+        # hand, that nothing ran. It is recorded on the outcome; 125 remains a
+        # display code, never the evidence.
         return VerifyOutcome(125, "failed to run verification command: %s" % (
             result.error or "command not found"), launch_failed=True)
     return VerifyOutcome(result.returncode,
@@ -95,8 +89,8 @@ def command_text(command: VerifyCommand) -> str:
 def verify_feedback(until_cmd: VerifyCommand, code: int, output: str) -> str:
     """The failure message fed back to the model for another fix attempt.
 
-    Carries the anti-gaming instruction: a weak model's cheapest route to a green
-    check is to weaken the check, so every feedback message says not to."""
+    Carries the anti-gaming instruction: every feedback message tells the model
+    not to weaken the check."""
     tail = (output or "").strip()[-4000:] or "(no output)"
     return (
         f"The verification command `{command_text(until_cmd)}` failed with exit "
@@ -114,25 +108,16 @@ def is_inconclusive(command: VerifyCommand, code: int,
     knowledge only :func:`run_verify` has and no exit code reliably carries. And
     pytest's exit 5 (no tests collected).
 
-    Neither is a failure the model can fix by editing code, so looping on one
-    would burn every retry to no purpose; neither is a pass either, so neither
-    may be reported as one. "Not reported as a pass" is concrete: the caller
-    settles the gate, says plainly that nothing was verified, and records
-    ``last_verify_state == "inconclusive"`` so a programmatic consumer (the GUI's
-    final event) can tell this apart from a green run rather than reading an
-    unqualified ok. ``tool_run_tests`` makes the same distinction for the same
-    reason.
+    Neither is a failure the model can fix by editing code, and neither is a
+    pass. The caller settles the gate, says plainly that nothing was verified,
+    and records ``last_verify_state == "inconclusive"`` so a programmatic
+    consumer (the GUI's final event) can tell this apart from a green run.
+    ``tool_run_tests`` makes the same distinction.
 
-    What is deliberately NOT here: guessing from 125/126/127. Those are the
-    POSIX conventions for "could not execute", but a command that ran perfectly
+    125/126/127 are NOT treated as inconclusive. A command that ran perfectly
     well can return them - npm exits 127 when a test script's binary is missing,
-    and `npm test` is exactly what auto-detection produces. Calling that "could
-    not run, nothing was verified" would hide a real failure, which is the same
-    dishonesty as billing the model for a check that never started, pointed the
-    other way. When the launch genuinely fails we KNOW it, so we do not guess;
-    when we do not know, the check is reported as the failure it looks like and
-    the model gets its retries (it can often fix these: create the missing
-    script, chmod +x, install the dependency)."""
+    and `npm test` is exactly what auto-detection produces - so such a check is
+    reported as the failure it looks like and the model gets its retries."""
     return did_not_start or (code == 5 and "pytest" in command_text(command))
 
 
@@ -159,28 +144,22 @@ def detect_verify_command(cwd: Path) -> Optional[VerifyCommand]:
        evidence of having a test setup (see :func:`_has_project_check`).
 
     The command SHAPE is delegated to ``tools/shell.py``'s ``_detect_test_runner``
-    so the oracle runs exactly what the ``run_tests`` tool would run - one
-    detection, not two that can drift apart. What is added here is the confidence
-    gate: ``_detect_test_runner`` always returns something (it falls back to
-    pytest), which is right for a tool the model asked to call but wrong for an
-    automatic gate. Without the gate, a project with no tests at all would get
-    pytest, exit 5 forever, and the oracle would look broken rather than absent.
+    so the oracle runs exactly what the ``run_tests`` tool would run. What is
+    added here is the confidence gate: ``_detect_test_runner`` always returns
+    something (it falls back to pytest), so without the gate a project with no
+    tests at all would get pytest and exit 5 forever.
 
     The gate asks two things, and BOTH have to hold: does this project have a
-    test setup, and can its runner actually be started here. The second is not
-    theoretical - it is why this repository's own `npm test` became an oracle
-    that could only ever return "failed to run" (see :func:`_has_project_check`).
+    test setup, and can its runner actually be started here (see
+    :func:`_has_project_check`).
     """
     from .project_config import ProjectConfigUnreadable, load_project_config
     try:
         configured = load_project_config(cwd).get("verify")
     except ProjectConfigUnreadable as e:
         # Say so rather than quietly auto-detecting: the project may configure a
-        # DIFFERENT verify command, so falling through silently would run an
-        # oracle the user did not choose and report its result as theirs. A note
-        # is the right altitude here (unlike the CLI's refusal): this runs mid
-        # session, where aborting would cost more than it protects, and a wrong
-        # verify command is a quality gate rather than a safety one.
+        # DIFFERENT verify command. A note, not a refusal - this runs mid
+        # session.
         from localm.debuglog import logger
         logger.warning("verify: ignoring the project config (%s); falling back "
                        "to auto-detection", e)
@@ -201,20 +180,17 @@ def _has_project_check(cwd: Path) -> bool:
     function's precedence must be mirrored here.
 
     Runnable, not merely present: a project file proves the project's SHAPE, not
-    that its runner is installed. Without the second half, this repo's own
-    package.json detected `npm test` on a box where an argv-list npm cannot
-    start, the oracle returned 125 on every gated turn, and the model was asked
-    to fix a condition no code change can reach. A check that cannot run is not
-    a check, so the answer is no oracle, not a doomed one."""
+    that its runner is installed. A check that cannot run is not a check, so the
+    answer is no oracle rather than one that returns 125 on every gated turn."""
     if (cwd / "Cargo.toml").is_file():
         # `cargo test` also compiles, so it is never vacuous.
         return _runner_available("cargo")
     if (cwd / "go.mod").is_file():
         return _runner_available("go")     # likewise `go test ./...`
     if (cwd / "package.json").is_file():
-        # .exists(), not .is_file(), to match _detect_test_runner's own yarn.lock
-        # test exactly: the runner checked here has to be the runner that will be
-        # picked there, or the gate vouches for a command nobody runs.
+        # .exists(), not .is_file(), to match _detect_test_runner's own
+        # yarn.lock test exactly: the runner checked here has to be the runner
+        # that will be picked there.
         lock = "yarn" if (cwd / "yarn.lock").exists() else "npm"
         return _npm_has_test_script(cwd) and _runner_available(lock)
     return _has_python_tests(cwd) and _pytest_importable()
@@ -234,25 +210,19 @@ def _pytest_importable() -> bool:
 
     The detected python command runs ``sys.executable -m pytest``, so the
     interpreter is always launchable - but with no pytest importable in it the
-    check exits 1 with "No module named pytest" on every run. That is the same
-    unfixable-by-the-model condition as a missing binary, only wearing an exit
-    code that looks like a real test failure, which makes it worse. It is a live
-    case rather than a hypothetical one: localm's own interpreter is what runs
-    the coder, and a user's Python project is not obliged to share it.
+    check exits 1 with "No module named pytest" on every run, which the model
+    cannot fix.
 
-    Same interpreter, but NOT quite the same question, so do not read more into
-    a True than it carries: ``-m`` prepends the project directory to sys.path,
-    while this asks about the localm process's own import state. A project with
-    a vendored pytest can therefore be declined here even though the command
-    would have worked. Erring that way costs an oracle; erring the other way
-    costs every retry on an unfixable failure, which is the harm this gate
-    exists for."""
+    Same interpreter, but NOT quite the same question: ``-m`` prepends the
+    project directory to sys.path, while this asks about the localm process's
+    own import state, so a project with a vendored pytest can be declined here
+    even though the command would have worked."""
     import importlib.util
     try:
         found = importlib.util.find_spec("pytest") is not None
     except Exception:                                          # noqa: BLE001
-        # A broken meta-path finder cannot confirm the runner, and an oracle we
-        # cannot vouch for is the thing this gate exists to prevent.
+        # A broken meta-path finder cannot confirm the runner, so the gate
+        # declines.
         found = False
     if not found:
         _log_no_oracle("pytest is not importable by this interpreter")
@@ -262,8 +232,8 @@ def _pytest_importable() -> bool:
 def _log_no_oracle(why: str) -> None:
     """Record why detection declined, so an absent gate stays discoverable.
 
-    Silence here would be the hidden problem: the user sees no verification line
-    and cannot tell whether the project has no check or the runner is missing."""
+    Without it the user sees no verification line and cannot tell whether the
+    project has no check or the runner is missing."""
     import logging
     logging.getLogger(__name__).debug(
         "no verification oracle: %s", why)

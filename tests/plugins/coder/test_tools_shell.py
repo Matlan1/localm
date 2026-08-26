@@ -23,7 +23,7 @@ from localm.plugins.coder.tools.shell import _js_test_command
 def _launcher(launched) -> str:
     """The program *launched* actually starts.
 
-    The platform shell's launch form differs on purpose: POSIX gets an argv list
+    The platform shell's launch form differs by platform: POSIX gets an argv list
     (execv receives it verbatim), Windows a raw command-line STRING, because an
     argv list is re-quoted by list2cmdline in syntax cmd.exe misreads. See
     tools/base.py:platform_shell.
@@ -234,13 +234,12 @@ class TestDetectTestRunner:
 
 
 class TestPassWithNoTestsActuallyReachesTheRunner:
-    """The flag used to be appended bare: ``npm test --passWithNoTests``.
+    """Appended bare, ``npm test --passWithNoTests`` never reaches the runner.
 
     npm parses an unknown ``--flag`` as a CLI config and forwards only nopt's
-    POSITIONAL remainder to the package script, so the flag never reached the
-    runner. It was decorative, and a JS project with no tests was billed a
-    verification failure anyway - the exact outcome it was added to prevent. It
-    now goes through npm's own documented ``--`` separator, and only to a runner
+    POSITIONAL remainder to the package script, so the flag is decorative and a
+    JS project with no tests is billed a verification failure anyway. It goes
+    through npm's own documented ``--`` separator instead, and only to a runner
     that actually has the flag, because with the separator it really does arrive
     and most runners reject an unknown option outright.
     """
@@ -284,12 +283,11 @@ class TestPassWithNoTestsActuallyReachesTheRunner:
 
     def test_yarn_gets_the_flag_bare_because_a_separator_would_break_it(
             self, tmp_path):
-        """npm and yarn are OPPOSITES here, and both directions were measured.
-        yarn classic already forwards a bare flag to the script, and warns that
-        a future yarn "will forward any explicit -- as-is to the scripts" -
-        which would hand the runner a literal `--` and demote the flag to a
-        positional argument. Giving yarn npm's separator would therefore break
-        a case that works today."""
+        """npm and yarn are OPPOSITES here. yarn classic already forwards a
+        bare flag to the script, and warns that a future yarn "will forward any
+        explicit -- as-is to the scripts", which would hand the runner a literal
+        `--` and demote the flag to a positional argument. Giving yarn npm's
+        separator would break a case that works today."""
         self._pkg(tmp_path, "jest")
         (tmp_path / "yarn.lock").write_text("", encoding="utf-8")
         cmd = _detect_test_runner(tmp_path)
@@ -303,9 +301,8 @@ class TestPassWithNoTestsActuallyReachesTheRunner:
 
     def test_the_explicit_npm_runner_builds_the_same_command_as_auto(
             self, tmp_path):
-        """run_tests(runner="npm") and the verify oracle's auto-detection were
-        two copies of the same literal and could drift; they share one builder
-        now, so this pins that they agree."""
+        """run_tests(runner="npm") and the verify oracle's auto-detection share
+        one builder, so this pins that they agree."""
         self._pkg(tmp_path, "jest")
         assert _js_test_command(tmp_path, "npm") == _detect_test_runner(tmp_path)
 
@@ -314,13 +311,11 @@ class TestPassWithNoTestsActuallyReachesTheRunner:
         detected command through the REAL npm and read back what the package
         script actually received.
 
-        The second half is the fires-control. The argv this repository shipped
-        before (bare, no separator) is run against the SAME project with the
-        SAME npm in the SAME test, and the flag does NOT arrive. Without it a
-        green first half would only prove that npm exists, not that the
-        separator is what delivers the flag - and that is precisely the gap the
-        original bug slipped through, since a pure argv-shape assertion cannot
-        see whether npm forwards what it is given.
+        The second half is the fires-control: the bare, no-separator argv is
+        run against the SAME project with the SAME npm in the SAME test, and the
+        flag does NOT arrive. Without it a green first half would only prove
+        that npm exists, not that the separator is what delivers the flag, which
+        a pure argv-shape assertion cannot see.
         """
         if shutil.which("npm") is None:
             pytest.skip("npm is not installed on this box")
@@ -445,14 +440,14 @@ class TestRunTests:
 
 
 class TestCallerArgsReachTheRunner:
-    """``run_tests``' own ``path`` and ``extra_args`` had the npm problem the
-    ``--passWithNoTests`` fix solved one code path over: appended bare, so npm
-    swallowed anything flag-shaped and quietly ran a plain suite instead.
+    """``run_tests``' own ``path`` and ``extra_args`` have the same npm problem
+    ``--passWithNoTests`` has one code path over: appended bare, npm swallows
+    anything flag-shaped and quietly runs a plain suite instead.
 
-    Measured on npm 11.13.0: ``npm test --watch`` gives the package script
-    ``ARGV=[]`` plus an "Unknown cli config" warning, while ``npm test --
-    --watch`` delivers it. So ``run_tests(runner="npm", extra_args="--watch")``
-    reported success for a run nobody asked for.
+    ``npm test --watch`` gives the package script ``ARGV=[]`` plus an "Unknown
+    cli config" warning, while ``npm test -- --watch`` delivers it, so
+    ``run_tests(runner="npm", extra_args="--watch")`` would report success for a
+    run nobody asked for.
     """
 
     @staticmethod
@@ -507,9 +502,9 @@ class TestCallerArgsReachTheRunner:
 
     def test_an_existing_separator_is_never_doubled(self, tmp_path):
         """The ``--passWithNoTests`` command already carries one and everything
-        appended lands after it. A second would reach the runner as a literal
-        argument (measured: ``npm test -- -- --watch`` delivers
-        ``["--", "--watch"]``), demoting the flag behind it."""
+        appended lands after it. A second reaches the runner as a literal
+        argument - ``npm test -- -- --watch`` delivers ``["--", "--watch"]`` -
+        demoting the flag behind it."""
         self._pkg(tmp_path, "jest")
         assert self._cmd_for(tmp_path, runner="npm", extra_args="--watch")[1:] \
             == ["test", "--", "--passWithNoTests", "--watch"]
@@ -524,11 +519,11 @@ class TestCallerArgsReachTheRunner:
         assert self._cmd_for(tmp_path, runner="npm")[1:] == ["test"]
 
     def test_yarn_never_gets_a_separator(self, tmp_path):
-        """npm and yarn are opposites, and both directions were measured. yarn
-        classic forwards a bare flag today and warns that a future yarn "will
-        forward any explicit -- as-is to the scripts", which would hand the
-        runner a literal ``--`` and demote the flag to a positional. Giving yarn
-        npm's separator would break the case npm needs it for."""
+        """npm and yarn are opposites. yarn classic forwards a bare flag today
+        and warns that a future yarn "will forward any explicit -- as-is to the
+        scripts", which would hand the runner a literal ``--`` and demote the
+        flag to a positional. Giving yarn npm's separator would break the case
+        npm needs it for."""
         self._pkg(tmp_path)
         (tmp_path / "yarn.lock").write_text("", encoding="utf-8")
         assert self._cmd_for(tmp_path, runner="yarn", path="tests",
@@ -552,13 +547,11 @@ class TestCallerArgsReachTheRunner:
         npm through ``run_tests`` and read back what the package script actually
         received.
 
-        The second half is the fires-control. The argv this repository shipped
-        before (caller args appended bare) is run against the SAME project with
-        the SAME npm in the SAME test, and the flag does NOT arrive while the
-        positional does. Without it a green first half would only prove that npm
-        exists, not that the separator is what delivers the flag - and that is
-        exactly the gap the bug lived in, since an argv-shape assertion cannot
-        see whether npm forwards what it is handed.
+        The second half is the fires-control: the bare-appended argv is run
+        against the SAME project with the SAME npm in the SAME test, and the
+        flag does NOT arrive while the positional does. Without it a green first
+        half would only prove that npm exists, not that the separator is what
+        delivers the flag, which an argv-shape assertion cannot see.
         """
         if shutil.which("npm") is None:
             pytest.skip("npm is not installed on this box")

@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Directory indexing must skip model weights and secret files (audit MED-18 +
-rag-blacklist-model-files).
+"""Directory indexing must skip model weights and secret files.
 
-61f55c4 inverted the folder-walk filter from a suffix WHITELIST to a
-blacklist, so every file whose suffix is not explicitly blocked is now read,
-sniffed, and (if text) indexed. The blacklist missed:
+The folder-walk filter is a suffix BLACKLIST, not a whitelist, so every file
+whose suffix is not explicitly blocked is read, sniffed, and (if text) indexed.
+The blacklist must therefore cover:
 
   - model weights (.gguf/.safetensors/.pt/.pth/.onnx/...): multi-GB binaries
-    that get fully read into RAM and sha256-hashed (twice) before being
-    rejected, repeated on every re-add - pure wasted I/O/RAM/CPU;
+    that would be fully read into RAM and sha256-hashed (twice) before being
+    rejected, repeated on every re-add;
   - secret material (.pem/.key/... and extensionless .env / id_rsa / .netrc):
-    plain text that now lands in a searchable, model-visible index.
+    plain text that would otherwise land in a searchable, model-visible index.
 
-Note: this is only the recursive FOLDER-WALK filter - a user who explicitly
-picks a single secret file is still honoured (explicit intent).
+This is only the recursive FOLDER-WALK filter - a user who explicitly picks a
+single secret file is still honoured.
 """
 
 from localm.rag.store import Collection

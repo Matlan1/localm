@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Owner-only gating for the two config keys that decide WHAT THE PROCESS LOADS
-(CodeQL WS7: alerts 100-107, 122-125, 127).
+"""Owner-only gating for the two config keys that decide WHAT THE PROCESS LOADS.
 
 ``binary_dir`` names the directory the native llama runtime is loaded from: the
 loader prepends it to the OS search path, CDLL()s every ``ggml*`` in it and loads
@@ -9,29 +8,17 @@ server process. ``embedding_model`` names a GGUF this process opens, and
 ``_sizing`` reads it on the CHAT model load path, so a poisoned value fires on
 the owner's own next action.
 
-Both were plain ``config:write`` fields with no ``admin_only``, which is a wider
-trust widening than ``rag_index_paths`` / ``net_allow_private`` / ``cors_origins``
-- all of which were already owner-only. ``embedding_model`` additionally had a
-SECOND writer, ``POST /api/rag/embedding``, mounted under the plugin's ``rag``
-scope; ``rag`` is not in ``scopes.PRIVILEGED_SCOPES`` and ``--scope chat --scope
-rag`` is the documented restricted key, so the schema flag alone would not have
-covered it.
+Both are therefore ``admin_only``, alongside ``rag_index_paths`` /
+``net_allow_private`` / ``cors_origins``. ``embedding_model`` has a SECOND writer,
+``POST /api/rag/embedding``, mounted under the plugin's ``rag`` scope; ``rag`` is
+not in ``scopes.PRIVILEGED_SCOPES`` and ``--scope chat --scope rag`` is the
+documented restricted key, so the schema flag alone does not cover it and that
+route carries its own gate.
 
-OWNERSHIP NOTE. The two ``admin_only=True`` schema flags themselves are NOT set by
-this branch. ``localm/settings_schema.py`` is owned, for this remediation program,
-by the 88-field CORE_FIELDS gating sweep, so both flags (and the exact-equality pin
-in ``tests/test_settings_schema.py``) were handed to that lane rather than edited
-here - three lanes writing the same kind of flag into one schema file risks a
-rebase silently dropping one, and a missing security flag has no conflict marker.
-
-That makes the first two test groups below a CROSS-LANE GUARD rather than a
-self-check: they fail on THIS branch if that sweep does not land the flags, or
-lands them without the gate actually consulting them. They assert MEMBERSHIP in
-``admin_only_keys()`` AND drive the real PATCH route end to end, because set
-membership alone cannot detect a gate that stopped reading the set - and
-membership is exactly what nobody checked when ``binary_dir`` sat unprotected.
-The ``test_owner_can_still_set_*`` cases are the other direction: they fail if the
-sweep OVER-gates and takes a documented owner capability away.
+The first two test groups assert MEMBERSHIP in ``admin_only_keys()`` AND drive the
+real PATCH route end to end, because set membership alone cannot detect a gate
+that stopped reading the set. The ``test_owner_can_still_set_*`` cases are the
+other direction: they fail if the gating takes a documented owner capability away.
 """
 from __future__ import annotations
 
@@ -134,8 +121,8 @@ def test_owner_can_still_set_load_selecting_key(app_env, key):
 
 
 def test_gate_is_specific_not_a_blanket_block(app_env):
-    """The same scoped key still writes an ordinary config:write field, so this
-    is a targeted trust gate rather than a general loss of the scope."""
+    """The same scoped key still writes an ordinary config:write field: this is a
+    targeted trust gate, not a general loss of the scope."""
     c, scoped, _ = app_env
     assert c.patch("/v1/config", headers=_scoped(scoped),
                    json={"net_allow": ["x.com"]}).status_code == 200
@@ -244,10 +231,9 @@ def test_resolve_embedding_model_path_rejects_nonlocal_spec(tmp_path, monkeypatc
     outbound net-NTLMv2 credential to a reachable one. So the refusal must land
     BEFORE any filesystem call, not after it.
 
-    Asserted by SPYING on the three syscall entry points and proving the spec
-    never reached any of them. A spy that delegates (rather than one that raises)
-    keeps this deterministic off-Windows and keeps pytest's own internal Path use
-    working - patching Path.stat to raise takes down the test runner itself."""
+    Asserted by SPYING on the three syscall entry points and checking the spec
+    never reached any of them. The spy DELEGATES instead of raising: patching
+    Path.stat to raise takes down pytest's own internal Path use."""
     import localm.config as cfg
     from localm.inference import embedder
     home = tmp_path / ".localm"
@@ -444,9 +430,9 @@ def test_setup_embeddings_cli_registers_a_known_model(tmp_path, monkeypatch):
 
 def test_setup_embeddings_cli_does_not_register_an_external_gguf(tmp_path,
                                                                  monkeypatch):
-    """The negative control for the guard above (the one alert 127 would have had
-    us delete): a GGUF OUTSIDE the embeddings dir is used but never registered,
-    so a user-pointed external model keeps whatever registration it already had."""
+    """The negative control for the guard above: a GGUF OUTSIDE the embeddings dir
+    is used but never registered, so a user-pointed external model keeps whatever
+    registration it already had."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     (home / "models" / "embeddings").mkdir(parents=True, exist_ok=True)
@@ -479,8 +465,8 @@ def test_loader_warns_when_the_runtime_dir_is_not_the_bundled_wheel(tmp_path,
                                                                     caplog,
                                                                     monkeypatch):
     """Everything in that directory gets native code execution in this process,
-    so an override must be VISIBLE in the log rather than silent (rule 5). It is
-    not an error: binary_dir stays a supported owner setting."""
+    so an override must be VISIBLE in the log, never silent. It is not an error:
+    binary_dir stays a supported owner setting."""
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(_loader, "_warned_foreign_binary_dir", False)
     monkeypatch.setenv("LLAMA_CPP_LIB", str(tmp_path / "custom" / "llama.dll"))

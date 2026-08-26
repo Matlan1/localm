@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The owner's chat memory must live in the shared "owner" namespace (audit MED-14).
+"""The owner's chat memory must live in the shared "owner" namespace.
 
-6fb3496 removed the ADMIN/owner short-circuit from principal_id (correct: a job
-must stay bound to the key that created it), but the memory plugin used
-principal_id directly to namespace chat memory. So in protected mode the owner's
-memories moved from the shared "owner" namespace to a per-key-hash namespace -
-invisible in the GUI and orphaned again on every key rotation.
+``principal_id`` has no ADMIN/owner short-circuit (a job must stay bound to the
+key that created it), so using it directly to namespace chat memory puts the
+owner's memories in a per-key-hash namespace in protected mode - invisible in
+the GUI and orphaned again on every key rotation.
 
-The fix routes the memory namespace through memory_principal(), which collapses
-an ADMIN/owner caller to the "owner" namespace while leaving principal_id (job
+The memory namespace routes through memory_principal(), which collapses an
+ADMIN/owner caller to the "owner" namespace while leaving principal_id (job
 ownership) unchanged.
 """
 

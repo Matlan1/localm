@@ -64,11 +64,11 @@ class _SessionMixin:
     def _rebuild_system_prompt(self) -> None:
         """Single source of truth for (re)building the system prompt.
 
-        Every build and rebuild site goes through here so the kwargs cannot drift -
-        notably the COMBINED external tool docs (mcp + plugin + skill) and the
-        provenance flag. A prior bug rebuilt with only ``_mcp_docs``, so plugin
-        tools and agent skills silently vanished from the prompt after a reindex /
-        memory reload / per-write map refresh, and the model "forgot" they existed.
+        Every build and rebuild site goes through here so the kwargs cannot
+        drift - notably the COMBINED external tool docs (mcp + plugin + skill)
+        and the provenance flag. Rebuilding with only ``_mcp_docs`` would drop
+        plugin tools and agent skills from the prompt after a reindex, memory
+        reload or per-write map refresh.
         """
         self._system_prompt = build_system_prompt(
             self.cwd,
@@ -108,17 +108,14 @@ class _SessionMixin:
 
         THE CHECKPOINT MOVES WITH THE SESSION. A checkpoint is filed under
         ``<digest(cwd)>/<checkpoint_id>.json``, so changing the cwd changes
-        where the NEXT save lands. Leaving the old file behind would give one
-        conversation two resumable entries - and the abandoned one is frozen
-        forever at the moment of the cd while describing work that has since
-        moved elsewhere, so "continue last session" in the old project would
-        offer a phantom that can never catch up. Migrating keeps exactly one
-        copy, where the session actually is.
+        where the NEXT save lands. The old file is migrated, keeping exactly one
+        copy, where the session actually is; leaving it behind would give one
+        conversation two resumable entries, the abandoned one frozen at the
+        moment of the cd.
 
-        Best-effort, deliberately: the cwd change itself has already been
-        decided by the caller and must not fail because a stale file could not
-        be moved. A failure is logged rather than swallowed, and it is not
-        silent data loss - the old checkpoint simply stays where it was.
+        The migration is best-effort: the cwd change has already been decided by
+        the caller and does not fail because a stale file could not be moved. A
+        failure is logged, and the old checkpoint stays where it was.
         """
         self._migrate_checkpoint(self.cwd, cwd)
         load_memory = _agent.load_memory  # live: honour a patched agent.load_memory
@@ -140,9 +137,8 @@ class _SessionMixin:
         directory to *new_cwd*'s. See set_cwd for why.
 
         Only ever touches THIS agent's own file (keyed on ``_checkpoint_id``),
-        never the whole project directory - a sibling session's checkpoint in
-        the same project is none of this session's business, exactly as
-        clear_checkpoint is careful not to reach one.
+        never the whole project directory, so a sibling session's checkpoint in
+        the same project is left alone - the same scope clear_checkpoint keeps.
         """
         from .checkpoint import _checkpoint_path_for
         try:
@@ -172,15 +168,13 @@ class _SessionMixin:
         """Tell the user when project memory or user instructions did NOT go into
         the system prompt whole (over the injection budget, or unreadable).
 
-        Both surfaces, because they have different channels: ``print_warning``
-        reaches the CLI (which registers no event sink, so ``_emit`` is a no-op
-        there), and an ``info`` event reaches the GUI (which renders ``info`` and
-        would drop an unknown ``warning`` type). Capping without this would be a
-        silent truncation, which AGENTS.md rule 5 forbids.
+        Both surfaces are used, because they have different channels:
+        ``print_warning`` reaches the CLI (which registers no event sink, so
+        ``_emit`` is a no-op there), and an ``info`` event reaches the GUI (which
+        renders ``info`` and would drop an unknown ``warning`` type).
 
-        Called from every site that (re)loads those files, so the user hears about
-        it right when they cause it - at session start, on /remember and /forget,
-        and on a cwd change - rather than never.
+        Called from every site that (re)loads those files - at session start, on
+        /remember and /forget, and on a cwd change.
         """
         print_warning = _agent.print_warning  # live: honour a patched print_warning
         for text in (_agent.memory_warning(self.cwd),
@@ -242,9 +236,8 @@ class _SessionMixin:
         sessions, so no trace is written that the mode forbids. Fires when the
         session changed files (via the write-tool tracker, OR via run_shell detected
         against a git baseline), or when it FAILED (incomplete, or repeated tool /
-        command errors) even with no file change - failure lessons are the most
-        valuable and were systematically absent before (audit cluster 11). A clean
-        read-only / no-op session still adds nothing. GUI/web sessions (event sink,
+        command errors) even with no file change. A clean read-only / no-op
+        session adds nothing. GUI/web sessions (event sink,
         still-running server) run the reflection in a background thread so the model
         call never blocks the close path / event loop; CLI runs reflect synchronously
         because the process is about to exit and a daemon thread might not finish.
@@ -263,10 +256,8 @@ class _SessionMixin:
             if changed:
                 diff_override = git_diff
         # A failure with no file change (an investigation-only or
-        # failed-before-first-write session) still carries a lesson, but the bar is
-        # a run that ACTUALLY failed to finish: the reflection costs a full model
-        # call that the CLI pays for SYNCHRONOUSLY as the user quits. Two things
-        # are not failures:
+        # failed-before-first-write session) still stores an episode, but the bar
+        # is a run that ACTUALLY failed to finish. Two things are not failures:
         #  - a bare tool-error count: incidental failures (a missing read_file, a
         #    failed grep) carry no lesson, and a genuinely broken run trips
         #    max_turns or a circuit breaker (_GLOBAL_ERROR_ABORT /
@@ -308,8 +299,8 @@ class _SessionMixin:
         outside the write-tool tracker (e.g. run_shell writes via git); None means
         use the tracker's cumulative session_diff(). *deadline* bounds the model
         call itself (seconds); None means unbounded, which is correct for the
-        GUI/web path - it already runs this off a daemon thread with nobody
-        waiting on it (REG-594's caller, the CLI, always passes one)."""
+        GUI/web path, since it already runs this off a daemon thread with nobody
+        waiting on it. The CLI caller always passes one."""
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
         try:
             import time as _time
@@ -319,11 +310,10 @@ class _SessionMixin:
             task = self._episode_task or next(
                 (m.get("content", "") for m in self._messages
                  if m.get("role") == "user"), "")
-            # The per-run flag is the right one here, unlike the trigger above:
-            # this records how the session ENDED, and the thin-episode fallback
-            # spells the distinction out - "did not complete" vs "completed with
-            # errors". A session that failed and then recovered completed; its
-            # failure is carried by what_failed, not by the outcome label.
+            # The per-run flag, not the session-level one used by the trigger
+            # above: this records how the session ENDED ("did not complete" vs
+            # "completed with errors"). A session that failed and then recovered
+            # completed; its failure is carried by what_failed.
             outcome = "ok" if self._last_run_ok else "incomplete"
             diff = diff_override if diff_override is not None else self.session_diff()
             # Real evidence of what went wrong, so the reflection can fill
@@ -352,9 +342,9 @@ class _SessionMixin:
                 # a timeout costs the model's prose, not the evidence.
                 # daemon=True: an expired deadline abandons this thread rather than
                 # joining it, and it must never block interpreter exit.
-                # Named "_holder", not "outcome": the enclosing
-                # _reflect_into_episode already binds "outcome" to the
-                # "ok"/"incomplete" episode-outcome string.
+                # Named "_holder": the enclosing _reflect_into_episode already
+                # binds "outcome" to the "ok"/"incomplete" episode-outcome
+                # string.
                 _holder: dict = {}
 
                 def _target() -> None:
@@ -418,18 +408,17 @@ class _SessionMixin:
 
         # tool_names mirrors the live agentic loop's own gate (loop.py's _loop
         # passes the same expression to parse_tool_calls), so the name-gated
-        # json/bare-JSON call shapes are recognised here exactly as they were when
-        # the model called them. Computed once, not per message: neither operand
+        # json/bare-JSON call shapes are recognised here as they were when the
+        # model called them. Computed once, not per message: neither operand
         # changes while this method runs.
         tool_names = set(_agent.TOOL_REGISTRY) - self.disabled_tools
 
-        # The transcript strips every recognised tool-call shape with the PARSER's
-        # own strip_tool_calls rather than a private copy of the regex.
-        # strip_tool_calls is a strict superset of an strip_xml_tool_calls-only
-        # splitter - it also recognises the fenced json/tool_call and bare
-        # top-level JSON shapes parse_tool_calls does - so a call written in one of
-        # those shapes is summarised here instead of surviving as raw fence markers
-        # or a raw JSON blob.
+        # The transcript strips every recognised tool-call shape with the
+        # PARSER's own strip_tool_calls, a strict superset of an
+        # strip_xml_tool_calls-only splitter: it also recognises the fenced
+        # json/tool_call and bare top-level JSON shapes parse_tool_calls does, so
+        # a call written in one of those is summarised rather than surviving as
+        # raw fence markers or a raw JSON blob.
         for msg in self._messages:
             role    = msg.get("role", "")
             content = msg.get("content", "")

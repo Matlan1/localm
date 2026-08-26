@@ -4,13 +4,12 @@ voice, coder session management, GUI model routes) a pool that is completely
 isolated from the asyncio loop's own default executor - the one
 localm/inference/ uses for model load/unload and chat/completion generation.
 
-Before this split, EVERY `loop.run_in_executor(None, ...)` call anywhere in
-the server (plugin or inference) drew from the same process-wide pool, so a
-caller holding only a narrow plugin scope could pipeline enough slow tool
-calls to occupy every worker thread and stall chat completions for every user
-of the server, including the admin. These tests prove the isolation property
-directly (saturating the plugin pool must not delay the default pool), not
-just that the two pools are different objects.
+Without the split, every `loop.run_in_executor(None, ...)` call anywhere in the
+server (plugin or inference) draws from the same process-wide pool, so a caller
+holding only a narrow plugin scope can pipeline enough slow tool calls to occupy
+every worker thread and stall chat completions for every user. These tests
+assert the isolation property directly - saturating the plugin pool must not
+delay the default pool - not just that the two pools are different objects.
 """
 
 from __future__ import annotations
@@ -66,12 +65,10 @@ def test_plugin_executor_is_not_the_loop_default_executor():
 
 
 def test_saturating_plugin_executor_does_not_stall_default_executor():
-    """Reproduces the exact DoS the split closes: a burst of slow plugin
-    calls (rag extraction/query, coder session ops, ...) used to fill the
-    shared default pool and starve chat generation's own
-    run_in_executor(None, ...) call, stalling every user's chat reply. With
-    separate pools, fully saturating the plugin pool must leave the default
-    pool's response time unaffected."""
+    """A burst of slow plugin calls (rag extraction/query, coder session ops,
+    ...) would fill a shared default pool and starve chat generation's own
+    run_in_executor(None, ...) call. With separate pools, fully saturating the
+    plugin pool must leave the default pool's response time unaffected."""
     ex = get_plugin_executor()
     n_workers = ex._max_workers
 

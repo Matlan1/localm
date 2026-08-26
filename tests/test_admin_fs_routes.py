@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Admin filesystem routes: UNC/device rejection, allowlist-before-syscall, and
-the cross-origin refusal for the host browser (CodeQL 3 and 10).
+the cross-origin refusal for the host browser.
 
-WHY THE ASSERTIONS LOOK LIKE THIS. The defect is not the HTTP response, it is the
+WHAT THE ASSERTIONS TARGET. The defect is not the HTTP response, it is the
 SYSCALL that happens on the way to it. ``Path.resolve`` on Windows calls
 ``_getfinalpathname`` (CreateFileW) plus a stat, so a UNC path aimed at an
 attacker's SMB server makes an outbound connection that Windows AUTO-AUTHENTICATES,
-surrendering the host's net-NTLMv2 credential - and that completes before any
-allowlist check downstream can return its 403. Both branches returning the same
-403 is exactly why an earlier reading called this harmless; the exfiltration
-channel is the connection, not the response body.
+surrendering the host's net-NTLMv2 credential, and that completes before any
+allowlist check downstream can return its 403. Both branches return the same 403,
+so the response body cannot distinguish them; the exfiltration channel is the
+connection.
 
-It also blocks: measured on a Windows box, a UNC path to a non-routable RFC5737
-address stalled 271.33 SECONDS before WinError 64, and an unresolvable UNC
-hostname 9.88s - inside an ``async def``, i.e. the whole event loop, per request.
+It also blocks: a UNC path to a non-routable RFC5737 address stalls for minutes
+before WinError 64 - inside an ``async def``, i.e. the whole event loop, per
+request.
 
 So the tests assert on the CODE PATH (no filesystem call is ever made on an
 unsanitized UNC string), not on wall clock alone. Wall clock is Windows-specific
-and a Linux CI run cannot reproduce the stall, so a timing-only test would
-silently prove nothing there.
+and a Linux run cannot reproduce the stall, so a timing-only test would prove
+nothing there.
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ from fastapi.testclient import TestClient
 from localm import scopes as S
 from localm.plugins.gui.web import attach_gui
 
-# A UNC path at a non-routable RFC5737 documentation address (TEST-NET-1), so it
-# never reaches a real host.
+# A UNC path at a non-routable RFC5737 documentation address, so it never
+# reaches a real host.
 UNC = r"\\192.0.2.1\share"
 UNC_FWD = "//192.0.2.1/share"
 DEVICE = r"\\.\PhysicalDrive0"
@@ -70,11 +70,10 @@ def fs_spy(monkeypatch):
     call when the path is UNC/device syntax.
 
     Guarding ALL of _FS_METHODS rather than just resolve() is what makes this
-    test suite safe to run. MEASURED: with the fix reverted and only resolve()
-    guarded, this file ran past a 10-MINUTE timeout - because the unguarded
-    is_dir() went on to make the real SMB dial to the RFC5737 address, exactly
-    the 271-second stall the unit is about. A regression must fail in
-    milliseconds with a clear message, never hang CI.
+    test suite safe to run: with only resolve() guarded, an unguarded is_dir()
+    goes on to make the real SMB dial to the RFC5737 address and the file runs
+    for minutes. A regression must fail in milliseconds with a clear message,
+    never hang.
 
     Recording AND raising is deliberate: the handlers wrap their bodies in
     ``except Exception -> HTTPException(500)``, so a raise alone could be
@@ -109,8 +108,8 @@ def _unc_calls(seen) -> list:
 
 @pytest.fixture
 def fs_app(tmp_path, monkeypatch):
-    """GUI stack on a throwaway home. Mirrors tests/test_fs_picker.py so the two
-    files exercise the same wiring."""
+    """GUI stack on a throwaway home, wired the same way the fs-picker suite
+    wires it."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -139,8 +138,8 @@ def _host_key():
 
 
 def _cfgwrite_key():
-    """config:write is a PRIVILEGED scope, so minting it needs the owner-equivalent
-    allow_privileged flag (same convention as tests/test_auth.py)."""
+    """config:write is a PRIVILEGED scope, so minting it needs the
+    owner-equivalent allow_privileged flag."""
     from localm import auth
     return auth.create_key("w", [S.CONFIG_WRITE], allow_privileged=True,
                            fs_access="host")["key"]
@@ -171,7 +170,7 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
         """``//host/share`` is an equivalent UNC spelling on Windows. On POSIX a
         leading ``//`` is a legal path prefix equivalent to ``/``, so it is NOT
         rejected there and the picker keeps working - the assertion is
-        platform-split on purpose, not skipped."""
+        platform-split, not skipped."""
         with TestClient(fs_app) as c:
             r = c.get("/api/fs/dirs", params={"path": UNC_FWD},
                       headers=_hdr(_host_key()))
@@ -201,12 +200,10 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
 
         The POSIX branch is pointed at a DISPOSABLE fixture root, never the
         machine's real "/". Listing "/" stats every child (/opt, /etc, /usr),
-        which is a real system-path touch and is exactly what the guard in
-        tests/conftest.py fails a test for. An earlier revision of this test did
-        exactly that: it passed on Windows, where the roots are drive letters,
-        and reddened master on the ubuntu CI leg - a platform blind spot rather
-        than a logic error, and the reason single-platform local green is a
-        weaker gate than it looks."""
+        which is a real system-path touch and is what the guard in
+        tests/conftest.py fails a test for. On Windows the roots are drive
+        letters, so a test that lists the real root passes there and fails only
+        on POSIX."""
         from localm.plugins.gui.routes import admin as admin_routes
         fake_root = tmp_path / "fakeroot"
         (fake_root / "alpha").mkdir(parents=True)
@@ -623,15 +620,13 @@ class TestFsRename:
     def test_never_overwrites_even_if_the_os_rename_call_would_silently_succeed(
             self, fs_app, tmp_path, monkeypatch):
         """POSIX rename(2) SILENTLY REPLACES an existing FILE target instead of
-        raising - that is documented rename(2) behavior, unlike Windows, which
-        refuses on its own. The two test_never_overwrites_* tests above pass on
-        THIS platform (Windows) regardless of whether fs_rename's explicit
-        `new_path.exists()` pre-check is present, because Path.rename() itself
-        already refuses here - so they cannot tell the pre-check apart from
-        incidental OS behavior (measured: removing the pre-check left them
-        green). This test makes Path.rename behave like POSIX's rename(2) on
-        EVERY platform, so only the explicit pre-check - never the OS call - can
-        be what refuses the overwrite."""
+        raising, unlike Windows, which refuses on its own. The two
+        test_never_overwrites_* tests above therefore pass on Windows whether or
+        not fs_rename's explicit `new_path.exists()` pre-check is present, so
+        they cannot tell the pre-check apart from incidental OS behavior. This
+        test makes Path.rename behave like POSIX's rename(2) on EVERY platform,
+        so only the explicit pre-check - never the OS call - can be what refuses
+        the overwrite."""
         src = tmp_path / "source.txt"
         src.write_text("SOURCE", encoding="utf-8")
         dst = tmp_path / "target.txt"

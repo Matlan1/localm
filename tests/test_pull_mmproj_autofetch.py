@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#957: a GUI/MCP pull of a vision GGUF had no way to pass --mmproj, so the
-projector was never fetched and the model downloaded silently unable to see
-an image. _pull_gguf_file now checks the HF repo's OWN file listing for an
-mmproj sibling at pull time (free metadata call) and, when found, fetches and
-records it on the registry entry - no CLI flag required. An explicit --mmproj
-(mmproj_spec) still wins when given (never silently override a user choice).
+"""A GUI/MCP pull of a vision GGUF has no way to pass --mmproj, so the projector
+would never be fetched and the model would download silently unable to see an
+image. _pull_gguf_file checks the HF repo's OWN file listing for an mmproj
+sibling at pull time (free metadata call) and, when found, fetches and records it
+on the registry entry - no CLI flag required. An explicit --mmproj (mmproj_spec)
+still wins when given.
 """
 
 import struct
@@ -222,10 +222,10 @@ class TestAmbiguousMultipleCandidates:
 
 
 class TestTraversalGuardOnRepoListing:
-    """The repo file listing is REMOTE, untrusted input (a malicious/compromised
-    repo could list anything). A candidate must be confined the same way an
-    explicit --mmproj filename already is (GAP-CLI-2) - filtered out before it
-    is even considered, not merely rejected after being picked."""
+    """The repo file listing is REMOTE, untrusted input (a malicious or
+    compromised repo could list anything). A candidate must be confined the same
+    way an explicit --mmproj filename already is - filtered out before it is even
+    considered, not merely rejected after being picked."""
 
     def test_unsafe_candidate_is_filtered_before_picking(
             self, fake_registry, monkeypatch):
@@ -413,16 +413,13 @@ class TestExplicitMmprojWins:
 
 
 class TestSyncModelsDirBackfillsExistingEntry:
-    """#957: an entry pulled BEFORE the auto-attach fix (or on a build that
-    predates it) already exists in the registry with no mmproj key - a
-    re-pull is explicitly NOT an acceptable fix (maintainer's ruling: "an
-    already pulled vision model must work just as a freshly pulled one, no
-    half measures"). sync_models_dir must notice and backfill it on its own,
-    using the source the entry already recorded - the exact case
-    test_already_downloaded_branch_also_attaches_mmproj (above) does NOT
-    cover, because that test starts from an EMPTY registry and calls
-    _pull_gguf_file (a re-pull) rather than starting from an ALREADY-
-    REGISTERED entry and calling sync_models_dir (no pull at all)."""
+    """An entry pulled BEFORE the auto-attach existed already sits in the
+    registry with no mmproj key, and a re-pull is not an acceptable fix: an
+    already-pulled vision model must work just as a freshly pulled one.
+    sync_models_dir notices and backfills it on its own, using the source the
+    entry already recorded - a case a test that starts from an EMPTY registry
+    and calls _pull_gguf_file cannot reach, since this one starts from an
+    ALREADY-REGISTERED entry and calls sync_models_dir with no pull at all."""
 
     def _preexisting_entry(self, store, models_dir, name="main", source="hf:o/r"):
         (models_dir / f"{name}.gguf").write_bytes(_LLM_BYTES)
@@ -579,10 +576,10 @@ class TestSyncModelsDirBackfillsExistingEntry:
 
     def test_net_mode_ask_still_backfills_no_half_measure_behind_a_setting(
             self, fake_registry, monkeypatch):
-        """The maintainer's ruling ("no half measures") must hold under the
-        DEFAULT net_mode ("ask"), not only for installs that separately opted
-        into net_mode=allow - matching _pull_gguf_file's own net_mode gate for
-        this identical operation on an explicit pull."""
+        """The backfill must hold under the DEFAULT net_mode ("ask"), not only for
+        installs that separately opted into net_mode=allow - matching
+        _pull_gguf_file's own net_mode gate for this identical operation on an
+        explicit pull."""
         store, models_dir = fake_registry
         self._preexisting_entry(store, models_dir)
         _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])

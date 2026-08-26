@@ -7,8 +7,7 @@ Collection.resync against a real folder, with the confinement policy applied and
 no chat model loaded).
 
 Everything that touches disk points LOCALM_HOME at a tmp dir and patches the
-config module, matching tests/test_jobs_plugin.py, so nothing touches the user's
-real data.
+config module, so nothing touches the user's real data.
 """
 
 from __future__ import annotations
@@ -139,8 +138,8 @@ def test_a_rag_job_survives_a_scheduler_round_trip(home):
 
 
 def test_a_rag_job_is_creatable_over_the_api(home, monkeypatch):
-    """Through the real plugin engine (open mode, no key), mirroring
-    tests/test_jobs_plugin.py::test_plugin_routes_via_engine."""
+    """Through the real plugin engine (open mode, no key), mirroring the jobs
+    plugin's own route test."""
     from pathlib import Path
 
     from fastapi import FastAPI
@@ -212,8 +211,7 @@ def no_shared_embedder(monkeypatch):
     whether a resync here indexes with vectors would depend on what an unrelated
     test did earlier. Default every test in this module to lexical-only; the
     embedding-specific tests below set their own. The real resolution path is
-    covered by ``test_rag_embed_fn_is_none_without_an_embedding_model`` and was
-    exercised end to end against a real bge-small model by hand.
+    covered by ``test_rag_embed_fn_is_none_without_an_embedding_model``.
 
     Yields the ORIGINAL function so that one test can still drive it."""
     from localm.plugins.builtin.jobs import runner

@@ -62,14 +62,13 @@ def resolve_swap_policy(plugin_block: dict, full_config: dict) -> str:
     wins, then a global one, else the default ``auto``. An unknown policy string
     falls back to ``auto``.
 
-    The legacy ``reload_llm_after_imagine`` / per-plugin ``reload_llm_after_generate``
-    boolean is a SEPARATE axis: it controls whether the chat model is *reloaded
-    after* a generation (eager vs lazy), surfaced as the backend ``reload_after``
-    setting, and deliberately does NOT influence the swap (unload-before)
-    decision. Keeping the two axes independent means an existing ``false`` config
-    keeps its lazy-reload behaviour while still getting the safe, VRAM-aware
-    ``auto`` swap default - instead of silently never freeing VRAM (an OOM risk on
-    a small card) the way mapping ``false -> never`` would.
+    The legacy ``reload_llm_after_imagine`` / per-plugin
+    ``reload_llm_after_generate`` boolean is a SEPARATE axis: it controls whether
+    the chat model is *reloaded after* a generation (eager vs lazy), surfaced as
+    the backend ``reload_after`` setting, and does NOT influence the swap
+    (unload-before) decision. The two axes stay independent, so an existing
+    ``false`` config keeps its lazy-reload behaviour while still getting the
+    VRAM-aware ``auto`` swap default.
     """
     block = plugin_block or {}
     explicit = block.get("model_swap_policy",
@@ -121,61 +120,53 @@ def media_single_device_shortfall(settings: dict, *,
     """``{"index", "needed", "free"}`` when the ONE card ComfyUI will actually use
     cannot hold the WHOLE media model, else ``None`` (fine, or nothing to check).
 
-    THE OTHER HALF OF ``decide_media_swap`` (REG-532). That gate reads COMBINED free
-    across a configured split, which is the right CAPACITY question and MUST stay that
-    way (every capacity decision uses the combined number). But no single model is
-    DIVIDED across the split the way a tensor_split GGUF is: each component loads whole
-    onto one ``get_torch_device()`` (``model_management.py:194``). So the gate can be
-    satisfied by 2x4 GB = 8 GB combined while a 4 GB model lands on ONE 4 GB card and
-    OOMs, spills to shared RAM, or trips the ROCm TDR. The gate is not wrong; it simply
-    cannot see placement.
+    THE OTHER HALF OF ``decide_media_swap``. That gate reads COMBINED free across a
+    configured split, which is the right CAPACITY question and MUST stay that way
+    (every capacity decision uses the combined number). But no single model is
+    DIVIDED across the split the way a tensor_split GGUF is: each component loads
+    whole onto one ``get_torch_device()`` (``model_management.py:194``). So the gate
+    can be satisfied by 8 GB combined across two 4 GB cards while a 4 GB model lands
+    on ONE of them and OOMs, spills to shared RAM, or trips the ROCm TDR. The gate
+    is not wrong; it cannot see placement.
 
-    NOTE, and do not let this rot: localm now DOES emit ComfyUI core's ``Select*Device``
-    nodes (:func:`localm.media.comfy_client.inject_device_placement`), but under the v1
-    placement policy the big MODEL stays on the preferred card (only the smaller CLIP +
-    VAE move to the second card). So the preferred card still holds the model whole, and
-    "does the preferred card hold the WHOLE job" remains a SAFE, conservative bound here:
-    it over-counts (it still demands room for the CLIP + VAE that placement moved off
-    this card), so it errs toward swapping the chat model, never toward an OOM. A
-    per-component-per-card refinement is a follow-up gated on per-component byte sizes,
-    which do not exist yet (only whole-job estimates). See dev-notes/media-split-gpu/
-    SPEC-placement.md.
+    localm DOES emit ComfyUI core's ``Select*Device`` nodes
+    (:func:`localm.media.comfy_client.inject_device_placement`), but under the v1
+    placement policy the big MODEL stays on the preferred card (only the smaller
+    CLIP + VAE move to the second card). So the preferred card still holds the model
+    whole, and "does the preferred card hold the WHOLE job" is a SAFE, conservative
+    bound here: it over-counts (it still demands room for the CLIP + VAE that
+    placement moved off this card), so it errs toward swapping the chat model, never
+    toward an OOM. A per-component-per-card refinement needs per-component byte
+    sizes, which do not exist yet (only whole-job estimates).
 
     This answers the placement question instead: does the specific card
     ``discover.resolve_preferred_device()`` chose hold the WHOLE model plus the same
-    headroom the aggregate demands. Deliberately NOT ``discover.gpu_split_shortfall``,
-    which checks a per-device RATIO SHARE - right for a tensor_split GGUF, an
-    UNDER-check here (a card holding 40% of a split would be asked for 40% of the model
-    and then handed 100% of it).
+    headroom the aggregate demands. NOT ``discover.gpu_split_shortfall``, which
+    checks a per-device RATIO SHARE - right for a tensor_split GGUF, an UNDER-check
+    here (a card holding 40% of a split would be asked for 40% of the model and then
+    handed 100% of it).
 
-    Uses the SAME headroom as ``should_swap_for_media`` so the per-device check is not
-    held to a thinner margin than the aggregate ceiling it composes with (the
-    convention ``gpu_split_shortfall`` documents).
+    Uses the SAME headroom as ``should_swap_for_media`` so the per-device check is
+    not held to a thinner margin than the aggregate ceiling it composes with.
 
     Returns None (nothing to check) when the policy is not 'auto' (an explicit
-    always/never is the user's choice and is not second-guessed), when no split is
-    configured (the combined reading already IS the single card's), when the estimate
-    is unknown ('auto' already swaps on unknown), when the live per-device reading did
-    not complete fresh this call (see the freshness note below), or when per-device
-    free is unmeasurable (cannot check; do not block a load that might work).
+    always/never is the user's choice), when no split is configured (the combined
+    reading already IS the single card's), when the estimate is unknown ('auto'
+    already swaps on unknown), when the live per-device reading did not complete
+    fresh this call, or when per-device free is unmeasurable (cannot check; do not
+    block a load that might work).
 
-    Freshness, NOT scope, is what this checks (AGENTS.md rule 5). A non-fresh
-    (GPU_PROBE_TIMEOUT/BUSY) reading is a frozen last-known-good value from an
-    earlier probe - like ``gpu_split_shortfall``, this does not compute a shortfall
-    from one. Deliberately does NOT gate on ``free_scope`` the way a reading
-    PRESENTED to a user as current fact must (see ``sysstats._vram_reading_trusted``):
-    a PROCESS-scoped reading OVER-states free the same way ``gpu_split_shortfall``'s
-    own docstring explains, and this function's ONLY use of the number is to trigger
-    the SAME protective action an under-detection would risk skipping - the extra
-    chat-model swap this repo's REG-532 note added specifically because the
-    (scope-blind) aggregate ``decide_media_swap`` check cannot see per-device
-    placement. Gating this on scope would make the check silently no-op on every
-    Windows + AMD ROCm/HIP box (permanently untrusted there), which is exactly the
-    platform the per-device gap this function exists to catch is real on - trading a
-    real safety net for a theoretical precision gain. See ``gpu_split_shortfall``'s
-    docstring for the full reasoning this mirrors; PR #710 tried the opposite
-    direction (omitting a tagged device) and was reverted for the same reason.
-    """
+    Freshness, NOT scope, is what this checks. A non-fresh (GPU_PROBE_TIMEOUT or
+    BUSY) reading is a frozen last-known-good value from an earlier probe, and like
+    ``gpu_split_shortfall`` this does not compute a shortfall from one. It does NOT
+    gate on ``free_scope`` the way a reading PRESENTED to a user as current fact
+    must (see ``sysstats._vram_reading_trusted``): a PROCESS-scoped reading
+    OVER-states free, and this function's ONLY use of the number is to trigger the
+    SAME protective action an under-detection would risk skipping - the extra
+    chat-model swap that covers what the scope-blind aggregate ``decide_media_swap``
+    check cannot see. Gating on scope would make the check silently no-op on every
+    Windows + AMD ROCm/HIP box, which is exactly the platform the per-device gap is
+    real on."""
     if settings.get("swap_policy", "auto") != "auto":
         return None
     need = settings.get("vram_estimate_bytes")
@@ -227,27 +218,23 @@ def media_split_notice(config: Optional[dict] = None, *,
     Three cases, in order:
 
     1. **Placement ACTIVE** (*placement* has a real ``gpu:N`` target): say what was
-       placed where. This is the line that would be a LIE if it still claimed media
-       "runs on ONE card" - per-component placement means the second card DOES carry
-       work (the text encoder + VAE), even though a single model still cannot be sharded
+       placed where. Per-component placement means the second card DOES carry work
+       (the text encoder + VAE), even though a single model still cannot be sharded
        across cards. Fires from the plan alone: placement is capability-driven (two
        visible cards is enough), so it does not require a configured chat split.
 
     2. **Split configured but placement UNAVAILABLE** (*capability* is present and not
-       available): the user configured a split and is not getting per-component placement
-       either - give the HONEST reason from the capability (old ComfyUI, one card
-       visible), not a flat "runs on one card".
+       available): the user configured a split and is not getting per-component
+       placement either - give the HONEST reason from the capability (old ComfyUI, one
+       card visible), not a flat "runs on one card".
 
-    3. **Split configured, no placement info threaded in** (legacy callers): the original
-       single-card notice, so existing behavior and tests are unchanged.
+    3. **Split configured, no placement info threaded in** (legacy callers): the
+       single-card notice.
 
-    Returns None on a single-GPU / unsplit box with no active placement, so a user who
-    configured nothing is never nagged about a shortfall that does not exist. The house
-    precedent for this altitude (a user-visible console notice for a capability the user
-    configured and is not fully getting) is the partial-GPU-offload notice in
-    ``inference/backends/llamacpp/_sizing.py``. Deliberately not ``logger.debug``: the
-    always-on ring buffer is INFO+, so a debug line is invisible without --debug and
-    would never reach a bug report."""
+    Returns None on a single-GPU or unsplit box with no active placement, so a user
+    who configured nothing is never nagged about a shortfall that does not exist. Not
+    a ``logger.debug`` line: the always-on ring buffer is INFO+, so a debug line is
+    invisible without --debug and would never reach a bug report."""
     from localm.config import load_config
     from localm.discover import applied_split_device_count, resolve_preferred_device
     cfg = config if config is not None else load_config()
@@ -309,17 +296,16 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
     mirrors ``jobs/runner.py``'s ``_evict_shared_engine_for_media`` instead,
     submitting the coroutine onto the server's captured event loop
     (``http_server._server_loop``) via ``asyncio.run_coroutine_threadsafe`` and
-    blocking THIS (caller's) thread on the result. That is required, not
-    optional: ``unload_all_models`` honors the in-flight-request pin and
-    serializes with ``get_engine`` only when it runs ON the loop - a raw
-    off-loop unload would race a concurrent request the way the pin-during-
-    unload fix (BUG-9b) already had to close for the media path.
+    blocking THIS (caller's) thread on the result. That is required:
+    ``unload_all_models`` honors the in-flight-request pin and serializes with
+    ``get_engine`` only when it runs ON the loop, and a raw off-loop unload would
+    race a concurrent request.
 
     Returns the unload status ("unloaded" / "in_use" / "already_unloaded"), or
     "skipped" when the server loop is unreachable (no live server - e.g. a bare
     CLI embed) / "error" on a failure to complete - in which case the embedder
-    loads alongside whatever chat model is resident (degraded, logged, never a
-    crash - AGENTS.md rule 5: every degrade is surfaced, not silent)."""
+    loads alongside whatever chat model is resident, degraded and logged, never a
+    crash."""
     import asyncio
     from localm.debuglog import logger
     from localm.inference import http_server as _hs
@@ -357,36 +343,30 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
 def _vram_free_reading() -> tuple:
     """``(free_bytes, fresh, scope)``: a free-VRAM reading, whether the probe behind
     it was fresh (list_gpus() completed inside its deadline) rather than a
-    timed-out/busy fallback to a stale last-known-good value, and the reading's
+    timed-out or busy fallback to a stale last-known-good value, and the reading's
     ``free_scope``.
 
-    Used for BOTH ends of the before/after delta (hence the name: it was
-    ``_vram_before_reading`` when only the 'before' end checked freshness, before
-    #694 moved it here and #697 added ``scope``). The 'after' end needs it just as
-    much - see _live_free_vram_bytes below.
+    Used for BOTH ends of the before/after delta.
 
-    A caller that reports vram_before_bytes/vram_after_bytes/vram_freed to
-    the user must know this: presenting a stale fallback as the CURRENT state
-    is exactly the rule-5 gap a release-verify pass caught - /v1/models/unload
-    reported byte-identical before/after readings, and vram_freed: false,
-    across two calls made minutes apart with genuinely different real GPU
-    states (confirmed stale via an OS-level VRAM counter showing the actual
-    free/use cycle worked correctly the whole time).
+    A caller that reports vram_before_bytes/vram_after_bytes/vram_freed to the
+    user must know this: presenting a stale fallback as the CURRENT state makes
+    /v1/models/unload report byte-identical before/after readings, and
+    vram_freed: false, across calls made minutes apart with genuinely different
+    real GPU states.
 
     ``scope`` is the reading's ``free_scope`` (see
-    discover._apply_device_global_free): FREE_SCOPE_PROCESS means the number counts
-    only THIS process's allocations, so on that platform it cannot see a model the
-    isolated GGUF worker loaded - a SECOND, independent way this same before/after
-    report can be wrong while the probe is perfectly fresh (not the staleness the
-    'fresh' flag guards). None when the double/fallback did not say.
+    discover._apply_device_global_free): FREE_SCOPE_PROCESS means the number
+    counts only THIS process's allocations, so on that platform it cannot see a
+    model the isolated GGUF worker loaded - a SECOND, independent way this same
+    before/after report can be wrong while the probe is perfectly fresh (not the
+    staleness the 'fresh' flag guards). None when the double or fallback did not
+    say.
 
     Defensive against a test double that patches vram_capacity()/vram_info()/
     list_gpus() with a plain no-kwarg callable or a fixed dict return_value
-    (neither accepts/implements return_status): such a double is treated as
-    "status unknown, assume fresh" (permissive, matching this reading's
-    behavior before return_status existed) rather than raising on a rejected
-    kwarg or an unexpected shape - only a REAL probe chain needs to prove
-    itself stale."""
+    (neither accepts nor implements return_status): such a double is treated as
+    "status unknown, assume fresh" rather than raising on a rejected kwarg or an
+    unexpected shape - only a REAL probe chain needs to prove itself stale."""
     from localm.discover import GPU_PROBE_OK, vram_capacity
     try:
         result = vram_capacity(return_status=True)
@@ -404,44 +384,34 @@ def _live_free_vram_bytes():
     """Free VRAM in bytes from a FRESH probe, or None when the reading is not
     live - the reader wait_for_vram_release() polls for the 'after' end.
 
-    Checking freshness on the 'before' end alone is not enough, and the gap is
-    not theoretical: the before-probe is itself what WARMS the driver, and the
-    native unload running between the two reads is exactly the kind of work that
-    wedges it. Once any probe overruns, discover._gpu_probe_inflight stays True
-    until the abandoned thread returns, so every subsequent poll is served the
-    frozen last-known-good value - which the before-read just refreshed. So
-    after == before, no rise, and the endpoint concluded "vram_freed": false with
-    before_fresh=True and therefore NO uncertainty flag at all: the original lie,
-    reproduced over real HTTP against the previous fix. Returning None here makes
-    that unmeasurable rather than falsely equal (AGENTS.md rule 5).
+    Checking freshness on the 'before' end alone is not enough: the before-probe
+    is itself what WARMS the driver, and the native unload running between the
+    two reads is exactly the kind of work that wedges it. Once any probe
+    overruns, discover._gpu_probe_inflight stays True until the abandoned thread
+    returns, so every subsequent poll is served the frozen last-known-good value,
+    which the before-read just refreshed. That makes after == before with no
+    rise, and the endpoint would conclude "vram_freed": false with
+    before_fresh=True and therefore no uncertainty flag at all. Returning None
+    here makes that unmeasurable rather than falsely equal.
 
     None means "could not measure now", never a fabricated 0.
 
-    NOT every free-VRAM caller is migrated to this, deliberately. Ones weighing
-    CAPACITY rather than reporting a completed action (the fit badges, the swap
-    gates, the eviction ceiling) still call vram_capacity() directly: a stale
-    ceiling costs an over- or under-swap, while refusing to decide at all would
-    break a working box every time the probe merely ran slow. What "unknown"
-    should MEAN for a decision gate is a real design question, and it is not
-    answered here.
+    NOT every free-VRAM caller uses this. Ones weighing CAPACITY rather than
+    reporting a completed action (the fit badges, the swap gates, the eviction
+    ceiling) still call vram_capacity() directly: a stale ceiling costs an over-
+    or under-swap, while refusing to decide at all would break a working box
+    every time the probe merely ran slow.
 
-    Corrected - this list previously named sysstats.vram_capacity() -> GET
-    /api/stats and gui/routes/models.py's /api/vram-estimate as open gaps
-    quoting a free figure with no freshness check; both now gate on
-    sysstats._vram_reading_trusted() (fresh AND device-global) before showing
-    `used`/`free` at all, same as this file's own CLI/GUI VRAM-display fixes.
-    http_server.switch_engine's 503 refusals (via discover.gpu_split_shortfall)
-    were never actually this defect: that function DOES require a fresh
-    GPU_PROBE_OK reading before emitting a shortfall (see its own docstring) -
-    it deliberately does not gate on free_scope, for a documented, sound
-    reason specific to a refuse-only decision (an over-stated free only makes
-    the refusal more conservative), not an oversight. Kept here as a pointer
-    for the next VRAM-surface sweep: once a probe overruns,
-    discover._gpu_probe_inflight stays True until the abandoned thread
-    returns, so every later call keeps serving the same frozen value - any
-    NEW caller that quotes a free figure as current fact needs the same
-    freshness (and, unless it is refuse-only like gpu_split_shortfall,
-    scope) check before trusting it."""
+    ``sysstats.vram_capacity()`` behind GET /api/stats and
+    ``gui/routes/models.py``'s /api/vram-estimate gate on
+    ``sysstats._vram_reading_trusted()`` (fresh AND device-global) before showing
+    `used`/`free` at all. ``http_server.switch_engine``'s 503 refusals (via
+    ``discover.gpu_split_shortfall``) require a fresh GPU_PROBE_OK reading before
+    emitting a shortfall but do not gate on free_scope, which is sound for a
+    refuse-only decision: an over-stated free only makes the refusal more
+    conservative. Any NEW caller that quotes a free figure as current fact needs
+    the same freshness check, and, unless it is refuse-only, the scope check
+    too."""
     free, fresh, _scope = _vram_free_reading()
     return free if fresh else None
 
@@ -466,14 +436,14 @@ def wait_for_vram_release(
     still unmeasurable when the timeout expired.
 
     That second None case is the honesty guard. ``False`` is a positive claim -
-    "VRAM did not drop" - and a poll that could not take a reading does not support
-    it. It matters because ``read_free`` is normally backed by the deadline-bounded
-    GPU probe (``discover.list_gpus``), whose status-aware callers pass None here
-    the moment a probe stops answering and starts serving a FROZEN last-known-good
-    value. Without this branch that frozen value equals ``before_bytes``, shows no
-    rise, and reports a confident "no VRAM was freed" while VRAM was in fact freed
-    (AGENTS.md rule 5). None reuses this function's already-documented "cannot
-    verify" meaning rather than inventing a fourth outcome.
+    "VRAM did not drop" - and a poll that could not take a reading does not
+    support it. ``read_free`` is normally backed by the deadline-bounded GPU probe
+    (``discover.list_gpus``), whose status-aware callers pass None here the moment
+    a probe stops answering and starts serving a FROZEN last-known-good value.
+    Without this branch that frozen value equals ``before_bytes``, shows no rise,
+    and reports a confident "no VRAM was freed" while VRAM was in fact freed. None
+    reuses this function's already-documented "cannot verify" meaning rather than
+    inventing a fourth outcome.
 
     The ``/v1/models/unload`` endpoint uses this so it does NOT return until VRAM
     is actually reclaimed; otherwise a media model can load on top of a
@@ -613,10 +583,9 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
         if not resp.ok:
             # A non-2xx (503 "No model specified", 401, or a 500 when the engine
             # load fails because the media backend still holds VRAM - the exact
-            # hazard this module manages) means the reload did NOT happen. Report
-            # that honestly instead of the false "Chat model ready." - lazy reload
-            # on the next message still recovers, so this is a message fix, not an
-            # escalation. Mirrors unload_chat_for_media's resp.ok check above.
+            # hazard this module manages) means the reload did NOT happen, and is
+            # reported as such instead of "Chat model ready.". Lazy reload on the
+            # next message still recovers.
             job.push({"type": "line", "text":
                       f"Reload deferred to the next message (HTTP {resp.status_code})."})
             return

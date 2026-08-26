@@ -1,16 +1,13 @@
-"""The cold torch GPU probe must run OUT of process (issue #833).
+"""The cold torch GPU probe must run OUT of process.
 
 A cold ``import torch`` on Windows runs a loop of ``LoadLibraryExW`` calls, which
 holds the OS loader lock; creating a thread needs that same lock, so no thread
 anywhere in the process can start while it runs, and the asyncio event loop
-stalls. A report's watchdog dump caught the request thread and a
-``subprocess.run`` both parked at the last line of ``Thread.start()`` while the
-GPU probe was inside torch's DLL loading, for 10.9s.
+stalls.
 
-The regression guard that matters is structural rather than timed: after a probe
-on a process where torch was NOT already resident, torch must still not be
-resident, because the enumeration happened in a child. A wall-clock assertion
-would be flaky on a loaded runner; this one is deterministic.
+The regression guard is structural rather than timed: after a probe on a process
+where torch was NOT already resident, torch must still not be resident, because
+the enumeration happened in a child.
 """
 from __future__ import annotations
 
@@ -28,7 +25,7 @@ from localm import discover
 class TestColdProbeStaysOutOfProcess:
 
     def test_cold_probe_uses_the_child_and_never_imports_torch_here(self, monkeypatch):
-        """The whole point of #833: a cold probe must not import torch here."""
+        """A cold probe must not import torch here."""
         calls = []
         monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
@@ -71,9 +68,8 @@ class TestColdProbeStaysOutOfProcess:
 
 class TestIsolatedProbeDegradesHonestly:
     """Every failure mode must return [] so the caller falls through to
-    nvidia-smi exactly as an in-process failure used to, and must say why at
-    debug rather than leaving "no GPU" indistinguishable from "could not ask"
-    (AGENTS.md rule 5)."""
+    nvidia-smi, and must say why at debug, so "no GPU" is never
+    indistinguishable from "could not ask"."""
 
     # caplog must name the "localm" logger, not just set a level. caplog's own
     # level lands on the ROOT logger, and discover logs through the "localm"
@@ -174,8 +170,7 @@ class TestIsolatedProbeDegradesHonestly:
             self, monkeypatch, caplog):
         """A cap must still exist (an adversarial/huge child stream cannot be
         logged unbounded), but a truncated diagnostic must SAY it was
-        truncated (AGENTS.md rule 5) rather than stopping mid-sentence with no
-        indication anything is missing."""
+        truncated, never stop mid-sentence with no indication."""
         caplog.set_level("DEBUG", logger=self._LOGGER)
         huge = self._LONG_PATH_PREFIX + self._ACTIONABLE_TAIL * 20
         assert len(huge) > discover._CHILD_STDERR_LOG_CAP
@@ -208,10 +203,9 @@ class TestIsolatedProbeDegradesHonestly:
 
 
 class TestWedgedTorchIsNotRetriedForever:
-    """`list_gpus` re-probes on every call by design (no TTL). So a box whose
-    torch cannot answer must not pay the full timeout every single probe, or it
-    never reaches the nvidia-smi fallback inside the caller's 15s deadline - the
-    sm_120 case in the report this came from."""
+    """`list_gpus` re-probes on every call (no TTL), so a box whose torch cannot
+    answer must not pay the full timeout every single probe, or it never reaches
+    the nvidia-smi fallback inside the caller's 15s deadline."""
 
     def setup_method(self):
         discover._reset_gpu_probe_cache()
@@ -366,8 +360,8 @@ cuda = _Cuda()
         ], f"enumeration contract drifted: {devices!r}"
 
     def test_child_skips_a_device_that_cannot_report_memory(self, tmp_path):
-        """One device failing must never hide the rest - the in-process branch
-        has always had that property and the child must match it."""
+        """One device failing must never hide the rest: the in-process branch
+        has that property and the child matches it."""
         stub = """
 class _Cuda:
     @staticmethod

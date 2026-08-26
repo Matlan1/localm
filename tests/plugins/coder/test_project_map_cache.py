@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Cross-session project-map caching, wired into Agent._build_project_map
-(persistence.py). The pure mechanism (save_cache/load_cached_and_reconcile)
-is covered in test_indexer.py; this file proves the WIRING - a second
-Agent constructed for the same project reuses the cache instead of doing a
-full ProjectMap.build() - and that _project_map_path_for reuses #1051's
-project-digest scheme (checkpoint.py's _project_dir_for) rather than
-inventing a second one.
-
-MEASURED (dev-notes, "coder project-map caching"): ProjectMap.build() on the
-real localm repo (300/1000+ files, capped) takes ~360-450ms; reconciling a
-cached map takes ~15-30ms - the reason this unit exists at all.
+(persistence.py). The pure mechanism (save_cache/load_cached_and_reconcile) is
+covered in test_indexer.py; this file covers the WIRING - a second Agent
+constructed for the same project reuses the cache instead of doing a full
+ProjectMap.build() - and that _project_map_path_for reuses the project-digest
+scheme in checkpoint.py's _project_dir_for.
 """
 
 from __future__ import annotations
@@ -82,14 +77,11 @@ def test_first_agent_builds_full_and_writes_a_cache(home, tmp_path):
 
 def test_second_agent_in_the_same_project_loads_from_cache_not_a_full_build(
         home, tmp_path):
-    """The actual wiring proof: a second Agent for the SAME project must
-    reconcile the cache rather than doing a full walk. ProjectMap.build() is
-    still the one call persistence.py makes (deliberately - see its
-    docstring: a second, differently-named classmethod call would silently
-    defeat every other test in the repo that mocks ProjectMap.build alone),
-    so the walk itself - not the build() call - is what must not happen on a
-    cache hit. os.walk is the ground truth for that; ProjectMap.from_cache
-    is the same signal persistence.py's own log message reads."""
+    """A second Agent for the SAME project must reconcile the cache rather than
+    doing a full walk. ProjectMap.build() is still the one call persistence.py
+    makes, so the WALK - not the build() call - is what must not happen on a
+    cache hit. os.walk is the ground truth for that; ProjectMap.from_cache is
+    the same signal persistence.py's own log message reads."""
     project = _project(tmp_path)
     _agent(project)   # first session: builds + caches
 
@@ -112,11 +104,10 @@ def test_second_agent_sees_an_edit_made_between_sessions(home, tmp_path):
 
 
 def test_privacy_mode_agent_writes_no_project_map_cache(home, tmp_path):
-    """Same promise save_checkpoint() already makes for the conversation: the
-    project map cache records this project's relative file paths and
-    extracted symbol names - real project content - under HOME, so a privacy
-    session must never leave it behind (checkup 2026-08-11 item 11 - this
-    write had no gate at all before this fix, unlike its sibling)."""
+    """The same promise save_checkpoint() makes for the conversation: the
+    project map cache records this project's relative file paths and extracted
+    symbol names - real project content - under HOME, so a privacy session must
+    never leave it behind."""
     project = _project(tmp_path)
     from localm.plugins.coder.agent.checkpoint import _project_map_path_for
     cache_path = _project_map_path_for(project)

@@ -8,15 +8,13 @@ HARNESS knobs - the numeric/behavioral settings around the loop - so a weak smal
 model and a long-reasoning model can run with settings tuned to them instead of a
 single one-size default.
 
-Phase 1 (this module) tunes only generation kwargs, the lowest-risk knobs:
-  - small  models: a steadier ``temperature`` (less drift / hallucination on a
-    weak model; coding wants determinism over diversity).
+It tunes generation kwargs only:
+  - small models: a steadier ``temperature``.
   - thinking models: a larger ``max_tokens`` so the answer is not truncated after
     a long <think> scratchpad.
 
 PRECEDENCE: a profile value is only a DEFAULT - an explicit caller value (a CLI
-flag or a ``.localcoder/config.toml`` key) always wins. The seed table below is
-deliberately small and conservative; it is the maintainer's to tune over time.
+flag or a ``.localcoder/config.toml`` key) always wins.
 
 Two accessors reflect a real asymmetry between the CLI and the GUI:
   - ``agent_gen_overrides`` returns only keys safe to apply in ANY construction
@@ -29,8 +27,8 @@ Two accessors reflect a real asymmetry between the CLI and the GUI:
 
 from __future__ import annotations
 
-# Conservative seed. Keyed by prompts.detect_model_family() output.
-# gemma / default deliberately have no overrides (baseline behavior).
+# Keyed by prompts.detect_model_family() output. gemma and default have no
+# overrides, so they keep baseline behavior.
 _PROFILES: dict = {
     "small":    {"temperature": 0.3},
     "thinking": {"max_tokens": 4096},

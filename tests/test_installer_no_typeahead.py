@@ -5,19 +5,14 @@ Setup runs long steps between questions (a uv download, a Python download, a ven
 build, a backend provision). Anything typed while one of those runs sits in the
 terminal's input queue and is delivered to the NEXT prompt - so one stray Enter
 silently accepts a default, and a double Enter accepts two questions in a row.
-Reported by the maintainer after accidentally acking two questions in one run.
+A `set /p` in place of a `choice` only makes the confirming Enter belong to its
+own prompt; it does not empty the queue, and a `choice` prompt consumes a
+buffered keypress outright. The queue must be emptied right before each question.
 
-This is SETUP-2 again. That fix only swapped a single `choice` for a `set /p` at
-one site, so the confirming Enter belonged to its own prompt - it never emptied the
-queue, so anything typed DURING a long step still leaked, and the remaining
-`choice` prompts consume a buffered keypress outright. The queue must be emptied
-right before each question.
-
-Static assertions, deliberately: the real failure needs a terminal with keystrokes
-queued during a multi-second download, which no unit test can stage. What CAN be
-pinned mechanically is that every prompt is preceded by the drop, so a prompt added
-later cannot quietly reintroduce it - a comment saying "remember to flush" is what
-failed the first time.
+Static assertions: the real failure needs a terminal with keystrokes queued
+during a multi-second download, which no unit test can stage. What CAN be pinned
+mechanically is that every prompt is preceded by the drop, so a prompt added
+later cannot quietly reintroduce it.
 """
 
 from __future__ import annotations
@@ -73,8 +68,8 @@ class TestBatchFlushesBeforeEveryPrompt:
             "the flush must actually empty the console input queue"
 
     def test_the_flush_can_never_block_an_install(self):
-        """Best-effort by design: with no console (piped/CI) it must no-op, not
-        error out and abort setup."""
+        """Best-effort: with no console (piped/CI) the flush must no-op, not error
+        out and abort setup."""
         body = "\n".join(_bat_lines())
         start = body.index("\n:flush\n")
         sub = body[start:start + 500]

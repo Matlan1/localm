@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression audit 2026-07-14, REG-579: a present but readable-and-EMPTY
-auth.key locked the owner out of their own server.
+"""A present but readable-and-EMPTY auth.key must not lock the owner out.
 
-_owner_key_present() only ever STAT'd the file (key_file().exists()), so a
-zero-byte or whitespace-only auth.key made any_key_configured() True ("auth is
-in effect") while get_api_key() still returned None - so verify() matched
-nothing and EVERY request 401'd. The owner could not recover through the API
-either: POST /v1/keys requires auth, and routes/keys.py's loopback auto-seed
-only fires when the server was_open. The only way out was deleting the file by
-hand. Pre-PR that install ran open.
+A zero-byte or whitespace-only auth.key makes get_api_key() return None, so an
+any_key_configured() that reported True would put auth "in effect" with nothing
+to verify against and every request would 401. The owner could not recover
+through the API either: POST /v1/keys requires auth, and routes/keys.py's
+loopback auto-seed only fires when the server was_open.
 
-The correct behaviour is not a judgement call - the rest of this module already
-decided it, three times over, for the identical question:
+The rest of localm.auth answers the same question the same way:
 
   * get_api_key():          "Empty / whitespace-only values count as no key."
   * set_api_key(""):        clears the key, "returning the server to open mode".
@@ -19,16 +15,9 @@ decided it, three times over, for the identical question:
                             ("a fresh or cleared install runs open by design"),
                             while an unreadable/corrupt one fails CLOSED.
 
-_owner_key_present()'s own docstring even claims it "mirrors _keystore_configured's
-own missing-vs-unreadable branching" - it did not. A readable empty file is not the
-"we cannot tell whether a key exists" case that fail-closed exists for: we CAN read
-it, and it unambiguously holds no key. Only a file we cannot READ stays fail-closed.
-
-The suite missed this because it only ever tested the two ENDS: a genuinely absent
-file (test_absent_owner_key_is_open) and an unreadable one simulated as a directory
-(test_unreadable_owner_key_fails_closed). test_empty_values_mean_no_key uses
-set_api_key(' '), which UNLINKS the file - landing in the "absent" branch, never
-"present-and-empty", and it only asserts get_api_key(), never any_key_configured().
+A readable empty file is not the "we cannot tell whether a key exists" case
+fail-closed exists for: it CAN be read, and it unambiguously holds no key. Only
+a file that cannot be READ stays fail-closed.
 """
 
 import pytest
@@ -63,10 +52,9 @@ def _write_key_file(auth, text):
     ("   \n\t \n", "whitespace only"),
 ])
 def test_present_but_empty_owner_key_is_open_not_a_lockout(auth, content, label):
-    """THE REGRESSION. A readable auth.key holding no key means NO KEY - the same
-    thing an absent file, an empty env var, and an empty ([]) keystore all mean.
-    It must not put auth "in effect" with no key to match, which locks the owner
-    out of their own server with no route back in.
+    """A readable auth.key holding no key means NO KEY - the same as an absent
+    file, an empty env var, or an empty ([]) keystore. It must not put auth "in
+    effect" with no key to match.
 
     Real ways this file appears: the user created it by hand to paste a key in
     later, an editor saved it empty, or a sync/backup left it truncated."""
@@ -84,16 +72,13 @@ def test_present_but_empty_owner_key_is_open_not_a_lockout(auth, content, label)
     (b"\xef\xbb\xbf  \n", "BOM + whitespace"),
 ])
 def test_key_file_holding_no_presentable_key_is_open_not_a_lockout(auth, raw, label):
-    """The same lockout by another route (found by a fresh-context review of the
-    first cut of this fix, which only handled str.strip()-able whitespace).
-
-    A BOM is what a Windows editor, or PowerShell's `Out-File -Encoding utf8`,
-    writes at the front of a hand-made file - the exact "I made the file to paste
-    a key in later" case this finding is about. str.strip() does NOT remove
-    U+FEFF, so a BOM-only file read as plain utf-8 is truthy: auth in effect,
-    holding a "key" that is a single invisible character no human can present.
-    NUL padding is what a crash- or sync-truncated file holds, and is not a key
-    either. Both must mean NO key, exactly like an empty file."""
+    """The same lockout by another route: str.strip() does NOT remove U+FEFF, so
+    a BOM-only file read as plain utf-8 is truthy - auth in effect, holding a
+    "key" that is a single invisible character no human can present. A BOM is
+    what a Windows editor, or PowerShell's `Out-File -Encoding utf8`, writes at
+    the front of a hand-made file. NUL padding is what a crash- or
+    sync-truncated file holds. Both must mean NO key, exactly like an empty
+    file."""
     p = auth.key_file()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(raw)
@@ -104,10 +89,10 @@ def test_key_file_holding_no_presentable_key_is_open_not_a_lockout(auth, raw, la
 
 
 def test_bom_prefixed_real_key_still_matches_what_the_owner_typed(auth):
-    """The other half of the BOM bug: a real key saved WITH a BOM must not come
-    back as '\\ufeff<key>', or the owner presenting the key they typed is rejected
-    (and, since U+FEFF is non-ASCII, hmac.compare_digest raises rather than
-    returning False - a 500 on every request)."""
+    """A real key saved WITH a BOM must not come back as '\\ufeff<key>', or the
+    owner presenting the key they typed is rejected - and, since U+FEFF is
+    non-ASCII, hmac.compare_digest raises rather than returning False, so every
+    request 500s."""
     p = auth.key_file()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b"\xef\xbb\xbfs3cret-key-value\n")
@@ -138,24 +123,22 @@ def test_notice_re_arms_so_a_later_downgrade_is_not_silent(auth):
 
 
 def test_empty_owner_key_leaves_the_open_mode_recovery_path_intact(auth):
-    """The concrete consequence the finding turns on: routes/keys.py mints the
-    first key only when the server was_open. If an empty auth.key reports "keys
-    configured", that auto-seed never fires and the lockout is permanent."""
+    """routes/keys.py mints the first key only when the server was_open, so an
+    empty auth.key that reported "keys configured" would make that auto-seed
+    unreachable."""
     _write_key_file(auth, "")
     was_open = not auth.any_key_configured()
     assert was_open, "the open -> protected recovery transition is unreachable"
 
 
 def test_empty_owner_key_is_surfaced_not_silent(auth):
-    """Rule 5: localm itself never writes an empty auth.key (set_api_key('')
-    unlinks it), so one is always an anomaly - a half-finished setup, or a file
-    truncated by a crash or a sync. Running open is correct, but it must be
-    DISCOVERABLE, not a silent security downgrade the owner never learns about.
+    """localm itself never writes an empty auth.key (set_api_key('') unlinks
+    it), so one is always an anomaly, and dropping to open mode over it is
+    reported rather than silent.
 
-    Asserted against the REAL always-on mechanism (debuglog's in-memory ring
+    Asserted against the REAL always-on mechanism - debuglog's in-memory ring
     buffer, which serve/gui install at startup and which bugreport renders under
-    "Recent activity"), not merely a caplog record: a warning that no shipped
-    handler ever receives would surface nothing in the actual product."""
+    "Recent activity" - not merely a caplog record."""
     from localm.debuglog import install_ring_buffer, recent_activity
     install_ring_buffer()
     path = _write_key_file(auth, "")
@@ -189,11 +172,10 @@ def test_empty_owner_key_warning_does_not_spam_the_request_path(auth):
 # --------------------------------------------------------------------------- #
 
 def test_unreadable_owner_key_still_fails_closed(auth):
-    """NEGATIVE CASE, the important one. "Readable and empty" must not be
-    conflated with "cannot be read". A file we cannot READ tells us nothing about
-    whether a key exists, so auth stays IN EFFECT (the server locks) rather than
-    silently dropping to open - the 2026-07-11 checkup HIGH. Here a directory
-    makes the read raise OSError."""
+    """NEGATIVE CASE: "readable and empty" must not be conflated with "cannot be
+    read". A file that cannot be READ says nothing about whether a key exists, so
+    auth stays IN EFFECT and the server locks. Here a directory makes the read
+    raise OSError."""
     auth.key_file().mkdir(parents=True, exist_ok=True)
     assert auth.any_key_configured() is True, (
         "an UNREADABLE owner key must fail CLOSED - the fix must only change the "

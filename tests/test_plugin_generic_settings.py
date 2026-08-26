@@ -2,13 +2,9 @@
 """The generic settings-contribution seam: host.add_settings(), and its
 GET/POST /v1/plugins/<name>/settings render/save path.
 
-Before this, add_settings(fields) appended to a list nothing ever read - a
-plugin could call it, get no error, and the fields would simply never appear
-anywhere (docs/plugins.md and docs/plugin-interop.md documented it as a real
-Host API method the whole time). This pins the real path: field-shape
-validation at register() time, aggregation across active plugins
-(PluginManager.get_all_plugin_settings), resolved-value rendering and
-validated persistence into config["plugins"][<name>], generic over widget
+The path: field-shape validation at register() time, aggregation across active
+plugins (PluginManager.get_all_plugin_settings), resolved-value rendering, and
+validated persistence into config["plugins"][<name>] - generic over widget
 rather than tied to a fixed field list the way the tts/media blocks are.
 """
 
@@ -34,8 +30,8 @@ def env(tmp_path, monkeypatch):
 
 def _make_settings_plugin(root, name, *, toml_extra=""):
     """A synthetic plugin that contributes a small, varied set of fields:
-    one of every widget family this generic path is meant to handle, plus one
-    admin_only/secret pair mirroring REC-MEDIA-CMD's shape."""
+    one of every widget family this generic path handles, plus one
+    admin_only/secret pair."""
     pdir = root / name
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "plugin.toml").write_text(
@@ -79,9 +75,8 @@ def _install_real_plugin(env, name="myplug"):
     dir (plugins_dir(), inside the patched LOCALM_HOME) and mark it enabled in
     config - what create_app(None)'s own PluginManager (default roots) needs
     to load it at construction time. Used only by tests that need the real
-    auth/scopes machinery create_app(None) wires up; the plain functional
-    tests above use a local PluginManager pointed at a throwaway dir instead,
-    same as test_plugin_engine.py's pattern."""
+    auth/scopes machinery create_app(None) wires up; the plain functional tests
+    above use a local PluginManager pointed at a throwaway dir instead."""
     import shutil
 
     from localm.config import update_config
@@ -136,8 +131,7 @@ def test_add_settings_accepts_valid_fields(env):
     fields = [PluginSettingField("greeting", Widget.TEXT, "Greeting", default="hi")]
     host.add_settings(fields)
     assert host.settings == fields
-    # A second call ADDS rather than replaces (mirrors the existing
-    # self.settings.extend behavior a plugin calling add_settings twice relies on).
+    # A second call ADDS rather than replaces.
     more = [PluginSettingField("mode", Widget.SELECT, "Mode", options=["a", "b"])]
     host.add_settings(more)
     assert host.settings == fields + more
@@ -277,8 +271,8 @@ def test_a_plugin_with_no_add_settings_call_contributes_nothing(env):
 
 
 def test_a_bad_add_settings_call_fails_the_load_and_is_surfaced(env):
-    """A plugin author's mistake (wrong shape) fails LOUDLY - the whole point of
-    validating at register() time - and is recorded, not silently dropped."""
+    """A wrong-shaped field fails the load at register() time and is recorded,
+    not silently dropped."""
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _bad_plugin(plugins, "broken", '''
@@ -411,9 +405,9 @@ def _bulk_fields(resp, plugin="myplug"):
 
 
 def test_get_and_post_require_config_scopes_not_the_plugins_own_scope(env):
-    """The reason this lives on the core routes and not the plugin's own
-    router: a key that merely grants 'may use myplug' must not be able to
-    rewrite its settings - same reasoning as the tts/media settings routes."""
+    """These live on the core routes, not the plugin's own router, so a key that
+    merely grants 'may use myplug' cannot rewrite its settings - the same gate
+    the tts/media settings routes use."""
     from localm import auth
     from localm.inference.http_server import create_app
 

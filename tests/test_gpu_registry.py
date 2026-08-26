@@ -97,16 +97,14 @@ class TestRegistryReadWrite:
 
     def test_write_entry_failure_is_best_effort(self, tmp_path, monkeypatch):
         """A write failure must never raise into the caller - it returns None
-        instead (RULE 5: logged, never a crash in the caller's request path).
+        instead, logged rather than crashing the caller's request path.
 
-        The fault is injected at ``config.atomic_write_private``, the writer
-        this function delegates to. It used to be injected at
-        ``pathlib.Path.write_text``, which write_entry called directly; once the
-        create moved to ``os.open`` inside the shared writer that patch stopped
-        intercepting anything, and a fault injector that silently fails to fire
-        is indistinguishable from a guard that correctly found nothing to
-        refuse. The ``is None`` assertion is itself the proof the injection
-        took: without it the function returns the written path.
+        The fault is injected at ``config.atomic_write_private``, the writer this
+        function delegates to, not at ``pathlib.Path.write_text``, which the
+        shared writer no longer calls: a fault injector that silently fails to
+        fire is indistinguishable from a guard that correctly found nothing to
+        refuse. The ``is None`` assertion is itself the proof the injection took,
+        since without it the function returns the written path.
         """
         d = tmp_path / "reg"
 
@@ -223,13 +221,12 @@ class TestListGpuPeers:
 
     def test_self_pid_excluded_even_without_exclude_self_id(self, tmp_path, monkeypatch):
         """The caller may have no instance_id to pass at all -
-        llamacpp/_sizing.py's _vram_holder_hint has none, by design (see its
-        docstring) - and must still never see itself as a peer. A registry
-        entry whose pid is THIS test process's own pid must be excluded even
-        with no exclude_self_id given, and even though pid_alive/_try_whoami
-        would happily vouch for it: this is the exact real-world shape of the
-        bug (a low-VRAM warning blaming "another localm instance" that was
-        actually itself, port and all)."""
+        llamacpp/_sizing.py's _vram_holder_hint has none - and must still never
+        see itself as a peer. A registry entry whose pid is THIS test process's
+        own pid must be excluded even with no exclude_self_id given, and even
+        though pid_alive/_try_whoami would happily vouch for it; otherwise a
+        low-VRAM warning blames "another localm instance" that is actually
+        itself, port and all."""
         d = tmp_path / "reg"
         self._write(d, "self-by-pid", 9010, model="my-model", pid=os.getpid())
         monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: True)
@@ -369,19 +366,17 @@ def _make_engine(name):
 
 class _UnfittableEngine(_FakeEngine):
     """Simulates the backend's OWN final sizing decision genuinely refusing
-    (GgufBackend._check_vram raising because the model cannot fit even at 0
-    GPU layers - llamacpp/_sizing.py). Since #753, switch_engine no longer
-    hard-refuses on its own crude whole-model estimate once local +
-    cooperative eviction is exhausted - it falls through to a real load
-    attempt and lets the backend decide, converting a genuine backend
-    RuntimeError into the same clean 503 shape the old crude refusal used to
-    produce (see switch_engine's `except RuntimeError` around new_engine.load).
-    These cooperative-unload tests are about the COOPERATION SEQUENCING
-    (was the registry queried, did a peer get asked, does failure never
-    escalate past 503), not about whole-model sizing - test_auto_gpu_layers.py
-    already covers that - so the model-b factory here must simulate a load
-    that genuinely cannot fit, or switch_engine's fall-through would just
-    succeed (200) instead of ever reaching a 503 to assert on."""
+    (GgufBackend._check_vram raising because the model cannot fit even at 0 GPU
+    layers - llamacpp/_sizing.py). switch_engine does not hard-refuse on its own
+    crude whole-model estimate once local and cooperative eviction are exhausted:
+    it falls through to a real load attempt and lets the backend decide,
+    converting a genuine backend RuntimeError into a clean 503 (see
+    switch_engine's `except RuntimeError` around new_engine.load). These
+    cooperative-unload tests are about the COOPERATION SEQUENCING (was the
+    registry queried, did a peer get asked, does failure never escalate past
+    503), not about whole-model sizing, so the model-b factory here must simulate
+    a load that genuinely cannot fit or the fall-through would just succeed
+    (200) instead of reaching a 503 to assert on."""
 
     def load(self):
         raise RuntimeError("VRAM exhausted: cannot fit even at 0 GPU layers")
@@ -428,13 +423,11 @@ def _dynamic_vram(free_gate=None):
 
 class TestSwitchEngineCooperativeUnload:
     def test_falls_back_to_503_without_coordination(self, multi_model_registry, monkeypatch):
-        """hs._gpu_coord unset (today's default for every existing test and
-        every --isolated run) -> the new branch is a pure no-op, cooperation is
-        never attempted, and the load still ends in a clean 503 when the
+        """hs._gpu_coord unset (the default for every existing test and every
+        --isolated run) -> the coordination branch is a pure no-op, cooperation
+        is never attempted, and the load still ends in a clean 503 when the
         backend's own sizing (simulated here - see _UnfittableEngine) genuinely
-        cannot fit it (since #753, switch_engine itself no longer hard-refuses
-        on its own crude estimate; it falls through and lets the backend
-        decide)."""
+        cannot fit it."""
         assert hs._gpu_coord is None
         monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
 

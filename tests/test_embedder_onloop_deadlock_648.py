@@ -1,21 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for #648: get_embedder()/evict_chat_for_embedder must never
-freeze the server event loop.
+"""get_embedder()/evict_chat_for_embedder must never freeze the server event
+loop.
 
-Root cause (#648): the async memory routes call get_embedder() SYNCHRONOUSLY on the
-event-loop thread; get_embedder() -> _maybe_swap_for_embedder -> evict_chat_for_embedder,
-which does `run_coroutine_threadsafe(unload_all_models(), _server_loop).result(timeout=300)`.
-When the caller is ALREADY on _server_loop's thread, the loop is blocked in .result()
-and can never run the scheduled coroutine -> the whole server freezes for up to 300s,
-then TimeoutError is swallowed to "error" (a degraded load).
+The async memory routes call get_embedder() SYNCHRONOUSLY on the event-loop
+thread; get_embedder() -> _maybe_swap_for_embedder -> evict_chat_for_embedder,
+which does
+`run_coroutine_threadsafe(unload_all_models(), _server_loop).result(timeout=300)`.
+When the caller is ALREADY on _server_loop's thread, the loop is blocked in
+.result() and can never run the scheduled coroutine, so the whole server freezes
+for up to 300s and the TimeoutError is then swallowed into "error" (a degraded
+load).
 
-The existing swap suite (test_embedder_vram_swap.py) misses this because its harness
-`_drive_evict` runs evict on an EXECUTOR thread (off-loop), where run_coroutine_threadsafe
-works. These tests drive the ON-loop path the real routes use.
+The existing swap suite (test_embedder_vram_swap.py) cannot see this: its
+harness `_drive_evict` runs evict on an EXECUTOR thread (off-loop), where
+run_coroutine_threadsafe works. These tests drive the ON-loop path the real
+routes use.
 
-Fix has two parts, one test each:
-  (1) an on-loop guard in evict_chat_for_embedder (never block-wait on the loop it runs on);
-  (2) the memory write routes resolve/load the embedder OFF the loop (run_in_executor).
+Two parts, one test each:
+  (1) an on-loop guard in evict_chat_for_embedder (never block-wait on the loop
+      it runs on);
+  (2) the memory write routes resolve/load the embedder OFF the loop
+      (run_in_executor).
 """
 
 from __future__ import annotations
@@ -47,8 +52,8 @@ def hsclean():
 def test_evict_on_loop_does_not_freeze_the_server(hsclean):
     """Calling evict_chat_for_embedder ON the server-loop thread (as an async
     memory route does via a synchronous get_embedder()) must return promptly, NOT
-    block the whole loop for the timeout. Pre-fix: blocks the full timeout, the
-    unload coroutine never runs, returns 'error'."""
+    block the whole loop for the timeout. Unguarded it blocks the full timeout,
+    the unload coroutine never runs, and it returns 'error'."""
     ran = {"unload": False}
 
     async def _fake_unload():
@@ -103,8 +108,8 @@ def test_evict_off_loop_still_evicts(hsclean):
 
 def test_memory_append_resolves_embedder_off_the_loop(tmp_path, monkeypatch):
     """POST /api/memory/append must not resolve/load the embedder on the event
-    loop: get_embedder()/embed() has to run on an executor thread. Pre-fix the
-    store write (and its embed_fn -> get_embedder) ran inline on the loop thread."""
+    loop: get_embedder()/embed() has to run on an executor thread, not inline on
+    the loop thread with the store write."""
     from localm.memory import MemoryStore
     import localm.inference.embedder as emb_mod
 

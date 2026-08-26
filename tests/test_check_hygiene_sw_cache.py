@@ -1,27 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """scripts/check_hygiene.py's PWA service-worker cache-derivation check (check 6).
 
-Formerly a bump gate: sw.js's CACHE constant was a hand-typed version string that had
-to be bumped whenever a cached asset changed, checked here by diffing the working tree
-against a baseline. That shipped stale three times undetected by human review before
-the gate existed, and the gate itself then produced a real merge conflict between any
-two concurrent GUI PRs (it went v88 -> v89 -> v90 -> v91 in one afternoon, and a
-fourth session spent two rebase rounds on that one line while its PR ran with NO CI at
-all - a conflicted PR gets no checks). See check_hygiene.py's own block comment above
-_SW_STATIC for the incident record.
+sw.js's CACHE constant is not a hand-typed version string in git:
+localm/plugins/gui/web.py's GET /sw.js route computes it fresh on every request
+from a content digest of the static assets being served. This file covers what
+check_hygiene.py enforces on the tracked file: SHELL precache coverage, and that
+the CACHE placeholder line is still in the shape web.py's route expects to
+substitute into.
 
-The fix moved the derivation out of git entirely: localm/plugins/gui/web.py's GET
-/sw.js route now computes CACHE fresh on every request from a content digest of the
-static assets being served (see tests/test_gui_sw_cache_route.py for that half). This
-file now covers what check_hygiene.py STILL enforces: SHELL precache coverage
-(unrelated to staleness - always mattered on its own) and that the CACHE placeholder
-line is still in the shape web.py's route expects to substitute into.
-
-These tests are written to survive MUTATION. Asserting `== []` on a clean tree proves
-nothing on its own - a gate hardwired to `return []` passes every such test. So every
-"clean" assertion here is paired with a positive control that must FAIL, and each
-silent-skip path (unparseable CACHE, unparseable SHELL, a moved sw.js) is asserted to
-be LOUD rather than merely absent. A gate that cannot fail is decoration.
+Every "clean" assertion here is paired with a positive control that must FAIL,
+and each silent-skip path (unparseable CACHE, unparseable SHELL, a moved
+sw.js) is asserted to be LOUD rather than merely absent.
 """
 
 import importlib.util
@@ -92,10 +81,9 @@ def test_no_change_is_clean(tmp_path, monkeypatch):
 
 
 def test_asset_content_changing_alone_is_not_flagged(tmp_path, monkeypatch):
-    """The OLD gate would have demanded a CACHE bump here. The new mechanism computes
-    CACHE at request time in web.py (see test_gui_sw_cache_route.py) - a cached asset's
-    bytes changing is no longer this check's business at all, only SHELL coverage and
-    the placeholder shape are."""
+    """CACHE is computed at request time in web.py, so a cached asset's bytes
+    changing is not this check's business; only SHELL coverage and the
+    placeholder shape are."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)
@@ -107,10 +95,10 @@ def test_asset_content_changing_alone_is_not_flagged(tmp_path, monkeypatch):
 # ---- a check that cannot run says so, never passes silently -------------------
 
 def test_unparseable_cache_constant_fails_loud(tmp_path, monkeypatch):
-    """A benign reformat (single quotes) must not silently disable this check forever -
-    and must be flagged for the RIGHT reason: web.py's route would fail to find the
-    line to substitute into, so every client would get a 500 instead of a service
-    worker. Regex-based parsers rot; the rot must be loud."""
+    """A reformat (single quotes) must not silently disable this check, and must
+    be flagged for the RIGHT reason: web.py's route would fail to find the line to
+    substitute into, so every client would get a 500 instead of a service
+    worker."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)
@@ -192,8 +180,8 @@ def test_shell_entry_with_no_file_behind_it_is_flagged(tmp_path, monkeypatch):
 
 def test_shell_module_missing_from_precache_is_flagged(tmp_path, monkeypatch):
     """sw.js promises SHELL holds every app/* and pages/* module. A new page module
-    that nobody adds to SHELL is not precached (so the PWA cannot open it offline).
-    Enforce the promise rather than documenting it."""
+    that nobody adds to SHELL is not precached, so the PWA cannot open it
+    offline."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)

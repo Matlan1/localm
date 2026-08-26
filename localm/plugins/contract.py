@@ -9,10 +9,6 @@ can also contribute a *server surface* via ``register(host)``: routes, a GUI
 tab, a settings section, and a capability scope. Built-in (in-tree) plugins and
 third-party (<data dir>/plugins) plugins use the same contract. Chat is the
 canonical built-in, *protected* plugin (cannot be disabled or uninstalled).
-
-Phase 0 defines the interfaces only. The engine (PluginManager) and the concrete
-Host land in Phase 2; loader.py is extended to populate PluginSpec in Phase 2;
-the existing features migrate onto register() in Phase 3.
 """
 
 from __future__ import annotations
@@ -29,8 +25,7 @@ API_VERSION = 1
 #: CLI format (parsed by loader.parse_manifest; its own keys are name/version/
 #: description/entry plus the separate [tools] table). Both formats share the
 #: installed dir, so each parser tolerates the other format's keys and warns
-#: only on a key known to NEITHER - typo protection without false alarms
-#: (LM-DA-007). Shared here so the two parsers cannot drift.
+#: only on a key known to NEITHER. Shared here so the two parsers cannot drift.
 KNOWN_PLUGIN_KEYS = frozenset({
     "name", "version", "api_version", "description", "scope",
     "requires_extras", "requires", "capabilities", "data_subdir",
@@ -59,7 +54,7 @@ class Surface:
 
 #: The keys a plugin.toml [surface] table understands. Derived from the Surface
 #: dataclass so it can never drift from what parse_spec actually reads; used to
-#: warn (never fail) on an unknown/misspelled key (LM-DA-007).
+#: warn (never fail) on an unknown or misspelled key.
 KNOWN_SURFACE_KEYS = frozenset(Surface.__dataclass_fields__)
 
 
@@ -79,21 +74,16 @@ class PluginSettingField:
     """One field a plugin contributes to its own settings section via
     ``host.add_settings()``.
 
-    Stored under ``config["plugins"][<plugin>][key]``, read/written through
+    Stored under ``config["plugins"][<plugin>][key]``, read and written through
     the same ``plugin_config()`` / ``save_plugin_config()`` block the plugin
-    already uses for everything else - GET/POST ``/v1/plugins/<name>/settings``
-    is the generic write surface, and the GUI renders each field with the same
-    per-widget control the core settings form and the tts/media sections
-    already use. ``widget`` must be one of ``localm.settings_schema.Widget``'s
-    values (import it from there rather than hardcoding the strings, so a
-    typo is caught at ``register()`` time instead of silently never
-    rendering). This is the seam ``docs/plugin-interop.md`` maps Open WebUI's
-    ``Valves`` onto.
+    already uses; GET/POST ``/v1/plugins/<name>/settings`` is the generic write
+    surface, and the GUI renders each field with its per-widget control.
+    ``widget`` must be one of ``localm.settings_schema.Widget``'s values, and a
+    value that is not raises at ``register()`` time.
 
-    ``default`` is shown/used only until the user (or a config import) sets
-    an explicit value in the plugin's own block - it is never written to disk
-    by itself. A blank/None save clears an override back to it, exactly like
-    the tts plugin's own settings block.
+    ``default`` is shown and used only until the user (or a config import) sets
+    an explicit value in the plugin's own block; it is never written to disk by
+    itself. A blank or None save clears an override back to it.
     """
     key: str
     widget: str
@@ -106,13 +96,11 @@ class PluginSettingField:
     default: Any = None
     # Requires an owner (ADMIN) principal to see or set - use for a field that
     # widens a trust boundary (a shell command, a script/network URL, a host
-    # path), mirroring REC-MEDIA-CMD / the tts library/wasm_paths fields.
+    # path).
     admin_only: bool = False
     # A widget=SECRET field's value/default are never included in GET/POST
-    # /v1/plugins/<name>/settings, regardless of admin_only - derived from the
-    # widget alone (not a separate flag a field could set inconsistently, e.g.
-    # widget=SECRET with the value still round-tripping in plaintext because a
-    # second flag was forgotten).
+    # /v1/plugins/<name>/settings, regardless of admin_only. Derived from the
+    # widget alone, not from a separate flag.
 
 
 @dataclass
@@ -136,9 +124,7 @@ class PluginSpec:
     tool_exports: list = field(default_factory=list)      # [tools] exports: coder
                                              # agent tools a third-party plugin
                                              # exports (loader.PluginManifest's
-                                             # key; carried here so this really
-                                             # is its superset, and so the GUI
-                                             # can show it without the loader)
+                                             # key, carried here too)
     path: Optional[str] = None               # plugin directory (third-party)
 
     def __post_init__(self) -> None:
@@ -169,10 +155,8 @@ class Host(Protocol):
     def plugin_config(self, name: Optional[str] = ...) -> dict: ...
     def save_plugin_config(self, name: Optional[str] = ..., cfg: Optional[dict] = ...) -> None: ...
     # Host-side scope checks are NOT implemented: the host has no request
-    # context (scopes are enforced per-request on the routes mounted via
-    # mount_router). Both raise NotImplementedError so a plugin that builds a
-    # guard on them fails loudly at development time instead of shipping a
-    # check that silently always passes (LM-DA-008).
+    # context, and scopes are enforced per-request on the routes mounted via
+    # mount_router. Both raise NotImplementedError.
     def has_scope(self, scope: str) -> bool: ...
     def require_scope(self, scope: str) -> None: ...
     def engine(self) -> Any: ...                          # inference engine handle

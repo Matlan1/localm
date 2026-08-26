@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S2 (GUI half): a loopback `localm gui` must not be locked out when require_auth
+"""A loopback `localm gui` must not be locked out when require_auth
 is on, WITHOUT putting the API key in JS-readable localStorage. On a loopback bind
 the shell route sets the key as an HttpOnly session cookie (protected mode) or
 seeds the per-process shell token as a JS global (open mode); a non-loopback LAN
@@ -177,12 +177,9 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
     presented no credential. Presenting no key to a keyed instance is the same as
     presenting an invalid one.
 
-    The auto-seed this class used to guard is GONE. It was origin-gated first,
-    which closed the cross-ORIGIN tier, but it could never close the LOCAL-PROCESS
-    one: a top-level browser navigation to http://127.0.0.1:PORT/ and a local
-    script calling the same URL are byte-identical at the HTTP layer. Measured on
-    a real socket, the cookie it handed out resolved to scopes ['admin'] and
-    minted a fresh admin key.
+    There is no origin-gated auto-seed: a top-level browser navigation to
+    http://127.0.0.1:PORT/ and a local script calling the same URL are
+    byte-identical at the HTTP layer, so no gate can separate them.
 
     Assertions are on the Set-Cookie ITSELF, never on a later request's status
     code: a downstream 401 can arrive for reasons unrelated to this route, so it
@@ -222,7 +219,7 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
         assert self.KEY not in cookies and self.KEY not in r.text
 
     def test_local_process_shaped_request_mints_nothing(self, monkeypatch):
-        """The tier the origin gate could not reach, and the reason the auto-seed
+        """The tier the origin gate cannot reach, and why the auto-seed
         was removed rather than gated harder: no Origin and a loopback-literal
         Host is exactly what a local script sends, and it is indistinguishable
         from the legitimate browser navigation above. Neither gets a session now."""
@@ -282,9 +279,8 @@ class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
         assert _sessions.lookup(sid) is not None            # and not invalidated
 
     def test_an_existing_session_survives_an_owner_key_roll(self, monkeypatch):
-        """THE PROPERTY THE REMOVED BRANCH WAS ORIGINALLY WRITTEN FOR, and the one
-        most at risk from deleting it. The session is deliberately decoupled from
-        the key VALUE, so rolling the owner key must not sign the browser out."""
+        """The session is decoupled from the key VALUE, so rolling the owner
+        key must not sign the browser out."""
         monkeypatch.setenv("LOCALM_API_KEY", self.KEY)
         app = _app("127.0.0.1")
         sid = self._grant_session(app)
@@ -367,8 +363,8 @@ class TestLaunchGrantHandoff:
 
 
 class TestPullGrant:
-    """SEC-PULL-CONFIRM: `localm gui --pull SPEC` mints a single-use, spec-bound
-    secret (mint_pull_grant) so its OWN deep link can auto-start the download with
+    """`localm gui --pull SPEC` mints a single-use, spec-bound secret
+    (mint_pull_grant) so its OWN deep link can auto-start the download with
     zero clicks (see init.js), while a forged `?pull=` link elsewhere - which
     cannot know this secret - falls back to an explicit human confirmation. This
     class covers the grant primitive itself; the HTTP redeem endpoint is covered

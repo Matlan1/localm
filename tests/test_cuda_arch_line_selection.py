@@ -1,21 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GH-833 (second half): the CUDA runtime-LINE selection must be driven by the
-GPU's own ARCHITECTURE (compute capability), not just the platform.
+"""The CUDA runtime-LINE selection is driven by the GPU's own ARCHITECTURE
+(compute capability), not just the platform.
 
-Before this, ``setup_llama.py`` unconditionally pinned the CUDA 12.x asset
-line. NVIDIA Blackwell (datacenter sm_100 / consumer+workstation sm_120, e.g.
-RTX 50-series) is not supported by that 12.4-toolkit build's fatbin - upstream
-only added Blackwell kernels starting CUDA 12.8 - so a Blackwell card handed
-the 12.x build fails at inference time even though the DLL loads cleanly.
-Upstream's own release already ships a 13.3-toolkit build (which does support
-it); this was a SELECTION bug, not a missing-asset one.
+NVIDIA Blackwell (datacenter sm_100 / consumer+workstation sm_120, e.g. RTX
+50-series) is not supported by the 12.4-toolkit build's fatbin - upstream only
+added Blackwell kernels starting CUDA 12.8 - so a Blackwell card handed the 12.x
+build fails at inference time even though the DLL loads cleanly. Upstream ships
+a 13.3-toolkit build that does support it.
 
-These tests are entirely offline (no network, no real GPU - there is no
-Blackwell hardware available to this suite) and drive the selection logic with
-a faked ``NvidiaInfo`` across a card-architecture x driver-capability matrix,
-including the unparseable and absent cases. What is NOT claimed or tested
-here: that an sm_120 card actually loads a model end to end - that needs real
-Blackwell hardware and is out of scope for this offline suite.
+These tests are entirely offline (no network, no real GPU) and drive the
+selection logic with a faked ``NvidiaInfo`` across a card-architecture x
+driver-capability matrix, including the unparseable and absent cases. NOT
+covered here: that an sm_120 card loads a model end to end, which needs real
+Blackwell hardware.
 """
 
 from __future__ import annotations
@@ -82,9 +79,7 @@ def test_cuda_line_bare_major_version_boundary(compute_capability, expected_line
 def test_unknown_or_unparseable_capability_degrades_to_safe_line(compute_capability):
     """An unmeasurable architecture must NOT be treated as evidence it needs
     the newer, narrower-compatibility line - it stays on cuda-12, the same
-    "unknown != too old" reasoning driver_ok already uses for the driver
-    version. Blocking or guessing cuda-13 here would be worse than staying on
-    the line that has worked for every pre-Blackwell card."""
+    "unknown != too old" treatment driver_ok gives the driver version."""
     info = sl.NvidiaInfo(present=True, compute_capability=compute_capability)
     assert info.cuda_line == "cuda-12"
 
@@ -118,29 +113,22 @@ def test_blackwell_card_with_13x_driver_is_driver_ok():
 
 
 def test_blackwell_card_with_13x_driver_below_pinned_patch_is_not_yet_ok():
-    """The 13.3 minimum mirrors the pre-existing 12.4 convention (match the
-    PINNED asset's own version, not just its major) since there is no
-    Blackwell hardware here to confirm CUDA's minor-version-compatibility
-    guarantee holds across the 13.x series. A driver reporting 13.0 is
-    therefore treated as not-yet-ok - the conservative side of that unknown,
-    which can only cost a Blackwell user a Vulkan fallback, never hand them a
-    build their driver cannot run."""
+    """The 13.3 minimum follows the 12.4 convention: match the PINNED asset's
+    own version, not just its major. A driver reporting 13.0 is therefore
+    treated as not-yet-ok and falls back to Vulkan."""
     info = sl.NvidiaInfo(present=True, compute_capability="12.0", cuda_capability="13.0")
     assert info.driver_ok is False
 
 
 def test_driver_ok_bare_major_driver_version_padded_not_prefix_compared():
     """The same bare-major-version boundary as cuda_line's, but for the
-    driver side: _ver_tuple treats a bare major as its own short tuple (e.g.
-    "13" -> (13,), proven by the pre-existing
-    test_ver_tuple_parses_and_tolerates_junk), and the comparison against a
-    (major, minor) threshold must pad rather than let Python's tuple
-    ordering treat the shorter tuple as smaller regardless of value. Padding
-    with a trailing 0 is the CONSERVATIVE reading (a bare "13" is treated as
-    the earliest possible 13.x, "13.0") - so it can still correctly fail a
-    minimum that needs a specific minor (13.3), while a bare major that is
-    numerically higher than the whole threshold (comparing the differing
-    first component) still passes regardless of the missing minor."""
+    driver side: _ver_tuple treats a bare major as its own short tuple ("13"
+    -> (13,)), and the comparison against a (major, minor) threshold pads
+    rather than letting Python's tuple ordering treat the shorter tuple as
+    smaller regardless of value. Padding with a trailing 0 reads a bare "13"
+    as the earliest possible 13.x, so it fails a minimum that needs a specific
+    minor (13.3), while a bare major numerically higher than the whole
+    threshold still passes."""
     # Bare "13" against the cuda-13 line's (13,3) minimum: 13.0 does not
     # clear 13.3 - correctly not-ok, not waved through by a padding bug.
     assert sl.NvidiaInfo(present=True, compute_capability="12.0",
@@ -275,14 +263,10 @@ def test_resolve_backend_asset_cuda_line_selects_matching_asset(monkeypatch, lin
 def test_pinned_fallback_offline_url_names_a_real_checksum_table_entry(monkeypatch, line, expected_fragment):
     """With the release API entirely unreachable (the templated-URL fallback
     inside _resolve_backend_asset), the guessed filename for EITHER line must
-    still be a REAL key in the pinned checksum table - i.e. this is a
-    selection bug fix, not something that needs a new asset upstream doesn't
-    have.
+    still be a REAL key in the pinned checksum table.
 
-    Re-pointed from the old _FALLBACK_TAG to _PINNED_TAG when the dynamic
-    resolution was replaced by the pin, which STRENGTHENS it: the tag it now
-    covers is the one a default install actually resolves, and no _latest_tag
-    monkeypatch is needed because the default path makes no network call at all."""
+    Uses _PINNED_TAG, the tag a default install actually resolves; no
+    _latest_tag monkeypatch is needed because that path makes no network call."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_release_assets", lambda tag: [])
     url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line=line)
@@ -356,7 +340,7 @@ def test_full_matrix_resolves_a_real_pair_and_never_gives_old_driver_new_line(
 # cuda_line == "cuda-13", not the module default. The CliRunner-level tests   #
 # of main()'s cuda dialogue wiring in test_cuda_setup.py use                  #
 # NvidiaInfo(present=False), whose cuda_line is "cuda-12" anyway, so they     #
-# cannot tell intact wiring from wiring reverted to the hardcoded default.    #
+# cannot tell intact wiring from the hardcoded default.                       #
 # --------------------------------------------------------------------------- #
 
 def test_main_threads_blackwell_arch_into_cuda13_fetch(monkeypatch, tmp_path):
@@ -419,9 +403,9 @@ def test_main_threads_pre_blackwell_arch_into_cuda12_fetch(monkeypatch, tmp_path
 
 
 # --------------------------------------------------------------------------- #
-# nvidia_preflight() against a realistic older-driver error response: older   #
-# nvidia-smi builds (confirmed on driver 470.182.03) reject                   #
-# --query-gpu=compute_cap with an error sentence rather than a version.       #
+# nvidia_preflight() against an older-driver error response: older nvidia-smi #
+# builds reject --query-gpu=compute_cap with an error sentence rather than a  #
+# version.                                                                    #
 # --------------------------------------------------------------------------- #
 
 def test_nvidia_preflight_handles_unsupported_compute_cap_field(monkeypatch):

@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-SETUP-NOBACKEND regression: setup-llama's load-test must report a FAILED
-provision when the native runtime LOADS but registers ZERO compute backends.
+"""setup-llama's load-test must report a FAILED provision when the native runtime
+LOADS but registers ZERO compute backends.
 
-Before this fix, ``_native_loads_ok()`` ran ``load_lib()`` in a subprocess and
-checked only ``returncode == 0``. ``load_lib()`` does not raise when no ggml
-compute backend registers - it logs a warning and returns the handle - so a build
-that loads yet cannot compute ("no backends are loaded") exited 0 and setup
-reported SUCCESS. ``_provision_with_fallback`` then never offered the working
-Vulkan/CPU fallback, and the user only discovered the broken runtime at the first
-model load, with the real cause (no registered backend) already lost. That is the
-AGENTS.md rule-5 anti-pattern ("it did not crash, so it is fine") at setup level.
+``load_lib()`` does not raise when no ggml compute backend registers - it logs a
+warning and returns the handle - so a build that loads yet cannot compute exits 0
+under a returncode-only check, and setup would report SUCCESS.
 
-The fix load-tests with ``compute_backends_available()`` and treats a load with no
-backend (subprocess exit 88) as a failure with a clear reason, distinct from a
-clean computing load (0) and a genuine load crash (non-zero + native traceback).
+``_native_loads_ok()`` load-tests with ``compute_backends_available()`` and treats
+a load with no backend (subprocess exit 88) as a failure with a clear reason,
+distinct from a clean computing load (0) and a genuine load crash (non-zero plus
+a native traceback).
 """
 
 from __future__ import annotations

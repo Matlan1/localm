@@ -16,8 +16,7 @@ from fastapi.testclient import TestClient
 
 
 def _coder_app(tmp_path, monkeypatch, *, api_key):
-    """Same shape as test_coder_resume.py's builder: a real app, real routes,
-    real Agent, real checkpoint files on disk."""
+    """A real app, real routes, real Agent, real checkpoint files on disk."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setenv("LOCALM_API_KEY", api_key)

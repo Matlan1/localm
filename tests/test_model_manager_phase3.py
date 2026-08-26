@@ -1,23 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Phase 3 hardening tests for localm.model_manager.
+"""Hardening tests for localm.model_manager.
 
-Covers three previously-unguarded behaviours:
+Covers three behaviours:
 
-FAC-5      --sha256 was a facade for HuggingFace pulls: only _pull_url consumed
-           it, so a mismatching --sha256 on an HF GGUF/snapshot pull was silently
-           ignored. It must now be honoured (verify against the downloaded HF
-           file) or refused with a clear error - never quietly dropped.
+--sha256 on a HuggingFace pull. Only _pull_url consumed it, so a mismatching
+    --sha256 on an HF GGUF or snapshot pull was silently ignored. It must be
+    honoured (verified against the downloaded HF file) or refused with a clear
+    error - never quietly dropped.
 
-GAP-CLI-1  A user-supplied -n name went into the registry raw (add_local used
-           'name or p.stem'), so '../evil' or 'a/b' became a registry key
-           unchanged. It must run through the same sanitizer sync_models_dir
-           uses for auto-discovered names.
+A user-supplied -n name. It went into the registry raw (add_local used
+    'name or p.stem'), so '../evil' or 'a/b' became a registry key unchanged. It
+    must run through the same sanitizer sync_models_dir uses for auto-discovered
+    names.
 
-GAP-CLI-2  The GGUF/URL filename was used as a dest path with no traversal guard
-           (o/r:../../evil.gguf or a URL ending in ../../evil.gguf), and a URL
-           stem collision short-circuited to "Already downloaded" and aliased a
-           new name onto whatever bytes already existed - even when the caller
-           supplied a --sha256 that did not match those bytes.
+The GGUF/URL filename as a dest path. It had no traversal guard
+    (o/r:../../evil.gguf or a URL ending in ../../evil.gguf), and a URL stem
+    collision short-circuited to "Already downloaded" and aliased a new name onto
+    whatever bytes already existed - even when the caller supplied a --sha256
+    that did not match those bytes.
 """
 
 from pathlib import Path
@@ -34,18 +34,15 @@ def _flat(text: str) -> str:
     """Lowercase captured console output with all whitespace collapsed.
 
     These messages are rendered through rich, which WRAPS them, and the wrap point
-    moves with the length of values interpolated into the message - notably the dest
-    PATH. So a long --basetemp (an xdist popen-gwN directory, say) can split a phrase
-    like "DIFFERENT model" across a line break and defeat a plain substring match.
-
-    MEASURED: test_plain_name_reuse_across_two_repos_is_refused passes with a short
-    basetemp and FAILS with a long one, same code, same machine, same minute. That is
-    why it looked like an ordering flake under -n auto.
+    moves with the length of values interpolated into the message - notably the
+    dest PATH. So a long --basetemp (an xdist popen-gwN directory, say) can split a
+    phrase like "DIFFERENT model" across a line break and defeat a plain substring
+    match.
 
     The negative assertions are the dangerous half: "different model" NOT in out
-    passes trivially once the wrap splits it, so the test goes green without testing
-    anything. Collapsing whitespace makes every assertion here about the MESSAGE
-    rather than about where the terminal happened to break the line.
+    passes trivially once the wrap splits it, so the test goes green without
+    testing anything. Collapsing whitespace makes every assertion here about the
+    MESSAGE rather than about where the terminal happened to break the line.
     """
     return " ".join(text.lower().split())
 
@@ -409,9 +406,9 @@ class TestSnapshotDestCollision:
 
     def test_plain_name_reuse_across_two_repos_is_refused(
             self, fake_registry, monkeypatch, capsys):
-        """THE finding: an ordinary user reusing a --name for a different
-        repo weeks later - no special characters, no attacker, just a name
-        they liked - must be refused, not silently merged."""
+        """An ordinary user reusing a --name for a different repo weeks later -
+        no special characters, no attacker, just a name they liked - must be
+        refused, not silently merged."""
         store, models_dir = fake_registry
         downloaded = self._wire(monkeypatch)
 
@@ -513,15 +510,13 @@ class TestSnapshotDestCollision:
 
     def test_final_registration_routes_through_dedup(
             self, fake_registry, monkeypatch):
-        """The second half of the fix: _pull_hf_snapshot's OWN call site for
-        the post-download registration must be _register_with_dedup, not the
-        plain _register - the same asymmetry _pull_gguf_file already closed
-        for its own path. (_register_with_dedup legitimately calls the plain
-        _register internally as its own final implementation step once its
-        dedup checks pass - that is not what this test is about; it is about
-        which function THIS CALL SITE reaches for directly, so both are
-        replaced with bare recording stubs rather than letting either run for
-        real.)"""
+        """_pull_hf_snapshot's OWN call site for the post-download registration
+        must be _register_with_dedup, not the plain _register - the same
+        asymmetry _pull_gguf_file already closed for its own path.
+        (_register_with_dedup legitimately calls the plain _register internally
+        as its own final step once its dedup checks pass; this is about which
+        function THIS CALL SITE reaches for directly, so both are replaced with
+        bare recording stubs rather than letting either run for real.)"""
         store, models_dir = fake_registry
         self._wire(monkeypatch)
 
@@ -752,12 +747,11 @@ _LLM_SIBLINGS = [
 class TestSnapshotTypeResolution:
     def test_tagless_transformers_llm_registers_as_llm_not_unknown(
             self, fake_registry, monkeypatch):
-        """REG-477: many base/older HF repos carry no exact pipeline_tag, so the
-        pre-download probe returns 'unknown'. The snapshot then registered
-        'unknown' WITHOUT ever reading the config.json it had just downloaded, so
-        a clearly-LlamaForCausalLM model silently vanished from GUI auto-select,
-        the MCP EngineCache and the jobs runner, though the same pull auto-loaded
-        and worked before."""
+        """Many base and older HF repos carry no exact pipeline_tag, so the
+        pre-download probe returns 'unknown'. The snapshot must then read the
+        config.json it just downloaded rather than registering 'unknown', or a
+        clearly-LlamaForCausalLM model vanishes from GUI auto-select, the MCP
+        EngineCache and the jobs runner."""
         store, _ = fake_registry
         _snapshot_env(monkeypatch, _LLM_SIBLINGS)
 
@@ -769,8 +763,8 @@ class TestSnapshotTypeResolution:
     def test_config_without_a_causal_arch_stays_unknown(
             self, fake_registry, monkeypatch):
         """Negative case: the fallback reads HARD metadata only. A repo whose
-        config.json shows no causal-LM architecture stays 'unknown' - never a
-        silent 'llm', which is the old fallback this must NOT restore."""
+        config.json shows no causal-LM architecture stays 'unknown', never a
+        silent 'llm'."""
         store, _ = fake_registry
 
         def _writer(d: Path):
@@ -814,12 +808,11 @@ class TestSnapshotTypeResolution:
 class TestSnapshotResumePreflight:
     def test_retry_counts_only_the_bytes_still_missing(
             self, fake_registry, monkeypatch, capsys):
-        """REG-514: a disk-full pull leaves a partial dest. Once the user frees
-        enough for the REMAINING bytes the retry must proceed, but the preflight
-        demanded the FULL repo size, ignoring what was already on disk, so the
-        download could never resume - defeating the very recovery it was added
-        for. _pull_gguf_file sums only the missing parts and _pull_url uses
-        (total - already_have); this path did neither."""
+        """A disk-full pull leaves a partial dest. Once the user frees enough for
+        the REMAINING bytes the retry must proceed: a preflight that demands the
+        FULL repo size, ignoring what is already on disk, could never resume.
+        _pull_gguf_file sums only the missing parts and _pull_url uses
+        (total - already_have); this path must do the same."""
         store, models_dir = fake_registry
         dest = models_dir / "partial"
         dest.mkdir(parents=True)

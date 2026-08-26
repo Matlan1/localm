@@ -5,50 +5,37 @@
 digest the keystore stores), ``localm/instances.py`` (the per-instance attach
 token, written by both ``register_instance`` and ``set_mode``) and
 ``localm/gpu_registry.py`` (the coordination token) all do the atomic
-temp+replace dance. All four already restricted the TEMP file before the rename
-and retried the destination on failure - the important half, and it was right.
-What survived was that each still CREATED the temp with ``tmp.write_text(...)``,
-so on POSIX the payload existed at the umask default (commonly 0644) between the
-create and the chmod that followed it. ``localm/auth.py`` had the same residual
-window and lost it in PR 1290; this is the recorded remainder.
+temp+replace dance. Each restricts the TEMP file before the rename and retries
+the destination on failure. Creating that temp with ``tmp.write_text(...)``
+would leave the payload at the umask default (commonly 0644) on POSIX between
+the create and the chmod that follows it, so it is created private instead.
 
-WHERE THE OBSERVABLE WINDOW ACTUALLY IS, because it is NOT where the auth.py
-test looks and the difference decides which assertion can fail here.
-
-``tests/test_auth_secret_write_perms.py`` fingerprints the temp file at the
-instant of the RENAME, and there that is the discriminating measurement: two of
-auth.py's three writers restricted only the DESTINATION, so pre-fix their temp
-was still at the directory default when ``os.replace`` consumed it.
-
-These four sites never had that defect. Pre-fix the POSIX sequence was:
+WHERE THE OBSERVABLE WINDOW IS, because it decides which assertion can fail
+here. With a ``write_text``-created temp the POSIX sequence is:
 
     write_text -> tmp is 0644        <- THE WINDOW
     restrict   -> tmp is 0600
     replace    -> destination is 0600
 
-so at rename time the temp was ALREADY 0600 and a rename-time fingerprint
-reports the same value before and after this fix. The only instrument that can
-see the window is one that reads the temp file's mode AT THE MOMENT THE
-RESTRICTION IS ASKED FOR, which is what ``_install_spies`` captures below.
+so at rename time the temp is ALREADY 0600, and a rename-time fingerprint (what
+``tests/test_auth_secret_write_perms.py`` measures) reports the same value
+either way. The only instrument that can see the window reads the temp file's
+mode AT THE MOMENT THE RESTRICTION IS ASKED FOR, which is what
+``_install_spies`` captures below.
 
-Consequences, stated rather than discovered later:
+Consequences:
 
 * ``test_the_temp_file_is_created_already_private`` is the regression guard for
-  THIS fix and it is POSIX-ONLY, by construction. On Windows ``os.open``'s mode
+  this property and is POSIX-ONLY by construction. On Windows ``os.open``'s mode
   argument writes no ACL at all, so the temp carries the inherited ACL until
-  ``restrict_file_perms`` runs icacls - identical before and after. Windows was
-  never affected and no assertion here can pretend otherwise.
+  ``restrict_file_perms`` runs icacls.
 * ``test_every_sibling_writer_restricts_its_temp_before_the_rename`` runs on
-  both platforms and pins the ordering and the end state. It CANNOT fail on the
-  pre-fix code and is not counted as a regression guard for this change; it
-  guards a future reordering, which is a different defect.
+  both platforms and pins the ordering and the end state. It guards a future
+  reordering, which is a different defect.
 
 The POSIX test pins the umask to 0o022 itself rather than inheriting the
-environment's. Under umask 0077 a ``write_text``-created file is ALREADY 0600,
-so the pre-fix code would satisfy the assertion and the guard would silently
-collapse on a machine where nothing is wrong - the lesson already recorded in
-tests/test_auth_kdf.py and tests/test_auth_secret_write_perms.py, which is
-about a control that cannot come from ambient process state.
+environment's: under umask 0077 a ``write_text``-created file is ALREADY 0600,
+so the guard would silently collapse on a machine where nothing is wrong.
 """
 
 import contextlib
@@ -75,11 +62,9 @@ def _perm_fingerprint(path):
     """A comparable description of *path*'s permissions on this platform.
 
     Same shape as tests/test_auth_secret_write_perms.py::_perm_fingerprint and
-    tests/test_auth_kdf.py::_acl_fingerprint - kept local rather than imported
-    across test modules, and named the same way so the three stay findable
-    together. On Windows this reads icacls, the same mechanism
-    ``restrict_file_perms`` itself uses; ``os.stat`` mode bits are meaningless
-    there, which is the entire reason that helper exists.
+    tests/test_auth_kdf.py::_acl_fingerprint. On Windows this reads icacls, the
+    same mechanism ``restrict_file_perms`` itself uses; ``os.stat`` mode bits
+    are meaningless there.
     """
     if os.name == "posix":
         return oct(os.stat(path).st_mode & 0o777)
@@ -92,8 +77,8 @@ def _perm_fingerprint(path):
 
 @contextlib.contextmanager
 def _umask(value):
-    """Pin the process umask for the duration. POSIX only - see the module
-    docstring for why the control must not be inherited from the environment."""
+    """Pin the process umask for the duration. POSIX only; the control must not
+    be inherited from the environment."""
     old = os.umask(value)
     try:
         yield
@@ -111,10 +96,9 @@ def _install_spies(monkeypatch):
     afterwards the temp file no longer exists to be inspected at all.
 
     Both spies delegate to the real implementation and assert nothing
-    themselves. An assertion raised INSIDE code under test is an input to that
-    code, not a verdict on it - ``instances.set_mode`` and
-    ``gpu_registry.write_entry`` both wrap this region in ``except OSError``,
-    so an AssertionError is not caught but an OSError-shaped complaint would be.
+    themselves: ``instances.set_mode`` and ``gpu_registry.write_entry`` wrap
+    this region in ``except OSError``, so an OSError-shaped complaint raised
+    here would be swallowed by the code under test.
     """
     import localm.config as cfg
     events = []
@@ -151,8 +135,8 @@ def _drive_every_sibling_writer(home):
     paired with a marker that must appear in that temp file's content - without
     which a test could pass by fingerprinting an empty or unrelated file.
 
-    ``register_instance`` and ``set_mode`` deliberately write the SAME
-    destination, so callers must not assume one rename per destination.
+    ``register_instance`` and ``set_mode`` write the SAME destination, so
+    callers must not assume one rename per destination.
     """
     import localm.gpu_registry as gpu_registry
     import localm.instances as instances
@@ -193,9 +177,8 @@ def _temp_events(events, kind, expected):
                            "the inherited one until icacls runs, before AND "
                            "after this fix. Windows was never affected.")
 def test_the_temp_file_is_created_already_private(home, monkeypatch):
-    """THE regression guard. Every sibling writer's temp file is already 0600
-    when the restriction is asked for, so it never existed at the umask
-    default."""
+    """Every sibling writer's temp file is already 0600 when the restriction is
+    asked for, so it never existed at the umask default."""
     with _umask(0o022):
         # The instrument's own control, inside the same umask: a plainly-created
         # file must NOT look restricted, so a umask that makes every fresh file
@@ -224,11 +207,8 @@ def test_every_sibling_writer_restricts_its_temp_before_the_rename(
         home, monkeypatch):
     """The ordering and the end state, on both platforms.
 
-    NOT a regression guard for the create-window fix: all four sites already
-    passed this before it, which is exactly why the module docstring says the
-    POSIX test above is the load-bearing one. This guards a future reordering
-    (restricting the destination instead of the temp), which is the defect
-    auth.py actually had.
+    Guards a future reordering (restricting the destination instead of the
+    temp).
     """
     import localm.config as cfg
 
@@ -294,11 +274,10 @@ def test_a_failed_restriction_still_persists_the_entry_and_never_raises(
 def test_the_written_bytes_are_unchanged_by_the_permission_fix(tmp_path):
     """A permissions fix must not quietly rewrite every registry file.
 
-    Pinned because the obvious "cleanup" here - adding ``os.O_BINARY`` to the
-    ``os.open`` - would silently switch every Windows install's session store,
-    instance registry and GPU coordination entry from CRLF to LF on their next
-    write. MEASURED: without it, os.open is in TEXT mode and reproduces
-    ``Path.write_text``'s output exactly.
+    Adding ``os.O_BINARY`` to the ``os.open`` would switch every Windows
+    install's session store, instance registry and GPU coordination entry from
+    CRLF to LF on their next write. Without it, os.open is in TEXT mode and
+    reproduces ``Path.write_text``'s output exactly.
     """
     from localm.config import atomic_write_private
 
@@ -315,9 +294,9 @@ def test_the_written_bytes_are_unchanged_by_the_permission_fix(tmp_path):
 
 
 def test_a_partial_write_is_resumed_rather_than_truncated(tmp_path, monkeypatch):
-    """``Path.write_text`` looped internally. Dropping to a raw ``os.write``
-    without a loop would newly allow a silently truncated file, because
-    ``os.write`` is one syscall and may consume less than the whole buffer."""
+    """The write is looped: ``os.write`` is one syscall and may consume less
+    than the whole buffer, so an unlooped raw write would allow a silently
+    truncated file."""
     from localm.config import atomic_write_private
 
     payload = json.dumps({"coordination_token": COORD_TOKEN}, indent=2)
@@ -341,9 +320,8 @@ def test_a_partial_write_is_resumed_rather_than_truncated(tmp_path, monkeypatch)
 
 def test_a_zero_byte_write_raises_and_leaves_the_destination_intact(
         tmp_path, monkeypatch):
-    """The other half of the loop: a write that accepts NOTHING must raise, not
-    spin and not rename a truncated file over a good one (rule 5 - a truncated
-    session store replacing a valid one is the worst outcome available here)."""
+    """The other half of the loop: a write that accepts NOTHING must raise,
+    never spin and never rename a truncated file over a good one."""
     from localm.config import atomic_write_private
 
     dest = tmp_path / "existing.json"

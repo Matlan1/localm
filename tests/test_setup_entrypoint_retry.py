@@ -2,25 +2,20 @@
 """setup.sh's localm-entry-point install/retry block, and localm.sh's own
 diagnosis of the same failure mode.
 
-Regression for a filed residual: setup.sh:342-360 retries the `uv pip install`
-once if `.venv/bin/localm` did not land (a real, reproduced WSL2/DrvFs quirk
-where uv reports success but drops exactly one file), then warns loudly and
-CONTINUES if it is still missing afterwards - by design, since the rest of
-setup does not depend on this entry point. But the retry call itself was a
-bare command under `set -euo pipefail`, the one unguarded command in that
-block: a retry that ERRORS (not just "ran but didn't create the file") kills
-setup right there, so the loud "STILL missing" warning a few lines below never
-prints - contradicting the block's own comment.
+setup.sh retries the `uv pip install` once if `.venv/bin/localm` did not land
+(a WSL2/DrvFs quirk where uv reports success but drops exactly one file), then
+warns loudly and CONTINUES if it is still missing afterwards, since the rest of
+setup does not depend on this entry point. The retry call must be GUARDED: as a
+bare command under `set -euo pipefail`, a retry that ERRORS (not just "ran but
+did not create the file") kills setup right there, so the loud "STILL missing"
+warning a few lines below never prints.
 
-No test covered any of the three already-verified-live branches (present /
-recovered-by-retry / still-missing-after-retry), let alone the retry-errors
-case this file adds coverage for. Extracts and runs ONLY the install/retry
-block (not the whole script) against a stub `uv`, in the extract-a-source-
-slice style of tests/test_setup_gpu_detect.py.
+Four branches are covered: present, recovered-by-retry, still-missing-after-
+retry, and retry-errors. Extracts and runs ONLY the install/retry block (not the
+whole script) against a stub `uv`.
 
-Also covers localm.sh's own misdiagnosis of this exact failure mode: it used
-to report "No .venv found" even when the venv was fine and only the console
-script was missing.
+Also covers localm.sh's own diagnosis of this failure mode: it must not report
+"No .venv found" when the venv is fine and only the console script is missing.
 """
 
 from __future__ import annotations
@@ -107,7 +102,7 @@ def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]
         "set -euo pipefail\n"
         'say() { printf "%s\\n" "$*"; }\n'
         # The real script sets EXTRAS earlier (the browser/app-window prompt,
-        # before this block), which the extracted block references via
+        # further up the file), which the extracted block references via
         # "${EXTRAS}" without setting it itself - under `set -u` above that is
         # otherwise an unbound-variable error before uv is even reached.
         'EXTRAS="coder,voice,monitor"\n'

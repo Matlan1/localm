@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""BUG-1: a recovered-crash report must contain something actionable.
+"""A recovered-crash report must contain something actionable.
 
 faulthandler only writes a native trace on fault SIGNALS (SIGSEGV etc.); a
-window-close or OS-kill leaves the trace file empty, so the report had only a
-generic "recovered on the next start" line ("dont seem to actually contain any
-useful information"). build_report also never rendered the native_trace it WAS
-given (only a 4-key allowlist reached the report). Now the report renders the
-native trace when present AND attaches the crashed run's own log tail (matched by
-the pid in the log filename), home-path-scrubbed.
+window-close or OS-kill leaves the trace file empty. The report renders the
+native trace when present AND attaches the crashed run's own log tail (matched
+by the pid in the log filename), home-path-scrubbed.
 """
 
 import json
@@ -76,12 +73,10 @@ class TestRecentLogTail:
 
 
 class TestLogUnavailableIsNotSilence:
-    """H4: an empty digest used to mean THREE unrelated things - no log file
-    matched this run, the file was found but could not be READ, and the run
-    genuinely logged nothing notable - and all three rendered as no log section
-    at all. The first two are failures to collect; reporting them as silence is
-    the AGENTS.md rule 5 shape (a step that failed must not look like success),
-    and it costs the maintainer the one artifact triage needs."""
+    """An empty digest can mean THREE unrelated things: no log file matched
+    this run, the file was found but could not be READ, or the run genuinely
+    logged nothing notable. The first two are failures to collect and must not
+    render as silence."""
 
     def test_unreadable_log_is_distinguished_from_a_missing_one(self, tmp_path):
         # A REAL OSError out of a REAL filesystem state (a directory wearing the

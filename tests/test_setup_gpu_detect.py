@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """setup.sh's detect_gpu(): NVIDIA must win over leftover ROCm tooling.
 
-Regression for a filed ordering bug: detect_gpu() checked rocminfo/rocm-smi/
-/opt/rocm BEFORE nvidia-smi, so a box with an NVIDIA GPU but ALSO some ROCm
-tooling on PATH (a shared ML rig, a base image bundling both vendor stacks)
-reported "rocm" - matching neither hwdetect.py's vendor priority
-("nvidia", "amd", "intel") nor the actual hardware. The real backend
-recommendation comes from `python -m localm.hwdetect` further down in
-setup.sh, which gets this right; $GPU from detect_gpu() only becomes
-load-bearing as setup.sh's OWN fallback if that probe's output is
-unparseable - see the `case "$REC" in ... *) case "$GPU" in ...` guard.
+Checking rocminfo/rocm-smi//opt/rocm BEFORE nvidia-smi makes a box with an
+NVIDIA GPU but ALSO some ROCm tooling on PATH (a shared ML rig, a base image
+bundling both vendor stacks) report "rocm" - matching neither hwdetect.py's
+vendor priority ("nvidia", "amd", "intel") nor the actual hardware. The real
+backend recommendation comes from `python -m localm.hwdetect` further down in
+setup.sh; $GPU from detect_gpu() only becomes load-bearing as setup.sh's OWN
+fallback if that probe's output is unparseable - see the
+`case "$REC" in ... *) case "$GPU" in ...` guard.
 
-Extracts and runs ONLY the detect_gpu() function body (not the whole
-script, which has side effects and prompts) with a controlled PATH holding
-stub commands - no real GPU hardware needed either way.
+Extracts and runs ONLY the detect_gpu() function body (not the whole script,
+which has side effects and prompts) with a controlled PATH holding stub
+commands - no real GPU hardware needed either way.
 """
 
 from __future__ import annotations

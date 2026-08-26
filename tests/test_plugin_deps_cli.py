@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Engine + CLI behaviour for auto-installing a plugin's pip extras.
+"""Engine and CLI behaviour for auto-installing a plugin's pip extras.
 
-The actual pip run and metadata resolution are unit-tested in
-test_plugin_deps.py; here we drive the ENGINE methods and the `localm plugin`
-commands, mocking the deps layer so nothing is really installed. A synthetic
-store plugin ``withdeps`` declares ``requires_extras = ["fakeextra"]``.
+The actual pip run and metadata resolution are unit-tested separately; here the
+ENGINE methods and the `localm plugin` commands are driven, with the deps layer
+mocked so nothing is really installed. A synthetic store plugin ``withdeps``
+declares ``requires_extras = ["fakeextra"]``.
 """
 
 import pytest

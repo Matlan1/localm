@@ -2,21 +2,16 @@
 """The Settings "Inference runtime" backend picker offers EXACTLY the backends
 `localm setup-llama --backend` accepts.
 
-WHY A TEST AND NOT PLUMBING. POST /api/runtime/update validates its `backend`
-against setup_llama.BACKENDS, and the CLI's own click.Choice is built from that
-same tuple, so those two can never disagree. The GUI is the third statement of
-the same fact and the only one git cannot check: index.html hardcodes the
-<option> list, because a card that cannot offer a backend until a network read
-has succeeded is useless on exactly the box this control exists for - one with
-no working runtime.
+POST /api/runtime/update validates its `backend` against
+setup_llama.BACKENDS, and the CLI's own click.Choice is built from that same
+tuple. The GUI is the third statement of the same fact: index.html hardcodes the
+<option> list, so that a card can offer a backend without a network read having
+succeeded first.
 
-So the drift risk is real and it is one-directional: someone adds a backend to
-setup_llama and the picker silently keeps offering the old set, or renames one
-and the picker starts sending a value the route now 400s. This test reads BOTH
-REAL ARTEFACTS - the shipped index.html and the live constant - so that drift
-is caught mechanically rather than by whoever next opens the Settings page.
-(diff-review-discipline.md item 19: keep one test bound to the real shipped
-artefact, because it finds the divergence the author failed to imagine.)
+The drift is one-directional: a backend added to setup_llama leaves the picker
+offering the old set, and a renamed one makes the picker send a value the route
+400s. This test reads BOTH REAL ARTEFACTS - the shipped index.html and the live
+constant.
 """
 
 from __future__ import annotations
@@ -69,7 +64,6 @@ def test_every_offered_backend_is_labelled_not_bare():
 
 
 def test_auto_is_offered():
-    """'auto' is what a bare `localm setup-llama` resolves through, and it is
-    the right pick for a first provision on unknown hardware. It is a real
+    """'auto' is what a bare `localm setup-llama` resolves through, and a real
     member of BACKENDS rather than a sentinel, so it must be selectable."""
     assert "auto" in _runtime_backend_options()

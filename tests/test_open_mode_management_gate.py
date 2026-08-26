@@ -1,13 +1,12 @@
 """Open-mode management gate.
 
-In open mode (no API key configured) the management endpoints used to run fully
-unauthenticated, so a no-Origin local client (curl / a script) could mint a key,
-flip config, install a plugin, load/unload a model, or browse the filesystem.
-This gate requires such requests to carry the per-process *shell token* that the
-loopback GUI shell injects into the SPA, closing the no-Origin gap without
-relying on Origin headers. Inference + read routes stay open; protected mode
-(a key exists) is unchanged (bearer auth handles it); an operator-allowlisted
-CORS origin is exempt (explicit trust).
+In open mode (no API key configured) a no-Origin local client (curl, a script)
+could otherwise mint a key, flip config, install a plugin, load or unload a
+model, or browse the filesystem. This gate requires such requests to carry the
+per-process *shell token* that the loopback GUI shell injects into the SPA,
+closing the no-Origin gap without relying on Origin headers. Inference and read
+routes stay open; protected mode (a key exists) is unchanged (bearer auth
+handles it); an operator-allowlisted CORS origin is exempt.
 """
 
 from unittest.mock import MagicMock
@@ -148,26 +147,24 @@ def _with_instance_token(app, token="the-instance-attach-token"):
 
 class TestKeylessActivityViaInstanceToken:
     def test_activity_refused_without_any_token(self, open_app):
-        """Baseline (#953 B1/B2/C1/E3): a genuinely open server 403s a bare
-        /api/activity read with no credential at all - this is the defect
-        the fix closes, not something it is meant to change."""
+        """Baseline: a genuinely open server 403s a bare /api/activity read
+        with no credential at all."""
         c, _ = open_app
         r = c.get("/api/activity")
         assert r.status_code == 403
 
     def test_activity_allowed_with_shell_token(self, open_app):
-        """The existing credential (the browser's shell token) must keep
-        working for /api/activity exactly as it does for management routes -
-        this fix only ADDS a second acceptable credential."""
+        """The browser's shell token keeps working for /api/activity exactly as
+        it does for management routes; the instance token is a second
+        acceptable credential, not a replacement."""
         c, app = open_app
         r = c.get("/api/activity", headers=_bearer(app))
         assert r.status_code == 200
 
     def test_activity_allowed_with_instance_token(self, open_app):
-        """THE FIX. A local CLI/MCP process has no shell_token (it never
-        reaches outside the browser-served page) but does have this
-        instance's own attach token from the 0600 registry file - that must
-        now be enough."""
+        """A local CLI or MCP process has no shell_token (it never reaches
+        outside the browser-served page) but does have this instance's own
+        attach token from the 0600 registry file, which is enough."""
         c, app = open_app
         token = _with_instance_token(app)
         r = c.get("/api/activity", headers={"Authorization": f"Bearer {token}"})
@@ -182,11 +179,10 @@ class TestKeylessActivityViaInstanceToken:
 
     def test_cross_origin_with_instance_token_still_refused(self, open_app):
         """THE CRITICAL NEGATIVE: a browser-shaped request (one carrying a
-        foreign Origin header) must NOT be able to use this new credential to
-        bypass the SSRF/cross-origin protection - the fix adds a credential a
-        local process can present, it does not weaken the origin check that
-        credential is still subject to. A real local CLI/MCP client never
-        sends Origin at all, so this costs the legitimate case nothing."""
+        foreign Origin header) must NOT be able to use this credential to
+        bypass the cross-origin protection. A real local CLI or MCP client
+        never sends Origin at all, so this costs the legitimate case
+        nothing."""
         c, app = open_app
         token = _with_instance_token(app)
         r = c.get("/api/activity", headers={
@@ -196,8 +192,8 @@ class TestKeylessActivityViaInstanceToken:
         assert r.status_code == 403
 
     def test_instance_token_is_not_a_key_in_protected_mode(self, monkeypatch):
-        """Mirrors test_shell_token_is_not_a_key_in_protected_mode: once a real
-        key exists, the instance token must not act as a bypass for it."""
+        """Once a real key exists, the instance token must not act as a bypass
+        for it."""
         monkeypatch.setenv("LOCALM_API_KEY", "owner-secret-xyz")
         app = create_app(_engine())
         app.state.instance_token = "the-instance-attach-token"
@@ -208,8 +204,8 @@ class TestKeylessActivityViaInstanceToken:
 
     def test_management_endpoints_also_accept_the_instance_token(self, open_app):
         """The middleware gate is shared by every open-mode management route,
-        not special-cased to /api/activity - the same local-process proof
-        should work everywhere shell_token already does."""
+        not special-cased to /api/activity: the same local-process proof works
+        everywhere shell_token does."""
         c, app = open_app
         token = _with_instance_token(app)
         r = c.post("/v1/models/unload",

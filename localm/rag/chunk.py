@@ -21,10 +21,8 @@ def chunk_text(text: str, *, chunk_chars: int = CHUNK_CHARS,
     """
     if not text.strip():
         return []
-    # A non-positive chunk size makes the wrap loop below (len(line) > chunk_chars
-    # -> line = line[chunk_chars - overlap:]) never shrink `line`, spinning
-    # forever. Not reachable from any HTTP route today (chunk size is the module
-    # default), but guard the footgun so a bad caller fails fast instead.
+    # A non-positive chunk size makes the wrap loop below (len(line) >
+    # chunk_chars -> line = line[chunk_chars - overlap:]) never shrink `line`.
     if chunk_chars < 1:
         raise ValueError("chunk_chars must be >= 1")
     overlap = max(0, min(overlap, chunk_chars // 2))
@@ -33,11 +31,9 @@ def chunk_text(text: str, *, chunk_chars: int = CHUNK_CHARS,
     paragraphs: list[tuple[int, str]] = []
     line_no = 1
     for raw in text.split("\n\n"):
-        # An ODD number of blank lines between paragraphs leaves a leading '\n' on
-        # this split element; those leading newlines belong to THIS paragraph's
-        # start (they precede its text), so advance past them before recording pos.
-        # Without this, pos is one line too low and the citation points at a blank
-        # line (B7).
+        # An ODD number of blank lines between paragraphs leaves a leading '\n'
+        # on this split element; those newlines precede this paragraph's text, so
+        # pos advances past them.
         lead = len(raw) - len(raw.lstrip("\n"))
         stripped = raw.strip("\n")
         if stripped.strip():

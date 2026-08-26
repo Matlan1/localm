@@ -3,11 +3,9 @@
 identity - "LocaLM.exe" in Task Manager and the LocaLM icon on the taskbar -
 instead of a bare python.exe.
 
-The mechanism is deliberately NOT a heavyweight freeze. localm's native inference
-libraries are provisioned per-hardware at runtime (`localm setup-llama`) and
-resolved by importing ``localm_llama_runtime``; a frozen monolith would have to
-bake one backend in at build time and would fight that model. Instead we brand the
-interpreter itself:
+The mechanism is not a freeze. localm's native inference libraries are provisioned
+per-hardware at runtime (`localm setup-llama`) and resolved by importing
+``localm_llama_runtime``, so the interpreter itself is branded instead:
 
   * Windows: copy the REAL interpreter (``sys._base_executable``) and its loader
     DLLs into ``<venv>/localm-app/LocaLM.exe``, then launch
@@ -22,17 +20,15 @@ interpreter itself:
     ``LocaLM.desktop`` launcher, so the app appears in the menu with its icon and a
     process monitor shows "LocaLM".
 
-Honest caveat: this is a BRANDED COPY of the interpreter, not a compiled binary.
-It is small, low-risk and self-contained (it lives inside the clone's own venv),
-and it delivers the native identity WITHOUT disturbing plugin discovery, native
-library resolution, or the GUI static assets - those keep resolving exactly as
-they do for the normal interpreter. A true compiled binary (PyInstaller/Nuitka)
-is documented as future work in docs/native-app.md.
+This is a BRANDED COPY of the interpreter, not a compiled binary. It is
+self-contained (it lives inside the clone's own venv) and does not disturb plugin
+discovery, native library resolution, or the GUI static assets - those keep
+resolving exactly as they do for the normal interpreter.
 
-Everything here is best-effort and fully guarded (the appface/winconsole ethos):
-building the launcher or stamping the icon must NEVER block a normal run. A
-just-built launcher is self-checked before we report success, and when a step
-cannot complete we SURFACE why (a returned note), never a silent false success.
+Everything here is best-effort and fully guarded: building the launcher or
+stamping the icon must NEVER block a normal run. A just-built launcher is
+self-checked before success is reported, and a step that cannot complete SURFACES
+why (a returned note), never a silent false success.
 """
 
 from __future__ import annotations
@@ -48,8 +44,8 @@ from typing import List, Optional
 
 # The window title / display name.
 APP_NAME = "LocaLM"
-# The taskbar grouping identity (Windows AppUserModelID). A distinct dotted id so
-# the running server is grouped as LocaLM rather than under the generic Python host.
+# The taskbar grouping identity (Windows AppUserModelID). A distinct dotted id, so
+# the running server groups as LocaLM and not under the generic Python host.
 APP_USER_MODEL_ID = "LocaLM.Server"
 
 
@@ -83,23 +79,21 @@ def _venv_root() -> Path:
 
 def _base_interpreter() -> Optional[Path]:
     """The REAL interpreter behind this process. Under a uv-managed Python the venv
-    ``python.exe`` is a trampoline that launches this one as a child; copying THIS
-    (``sys._base_executable``) gives a single genuine LocaLM process rather than a
-    trampoline whose child is still python.exe. Resolved (follows a POSIX symlink)
-    so we copy a real binary. Falls back to ``sys.executable``.
+    ``python.exe`` is a trampoline that launches this one as a child, so copying
+    THIS (``sys._base_executable``) gives a single genuine LocaLM process instead
+    of a trampoline whose child is still python.exe. Resolved (follows a POSIX
+    symlink) so the copy is a real binary. Falls back to ``sys.executable``.
 
     ``sys._base_executable`` is computed by CPython as ``<base_prefix>/<basename
     of the CURRENTLY RUNNING exe>``. When this process IS ALREADY the branded
     LocaLM.exe copy (e.g. ``make-launcher --force`` invoked from LocaLM.exe
     itself, to refresh the launcher after a Python upgrade), that resolves to
-    ``<base_prefix>/LocaLM.exe`` - a file that never exists, since LocaLM.exe is
-    only ever copied into ``<venv>/localm-app/`` (verified live during the #621
-    follow-up investigation). Fall back to ``_mp_spawn.real_base_python()``
-    (``<base_prefix>/python.exe``) in that case - the same base-interpreter
-    lookup already proven for #617's multiprocessing-spawn redirect - so a
+    ``<base_prefix>/LocaLM.exe``, which never exists - LocaLM.exe is only ever
+    copied into ``<venv>/localm-app/``. That case falls back to
+    ``_mp_spawn.real_base_python()`` (``<base_prefix>/python.exe``), so a
     ``--force`` relaunch from the branded launcher itself can still find a real
     interpreter to copy. Windows-only (the fallback's filename is hardcoded);
-    on other platforms a failed resolution still returns None, unchanged."""
+    on other platforms a failed resolution returns None."""
     be = getattr(sys, "_base_executable", None) or sys.executable
     try:
         p = Path(be).resolve()
@@ -192,19 +186,17 @@ def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
     ``_base_interpreter`` then resolves *src* to the real base interpreter, a
     different file than *dst*).
 
-    Verified live (see dev-notes): Windows blocks a direct content-overwrite of
-    a running exe's file (``OSError`` / WinError 32, sharing violation) but DOES
-    allow renaming that same running exe's file out of the way first (the
-    loader holds it open with ``FILE_SHARE_DELETE``), after which a fresh copy
-    can be written at the freed path. The fast path (plain copy) is tried
-    first since *dst* is USUALLY not running. Returns True if the rename
-    fallback was needed.
+    Windows blocks a direct content-overwrite of a running exe's file
+    (``OSError`` / WinError 32, sharing violation) but DOES allow renaming that
+    same running exe's file out of the way first (the loader holds it open with
+    ``FILE_SHARE_DELETE``), after which a fresh copy can be written at the freed
+    path. The fast path (plain copy) is tried first, since *dst* is USUALLY not
+    running. Returns True if the rename fallback was needed.
 
     Deleting the renamed-aside file while the original process is still alive
-    also fails live (WinError 5) - not a real failure, just Windows not
-    releasing the name until the last handle closes - so that cleanup is
-    best-effort: a straggling ``.old`` file is harmless and is cleared on the
-    NEXT successful rebuild, once the old process has exited."""
+    fails with WinError 5 - Windows does not release the name until the last
+    handle closes - so that cleanup is best-effort: a straggling ``.old`` file
+    is harmless and is cleared on the NEXT successful rebuild."""
     try:
         shutil.copy2(src, dst)
         return False
@@ -245,7 +237,7 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
             return LauncherResult(ok=True, path=dst, notes=notes)
         # When rebuilding via --force from the already-running LocaLM.exe, dst is
         # this process's own executing image, so the copy needs the running-exe
-        # fallback rather than a plain shutil.copy2.
+        # fallback, not a plain shutil.copy2.
         replaced_running = _copy_replacing_possibly_running_exe(base, dst)
         dlls = _copy_runtime_dlls(base.parent, dst.parent)
         notes.append(f"built {dst.name} from {base.name} + {len(dlls)} runtime DLL(s)"

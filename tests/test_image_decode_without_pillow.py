@@ -1,23 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A missing Pillow must not be reported as a native inference fault.
 
-Found during 0.1.4 release verification on a cold install with the base extras
-(`coder,voice,monitor` - exactly what setup.bat/setup.sh install before the
-OPTIONAL torch step). Pillow shipped only in the `gpu` extra, so any install that
-skipped the torch stack - the CPU backend, or a torch install that failed, both
-of which print "GGUF chat still works" - had no image decoder at all.
+Pillow shipping only in the `gpu` extra leaves any install that skipped the torch
+stack - the CPU backend, or a torch install that failed, both of which print
+"GGUF chat still works" - with no image decoder at all.
 
-Asking a GGUF vision model about an image then produced:
+Asking a GGUF vision model about an image then produces:
 
     [inference error: Native inference fault (worker exit 1). The model has been
      unloaded and will reload on the next request. See the debug log for the
      native stack trace.]
 
-Every clause of that was false. The debug log held a plain `ModuleNotFoundError:
-No module named 'PIL'`; there was no native fault and no native stack trace, and
-the model was fine. The GGUF worker's dispatch loop lets an escaping exception
-kill the process on purpose (it means a native fault left the model in an unknown
-state), so an unguarded ImportError inside the worker inherited that treatment.
+Every clause of that is false: the debug log holds a plain `ModuleNotFoundError:
+No module named 'PIL'`, there is no native fault and no native stack trace, and
+the model is fine. The GGUF worker's dispatch loop lets an escaping exception
+kill the process by design (it means a native fault left the model in an unknown
+state), so an unguarded ImportError inside the worker inherits that treatment.
 
 Two independent guards, because either alone leaves a real hole:
   1. Pillow is a CORE dependency, so the situation should not arise.
@@ -82,10 +80,10 @@ def test_decoding_an_image_does_not_require_numpy(monkeypatch):
     """The image path needs Pillow and nothing else.
 
     numpy is NOT a core dependency - it arrives transitively via the voice extra,
-    so a base install can easily lack it. `localm.inference.media` used to import
-    it at module scope for a single return annotation on decode_audio, under
-    `from __future__ import annotations`, so it was never evaluated at runtime and
-    bought nothing - while making the whole module, decode_image_url included,
+    so a base install can easily lack it. A module-scope `import numpy` in
+    `localm.inference.media` for a single return annotation under
+    `from __future__ import annotations` is never evaluated at runtime and buys
+    nothing, while making the whole module, decode_image_url included,
     unimportable without numpy.
 
     Blocking the LEAF module and re-importing is what makes this real: asserting
@@ -130,7 +128,7 @@ def test_cli_reports_the_missing_library_not_vision_guidance(monkeypatch, capsys
 
     A new subclass silently inherits into every existing handler of its parent,
     so this asserts the CLI distinguishes them rather than collapsing both into
-    one message. Ordering is the whole fix, and ordering is invisible in a diff.
+    one message.
     """
     from localm.cli import chat as chat_mod
 

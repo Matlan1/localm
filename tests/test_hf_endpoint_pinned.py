@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S7: HF_ENDPOINT/HF_HUB_ENDPOINT are ambient env vars localm never exposes as
-a setting anywhere (no settings_schema.py key, no CLI flag, no docs). Every
-huggingface_hub call site in pull.py and embedder.py now pins
+"""HF_ENDPOINT/HF_HUB_ENDPOINT are ambient env vars localm never exposes as a
+setting anywhere (no settings_schema.py key, no CLI flag, no docs). Every
+huggingface_hub call site in pull.py and embedder.py pins
 endpoint="https://huggingface.co" explicitly, so a stray HF_ENDPOINT or
-HF_HUB_ENDPOINT left over in the user's shell can never silently redirect a
-model pull to a different host.
+HF_HUB_ENDPOINT left over in the user's shell cannot redirect a model pull to a
+different host.
 
 One test per call site, each asserting the ACTUAL kwarg the real
 huggingface_hub function/constructor received - not merely that the call

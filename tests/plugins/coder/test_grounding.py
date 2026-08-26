@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B7: the coder agent would answer questions about the project from assumption
-(hallucinating files / APIs that do not exist) instead of reading the code first.
-The system prompt now carries an explicit grounding rule: read or search the
+"""The system prompt carries an explicit grounding rule: read or search the
 relevant files before answering a question about the project, and base every
-claim on a tool result. This holds for every model family (incl. the compressed
-small-model prompt).
+claim on a tool result. This holds for every model family, including the
+compressed small-model prompt.
 """
 
 from pathlib import Path

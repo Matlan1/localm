@@ -66,11 +66,10 @@ _WORKFLOW_OWN_WORK_TIMEOUT_S = 30.0
 _WORKFLOW_RMW_TIMEOUT_S = 2 * _WORKFLOW_OWN_WORK_TIMEOUT_S
 
 # Distinct from None, which is a legitimate VALUE for `active` (no workflow
-# selected) - using None as both "caller did not pass this" and "resolved to
-# no selection" made list_workflows re-resolve selected_name() a second time
-# whenever nothing was selected, defeating the single-config-load point of
-# passing `active` through at all (caught by
-# test_list_workflows_route_only_loads_config_once).
+# selected). Using None as both "caller did not pass this" and "resolved to no
+# selection" makes list_workflows re-resolve selected_name() a second time
+# whenever nothing is selected, defeating the single-config-load point of
+# passing `active` through at all.
 _UNSET = object()
 
 
@@ -84,15 +83,14 @@ def _confined(media: str, name: str) -> Path:
     """A path-safe handle inside the media dir. Raises ValueError on a
     traversal/invalid name.
 
-    confined_name() itself raises fastapi.HTTPException by design (pathsafe.py
-    documents it as being for HTTP call sites only) - but this module claims to
-    be framework-free (see the module docstring) and now has a non-HTTP caller
-    (the CLI), so normalize here. Every function in this module already
-    documents "Raises ValueError" for its own bad-name case; without this, that
-    was only true when the failure came from the name-not-found checks below,
-    never from confinement itself. make_workflow_router's routes already catch
-    ValueError and convert it to HTTPException(400, str(e)) themselves, so the
-    HTTP response (400, "Invalid file name") is unchanged."""
+    confined_name() itself raises fastapi.HTTPException (pathsafe.py documents it
+    as being for HTTP call sites only), but this module is framework-free (see
+    the module docstring) and has a non-HTTP caller (the CLI), so the exception
+    is normalized here. Every function in this module documents "Raises
+    ValueError" for its own bad-name case, and that covers confinement failures
+    too. make_workflow_router's routes catch ValueError and convert it to
+    HTTPException(400, str(e)) themselves, so the HTTP response (400, "Invalid
+    file name") is unchanged."""
     from fastapi import HTTPException
     from localm.pathsafe import confined_name
     try:
@@ -168,9 +166,9 @@ def list_workflows(media: str, *, active=_UNSET) -> list:
 def _list_and_selected(media: str) -> tuple:
     """(list_workflows(media), selected_name(media)) from ONE config load.
     Every route in make_workflow_router needs both together; calling them
-    independently (the previous shape) loaded config.json TWICE per request -
-    real cost on Windows, where a config read can hit the documented ~1s
-    antivirus/indexer retry (config.py's _replace_atomic doc)."""
+    independently loads config.json TWICE per request - real cost on Windows,
+    where a config read can hit the documented ~1s antivirus/indexer retry
+    (config.py's _replace_atomic doc)."""
     active = selected_name(media)
     return list_workflows(media, active=active), active
 
@@ -300,9 +298,9 @@ def _finalize_migration(media: str, legacy: Path, dest: Path) -> tuple:
     selection whose file has gone falls through to the legacy), so the moved copy
     must become the selection or generation would silently drop to the example.
 
-    Fail-safe (AGENTS.md rule 5): the original is removed ONLY once the override
-    is safely active from home, so a failed select/remove never silently
-    deactivates or loses the user's workflow."""
+    Fail-safe: the original is removed ONLY once the override is safely active
+    from home, so a failed select/remove never silently deactivates or loses the
+    user's workflow."""
     if active_workflow_path(media) is None:
         try:
             select_workflow(media, dest.name)
@@ -390,20 +388,19 @@ def make_workflow_router(media: str):
 
     # Off the event loop, all four routes: list_workflows/selected_name do
     # synchronous filesystem I/O (a directory glob + a stat per file, a
-    # config.json read) that inline blocked the WHOLE server for the duration -
-    # worst on GET, which the GUI polls on its own timer, so this was a
-    # repeating, self-inflicted stall for as long as the page was open. Same
-    # REG-638 shape as the already-offloaded comfy-model-slots route.
+    # config.json read) that inline blocks the WHOLE server for the duration -
+    # worst on GET, which the GUI polls on its own timer, so it is a repeating
+    # stall for as long as the page is open. Same shape as the already-offloaded
+    # comfy-model-slots route.
     #
     # Every route ALSO acquires _lock_for(media) around its whole body, inside
     # the threadpool closure (so it costs the worker thread, never the event
-    # loop) - see the module-level comment on _lock_for for why: offloading
-    # alone removed the free serialization these check-then-act sequences
-    # depended on, and this restores it.
+    # loop) - see the module-level comment on _lock_for: offloading alone removes
+    # the free serialization these check-then-act sequences depend on, and this
+    # restores it.
     #
-    # Bounded (follow-up to #1057) at _WORKFLOW_RMW_TIMEOUT_S - see that
-    # constant's own comment for why a client-side timeout here is still
-    # safe against corruption.
+    # Bounded at _WORKFLOW_RMW_TIMEOUT_S - see that constant's own comment for
+    # why a client-side timeout here is still safe against corruption.
 
     @router.get(f"/api/{media}/workflows")
     async def _list_workflows():

@@ -54,11 +54,10 @@ def _progress_file_info(target_parts: List[Path]) -> "tuple[str | None, int, int
 class _ProgressOutcome:
     """Explicit success signal for the progress context managers.
 
-    A context manager cannot infer success from the absence of an exception:
-    ``_pull_gguf_file`` reports a failed part with ``return False`` from INSIDE
-    its ``with`` block, which unwinds perfectly cleanly. Detecting only
-    exceptions would still announce 100% for that download. So the body has to
-    SAY it finished, and silence means it did not.
+    The body must SAY it finished by calling ``ok()``; silence means it did not.
+    The absence of an exception is not enough: ``_pull_gguf_file`` reports a
+    failed part with ``return False`` from INSIDE its ``with`` block, which
+    unwinds perfectly cleanly.
     """
 
     __slots__ = ("succeeded",)
@@ -75,14 +74,13 @@ def _incomplete_prefixes(base_dir: Path, rel_parts: List[str]) -> "set[str] | No
 
     huggingface_hub names a local-dir temp file
     ``<short_hash(<name>.metadata)>.<etag>.incomplete`` under
-    ``<local_dir>/.cache/huggingface/download/<subpath>/`` (verified against
-    huggingface_hub 1.23.0). The etag is not knowable in advance, but the hash
-    prefix is, and it is what separates OUR parts from a concurrent pull's.
+    ``<local_dir>/.cache/huggingface/download/<subpath>/``. The etag is not
+    knowable in advance, but the hash prefix is, and it is what separates OUR
+    parts from a concurrent pull's.
 
-    Returns None when the layout cannot be computed - this reaches into
-    huggingface_hub internals, so a version that moves them must degrade rather
-    than break. The caller then falls back to an unfiltered scan of this
-    destination, which is coarser but never counts another DESTINATION's bytes.
+    Returns None when the layout cannot be computed. The caller then falls back
+    to an unfiltered scan of this destination, which is coarser but never counts
+    another DESTINATION's bytes.
     """
     try:
         from huggingface_hub._local_folder import _short_hash
@@ -108,9 +106,7 @@ def _download_progress(target_parts: List[Path], total_size: int, *,
 
     Active in GUI mode (LOCALM_PROGRESS_JSON=1). A total of 0 means "we could
     not size this": progress still streams with ``pct: null`` so the GUI shows a
-    busy bar with a running byte count, matching _snapshot_progress. Emitting
-    NOTHING in that case (the old behaviour) turned a single failed HEAD into a
-    completely silent multi-GB download.
+    busy bar with a running byte count, matching _snapshot_progress.
 
     Yields a _ProgressOutcome; call ``.ok()`` on the success path or the closing
     event reports the measured partial instead of 100%.
@@ -236,23 +232,17 @@ def _snapshot_progress(disk_bytes_fn, total_size: int):
 
 
 def _report_success(rich_msg: str, plain_msg: str) -> None:
-    """Announce a completed pull without letting a DISPLAY failure read as an
-    OPERATION failure. Every call site reaches this only after the download,
-    checksum verification and registry write are already fully done - that is
-    the precondition that makes swallowing a failure here safe: there is no
-    remaining work this call could be masking. Moving a call to this function
-    earlier, before that work completes, would silently break that guarantee.
+    """Announce a completed pull. A DISPLAY failure never reads as an OPERATION
+    failure: every exception raised by the announcement is caught here.
 
-    ``except Exception`` (not a narrower type) is deliberate and MEASURED, not
-    a guess: this exact line has independently crashed two different ways on
-    the checkmark glyph - a ``ModuleNotFoundError`` from rich's cell-width
-    lookup (``rich._unicode_data``) and a ``UnicodeEncodeError`` from a legacy
-    Windows console write path (see
-    dev-notes/ROOTCAUSE-pull-success-reported-as-failed-2026-08-05.md) - so an
-    enumerated except clause would have missed one of them. The GUI runs pull
-    as a subprocess and treats a non-zero exit as "the pull failed"
-    (localm/plugins/gui/jobs.py), so an uncaught exception here reports a
-    provably successful multi-GB download as failed.
+    Precondition: at every call site the download, checksum verification and
+    registry write are already fully done, so there is no remaining work this
+    call could be masking. A call moved earlier, before that work completes,
+    breaks that guarantee.
+
+    The rich message is printed first; on any exception a warning is logged and
+    the plain-ASCII message is printed instead. A failure of that fallback is
+    logged too and never propagates.
     """
     try:
         console.print(rich_msg)
@@ -436,15 +426,13 @@ def _stem_from_url(url: str) -> str:
 
 
 def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
-    """
-    Verify there is at least *required_bytes* of free space on the volume that
-    holds *dest_dir*.  Prints a warning and returns False when space is
+    """Verify there is at least *required_bytes* of free space on the volume that
+    holds *dest_dir*. Prints a warning and returns False when space is
     insufficient; returns True when fine or when the check is skipped
     (e.g. ``required_bytes == 0``).
 
-    If the free-space check itself cannot be measured (offline models dir,
-    permission denied, etc.) it is treated as OK by design: a WARNING is
-    logged and the download proceeds rather than blocking a working setup.
+    An unmeasurable free-space check (offline models dir, permission denied,
+    etc.) is treated as OK: a WARNING is logged and the download proceeds.
     """
     if not required_bytes:
         return True
@@ -487,26 +475,22 @@ def _hf_file_sha256(repo_id: str, filename: str) -> Optional[str]:
 
 
 def _pick_best_of_same_repo_mmprojs(cands: List[str]) -> str:
-    """Deterministic pick among several mmproj filenames found in the SAME
-    repo, once stem-matching (``_pick_mmproj_candidate``) couldn't narrow them
-    to one. Unlike a cross-model directory glob (``find_sibling_mmproj``),
-    every candidate here already comes from the ONE repo the caller is
-    pulling from, so they are near-certainly quantised variants of the SAME
-    projector for the SAME model rather than projectors for different models -
-    guessing among them costs precision, never correctness. Prefers the
-    conventional highest-precision f16 build; falls back to a sorted-first
-    pick for determinism."""
+    """Deterministic pick among several mmproj filenames found in the SAME repo,
+    once stem-matching (``_pick_mmproj_candidate``) could not narrow them to one.
+    Every candidate here comes from the ONE repo the caller is pulling from, so
+    they are quantised variants of the same projector for the same model.
+    Prefers the conventional highest-precision f16 build; falls back to a
+    sorted-first pick for determinism."""
     f16 = [c for c in cands if "f16" in c.lower()]
     return f16[0] if f16 else sorted(cands)[0]
 
 
 def _hf_repo_files(repo_id: str) -> Optional[List[str]]:
     """*repo_id*'s file listing, or None when it could not be fetched at all
-    (offline, API error, rate limit) - kept distinct from "fetched, and it
-    lists none": a listing FAILURE must never be read as "this repo has no
-    projector" (AGENTS.md rule 5 - do not collapse 'could not look' into
-    'looked and found nothing'), or a transient HF API hiccup would print a
-    false "no vision projector found" note."""
+    (offline, API error, rate limit) - kept distinct from "fetched, and it lists
+    none". A listing FAILURE must never be read as "this repo has no projector",
+    which would print a false "no vision projector found" note on a transient HF
+    API hiccup."""
     try:
         from huggingface_hub import HfApi
         return HfApi(endpoint=_HF_ENDPOINT).list_repo_files(repo_id)
@@ -522,13 +506,12 @@ def _pick_mmproj_from_listing(
     """The mmproj (vision projector) filename among *files* (a repo's file
     listing) that pairs with *model_filename*, or None when none qualify.
 
-    *files* comes from a REMOTE HF repo listing, so every candidate is
-    confined through ``_safe_models_filename`` (the same guard an explicit
-    --mmproj filename gets, GAP-CLI-2) before it is even considered for
-    picking - not merely rejected after being chosen. A single-path-component
-    check alone (e.g. "no '/'") is not enough: on Windows a value with no
-    forward slash at all can still be a drive-qualified or backslash-relative
-    path, and ``_safe_models_filename`` is what actually rejects those, plus
+    *files* comes from a REMOTE HF repo listing, so every candidate is confined
+    through ``_safe_models_filename`` - the same guard an explicit --mmproj
+    filename gets - before it is considered for picking, not merely rejected
+    after being chosen. A single-path-component check alone (e.g. "no '/'") is
+    not enough: on Windows a value with no forward slash can still be a
+    drive-qualified or backslash-relative path. ``_safe_models_filename`` also
     confines the result to land inside *base_dir*."""
     cands = [f for f in files
              if f != model_filename and "mmproj" in f.lower()
@@ -557,10 +540,9 @@ def _hf_repo_mmproj_filename(
 ) -> Optional[str]:
     """The mmproj (vision projector) filename in *repo_id*'s OWN file listing
     that pairs with *model_filename*, or None when the repo ships none (or its
-    listing could not be fetched at all). A free HuggingFace metadata call
-    (repo file listing, no download) - this is what lets a GUI/MCP pull attach
-    a vision model's projector automatically, instead of requiring the CLI
-    --mmproj flag the user would otherwise have to name by hand."""
+    listing could not be fetched at all). A free HuggingFace metadata call (repo
+    file listing, no download), so a GUI/MCP pull can attach a vision model's
+    projector without the CLI --mmproj flag."""
     files = _hf_repo_files(repo_id)
     if files is None:
         return None
@@ -568,20 +550,16 @@ def _hf_repo_mmproj_filename(
 
 
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Optional[Path]:
-    """Auto-attach companion: look for a vision projector shipped in the SAME
-    HF repo as *filename* and fetch it too - the repo listing is available at
-    pull time, which is exactly when this decision is cheap (#957: a GUI pull
-    of a vision GGUF silently had no projector, so the model downloaded but
-    could never actually see an image).
+    """Auto-attach companion: look for a vision projector shipped in the SAME HF
+    repo as *filename* and fetch it too.
 
     Returns the local Path of a verified projector to record on the model's
-    registry entry, or None. When the listing could not be fetched at all,
-    stays silent (see ``_hf_repo_files``) - only when the repo listing was
-    genuinely read and *filename* looks like a vision-language release (by
-    name) with no usable projector among it does this print an informational
-    note, so the gap is visible at pull time rather than discovered silently
-    at first image - registry.py's ``vision_input_guidance`` is the analogous
-    message for the chat-time case.
+    registry entry, or None. When the listing could not be fetched at all, stays
+    silent (see ``_hf_repo_files``). Only when the repo listing was genuinely
+    read and *filename* looks like a vision-language release (by name) with no
+    usable projector among it does this print an informational note, so the gap
+    is visible at pull time rather than at first image; registry.py's
+    ``vision_input_guidance`` is the analogous message for the chat-time case.
     """
     files = _hf_repo_files(repo_id)
     if files is None:
@@ -628,13 +606,12 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
 
 
 def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
-    """True when *entry* (a registry entry whose file is *path*) is a
-    plausible target for the #957 mmproj backfill: pulled from an HF repo,
-    a plain LLM registration (never a projector needing its own projector),
-    and not already carrying a recorded ``mmproj``. Pure/no I/O - the network
-    decision lives in ``backfill_mmproj_for_entry`` below, so a caller (e.g.
-    a sync pass counting candidates before deciding whether to spend the
-    per-call budget) can filter cheaply first."""
+    """True when *entry* (a registry entry whose file is *path*) is a plausible
+    target for the mmproj backfill: pulled from an HF repo, a plain LLM
+    registration (never a projector needing its own projector), and not already
+    carrying a recorded ``mmproj``. Pure and does no I/O - the network decision
+    lives in ``backfill_mmproj_for_entry`` below, so a caller can filter cheaply
+    first."""
     source = str(entry.get("source", ""))
     if not source.startswith("hf:"):
         return False
@@ -648,35 +625,22 @@ def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
 
 
 def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
-    """#957: an LLM pulled BEFORE the auto-attach fix (or from a build that
-    predates it) has no mmproj recorded and never will on its own - the
-    maintainer's ruling on the issue is explicit that a re-pull is not an
-    acceptable fix ("an already pulled vision model must work just as a
-    freshly pulled one, no half measures"). This is the same-repo lookup a
-    fresh pull already does (``_maybe_fetch_repo_mmproj``), reused so an
-    existing registry entry gets exactly the same auto-attach + hard-verify
-    treatment retroactively, driven by the ``source`` this entry ALREADY
-    recorded (``hf:<repo_id>``) - no re-download of the model itself, no
-    user action.
+    """Attach a vision projector to an LLM registry entry that has none, using
+    the same-repo lookup a fresh pull does (``_maybe_fetch_repo_mmproj``) and the
+    ``source`` this entry already recorded (``hf:<repo_id>``). The model itself
+    is not re-downloaded and no user action is needed; the fetched projector gets
+    the same auto-attach plus hard-verify treatment a fresh pull gives it.
 
-    Returns the fetched/verified projector Path (caller records it), or None
-    when not a candidate, blocked by policy, or nothing was found - never
-    raises (mirrors ``_maybe_fetch_repo_mmproj``'s own contract; a sync pass
-    must not be taken down by one bad entry).
+    Returns the fetched/verified projector Path (the caller records it), or None
+    when not a candidate, blocked by policy, or nothing was found. Never raises,
+    mirroring ``_maybe_fetch_repo_mmproj``'s own contract, so a sync pass is not
+    taken down by one bad entry.
 
-    Network policy: gated on ``network_mode() != "off"`` - deliberately the
-    SAME bar ``_pull_gguf_file``'s own net_mode gate uses for this identical
-    HF-listing-plus-download operation on an explicit pull (see this
-    module's top-level gate), not the stricter "== allow" bar
-    ``embedder.py``'s automatic download uses for ITS background fetch.
-    embedder.py can afford the stricter bar because a working degraded
-    fallback already exists (lexical BM25); vision has none - the feature is
-    simply broken until the projector exists - and the maintainer's ruling
-    is that this must resolve itself under the SAME default configuration a
-    fresh pull already resolves it under, not only for installs that have
-    separately opted into net_mode=allow. Only the one deliberate "off"
-    kill-switch is honoured as a hard stop, matching the fresh-pull path
-    exactly."""
+    Network policy: gated on ``network_mode() != "off"``, the SAME bar
+    ``_pull_gguf_file``'s own net_mode gate uses for this identical
+    HF-listing-plus-download operation on an explicit pull, not the stricter
+    "== allow" bar ``embedder.py`` uses for its background fetch. Only the "off"
+    kill-switch is a hard stop."""
     if not mmproj_backfill_candidate(entry, path):
         return None
     from localm.netpolicy import network_mode
@@ -690,12 +654,11 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
 
 def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
     """Download the user-named --mmproj file (owner/repo:file.gguf) into
-    *base_dir* and return its local path, verified as a real vision projector
-    - or None on a bad spec, failed download, or failed verification (always
-    printed, never silent). An explicit --mmproj always wins over the
-    same-repo auto-detection in ``_maybe_fetch_repo_mmproj``: the caller only
-    reaches here when the user named one (never silently override a user's
-    explicit choice)."""
+    *base_dir* and return its local path, verified as a real vision projector -
+    or None on a bad spec, failed download, or failed verification (always
+    printed, never silent). An explicit --mmproj always wins over the same-repo
+    auto-detection in ``_maybe_fetch_repo_mmproj``; the caller only reaches here
+    when the user named one."""
     # A '/' must be present (an owner/repo) as well as one of the two file markers,
     # matching pull_model's own is_single_file_spec check. Without the '/' a bare
     # 'file.gguf' reaches the else branch below, where rsplit on a '/'-free string
@@ -750,9 +713,7 @@ def _mmproj_for_registration(
     """The vision-projector Path to record on this pull's registry entry, or
     None. An explicit --mmproj wins when given, else the same-repo listing is
     auto-checked. Skipped entirely for a foreign destination (ComfyUI's
-    dest_dir - not one of localm's own chat models), anything that isn't a
-    plain 'llm' registration (a projector cannot itself need a projector, and
-    an embedding/lora/etc. pull was never going to see an image), and a
+    dest_dir), for anything that is not a plain 'llm' registration, and for a
     *filename* that already looks like a projector by its own name."""
     if dest_dir is not None or reg_type != "llm" or "mmproj" in filename.lower():
         return None
@@ -776,26 +737,21 @@ def _pull_gguf_file(
     restricted to .gguf - any single-file ``owner/repo:filename`` spec dispatches
     here, see ``pull_model``'s docstring).
 
-    ``expected_sha256`` is the user-supplied ``--sha256`` digest. It is NOT a
-    facade here (FAC-5): when given it is reconciled with HuggingFace's own LFS
-    metadata up front, and the downloaded first part is verified against it
-    before the model is registered.
+    ``expected_sha256`` is the user-supplied ``--sha256`` digest. When given it
+    is reconciled with HuggingFace's own LFS metadata up front, and the
+    downloaded first part is verified against it before the model is registered.
 
     ``dest_dir``, when given, routes the download to that directory instead of
     ``MODELS_DIR`` (e.g. a ComfyUI models subfolder) and is created via
     ``_mkdir_or_explain`` instead of ``ensure_dirs()``. ``register`` still
     controls whether the download is added to localm's own model registry -
-    a file routed elsewhere (e.g. for ComfyUI, not for localm's own chat-model
-    catalog) should normally pass ``register=False``.
+    a file routed elsewhere should normally pass ``register=False``.
 
     ``mmproj_spec``, when given, is the user's explicit ``--mmproj
-    owner/repo:file.gguf`` choice and always wins over the automatic
-    same-repo projector lookup below (never silently override an explicit
-    choice). When it is None and the pulled file registers as a plain 'llm',
-    the HF repo's own file listing is checked for a vision-projector (mmproj)
-    sibling and, if found, fetched and recorded on the registry entry - a GUI
-    or MCP pull never had a way to pass --mmproj, so without this a vision
-    GGUF downloaded with no way to ever see an image (#957).
+    owner/repo:file.gguf`` choice and always wins over the automatic same-repo
+    projector lookup below. When it is None and the pulled file registers as a
+    plain 'llm', the HF repo's own file listing is checked for a vision-projector
+    (mmproj) sibling and, if found, fetched and recorded on the registry entry.
     """
     try:
         from huggingface_hub import hf_hub_download, hf_hub_url
@@ -885,10 +841,10 @@ def _pull_gguf_file(
         return True
 
     # Pre-download duplicate check: are the same bytes already registered? Applied
-    # only when the destination IS localm's own models dir, because find_by_sha256
-    # answers 'is it in the registry', not 'is it at the destination'. With an
-    # explicit dest_dir the file is wanted THERE, and such a pull is register=False
-    # by design, so neither skipping nor aliasing applies.
+    # only when the destination IS localm's own models dir, since find_by_sha256
+    # answers 'is it in the registry', not 'is it at the destination'. A pull with
+    # an explicit dest_dir is register=False, so neither skipping nor aliasing
+    # applies.
     if verify_digest and not redownload and dest_dir is None:
         dups = _mm.find_by_sha256(verify_digest)
         if dups:
@@ -1007,24 +963,18 @@ def _warn_if_repo_ships_code(dest: Path, repo_id: str) -> None:
     """Say plainly when a downloaded repo contains Python.
 
     ``snapshot_download`` fetches the WHOLE repo, so a HuggingFace repo's own .py
-    lands on disk like any other file. Historically the HF backend then loaded a
-    model directory with transformers' remote-code flag hard-coded on, so that
-    Python was imported and executed on the next load (CodeQL alert 49).
+    lands on disk like any other file.
 
-    Two reasons this is a warning and not an allow_patterns allowlist:
-
-    1. Execution is already off. ``hf_trust_remote_code`` defaults to False and a
-       model that needs custom code is refused with an explanation instead of
-       being run (see inference/backends/hf.py), so the file on disk is inert.
-    2. An allowlist is the riskier change. A model needs more than weights plus a
-       tokenizer - chat templates (.jinja), merges.txt, shard index files,
-       per-component subdirectories for multimodal repos - and a pattern list that
-       misses one silently produces a broken, half-downloaded model. Refusing to
-       download a file we might need, to protect against code we already refuse to
-       run, trades a real breakage for no extra safety.
+    The file is inert: ``hf_trust_remote_code`` defaults to False and a model
+    that needs custom code is refused with an explanation instead of being run
+    (see inference/backends/hf.py). Everything is fetched rather than filtered
+    through an allow_patterns allowlist, which would silently produce a broken,
+    half-downloaded model whenever it missed a needed file (chat templates
+    (.jinja), merges.txt, shard index files, per-component subdirectories for
+    multimodal repos).
 
     So: fetch everything, and make the presence of code VISIBLE at the moment it
-    arrives, rather than leaving the user to discover it later or not at all.
+    arrives.
     """
     try:
         py = sorted(p for p in dest.rglob("*.py") if p.is_file())
@@ -1058,14 +1008,11 @@ def _resolve_snapshot_type(dest: Path, model_type: str) -> str:
     The pipeline_tag probe runs BEFORE the download and answers 'unknown' for any
     repo without an exact tag (common for base and older repos). The files now on
     disk are a HARDER signal than that API record, so when the probe could not
-    resolve, classify the real config.json with the same deterministic reader
-    ``add_local`` uses. Registering a plainly-LlamaForCausalLM repo as 'unknown'
-    hid it from GUI auto-select, the MCP EngineCache and the jobs runner even
-    though it downloaded fine (REG-477).
+    resolve, the real config.json is classified with the same deterministic
+    reader ``add_local`` uses.
 
     A probe that DID resolve (lora/vae/embedding/...) is authoritative and is
-    never overridden here, and an unresolvable config.json stays 'unknown' - this
-    fills in a gap, it does not restore the old silent 'llm' fallback.
+    never overridden here, and an unresolvable config.json stays 'unknown'.
     """
     if model_type != "unknown":
         return model_type
@@ -1096,8 +1043,8 @@ def _snapshot_is_complete(dest: Path, repo_siblings, repo_id: str) -> bool:
     could not be fetched (offline / API error), which degrades to exactly that
     weaker check.
 
-    Module-level rather than a closure so the confinement below is directly
-    testable (tests/test_registry_confinement.py)."""
+    Module-level rather than a closure, so the confinement below is directly
+    testable."""
     # Imported inside the function so the CLI download path does not import fastapi
     # (pulled in by pathsafe for confined_name's HTTPException) just to validate a
     # filename.
@@ -1215,8 +1162,8 @@ def _pull_hf_snapshot(
     # is used as both the MODELS_DIR subdirectory name and the registry key with no
     # uniqueness check upstream, so two different repos - or a --name reused across
     # two pulls - can compute the same dest. snapshot_download MERGES into
-    # local_dir rather than clearing it first, so pulling into an occupied folder
-    # would mix the two repos' files together.
+    # local_dir instead of clearing it first, so pulling into an occupied folder
+    # mixes the two repos' files together.
     #
     # The test: is there ALREADY a registry entry pointing at this exact dest for a
     # DIFFERENT source? A resumable partial of the SAME repo has no registry entry
@@ -1267,14 +1214,13 @@ def _pull_hf_snapshot(
         return False
 
     _warn_if_repo_ships_code(dest, repo_id)
-    # Registration goes through _register_with_dedup, like _pull_gguf_file's own
-    # calls above.
+    # Registration goes through _register_with_dedup.
     #
     # Its bool return is checked, not assumed True: the dest-collision block above
     # only guards a foreign occupant already at THIS path, and model_name can still
     # be taken by a DIFFERENT path, which _register_with_dedup declines
-    # non-interactively. By then the download has already written real bytes to
-    # disk, so the outcome is reported rather than assumed.
+    # non-interactively. Real bytes are already on disk by then, so the outcome is
+    # reported rather than assumed.
     registered = _mm._register_with_dedup(
         model_name, dest, f"hf:{repo_id}",
         model_type=_resolve_snapshot_type(dest, model_type))
@@ -1296,13 +1242,13 @@ def _pull_hf_snapshot(
 def _ssrf_resolve_final_url(url: str) -> str:
     """Follow the redirect chain HEAD-only, re-validating EVERY hop against the
     netpolicy SSRF guard, and return the final URL. Model pulls legitimately
-    redirect (HuggingFace -> CDN), so we follow - but check each hop instead of
-    trusting requests' automatic, UNCHECKED redirect following, which a public
-    URL could otherwise use to bounce the download into 127.0.0.1 /
-    169.254.169.254 / an RFC1918 service (SSRF-PULL). Each HEAD is IP-pinned to the
-    validated address so the connect cannot rebind off the checked host
-    (SSRF-REBIND). Raises NetworkPolicyError if any hop resolves to a non-public
-    host or cannot be resolved to a validated address."""
+    redirect (HuggingFace -> CDN), so redirects are followed, but each hop is
+    checked rather than trusting requests' automatic, UNCHECKED redirect
+    following, which a public URL could use to bounce the download into
+    127.0.0.1 / 169.254.169.254 / an RFC1918 service. Each HEAD is IP-pinned to
+    the validated address so the connect cannot rebind off the checked host.
+    Raises NetworkPolicyError if any hop resolves to a non-public host or cannot
+    be resolved to a validated address."""
     import urllib.parse
 
     from localm import netpolicy
@@ -1573,8 +1519,8 @@ def _pull_url(
 def _hf_pipeline_tag_to_type(repo_id: str) -> str:
     """Classify a HuggingFace repo's model type from HARD metadata. The real
     implementation lives in localm.discover (shared with search-result
-    classification there); lazy import matches this module's existing
-    convention of not importing localm.discover at module scope."""
+    classification there); the import is lazy, so localm.discover is not imported
+    at module scope."""
     from localm.discover import _hf_pipeline_tag_to_type as _classify
     return _classify(repo_id)
 

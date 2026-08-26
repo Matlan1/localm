@@ -101,7 +101,7 @@ def _build_music_workflow(
     has no sampler / prompt / latent node localm can drive."""
     # Resolve the nodes we drive by ROLE (sampler by class_type, then the ACE-Step
     # prompt and latent by following its graph edges) instead of hardcoded ids, so
-    # a user's own exported ACE-Step graph works without renumbering (MEDIA-1).
+    # a user's own exported ACE-Step graph works without renumbering.
     roles = resolve_sampler_roles(workflow)
     _, sampler = roles["sampler"]
     _, positive = roles["positive"]
@@ -284,7 +284,7 @@ def generate_music(
 
     # Per-component GPU placement (opt-in, multi-GPU only): inject the core Select*Device
     # nodes per the plan resolve_media_placement() decided. A component whose loader is
-    # absent from this graph is surfaced to the user, never silently dropped (rule 5); the
+    # absent from this graph is surfaced to the user, never silently dropped; the
     # happy-path summary already went out via the placement notice.
     if placement:
         for _note in inject_device_placement(workflow, placement):
@@ -294,9 +294,9 @@ def generate_music(
     # Queue. Mark 'now' in ComfyUI's own console log FIRST (comfy_console_tail_start),
     # so any silent partial-apply warning it prints while running THIS prompt (a
     # mismatched checkpoint's UNet/CLIP/VAE keys, ...) can be attributed to this
-    # generation and not an earlier one - see NEW-COMFY-SILENT-PARTIAL-APPLY in
-    # image_gen/comfy.py (#1033). None when localm did not launch this ComfyUI
-    # itself; comfy_console_warnings_since() then always reports checked=False.
+    # generation and not an earlier one - see the same handling in
+    # image_gen/comfy.py. None when localm did not launch this ComfyUI itself;
+    # comfy_console_warnings_since() then always reports checked=False.
     console_tail_start = comfy_console_tail_start(api_url)
     kind, value = comfy_submit_prompt(api_url, workflow)
     if kind == SUBMIT_NO_ID:
@@ -358,9 +358,9 @@ def generate_music(
     # keys, ...) is not an execution_error to ComfyUI, only a console warning, and
     # the run still "succeeds" with that component silently under-applied. Check
     # for any KNOWN warning of that shape printed while THIS prompt ran (see
-    # NEW-COMFY-SILENT-PARTIAL-APPLY in image_gen/comfy.py). console_checked
-    # reflects whether a real read actually happened just now, not whether
-    # console_tail_start found a process before the prompt was even submitted.
+    # image_gen/comfy.py). console_checked reflects whether a real read actually
+    # happened just now, not whether console_tail_start found a process before the
+    # prompt was even submitted.
     console_checked, comfy_console_warnings = comfy_console_warnings_since(
         api_url, console_tail_start)
     comfy_console_warning_text = ("; ".join(comfy_console_warnings)

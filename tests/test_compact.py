@@ -83,7 +83,7 @@ class TestCompactMessages:
         assert "removed to fit" in out[0]["content"]
 
     def test_never_raises(self):
-        # Even a generator that throws non-Exception-ish stuff inside
+        # A summariser that returns None instead of a string.
         out, changed = compact_messages(_history(6), lambda m, t: None)
         assert changed is True
 

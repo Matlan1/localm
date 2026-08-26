@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B2: the Linux GPU install route must be documented as first-class, with the
+"""The Linux GPU install route must be documented as first-class, with the
 pip-extra caveat and WSL2/VM caveats (the `[gpu]` extra cannot embed an index
 URL, so Linux users need setup.sh / a manual --index-url install).
 """

@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Host-side visibility for client-initiated GUI jobs (G2).
 
-A model pull started from a phone/PWA used to be invisible on the host (the person
-running ``localm gui``): its output went only to the per-job event queue the browser
-reads. _HostAnnouncer mirrors the job's start / throttled progress / end to the host
-stdout + debug log. line() is pure (the throttle), so it is unit-testable; one
+A model pull started from a phone or PWA sends its output to the per-job event
+queue the browser reads, which the person running ``localm gui`` does not see.
+_HostAnnouncer mirrors the job's start, throttled progress and end to the host
+stdout and debug log. line() is pure (the throttle), so it is unit-testable; one
 integration test drives start_cli with a mocked subprocess for the full path.
 
-#621 follow-up: a job's actual failure reason (the real git/pip/native error
-text) used to reach ONLY the ephemeral per-job SSE stream a browser tab
-happened to have open - a ComfyUI setup failure left nothing more informative
-than "ComfyUI setup failed" anywhere a bug report could read from.
-record_line/announce_failure_detail close that gap."""
+record_line/announce_failure_detail put a job's actual failure reason (the real
+git/pip/native error text) somewhere a bug report can read, rather than only on
+the ephemeral per-job SSE stream."""
 
 import json
 import logging
@@ -123,9 +121,9 @@ def test_record_line_tail_is_bounded():
 
 
 def test_start_cli_logs_failure_detail_from_real_output(caplog):
-    """Regression pin for #621: a job that FAILS must leave its actual output
-    (not just "<label> failed") somewhere a bug report can read from - the
-    debug log, via the localm logger, not only the browser's SSE stream."""
+    """A job that FAILS must leave its actual output, not just "<label>
+    failed", in the debug log via the localm logger, not only on the browser's
+    SSE stream."""
     class _FakeFailingProc:
         returncode = 1
 

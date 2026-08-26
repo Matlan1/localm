@@ -1,25 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0009 D1: before the first byte lands, "0%" is a claim, not a measurement.
+"""Before the first byte lands, "0%" is a claim, not a measurement.
 
-THE DEFECT, and why the previous fix did not close it. #1098 replaced a
-hardcoded `0` seed with a real measurement, and its own comment says the two
-"agree on a fresh pull". They do - the measurement is 0 - so `_emit_progress`
-computed `pct = round(0 * 100 / total, 1)` = 0.0 and the GUI rendered a
-confident "0% . 0 B / 1.04 GB" through DNS, TLS and the first HTTP round trip.
-The fix made the zero HONEST; D1 is about the zero being a CLAIM. A rendered 0%
-cannot be told from a stalled download, which is the entire point of the row.
+Seeding the progress row from a real measurement makes the zero HONEST, but on a
+fresh pull the measurement IS 0, so `_emit_progress` computes
+`pct = round(0 * 100 / total, 1)` = 0.0 and the GUI renders a confident
+"0% . 0 B / 1.04 GB" through DNS, TLS and the first HTTP round trip. A rendered
+0% cannot be told from a stalled download.
 
-MEASURED on master before this change, both context managers, total known and
-nothing on disk: TWO frames carrying `pct: 0.0` - the opening seed AND the first
-poll tick. Seeding alone would not have closed it, because both poll loops start
-at `last = -1`, so the first `dl == 0` reading differs from `last` and emits.
+With the total known and nothing on disk, TWO frames carry `pct: 0.0` in both
+context managers - the opening seed AND the first poll tick - so fixing the seed
+alone does not close it: both poll loops start at `last = -1`, so the first
+`dl == 0` reading differs from `last` and emits.
 
-WHAT THE FIXTURES MUST BE ABLE TO EXPRESS (item 19):
+WHAT THE FIXTURES MUST BE ABLE TO EXPRESS:
 
 * A fixture with bytes already on disk can never produce the fresh case, and a
   fixture with none can never prove the resume percentage survives. Both are
   here, because the fix has to remove one while keeping the other - an
-  unconditional `pct: None` seed would pass half of this file and regress #1098.
+  unconditional `pct: None` seed would pass half of this file and throw away a
+  true resume percentage.
 * A fixture that always succeeds can never reach the terminal-exactness rule: a
   FAILED pull that landed nothing genuinely IS at zero, and reporting "unknown"
   there is the mirror error. One case below never calls `.ok()`.
@@ -85,9 +84,9 @@ class TestAFreshPullNeverClaimsZeroPercent:
 class TestARealMeasurementIsStillReported:
     def test_a_resume_reports_its_percentage_from_the_very_first_event(
             self, gui, capsys):
-        """#1098's half, which this must not undo. 429304 of 4683073 is a TRUE
-        9.2% before any new byte moves, and an unconditional `pct: None` seed
-        would throw it away - trading this defect for its mirror image."""
+        """429304 of 4683073 is a TRUE 9.2% before any new byte moves, and an
+        unconditional `pct: None` seed would throw it away - trading this defect
+        for its mirror image."""
         with mm._snapshot_progress(lambda: 429_304, 4_683_073) as outcome:
             outcome.ok()
         first = _events(capsys)[0]
@@ -111,10 +110,10 @@ class TestARealMeasurementIsStillReported:
 class TestTheTerminalEventKeepsExactSemantics:
     def test_a_failed_pull_that_landed_nothing_reports_zero_not_unknown(
             self, gui, capsys):
-        """The mirror error, and the reason this is a parameter rather than a
-        blanket rule in _emit_progress. When the run is OVER, zero bytes is a
-        fact we know, and "unknown" would be the opposite lie. `.ok()` is never
-        called, so this is the failure path."""
+        """The mirror error: when the run is OVER, zero bytes is a known fact and
+        "unknown" would be the opposite lie, so the suppression is a parameter
+        rather than a blanket rule in _emit_progress. `.ok()` is never called, so
+        this is the failure path."""
         with mm._snapshot_progress(lambda: 0, 1_000_000):
             pass
         last = _events(capsys)[-1]

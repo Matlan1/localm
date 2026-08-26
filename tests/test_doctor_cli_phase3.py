@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""M2 Phase 3 tests for `localm doctor` and the REPL `_handle_command`.
+"""Tests for `localm doctor` and the REPL `_handle_command`.
 
 Covers:
-  BUG-1  doctor must check llama lib *integrity* (size>0), not mere existence.
-  BUG-2  doctor must not print "CPU mode only" when torch reports a GPU.
-  FAC-4  doctor must show a real version for 'rich' (importlib.metadata).
-  GAP-CLI-3  /temp and /tokens must clamp absurd/negative/zero values.
-  SEC-9  /save must be confined to the cwd (reject traversal/absolute escapes).
+  - doctor must check the llama lib's *integrity* (size>0), not mere existence.
+  - doctor must not print "CPU mode only" when torch reports a GPU.
+  - doctor must show a real version for 'rich' (importlib.metadata).
+  - /temp and /tokens must clamp absurd/negative/zero values.
+  - /save must be confined to the cwd (reject traversal/absolute escapes).
 
 The doctor tests drive the real click command through the ``cli_runner``
 fixture and monkeypatch the smi/torch/rich probes. The REPL tests unit-call
@@ -28,27 +28,20 @@ doctor_mod = importlib.import_module("localm.cli.doctor")
 
 @pytest.fixture(autouse=True)
 def _neutralise_native_lib_loaded():
-    """_loader.native_lib_loaded() (added by #754) is True for the rest of ANY
-    xdist worker in which a real_gguf-gated test has RUN (conftest.py's lazy
-    resource gate - or the test itself - calls load_lib() at that test's setup,
-    and _loaded_lib is deliberately never reset). Once True, doctor.py's own
-    _check_vram_torch() skips the torch attempt ENTIRELY (see its docstring -
-    the same known-doomed DLL-identity conflict), so
-    test_doctor_no_cpu_only_warning_when_torch_sees_gpu's fake "RTX 4090" torch
-    never gets read at all - confirmed by reproduction: forcing
-    _loader._loaded_lib truthy before this test, standalone, reproduces the
-    exact "RTX 4090" missing from output failure a full-suite run hits when a
-    real_gguf-gated file (e.g. test_kv_bytes_offload.py) loads the native
-    runtime first in the same worker.
+    """_loader.native_lib_loaded() is True for the rest of ANY xdist worker in
+    which a real_gguf-gated test has RUN (conftest.py's lazy resource gate - or
+    the test itself - calls load_lib() at that test's setup, and _loaded_lib is
+    never reset). Once True, doctor.py's own _check_vram_torch() skips the torch
+    attempt ENTIRELY (see its docstring - the same known-doomed DLL-identity
+    conflict), so test_doctor_no_cpu_only_warning_when_torch_sees_gpu's fake
+    "RTX 4090" torch never gets read at all.
 
-    Same pattern as test_vram_preflight.py's own _neutralise_native_lib_loaded
-    (copied rather than shared via conftest.py - see that fixture's docstring
-    for why this stays an opt-in, module-scoped fixture rather than a global
-    one: tests/test_native_dll_conflict_guard.py unit-tests
-    native_lib_loaded() itself, and a global override would silently defeat
-    that test's own mock instead of guarding against the real cross-worker
-    pollution). Patches the FUNCTION, not the underlying _loaded_lib variable
-    (there is no separate cache variable here) - restored after every test."""
+    Stays an opt-in, module-scoped fixture rather than a global one: another
+    test module unit-tests native_lib_loaded() itself, and a global override
+    would silently defeat that test's own mock instead of guarding against the
+    real cross-worker pollution. Patches the FUNCTION, not the underlying
+    _loaded_lib variable (there is no separate cache variable here) - restored
+    after every test."""
     from localm.inference.backends.llamacpp import _loader
     saved = _loader.native_lib_loaded
     _loader.native_lib_loaded = lambda: False
@@ -251,10 +244,9 @@ class TestDoctorVramReadingHonesty:
     ):
         """A served last-known-good list (TIMEOUT/BUSY/INCONCLUSIVE) is not a
         current measurement even when it carries a FREE_SCOPE_DEVICE tag from
-        the earlier successful probe that produced it - this is the gap that
-        was open before this fix: list_gpus() was called without
-        return_status=True, so a stale-but-tagged-device correction was
-        substituted in and printed as fact."""
+        the earlier successful probe that produced it. Calling list_gpus()
+        without return_status=True substitutes a stale-but-tagged-device
+        correction and prints it as fact."""
         from localm import discover
         monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
         _no_smi(monkeypatch)

@@ -2,7 +2,7 @@
 import sys
 from typing import Optional
 
-# Force UTF-8 output on Windows so Rich's Unicode markup doesn't crash
+# Force UTF-8 output on Windows.
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -21,13 +21,10 @@ console = Console()
 
 def _exposed_bind_warning(host: str) -> Optional[str]:
     """
-    Warning text when binding beyond loopback unsafely. Two unsafe cases, both of
-    which serve a takeable LLM API to the whole network:
+    Warning text when binding beyond loopback unsafely. Two unsafe cases:
       * no API key set at all (unauthenticated), or
-      * a key is set but is too weak (e.g. a 1-char LOCALM_API_KEY env var or a
-        hand-edited auth.key) - the 8-char floor is only enforced at SET time, so
-        an env/file-sourced key bypasses it; a trivially-guessable owner secret
-        is no better than none (NEW-O).
+      * a key is set but is shorter than MIN_KEY_LEN (an env-var or
+        hand-edited auth.key value bypasses the set-time floor).
     Returns None when the configuration is safe (loopback, or a strong key).
     """
     from localm.auth import MIN_KEY_LEN, any_key_configured, get_api_key
@@ -60,28 +57,17 @@ def _resolve_bind_host(cli_host: Optional[str]):
     """Resolve the effective bind host for a fresh server start. Returns
     ``(host, from_config)``.
 
-    Precedence: an explicit ``-H/--host`` always wins for that process - and
-    survives an in-place restart, which re-execs the same argv (see
-    http_server._restart_argv). With no explicit flag, the GUI-settable
-    ``bind_host`` config key applies (Applies.RESTART: this read, running in
-    the fresh process, is what makes a Settings-driven bind take effect across
-    the Restart server button). Otherwise loopback.
+    Precedence: an explicit ``-H/--host`` wins, then the ``bind_host`` config
+    key, otherwise loopback.
 
-    ``from_config`` tells the caller the value came from config, i.e. was
-    possibly set from the GUI by a user with NO terminal - a failed
-    precondition past that point (no strong API key, TLS unavailable) must
-    degrade LOUDLY to a loopback bind rather than exit, or the server dies
-    with no terminal-free way back. Explicit CLI binds keep their fail-hard
-    behavior (the operator typing -H is watching a terminal).
+    ``from_config`` is True when the value came from config. A caller meeting
+    a failed precondition past that point (no strong API key, TLS unavailable)
+    must degrade LOUDLY to a loopback bind rather than exit; explicit CLI
+    binds keep their fail-hard behavior.
 
-    A config value that is not even well-FORMED (possible only via a
-    hand-edited config.json - PATCH /v1/config and `localm config` both
-    validate at write time) is treated as unset, with a warning. Syntax is all
-    this helper can judge; whether the address is bindable RIGHT NOW (a
-    specific interface IP can go stale when DHCP reassigns the machine) is a
-    runtime question answered by _bind_preflight_error at the call site in
-    plugins/gui/cli.py - handing a stale address to uvicorn would kill the
-    server at startup, the exact no-way-back failure above."""
+    A config value that is not well-FORMED is treated as unset, with a
+    warning. Syntax is all this helper judges; whether the address is bindable
+    RIGHT NOW is answered by _bind_preflight_error at the call site."""
     if cli_host is not None:
         return str(cli_host), False
     from localm.config import load_config
@@ -104,21 +90,8 @@ def _bind_preflight_error(host: str) -> Optional[str]:
     """Why *host* cannot be bound on this machine RIGHT NOW, or None when it
     can. Probes with a real throwaway bind to an ephemeral port.
 
-    Exists because syntax validation cannot see the commonest real failure of
-    the ``bind_host`` config key's own recommended use: a SPECIFIC interface
-    IP that is no longer assigned, because DHCP gave the machine a different
-    address some time after the value was saved. Handing such a host to the
-    server kills the process at the socket bind (uvicorn exits on a failed
-    bind, and portmux's uvicorn fallback re-tries the same host) - for a
-    config-driven bind that is a locked-out user with no terminal, so the
-    caller falls back to loopback instead. Loopback and the wildcards bind
-    trivially; the probe costs one socket.
-
-    Known residual, stated rather than glossed: the address can still
-    disappear in the window between this probe and the real bind. The probe
-    closes the common stale-at-boot case; it is not a TOCTOU-free guarantee,
-    and the explicit-CLI path (-H) deliberately keeps today's fail-hard
-    behavior in front of the operator who typed it."""
+    The address can still stop being bindable between this probe and the real
+    bind; this is not a TOCTOU-free guarantee."""
     import socket
     try:
         infos = socket.getaddrinfo(host, 0, type=socket.SOCK_STREAM,
@@ -135,20 +108,12 @@ def _config_tls_pair(cfg: dict):
     """The usable custom TLS pair from config, or ``None``.
 
     ``(tls_cert, tls_key)`` when both keys are set, both files exist, and the
-    pair actually loads as a certificate chain (``SSLContext.load_cert_chain``,
-    which also proves the key matches the cert). Anything less returns None
-    with a WARNING naming what is wrong, so the caller falls back to the
-    built-in certificate: a config-sourced pair is applied at a startup nobody
-    may be watching (possibly set from the GUI, applied by the Restart
-    button), so a broken pair must not become a dead server (uvicorn raises on
-    an unloadable pair) - and must not become cleartext either. Falling back
-    to the built-in cert keeps the bind encrypted and the server reachable;
-    the warning keeps the substitution honest (clients pinning the custom cert
-    will refuse the built-in one, which is the loud, safe direction).
+    pair loads as a certificate chain (``SSLContext.load_cert_chain``, which
+    also proves the key matches the cert). Anything less returns None with a
+    WARNING naming what is wrong, and the caller falls back to the built-in
+    certificate.
 
-    The CLI pair (--tls-cert/--tls-key) deliberately does NOT come through
-    here: click checks existence at parse time and a broken pair then fails
-    uvicorn's own startup in front of the operator who typed it."""
+    The CLI pair (--tls-cert/--tls-key) does not come through here."""
     import ssl
     from pathlib import Path
     from localm.debuglog import logger
@@ -182,22 +147,16 @@ def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
     """Decide TLS for a bind and return ``(ssl_certfile, ssl_keyfile)`` - or
     ``(None, None)`` for plain HTTP.
 
-    Built-in TLS (NET-1): on any non-loopback bind localm mints its own local-CA
-    certificate so HTTPS works out of the box (the API key and all traffic are
-    encrypted). ``--no-tls`` forces plain HTTP (the key would cross the network
-    in cleartext); ``--tls-cert``/``--tls-key`` override with a user-supplied
-    pair on any bind. Raises on a half-specified override; the cert-generation
-    path may raise on a broken crypto stack and the caller refuses to fall back
-    to cleartext.
+    On any non-loopback bind localm mints its own local-CA certificate.
+    ``--no-tls`` forces plain HTTP; ``--tls-cert``/``--tls-key`` override with
+    a user-supplied pair on any bind. Raises on a half-specified override, and
+    the cert-generation path may raise on a broken crypto stack.
 
-    The GUI-settable config keys are the persistent, flag-less forms and CLI
-    flags win over all of them: ``tls_enabled`` False acts as --no-tls (only
-    when --no-tls was not itself passed - there is no positive --tls flag, so
-    an absent flag cannot veto the config), and a usable ``tls_cert``/
+    CLI flags win over the config keys: ``tls_enabled`` False acts as --no-tls
+    (only when --no-tls was not itself passed), and a usable ``tls_cert``/
     ``tls_key`` pair acts as the override pair (an UNUSABLE config pair falls
-    back to the built-in cert with a warning instead of dying or serving
-    cleartext - see _config_tls_pair; an explicit CLI pair keeps its fail-hard
-    behavior and never reads config at all).
+    back to the built-in cert with a warning - see _config_tls_pair; an
+    explicit CLI pair never reads config at all).
     """
     if tls_cert or tls_key:
         if not (tls_cert and tls_key):
@@ -216,9 +175,9 @@ def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
         return pair
     from localm import netname, tls
     from localm.config import home_dir
-    # Cover the reachable NAMES too (localm.local, <hostname>.local, the Tailscale
-    # MagicDNS name) so name-based HTTPS has no cert-name-mismatch warning after
-    # the one-time CA trust - not just the bind IP. Best-effort; never blocks TLS.
+    # Put the reachable names (localm.local, <hostname>.local, the Tailscale
+    # MagicDNS name) in the certificate alongside the bind IP. Best-effort;
+    # never blocks TLS.
     extra_names = netname.cert_hostnames()
     return tls.ensure_cert(home_dir(), hostnames=[host, *extra_names])
 
@@ -226,9 +185,8 @@ def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
 
 
 def _setup_tls_or_exit(host, *, no_tls, tls_cert, tls_key):
-    """Resolve TLS for *host*, or exit(2) rather than silently serve a network
-    bind in cleartext. Returns ``(ssl_certfile, ssl_keyfile)`` (cert is None for
-    plain HTTP)."""
+    """Resolve TLS for *host*, or print an error and exit(2). Returns
+    ``(ssl_certfile, ssl_keyfile)`` (cert is None for plain HTTP)."""
     try:
         return _resolve_tls(host, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)
     except click.UsageError:
@@ -256,44 +214,26 @@ def _complete_model_name(ctx, param, incomplete):
 
 
 def _stdout_is_a_pipe() -> bool:
-    """True when stdout is a PIPE - the only shape in which a downstream consumer
-    (``localm ... | head``, ``| findstr``) can close the far end under us.
-
-    This is the discriminator for a bare EINVAL, which Windows raises for a broken
-    pipe AND for a broad set of genuine I/O misuse (see _GracefulGroup.invoke). It
-    is not a guess: on Windows a real early pipe close was MEASURED to surface as
-    OSError errno=22 with isinstance(e, BrokenPipeError) False, so the exception
-    alone cannot be trusted - while os.fstat reports S_ISFIFO True for that same
-    stdout at the handler, and False for a console or a file redirect.
-
-    Deliberately NOT "flush stdout and see if it fails": the flush that broke the
-    pipe already discarded the buffer, so by the time this runs a second flush
-    SUCCEEDS on a genuinely dead pipe (measured) - that probe reports healthy for
-    the exact case it is meant to catch. A zero-byte write is no better (measured:
-    it returns 0 on a broken pipe)."""
+    """True when stdout is a PIPE, from ``os.fstat``. False for a console, a
+    file redirect, a wrapped/replaced stdout with no fileno, or a stdout that
+    is gone. Qualifies a bare EINVAL in _GracefulGroup.invoke."""
     import os
     import stat
     try:
         return stat.S_ISFIFO(os.fstat(sys.stdout.fileno()).st_mode)
     except Exception:
-        # No fileno (a wrapped/replaced stdout) or stdout is gone: not a pipe we
-        # can confirm, so an EINVAL here is treated as a REAL error and reported.
-        # Failing toward reporting is the safe direction - a spurious report is
-        # noise, a swallowed failure is a lie (rule 5).
+        # No fileno (a wrapped/replaced stdout), or stdout is gone.
         return False
 
 
 class _GracefulGroup(click.Group):
-    """Single, cross-cutting failure handler for the whole CLI.
-
-    Every subcommand (run, gui, serve, coder, setup-llama, ...) is invoked
-    through this group, so an unexpected crash anywhere is caught in ONE place:
-    we say "sorry, X went wrong because Y" and offer a prefilled, editable bug
-    report. A command that hits a known problem just raises bugreport.LocalmError
-    with a good summary/reason; it does not know about reporting itself.
+    """Click group that catches an unexpected crash in any subcommand, says
+    "sorry, X went wrong because Y", and offers a prefilled, editable bug
+    report. A command that hits a known problem raises bugreport.LocalmError
+    with its own summary/reason.
 
     User errors (ClickException / bad usage), Ctrl+C, and clean exits pass
-    through untouched - those are not bugs."""
+    through untouched."""
 
     def invoke(self, ctx):
         try:
@@ -304,30 +244,10 @@ class _GracefulGroup(click.Group):
         except OSError as e:
             # A downstream consumer closing the pipe early (`localm ... | head`,
             # `| findstr`) surfaces as BrokenPipeError, or on Windows as an OSError
-            # EPIPE/EINVAL from the stdout flush. That is NOT a bug: do not report it
-            # (reporting would write to the same dead stdout and re-crash), and exit
-            # as if killed by SIGPIPE. A real OSError falls through to reporting.
-            #
-            # EINVAL must be qualified by stdout ACTUALLY being a pipe (REG-555).
-            # Windows raises errno 22 for a broad set of GENUINE I/O misuse - reading
-            # a directory as a file, an invalid or reserved path, a bad handle, some
-            # native/ctypes and socket calls. Accepting a bare EINVAL as "the pipe
-            # closed" meant any of those exited 0, printed nothing and filed no
-            # report: the command hard-failed and told the user, and every script
-            # checking the exit code, that it had SUCCEEDED. That is the
-            # fail-closed-to-silent-success shape rule 5 exists to forbid, and it hid
-            # real bugs.
-            #
-            # EPIPE needs no such qualification (it means exactly "broken pipe", and
-            # Python maps it to BrokenPipeError anyway - verified, not assumed).
-            #
-            # Known residual, stated rather than papered over: a genuine EINVAL
-            # raised WHILE stdout happens to be a pipe is still read as a pipe close.
-            # Nothing available at this layer separates those two (the measurements
-            # in _stdout_is_a_pipe rule out the obvious probes), and the alternative -
-            # a bug report on every legitimate `| head` - is the regression this
-            # handler was written to fix. The common shapes (a terminal, a file
-            # redirect, no pipe at all) are now reported correctly.
+            # EPIPE/EINVAL from the stdout flush: close stdout and exit 0 without
+            # reporting. EINVAL counts only when stdout is ACTUALLY a pipe, since
+            # Windows also raises errno 22 for genuine I/O misuse; EPIPE needs no
+            # such qualification. Any other OSError falls through to reporting.
             import errno
             if (isinstance(e, BrokenPipeError)
                     or e.errno == errno.EPIPE
@@ -345,10 +265,7 @@ class _GracefulGroup(click.Group):
 
     @staticmethod
     def _report_failure(ctx, e):
-        # Reporting must never itself crash the handler (that would turn a caught bug
-        # into the hard crash we are trying to avoid), so guard it - and if reporting
-        # fails, write the fallback to STDERR, since STDOUT may be the very pipe that
-        # just broke.
+        # Guarded so a failure inside reporting cannot crash the handler.
         try:
             from localm import bugreport
             interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
@@ -364,8 +281,7 @@ class _GracefulGroup(click.Group):
                     context={"command": getattr(ctx, "invoked_subcommand", None)},
                     interactive=interactive)
         except Exception:
-            # Broken-pipe is already handled above (before this point), so stdout is
-            # live here for a real failure - the original fallback is safe.
+            # A broken pipe is handled earlier, so stdout is live here.
             console.print(f"[red]localm failed:[/red] {e}")
 
 
@@ -378,18 +294,13 @@ def running_server(*, allow_url_override: bool = True):
     the right credential: the owner key (``LOCALM_API_KEY`` env, else the
     persisted ``auth.key``) when one is configured, otherwise the discovered
     instance's own attach token - the 0600 per-instance registry field that
-    the open-mode management gate accepts in place of a key (#953). A caller
-    that skips this and builds its own headers gets a 403 on the default,
-    keyless install, which is how localm runs out of the box.
+    the open-mode management gate accepts in place of a key.
 
-    Returns None rather than exiting so a caller can decide: some verbs need a
-    server and must say so, while ``comfy status`` still has an honest partial
-    answer to give without one.
+    Returns None rather than exiting when nothing serves this directory.
 
-    *allow_url_override*: honour ``LOCALM_URL`` for a different instance, the
-    same escape hatch ``localm unload`` offers. An overridden URL has no
-    registry entry, so there is no attach token to fall back on and a keyless
-    server there needs ``LOCALM_API_KEY``.
+    *allow_url_override*: honour ``LOCALM_URL`` for a different instance. An
+    overridden URL has no registry entry, so there is no attach token to fall
+    back on and a keyless server there needs ``LOCALM_API_KEY``.
     """
     import os
 
@@ -422,20 +333,11 @@ def server_call(url, headers, method: str, path: str, *, timeout: float = 30.0,
       ``"http"``         - some other HTTP status; payload is ``(code, detail)``
       ``"unreachable"``  - could not connect; payload is a short reason
 
-    The same five-outcome split ``localm.selfclient.read_activity`` keeps, for
-    the same reason: folding any of them into the others reports an answer on
-    the evidence of never having got one. ``unsupported`` matters most here -
-    an older server with no ``/v1/comfy/status`` must not read as "ComfyUI is
-    not running".
-
-    *not_found* names what a 404 MEANS on this particular path, because the
-    status code alone cannot tell you. On ``/v1/comfy/status`` a 404 is an
-    older server with no such route; on ``/api/jobs/<id>/cancel`` the route
-    exists and 404s for an id that is not there (or not yours). Same code, two
-    unrelated answers, and a caller that printed "this server predates the
-    feature" for a mistyped job id would be reporting the wrong one. Pass
-    ``not_found="missing"`` where the object, not the route, is what is absent.
-    405 is never *not_found* - see the comment at that branch.
+    *not_found* names what a 404 MEANS on this particular path. On
+    ``/v1/comfy/status`` a 404 is an older server with no such route; on
+    ``/api/jobs/<id>/cancel`` the route exists and 404s for an id that is not
+    there (or not yours). Pass ``not_found="missing"`` where the object, not
+    the route, is what is absent. 405 is never *not_found*.
     """
     import requests
 
@@ -451,19 +353,9 @@ def server_call(url, headers, method: str, path: str, *, timeout: float = 30.0,
     if r.status_code == 404:
         return not_found, r.status_code
     if r.status_code == 405:
-        # MEASURED against a real running server, because the obvious
-        # assumption is wrong: a POST to a path this server does not serve
-        # comes back 405, NOT 404. Only GET produces a 404 there. So reading
-        # 404 alone as "no such route" made `comfy start` report "Could not
-        # start ComfyUI (HTTP 405)" on a server with no media plugin
-        # installed, instead of falling through to the route that could
-        # actually start it.
-        #
-        # Always "unsupported", never *not_found*: 405 is a statement about
-        # the path and method, and can never mean "the object you named is
-        # missing" - a mounted route with a genuinely absent object answers
-        # 404 with its own detail (measured: POST /api/jobs/<unknown>/cancel
-        # gives 404 "No such job: ...").
+        # A POST to a path this server does not serve comes back 405, not
+        # 404; only GET produces a 404 there. Always "unsupported", never
+        # *not_found*: a mounted route whose object is absent answers 404.
         return "unsupported", r.status_code
     if not r.ok:
         detail = ""
@@ -475,17 +367,15 @@ def server_call(url, headers, method: str, path: str, *, timeout: float = 30.0,
     try:
         return "ok", r.json()
     except ValueError:
-        # A 200 whose body is not JSON means something other than localm
-        # answered on that port, not an empty/negative result.
+        # A 200 whose body is not JSON: something other than localm answered
+        # on that port.
         return "http", (r.status_code, "the reply was not JSON")
 
 
 def report_server_failure(state, payload, what: str) -> None:
     """Print why *what* could not be done, naming WHICH failure happened.
 
-    Never prints a negative RESULT - every branch here is "could not ask", and
-    a caller that turned any of them into "it is not running" or "nothing to
-    do" would be stating an answer it never obtained.
+    Every branch says "could not ask"; none prints a negative RESULT.
     """
     if state == "unreachable":
         console.print(f"[red]Could not reach the localm server[/red] to {what} "
@@ -518,8 +408,8 @@ def no_server_message(what: str) -> None:
 
 
 def _read_version_for_cli() -> str:
-    """Version string for ``localm --version``: the live VERSION file (so it tracks
-    a code-only self-update), falling back to a static string if unreadable."""
+    """Version string for ``localm --version``: the live VERSION file, falling
+    back to a static string if unreadable."""
     try:
         from localm._version import read_version
         return read_version()
@@ -533,19 +423,17 @@ def _read_version_for_cli() -> str:
 @click.version_option(_read_version_for_cli(), prog_name="localm")
 def main() -> None:
     """Run local LLMs offline - HuggingFace and GGUF models, AMD/NVIDIA/CPU."""
-    # Install the process-wide graceful-failure net so a crash anywhere - a
-    # background thread (preload, jobs, coder), or any uncaught main-thread
-    # error - becomes a "sorry X for Y" + bug-report offer, not a hard crash.
-    # The _GracefulGroup above still handles per-command errors with nicer
-    # context; this covers everything the group does not wrap.
+    # Install the process-wide graceful-failure net: a crash in a background
+    # thread (preload, jobs, coder) or any uncaught main-thread error becomes a
+    # "sorry X for Y" + bug-report offer instead of a hard crash.
     from localm import bugreport
     from localm.debuglog import honor_env_debug, install_ring_buffer
-    # Always-on, in-memory recent-activity buffer so a bug report carries what the
-    # app was doing before it broke - even without --debug (a tester has no log
-    # file). INFO+ only, so chat content (logged at DEBUG) never enters it.
+    # Always-on, in-memory recent-activity buffer for bug reports, with or
+    # without --debug. INFO+ only, so chat content (logged at DEBUG) never
+    # enters it.
     install_ring_buffer()
-    # Honour LOCALM_DEBUG=1 as a real debug request: open the log file, not just
-    # flip verbose semantics (REC-DEBUGENV). No-op unless the env var is set.
+    # Honour LOCALM_DEBUG=1 by opening the log file, not just flipping verbose
+    # semantics. No-op unless the env var is set.
     honor_env_debug()
     bugreport.install_global_handlers()
 
@@ -553,10 +441,8 @@ def main() -> None:
 def console_main() -> None:
     """The ``localm`` console-script entry point (pyproject [project.scripts]).
 
-    Guards that we are inside the project venv, then runs the CLI group. Kept
-    SEPARATE from ``main`` so in-process callers - the test suite's CliRunner and
-    the ``localm coder`` route - invoke the group directly without the venv gate;
-    only the stray-global-exe path (a separate ``pip install``) hits it (NEW-J)."""
+    Guards that we are inside the project venv, then runs the CLI group.
+    In-process callers invoke ``main`` directly and skip the venv gate."""
     from localm._venvguard import require_venv
     require_venv()
     main()

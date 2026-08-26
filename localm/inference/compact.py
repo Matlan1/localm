@@ -25,9 +25,8 @@ COMPACT_RATIO = 0.70
 KEEP_RECENT = 4
 
 # Budget for the generated summary. Thinking-family models spend their first
-# few hundred tokens on the reasoning channel (stripped before storage), so the
-# budget must leave room for the visible summary AFTER the scratchpad, or the
-# reply is all <think> and compaction degrades to the hard trim every time.
+# few hundred tokens on the reasoning channel (stripped before storage), so this
+# leaves room for the visible summary AFTER the scratchpad.
 SUMMARY_MAX_TOKENS = 1024
 
 _TRIM_NOTE = (
@@ -118,11 +117,9 @@ def compact_messages(
         ) or "").strip()
     except Exception:
         summary = ""
-    # A thinking model may spend the whole budget on its reasoning channel; the
-    # stored "summary" was then 100% <think> scratchpad (memory-audit
-    # 2026-07-02, live-confirmed on the CLI path), silently degrading recall of
-    # the summarised turns. Keep only the visible answer; an all-reasoning
-    # reply becomes empty and takes the honest hard-trim fallback below.
+    # A thinking model may spend the whole budget on its reasoning channel.
+    # Keep only the visible answer; an all-reasoning reply becomes empty and
+    # takes the hard-trim fallback below.
     from localm.textnorm import strip_think
     summary = strip_think(summary).strip()
 

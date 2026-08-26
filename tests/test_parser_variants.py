@@ -183,10 +183,8 @@ class TestLenientFlag:
     happened to match a real tool name, with no marker of its own signalling
     the model intended to call a tool at all (a bare top-level JSON object,
     or a ```json/bare ``` fence). Every OTHER recognised shape carries such a
-    marker, however mangled, and must stay unflagged - execution.py keys a
-    confirmation requirement on this, so a false positive here would demand
-    confirmation on ordinary, already-trusted tool calls, and a false
-    negative would silently reopen the gap this exists to close."""
+    marker, however mangled, and must stay unflagged: execution.py keys a
+    confirmation requirement on this flag."""
 
     TOOLS = {"read_file", "write_file", "edit_files", "run_shell", "tree"}
 
@@ -278,9 +276,7 @@ class TestLooksLikeToolAttempt:
         assert looks_like_tool_attempt(text, self._REAL_TOOL_NAMES)
 
     def test_hallucinated_xml_tag_not_flagged_without_tool_names(self):
-        # No tool_names passed -> falls back to the original, narrower checks
-        # only (backward compatible default; every existing caller that omits
-        # the argument keeps its old behavior).
+        # No tool_names passed -> falls back to the narrower checks only.
         text = '<edit_file>\n{"path": "sample.py"}\n</edit_file>'
         assert not looks_like_tool_attempt(text)
 
@@ -334,8 +330,8 @@ class TestStreamHiding:
 
 
 class TestRecoveredMalformations:
-    """Local models often emit JSON that is not quite valid - recover it instead of
-    silently failing to parse (which showed an empty bubble + wrote nothing)."""
+    """Local models often emit JSON that is not quite valid - recover it instead
+    of silently failing to parse."""
 
     def test_python_triple_quoted_content(self):
         # write_file with triple-quoted content.
@@ -389,9 +385,9 @@ class TestRecoveredMalformations:
 
 class TestNonStringName:
     """A tool call whose "name" is not a string is malformed, same as broken
-    JSON. Without the guard an unhashable name (dict/list) raised TypeError at
+    JSON. Without the guard an unhashable name (dict/list) raises TypeError at
     the parser's own `parsed[0] in tool_names` check and at execution's
-    `call.name in self.disabled_tools` (2026-07-02 coder tool sweep)."""
+    `call.name in self.disabled_tools`."""
 
     @pytest.mark.parametrize("name_literal", ["123", "null"])
     def test_scalar_name_rejected(self, name_literal):

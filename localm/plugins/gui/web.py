@@ -40,17 +40,14 @@ _KEEPALIVE_S = 15
 
 class _RevalidatingStatic(StaticFiles):
     """Serve the GUI assets with ``Cache-Control: no-cache`` so the browser
-    REVALIDATES every load instead of silently serving a stale copy.
+    REVALIDATES every load instead of serving a stale copy.
 
-    SEAMLESS UPDATES: Starlette's StaticFiles sends an ``ETag`` but no
-    ``Cache-Control``, so browsers fall back to HEURISTIC caching and can keep an
-    old ``app.js`` / ``sw.js`` / ``style.css`` for a while - the user (or a tester)
-    then has to clear the cache by hand to pick up new code. ``no-cache`` does NOT
-    disable caching: the browser still caches and revalidates with the ETag, so an
-    unchanged file is a cheap ``304`` and a changed one is fetched fresh. It also
-    lets a phone's ``serviceWorker.register(...).update()`` actually see a new
-    ``sw.js`` (the browser HTTP-caching sw.js is a known update-stickiness cause).
-    The server, not the user, is now responsible for delivering current code."""
+    Starlette's StaticFiles sends an ``ETag`` but no ``Cache-Control``, so
+    browsers fall back to HEURISTIC caching and can keep an old ``app.js`` /
+    ``sw.js`` / ``style.css``. ``no-cache`` does NOT disable caching: the browser
+    still caches and revalidates with the ETag, so an unchanged file is a cheap
+    ``304`` and a changed one is fetched fresh. It also lets a phone's
+    ``serviceWorker.register(...).update()`` see a new ``sw.js``."""
 
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
@@ -161,11 +158,11 @@ SW_CACHE_LINE_RE = re.compile(r'(const CACHE = ")[^"]+(";)')
 
 def _sw_cacheable_files() -> list[Path]:
     """Every FILE under STATIC_DIR the service worker's fetch handler can cache
-    first, sorted for deterministic hashing. Deliberately NOT limited to sw.js's
-    own SHELL precache list: the fetch handler runtime-caches ANY same-origin,
-    non-API GET into the same versioned cache (see sw.js's fetch listener), so a
-    non-SHELL asset (a KaTeX font, /vendor/jsQR.js, ...) goes stale exactly
-    as hard as a SHELL one and must invalidate the version the same way."""
+    first, sorted for deterministic hashing. NOT limited to sw.js's own SHELL
+    precache list: the fetch handler runtime-caches ANY same-origin, non-API GET
+    into the same versioned cache (see sw.js's fetch listener), so a non-SHELL
+    asset (a KaTeX font, /vendor/jsQR.js, ...) goes stale exactly as hard as a
+    SHELL one and must invalidate the version the same way."""
     out = []
     for p in STATIC_DIR.rglob("*"):
         if not p.is_file():
@@ -182,23 +179,14 @@ def _compute_sw_cache_value() -> str:
     (see ``_sw_cacheable_files``), used as sw.js's served CACHE version.
 
     Computed FRESH on every request from whatever is currently on disk - never
-    hand-typed, never committed to git. This is what makes it immune to the
-    incident this replaces: a hand-maintained ``localm-shell-vNN`` line shipped
-    stale THREE times (undetected by review) because bumping it depended on a
-    human remembering, and even after a hygiene gate was added to catch a
-    missed bump, the shared counter line still produced a real merge conflict
-    between any two GUI PRs landing close together. A value derived fresh from
-    the files being served has nothing checked into git to forget OR to
-    conflict over - two branches touching different assets each simply serve a
-    correct value; once merged, the tree naturally reflects both changes.
+    hand-typed, never committed to git, so two branches touching different assets
+    each serve a correct value and the merged tree reflects both changes.
 
     A file that cannot be read (missing, permission error) feeds a distinct
     ``MISSING:<path>: <error>`` marker into the digest instead of crashing this
-    route - a broken asset still forces a cache-bust rather than either a 500
-    or, worse, silently serving a digest that looks unchanged. The read failure
-    is ALSO logged loudly (AGENTS.md rule 5): a client seeing stale assets
-    because of a broken install should be discoverable in the debug log, not
-    only inferable from cache behaviour."""
+    route, so a broken asset still forces a cache-bust rather than a 500 or a
+    digest that looks unchanged. The read failure is ALSO logged loudly, so stale
+    assets caused by a broken install are discoverable in the debug log."""
     h = hashlib.sha256()
     for p in _sw_cacheable_files():
         rel = p.relative_to(STATIC_DIR).as_posix()
@@ -219,26 +207,19 @@ def _compute_sw_cache_value() -> str:
 def _sw_js_response(if_none_match: "str | None" = None) -> Response:
     """sw.js's own bytes with the CACHE constant substituted for a fresh content
     digest (see ``_compute_sw_cache_value``). An unparseable source (the
-    placeholder line was edited into some other shape) is a real problem - fail
-    LOUD with a clear 500 rather than silently serving the placeholder text as
-    a literal cache name that could collide across unrelated deploys.
+    placeholder line edited into some other shape) fails LOUD with a 500 rather
+    than serving the placeholder text as a literal cache name that could collide
+    across unrelated deploys.
 
-    Honors a conditional GET (``If-None-Match``) with a real 304 the same way
-    ``_RevalidatingStatic`` already does for every other static asset - its own
-    docstring's contract is "no-cache does NOT disable caching: the browser
-    still caches and revalidates with the ETag, so an unchanged file is a
-    cheap 304". Routing this ONE path around that mount must not silently
-    drop that contract for it. The ETag is over the FINAL substituted body,
-    not just the computed cache value: an edit to sw.js's own logic (with no
-    watched asset changing) still changes what gets served and must not
-    collide with a stale ETag from before the edit.
+    Honors a conditional GET (``If-None-Match``) with a real 304, the same as
+    ``_RevalidatingStatic`` does for every other static asset. The ETag is over
+    the FINAL substituted body, not just the computed cache value: an edit to
+    sw.js's own logic, with no watched asset changing, still changes what gets
+    served and must not collide with a stale ETag.
 
     ``read_text`` applies universal-newline translation, so a CRLF-checked-out
-    source (this repo's default on Windows) is served with LF line endings -
-    harmless (JS does not care) and, since it happens the same way on every
-    request, does not affect determinism; noted so a future reader diffing the
-    served bytes against the git-tracked file does not mistake the line-ending
-    difference for a real bug."""
+    source is served with LF line endings. It happens the same way on every
+    request, so it does not affect determinism."""
     text = (STATIC_DIR / "sw.js").read_text(encoding="utf-8")
     value = _compute_sw_cache_value()
     # Count matches BEFORE substituting rather than using subn's own return count:
@@ -295,14 +276,14 @@ def _consume_launch_grant(app, token: str) -> bool:
 
 def mint_pull_grant(app, spec: str, ttl: float = 120.0) -> str:
     """Mint a single-use, short-lived grant binding a specific model *spec* to an
-    unguessable token (SEC-PULL-CONFIRM). ``localm gui --pull SPEC`` puts this in
-    the deep link (``?pull=SPEC&pull_token=...``) so ITS OWN browser tab can
-    auto-start the download with zero clicks; a forged ``?pull=`` link (any other
-    page, or a hidden iframe on any site while localm runs locally) cannot know
-    this secret, so the frontend falls back to an explicit human confirmation
-    instead (see init.js) - a download never starts from a URL alone. Stored
-    in-process on ``app.state.pull_grants`` (dies on restart); expired grants are
-    pruned on each mint so the dict cannot grow."""
+    unguessable token. ``localm gui --pull SPEC`` puts this in the deep link
+    (``?pull=SPEC&pull_token=...``) so ITS OWN browser tab can auto-start the
+    download with zero clicks; a forged ``?pull=`` link (any other page, or a
+    hidden iframe on any site while localm runs locally) cannot know this secret,
+    so the frontend falls back to an explicit human confirmation instead (see
+    init.js) - a download never starts from a URL alone. Stored in-process on
+    ``app.state.pull_grants`` (dies on restart); expired grants are pruned on each
+    mint so the dict cannot grow."""
     import secrets as _secrets
     import time as _time
     grants = getattr(app.state, "pull_grants", None)
@@ -344,12 +325,12 @@ def consume_pull_grant(app, spec: str, token: str) -> bool:
 def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     """Establish the auth cookie on *response* for a loopback owner: mint an
     OPAQUE server-side session for the current owner *key* and set the HttpOnly
-    ``localm_session`` cookie to the SESSION ID (never the key, so it never touches
-    page JS and rolling the key does not invalidate it). It carries SESSION_MAX_AGE
-    so the session PERSISTS across a browser/PWA restart (SEAMLESS). No-op if *key*
-    is not a valid key. The CSRF token is DERIVED from the session and fetched by
-    the client from GET /api/session, so there is no separate CSRF cookie to set (or
-    to fall out of sync with the session, the pre-rework 'missing CSRF token' bug)."""
+    ``localm_session`` cookie to the SESSION ID (never the key, so it never
+    touches page JS and rolling the key does not invalidate it). It carries
+    SESSION_MAX_AGE, so the session persists across a browser/PWA restart. No-op
+    if *key* is not a valid key. The CSRF token is DERIVED from the session and
+    fetched by the client from GET /api/session, so there is no separate CSRF
+    cookie to set or to fall out of sync with the session."""
     from localm import scopes as S, sessions
     from localm.auth import (_hash_key, _is_owner_key, fs_access_for,
                              rag_roots_for, verify)
@@ -369,7 +350,7 @@ def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     except Exception as e:
         # The session store could not be written (e.g. a corrupt or unreadable
         # sessions.json). Serve the shell WITHOUT a session cookie so the client falls
-        # to the key gate, and log the reason. No cookie means no access granted.
+        # to the key gate, and log the failure. No cookie means no access granted.
         from localm.debuglog import logger as _dbg
         _dbg.warning("could not establish a browser session (auto-seed): %s; "
                      "serving the shell unauthenticated (the key gate will show)", e)
@@ -408,9 +389,8 @@ class RuntimeSetupRequest(BaseModel):
     """Body for POST /api/runtime/update - the GUI's form of the three
     `localm setup-llama` options a GUI-only user could not otherwise reach.
 
-    ALL FIELDS ARE OPTIONAL AND THE WHOLE BODY MAY BE ABSENT, deliberately:
-    an empty request still means exactly what it meant before they existed
-    ("re-provision what is installed"), so no existing caller changes.
+    ALL FIELDS ARE OPTIONAL AND THE WHOLE BODY MAY BE ABSENT. An empty request
+    means "re-provision what is installed".
 
     backend:  one of setup_llama.BACKENDS, or None to keep the installed one
               (and "auto" when nothing is installed - the first-provision case).
@@ -628,17 +608,15 @@ def _name_is_safe(safe: str) -> bool:
     A shared security guard, not a local helper. Several call sites depend on it,
     covering both the write paths (/api/upload, /share-target) and the delete
     path (via _confined_upload_path), so widening _BAD_NAME_CHARS widens what all
-    of them accept. Grep for the callers before changing it rather than trusting
-    this sentence: a list written into a docstring goes stale the moment someone
-    adds one.
+    of them accept.
 
     This is a bare character check plus a '.'/'..' rejection, with NO filesystem
-    call - the right shape for share.py's write path, which folds *safe* into an
+    call - the shape share.py's write path needs, since it folds *safe* into an
     already-unique, UUID-prefixed name rather than resolving it directly. Windows
-    reserved DEVICE names (con, nul, com1 ...) are deliberately NOT rejected here,
-    matching pathsafe.confined_name's documented contract; the upload write path
-    stays non-clobbering via _unique_upload_target's exists() check, so only a
-    bare extensionless device name behaves unusually on Windows. A caller that
+    reserved DEVICE names (con, nul, com1 ...) are NOT rejected here, matching
+    pathsafe.confined_name's documented contract; the upload write path stays
+    non-clobbering via _unique_upload_target's exists() check, so only a bare
+    extensionless device name behaves unusually on Windows. A caller that
     resolves *safe* against a real directory (confinement, directory-escape,
     OS-level alias substitution) needs the FULL check - see _confined_upload_path,
     which uses pathsafe.confined_name for that.
@@ -661,21 +639,15 @@ def _confined_upload_path(name: str) -> Path:
     a name with illegal/control chars cannot traverse out or crash. Raises
     HTTPException(400) on an unsafe name.
 
-    This is the ONLY caller in this file that resolves a raw name against a
-    real directory without going through _unique_upload_target's retry-with-
-    counter first (it backs DELETE /api/uploads/{name}, where the point is to
-    remove the EXISTING file, not to find a fresh name) - so it is also the
-    one place an OS-level alias (an NTFS 8.3 short name resolving to a
-    pre-existing, differently-named file) could have let a delete request for
-    a name the caller never saw land on someone else's real file, passing
-    confinement (the write/delete stays inside the uploads dir - not CWE-22)
-    while acting on the wrong target. pathsafe.confined_name closes this: its
-    strict resolved-name-equals-requested-name check rejects an alias as a
-    side effect of the same containment check, with no separate alias logic
-    needed - and it also carries the same reserved-character rejection
-    _name_is_safe already applies here, so this call is not weakening
-    anything, only adding the confinement + alias guarantee neither
-    _name_is_safe nor a bare .resolve() provided on its own."""
+    The ONLY caller in this file that resolves a raw name against a real
+    directory without going through _unique_upload_target's retry-with-counter
+    first: it backs DELETE /api/uploads/{name}, where the point is to remove the
+    EXISTING file. pathsafe.confined_name's strict
+    resolved-name-equals-requested-name check therefore also rejects an OS-level
+    alias (an NTFS 8.3 short name resolving to a pre-existing, differently-named
+    file), which would otherwise pass confinement while acting on the wrong
+    target. It carries the same reserved-character rejection _name_is_safe
+    applies here, and adds the confinement plus alias guarantee."""
     base = _uploads_dir()
     safe = Path(name or "").name            # basename only, drops any dir parts
     if not _name_is_safe(safe):

@@ -54,9 +54,8 @@ class TestNetworkMode:
         assert network_mode() == "ask"
 
     def test_config_read_failure_resolves_off(self, monkeypatch, caplog):
-        # An unreadable config must NOT silently downgrade an explicit
-        # net_mode="off" kill switch to "ask" (fail-open). It fails SAFE to "off"
-        # and surfaces a warning, erring toward no network.
+        # An unreadable config must NOT downgrade an explicit net_mode="off"
+        # kill switch to "ask". It resolves to "off" and surfaces a warning.
         def boom():
             raise OSError("config unreadable")
         monkeypatch.setattr("localm.config.load_config", boom)

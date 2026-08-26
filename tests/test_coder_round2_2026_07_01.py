@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 round-2 inference/coder cluster.
+"""Inference/coder behaviour:
 
-  REC-CODER-MODE-TOML  - effective_mode('coder', cwd) honors .localcoder/config.toml
-  REC-CODER-FAMILY     - detect_model_family matches substrings / resolved repo ids
-  REC-CODER-LOOPBREAK  - the coder aborts on repeated identical (scaffold) responses
+  - effective_mode('coder', cwd) honors .localcoder/config.toml
+  - detect_model_family matches substrings / resolved repo ids
+  - the coder aborts on repeated identical (scaffold) responses
 """
 
 from unittest.mock import patch
@@ -60,8 +60,6 @@ def test_repeated_response_breaker_aborts(tmp_path):
     with patch.object(agent, "_call_llm", return_value=fixed):
         result = agent.run_task("do the thing")
     # WHICH breaker tripped, asserted on STATE rather than on the message text.
-    # First, because pytest stops at the first failure.
-    #
     # _repeat_response_count is incremented in exactly ONE place (the
     # repeated-scaffold breaker in agent/loop.py) and run_task does not reset
     # it, so after the call it records that THIS breaker fired. loop.py has
@@ -77,8 +75,8 @@ def test_repeated_response_breaker_aborts(tmp_path):
 
 
 def test_family_enrichment_uses_registry_source(tmp_path, monkeypatch):
-    # An opaque alias whose registry source is a gemma repo must classify as gemma
-    # (the enrichment reads the registry entry's "source", not the (path,hint) tuple).
+    # An opaque alias whose registry source is a gemma repo classifies as gemma:
+    # the enrichment reads the registry entry's "source", not the (path,hint) tuple.
     import localm.model_manager as mm
     monkeypatch.setattr(
         mm, "load_registry",

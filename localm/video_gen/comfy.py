@@ -74,7 +74,7 @@ from localm.media.comfy_client import (
 # your own checkpoint/graph without publishing which models you run.  The
 # parameters are injected by ROLE (the sampler is found by class_type and the
 # positive / negative / latent / CreateVideo nodes by following its graph
-# edges), so a local graph no longer has to preserve any particular node ids -
+# edges), so a local graph does not have to preserve any particular node ids -
 # it only has to wire a KSampler with positive/negative/latent_image inputs.
 _WORKFLOW_PATH = Path(__file__).parent / "wan_workflow.json"
 _WORKFLOW_LOCAL_PATH = Path(__file__).parent / "wan_workflow_local.json"
@@ -226,12 +226,10 @@ def _write_video_sidecar(
     else None.
 
     ``comfy_console_warning``/``comfy_console_checked`` mirror
-    image_gen.comfy._write_image_sidecar's fields - see
-    NEW-COMFY-SILENT-PARTIAL-APPLY there for the full rationale. In short:
-    ComfyUI can silently under-apply a mismatched checkpoint's weights and
-    still report success, and the pair exists so "checked, found nothing" is
-    never collapsed with "could not check at all" (a remote/already-running
-    ComfyUI localm did not launch)."""
+    image_gen.comfy._write_image_sidecar's fields: ComfyUI can silently
+    under-apply a mismatched checkpoint's weights and still report success, and
+    the pair keeps "checked, found nothing" distinct from "could not check at
+    all" (a remote or already-running ComfyUI localm did not launch)."""
     try:
         sidecar = {
             "prompt": prompt,
@@ -418,7 +416,7 @@ def generate_video(
 
     # Per-component GPU placement (opt-in, multi-GPU only): inject the core Select*Device
     # nodes per the plan resolve_media_placement() decided. A component whose loader is
-    # absent from this graph is surfaced to the user, never silently dropped (rule 5); the
+    # absent from this graph is surfaced to the user, never silently dropped; the
     # happy-path summary already went out via the placement notice.
     if placement:
         for _note in inject_device_placement(workflow, placement):
@@ -428,9 +426,9 @@ def generate_video(
     # Queue. Mark 'now' in ComfyUI's own console log FIRST (comfy_console_tail_start),
     # so any silent partial-apply warning it prints while running THIS prompt (a
     # mismatched checkpoint's UNet/CLIP/VAE keys, ...) can be attributed to this
-    # generation and not an earlier one - see NEW-COMFY-SILENT-PARTIAL-APPLY in
-    # image_gen/comfy.py (#1033). None when localm did not launch this ComfyUI
-    # itself; comfy_console_warnings_since() then always reports checked=False.
+    # generation and not an earlier one. None when localm did not launch this
+    # ComfyUI itself; comfy_console_warnings_since() then always reports
+    # checked=False.
     console_tail_start = comfy_console_tail_start(api_url)
     kind, value = comfy_submit_prompt(api_url, workflow)
     if kind == SUBMIT_NO_ID:

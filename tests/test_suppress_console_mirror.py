@@ -4,15 +4,12 @@ mirroring StreamHandler (see debuglog._add_console_handler) so a log record
 emitted inside the block reaches only the FILE handler, never the shared
 terminal.
 
-Exists because the mirror's own stream (_stable_console_stream) is
-DELIBERATELY immune to the OS-level fd-2 redirect the llamacpp backend uses
-to silence native stderr (see that function's docstring) - a real, wanted
-property in general, but one that let a debug-mode log call from inside the
-GGUF chat backend's isolated child (_apply_cpu_moe's _dbg.info) write straight
-to the shared terminal, racing the parent's Rich load-spinner and stranding a
-stuck "0:00:00" ghost frame on screen. See
-tests/test_moe_placement_report.py for the integration-level proof that
-LlamaCpp.__init__'s merged native-call scope actually engages this.
+The mirror's own stream (_stable_console_stream) is immune to the OS-level
+fd-2 redirect the llamacpp backend uses to silence native stderr, so without
+this a debug-mode log call from inside the GGUF chat backend's isolated child
+(_apply_cpu_moe's _dbg.info) writes straight to the shared terminal, racing the
+parent's Rich load-spinner. tests/test_moe_placement_report.py covers
+LlamaCpp.__init__'s merged native-call scope engaging this.
 """
 
 import logging

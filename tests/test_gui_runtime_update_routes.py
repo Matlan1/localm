@@ -6,11 +6,10 @@
                               entry point, never blocking the request and never
                               re-implementing provisioning here.
 
-Mirrors test_managed_comfy_s5_gui.py's shape: the heavy CLI is stubbed so these
-assert only the DISPATCH contract (job id returned, correct argv, correct 400s
-and 409s). A real run is deliberately never made: setup-llama provisions into
-the venv's localm_llama_runtime wheel, so an actual dispatch here would replace
-this machine's runtime.
+The heavy CLI is stubbed, so these assert only the DISPATCH contract (job id
+returned, correct argv, correct 400s and 409s). A real run is never made:
+setup-llama provisions into the venv's localm_llama_runtime wheel, so an actual
+dispatch here would replace this machine's runtime.
 """
 
 from __future__ import annotations
@@ -154,9 +153,8 @@ def test_check_reports_no_previous_with_only_one_build_on_record(app, runtime_di
 # --------------------------------------------------------------------------- #
 
 def test_update_dispatches_job_with_force_and_yes(app, runtime_dir, no_subprocess):
-    """NEW-UPDATE-RUNTIME-CLASS-IS-A-NO-OP applies here too: without --force
-    setup-llama's own already-provisioned guard would make this a no-op;
-    --yes keeps the unattended job from ever hanging on a prompt."""
+    """Without --force, setup-llama's own already-provisioned guard makes this a
+    no-op; --yes keeps the unattended job from hanging on a prompt."""
     sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10300")
 
     with TestClient(app) as client:
@@ -172,12 +170,10 @@ def test_update_dispatches_job_with_force_and_yes(app, runtime_dir, no_subproces
 
 
 def test_update_with_nothing_installed_provisions_with_auto_detect(app, no_subprocess):
-    """The uninstalled case used to 409 ("nothing to update - run setup
-    first"), which made INITIAL PROVISIONING unreachable for a user who has
-    only the GUI - and left a box whose runtime failed to provision with no
-    route back, since the one surface still working refused the one action
-    that would fix it. With no backend named and none installed, this must
-    dispatch the same auto-detect a bare `localm setup-llama` performs."""
+    """With no backend named and none installed, this must dispatch the same
+    auto-detect a bare `localm setup-llama` performs. A 409 ("nothing to update -
+    run setup first") makes INITIAL PROVISIONING unreachable for a GUI-only user,
+    and leaves a box whose runtime failed to provision with no route back."""
     with TestClient(app) as client:
         r = client.post("/api/runtime/update")
 

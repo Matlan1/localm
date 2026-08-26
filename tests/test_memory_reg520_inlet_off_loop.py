@@ -1,37 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-520: the recall inlet must not do its blocking work on the event loop.
+"""The recall inlet must not do its blocking work on the event loop.
 
 `recall(reinforce=True)` runs on EVERY non-privacy chat turn that recalls at
-least one memory, and since #520 it takes the namespace lock, `_load()`s the
-whole records JSONL AND the `.vec.json` embedding sidecar, then `_save()`s both
-back (store.py). With embeddings enabled that sidecar is hundreds of records x
+least one memory: it takes the namespace lock, `_load()`s the whole records
+JSONL AND the `.vec.json` embedding sidecar, then `_save()`s both back
+(store.py). With embeddings enabled that sidecar is hundreds of records x
 embedding-dim floats - multiple MB of JSON parsed and re-serialised per turn.
-Pre-#520 the reinforce path did a single `_save()` and no `_load()` and no lock.
 
-All of it ran ON the uvicorn event loop: `chat.py` does
-`await pipeline.run_inlet(...)`, and `chat_pipeline.py` calls
+`chat.py` does `await pipeline.run_inlet(...)`, and `chat_pipeline.py` calls
 `entry.fn(messages, ctx)` INLINE, so a sync hook body executes on the loop
-thread. #654 fixed the paired HIGH on the CONSOLIDATION side only (the lock is
-no longer held across slow LLM calls), so this acquire no longer WAITS minutes -
-but the per-turn reload/re-serialise cost on the loop was untouched.
+thread.
 
-The inlet also resolves the shared embedder (`_embed_fn` -> `get_embedder`),
-which is worse than slow: BUG #648 (vram.py:180-199) documents that a VRAM swap
-submits a coroutine onto the server loop and BLOCKS the calling thread waiting
-for it, so calling it FROM the loop thread would deadlock. There is a
-belt-and-braces guard that detects this and SKIPS the guarded chat-model
-eviction, warning "This call should be offloaded to an executor" and loading the
-embedder alongside the resident chat model ("may be tight on VRAM"). The memory
-ROUTES offload via `_off_loop`; the inlet HOOK did not, so it tripped that
-degraded path on every recalling turn.
+The inlet also resolves the shared embedder (`_embed_fn` -> `get_embedder`). A
+VRAM swap (vram.py) submits a coroutine onto the server loop and BLOCKS the
+calling thread waiting for it, so calling it FROM the loop thread would
+deadlock; a guard detects that, SKIPS the guarded chat-model eviction, warns
+"This call should be offloaded to an executor" and loads the embedder alongside
+the resident chat model.
 
-Fix: register an async wrapper that runs the (unchanged, still-sync, still
-directly testable) `_memory_inlet` body through the existing `_off_loop` helper.
-`run_inlet` already awaits an awaitable hook, so this needs no pipeline change.
-
-Suite miss: unit tests use tiny stores with no embedding sidecar and never assert
-on event-loop latency or on WHICH THREAD the body runs, so an inline blocking
-call is indistinguishable from a fast one.
+So the registered hook is an async wrapper that runs the unchanged, still-sync,
+still directly testable `_memory_inlet` body through the `_off_loop` helper.
+`run_inlet` already awaits an awaitable hook.
 """
 
 from __future__ import annotations
@@ -74,7 +63,7 @@ class TestInletHookIsOffLoaded:
     def test_the_registered_inlet_is_awaitable(self):
         """run_inlet awaits an awaitable hook (chat_pipeline.py), so an async hook
         is the seam that lets the body leave the loop thread. A plain sync hook is
-        executed INLINE on the loop - that is the bug."""
+        executed INLINE on the loop."""
         import inspect
         fn = _registered_inlet()
         assert inspect.iscoroutinefunction(fn), (
@@ -106,9 +95,8 @@ class TestInletHookIsOffLoaded:
             "get_embedder() VRAM swap) block the whole server")
 
     def test_the_hook_returns_the_bodys_result_unchanged(self, monkeypatch):
-        """NEGATIVE CASE: offloading must not change the contract. Without this, a
-        wrapper that returned None always would pass the thread test while
-        silently disabling memory injection entirely."""
+        """NEGATIVE CASE: offloading must not change the contract - the hook
+        returns the body's result unchanged."""
         sentinel = [{"role": "system", "content": "MEMORY BLOCK"}]
         monkeypatch.setattr(plug, "_memory_inlet", lambda m, c: sentinel)
         fn = _registered_inlet()
@@ -138,9 +126,8 @@ class TestInletHookIsOffLoaded:
 
 
 class TestSyncBodyStaysDirectlyTestable:
-    """The sync body must remain importable and callable, so the ~15 existing
-    tests that drive plug._memory_inlet(...) directly keep exercising the real
-    logic rather than a coroutine."""
+    """The sync body must remain importable and callable, so tests can drive
+    plug._memory_inlet(...) directly instead of a coroutine."""
 
     def test_memory_inlet_is_still_a_plain_sync_callable(self):
         import inspect

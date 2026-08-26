@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """S5 slice: the localm-managed ComfyUI DISCOVERY HINT in `localm doctor`.
 
-Design decision 8 (dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md): the
-managed-ComfyUI feature is opt-in and off by default, surfaced for discovery as
-a NON-INSTALLING hint in `localm doctor`. This proves the hint is:
+The managed-ComfyUI feature is opt-in and off by default, surfaced for discovery
+as a NON-INSTALLING hint in `localm doctor`. This proves the hint is:
   - shown only when NO managed ComfyUI is installed;
   - replaced by an installed-status line (with the managed root path) when one
     IS installed;
@@ -12,7 +11,7 @@ a NON-INSTALLING hint in `localm doctor`. This proves the hint is:
 Drives the real click doctor command through the ``cli_runner`` fixture (which
 pins a throwaway LOCALM_HOME) and stubs the llama-lib / smi / torch probes so the
 only variable under test is the managed-ComfyUI state - it never touches real GPU
-state (mirrors test_doctor_cli_phase3.py).
+state.
 """
 
 import importlib
@@ -78,8 +77,8 @@ def _install_managed():
     """Create the S1 on-disk layout that makes is_managed_comfy_installed() true,
     under whatever LOCALM_HOME the cli_runner fixture pinned. Uses the module's
     own path accessors so it is platform-agnostic (venv interpreter path differs
-    on Windows vs POSIX). Includes the completion marker (#621 follow-up -
-    main.py + venv alone means "still installing")."""
+    on Windows vs POSIX). Includes the completion marker: main.py + venv alone
+    means "still installing"."""
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)

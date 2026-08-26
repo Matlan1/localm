@@ -1,35 +1,32 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-444 (regression audit 2026-07-14): the ComfyUI readiness cache reported a
-DEAD ComfyUI as running, for the rest of the process lifetime.
+"""The ComfyUI readiness cache must not report a DEAD ComfyUI as running for the
+rest of the process lifetime.
 
-#444 added a readiness cache so ensure_comfy() would stop pinging /system_stats
-on every call (each media submission pinged twice back-to-back - once at the
-route-handler layer via ensure_available, once at the top of the generator). The
-premise, stated in comfy_client's module docstring, was that "ComfyUI does not
-appear or disappear on its own between requests". On this stack it very much
-does: an OOM on a large render, a ZLUDA/ROCm torch crash, the user closing its
-window, or VRAM eviction all kill it mid-session.
+The cache exists so ensure_comfy() stops pinging /system_stats on every call
+(each media submission pings twice back-to-back - once at the route-handler layer
+via ensure_available, once at the top of the generator). Its premise, stated in
+comfy_client's module docstring, is that "ComfyUI does not appear or disappear on
+its own between requests". On this stack it does: an OOM on a large render, a
+ZLUDA/ROCm torch crash, the user closing its window, or VRAM eviction all kill it
+mid-session.
 
-Once ``mark_comfy_alive`` had run (opening the Image page warms it via
-GET /v1/comfy/status), ``ensure_comfy`` returned "ComfyUI is running." at
-comfy_client.py:1133 WITHOUT pinging. So every later generation submitted a
-prompt to a dead server and failed deep in the submit path with an opaque
-ConnectionError - and the two things that made this recoverable were both lost:
-the auto-launch from comfy_workdir, and the clean actionable "not reachable ...
-point localm at your install" message. Nothing invalidated the entry on a
-generation failure (mark_comfy_dead had only two call sites: stop_comfy, and the
-non-cached branch that is unreachable once confirmed), so it persisted until the
-user hit Stop or reopened a media page. On the CLI and the coder's
-generate_image path there is no /v1/comfy/status trigger at all, so it persisted
-for the whole process.
+Once ``mark_comfy_alive`` has run (opening the Image page warms it via
+GET /v1/comfy/status), an unbounded confirmation makes ``ensure_comfy`` return
+"ComfyUI is running." WITHOUT pinging. Every later generation then submits a
+prompt to a dead server and fails deep in the submit path with an opaque
+ConnectionError, losing both recovery routes: the auto-launch from comfy_workdir,
+and the clean actionable "not reachable ... point localm at your install"
+message. Nothing invalidates the entry on a generation failure
+(``mark_comfy_dead`` has only two call sites: stop_comfy, and the non-cached
+branch that is unreachable once confirmed), and the CLI and the coder's
+generate_image path have no /v1/comfy/status trigger at all.
 
-Fix: the confirmation is now time-bounded. That keeps the entire win the cache
-was added for - the back-to-back double-ping inside ONE submission is
-milliseconds apart, far inside the window - while bounding staleness to seconds
-instead of forever, so a mid-session death is detected on the next generation and
-auto-relaunch works again. is_comfy_confirmed has exactly one consumer
-(ensure_comfy); /v1/comfy/status always does a real ping and merely primes the
-cache, so nothing else regresses.
+The confirmation is therefore time-bounded. That keeps the win the cache was
+added for - the back-to-back double-ping inside ONE submission is milliseconds
+apart, far inside the window - while bounding staleness to seconds, so a
+mid-session death is detected on the next generation and auto-relaunch works.
+is_comfy_confirmed has exactly one consumer (ensure_comfy); /v1/comfy/status
+always does a real ping and merely primes the cache.
 """
 
 from __future__ import annotations

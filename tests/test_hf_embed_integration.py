@@ -6,16 +6,13 @@ through ``HFBackend``, and we assert that the backend reports ``can_embed`` Fals
 and that ``Engine.embed`` routes to the dedicated on-device embedder instead of
 mean-pooling the chat model's own hidden states.
 
-A stub backend cannot prove this: the whole defect was that a REAL transformers
-causal LM answers ``hasattr(model, "encode")`` False (so hf.embed()'s only
-"is this a real embedder" check missed it) while ``can_generate()`` answers True.
-Only a real checkpoint exercises that distinction.
+A stub backend cannot prove this: a REAL transformers causal LM answers
+``hasattr(model, "encode")`` False while ``can_generate()`` answers True, and
+only a real checkpoint exercises that distinction.
 
-Why it matters (measured 2026-07-15 through localm's own IsolatedEmbedder,
-CPU-only): a chat decoder's mean-pooled vectors look healthy but cannot separate
-related from unrelated text - Qwen2.5-0.5B's max UNRELATED cosine (0.7523)
-EXCEEDS its min RELATED cosine (0.7518), versus bge-small's +0.29 margin. Those
-vectors reached /v1/embeddings and RAG.
+A chat decoder's mean-pooled vectors look healthy but cannot separate related
+from unrelated text: its max UNRELATED cosine can exceed its min RELATED
+cosine, where a real embedding model leaves a wide margin.
 
 Marked @integration so the default `pytest -m "not integration"` skips it (it
 downloads ~2.5 MB on first run and needs torch + transformers).
@@ -64,11 +61,9 @@ def test_declared_arch_suffixes_match_transformers_own_generation_mixin():
     can_embed classifies a checkpoint by the NAME of its declared architecture,
     because resolving the class would import transformers (and torch, which cannot
     be imported alongside the bundled llama.dll - see _declared_generative). That
-    naming convention is an assumption about transformers, so it gets checked
-    against the real classes HERE, where importing transformers is legitimate:
-    GenerationMixin is transformers' own definition of "this generates". If
-    upstream renames a task head, this fails loudly instead of letting a model be
-    silently misrouted.
+    naming convention is checked against the real classes HERE, where importing
+    transformers is legitimate: GenerationMixin is transformers' own definition
+    of "this generates". A renamed task head upstream fails this test.
     """
     pytest.importorskip("torch", exc_type=ImportError)
     pytest.importorskip("transformers", exc_type=ImportError)
@@ -99,20 +94,18 @@ def test_declared_arch_suffixes_match_transformers_own_generation_mixin():
 
 def test_real_bert_encoder_is_still_embedding_capable(hf_encoder_backend):
     """A REAL encoder embedding model must NOT be misrouted to the dedicated
-    embedder: it embeds well itself, and refusing it would regress a working path.
+    embedder: it embeds well itself.
 
-    This is the case a mocked model cannot express. HFWorker.load() tries
-    AutoModelForCausalLM before AutoModel, and transformers registers bert as a
-    causal LM, so this pure encoder loads as BertLMHeadModel and answers
-    can_generate() True. Asserting on the real object is what proves can_embed
-    reads the DECLARED architecture instead.
+    HFWorker.load() tries AutoModelForCausalLM before AutoModel, and
+    transformers registers bert as a causal LM, so this pure encoder loads as
+    BertLMHeadModel and answers can_generate() True. Asserting on the real
+    object proves can_embed reads the DECLARED architecture instead.
 
-    The real loaded model object now lives in HFBackend's isolated child
-    process, not directly accessible from here - so this loads a second,
-    RAW HFWorker in-process (the identical loading code HFBackend's own child
-    runs) purely to inspect ._model directly for the ground-truth assertions,
-    while hf_encoder_backend (the actual HFBackend proxy fixture) proves the
-    SAME facts hold through the real, isolated production path below.
+    The real loaded model object lives in HFBackend's isolated child process,
+    so this loads a second, RAW HFWorker in-process (the identical loading code
+    HFBackend's own child runs) purely to inspect ._model directly, while
+    hf_encoder_backend (the HFBackend proxy fixture) proves the SAME facts hold
+    through the isolated production path below.
     """
     from localm.inference.backends._hf_worker import HFWorker
 
@@ -175,8 +168,8 @@ def test_real_causal_lm_reports_it_cannot_embed(hf_chat_backend):
     """The real checkpoint is a generative decoder, so can_embed is False.
 
     Same raw-HFWorker-load pattern as test_real_bert_encoder_is_still_
-    embedding_capable above, for the same reason: the real model object lives
-    in hf_chat_backend's isolated child process, not directly accessible here.
+    embedding_capable above: the real model object lives in hf_chat_backend's
+    isolated child process, not directly accessible here.
     """
     from localm.inference.backends._hf_worker import HFWorker
 

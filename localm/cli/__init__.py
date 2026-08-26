@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """localm CLI package.
 
-This package replaces the former single-file ``localm/cli.py``; it is split by
-command area (chat, serve, models, media, rag, keys, doctor, maintenance,
-plugins, completion) around a shared ``_core`` module that owns the root
-``main`` group and the cross-cutting helpers.
+Split by command area (chat, serve, models, media, rag, keys, doctor,
+maintenance, plugins, completion) around a shared ``_core`` module that owns
+the root ``main`` group and the cross-cutting helpers.
 
-``localm.cli`` keeps the same public surface the rest of the app and the test
-suite rely on:
+The public surface:
   * ``localm.cli:main`` (the entry point / ``localm/__main__.py``),
   * the helpers ``gui/cli.py`` imports (``_exposed_bind_warning``,
     ``_setup_tls_or_exit``),
@@ -15,16 +13,15 @@ suite rely on:
     ``plugin_setup``, ``_handle_command``, ``_ThinkPrinter``, ...), and
   * the names tests monkeypatch on this module (``console``, ``HOME_DIR``,
     ``find_binary_dir``, ``add_local``, ``load_config``, ``sys``, ``click``,
-    ...). The few call sites that consume a monkeypatched name resolve it from
-    this package at call time (see chat._handle_command, doctor.doctor,
-    models.add) so a patch on ``localm.cli.<name>`` reaches the call site.
+    ...). The call sites that consume a monkeypatched name resolve it from
+    this package at call time, so a patch on ``localm.cli.<name>`` reaches the
+    call site.
 """
-# sys/click on the package surface for test monkeypatch (contract: docstring).
-# (F401: kept on purpose, not used here.)
+# sys/click on the package surface for test monkeypatch.
 import sys  # noqa: F401
 import click  # noqa: F401
 
-# Config + model-manager names on the package for test monkeypatch (docstring).
+# Config + model-manager names on the package for test monkeypatch.
 from ..config import (  # noqa: F401
     HOME_DIR, find_binary_dir, load_config, save_config,
 )
@@ -33,8 +30,7 @@ from ..model_manager import (  # noqa: F401
     remove_model, show_shortcuts, sync_models_dir,
 )
 
-# Shared core: root group + cross-cutting helpers. gui/cli.py imports
-# _exposed_bind_warning / _setup_tls_or_exit from here.
+# Shared core: root group + cross-cutting helpers.
 from ._core import (  # noqa: F401
     main, console_main, console, _GracefulGroup, _read_version_for_cli,
     _bind_preflight_error, _exposed_bind_warning, _resolve_bind_host,
@@ -42,8 +38,7 @@ from ._core import (  # noqa: F401
 )
 
 # Command submodules imported for their import-time side effect: registering
-# commands on ``main``. Aliased to avoid clashing with the re-exports below;
-# side-effect-only, so ruff flags them unused (noqa F401).
+# commands on ``main``. Aliased so they do not clash with the re-exports below.
 from . import (  # noqa: F401
     chat as _chat,
     serve as _serve,

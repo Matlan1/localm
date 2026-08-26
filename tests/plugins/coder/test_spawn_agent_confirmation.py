@@ -1,21 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """spawn_agent must not let a child bypass the parent's confirmation posture.
 
-``tool_spawn_agent`` used to hardcode the child Agent's ``auto_approve=True``
-and never passed through ``dry_run``, ``always_confirm``, or
-``confirm_handler`` from the parent session. So a parent that required
-confirmation before destructive tools (``auto_approve=False``), was running
-under ``--dry-run``, or had a GUI confirm handler wired up would still spawn a
-child that freely executed write_file/edit_file/patch_file/run_shell/
-git_commit/git_push with zero confirmation - a full bypass of the parent's
-safety posture (2026-07-09 checkup finding #11).
+Hardcoding the child Agent's ``auto_approve=True`` and not passing through
+``dry_run``, ``always_confirm`` or ``confirm_handler`` from the parent session
+means a parent that required confirmation before destructive tools
+(``auto_approve=False``), was running under ``--dry-run``, or had a GUI confirm
+handler wired up would still spawn a child that freely executed
+write_file/edit_file/patch_file/run_shell/git_commit/git_push with zero
+confirmation.
 
 These tests use REAL parent and child Agent instances (no Agent mocking) and
-drive an actual destructive tool call through the child's own
-``_execute_tool`` - the exact code path ``run_task``/``_loop`` uses
-internally, always with ``interactive=False`` (see agent/loop.py
-``run_task``). This reproduces the original bypass end to end rather than
-merely inspecting constructor kwargs.
+drive an actual destructive tool call through the child's own ``_execute_tool``
+- the exact code path ``run_task``/``_loop`` uses internally, always with
+``interactive=False`` - rather than merely inspecting constructor kwargs.
 """
 
 from unittest.mock import patch

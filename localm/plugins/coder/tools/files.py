@@ -223,17 +223,16 @@ _MODEL_REGEX_MAX_LINE = 64 * 1024   # a single line longer than this is not sear
 def _compile_model_pattern(pattern: str, flags):
     """Compile an attacker-supplied pattern on the interruptible engine.
 
-    Deliberately NO fallback to stdlib ``re`` when ``regex`` is missing. A
-    fallback would silently restore the unbounded path while every caller
-    carried on believing it was bounded - a safety step that fails and reports
-    success, which AGENTS.md rule 5 forbids in as many words. If the engine is
-    absent the tool refuses and says why, which is recoverable; a silent
+    NO fallback to stdlib ``re`` when ``regex`` is missing: a fallback would
+    silently restore the unbounded path while every caller carried on believing
+    it was bounded - a safety step that fails and reports success. If the engine
+    is absent the tool refuses and says why, which is recoverable; a silent
     downgrade is not.
 
-    ``regex`` is a DECLARED core dependency for this reason. It was previously
-    present only transitively, via `transformers` under optional-dependencies,
-    so a base install had no `regex` at all and this guard would have been
-    absent exactly where nobody was looking.
+    ``regex`` is a DECLARED core dependency for this reason. Carried only
+    transitively (via `transformers` under optional-dependencies) it would be
+    missing from a base install, so this guard would be absent exactly where
+    nobody is looking.
     """
     try:
         import regex
@@ -321,14 +320,14 @@ def _resolve_edit(text: str, old: str):
       - ``tolerant``: True when the exact match missed and a whitespace-tolerant
         match was used instead (so the caller can say so, not hide it).
 
-    An exact substring match is tried first and always wins (unchanged
-    behavior). Only on an exact miss does it retry with a whitespace-tolerant
-    match: every run of whitespace in ``old`` is allowed to match any run of
-    whitespace in the file, so a snippet the model reconstructed with a
-    different indentation or a collapsed line wrap still lands. That fallback is
-    accepted ONLY when it matches exactly one region - never guess between
-    several candidates - so it can widen what matches but can never change WHICH
-    of two ambiguous regions is edited.
+    An exact substring match is tried first and always wins. Only on an exact
+    miss does it retry with a whitespace-tolerant match: every run of whitespace
+    in ``old`` is allowed to match any run of whitespace in the file, so a
+    snippet the model reconstructed with a different indentation or a collapsed
+    line wrap still lands. That fallback is accepted ONLY when it matches
+    exactly one region - never guess between several candidates - so it can
+    widen what matches but can never change WHICH of two ambiguous regions is
+    edited.
     """
     idx = text.find(old)
     if idx != -1:
@@ -1248,7 +1247,7 @@ def tool_search_replace(
         try:
             fp.write_text(new_text, encoding="utf-8")
         except Exception as e:
-            # Files written before this one are modified on disk; report exactly what
+            # Earlier files in this batch are already modified on disk; report what
             # was and was not applied. changes carries only the files that succeeded, so
             # the caller can still record and undo the partial mutation.
             pending = [str(r) for _, r, _, _, _ in changes

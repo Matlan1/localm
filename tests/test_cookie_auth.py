@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S2 (hardened): opaque-session-cookie auth + session-derived CSRF for the GUI.
+"""Opaque-session-cookie auth + session-derived CSRF for the GUI.
 
 The GUI POSTs the key once to ``/api/session``; the server mints an OPAQUE server-
 side session and sets its id as the HttpOnly ``localm_session`` cookie (never the
 key). CSRF is an HMAC DERIVED from the session, returned in the response body and by
 GET /api/session (NOT a separate cookie that could desync), and echoed in the
 ``X-CSRF-Token`` header on state-changing requests. The bearer header path
-(CLI/SDK/coder) is unchanged and CSRF-exempt (a cross-site page can neither read the
-key nor set the Authorization header).
+(CLI/SDK/coder) is CSRF-exempt: a cross-site page can neither read the key nor set
+the Authorization header.
 
 These tests are the oracle; each carries a negative case.
 """
@@ -83,9 +83,9 @@ def test_login_sets_httponly_session_and_returns_csrf_token(client):
 
 
 def test_session_cookie_is_persistent(client):
-    """SEAMLESS: the session cookie must PERSIST across a browser/PWA restart, so
-    it carries a max-age (not a session cookie dropped on close - which made the
-    key gate, and its 'Install certificate' step, reappear every restart)."""
+    """The session cookie must PERSIST across a browser/PWA restart, so it carries
+    a max-age. A session cookie dropped on close makes the key gate, and its
+    'Install certificate' step, reappear every restart."""
     from localm.inference.http_server import SESSION_MAX_AGE
     r = _login(client)
     assert r.status_code == 200, r.text
@@ -155,8 +155,8 @@ def test_scoped_key_session_does_not_outlive_the_key_expiry(monkeypatch):
 def test_owner_session_is_not_gated_on_the_keystore(monkeypatch):
     """The scoped-session keystore re-check must NOT touch OWNER (ADMIN) sessions:
     the owner key is not in the keystore, so gating it there would wrongly log the
-    owner out. An ADMIN session stays valid even with an empty keystore (and across a
-    key roll - the S1 fix)."""
+    owner out. An ADMIN session stays valid even with an empty keystore, and
+    across a key roll."""
     monkeypatch.setenv("LOCALM_API_KEY", "owner-only-key-abcdef")
     from localm import auth, sessions
     from localm import scopes as S
@@ -192,13 +192,13 @@ def test_startup_sweeps_expired_sessions(monkeypatch):
 
 
 def test_session_survives_owner_key_roll(monkeypatch):
-    """THE reported bug, at the HTTP layer: after login, rolling the owner key must
-    NOT log the browser out. The cookie is a session id decoupled from the key, so
-    a protected request over the SAME cookie still authorizes after the roll.
+    """At the HTTP layer: after login, rolling the owner key must NOT log the
+    browser out. The cookie is a session id decoupled from the key, so a protected
+    request over the SAME cookie still authorizes after the roll.
 
-    Standalone (no shared `client` fixture) and monkeypatch-only for LOCALM_API_KEY:
-    mixing patch.dict (the fixture) with monkeypatch.setenv on the same var leaks it
-    into later open-mode tests via a teardown-order conflict."""
+    Standalone (no shared `client` fixture) and monkeypatch-only for
+    LOCALM_API_KEY: mixing patch.dict (the fixture) with monkeypatch.setenv on the
+    same var leaks it into later open-mode tests via a teardown-order conflict."""
     from localm import auth
     monkeypatch.setenv("LOCALM_API_KEY", "old-owner-key-123456")
     with TestClient(create_app(_make_engine())) as c:
@@ -238,10 +238,10 @@ def test_cookie_unsafe_method_without_csrf_is_refused(client):
 
 
 def test_cookie_unsafe_method_with_csrf_allowed(client):
-    """Also THE S3 fix: the CSRF token is derived from the session, not a separate
-    readable cookie, so a client that clears all readable cookies (what
-    resetClientState did, which could NOT clear the HttpOnly session) still gets a
-    usable token from /api/session and its writes keep working - no 403 storm."""
+    """The CSRF token is derived from the session, not a separate readable cookie,
+    so a client that clears all readable cookies - which cannot clear the HttpOnly
+    session - still gets a usable token from /api/session and its writes keep
+    working, with no 403 storm."""
     assert _login(client).status_code == 200
     # There is no readable localm_csrf cookie to clear in the first place.
     assert not client.cookies.get(CSRF_COOKIE)
@@ -333,9 +333,9 @@ def test_login_in_open_mode_no_bypass(tmp_path, monkeypatch):
 
 def test_require_auth_no_key_fails_closed_even_with_forged_cookie(tmp_path, monkeypatch):
     """LOCALM_REQUIRE_AUTH with no key configured must fail CLOSED on a protected
-    route, and a forged session cookie cannot bypass that gate. The refusal is now
-    401 (was 503): a 401 makes the GUI show the key prompt instead of a 'server
-    down' overlay; the security property is that it is refused, never 200."""
+    route, and a forged session cookie cannot bypass that gate. The refusal is 401
+    so the GUI shows the key prompt instead of a 'server down' overlay; the
+    security property is that it is refused, never 200."""
     _open_mode(monkeypatch, tmp_path)
     monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
     with TestClient(create_app(_make_engine()), raise_server_exceptions=True) as c:

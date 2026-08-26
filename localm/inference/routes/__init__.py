@@ -5,8 +5,7 @@ Each module exposes ``register(app, ctx)`` which defines that group's routes on
 the FastAPI ``app``. ``create_app`` (in ``localm.inference.http_server``) builds
 the app, installs middleware + the lifespan + the 500 backstop, constructs the
 shared ``ctx`` (audit log / transcript / session mode), and calls each group's
-``register``. This keeps the factory small and each route group in its own file
-without changing any route path, status code, response shape, or auth dependency.
+``register``.
 
 The shared engine state (``_engine``, ``_inference_sem``) lives as module globals
 in ``http_server``; route modules read the live values via

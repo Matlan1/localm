@@ -304,9 +304,8 @@ def test_changed_value_names_both_numbers(capsys):
 
 
 def test_header_predating_a_bound_member_is_a_note_not_a_failure():
-    """The b10360 case, measured against the real header: localm binds AUTO = -1
-    and that pinned ref predates it. Failing here would redden the default run on
-    master over a build with nothing wrong with it."""
+    """localm binds AUTO = -1 and the pinned ref predates that member, so the
+    check reports a note rather than failing."""
     problems, notes = _run_enum(_LOAD_MODE, _ENUM_NO_AUTO)
     assert problems == 0
     assert notes == []      # not additive either: localm binds it, upstream lacks it

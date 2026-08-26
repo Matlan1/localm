@@ -9,7 +9,7 @@ and install exactly those specifiers.
 
 It runs on the HOST only: the CLI, or a loopback GUI request. A remote client
 must never reach the install path (enforced at the route). Failures surface the
-real pip/uv output instead of being swallowed (AGENTS "We do not hide problems").
+real pip/uv output instead of being swallowed.
 """
 
 from __future__ import annotations
@@ -140,11 +140,10 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
     ``(ok, combined_output)``. ``--python sys.executable`` pins uv to this venv
     regardless of the ambient VIRTUAL_ENV.
 
-    ``env`` pins uv's AND pip's caches inside the data dir (rule 4: self-contained).
-    Both are set because the uv attempt runs first and pip second, and each caches to
-    a per-user location OUTSIDE the data dir when left to its default - so without this
-    a plugin-extra install silently leaks wheels to ``%LOCALAPPDATA%`` / ``~/.cache``.
-    See ``config.contained_pip_env``."""
+    ``env`` pins uv's AND pip's caches inside the data dir. Both are set: the uv
+    attempt runs first and pip second, and each caches to a per-user location
+    OUTSIDE the data dir when left to its default. See
+    ``config.contained_pip_env``."""
     env = config.contained_pip_env()
     attempts = (
         ["uv", "pip", "install", "--python", sys.executable, *reqs],

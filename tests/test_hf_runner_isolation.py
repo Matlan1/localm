@@ -5,24 +5,16 @@ HFWorker's native calls (a "fast" tokenizer's Rust regex pre-tokenizer stage,
 a torch forward pass, model.generate()) are uninterruptible from Python: a
 catastrophic-backtracking tokenizer pattern or a genuinely wedged native call
 hangs the calling thread forever, and nothing short of killing the process
-reclaims it. Before this isolation existed, that thread was one of the
-server's fixed-size asyncio default-executor workers - so a single hang
-permanently burned a pool slot, and 16 of them (this box's pool size)
-exhausted the pool entirely, taking down embeddings/model-loads/token
-counting for every OTHER model too (see dev-notes/decisions-2026-07-30-
-release-gate.md, Q2). localm therefore runs the whole HF backend lifecycle in
-an isolated worker process; a crash or hang there kills only the worker, and
-the caller gets a clean, catchable error within a bounded time while the
-server itself stays up.
+reclaims it. localm therefore runs the whole HF backend lifecycle in an
+isolated worker process; a crash or hang there kills only the worker, and the
+caller gets a clean, catchable error within a bounded time while the server
+itself stays up.
 
 These tests prove the containment property with REAL, uncatchable faults (a
 hard process exit, a genuine abort, and a hang) injected into the worker via
-the LOCALM_HF_FAULT_FOR_TEST hook - the same code path a real hang would
-take. Modeled directly on tests/test_gguf_runner_isolation.py (the identical
-property for GgufBackend/PR #606) and tests/test_voice_robustness.py (the
-STT worker). The final test in this file goes one step further than either
-of those: it proves the ACTUAL bug end to end, not just the runner's own
-synchronous timeout contract - see TestExecutorPoolReclaim below.
+the LOCALM_HF_FAULT_FOR_TEST hook - the same code path a real hang would take.
+TestExecutorPoolReclaim goes one step further and drives the runner through
+loop.run_in_executor(), not just its own synchronous timeout contract.
 """
 
 from __future__ import annotations
@@ -157,8 +149,7 @@ class TestChatStreamCrashContainment:
         just a real native fault - must crash only the child, never the
         caller. Reproduced here without needing a real model by sending
         chat_stream before any load (worker is None -> AttributeError inside
-        _runner_main's dispatch -> uncaught -> the process dies), exactly
-        mirroring test_gguf_runner_isolation.py's identical test."""
+        _runner_main's dispatch -> uncaught -> the process dies)."""
         r = HFRunner()
         r._spawn()
         try:
@@ -197,8 +188,7 @@ class TestSimpleRequestCrashContainment:
     def test_embed_crash_is_contained(self):
         """Same as test_count_tokens_crash_is_contained, for embed() - a real
         production call path (HFBackend.embed) that GgufRunner has no
-        equivalent of (GGUF's can_embed is a fixed False), so it has no
-        upstream test to mirror and needs its own coverage."""
+        equivalent of, since GGUF's can_embed is a fixed False."""
         r = HFRunner()
         r._spawn()
         r._proc.kill()
@@ -212,10 +202,9 @@ class TestSimpleRequestCrashContainment:
 
 
 class TestCrashDiagnosticsReachDebugLog:
-    """Mirrors test_gguf_runner_isolation.py's identical test: the parent's
-    crash message points the user at the debug log, so the worker's actual
-    exception detail must really reach that log, not just the parent's own
-    generic message.
+    """The parent's crash message points the user at the debug log, so the
+    worker's actual exception detail must really reach that log, not just the
+    parent's own generic message.
 
     Covers only the half of the problem that HAS a Python exception. The other
     half - a death by native signal, where no ``except`` clause ever runs - is
@@ -254,43 +243,25 @@ class TestCrashDiagnosticsReachDebugLog:
 
 
 class TestNativeSignalCrashDiagnosticsReachDebugLog:
-    """The class above closes the gap for a crash that still has a PYTHON
-    exception (``logger.critical(exc_info=True)`` in ``_runner_entry`` catches
-    it). It cannot close the gap for the OTHER half: a SIGILL/SIGSEGV/SIGABRT
-    inside native code (a torch forward pass, a CUDA/ROCm kernel, a fast
-    tokenizer's Rust stage) never returns to Python, so no ``except`` clause,
-    including that one, can run.
+    """The class above covers a crash that still has a PYTHON exception
+    (``logger.critical(exc_info=True)`` in ``_runner_entry`` catches it). This
+    one covers the OTHER half: a SIGILL/SIGSEGV/SIGABRT inside native code (a
+    torch forward pass, a CUDA/ROCm kernel, a fast tokenizer's Rust stage) never
+    returns to Python, so no ``except`` clause can run, and only faulthandler's
+    armed trace file records anything.
 
-    That residual half is EXACTLY the shape reported in issues 1222 / 1223:
-    ``Native inference fault (worker exit -4)``. On Linux ``multiprocessing``
-    reports ``-N`` for death by signal N, so ``-4`` is SIGILL - an illegal
-    instruction inside native code, with no Python exception anywhere. The
-    parent's message told the user to see the debug log for the native stack
-    trace and, before this fix, NOTHING was ever written for that class.
-
-    MEASURED on this box (not assumed) before writing these tests, because they
-    all depend on it: with faulthandler armed, ``os.abort()`` in a real spawned
-    child writes 686 bytes beginning "Fatal Python error: Aborted" plus the
-    Python frame that entered native code; with it DISARMED the destination file
-    is 0 bytes. That negative control is what makes a pass here evidence of this
-    arming rather than of something else having written the file.
-
-    ``os.abort()`` (the ``LOCALM_HF_FAULT_FOR_TEST=abort`` hook) is used rather
-    than a synthetic SIGILL because it is the same CLASS - the process dies from
-    a native signal with no Python exception - and it is the project's existing,
-    already-trusted way to produce that class in a REAL child process.
-
-    Ported from tests/test_gguf_runner_isolation.py's class of the same name.
+    ``os.abort()`` (the ``LOCALM_HF_FAULT_FOR_TEST=abort`` hook) produces that
+    class in a REAL child process: the process dies from a native signal with no
+    Python exception.
     """
 
     def _fault_during_chat_stream(self, monkeypatch):
         """Drive a real worker to a real native abort mid-chat_stream. Returns
         ``(message, trace_path)``.
 
-        The fault env var is set BEFORE ``_spawn()`` deliberately: the child
-        reads it from its OWN ``os.environ``, which is a snapshot taken at spawn
-        time, so setting it afterwards could never reach the running child (the
-        same trap documented on test_count_tokens_crash_is_contained above)."""
+        The fault env var is set BEFORE ``_spawn()``: the child reads it from
+        its OWN ``os.environ``, a snapshot taken at spawn time, so setting it
+        afterwards never reaches a running child."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
 
         r = HFRunner()
@@ -306,14 +277,12 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
 
     def test_native_abort_is_reported_with_its_captured_trace(
             self, monkeypatch, caplog):
-        """The reported symptom, inverted: after a native-signal death the
-        caller must be told WHAT faulted, not merely that something did.
+        """After a native-signal death the caller is told WHAT faulted, not
+        merely that something did.
 
         Asserts on the TRACE CONTENT rather than on the exit code or the
-        presence of the words "native inference fault" - both of those were
-        already true BEFORE this fix and are exactly what the field logs show.
-        The trace text is the only thing that distinguishes a captured fault
-        from an uncharacterised one."""
+        presence of the words "native inference fault": the trace text is what
+        distinguishes a captured fault from an uncharacterised one."""
         with caplog.at_level(logging.ERROR, logger="localm"):
             message, _ = self._fault_during_chat_stream(monkeypatch)
 
@@ -335,8 +304,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
 
     def test_load_crash_also_reports_its_captured_trace(self, monkeypatch):
         """The load path builds its own crash message, separately from
-        chat_stream's, so it needs its own proof - a fix applied to one of two
-        hand-written message sites is a fix to half the problem."""
+        chat_stream's, so it carries its own captured trace."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
         r = HFRunner()
         try:
@@ -351,16 +319,11 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
             r.shutdown(grace=0)
 
     def test_no_trace_captured_is_stated_not_implied(self, monkeypatch):
-        """When nothing was captured the message must SAY so.
+        """When nothing was captured the message SAYS so, rather than pointing
+        at a debug log with nothing in it.
 
-        The pre-fix message asserted a trace was in the debug log whether or not
-        anything had written one, which is what sent the reporter looking for a
-        trace that was never going to be there. Silence about a failed capture
-        is the rule-5 violation; an explicit "none was captured" is not.
-
-        Arming-INDEPENDENT by design (it drops the path the parent would read),
-        so unlike its siblings it stays green under the fires-control - it
-        covers the branch that exists precisely for when arming did NOT work."""
+        Arming-independent: it drops the path the parent would read, so it
+        covers the branch that exists for when arming did not work."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
         r = HFRunner()
         r._spawn()
@@ -376,12 +339,9 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
 
     def test_hard_killed_worker_does_not_imply_a_trace(self):
         """A worker killed outright (SIGKILL / TerminateProcess) runs no handler
-        at all, so faulthandler cannot write anything - and the simple-RPC crash
-        message must not imply otherwise.
-
-        This is the honest branch on a REAL uncapturable death rather than a
-        simulated one, and it covers the third message site (``_simple_rpc``),
-        which the two above never reach."""
+        at all, so faulthandler writes nothing and the simple-RPC crash message
+        says a trace was not captured. Covers the third message site
+        (``_simple_rpc``), which the two above never reach."""
         r = HFRunner()
         r._spawn()
         r._proc.kill()
@@ -402,10 +362,8 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         """The per-worker trace file must not survive the crash it describes: a
         stale file would be misread as a fresh crash by the next reader.
 
-        Asserts the trace was CAPTURED as well as gone. Without that first half
-        this test passes vacuously when nothing ever wrote the file - with the
-        arming call removed, "the file does not exist" is trivially true and the
-        test could not fail on the defect it was written for."""
+        Asserts the trace was CAPTURED as well as gone, so the check cannot pass
+        on a file that was never written."""
         message, trace_path = self._fault_during_chat_stream(monkeypatch)
         assert trace_path is not None
         assert "Fatal Python error" in message, (
@@ -415,19 +373,15 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
             f"the worker crash-trace file was left behind at {trace_path}")
 
     def test_healthy_worker_arms_a_trace_then_reaps_it(self):
-        """The capture costs one empty file per model load, so a clean shutdown
-        has to reap it or a long-running server slowly fills its own logs dir.
+        """The capture costs one empty file per model load, and a clean shutdown
+        reaps it.
 
         Checks the file EXISTS while the worker is alive before checking it is
-        gone afterwards - same reason as the test above: "absent at the end" is
-        satisfied just as well by never having armed at all, so on its own it
-        proves nothing about either arming or cleanup.
+        gone afterwards, so the check cannot pass on a worker that never armed.
 
-        The existence check is POLLED, not immediate. ``_spawn()`` returns as
-        soon as ``Process.start()`` does, and a spawn-context child then has to
-        boot a fresh interpreter and run its imports before it arms anything - so
-        an immediate check races the child and fails on a perfectly healthy
-        worker."""
+        The existence check is POLLED, not immediate: ``_spawn()`` returns as
+        soon as ``Process.start()`` does, and a spawn-context child then boots a
+        fresh interpreter and runs its imports before it arms anything."""
         r = HFRunner()
         r._spawn()
         trace_path = r._crash_trace_path
@@ -461,11 +415,8 @@ class TestExecutorPoolReclaim:
         without needing 16 concurrent hangs. Two assertions: (a) the call
         raises within its bounded timeout instead of hanging forever, and
         (b) a SUBSEQUENT, unrelated run_in_executor call on the SAME pool
-        completes promptly afterward - proof the slot was reclaimed, not
-        merely that this coroutine stopped waiting on it (the maintainer's
-        own framing: "a timeout at the call site stops waiting, not
-        working" - this test asserts the WORKING half, not just the
-        waiting half)."""
+        completes promptly afterward, so the slot was reclaimed rather than
+        merely abandoned by this coroutine."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "hang")
         # Short timeout so the test itself stays fast; only the executor-thread
         # consequence of the bound is under test here.
@@ -536,10 +487,8 @@ class TestCooperativeCancel:
     def test_cancel_stream_gets_done_without_killing_the_worker(self):
         """A worker that cooperates with cancel_stream (streams a couple of
         chunks, then confirms "done" once it sees the ctrl_q signal - what
-        the real control-thread + StoppingCriteria produce) must leave the
-        process ALIVE. This is the core proof that HF's mid-stream cancel is
-        now cooperative, not kill-based - see _hf_runner.py's module
-        docstring."""
+        the real control-thread + StoppingCriteria produce) leaves the process
+        ALIVE: the mid-stream cancel is cooperative, not kill-based."""
         r = _make_runner()
 
         def _child():
@@ -571,19 +520,14 @@ class TestCooperativeCancel:
         assert r._req_q is not None, "a live worker's queues must not be torn down"
 
     def test_drain_timeout_falls_back_to_killing_the_worker(self, monkeypatch):
-        """If the child never confirms cancel_stream (a genuinely wedged
-        native call - the same uninterruptible-from-Python risk this module
-        exists to contain), the drain must NOT assume success: it falls back
-        to killing the worker, mirroring ModelRunner's identical fallback
-        (tests/test_runner_stream_timeouts.py's
-        TestBackendRecoversAfterDrainTimeoutKill).
+        """If the child never confirms cancel_stream (a genuinely wedged native
+        call), the drain does NOT assume success: it falls back to killing the
+        worker.
 
-        Also proves the fallback fires only AFTER a genuine cooperative
-        attempt was made, not instead of one: the fake child records the
-        real ctrl_q message it received (with its seq) before wedging, so a
-        regression that short-circuited straight to shutdown(grace=0)
-        without ever touching ctrl_q - which would leave the SAME
-        fake_proc.terminated/_req_q-is-None end state - is still caught."""
+        The fallback fires only AFTER a genuine cooperative attempt: the fake
+        child records the real ctrl_q message it received (with its seq) before
+        wedging, so a short-circuit straight to shutdown(grace=0) - which leaves
+        the same terminated/_req_q-is-None end state - is still caught."""
         monkeypatch.setattr(runner_mod, "_CANCEL_DRAIN_TIMEOUT", 0.3)
         r = _make_runner()
         fake_proc = r._proc
@@ -633,20 +577,17 @@ from localm.inference.backends._hf_runner import _ctrl_msg_cancels_seq  # noqa: 
 
 class TestCtrlMsgCancelsSeq:
     """_ctrl_msg_cancels_seq is what _control_loop calls to decide whether a
-    drained ctrl_q message should actually stream_cancel_event.set() - the
-    exact logic that closes the stale-cancel race a fresh review found:
-    ctrl_q and req_q are independent queues, so a cancel meant for a stream
-    that already finished can still be drained after the dispatch loop has
-    moved on to a new, unrelated stream. Pure function, no threads/queues
-    needed to test it directly."""
+    drained ctrl_q message should actually stream_cancel_event.set(). ctrl_q
+    and req_q are independent queues, so a cancel meant for a stream that
+    already finished can still be drained after the dispatch loop has moved on
+    to a new, unrelated stream. Pure function, no threads or queues needed."""
 
     def test_matching_seq_cancels(self):
         assert _ctrl_msg_cancels_seq(("cancel_stream", 7), 7) is True
 
     def test_stale_seq_does_not_cancel(self):
-        """The exact scenario the fix exists for: a cancel meant for stream
-        7 drained after the dispatch loop has already moved on to stream 8
-        must NOT cancel stream 8."""
+        """A cancel meant for stream 7, drained after the dispatch loop has
+        already moved on to stream 8, must NOT cancel stream 8."""
         assert _ctrl_msg_cancels_seq(("cancel_stream", 7), 8) is False
 
     def test_no_current_stream_does_not_cancel(self):
@@ -675,10 +616,9 @@ class TestCtrlMsgCancelsSeq:
 class TestCancelCriteriaUnit:
     """Direct, model-free unit test of _hf_worker.py's _CancelCriteria - the
     StoppingCriteria transformers' generate() loop actually calls once per
-    decode step. Needs real torch (to build a real input_ids tensor and
-    check the real return dtype/shape contract StoppingCriteriaList relies
-    on - see _CancelCriteria's own docstring on why a plain bool would
-    break under its `|` reduction), but no model and no subprocess."""
+    decode step. Needs real torch (to build a real input_ids tensor and check
+    the real return dtype/shape contract StoppingCriteriaList relies on under
+    its `|` reduction), but no model and no subprocess."""
 
     def test_cleared_event_reports_all_false(self):
         from localm.inference.backends.llamacpp import _loader

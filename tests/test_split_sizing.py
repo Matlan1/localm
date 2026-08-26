@@ -6,19 +6,17 @@ _auto_gpu_layers, _check_vram, _auto_ctx_max, _check_context_fit - see
 llamacpp/_sizing.py), with vram_capacity(combined_only=True) as the single
 summing source (discover.py).
 
-The regression these tests pin (functional audit 2026-07-21, gpu-split scope):
-the admission gate (vram_capacity + gpu_split_shortfall) learned to sum across
-a split long ago, but the backend's own deeper preflight stayed split-blind -
-on a simulated 2x16 GB box with a 20 GB model and gpu_split_indices=[0, 1],
-_auto_gpu_layers picked a silent partial offload (21/32 layers), _check_vram
-hard-refused a pinned load with a factually wrong "cannot fit regardless", and
-_auto_ctx_max collapsed the growth ceiling to n_ctx despite ~11 GB combined
+The admission gate (vram_capacity + gpu_split_shortfall) sums across a split,
+and the backend's own deeper preflight must too. Split-blind sizing on a
+simulated 2x16 GB box with a 20 GB model and gpu_split_indices=[0, 1] makes
+_auto_gpu_layers pick a silent partial offload (21/32 layers), _check_vram
+hard-refuse a pinned load with a factually wrong "cannot fit regardless", and
+_auto_ctx_max collapse the growth ceiling to n_ctx despite ~11 GB combined
 headroom.
 
-Style mirrors tests/test_auto_gpu_layers.py and tests/test_gpu_split_wiring.py:
-the REAL methods run; only the VRAM readings (localm.discover.list_gpus /
-the single-device probe pair), localm.config.load_config, and the model
-size/layer count are faked.
+The REAL methods run; only the VRAM readings (localm.discover.list_gpus / the
+single-device probe pair), localm.config.load_config, and the model size/layer
+count are faked.
 """
 
 from types import SimpleNamespace
@@ -48,9 +46,8 @@ def _model(tmp_path, size_bytes, *, n_gpu_layers=99, auto=True, n_ctx=4096,
 
 
 def _vram(free, total):
-    """Deterministic SINGLE-DEVICE reading, all three real paths patched
-    together - copied from tests/test_auto_gpu_layers.py (see its docstring
-    for why each of the three patches is required on a GPU-equipped box)."""
+    """Deterministic SINGLE-DEVICE reading, with all three real paths patched
+    together, which is what a GPU-equipped box needs."""
     from contextlib import ExitStack
 
     stack = ExitStack()
@@ -345,7 +342,7 @@ class TestCheckContextFitSplitAware:
             self, tmp_path, monkeypatch):
         # The KV delta fits the split's combined free but not one card's: the
         # KV cache must STAY in VRAM (True). The single-device reading is
-        # patched too small on purpose - a split-blind check would say False.
+        # patched too small: a split-blind check would say False.
         per_token = 100_000
         delta = (8192 - 4096) * per_token          # ~0.4 GB of new KV
         _split_box(monkeypatch, [(delta, 16 * GB), (delta, 16 * GB)])
@@ -603,9 +600,8 @@ class TestImplicitSplitSizing:
 
 
 class TestSingleGpuPathUnchanged:
-    """The regression that matters most: one card is the field's commonest
-    configuration and it works today. Every number below is the FLAT-overhead
-    arithmetic that shipped before the implicit-split change."""
+    """One card, the commonest configuration. Every number below is the
+    FLAT-overhead arithmetic the single-GPU path produces."""
 
     def test_layer_sizing_is_byte_identical_on_one_card(self, tmp_path,
                                                         monkeypatch):
@@ -648,11 +644,10 @@ class TestSingleGpuPathUnchanged:
 class TestImplicitSplitDecisionIsRecorded:
     """The combined budget must leave a trace naming the figures it used.
 
-    Rule 5, surface the decision - the same contract resolve_auto_split_ratios
-    states for its own INFO line. Until this existed only the DECLINE path
-    logged, so a bug report about a wrongly-sized load could not distinguish a
-    budget taken across the whole board from one taken against a single card,
-    which is exactly the defect implicit_split_capacity was added to fix.
+    The same contract resolve_auto_split_ratios states for its own INFO line.
+    With only the DECLINE path logging, a bug report about a wrongly-sized load
+    cannot distinguish a budget taken across the whole board from one taken
+    against a single card.
     """
 
     def test_combined_budget_logs_the_devices_and_the_figures(

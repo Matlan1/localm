@@ -73,12 +73,11 @@ class TestEffectiveMode:
         through to a more permissive global mode.
 
         The project file is the only place a user can say "this project is
-        private". When it does not parse we cannot know whether it said so, and
-        resolution used to continue to the global coder_mode - so a user whose
-        global mode is "log" gets a full transcript written for a session they
-        had marked private, with nothing said. Same direction as
-        test_config_failure_means_privacy above: a mode we cannot establish
-        resolves to the safest one.
+        private". When it does not parse we cannot know whether it said so, so
+        continuing to the global coder_mode gives a user whose global mode is
+        "log" a full transcript written for a session they had marked private,
+        with nothing said. Same direction as test_config_failure_means_privacy
+        above: a mode we cannot establish resolves to the safest one.
         """
         cfg_dir = tmp_path / ".localcoder"
         cfg_dir.mkdir()

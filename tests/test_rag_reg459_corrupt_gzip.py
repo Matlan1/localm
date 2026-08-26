@@ -1,27 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-459: a corrupt/truncated gzip must raise ExtractError, not escape raw.
+"""A corrupt or truncated gzip raises ExtractError rather than escaping raw.
 
 extract_bytes routes any tar-family suffix / gzip-sniffed input to
-_extract_tar_or_stream, whose tarfile.open() is guarded ONLY by
-`except tarfile.ReadError`. tarfile's gzopen reads the first tar block through a
-GzipFile; on a TRUNCATED stream GzipFile raises EOFError, and gzopen only
-converts OSError to ReadError - EOFError is not an OSError. So a raw EOFError
-(or zlib.error for a mid-block corruption) propagates out past every
+_extract_tar_or_stream. tarfile's gzopen reads the first tar block through a
+GzipFile; on a TRUNCATED stream GzipFile raises EOFError, and gzopen converts
+only OSError to ReadError - EOFError is not an OSError. An unguarded EOFError
+(or zlib.error for a mid-block corruption) would propagate past every
 `except ExtractError` guard in the callers:
 
   - store.py's folder index records a failing file in failed[] and CONTINUES;
-    an unhandled EOFError instead breaks the per-file loop and ABORTS THE WHOLE
+    an unhandled EOFError instead breaks the per-file loop and aborts the whole
     index run.
-  - plug.py's /api/rag/extract upload turns it into an unhandled 500 instead of
-    the intended clean 422.
+  - plug.py's /api/rag/extract upload would answer 500 rather than 422.
 
-The whole point of ExtractError is "this ONE file could not be read" - a bad
-member must never take down the batch around it.
-
-The suite missed this because every archive in tests/test_rag_archive_safety.py
-(and the later depth-bomb / member-bomb hardening tests) is built with
-well-formed helpers, so the one input class where tarfile's gzip path raises
-EOFError instead of ReadError is never fed in.
+ExtractError means "this ONE file could not be read", so a bad member does not
+take down the batch around it.
 """
 
 from __future__ import annotations
@@ -70,8 +63,8 @@ class TestCorruptCompressedStreamsRaiseExtractError:
 
     @pytest.mark.parametrize("name", ["notes.txt.bz2", "notes.txt.xz"])
     def test_sibling_compression_formats_stay_extracterror(self, name):
-        """Control: the .bz2/.xz openers already convert their EOF to ReadError,
-        so these were correct pre-fix and must STAY correct."""
+        """Control: the .bz2/.xz openers convert their own EOF to ReadError, so
+        these also surface as ExtractError."""
         raw = b"hello world " * 100
         full = bz2.compress(raw) if name.endswith(".bz2") else lzma.compress(raw)
         with pytest.raises(ExtractError):
@@ -79,9 +72,8 @@ class TestCorruptCompressedStreamsRaiseExtractError:
 
 
 class TestValidArchivesStillExtract:
-    """NEGATIVE CASE: the fix must not turn a broadened error guard into
-    'every compressed input fails'. A well-formed stream must still extract, or
-    the tests above would pass on a completely broken extractor."""
+    """NEGATIVE CASE: a well-formed stream still extracts, so the broadened
+    error guard has not turned into 'every compressed input fails'."""
 
     def test_valid_single_gzip_still_extracts_its_text(self):
         out = extract_bytes(gzip.compress(b"hello gzip world"), "notes.txt.gz")

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A model that cannot see images must REJECT image input, not silently drop it.
 
-Regression guard for the audit finding that GGUF (and text-only HF) accepted an
-image_url part, discarded it, and answered about a picture the model never
-received. The contract now: raise UnsupportedInputError at the backend, and
-return a clean 400 at the HTTP route.
+GGUF (and text-only HF) accepting an image_url part, discarding it, and answering
+about a picture the model never received is the failure. The contract: raise
+UnsupportedInputError at the backend, and return a clean 400 at the HTTP route.
 """
 
 import importlib.util
@@ -178,11 +177,10 @@ class TestVisionGuidance:
     def test_no_transformers_stack_offers_gguf_route_not_a_false_claim(
             self, monkeypatch):
         """The final fallback (no HF vision model registered, no transformers
-        stack installed) used to claim 'the built-in GGUF backend is
-        text-only' - flatly false: mtmd GGUF vision IS implemented (this same
-        function's own mmproj_failed docstring says so, and #957's own live
-        E2E proves it). The message must offer the GGUF+mmproj route instead
-        of denying GGUF vision exists at all."""
+        stack installed) must not claim 'the built-in GGUF backend is
+        text-only': mtmd GGUF vision IS implemented, as this same function's own
+        mmproj_failed message says. The message offers the GGUF+mmproj route
+        instead of denying GGUF vision exists at all."""
         import localm.model_manager as mm
         import importlib.util
         monkeypatch.setattr(mm, "load_registry", lambda: {})
@@ -201,7 +199,7 @@ class TestVisionGuidance:
         assert "cannot accept image" in msg               # legacy phrase still present
         assert "mmproj" in msg
         assert "failed to load" in msg
-        assert "not implemented" not in msg               # the old stale claim is gone
+        assert "not implemented" not in msg
         # The default (text-only) message must NOT mention mmproj, and only on
         # the branch where the HuggingFace stack IS installed: with transformers
         # absent, vision_input_guidance points at the GGUF route and names

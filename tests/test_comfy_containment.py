@@ -51,10 +51,9 @@ def _is_unc_or_device(s: str) -> bool:
 def _minimal_png() -> bytes:
     """A structurally valid 1x1 PNG for the stub's image outputs.
 
-    ComfyUI writes real PNGs, so the stub must too: otherwise generate_image's
-    _strip_png_metadata gets non-PNG bytes and (correctly) warns the strip could
-    not run, which is not what these containment tests are exercising. Real PNG
-    bytes let the actual strip path run clean, as it does in production."""
+    ComfyUI writes real PNGs, so the stub does too: with non-PNG bytes
+    generate_image's _strip_png_metadata warns that the strip could not run,
+    which is not what these containment tests exercise."""
     def chunk(ctype: bytes, data: bytes) -> bytes:
         return (len(data).to_bytes(4, "big") + ctype + data
                 + zlib.crc32(ctype + data).to_bytes(4, "big"))
@@ -247,19 +246,17 @@ def test_contain_without_dir_warns_but_still_clears_history(stub, monkeypatch):
 
 
 class TestContainmentRejectsOutOfBoundsNames:
-    """CodeQL 116-119: every name below is parsed straight out of ComfyUI's own
-    HTTP JSON (/history outputs, the /upload/image reply), so a remote or
-    compromised ComfyUI - which sanitize_comfy_url permits over plaintext http on
-    a LAN or public api_url - controls it. pathlib gives full escape: an ABSOLUTE
-    component REPLACES the base, and a traversing subfolder walks out of it.
+    """Every name below is parsed straight out of ComfyUI's own HTTP JSON
+    (/history outputs, the /upload/image reply), so a remote or compromised
+    ComfyUI - which sanitize_comfy_url permits over plaintext http on a LAN or
+    public api_url - controls it. Under plain pathlib an ABSOLUTE component
+    REPLACES the base and a traversing subfolder walks out of it.
 
-    Two properties per vector, and BOTH matter:
+    Two properties per vector:
       1. the file outside the ComfyUI dirs SURVIVES (containment held), and
-      2. a WARNING is returned (AGENTS rule 5: a rejected name is never silently
-         skipped - containment must not report a success it did not achieve).
+      2. a WARNING is returned, so a rejected name is never silently skipped.
 
-    The pre-existing tests above all use well-formed names, so they cannot see
-    any of this.
+    The tests above all use well-formed names.
     """
 
     @staticmethod
@@ -271,11 +268,10 @@ class TestContainmentRejectsOutOfBoundsNames:
         v.write_text("do not delete me", encoding="utf-8")
         return v
 
-    # EVERY vector resolves INSIDE tmp_path. A negative run of this file executes
-    # the deliberately-unconfined code for real, so the absolute vector is BUILT
-    # from tmp_path, which is itself absolute AND drive-qualified on Windows: it
-    # exercises the identical escape (an absolute component REPLACES the base
-    # under pathlib) with the blast radius inside the fixture.
+    # EVERY vector resolves INSIDE tmp_path. The absolute vector is BUILT from
+    # tmp_path, which is itself absolute AND drive-qualified on Windows, so it
+    # exercises the same escape (an absolute component REPLACES the base under
+    # pathlib) without naming a path outside the fixture.
     ABS = "<ABS_OUTSIDE>"
 
     @pytest.mark.parametrize("subfolder,filename", [
@@ -327,9 +323,8 @@ class TestContainmentRejectsOutOfBoundsNames:
         assert "WARNING" in warn, "a refused name must be surfaced, not skipped"
 
     def test_legitimate_nesting_still_deletes(self, stub):
-        """The fix must NOT break ComfyUI's normal nested output: `subfolder` is
-        a real feature, so confinement has to permit depth and reject only
-        escape. A regression here would silently stop containing real outputs."""
+        """`subfolder` is a real ComfyUI feature, so confinement permits depth
+        and rejects only escape."""
         nested = stub.output_dir / "batch01"
         nested.mkdir()
         (nested / "ComfyUI_00007_.png").write_bytes(b"X")
@@ -352,10 +347,8 @@ class TestContainmentRejectsOutOfBoundsNames:
         is a short-name-alias for a DIFFERENT, real file already sitting in the
         same output directory - e.g. an earlier generation's output. That
         target stays strictly under output/, so the escape checks above cannot
-        see it; only the resolved-name check catches it. This does not need a
-        real 8.3-enabled volume - it simulates the OS-level substitution
-        deterministically, same technique as test_pathsafe_confined_under.py's
-        alias tests."""
+        see it; only the resolved-name check catches it. The OS-level
+        substitution is simulated, so no 8.3-enabled volume is needed."""
         victim = stub.output_dir / "LongModelNameThatIsVeryLong.png"
         victim.write_bytes(b"do not delete me")
         alias = "LONGMO~1.PNG"
@@ -406,10 +399,10 @@ class TestContainmentRejectsOutOfBoundsNames:
 
 
 class TestComfyOutputRootUncGuard:
-    """2026-07-29 sweep, M5: _comfy_output_root() is the read-time choke point
-    every caller of contain_comfy_artifacts goes through - comfy_output_dir is
-    settable by a config:write-scoped (privileged, not ADMIN) caller, and
-    reached Path(cand) with zero validation."""
+    """_comfy_output_root() is the read-time choke point every caller of
+    contain_comfy_artifacts goes through, and comfy_output_dir is settable by a
+    config:write-scoped (privileged, not ADMIN) caller, so the UNC/device guard
+    lives there."""
 
     @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
     def test_unc_and_device_dir_returns_none(self, bad):
@@ -430,16 +423,12 @@ class TestComfyOutputRootUncGuard:
 
 
 class TestContainmentRejectsUntrustedRoot:
-    """2026-07-29 sweep, M6/M7: confined_under() only ever validates the
-    RELATIVE path handed to it - it never asks whether the BASE it is
-    confined under is itself safe. comfy_output_dir (the source of that base)
-    is settable by a config:write-scoped caller (privileged, but not ADMIN -
-    inference/routes/config.py's set_media_config ADMIN-gates launch_cmd/
-    api_url/workdir but deliberately not this key). Every test above this
-    class passes a trusted, test-fixed root (stub.output_dir), so none of
-    them could ever have caught a UNC-shaped comfy_output_dir reaching
-    confined_under's own .resolve() call - the SMB dial - before any
-    containment check runs."""
+    """confined_under() validates only the RELATIVE path handed to it, never
+    whether the BASE it is confined under is itself safe. comfy_output_dir (the
+    source of that base) is settable by a config:write-scoped caller
+    (privileged, but not ADMIN). Every test above this class passes a trusted,
+    test-fixed root (stub.output_dir), so a UNC-shaped comfy_output_dir reaching
+    confined_under's own .resolve() call is only covered here."""
 
     @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
     def test_unc_and_device_output_dir_rejected_without_touching_the_filesystem(
@@ -481,7 +470,7 @@ class TestContainmentRejectsUntrustedRoot:
 
     def test_ordinary_root_is_unaffected(self, stub):
         """Control: an ordinary (non-UNC) root still resolves and contains
-        normally - the guard must not over-reject."""
+        normally."""
         fn = "ComfyUI_00043_.png"
         (stub.output_dir / fn).write_bytes(b"X")
         stub.history["pidOrd"] = {"9": {"images": [
@@ -533,13 +522,9 @@ def test_generate_image_default_keeps_comfy_copy(stub, tmp_path, monkeypatch):
 
 def test_generate_image_threads_instance_token_to_unload(stub, tmp_path, monkeypatch):
     """The instance_token the image route resolved from its own app state (for
-    keyless-mode auth on the localm_url unload call) must actually reach
-    _localm_unload, not be silently dropped somewhere between the plug.py
-    route and comfy.py's call site - the fifth site of the credential-
-    precedence class fixed alongside cli/models.py (#1121) and self_request
-    (#1114): generate_image did not even accept an instance_token parameter
-    before this fix, so the fallback was unreachable no matter what the route
-    resolved."""
+    keyless-mode auth on the localm_url unload call) reaches _localm_unload,
+    rather than being dropped between the plug.py route and comfy.py's call
+    site."""
     monkeypatch.setattr(comfy, "workflow_path",
                         lambda: comfy._WORKFLOW_EXAMPLE_PATH)
     unload_spy = MagicMock(return_value=None)

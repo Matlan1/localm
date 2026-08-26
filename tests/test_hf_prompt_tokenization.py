@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HF backend prompt tokenization: no double-BOS (U-1).
+"""HF backend prompt tokenization: no double-BOS.
 
 ``apply_chat_template(tokenize=False)`` already emits the model's BOS (Gemma
 ``<bos>``, Llama-3 ``<|begin_of_text|>``, Mistral ``<s>``). Re-tokenizing that
@@ -9,10 +9,8 @@ chat path must re-tokenize with ``add_special_tokens=False`` (matching what
 ``apply_chat_template(tokenize=True)`` does internally and the count_tokens path).
 
 Tests HFWorker (``_hf_worker.py``), not the HFBackend proxy (``hf.py``):
-tokenization/chat-template logic runs only in the isolated child process now
-(see the thread-pool-exhaustion fix), so this in-process, no-subprocess unit
-test targets the class that actually owns that logic - HFWorker's chat_stream
-body is unchanged from what HFBackend's used to be, just moved.
+tokenization and chat-template logic run only in the isolated child process, so
+this in-process, no-subprocess unit test targets the class that owns them.
 """
 
 from unittest.mock import MagicMock

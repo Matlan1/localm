@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F8 regression suite (memory-audit 2026-07-02): forgetting and semantic recall
-must work in real operation.
+"""Forgetting and semantic recall in real operation.
 
 - prune (decay + size cap) must run even when a consolidation extracts zero
-  facts (it used to be reachable only through a fact-producing run);
+  facts, not only through a fact-producing run;
 - vectors must backfill so semantic recall turns on retroactively after an
   embedding model is installed later;
 - the vector path must be used on a small store (< TINY_CORPUS), where the

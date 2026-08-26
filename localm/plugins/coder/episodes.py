@@ -2,27 +2,23 @@
 """
 Episodic memory for the coder agent.
 
-The coder already has working memory (the live context), semantic memory
-(project memory in LOCALCODER.md), procedural memory (skills), and retrieval
-(RAG). The one gap is EPISODIC memory: a record of what happened on past tasks
-and what was learned, recalled when a similar task comes up again.
+A record of what happened on past tasks and what was learned, recalled when a
+similar task comes up again. It sits alongside the coder's working memory (the
+live context), semantic memory (project memory in LOCALCODER.md), procedural
+memory (skills), and retrieval (RAG).
 
 This module stores one *episode* per finished session (task, outcome, what
 worked, what failed, the single most useful lesson, and the files touched) and
 retrieves the most relevant past episodes for a new task with the same
 embedding-free BM25 ranker the RAG plugin uses.
 
-Episodes have a LIFECYCLE, not a FIFO queue (memory-audit 2026-07-02 finding
-39). ``add()`` merges a near-identical restatement into the record it repeats,
-then, at the cap, evicts by VALUE (what the episode teaches, decayed by age)
-rather than by arrival order, and ARCHIVES whatever it drops to a capped
-``.forgotten.jsonl`` sidecar so forgetting is recoverable. This mirrors the chat
-memory store, which already archives its evictions (``localm/memory/store.py``
-``_archive_forgotten``) and reports its consolidation instead of mutating
-silently. An LLM merge of merely *related* lessons is available too, but it is
-strictly OPT-IN (``consolidate``): a local model rewriting memory is exactly
-where a bad merge would poison every future run, so it never runs on a timer or
-at session close, and it archives its inputs so it is reversible.
+Episodes have a LIFECYCLE, not a FIFO queue. ``add()`` merges a near-identical
+restatement into the record it repeats, then, at the cap, evicts by VALUE (what
+the episode teaches, decayed by age) rather than by arrival order, and ARCHIVES
+whatever it drops to a capped ``.forgotten.jsonl`` sidecar, so forgetting is
+recoverable. An LLM merge of merely *related* lessons is available too, but it
+is strictly OPT-IN (``consolidate``): it never runs on a timer or at session
+close, and it archives its inputs so it is reversible.
 
 Every episode carries a stable ``id``, so a run can record WHICH lessons it
 recalled (the agent surfaces them on an ``episodes_recalled`` event and in the
@@ -162,11 +158,10 @@ class Episode:
     def search_text(self) -> str:
         """The text BM25 ranks against when matching a new task.
 
-        Includes ``what_worked``: the approach or command that actually worked is
-        precisely what a similar future task wants to find, and leaving it out of
-        the ranked text was half of what made the field dead (audit finding 39).
-        ``what_failed`` stays out of the ranked text but is rendered on recall, as
-        before - a lesson should be found by what to DO, then warn about the trap.
+        Includes ``what_worked``: the approach or command that actually worked
+        is what a similar future task looks for. ``what_failed`` stays OUT of the
+        ranked text and is rendered on recall, so a lesson is found by what to DO
+        and then warns about the trap.
         """
         parts = [self.task, self.summary, self.lesson, self.what_worked,
                  " ".join(self.files)]
@@ -186,10 +181,9 @@ def _derive_id(ep: "Episode") -> str:
 def _dedup_signature(ep: "Episode") -> str:
     """The content-word text near-duplicate detection compares.
 
-    Task AND distilled lesson, deliberately: a duplicate restates both. Comparing
-    the lesson alone would collapse two genuinely different tasks that happened to
-    yield the same generic advice ("add a test first"), which is memory loss
-    dressed up as tidying."""
+    Task AND distilled lesson: a duplicate restates both. Comparing the lesson
+    alone would collapse two different tasks that happened to yield the same
+    generic advice."""
     return _content_tokens(" ".join(p for p in (ep.task, ep.lesson or ep.summary)
                                     if p))
 
@@ -377,15 +371,11 @@ class EpisodeStore:
                 time.sleep(delay)
 
     def _archive(self, episodes: list, reason: str) -> bool:
-        """Append *episodes* to the capped ``.forgotten.jsonl`` sidecar BEFORE they
-        leave the live log, so a drop is RECOVERABLE instead of a silent delete
-        (the chat store does exactly this, memory/store.py ``_archive_forgotten``).
+        """Append *episodes* to the capped ``.forgotten.jsonl`` sidecar BEFORE
+        they leave the live log, so a drop is recoverable.
 
         Returns True when persisted, or when there was nothing to archive. On
-        failure it returns False and the caller LOGS AND PROCEEDS: refusing the
-        write would break a working setup over a best-effort sidecar, which is the
-        wrong altitude, but the failure must still leave a trace rather than being
-        swallowed (AGENTS.md rule 5)."""
+        failure it returns False and the caller logs and proceeds."""
         if not episodes:
             return True
         try:
@@ -468,14 +458,12 @@ class EpisodeStore:
         archiving anything dropped first.
 
         What the write did is left on ``last_merged`` / ``last_evicted`` /
-        ``last_archive_ok`` and logged, so an eviction is reportable rather than
-        invisible. *dedup* is False only for restore(), where collapsing the record
-        back into the one that superseded it would silently undo the restore.
+        ``last_archive_ok`` and logged, so an eviction is reportable. *dedup* is
+        False only for restore(), where collapsing the record back into the one
+        that superseded it would undo the restore.
 
         The whole read-mutate-write sequence runs under this project's lock (see
-        _store_lock): unlocked, a concurrent add() elsewhere reading the same
-        pre-write state would have its own addition silently clobbered by whichever
-        write lands second (LM-DA-checkup finding, episode-lifecycle round 2)."""
+        _store_lock), so a concurrent add() elsewhere cannot clobber it."""
         with _store_lock(self._file):
             eps = self.all()
             now = time.time()
@@ -708,10 +696,7 @@ class EpisodeStore:
     def clear(self) -> None:
         """Erase everything this project remembers, ARCHIVE INCLUDED.
 
-        The archive has to go too: "cleared episodic memory" while the lesson text
-        still sat in a sidecar would be a privacy claim that is not true, and a
-        user wiping what the coder remembers means all of it (rule 5 - a step that
-        does not fully happen must not report success)."""
+        The archive goes too, so no lesson text survives in a sidecar."""
         self._file.unlink(missing_ok=True)
         self._file.with_suffix(".vec.json").unlink(missing_ok=True)
         self.archive_path.unlink(missing_ok=True)
@@ -764,9 +749,8 @@ _CONSOLIDATE_HEADER = (
 def _relate_groups(eps: list, ratio: float = _RELATE_RATIO) -> list:
     """Indices of episodes grouped by signature similarity (single-link, greedy).
 
-    Deliberately simple and deterministic: the model decides what a merged lesson
-    SAYS, never which records are related, so a bad model cannot silently pull two
-    unrelated lessons together."""
+    Deterministic: the model decides what a merged lesson SAYS, never which
+    records are related."""
     n = len(eps)
     sigs = [_dedup_signature(e) for e in eps]
     seen: set = set()
@@ -803,16 +787,14 @@ def consolidate(store: "EpisodeStore", *, complete: Callable[[str], str],
                 max_groups: int = 5, group_max: int = 6) -> dict:
     """OPT-IN: ask a model to merge RELATED (not near-identical) lessons into one.
 
-    This is deliberately never automatic - not on a timer, not at session close.
-    A local model rewriting stored memory is exactly where one bad merge poisons
-    every future run, and the 2026-07-02 audit put background reflection agents on
-    its explicitly-not list. Near-identical records are already collapsed
-    deterministically by add(); this only touches the looser related band, and it
-    ARCHIVES every input, so any merge it gets wrong is reversible via restore().
+    Never automatic - not on a timer, not at session close. Near-identical
+    records are already collapsed deterministically by add(); this only touches
+    the looser related band, and it ARCHIVES every input, so a merge it gets
+    wrong is reversible via restore().
 
     Returns a report ({groups, merged, replaced, skipped, archived, warning}) so
-    the caller can tell the user what happened rather than mutating silently. A
-    group whose merge comes back unusable is LEFT ALONE, never dropped."""
+    the caller can tell the user what happened. A group whose merge comes back
+    unusable is LEFT ALONE, never dropped."""
     from localm.debuglog import logger
     eps = store.all()
     out = {"groups": 0, "merged": 0, "replaced": 0, "skipped": 0, "archived": 0}
@@ -929,7 +911,7 @@ def _build_reflect_prompt(task: str, outcome: str, files: list, diff: str,
         + "\n\nWORK LOG (unified diff of the changes):\n" + diff_s
     )
     # The tool and command failures the session hit, capped and neutralised like
-    # the diff, used to fill what_failed.
+    # the diff. Fills what_failed.
     err_s = neutralise((errors or "").strip()[:max_error_chars])
     if err_s:
         prompt += (
@@ -996,15 +978,13 @@ def reflect_and_store(
 ) -> Episode:
     """Ask the model to reflect on a finished session, then store one episode.
 
-    Caller gates this on the privacy contract (privacy mode / restricted sessions
-    must not call it). *errors* is a bounded trace of the tool/command failures the
-    session hit; it is fed to the reflection as evidence for what_failed (cluster
-    13), and, when the model produces nothing usable, is stored as a thin FAILURE
-    episode so the most valuable lessons (what went wrong) are not lost to a weak
-    model (cluster 11). A no-evidence unusable reply yields an EMPTY episode that is
-    NOT stored (a blank record would only dilute retrieval) - the skip is logged so
-    a silently non-learning setup is discoverable (rule 5); episodic memory is
-    best-effort and must never break a coder run.
+    Caller gates this on the privacy contract (privacy mode and restricted
+    sessions must not call it). *errors* is a bounded trace of the tool/command
+    failures the session hit; it is fed to the reflection as evidence for
+    what_failed, and, when the model produces nothing usable, is stored as a
+    thin FAILURE episode. A no-evidence unusable reply yields an EMPTY episode
+    that is NOT stored, and the skip is logged. Best-effort: it never breaks a
+    coder run.
     """
     prompt = _build_reflect_prompt(task, outcome, files, diff, max_diff_chars,
                                    errors, max_error_chars)

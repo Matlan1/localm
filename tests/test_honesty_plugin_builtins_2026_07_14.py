@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Honesty-audit (AGENTS.md rule 5) fixes for the plugin builtins.
+"""Failure-surfacing behaviour in the plugin builtins.
 
-Each test guards a site that used to hide a real failure - a swallowed exception,
-a silenced warning, or a false cause reported in place of the true one. The fix is
-always to SURFACE (a debug/WARNING log, or the honest error), keep the guard, and
-not crash. Every test has a built-in negative case: it fails against the pre-fix
-code (proven by git-stashing the source and re-running) and passes after.
+Each test covers a site that could hide a real failure - a swallowed exception,
+a silenced warning, or a false cause reported in place of the true one - and
+asserts that it SURFACES (a debug/WARNING log, or the honest error), keeps its
+guard, and does not crash.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ import pytest
 
 def test_scheduler_loop_logs_tick_failure(monkeypatch):
     """An unreadable jobs.json makes store.list() raise every tick, which halts
-    ALL scheduled jobs. The old `except: pass` hid it; the loop must now WARN."""
+    ALL scheduled jobs; the loop WARNs rather than swallowing it."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
 
     class BoomStore:
@@ -99,8 +98,8 @@ def test_self_describe_image_propagates_transport_error(monkeypatch):
 
 
 def test_image_extract_reports_honest_cause_not_empty(monkeypatch):
-    """End to end: extract_bytes must wrap the REAL error ("Image description
-    failed: ...") instead of the misleading "returned empty description"."""
+    """End to end: extract_bytes wraps the REAL error ("Image description
+    failed: ...") rather than reporting "returned empty description"."""
     import localm.plugins.builtin.rag.plug as ragplug
     import localm.selfclient as selfclient
     from localm.rag.extract import ExtractError, extract_bytes
@@ -187,8 +186,8 @@ def test_read_memory_distinguishes_absent_from_unreadable(tmp_path, monkeypatch)
 
 
 def test_unreadable_legacy_memory_not_marked_migrated(tmp_path, monkeypatch):
-    """The core false-success bug: an exists-but-unreadable chat-memory.md must NOT
-    cause _migrate_legacy to write the permanent .legacy-imported marker."""
+    """An exists-but-unreadable chat-memory.md does not cause _migrate_legacy to
+    write the permanent .legacy-imported marker."""
     monkeypatch.setenv("LOCALM_MODE", "log")             # persist enabled
     import localm.plugins.builtin.memory.plug as plug
     from localm.memory import MemoryStore
@@ -288,8 +287,8 @@ def test_self_classify_logs_on_failure(monkeypatch):
 
 
 def test_self_classify_logs_on_non_ok_response(monkeypatch):
-    """self_request never raises on a non-2xx, so a non-ok HTTP response was the
-    silent fall-through path - it must be logged too."""
+    """self_request never raises on a non-2xx, so a non-ok HTTP response is
+    logged on its way to the fall-through as well."""
     import localm.plugins.builtin.rag.plug as ragplug
     import localm.selfclient as selfclient
 

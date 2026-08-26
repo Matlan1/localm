@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Role-based ComfyUI node resolution (I3 / MEDIA-1).
+"""Role-based ComfyUI node resolution.
 
-These pin the contract that injection resolves nodes by class_type + graph edges
-rather than hardcoded ids, so a user's own exported graph - with arbitrary node
-ids - is driven correctly. The end-to-end test runs generate_video against a fully
-RENUMBERED Wan graph and proves the prompt/seed/latent/fps still land in the right
-places.
+Injection resolves nodes by class_type plus graph edges, never by hardcoded ids,
+so a user's own exported graph with arbitrary node ids is driven correctly. The
+end-to-end test runs generate_video against a fully RENUMBERED Wan graph and
+checks the prompt, seed, latent and fps still land in the right places.
 """
 
 import json

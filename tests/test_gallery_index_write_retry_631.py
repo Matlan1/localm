@@ -1,33 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-631 (regression audit 2026-07-14): the gallery ownership index's atomic
-write had no retry and no temp cleanup, so on Windows an external open of the
-index file failed the whole request and orphaned a temp file.
+"""The gallery ownership index's atomic write needs a bounded retry and temp
+cleanup, or on Windows an external open of the index file fails the whole request
+and orphans a temp file.
 
 ``gallery._write_index`` (called from ``stamp_owner`` on EVERY image/music/video
 generation, and from ``forget_owner`` / ``rename_owner`` on delete/move/rename)
-wrote a unique temp then called ``os.replace(tmp, p)``. If any external process
+writes a unique temp then calls ``os.replace(tmp, p)``. If any external process
 holds ``gallery_index/<kind>.json`` open WITHOUT FILE_SHARE_DELETE at that
 instant - an antivirus mid-scan, the Windows Search Indexer, a backup agent, or
 the user's own file browser - os.replace raises PermissionError (WinError 5/32).
-With no bounded retry and no try/finally:
+Without a bounded retry and a try/finally:
 
- (a) the exception propagated and 500'd the request even though the media file
-     was already written to disk, so the caller believed generation/delete had
-     failed while the new file sat there un-stamped (hence untracked, and by
+ (a) the exception propagates and 500s the request even though the media file is
+     already written to disk, so the caller believes generation/delete failed
+     while the new file sits there un-stamped (hence untracked, and by
      owner_of()'s untracked default, open); and
- (b) the unique temp file was orphaned in gallery_index/, one per failure.
+ (b) the unique temp file is orphaned in gallery_index/, one per failure.
 
-The prior code did a plain in-place ``p.write_text(...)``, which needs only write
-access and does not require the existing handle to permit delete-sharing - so it
-SUCCEEDED in exactly the concurrent-external-open cases where os.replace now
-fails. That makes it a real Windows-only regression on the happy path.
-
-The repo already had the established fix: ``storekit.atomic_write`` (PR #566),
-the shared kernel helper with the bounded PermissionError retry, which
-rag/store.py and memory/store.py already delegate to. _write_index now uses it
-too rather than hand-rolling a third copy - the exact drift storekit exists to
-stop. The temp-cleanup half was missing from storekit itself and is fixed there,
-so every caller stops leaking.
+_write_index therefore delegates to ``storekit.atomic_write``, the shared kernel
+helper with the bounded PermissionError retry that rag/store.py and
+memory/store.py also use, and the temp cleanup lives in storekit so every caller
+gets it.
 """
 
 from __future__ import annotations

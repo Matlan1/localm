@@ -13,9 +13,8 @@ The regression: ``comfy_api/internal/__init__.py::make_locked_method_func`` does
 ``getattr(type_obj, func).__func__``, assuming a node's FUNCTION is a bound method.
 A node whose FUNCTION resolves to a plain function (the core audio VAEDecodeAudio,
 used by native ACE-Step) has no ``.__func__`` -> ``AttributeError: 'function'
-object has no attribute '__func__'``. Refs: Comfy-Org/ComfyUI #12116,
-patientx/ComfyUI-Zluda #424. The fix makes that one access tolerant of a plain
-function; everything else is a faithful copy of the upstream body.
+object has no attribute '__func__'``. The patch makes that one access tolerant of
+a plain function; everything else is a faithful copy of the upstream body.
 
 Hard rules for this file (do not relax):
 - It MUST NOT import localm - it runs inside the ComfyUI interpreter, not localm's.
@@ -23,16 +22,15 @@ Hard rules for this file (do not relax):
   and can never break ComfyUI startup.
 - It is conservative: it patches ONLY when make_locked_method_func exists AND has
   the exact known signature AND still does the fragile UNGUARDED ``.__func__``
-  access. On any unexpected or already-fixed shape it no-ops, so it self-expires
-  the moment upstream ships its own fix.
+  access. On any unexpected or already-fixed shape it no-ops, so it stops
+  applying once upstream ships its own fix.
 - It prints ONE line, only when it actually patches, so a real patch is
-  discoverable (localm captures the ComfyUI launcher output to a log). We do not
-  hide problems, and we do not claim a fix we did not apply.
+  discoverable (localm captures the ComfyUI launcher output to a log).
 - It best-effort chains any pre-existing sitecustomize it shadowed on the path.
 """
 
-# Deliberately no `from __future__ import annotations` and no localm imports: this
-# module is executed by the ComfyUI interpreter as a bare top-level sitecustomize.
+# No `from __future__ import annotations` and no localm imports: this module is
+# executed by the ComfyUI interpreter as a bare top-level sitecustomize.
 
 _TARGET = "comfy_api.internal"
 
@@ -205,11 +203,11 @@ def _chain_previous_sitecustomize():
 
 
 # Run at import (interpreter startup). Every callee is already internally guarded,
-# but a sitecustomize must NEVER break the interpreter it loads into, so the whole
-# block is also wrapped: if anything somehow escapes, degrade to a total no-op and
-# ComfyUI runs exactly as if the shim were not present. This is not hiding a problem
-# - it is the documented fallback (the INFO line prints ONLY on a real patch, so "no
-# line" honestly means "not patched" and the generation still fails with the reason).
+# and the whole block is wrapped as well: a sitecustomize must never break the
+# interpreter it loads into, so anything that escapes degrades to a total no-op and
+# ComfyUI runs exactly as if the shim were not present. The INFO line prints ONLY
+# on a real patch, so no line means not patched and the generation still fails
+# with its own reason.
 try:
     try:
         _install()

@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """ProjectMap.build: directory pruning, bounded collection, and a wall-clock
-deadline so a coder session pointed at a huge root (Z:\\) cannot appear to hang
-(CODER-1). The old build did sorted(root.rglob("*")) - it materialised and
-sorted the WHOLE tree (descending into node_modules / .git / system dirs) before
-the file cap was ever checked.
+deadline so a coder session pointed at a huge root cannot appear to hang. A
+``sorted(root.rglob("*"))`` materialises and sorts the WHOLE tree (descending
+into node_modules / .git / system dirs) before the file cap is ever checked.
 
 Also mark_dirty() / _rescan_if_dirty(): the stat-diff + listdir reconciliation
 that keeps the map from going stale after a run_shell write (which - unlike
@@ -236,21 +235,19 @@ def test_rescan_does_not_discover_a_brand_new_directory(tmp_path):
 
 
 def test_rescan_skips_new_file_discovery_on_a_capped_build(tmp_path):
-    """Live finding on the real repo: build() truncated at 300 of 1000+
-    matching files, so a directory with one tracked file could hold dozens
-    more that were NEVER candidates - a listdir sweep cannot tell those apart
-    from a file run_shell genuinely just created, and treating them the same
-    silently grew the map past max_files a little more on every dirty read
-    (measured: 79 "new" files, 45ms, on one rescan of this repo alone).
-    files_capped gates exactly that pass off; the stat-diff pass for already-
-    tracked files is unaffected, since a tracked file's own stat is
+    """build() truncates at max_files, so a directory with one tracked file can
+    hold dozens more that were NEVER candidates. A listdir sweep cannot tell
+    those apart from a file run_shell genuinely just created, and treating them
+    the same grows the map past max_files a little more on every dirty read.
+    files_capped gates exactly that pass off; the stat-diff pass for
+    already-tracked files is unaffected, since a tracked file's own stat is
     meaningful either way.
 
-    Spies on refresh_file directly, not just the outcome, so the GATE is what
-    is under test: without files_capped this is exactly the call the spy
-    would record for z.py. (The touched-a.py edit is what makes this a REAL
-    rescan rather than a no-op - mark_dirty() alone never triggers one; only
-    the next read, here pm.file_count(), does.)"""
+    Spies on refresh_file directly, not just the outcome, so the GATE is what is
+    under test: without files_capped this is exactly the call the spy would
+    record for z.py. (The touched-a.py edit is what makes this a REAL rescan
+    rather than a no-op - mark_dirty() alone never triggers one; only the next
+    read, here pm.file_count(), does.)"""
     sub = tmp_path / "pkg"
     sub.mkdir()
     (sub / "a.py").write_text("def old():\n    pass\n", encoding="utf-8")
@@ -411,7 +408,7 @@ def test_load_reconcile_returns_none_for_a_corrupt_cache(tmp_path):
 
 def test_load_reconcile_returns_none_for_wrong_shape(tmp_path):
     """A future-version or hand-edited cache with the wrong fields must fall
-    back to a full build(), never raise and never be trusted (rule 5)."""
+    back to a full build(), never raise and never be trusted."""
     cache = tmp_path / ".cache" / "cache.json"
     cache.parent.mkdir(parents=True)
     cache.write_text('{"version": 2, "files": []}', encoding="utf-8")
@@ -430,12 +427,10 @@ def test_load_reconcile_returns_none_for_a_different_root(tmp_path):
 
 def test_load_reconcile_returns_none_when_older_than_max_age(tmp_path):
     """A cache older than max_age_s is rejected. Backdates cached_at directly
-    (rather than asserting elapsed real time > 0.0) because time.time() on
-    this platform resolves via GetSystemTimeAsFileTime() at ~15.6ms
-    granularity (MEASURED: back-to-back time.time() calls return the exact
-    same value) - a save-then-load round trip this fast can complete inside
-    one tick, making elapsed == 0.0 and racing a max_age_s=0.0 bound instead
-    of testing the staleness check."""
+    rather than asserting elapsed real time > 0.0, because time.time() on this
+    platform resolves via GetSystemTimeAsFileTime() at ~15.6ms granularity: a
+    save-then-load round trip can complete inside one tick, making elapsed == 0.0
+    and racing a max_age_s=0.0 bound instead of testing the staleness check."""
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     cache = tmp_path / ".cache" / "cache.json"
     ProjectMap.build(tmp_path).save_cache(cache)

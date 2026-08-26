@@ -2,12 +2,11 @@
 """The grammar sampler works; the generation loop must never double-accept.
 
 llama_sampler_sample() already ACCEPTS the sampled token into every stateful
-sampler in the chain (upstream documents it as "sample and accept"). The loop
-used to call llama_sampler_accept() again after it, which advanced the grammar
-parser twice per token until its parse stacks emptied and it threw
-std::runtime_error across the C ABI (WinError 0xe06d7363) - misdiagnosed for
-months as "the bundled build's grammar sampler faults". It also double-counted
-every token in the repetition-penalty window.
+sampler in the chain (upstream documents it as "sample and accept"). Calling
+llama_sampler_accept() again after it advances the grammar parser twice per
+token until its parse stacks empty and it throws std::runtime_error across the
+C ABI (WinError 0xe06d7363), and double-counts every token in the
+repetition-penalty window.
 
 The unit tests pin the no-double-accept contract with the DLL never loaded;
 the @integration test proves grammar-constrained generation end to end on a
@@ -147,26 +146,17 @@ def test_route_rejects_invalid_grammar_with_400_not_silent_200():
 
 
 def test_route_reports_worker_crash_during_grammar_check_as_a_fault_not_bad_grammar():
-    """GitHub #964: a bare RuntimeError from engine.validate_grammar() means the
-    isolated worker faulted (crashed, timed out, or replied unexpectedly -
+    """A bare RuntimeError from engine.validate_grammar() means the isolated
+    worker faulted (crashed, timed out, or replied unexpectedly -
     ModelRunner._simple_request has four such shapes), which has nothing to do
-    with whether the caller's grammar is valid. Before the fix this was
-    mislabeled a 400 "Invalid grammar: <fault message>", telling the caller to
-    fix the wrong thing. It must be a 503 that names the worker fault instead
-    (with no promise of an automatic reload - only two of the four shapes
-    actually kill the worker, see the route's own comment), matching
-    /v1/embeddings' identical isolated-worker-crash handling in this same
-    file - and generation must never start on top of a fault we could not
-    actually validate against.
+    with whether the caller's grammar is valid. It must be a 503 that names the
+    worker fault, with no promise of an automatic reload (only two of the four
+    shapes actually kill the worker), matching /v1/embeddings' isolated-worker-
+    crash handling - and generation must never start on top of a fault that
+    could not be validated against.
 
-    This closes the MISLABELING, not the whole #964 report. The bug was filed
-    via the coder plugin's own HTTP client (localm/plugins/coder/backends/
-    http.py), which never reads a response body except on 401/403 and now
-    retries 503 for up to ~30s (400 was not retried) - so for THAT specific
-    caller the improved detail text below is still never seen, and 500ms
-    became ~30s of blind retries first. That gap is in a file this fix does
-    not own. This test uses a client that DOES read the body (TestClient +
-    r.json()) and only proves the server side is now honest."""
+    Uses a client that reads the response body (TestClient + r.json()), and
+    covers the server side only."""
     import os
 
     from fastapi.testclient import TestClient
@@ -241,17 +231,13 @@ def test_completions_route_reports_worker_crash_during_grammar_check_as_a_fault(
 
 
 def test_route_rejects_pathologically_nested_grammar_before_any_native_call():
-    """LM-FZ-001 regression pin: a grammar built of deep unmatched-paren nesting
-    (the exact minimized PoC that drove llama.cpp's native GBNF parser into a
-    real stack overflow - caught exception in one run, a hard
-    STATUS_ACCESS_VIOLATION process crash in another) must be rejected with a
-    clean 400 by a pure-Python structural check BEFORE it ever reaches
-    engine.validate_grammar() - not merely turned into a 400 *after* a native
-    call, which would still crash a real backend. Proven here by asserting
-    engine.validate_grammar is never even invoked, so the check protects the
-    RunnerBusy-deferred path too (which otherwise skips up-front validation
-    entirely and lets a bad grammar reach the native sampler at generation
-    time instead)."""
+    """A grammar built of deep unmatched-paren nesting drives llama.cpp's native
+    GBNF parser into a stack overflow, so it must be rejected with a clean 400
+    by a pure-Python structural check BEFORE it ever reaches
+    engine.validate_grammar(). Asserted by checking engine.validate_grammar is
+    never invoked, so the check also covers the RunnerBusy-deferred path, which
+    otherwise skips up-front validation entirely and lets a bad grammar reach
+    the native sampler at generation time."""
     import os
 
     from fastapi.testclient import TestClient
@@ -297,8 +283,8 @@ def test_check_grammar_structure_accepts_realistic_deeply_nested_grammar():
 
 
 def test_check_grammar_structure_rejects_huge_repeat_count():
-    """A `{100000}` repeat count is a second documented pathological shape
-    (LM-FZ-001) distinct from paren-depth nesting - reject it too."""
+    """A `{100000}` repeat count is a pathological shape distinct from
+    paren-depth nesting, and is rejected too."""
     from localm.inference.backends.base import InvalidGrammarError
     from localm.inference.gbnf import check_grammar_structure
 
@@ -308,15 +294,10 @@ def test_check_grammar_structure_rejects_huge_repeat_count():
 
 def test_check_grammar_structure_rejects_count_above_native_ceiling_margin():
     """MAX_GRAMMAR_REPEAT_COUNT must sit AT OR BELOW llama.cpp's real native
-    GBNF parser ceiling (measured 1999 on the bundled runtime via a live
-    check_grammar probe with a negative control - see gbnf.py's own comment),
-    not merely below some arbitrary round number. Before this test's fix,
-    MAX_GRAMMAR_REPEAT_COUNT was 10000: a repeat count of 5000 is well over
-    the real native ceiling but used to clear this structural pre-check
-    cleanly, so it would fail only much later at the native parse instead of
-    getting a clean 400 up front - exactly the failure this pre-check exists
-    to prevent. The error must also name the actual configured limit, so a
-    caller hitting it knows what to change."""
+    GBNF parser ceiling, which is 1999 on the bundled runtime. A repeat count
+    over that ceiling must get a clean 400 from this structural pre-check rather
+    than failing later at the native parse, and the error must name the actual
+    configured limit."""
     from localm.inference.backends.base import InvalidGrammarError
     from localm.inference.gbnf import MAX_GRAMMAR_REPEAT_COUNT, check_grammar_structure
 
@@ -399,10 +380,9 @@ def test_grammar_constrains_real_generation():
 def test_invalid_grammar_does_not_poison_later_valid_grammars():
     """A single MALFORMED grammar must not disable grammar for later VALID requests.
 
-    Regression pin for the poisoning bug (live-confirmed): an invalid grammar used
-    to NULL-deref the native sampler; the OSError handler latched
-    _grammar_unsupported and thereafter stripped grammar from EVERY request. The
-    fix rejects a bad grammar up front (InvalidGrammarError) so the latch never
+    An invalid grammar NULL-derefs the native sampler, and the OSError handler
+    latches _grammar_unsupported, which strips grammar from every later request.
+    A bad grammar is rejected up front (InvalidGrammarError) so the latch never
     trips and valid grammars keep constraining."""
     try:
         from localm.inference.backends.llamacpp._loader import load_lib
@@ -456,11 +436,9 @@ def test_invalid_grammar_does_not_poison_later_valid_grammars():
 #  level and at the route level.
 
 def _fast_trigger_probe_timeout(monkeypatch):
-    """Shrink BOTH probe timeouts for tests that deliberately trigger a
-    rejection, so the test does not need to wait out the production timeout
-    to prove the same property - the spawn timeout matters too, since
-    whichever test in the run happens to trigger the daemon's first spawn
-    pays THAT bound, not the steady-state one. Production values are
+    """Shrink BOTH probe timeouts for tests that trigger a rejection. The spawn
+    timeout matters too: whichever test in the run triggers the daemon's first
+    spawn pays that bound, not the steady-state one. Production values are
     unaffected outside the test."""
     import localm.inference.gbnf as gbnf
     monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_TIMEOUT", 0.5)
@@ -492,8 +470,8 @@ def test_static_shape_rejection_accepts_legitimate_patterns():
 
 
 def test_static_shape_rejection_catches_the_928_pattern_shape():
-    """The exact historical #928/#833 shape - a leading unanchored wildcard -
-    must be caught here, for free, without ever touching the daemon."""
+    """A leading unanchored wildcard must be caught here, without ever touching
+    the daemon."""
     from localm.inference.gbnf import _static_shape_rejection
 
     reason = _static_shape_rejection(r"[\s\S]*?(<tool_call>[\s\S]*)")
@@ -501,9 +479,8 @@ def test_static_shape_rejection_catches_the_928_pattern_shape():
 
 
 def test_static_shape_rejection_catches_nested_quantifiers():
-    """The other textbook catastrophic-backtracking shape, independent of
-    this codebase's own history: a group with its own top-level quantifier,
-    itself immediately re-quantified."""
+    """The other textbook catastrophic-backtracking shape: a group with its own
+    top-level quantifier, itself immediately re-quantified."""
     from localm.inference.gbnf import _static_shape_rejection
 
     for pattern in (r"(a+)+", r"(a*)*b", r"(x{2,})+"):
@@ -512,17 +489,12 @@ def test_static_shape_rejection_catches_nested_quantifiers():
 
 
 def test_static_shape_rejection_catches_oversized_pattern():
-    """No length cap existed anywhere on a caller-supplied trigger pattern
-    before it reached re.compile() in the isolated daemon (_trigger_probe.py)
-    - found in cross-session review after the grammar_triggers fix landed.
-    An uncapped pattern still costs real CPU before any adversarial-shape
-    logic runs: _static_shape_rejection's own paren-depth scan, and (had it
-    passed the static filter) _pattern_derived_probes' character-frequency
-    scan in the daemon, are both O(len(pattern)); the pattern string is also
-    the cache key in _VALIDATED_TRIGGER_PATTERNS, so an oversized pattern is
-    retained in memory up to _MAX_CACHED_TRIGGER_PATTERNS times. Real trigger
-    patterns are tiny (TOOL_CALL_TRIGGER is ~30 chars); MAX_TRIGGER_PATTERN_
-    BYTES is far above any legitimate need while still bounding the above."""
+    """A caller-supplied trigger pattern longer than MAX_TRIGGER_PATTERN_BYTES
+    must be rejected by the static filter. An uncapped pattern costs real CPU
+    before any adversarial-shape logic runs (_static_shape_rejection's
+    paren-depth scan and _pattern_derived_probes' character-frequency scan are
+    both O(len(pattern))), and the pattern string is the cache key in
+    _VALIDATED_TRIGGER_PATTERNS."""
     from localm.inference.gbnf import MAX_TRIGGER_PATTERN_BYTES, _static_shape_rejection
 
     oversized = "a" * (MAX_TRIGGER_PATTERN_BYTES + 1)
@@ -565,19 +537,13 @@ def test_oversized_pattern_rejected_without_reaching_the_probe():
 
 
 def test_n_distinct_known_shape_attacks_never_reach_the_probe():
-    """The actual DoS-amplification fix, proven directly: N distinct
-    catastrophic patterns (same historical shape, different literals so
-    none share a cache entry) must reject in a time that could ONLY be
-    explained by the static filter - the production probe timeout alone
-    (seconds each) would make N of them take N times that.
+    """N distinct catastrophic patterns (same shape, different literals so none
+    share a cache entry) must reject in a time that could only be explained by
+    the static filter; the production probe timeout alone would make N of them
+    take N times that.
 
-    CPU time (time.process_time()), not wall-clock: an upper-bound elapsed
-    assertion on a shared box is exactly the flake shape this repo already
-    hit and fixed the same night in test_redos_bounds.py's Unit A tests
-    (dev-notes/FIX-LOOP-2026-07-29.md) - contention inflates wall-clock
-    without inflating the actual (tiny, pure-Python) CPU work this loop
-    does, so a wall-clock upper bound can fail under load for reasons that
-    have nothing to do with the property under test."""
+    Asserts CPU time (time.process_time()), not wall-clock: contention inflates
+    wall-clock without inflating the pure-Python CPU work this loop does."""
     import time
 
     from localm.inference.backends.base import InvalidGrammarError
@@ -595,15 +561,11 @@ def test_n_distinct_known_shape_attacks_never_reach_the_probe():
 
 
 def test_pattern_derived_probes_are_single_character_not_interleaved():
-    """Regression pin for a real bug caught in this session before it
-    shipped: an earlier version concatenated ALL of a pattern's extracted
-    characters into one repeated probe (e.g. "aabaabaab..." for a pattern
-    naming 'a' and 'b'), which defeats itself - the interleaved 'b' acts as
-    a periodic terminator that resets the backtracking search space before
-    it can blow up, so the dangerous (a|a)*b pattern completed in ~2ms
-    against that probe despite taking 131.9s against 30 PURE 'a' characters
-    with no 'b' at all. Each derived probe must be ONE character alone,
-    repeated - never a mix."""
+    """Each derived probe must be ONE character alone, repeated - never a mix.
+    Concatenating all of a pattern's extracted characters into one repeated
+    probe (e.g. "aabaabaab...") defeats itself: the interleaved 'b' acts as a
+    periodic terminator that resets the backtracking search space before it can
+    blow up."""
     from localm.inference._trigger_probe import _pattern_derived_probes
 
     probes = _pattern_derived_probes(r"(a|a)*b")
@@ -617,14 +579,12 @@ def test_pattern_derived_probes_are_single_character_not_interleaved():
 
 
 def test_pattern_derived_probes_catches_ambiguous_alternation_not_caught_by_static_filter(monkeypatch):
-    """The other half of the composition: an ambiguous-alternation pattern
-    like (a|a)*b is genuinely catastrophic (131.9s measured on 30 raw 'a'
-    characters) but matches NEITHER static shape (no leading wildcard, and
-    the group has no quantifier of its OWN - only alternation, which
-    _static_shape_rejection does not and cannot cheaply analyze). It must
-    still be caught, by the probe layer, using a probe DERIVED from the
-    pattern's own characters (see _pattern_derived_probes) - proving the
-    two layers are not redundant, each catches what the other cannot."""
+    """The other half of the composition: an ambiguous-alternation pattern like
+    (a|a)*b is genuinely catastrophic but matches NEITHER static shape (no
+    leading wildcard, and the group has no quantifier of its OWN - only
+    alternation, which _static_shape_rejection cannot cheaply analyze). It must
+    still be caught by the probe layer, using a probe DERIVED from the
+    pattern's own characters (see _pattern_derived_probes)."""
     import time
 
     from localm.inference.backends.base import InvalidGrammarError
@@ -648,12 +608,10 @@ def test_pattern_derived_probes_catches_ambiguous_alternation_not_caught_by_stat
 
 
 def test_pattern_derived_probes_includes_punctuation_characters():
-    """The isalnum() filter (closed 2026-08-11) meant a pattern whose
-    catastrophic-backtracking ambiguity is keyed to a PUNCTUATION character -
-    e.g. the literal comma in ``(,|,)*b`` - never got a derived probe for
-    that character at all, since isalnum() silently dropped it before the
-    frequency count ever saw it. Every distinct character the pattern names
-    is now a candidate, not just alnum() ones."""
+    """Every distinct character the pattern names is a probe candidate, not
+    just alnum() ones - so a pattern whose catastrophic-backtracking ambiguity
+    is keyed to a PUNCTUATION character, e.g. the literal comma in
+    ``(,|,)*b``, still gets a derived probe for it."""
     from localm.inference._trigger_probe import _pattern_derived_probes
 
     probes = _pattern_derived_probes(r"(,|,)*b")
@@ -665,14 +623,9 @@ def test_pattern_derived_probes_includes_punctuation_characters():
 
 def test_pattern_derived_probes_catches_ambiguous_alternation_keyed_to_punctuation(monkeypatch):
     """Same defect class as test_..._not_caught_by_static_filter above, but
-    keyed to a PUNCTUATION character rather than a letter - the isalnum()
-    bypass this closes (2026-08-11): before the fix, _pattern_derived_probes
-    silently dropped every non-alnum character from consideration, so a
-    pattern whose ambiguity is keyed to a literal comma got NO derived probe
-    for it and passed validation despite being genuinely catastrophic (same
-    mechanism as ``(a|a)*b``, just keyed to ``,`` instead of ``a`` - neither
-    fixed probe contains a repeated comma either, so nothing else would
-    catch it)."""
+    keyed to a PUNCTUATION character rather than a letter: ``(,|,)*b`` is the
+    same catastrophic mechanism as ``(a|a)*b``, and neither fixed probe
+    contains a repeated comma, so only a derived probe can catch it."""
     import time
 
     from localm.inference.backends.base import InvalidGrammarError
@@ -715,11 +668,9 @@ def test_pattern_derived_probes_still_bounded_with_many_punctuation_characters()
 
 
 def test_validate_trigger_patterns_accepts_the_fixed_tool_call_trigger():
-    """Dogfood check: localm's OWN production trigger pattern (post-#933) must
-    pass its own validator - proves the validator is not so tight it rejects
-    the exact pattern this codebase ships, and stands as a regression guard
-    against a FUTURE dangerous pattern being reintroduced into
-    TOOL_CALL_TRIGGER without anyone noticing."""
+    """Dogfood check: localm's OWN production trigger pattern must pass its own
+    validator, so a dangerous pattern cannot be introduced into
+    TOOL_CALL_TRIGGER unnoticed."""
     from localm.inference.gbnf import TOOL_CALL_TRIGGER, validate_trigger_patterns
 
     validate_trigger_patterns([TOOL_CALL_TRIGGER])  # must not raise
@@ -736,22 +687,13 @@ def test_validate_trigger_patterns_accepts_a_different_legitimate_pattern():
 
 
 def test_validate_trigger_patterns_rejects_the_old_catastrophic_pattern():
-    """Regression pin: the EXACT pre-#933 TOOL_CALL_TRIGGER pattern - the one
-    that actually crashed #928/#833 - must be rejected by the validator, not
-    merely fixed in localm's own copy. Proves the general defense catches the
-    specific historical defect, not just a synthetic example of it.
+    """The catastrophic TOOL_CALL_TRIGGER pattern must be rejected by the
+    validator itself, not merely absent from localm's own copy.
 
-    Also a regression pin for the DoS-amplification fix: this exact shape
-    (leading unanchored wildcard) must be caught by _static_shape_rejection,
-    the cheap in-process layer, NOT the daemon probe - proven by requiring
-    the rejection to complete near-instantly with NO monkeypatched timeout
-    (the production timeouts are seconds; a fast completion here can only
-    mean the probe was never reached). MEASURED live before this static
-    layer existed: rejecting this exact pattern took ~10s (the probe's
-    SPAWN timeout, not even the steady-state one, because every prior
-    rejection kills and respawns the daemon) - and N distinct such patterns
-    serialize behind the probe's single lock at that cost EACH, which is
-    the DoS this static layer exists to remove from the queue entirely."""
+    That shape (a leading unanchored wildcard) must be caught by
+    _static_shape_rejection, the cheap in-process layer, NOT the daemon probe -
+    asserted by requiring the rejection to complete near-instantly with no
+    monkeypatched timeout, since the production timeouts are seconds."""
     import time
 
     from localm.inference.backends.base import InvalidGrammarError
@@ -803,12 +745,10 @@ def test_validate_trigger_patterns_caches_by_exact_pattern_string():
 
 def test_route_rejects_catastrophic_grammar_trigger_before_any_native_call(monkeypatch):
     """The API-facing sibling of test_route_rejects_pathologically_nested_
-    grammar_before_any_native_call above: a caller-supplied grammar_triggers
-    pattern shaped like the actual #928/#833 defect must be rejected with a
-    clean 400 by validate_trigger_patterns BEFORE it reaches the native
-    sampler, proven by asserting chat_stream is never called - not merely
-    turned into a 400 after a native call/crash, which would still be able to
-    hang or take down a real backend."""
+    grammar_before_any_native_call above: a catastrophically-shaped
+    caller-supplied grammar_triggers pattern must be rejected with a clean 400
+    by validate_trigger_patterns BEFORE it reaches the native sampler, asserted
+    by checking chat_stream is never called."""
     import os
 
     from fastapi.testclient import TestClient
@@ -840,10 +780,7 @@ def test_route_rejects_catastrophic_grammar_trigger_before_any_native_call(monke
 
 def test_route_accepts_safe_grammar_trigger_and_reaches_generation():
     """The positive case: a legitimate grammar_triggers pattern must NOT be
-    blocked by the new validation - the request proceeds to generation
-    exactly as it did before this defense existed. Guards against the
-    validator becoming a false-positive trap that would violate "keep the
-    feature working" as much as removing it would have."""
+    blocked by the validation - the request proceeds to generation."""
     import os
 
     from fastapi.testclient import TestClient
@@ -878,9 +815,8 @@ def test_route_accepts_safe_grammar_trigger_and_reaches_generation():
 
 
 def test_probe_on_slot_joins_inflight_prewarm_without_duplicate_spawn():
-    """PR #943's property, carried over to the per-slot probe pool: a caller
-    that finds its slot empty must JOIN an in-flight pre-warm thread rather
-    than start a duplicate spawn.
+    """A caller that finds its slot empty must JOIN an in-flight pre-warm
+    thread rather than start a duplicate spawn.
 
     Uses Event synchronization to guarantee the fake pre-warm thread is alive
     and waiting when _probe_on_slot performs its first check (slot.proc is
@@ -952,10 +888,9 @@ class _HangingStream:
     inside re.search(), so the caller's own timeout is the only thing that can
     detect it (nothing inside one thread can interrupt a C-level match).
 
-    Patched in at the SPAWN level rather than replacing _readline_with_timeout,
-    so the real timeout helper - its reader thread, its queue, its abandonment
-    of the stuck thread - runs for real. Patching the helper instead would
-    delete the very mechanism these tests exist to measure."""
+    Patched in at the SPAWN level, not by replacing _readline_with_timeout, so
+    the real timeout helper - its reader thread, its queue, its abandonment of
+    the stuck thread - runs for real."""
 
     def __init__(self) -> None:
         self._never = threading.Event()
@@ -980,12 +915,8 @@ def _fresh_pool(monkeypatch, size: int, waiters: "int | None" = None) -> None:
     shrinks the pool cannot leak that into the next one.
 
     A FRESH WAITER GATE ALWAYS, whether or not *waiters* is given: the gate is
-    module-level state exactly like the pool, and a test that failed while a
-    thread was parked in it would otherwise hand the next test a non-zero
-    starting count - which reads as a leak in code that never ran. Pass
-    *waiters* to also set the cap; leaving it None keeps the production
-    constant, so a test that does not care about the cap is not silently
-    running against a different one."""
+    module-level state exactly like the pool. Pass *waiters* to also set the
+    cap; leaving it None keeps the production constant."""
     import queue as _queue
 
     import localm.inference.gbnf as gbnf
@@ -1001,9 +932,9 @@ def _fresh_pool(monkeypatch, size: int, waiters: "int | None" = None) -> None:
 
 
 def _wait_until(predicate, timeout: float = 5.0) -> bool:
-    """Poll *predicate* to a deadline. Used instead of a bare sleep so these
-    tests synchronise on the state they actually need rather than on a guess
-    about how fast this box is today."""
+    """Poll *predicate* to a deadline, returning whether it became true. Used
+    instead of a bare sleep so these tests synchronise on the state they need,
+    not on wall clock."""
     import time
 
     deadline = time.perf_counter() + timeout
@@ -1015,19 +946,16 @@ def _wait_until(predicate, timeout: float = 5.0) -> bool:
 
 
 def test_concurrent_dangerous_patterns_do_not_serialize(monkeypatch):
-    """THE residual, measured: N patterns that each hang their probe must cost
-    about ceil(N / pool) timeouts of wall clock, not N of them.
+    """N patterns that each hang their probe must cost about ceil(N / pool)
+    timeouts of wall clock, not N of them.
 
-    Every pattern here is UNIQUE (the cache is keyed on the exact string, and a
-    repeated pattern would be answered from it) and shaped to pass the static
-    filter, so each one genuinely reaches the daemon and genuinely waits out the
-    full timeout - which is what the 18 x 2.0s in the ruling's arithmetic were.
+    Every pattern here is UNIQUE (the cache is keyed on the exact string) and
+    shaped to pass the static filter, so each one reaches the daemon and waits
+    out the full timeout.
 
-    The assertion is deliberately loose relative to the arithmetic (8 patterns
-    over 4 slots = 2 rounds = ~1.0s, allowed up to 2.5s) because this box runs
-    many sessions at once. It is still nowhere near the ~4.0s that serial
-    execution costs, and the fires-control below pins that gap: forcing the pool
-    to 1 slot makes this same test fail on the elapsed bound."""
+    The assertion is loose relative to the arithmetic (8 patterns over 4 slots
+    = 2 rounds = ~1.0s, allowed up to 2.5s) but still well under the ~4.0s that
+    serial execution costs."""
     import time
 
     import localm.inference.gbnf as gbnf
@@ -1066,10 +994,7 @@ def test_concurrent_dangerous_patterns_do_not_serialize(monkeypatch):
 def test_a_saturated_pool_refuses_fast_instead_of_queueing(monkeypatch):
     """ADMISSION CONTROL: a caller that cannot get a slot is refused promptly,
     and is refused as UNDETERMINED - a statement about the validator, not a
-    verdict on its pattern.
-
-    Without this, concurrency alone would still let a large enough flood queue
-    without limit; it would just take pool-size times longer to get there."""
+    verdict on its pattern."""
     import time
 
     import localm.inference.gbnf as gbnf
@@ -1109,12 +1034,8 @@ def test_an_undetermined_verdict_is_never_cached(monkeypatch):
     """"I could not check this" must NEVER be remembered as "this pattern is
     bad". The cache is keyed on the pattern and lives for the process, so
     caching a transient validator failure would reject a perfectly good pattern
-    for the rest of the run.
-
-    This is not only about the new saturation case: a spawn failure has always
-    been classified as a rejection and cached as one, so before this change a
-    single failed subprocess spawn permanently poisoned whatever pattern
-    happened to arrive during it."""
+    for the rest of the run. Covers both the saturation case and a failed
+    subprocess spawn."""
     import localm.inference.gbnf as gbnf
     from localm.inference.backends.base import TriggerValidatorUnavailableError
 
@@ -1267,19 +1188,17 @@ def test_the_completions_route_also_answers_503(monkeypatch):
 
 
 def test_sequential_callers_keep_exactly_one_daemon_alive():
-    """The pool must cost NOTHING in the ordinary case, and that is a claim
-    about LIFO specifically, not about pools in general.
+    """The pool must cost NOTHING in the ordinary case, which is a property of
+    the LIFO slot queue.
 
     Handing slots out last-in-first-out re-gives the same warm slot to each
     sequential caller, so a server whose real concurrency is 1 spawns ONE
-    daemon and the other three slots stay empty. Swap the LifoQueue for a plain
-    (FIFO) Queue and the same six calls round-robin across all four slots,
-    spawning four Python subprocesses to serve a workload that never had more
-    than one caller - paying the whole pool's memory for concurrency nobody
-    used.
+    daemon and the other three slots stay empty. A plain FIFO Queue would
+    round-robin the same six calls across all four slots, spawning four Python
+    subprocesses.
 
-    Deliberately uses REAL daemons and the real protocol: the property is about
-    how many processes actually get spawned, which a faked spawn cannot show."""
+    Uses REAL daemons and the real protocol: the property is about how many
+    processes actually get spawned, which a faked spawn cannot show."""
     import localm.inference.gbnf as gbnf
 
     for i in range(6):
@@ -1330,9 +1249,8 @@ def test_the_waiter_cap_leaves_room_for_the_pool_it_guards():
 
     A waiter cap below the pool size would refuse callers that the pool was
     about to serve anyway, turning a queue bound into a throughput bound. Both
-    numbers are tunable and neither is wrong alone, so the arithmetic is what
-    has to be pinned - a test asserting `== 8` would pass while someone doubled
-    the pool and left the cap behind."""
+    numbers are tunable, so the arithmetic is what is pinned, not the
+    literals."""
     import localm.inference.gbnf as gbnf
 
     assert gbnf._TRIGGER_PROBE_MAX_WAITERS >= gbnf._TRIGGER_PROBE_POOL_SIZE, (
@@ -1346,10 +1264,8 @@ def test_a_caller_the_pool_can_serve_never_becomes_a_waiter(monkeypatch):
 
     Run with ZERO waiter permits, so any caller that consumed one would be
     refused outright. A caller with a free slot in front of it must still be
-    served: it never queues, so it must never need a permit. This is the exact
-    regression that a naive "take a permit on entry" implementation produces,
-    and it would be invisible in the saturation test below - that one only ever
-    exercises callers that DO have to queue."""
+    served: it never queues, so it must never need a permit. The saturation
+    test below cannot cover this - it only exercises callers that DO queue."""
     import localm.inference.gbnf as gbnf
 
     _fresh_pool(monkeypatch, 2, waiters=0)
@@ -1377,11 +1293,10 @@ def test_a_full_waiter_queue_refuses_immediately_instead_of_parking_a_thread(mon
 
     Both outcomes are _PROBE_UNDETERMINED, so the verdict alone cannot tell a
     capacity refusal from an ordinary slot-wait timeout - with no cap at all
-    this caller still ends up undetermined, just 3.0s later having held a
-    default-executor thread for the whole time. THE ELAPSED TIME IS THE
-    PROPERTY; the verdict is only the precondition. Asserted together with the
-    distinct reason string so a future refactor cannot satisfy this by making
-    both refusals identical again."""
+    this caller still ends up undetermined, just 3.0s later, having held a
+    default-executor thread the whole time. THE ELAPSED TIME IS THE PROPERTY;
+    the verdict is only the precondition. Asserted together with the distinct
+    reason string."""
     import time
 
     import localm.inference.gbnf as gbnf
@@ -1443,13 +1358,11 @@ def test_a_capacity_refusal_is_never_an_acceptance(monkeypatch):
 
     Deterministic: the slot and the only waiter permit are taken directly, so
     there is no thread timing in this test at all. _spawn_trigger_probe_daemon
-    is patched to explode as a second, independent guarantee - if the gate ever
-    let this caller past, it would reach a spawn that cannot succeed rather
-    than quietly probing something.
+    is patched to explode as a second, independent guarantee - a caller the
+    gate let past would reach a spawn that cannot succeed.
 
     The elapsed bound is what discriminates: without the cap this same call
-    still returns UNDETERMINED, 3.0s later, so asserting only the verdict would
-    pass with the mechanism removed."""
+    still returns UNDETERMINED, 3.0s later."""
     import time
 
     import localm.inference.gbnf as gbnf

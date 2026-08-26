@@ -81,11 +81,10 @@ def split_think(text: str) -> tuple[str, str]:
     and the concatenated reasoning with the tags removed. An unclosed ``<think>``
     runs to the end. Multiple blocks are concatenated.
 
-    Linear single pass (AUD-SPLITTHINK): scans with ``str.find`` and slices each
-    segment exactly once, so it stays O(n) even on pathologically interleaved
-    tags. The previous ThinkSplitter path re-sliced its whole buffer per tag
-    (``buf = buf[cut:]`` in a loop) - the classic O(n^2) pattern. ThinkSplitter
-    is still used for the streaming path, where each piece is small."""
+    Linear single pass: scans with ``str.find`` and slices each segment exactly
+    once, so it stays O(n) even on pathologically interleaved tags.
+    ThinkSplitter, which re-slices its whole buffer per tag, is used for the
+    streaming path, where each piece is small."""
     content: list[str] = []
     reasoning: list[str] = []
     i, n, in_think = 0, len(text), False
@@ -116,12 +115,11 @@ def strip_think(text: str) -> str:
     already-scrubbed text), then drops the think channel, including an UNCLOSED
     trailing block (a truncated thinking reply must never leak scratchpad).
 
-    This is the one helper every INTERNAL consumer of model output must run
-    before storing or parsing a reply (memory consolidation, episodic
-    summaries, job results, compaction summaries, coder reflection). The /v1
-    routes already split reasoning for clients; this covers everything that
-    never passes through them. See dev-notes/memory-audit-2026-07-02.md C1:
-    raw ``<think>`` scratchpad was stored verbatim as durable memory."""
+    This is the helper every INTERNAL consumer of model output runs before
+    storing or parsing a reply (memory consolidation, episodic summaries, job
+    results, compaction summaries, coder reflection). The /v1 routes already
+    split reasoning for clients; this covers everything that never passes
+    through them."""
     return split_think(scrub_text(text or ""))[0]
 
 

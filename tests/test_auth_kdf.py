@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The owner key is USER-CHOOSABLE, so its persisted digest gets a real KDF.
 
-CodeQL alert 88 (py/weak-sensitive-data-hashing) on ``auth._hash_key``. The
-premise that it only ever sees ``secrets.token_urlsafe(32)`` is false: it holds
-for named KEYSTORE keys, but ``localm key set KEY`` persists a key the user
+``auth._hash_key`` does not only ever see ``secrets.token_urlsafe(32)``: that
+holds for named KEYSTORE keys, but ``localm key set KEY`` persists a key the user
 provides, and ``LOCALM_API_KEY`` / a hand-edited ``auth.key`` bypass
-``set_api_key`` entirely so they are not even length- or charset-checked.
+``set_api_key`` entirely, so they are not even length- or charset-checked.
 
 The harm is not that the digest authenticates (the owner key is verified by a
 PLAINTEXT constant-time compare against ``auth.key``). It is that the digest is
@@ -201,8 +200,7 @@ def test_legacy_owner_sessions_are_relinked_to_the_derived_identity(auth):
 def test_a_job_stamped_with_the_legacy_owner_digest_stays_the_owners(auth,
                                                                     monkeypatch):
     """jobs.json is the other store holding this digest. A scheduled job stamped
-    before the upgrade must not silently lose its owner (REG-509 by a new
-    route)."""
+    before the upgrade must not silently lose its owner."""
     from localm.plugins.builtin.jobs.runner import _shell_still_authorized
     key = "correct-horse"
     auth.set_api_key(key)
@@ -288,8 +286,8 @@ def test_owner_kdf_keep_is_small_enough_to_stay_fast(auth):
     """Pins the actual fix: the constant that bounds how many full scrypt
     derivations a single set_api_key call can burn re-verifying stale,
     guaranteed-not-to-match records before minting a new one. A wall-clock
-    assertion would be flaky on a busy shared box (see test-slot-policy.md);
-    this constant IS the bound, so assert it directly."""
+    assertion would be flaky on a busy shared box; this constant IS the bound,
+    so assert it directly."""
     assert auth._OWNER_KDF_KEEP <= 4, (
         f"_OWNER_KDF_KEEP={auth._OWNER_KDF_KEEP} lets a single set_api_key "
         "call burn that many extra full scrypt derivations against kept "
@@ -374,7 +372,7 @@ def test_env_var_owner_key_works_end_to_end_and_is_derived(auth, monkeypatch):
     charset-checked - it is the sharpest version of the user-chosen case."""
     from localm.inference.http_server import _principal_from_token
     from localm import scopes as S
-    key = "hunter2"                        # shorter than MIN_KEY_LEN, on purpose
+    key = "hunter2"                        # shorter than MIN_KEY_LEN
     monkeypatch.setenv("LOCALM_API_KEY", key)
 
     assert auth.get_api_key() == key

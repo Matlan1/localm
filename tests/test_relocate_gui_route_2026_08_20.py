@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GET /api/models `missing`/`last_path` + POST /api/models/relocate - the GUI
-form of `localm relocate MODEL NEW_PATH` (PARITY-AUDIT-CLI-GUI-2026-08-19.md,
-CLI-only gap #5). No route re-pointed a registry entry before this; the GUI was
-also blind to the 'missing' condition the CLI's own `localm list` already flags.
+"""GET /api/models `missing`/`last_path` plus POST /api/models/relocate - the GUI
+form of `localm relocate MODEL NEW_PATH`, and the GUI's view of the 'missing'
+condition `localm list` flags.
 
 SECURITY: new_path always names a location on the server's own disk (unlike a
 pull spec, which may be a remote HuggingFace repo id), so relocate is gated on

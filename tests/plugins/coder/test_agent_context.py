@@ -111,7 +111,8 @@ class TestPatchModeIntercept:
         assert "+x = 2" in diff
 
     def test_edit_file_wrong_keys_produce_no_diff(self, tmp_path):
-        """Verify the old bug is gone: 'old_string'/'new_string' no longer used."""
+        """'old_string'/'new_string' are not the keys read, so they yield empty
+        strings and no diff."""
         agent = _make_agent(tmp_path)
         agent.patch_mode = True
 
@@ -134,7 +135,8 @@ class TestPatchModeIntercept:
         assert result == raw_diff
 
     def test_patch_file_old_key_patch_returns_none(self, tmp_path):
-        """Verify old bug is gone: 'patch' key is no longer used."""
+        """A 'patch' key is not read: with no 'diff' key the intercept returns
+        None."""
         agent = _make_agent(tmp_path)
         agent.patch_mode = True
 

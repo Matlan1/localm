@@ -3,10 +3,9 @@
 
 The actual synthesis happens client-side (``static/tts.js`` loads Kokoro through
 the vendored ``kokoro-js`` and caches the model in the browser), so this server
-module is deliberately tiny: it serves the plugin's static assets and reports the
-resolved engine/voice config. Nothing is written to disk, so privacy mode stays
-trace-free with no extra gating (the in-browser path inherits chat's no-traces
-property for free).
+module only serves the plugin's static assets and reports the resolved
+engine/voice config. Nothing is written to disk, so privacy mode stays
+trace-free with no extra gating.
 
 Routes (mounted by the engine, auto-scoped to the ``tts`` capability):
   GET /api/tts/status   - is the plugin usable / which engine
@@ -18,12 +17,11 @@ defaults live in the tracked ``tts.example.json`` template, and the user's
 non-tracked overrides under ``config["plugins"]["tts"]`` win over them. The
 default model id lives ONLY in the template, never hard-coded in this module.
 
-WRITING those overrides is deliberately NOT here: the settings surface is
-GET/POST ``/v1/tts/config`` in ``localm.inference.routes.config`` (validated by
+WRITING those overrides is NOT here: the settings surface is GET/POST
+``/v1/tts/config`` in ``localm.inference.routes.config`` (validated by
 ``settings_schema.validate_tts_block``, mirroring the per-plugin media config).
-Routes mounted here are auto-scoped to the ``tts`` capability, so a plain
-"may use text-to-speech" key would otherwise be able to rewrite the model id and
-the script URL every browser loads. Changing settings costs ``config:write``.
+Routes mounted here are auto-scoped to the ``tts`` capability, so changing a
+setting costs ``config:write`` rather than a plain "may use text-to-speech" key.
 """
 
 from __future__ import annotations
@@ -45,9 +43,9 @@ def _resolved() -> dict:
         try:
             override = _host.plugin_config("tts")
         except Exception as e:
-            # Best-effort by design: a config-layer hiccup must not break TTS,
-            # but the user's overrides silently reverting to the template
-            # defaults needs a trace to be diagnosable.
+            # Best-effort: a config-layer failure must not break TTS, and is
+            # logged so a silent revert to the template defaults is
+            # diagnosable.
             logger.debug("tts: plugin_config('tts') failed (%s); "
                          "using template defaults for this request", e)
             override = {}

@@ -13,9 +13,9 @@ def _refuse_if_locked(console):
 
     A `rag` write shares its collection with a running server (its scheduler, or
     an add from the GUI). The store waits a bounded time for that other process
-    and then refuses rather than interleaving with it, so the CLI's job here is
-    to report WHO holds the collection - which the error already names - instead
-    of showing a traceback for what is a normal, recoverable situation."""
+    and then refuses rather than interleaving with it; the refusal names who
+    holds the collection, and that message is printed instead of a
+    traceback."""
     from rich.markup import escape
 
     from ..rag import CollectionLockedError
@@ -82,7 +82,7 @@ def rag_add(collection, paths, force, embed, url):
     Folders are indexed recursively (txt/md/pdf/docx/html/code). Unchanged
     files (same content) are skipped; changed ones are re-indexed. Use --force
     to re-index regardless. By default CLI indexing is lexical-only; pass --embed
-    to add embeddings via a running server, matching the GUI (REC-RAG-EMBED-PARITY).
+    to add embeddings via a running server, matching the GUI.
 
     \b
     Examples:
@@ -97,10 +97,9 @@ def rag_add(collection, paths, force, embed, url):
     console = Console()
     coll = run_or_die(Collection, collection)
     embed_fn = _cli_rag_embed_fn(url) if embed else None
-    # Same expression as `rag reembed` (below): the configured embedding model's
-    # name, so a fresh collection ends up with embedding_model() on record (FIX4)
-    # instead of only reembed() ever writing it. None (never embedded) is fine -
-    # the store only records it the first time embedding actually succeeds.
+    # The configured embedding model's name, so a fresh collection ends up with
+    # embedding_model() on record. None (never embedded) is fine: the store only
+    # records the name the first time embedding actually succeeds.
     model_name = None
     if embed:
         from localm.config import load_config
@@ -156,20 +155,18 @@ def rag_repair(collection, embed, url, yes):
     paths = coll.documents()
     if not paths:
         if coll.corrupt:
-            # Corrupt is not the same as empty: say so instead of the misleading
-            # "no indexed documents" (AGENTS rule 5 - do not hide the problem).
+            # Corrupt is not the same as empty: say so instead of "no
+            # indexed documents".
             console.print(f"[yellow]'{escape(collection)}' index is corrupt and no "
                           "document sources survived to rebuild from.[/yellow]")
         else:
             console.print(f"[yellow]'{escape(collection)}' has no indexed documents.[/yellow]")
         return
     # An `upload:<name>` doc has no server-side source - the uploaded bytes are
-    # never retained (add_uploads' own docstring) - so add_paths silently drops
-    # it (Path('upload:x').is_file() is always False) and repair would touch
-    # nothing for it. A collection built ENTIRELY from uploads used to get a
-    # "repaired: 0 re-indexed, 0 added" success line as if something had been
-    # fixed (NEW-RAG-INDEX-WARN-SPAM residual C) - refuse honestly instead, and
-    # a MIXED collection proceeds on what it can rebuild and says what it can't.
+    # never retained - so add_paths silently drops it
+    # (Path('upload:x').is_file() is always False) and repair touches nothing
+    # for it. A collection built ENTIRELY from uploads is refused; a MIXED one
+    # proceeds on what it can rebuild and says what it cannot.
     repairable = [p for p in paths if not p.startswith("upload:")]
     upload_only = len(paths) - len(repairable)
     if not repairable:
@@ -193,31 +190,22 @@ def rag_repair(collection, embed, url, yes):
             f"[yellow]{upload_only} uploaded document(s) in '{escape(collection)}' have "
             "no server-side source and will be left as-is.[/yellow]")
     # A repair is force=True on every doc: without --embed, every re-indexed
-    # chunk gets NO vector, silently dropping a collection that currently has
-    # semantic search back to BM25-only (this is exactly the bug behind
-    # REC-RAG-REPAIR-EMBED - a plain "repaired" success line gave no hint that
-    # embeddings had just been removed). Surface it and require an explicit
-    # yes rather than hiding a real capability loss (AGENTS rule 5).
+    # chunk gets NO vector, dropping a collection that currently has semantic
+    # search back to BM25-only. Surface that and require an explicit yes.
     if not embed and coll.stats().get("has_vectors") and not yes:
         console.print(
             f"[yellow]'{escape(collection)}' currently has semantic (hybrid) search. "
             "Repairing without --embed will REMOVE the existing embeddings for "
             "every re-indexed document (it goes back to BM25/lexical-only).[/yellow]")
-        # Deliberately NOT `abort=True`: it collapses "the user answered no" and
-        # "there was no user to answer" into the same Abort. That is REG-589 - run
-        # from cron/CI/a script with no stdin, click.confirm hits EOF, and repair
-        # exits non-zero having done NOTHING, on exactly the stale/corrupt hybrid
-        # indexes it exists to rebuild. Without abort=True, an explicit "no"
-        # RETURNS False while EOF still raises Abort, so the two are separable.
+        # NOT `abort=True`: that collapses "the user answered no" and "there
+        # was no user to answer" into the same Abort. Without it, an explicit
+        # "no" RETURNS False while EOF still raises Abort, so the two stay
+        # separable.
         try:
             proceed = click.confirm("Continue and drop the embeddings?")
         except click.Abort:
-            # Nobody was there to answer. Both alternatives are bad: aborting
-            # stops repairing (REG-589), and proceeding would silently delete this
-            # collection's semantic search (REC-RAG-REPAIR-EMBED, the reason this
-            # prompt exists). So take the branch that loses NOTHING - preserve the
-            # embeddings the collection already has - and SAY so rather than
-            # choosing silently (rule 5). The repair still happens, exit 0.
+            # Nobody was there to answer: keep the embeddings the collection
+            # already has, say so, and let the repair run (exit 0).
             console.print(
                 "[yellow]Not an interactive terminal, so nothing can answer that. "
                 "Repairing WITH embeddings so they are not lost - pass --yes to "
@@ -287,9 +275,9 @@ def rag_resync(collection, embed, url, prune_missing):
         console.print(f"[red]No such collection:[/red] {escape(collection)}")
         sys.exit(1)
     if not coll.roots():
-        # Not an error: the collection works, it just has no folder to re-walk,
-        # so a re-sync can only refresh the files it already knows. Say which it
-        # is rather than reporting a bare "0 added" that looks like a no-op.
+        # Not an error: with no folder to re-walk, a re-sync can only refresh
+        # the files it already knows, so say that rather than reporting a bare
+        # "0 added".
         console.print(
             f"[yellow]'{escape(collection)}' has no indexed folders recorded, so this "
             f"only re-checks its {len(coll.documents())} known document(s). "
@@ -303,11 +291,10 @@ def rag_resync(collection, embed, url, prune_missing):
         from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
         model_name = str(load_config().get("embedding_model")
                           or DEFAULT_EMBEDDING_MODEL).strip()
-    # policy=None, exactly like `rag add` from the CLI: the local operator can
-    # already read their own files, so they stay unconfined (the credential-dir
-    # hard floor still applies inside confine_index_path). The SCHEDULED job path
-    # is different on purpose and passes indexing_policy() - it is not a local
-    # operator and can be created through the API by a scoped key.
+    # policy=None, like `rag add` from the CLI: a local operator stays
+    # unconfined (the credential-dir hard floor still applies inside
+    # confine_index_path). The SCHEDULED job path passes indexing_policy()
+    # instead.
     with _refuse_if_locked(console):
         result = coll.resync(
             embed_fn=embed_fn, policy=None, prune_missing=prune_missing,
@@ -336,7 +323,7 @@ def rag_resync(collection, embed, url, prune_missing):
                       f"nothing under it was indexed, flagged, or removed."
                       f"[/yellow]")
     if result.get("vector_degrade_reason"):
-        # The store logs this, but a CLI user does not read the debug log.
+        # Also logged by the store.
         console.print(
             f"[yellow]Semantic search is degraded: "
             f"{escape(result['vector_degrade_reason'])}. The stored vector index was "
@@ -392,9 +379,8 @@ def rag_reembed(collection, url, yes):
             res = coll.reembed(embed_fn=_cli_rag_embed_fn(url), model_name=model,
                                on_progress=lambda m, **_: console.print(f"[dim]{escape(m)}[/dim]"))
         except Exception as e:
-            # The previous index is intact by construction (reembed only swaps it
-            # in after the whole set is computed and validated), so say so - the
-            # user's next question is always "did I just lose my collection?".
+            # reembed only swaps the new index in after the whole set is
+            # computed and validated, so the previous one is still intact.
             console.print(f"[red]Re-embed failed: {escape(str(e))}[/red]")
             console.print("[dim]The previous index was left untouched.[/dim]")
             raise SystemExit(1)
@@ -405,10 +391,11 @@ def rag_reembed(collection, url, yes):
 
 def _cli_rag_embed_fn(url):
     """Build a query embedder that calls a running localm server's
-    /v1/embeddings (for `rag query --embed`), so the CLI gets the same hybrid
-    retrieval the GUI does. Returns a lazy callable - it only connects when the
-    query is actually embedded, so a missing server degrades to lexical-only
-    inside Collection.query rather than failing the command. *url* overrides the
+    /v1/embeddings (for `rag query --embed`).
+
+    Returns a lazy callable: it only connects when the query is actually
+    embedded, so a missing server degrades to lexical-only inside
+    Collection.query rather than failing the command. *url* overrides the
     auto-discovered base URL."""
     base = url
     if not base:
@@ -425,17 +412,11 @@ def _cli_rag_embed_fn(url):
     base = base.rstrip("/")
     embeddings_url = base + ("/embeddings" if base.endswith("/v1") else "/v1/embeddings")
 
-    # Send the CONFIGURED embedding model name, exactly as the GUI's server-side
-    # self-embed does (plugins/builtin/rag/plug.py _make_self_embed). The old
-    # hardcoded "model": "localm" was the bug: /v1/embeddings routes an embed
-    # request to the dedicated embedder ONLY when the model name matches the
-    # registered embedder OR the configured `embedding_model` (see
-    # inference/routes/chat.py). "localm" matches neither, so with a dedicated
-    # embedder and no chat model loaded it fell through to the chat path and
-    # 503'd - making EVERY `rag add/query --embed` from the CLI silently index
-    # lexical-only, while the GUI (which sends the config name) got real
-    # embeddings. This is the REC-RAG-EMBED-PARITY the docstring promised but the
-    # name broke.
+    # Send the CONFIGURED embedding model name, as the GUI's server-side
+    # self-embed does: /v1/embeddings routes an embed request to the dedicated
+    # embedder ONLY when the model name matches the registered embedder OR the
+    # configured `embedding_model`, and otherwise falls through to the chat
+    # path.
     from localm.config import load_config as _lc
     from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
     _emb_model = str(_lc().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip() or "localm"
@@ -445,10 +426,8 @@ def _cli_rag_embed_fn(url):
         from localm import tls as _tls
         from localm.auth import get_api_key
         headers = {}
-        # env var, else the persisted <home>/auth.key: a `localm key generate` /
-        # launcher-keyed server keeps the key in auth.key, not the env, so reading
-        # env-only 401'd every --embed call and silently indexed lexical-only
-        # (memory-audit cluster 19).
+        # get_api_key() reads the env var, else the persisted <home>/auth.key,
+        # where a `localm key generate` / launcher-keyed server keeps it.
         key = get_api_key()
         if key:
             headers["Authorization"] = f"Bearer {key}"
@@ -579,8 +558,8 @@ def rag_rm(collection, yes):
                       "kept; only the index is removed.", abort=True)
     with _refuse_if_locked(console):
         try:
-            # on_wait so a delete that queues behind a running index says why it
-            # is sitting there, rather than looking hung for up to 30 seconds.
+            # on_wait: a delete that queues behind a running index reports
+            # what it is waiting for.
             if delete_collection(
                     collection,
                     on_wait=lambda t: console.print(f"  [dim]{escape(t)}[/dim]")):

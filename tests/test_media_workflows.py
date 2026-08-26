@@ -131,10 +131,9 @@ def test_router_endpoints_list_upload_select_delete():
 
 
 def test_upload_route_504s_when_the_write_hangs_past_budget(monkeypatch):
-    """Follow-up to #1057: before this fix, a wedged save_workflow() call left
-    the HTTP request hanging forever. Now it returns a clear 504 within the
-    configured budget - proven end to end through the real route, not just
-    the underlying wrapper (see test_threadpool_timeout.py for that)."""
+    """A wedged save_workflow() call must not leave the HTTP request hanging:
+    the route returns a clear 504 within the configured budget, proven end to
+    end through the real route rather than only the underlying wrapper."""
     import time as _time
 
     from fastapi import FastAPI
@@ -165,26 +164,24 @@ def test_upload_route_504s_when_the_write_hangs_past_budget(monkeypatch):
 
 
 def test_rmw_timeout_has_headroom_over_a_single_holders_own_work_ceiling():
-    """Structural guard (diff-review-discipline: assert the ARITHMETIC, not
-    the literal): _WORKFLOW_RMW_TIMEOUT_S is the budget every route actually
-    uses, but all four routes share ONE _lock_for(media) lock acquired INSIDE
-    that same bounded call - so a request's own clock also covers however
-    long it waits behind another holder. If this ever regresses to matching
+    """Structural guard, asserting the ARITHMETIC rather than the literal:
+    _WORKFLOW_RMW_TIMEOUT_S is the budget every route actually uses, but all
+    four routes share ONE _lock_for(media) lock acquired INSIDE that same
+    bounded call, so a request's own clock also covers however long it waits
+    behind another holder. If this regresses to matching
     _WORKFLOW_OWN_WORK_TIMEOUT_S exactly, a merely-slow (not hung) writer can
-    again collaterally 504 a concurrently-queued, otherwise-instant reader
-    sharing the same lock (see test_a_merely_slow_write_does_not_collaterally_
-    504_a_queued_read below for the reproduction)."""
+    collaterally 504 a concurrently-queued, otherwise-instant reader sharing
+    the same lock (see test_a_merely_slow_write_does_not_collaterally_
+    504_a_queued_read below)."""
     assert mw._WORKFLOW_RMW_TIMEOUT_S >= 2 * mw._WORKFLOW_OWN_WORK_TIMEOUT_S
 
 
 @pytest.mark.anyio
 async def test_a_merely_slow_write_does_not_collaterally_504_a_queued_read(monkeypatch):
-    """Regression for a cascade found in adversarial review of the #1057
-    follow-up: a write that is merely slow (not hung, and would have
-    exceeded a naive single-holder budget) must not push a concurrently-
-    queued, trivially-fast read past ITS OWN budget purely from waiting on
-    the shared per-media lock. Reproduced end to end over real concurrent
-    HTTP requests, not just at the function level."""
+    """A write that is merely slow (not hung, and over a naive single-holder
+    budget) must not push a concurrently-queued, trivially-fast read past ITS
+    OWN budget purely from waiting on the shared per-media lock. Driven end to
+    end over real concurrent HTTP requests, not just at the function level."""
     import asyncio
 
     import httpx
@@ -498,12 +495,10 @@ def test_lock_for_does_not_serialize_different_media():
 
 
 def test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_file(home):
-    """CONFIRMED by the adversarial review (live reproduction against the
-    real save_workflow(), 59-74% corruption rate across several trial
-    shapes): two real OS threads racing to save the SAME filename, with no
-    lock, produced torn/invalid JSON on disk. Under the per-media lock the
-    writes must serialize, so the file on disk must ALWAYS be valid JSON
-    matching one of the two payloads, in full, never a mix of both."""
+    """Two real OS threads racing to save the SAME filename with no lock
+    produce torn/invalid JSON on disk. Under the per-media lock the writes must
+    serialize, so the file on disk must ALWAYS be valid JSON matching one of the
+    two payloads, in full, never a mix of both."""
     small_data = {"3": {"class_type": "KSampler", "inputs": {"a": "x" * 500}}}
     large_data = {"3": {"class_type": "KSampler", "inputs": {"a": "y" * 50_000}}}
     small = json.dumps(small_data).encode()
@@ -541,12 +536,11 @@ def test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_file(home):
 
 
 def test_concurrent_list_survives_a_racing_delete(home):
-    """CONFIRMED by the adversarial review (live reproduction): a DELETE
-    landing between list_workflows' is_file() check and its later stat()
-    calls raised an unhandled FileNotFoundError -> 500. Under the lock, a
-    listing and a delete for the same media can no longer interleave at
-    all - list_workflows must never raise, no matter how many concurrent
-    deletes are racing it."""
+    """A DELETE landing between list_workflows' is_file() check and its later
+    stat() calls raises an unhandled FileNotFoundError -> 500. Under the lock, a
+    listing and a delete for the same media cannot interleave at all:
+    list_workflows must never raise, no matter how many concurrent deletes are
+    racing it."""
     d = mw.workflows_dir("image")
     d.mkdir(parents=True, exist_ok=True)
     names = [f"wf{i}.json" for i in range(20)]
@@ -580,13 +574,12 @@ def test_concurrent_list_survives_a_racing_delete(home):
 
 
 def test_concurrent_select_and_delete_never_orphans_the_selection(home):
-    """CONFIRMED by the adversarial review (live reproduction): a select and a
-    delete of the SAME file, racing, could leave config["plugins"]["image"]
-    ["workflow"] pointing at a file that no longer exists on disk - the
-    documented invariant ("a generation is never left pointing at a missing
-    file") violated. Under the lock the two operations fully serialize, so
-    after both finish, the invariant must hold: whatever is selected (if
-    anything) must still exist on disk."""
+    """A select and a delete of the SAME file, racing, can leave
+    config["plugins"]["image"]["workflow"] pointing at a file that no longer
+    exists on disk, violating the documented invariant ("a generation is never
+    left pointing at a missing file"). Under the lock the two operations fully
+    serialize, so after both finish whatever is selected (if anything) must
+    still exist on disk."""
     d = mw.workflows_dir("image")
     d.mkdir(parents=True, exist_ok=True)
     (d / "x.json").write_bytes(_WF)

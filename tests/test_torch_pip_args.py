@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The torch wheel SOURCE must be correct for EVERY hardware+OS combination, not
-just the maintainer's gfx1030 box (the "works on any hardware" rule). On Windows,
-AMD has no single ROCm wheel: gfx103X (RX 6000 / RDNA2) uses localm's bundled
-self-contained build, while RX 7000/9000 (RDNA3/RDNA4) use AMD's official Windows
-ROCm wheels (public preview). ``hwdetect.torch_pip_args`` is the single tested
-source of truth both installers consult via ``hwdetect torch-args <backend>``.
+just one box. On Windows, AMD has no single ROCm wheel: gfx103X (RX 6000 /
+RDNA2) uses localm's bundled self-contained build, while RX 7000/9000
+(RDNA3/RDNA4) use AMD's official Windows ROCm wheels (public preview).
+``hwdetect.torch_pip_args`` is the single tested source of truth both installers
+consult via ``hwdetect torch-args <backend>``.
 
-These pin the ROUTING. Executing the RX 7000/9000 Windows wheels is pending real
-RDNA3/RDNA4 hardware (the dev box is gfx1030); the gfx103X path is verified live.
+These pin the ROUTING. Executing the RX 7000/9000 Windows wheels needs real
+RDNA3/RDNA4 hardware.
 """
 
 from __future__ import annotations
@@ -48,10 +48,9 @@ def test_cuda_uses_cu126_any_os(monkeypatch):
 
 
 def test_cuda_uses_blackwell_line_when_detected(monkeypatch):
-    """The bug this pins: pytorch_index_url("cuda") used to be a flat cu126
-    regardless of hardware, so a real Blackwell GPU got a wheel with no
-    kernels for it - torch loaded but warned every device was unsupported
-    and ran CPU-only. Found live, 2026-08-11, on a real 3x-Blackwell box."""
+    """pytorch_index_url("cuda") must not be a flat cu126 regardless of
+    hardware: a real Blackwell GPU then gets a wheel with no kernels for it, so
+    torch loads but warns every device is unsupported and runs CPU-only."""
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [(12, 0)])
     args = hwdetect.torch_pip_args("cuda", _det("nvidia rtx pro 4000 blackwell", ("nvidia",)))
     assert args == "torch torchvision --index-url https://download.pytorch.org/whl/cu130"
@@ -59,9 +58,9 @@ def test_cuda_uses_blackwell_line_when_detected(monkeypatch):
 
 def test_cuda_uses_blackwell_line_if_any_of_several_gpus_is_blackwell(monkeypatch):
     """A mixed box (an older card alongside a Blackwell one) must still pick
-    the line the newest card needs - the older card is expected to remain
-    covered by the broader, newer wheel's SM target list, whereas the reverse
-    (a Blackwell card on cu126) is what is actually broken."""
+    the line the newest card needs - the older card stays covered by the
+    broader, newer wheel's SM target list, whereas a Blackwell card on cu126
+    does not run."""
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities",
                         lambda: [(8, 9), (12, 0)])
     assert hwdetect.pytorch_index_url("cuda") == "https://download.pytorch.org/whl/cu130"

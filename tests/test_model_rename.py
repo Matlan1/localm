@@ -2,8 +2,8 @@
 """
 Tests for rename_model: registry MOVE (not copy, unlike alias_model), sibling
 aliases left untouched, and best-effort migration of the config/jobs/RAG
-references that name the old model. See tests/test_model_dedup.py for the
-sibling alias_model/registry-RMW test patterns this mirrors.
+references that name the old model. Mirrors the sibling
+alias_model/registry-RMW test patterns.
 """
 
 import json
@@ -135,7 +135,7 @@ class TestRenameModelWithNotes:
     """rename_model() is a thin bool-only wrapper over this; a caller that
     needs to SHOW the migration notes to a user (the GUI route) must call
     this instead, or the honest "here is what could not be migrated" report
-    never leaves the server log (AGENTS.md rule 5)."""
+    never leaves the server log."""
 
     def test_successful_rename_always_reports_the_unreachable_localcoder_note(
             self, fake_registry, tmp_path):
@@ -172,9 +172,9 @@ class TestRenameModelWithNotes:
 
 
 class TestRenameModelRace:
-    """Same atomic-RMW discipline as TestRegistryRmwAtomicity in
-    test_model_dedup.py: a concurrent writer landing between the precheck
-    read and the atomic move must never be lost."""
+    """Same atomic-RMW discipline as the registry dedup tests: a concurrent
+    writer landing between the precheck read and the atomic move must never be
+    lost."""
 
     def _racy_load(self, mm_mod, store, monkeypatch, inject):
         real_load = mm_mod.load_registry

@@ -2,9 +2,8 @@
 """Timed-out subprocesses surface the output they produced before the kill.
 
 subprocess.TimeoutExpired carries the partial stdout/stderr captured up to the
-timeout; run_shell, run_tests and the git tools used to throw it away, so a
-command that printed real diagnostics then hung reported only "timed out"
-(2026-07-02 coder tool sweep). The helper lives in tools/base.py."""
+timeout. Discarding it leaves a command that printed real diagnostics and then
+hung reporting only "timed out". The helper lives in tools/base.py."""
 
 import subprocess
 from unittest.mock import patch
@@ -116,11 +115,11 @@ class TestGitTimeout:
 
 
 class TestGoalVerifyTimeout:
-    """CODER-2: cli/goal.py's _run_verify used to silently drop any output the
-    verification command produced before a timeout - unlike run_shell/run_tests/
-    git, which all preserve it via _partial_on_timeout. Now that all four go
-    through the shared run_subprocess() primitive, goal.py must get the same
-    partial-output behaviour, not just a bare 'timed out' message."""
+    """cli/goal.py's _run_verify must preserve any output the verification
+    command produced before a timeout, the same as run_shell/run_tests/git do via
+    _partial_on_timeout. All four go through the shared run_subprocess()
+    primitive, so goal.py gets the same partial-output behaviour rather than a
+    bare 'timed out' message."""
 
     def test_partial_output_included(self, tmp_path):
         import localm.plugins.coder.cli as cli

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Native (ggml-registry) GPU device enumeration for the vulkan build's GUI
-selectors - GPU-SPLIT-VKINDEX follow-up.
+selectors.
 
 On the vulkan build the split/main-GPU indices the loader consumes live in
 ggml-vulkan's own index space, which ``list_gpus()`` (torch.cuda / nvidia-smi)
-is structurally blind to - so the Settings selectors, which are populated from
-``list_gpus()``, could never offer or display a split there. The fix chain
-under test:
+is structurally blind to - so the Settings selectors, populated from
+``list_gpus()``, could never offer or display a split there. The chain under
+test:
 
-- ``_vram_probe`` (the crash-isolated probe daemon) answers a new ``devices``
+- ``_vram_probe`` (the crash-isolated probe daemon) answers a ``devices``
   request with a one-line JSON inventory of the ggml registry's non-CPU
   devices, alongside the existing any-other-line -> "<free> <total>" memory
   reply.
@@ -19,9 +19,8 @@ under test:
   consumers ({"index", "name", "total", "free"}), preferring the human
   description over the backend's terse name.
 
-The daemon round-trip here runs against a FAKE daemon object (no native code,
-no subprocess): the real native enumeration is exercised by the live check
-documented in dev-notes/checkup/REPORT-2026-07-21-gpu-split.md.
+The daemon round-trip here runs against a FAKE daemon object: no native code and
+no subprocess.
 """
 
 from __future__ import annotations
@@ -214,8 +213,8 @@ def test_native_gpu_devices_none_when_daemon_cannot_answer(monkeypatch):
 # skipped and META aborts fatally. So the two numberings diverge on a box with
 # a discrete card beside integrated graphics.
 #
-# The inventories below are synthetic. The single-GPU and CPU-last shapes are
-# pinned too, since those are the arrangement this dev box actually reports.
+# The inventories below are synthetic; the single-GPU and CPU-last shapes are
+# pinned too.
 
 # The ggml device-type enum has GROWN: IGPU was inserted AHEAD of ACCEL, so the
 # value 2 means ACCEL on an older runtime and INTEGRATED GPU on a newer one.
@@ -229,10 +228,10 @@ _TYPE_NOT_GPU = 2
 def _native(monkeypatch, raw):
     """Drive the REAL native_gpu_devices() over a synthetic raw inventory.
 
-    Deliberately not a direct _llama_visible_devices() call: the derivation was
-    extracted into a helper, and a test that only exercises the helper is blind
-    to whether native_gpu_devices actually applies it. These go through the
-    public function so reverting the wiring goes red."""
+    Not a direct _llama_visible_devices() call: the derivation lives in a
+    helper, and a test that only exercises the helper is blind to whether
+    native_gpu_devices actually applies it. These go through the public function
+    so reverting the wiring goes red."""
     from localm import discover
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(_loader, "gpu_devices_isolated", lambda: raw)
@@ -288,9 +287,8 @@ def test_second_discrete_card_becomes_reachable_across_an_igpu(monkeypatch):
 def test_igpu_only_box_is_left_exactly_as_it_was(monkeypatch):
     """NO REGRESSION on the commonest affected machine. With no discrete GPU,
     llama.cpp falls back to the single integrated one as device 0, which is
-    what this inventory already numbers 0 - the two agree and a load works
-    today. Returning [] here would hide a working device behind a "no GPU"
-    reading, which is a worse bug than the one being fixed."""
+    what this inventory already numbers 0 - the two agree and a load works.
+    Returning [] here would hide a working device behind a "no GPU" reading."""
     raw = [{"index": 0, "name": "Vulkan0", "description": "Intel Iris Xe",
             "type": _TYPE_NOT_GPU, "free": 6 * GB, "total": 8 * GB}]
     assert _native(monkeypatch, raw) == [
@@ -340,10 +338,10 @@ def test_all_discrete_multi_gpu_is_untouched(monkeypatch):
 
 
 def test_dev_box_single_discrete_gpu_shape_is_unchanged(monkeypatch):
-    """Pinned to the shape actually MEASURED on this project's dev box, where
-    compute_devices() reports [("ROCm0", 1), ("CPU", 0)] - the GPU FIRST and
-    the CPU LAST, which is the opposite of the instinctive fixture. The CPU is
-    already excluded upstream of here by native_device_inventory."""
+    """Pinned to the shape this project's dev box reports, where
+    compute_devices() returns [("ROCm0", 1), ("CPU", 0)] - the GPU FIRST and the
+    CPU LAST, the opposite of the instinctive fixture. The CPU is already
+    excluded upstream of here by native_device_inventory."""
     assert _native(monkeypatch, [
         {"index": 0, "name": "ROCm0",
          "description": "AMD Radeon RX 6900 XT", "type": _TYPE_GPU,

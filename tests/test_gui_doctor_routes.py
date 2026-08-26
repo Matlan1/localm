@@ -144,9 +144,9 @@ def test_a_failing_check_makes_the_verdict_fail_without_failing_the_run(app, stu
 
 
 def test_a_run_that_could_not_complete_is_reported_as_an_error(app, stub_run):
-    """The sharpest failure this route can have: an unrunnable diagnostic
-    rendering as a clean bill of health. The verdict must be ERROR, the reason
-    must survive, and the JOB must be marked failed."""
+    """An unrunnable diagnostic must not render as a clean bill of health: the
+    verdict must be ERROR, the reason must survive, and the JOB must be marked
+    failed."""
     stub_run(d.DiagnosticsReport(checks=(), verdict=d.ERROR,
                                  error="the diagnostics run did not finish within 360s"))
     with TestClient(app) as client:

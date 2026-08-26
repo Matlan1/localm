@@ -2,15 +2,14 @@
 """Pre-load KV sizing from the GGUF header (gguf_kv_bytes_per_token) and its use
 by VramSizingMixin._kv_bytes_per_token / _auto_gpu_layers.
 
-The defect these pin: the per-token KV cost used to be derived from the model's
-FILE SIZE (_bytes_per_token), but KV cost is a function of the ATTENTION shape
-only. That is wrong in both directions - it over-charges a sparse MoE, whose file
-is inflated by expert weights that cost no KV at all, and under-charges a wide-KV
-dense model. The MoE direction silently UNDER-offloads (weight budget shrinks, so
-_auto_gpu_layers picks fewer layers) and nothing warns.
+KV cost is a function of the ATTENTION shape only, never of the model's FILE
+SIZE: a file-size estimate over-charges a sparse MoE, whose file is inflated by
+expert weights that cost no KV at all, and under-charges a wide-KV dense model.
+An over-charged KV shrinks the weight budget, so _auto_gpu_layers offloads fewer
+layers.
 
-These tests build REAL GGUF headers byte by byte and drive the real parser and the
-real sizing path - no mock stands in for the code under test.
+These tests build REAL GGUF headers byte by byte and drive the real parser and
+the real sizing path.
 """
 
 import struct
@@ -44,9 +43,7 @@ def _gguf(path, kv, *, version=3, magic=b"GGUF", tensors=()):
     either a list (written as uint32) or a (element_type, list) pair.
 
     The pair form exists because REAL GGUF writers emit the per-layer
-    head_count_kv array as INT32 (type 5) - measured on real Granite 4 H and LFM2
-    headers. A helper that could only emit uint32 would make every element-type
-    bug invisible to every test here."""
+    head_count_kv array as INT32 (type 5), as Granite 4 H and LFM2 headers do."""
     out = [magic, struct.pack("<I", version),
            struct.pack("<QQ", len(tensors), len(kv))]
     for key, vtype, val in kv:
@@ -80,9 +77,9 @@ def _gguf(path, kv, *, version=3, magic=b"GGUF", tensors=()):
 
 
 def _hybrid_tensors(n_layers, attending):
-    """Tensor names for a hybrid stack: EVERY layer carries attn_norm (which is
-    why a bare "attn" match would count them all), only *attending* layers carry
-    attn_k/attn_v. Copied from the real Qwen3-Next / Granite 4 H / LFM2 files."""
+    """Tensor names for a hybrid stack: EVERY layer carries attn_norm, and only
+    *attending* layers carry attn_k/attn_v. Taken from the real Qwen3-Next /
+    Granite 4 H / LFM2 files."""
     names = []
     for i in range(n_layers):
         names.append(f"blk.{i}.attn_norm.weight")
@@ -203,14 +200,13 @@ class TestSparseMoeIsNotOverCharged:
     def test_same_attention_shape_costs_the_same_kv_whatever_the_file_size(
             self, tmp_path):
         """A sparse MoE and a dense model with the SAME attention shape have the
-        SAME KV cost per token. The file-size heuristic says otherwise, and that
-        difference is the bug."""
+        SAME KV cost per token, whatever their file sizes."""
         moe = _gguf(tmp_path / "moe.gguf", _shape("qwen3moe", 48, 2048, 16, 4))
         dense = _gguf(tmp_path / "dense.gguf", _shape("qwen3", 48, 2048, 16, 4))
         assert gguf_kv_bytes_per_token(moe) == gguf_kv_bytes_per_token(dense)
 
-        # The heuristic they replace disagrees wildly for the same attention
-        # shape because the MoE file carries expert weights.
+        # A file-size estimate disagrees wildly for the same attention shape,
+        # because the MoE file carries expert weights.
         heur_moe = GgufBackend._bytes_per_token(18 * GB)     # ~30B-A3B on disk
         heur_dense = GgufBackend._bytes_per_token(3 * GB)    # same attention, dense
         assert heur_moe != heur_dense, "precondition: the heuristic must differ"
@@ -220,9 +216,9 @@ class TestSparseMoeIsNotOverCharged:
 
 
 class TestAutoGpuLayersUsesTheRealShape:
-    """End-to-end: the over-charged KV shrank the weight budget, so _auto_gpu_layers
-    offloaded FEWER layers than would actually fit. This is the negative case - it
-    fails against the file-size-only code."""
+    """End-to-end: _auto_gpu_layers offloads the number of layers the REAL
+    attention shape allows, not the smaller number a file-size KV estimate
+    yields."""
 
     @staticmethod
     def _vram(free, total):
@@ -300,12 +296,10 @@ class TestAutoGpuLayersUsesTheRealShape:
 # --------------------------------------------------------------------------- #
 
 class TestEstimateVramUsesTheRealShape:
-    """sysstats.estimate_vram powers /api/vram-estimate (the Settings performance
-    sliders' live readout). It used to derive bytes-per-token from model_bytes
-    directly - byte-identical to the heuristic #865 replaced everywhere else,
-    just left behind in a module #865 never touched. It cannot read a GGUF
-    header itself (it only ever sees a byte count), so the caller reads the
-    header and passes the result in via kv_bytes_per_token."""
+    """sysstats.estimate_vram powers /api/vram-estimate (the Settings
+    performance sliders' live readout). It cannot read a GGUF header itself, as
+    it only ever sees a byte count, so the caller reads the header and passes
+    the result in via kv_bytes_per_token."""
 
     def test_sparse_moe_lands_on_the_attention_shape_not_the_heuristic(
             self, tmp_path):
@@ -355,14 +349,10 @@ class TestEstimateVramUsesTheRealShape:
         assert est["kv_cache"] > 0
 
     def test_moe_pinned_bytes_reduces_the_weights_estimate(self, tmp_path):
-        """AUDIT-KV-SYSSTATS, the sequel: _sizing.py's VramSizingMixin.
-        _effective_model_bytes_for_vram discounts a Mixture-of-Experts load's
-        weight footprint by whatever n_cpu_moe pins to system RAM - this GUI
-        estimate must apply the SAME discount, or the live readout keeps
-        showing the whole file as VRAM-needed even after the load itself
-        would succeed. moe_pinned_bytes=0 (the default) must be a no-op -
-        every existing caller/test that never passes it keeps today's
-        answer."""
+        """_sizing.py's VramSizingMixin._effective_model_bytes_for_vram
+        discounts a Mixture-of-Experts load's weight footprint by whatever
+        n_cpu_moe pins to system RAM, and this GUI estimate applies the SAME
+        discount. moe_pinned_bytes=0 (the default) is a no-op."""
         from localm.sysstats import estimate_vram
         model_bytes = 800 * 1024 * 1024   # 800 MB file, matches the real MoE test scale
         pinned = 700 * 1024 * 1024        # 700 MB of it pinned to system RAM
@@ -395,8 +385,8 @@ class TestEstimateVramUsesTheRealShape:
 
 def _granite_layers():
     """The real Granite 4.0 H Tiny pattern: 40 layers, attention at 5/15/25/35
-    with 4 KV heads, mamba (no KV cache) everywhere else. Read off the actual
-    published header, and corroborated by that model's config.json layer_types."""
+    with 4 KV heads, mamba (no KV cache) everywhere else, matching that model's
+    config.json layer_types."""
     return [4 if i in (5, 15, 25, 35) else 0 for i in range(40)]
 
 
@@ -508,12 +498,12 @@ class TestHybridPerLayerKvHeads:
 
 class TestHybridStatedAsAScalarWithoutTensorInfo:
     """Qwen3-Next states ONE head_count_kv for a stack whose layers differ, and
-    its METADATA records nothing about which layers attend (verified against the
-    real file: 44 keys, no full_attention_interval, no layer_types, no array).
+    its METADATA records nothing about which layers attend: no
+    full_attention_interval, no layer_types, no array.
 
-    These fixtures carry no tensor list, which is the case where nothing in the
-    file can answer, so the probe declines. When the tensor list IS present it
-    answers exactly - see TestScalarHybridResolvedFromTensorNames."""
+    These fixtures carry no tensor list either, so nothing in the file can
+    answer and the probe declines. When the tensor list IS present it answers
+    exactly - see TestScalarHybridResolvedFromTensorNames."""
 
     @staticmethod
     def _qwen3next(tmp_path, extra=()):
@@ -565,9 +555,9 @@ class TestScalarHybridResolvedFromTensorNames:
     architecture table: an attending layer carries attn_k/attn_v weights, a
     linear-attention / SSM / short-convolution layer does not.
 
-    The industry default here is to broadcast the single head count across every
-    layer (Ollama's fs/ggml does exactly that), which over-charges Qwen3-Next by
-    4x. Reading the tensor list gets the exact figure instead."""
+    Broadcasting the single head count across every layer, as some other
+    readers do, over-charges Qwen3-Next by 4x. Reading the tensor list gets the
+    exact figure."""
 
     QWEN3NEXT_ATTENDING = frozenset(range(3, 48, 4))    # 12 of 48, from the file
 
@@ -672,8 +662,8 @@ def test_real_published_header(tmp_path, name, repo_path, expected, why):
     """Range-fetch a real GGUF's leading bytes, far enough in to carry both the
     metadata block and the tensor list - the tensor list is what resolves a
     hybrid that states a single head count, and it sits after the tokenizer
-    vocab (measured 5.71 MiB into the Qwen3-Next file). In production localm has
-    the whole file on disk, so this prefix stands in for that."""
+    vocab (about 5.7 MiB into the Qwen3-Next file). In production localm has the
+    whole file on disk, so this prefix stands in for that."""
     import urllib.request
     from localm.http_ssl import verified_urlopen
 

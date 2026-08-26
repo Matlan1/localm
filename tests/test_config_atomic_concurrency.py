@@ -3,15 +3,14 @@
 Windows ``os.replace`` raises PermissionError (WinError 5) when ANOTHER handle has
 the destination open at that instant - a second localm process reading the file,
 an antivirus / indexer / backup scanner, Windows Search. The window is
-microseconds, so a bare os.replace made a config/registry SAVE crash (and a
-concurrent read spuriously fall back to .bak/defaults) whenever a reader happened
-to touch the file mid-write (AUD-WINREPLACE).
+microseconds, so a bare os.replace makes a config/registry SAVE crash (and a
+concurrent read spuriously fall back to .bak/defaults) whenever a reader touches
+the file mid-write.
 
-Both sides now ride out the transient sharing violation with a bounded retry,
-while a PERSISTENT permission problem still surfaces (do-not-hide-problems).
-These tests inject the transient fault deterministically at the OS boundary, so
-they exercise the real _atomic_write_json / _read_json code paths on every
-platform; the real Windows race was also reproduced by hand (see the PR)."""
+Both sides ride out the transient sharing violation with a bounded retry, while
+a PERSISTENT permission problem still surfaces. These tests inject the transient
+fault deterministically at the OS boundary, so they exercise the real
+_atomic_write_json / _read_json code paths on every platform."""
 
 import json
 import os

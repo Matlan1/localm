@@ -187,11 +187,11 @@ class TestDecideMediaSwap:
                                  read_free=lambda: 4 * GB) is True
 
     def test_default_read_free_is_split_aware(self, monkeypatch):
-        """AUDIT-GPU-SPLIT-1: with no read_free override (the real call sites
-        in image/music/video plug.py all omit it), the default must weigh a
-        media job against COMBINED split capacity, not just the single main
-        GPU - otherwise a split-configured machine needlessly swaps the chat
-        model out even when the split already covers the media job."""
+        """With no read_free override (the real call sites in image/music/video
+        plug.py all omit it), the default must weigh a media job against
+        COMBINED split capacity, not just the single main GPU - otherwise a
+        split-configured machine needlessly swaps the chat model out even when
+        the split already covers the media job."""
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         monkeypatch.setattr(

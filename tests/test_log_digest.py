@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#617 follow-up: the bug-report log tail must survive an arbitrary amount of
-routine activity following the actual error, and must not bury a real error
-report under repeated "all is well" polling lines.
+"""The bug-report log tail must survive an arbitrary amount of routine activity
+following the actual error, and must not bury a real error report under
+repeated "all is well" polling lines.
 
 localm._log_digest replaces the old blind last-N-lines cut with a digest that
 keeps every WARNING+/traceback record from the whole run and collapses runs of
@@ -157,13 +157,10 @@ class TestNativeCrashContinuationSurvives:
     append has no "TIMESTAMP LEVEL NAME:" prefix, so parse_records() always
     attaches it as a CONTINUATION of whatever record precedes it - almost
     always a routine DEBUG-level poll given how dense e.g. GET /api/stats
-    logging is in a real log. Before this fix, such a record silently
-    inherited the benign DEBUG level and was swept into collapse_records'
-    near-duplicate collapsing, and even the one surviving instance of a
-    collapsed run kept only its first line - so the crash text vanished
-    from the digest entirely, with no "omitted" notice, violating the
-    module's own "never drops an error record silently" guarantee. See the
-    #928 bug report investigation."""
+    logging is in a real log. Such a record must not inherit the benign DEBUG
+    level and be swept into collapse_records' near-duplicate collapsing, which
+    keeps only the first line of the one surviving instance and would drop the
+    crash text from the digest with no "omitted" notice."""
 
     def test_unformatted_cuda_crash_line_survives_dense_polling_noise(self):
         lines = [_polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2 + i / 100)
@@ -222,9 +219,8 @@ class TestNativeCrashContinuationSurvives:
     def test_known_tradeoff_unrecognized_differing_numeric_continuations_still_collapse(self):
         # On POSIX, 137 and 139 are 128 + SIGKILL and 128 + SIGSEGV, so the two
         # unleveled continuation lines collapsed together here stand for two
-        # different faults read as one fault twice. That is the accepted trade-off:
-        # disabling number-masking for continuation lines breaks the CUDA-Graph-id
-        # collapsing in the sibling test above.
+        # different faults read as one fault twice. Number-masking stays on for
+        # continuation lines; the sibling test above depends on it.
         lines = []
         for i in range(6):
             base = _polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2 + i / 100)
@@ -264,13 +260,13 @@ class TestBudgetFitting:
 
 
 class TestContentNeverLeaks:
-    """#961: a bug report must never carry chat content. Before this fix, a
-    content-bearing debug record (the raw model reply, a memory-embed content
-    snippet, a web-tool query) that happened to contain a signal word
-    (error/exception/...) was PROMOTED to ERROR status by is_error_record and
-    kept verbatim - the opposite of withheld, and prioritized over genuine
-    errors when the digest is over budget. These records must be dropped
-    before that classification ever runs, regardless of their content."""
+    """A bug report must never carry chat content. A content-bearing debug
+    record (the raw model reply, a memory-embed content snippet, a web-tool
+    query) that contains a signal word (error/exception/...) would otherwise be
+    PROMOTED to ERROR status by is_error_record and kept verbatim, and
+    prioritized over genuine errors when the digest is over budget. These
+    records are dropped before that classification runs, whatever they
+    contain."""
 
     def test_raw_model_output_withheld_even_when_it_contains_error_text(self):
         text = (
@@ -426,12 +422,10 @@ class TestContentNeverLeaks:
 
 
 class TestNativeLineRunCollapsesWithinOneRecord:
-    """#958/#952: a long run of unleveled native (ggml/CUDA/HIP) stderr has no
+    """A long run of unleveled native (ggml/CUDA/HIP) stderr has no
     "TIMESTAMP LEVEL NAME:" prefix of its own, so it always glues onto ONE
-    record as continuation lines (parse_records has no other choice) - never
-    a run of multiple RECORDS for collapse_records' record-level collapse to
-    fold. A real report's entire tail was ~70 copies of one native line for
-    exactly this reason."""
+    record as continuation lines - never a run of multiple RECORDS for
+    collapse_records' record-level collapse to fold."""
 
     def test_giant_run_of_near_duplicate_native_lines_collapses_within_one_record(self):
         # HUNDREDS of consecutive unleveled lines, not one native line per separate
@@ -483,21 +477,15 @@ class TestNativeLineRunCollapsesWithinOneRecord:
         assert "repeated" not in digest
 
     def test_error_record_repeated_lines_now_also_collapse(self):
-        """#958/#952 (measured 2026-08-05): the ORIGINAL version of this test
-        asserted the opposite - that an error-classified record's lines
-        "must stay verbatim... line-level collapsing only ever applies to
-        BENIGN records". That was the bug, not a design boundary: collapse_records
-        called _collapse_line_runs on every benign branch but skipped it
-        entirely for is_error_record's branch, so a long run of near-
-        duplicate native (ggml/CUDA/HIP) stderr glued onto a WARNING/ERROR
-        header - not just a benign one - survived fully uncollapsed. A real
-        production report measured 122 such lines / 3123 chars from exactly
-        this gap. "Errors are kept verbatim" still holds after this fix: the
-        header and one real instance of every distinct line survive; only a
-        genuinely-repeating run (same text once numbers are masked, same as
-        the benign path) folds to a repeat count - see
-        test_error_record_with_distinct_lines_stays_fully_verbatim below for
-        the case this must NOT touch."""
+        """_collapse_line_runs applies to an ERROR-classified record too, so a
+        long run of near-duplicate native (ggml/CUDA/HIP) stderr glued onto a
+        WARNING/ERROR header collapses like the benign path.
+
+        "Errors are kept verbatim" still holds: the header and one real
+        instance of every distinct line survive, and only a genuinely-repeating
+        run (same text once numbers are masked) folds to a repeat count - see
+        test_error_record_with_distinct_lines_stays_fully_verbatim below for the
+        case this must NOT touch."""
         header = "2026-07-13 15:25:20,000 WARNING localm: GPU probe degraded"
         # Differs only by a masked number, exactly like the benign fixtures
         # above - a genuine near-duplicate run, not distinct diagnostic content.

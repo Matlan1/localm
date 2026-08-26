@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""U5: tokenizers must be pinned to ONE version so it stops flipping between
-setup runs (the reported 0.23.1 <-> 0.22.2 churn). tokenizers is a transitive
-dep of the unpinned transformers~=5.12, with no lockfile, so it floated.
+"""tokenizers must be pinned to ONE version, so it cannot flip between setup
+runs. It is a transitive dependency of transformers, and there is no lockfile.
 """
 
 import re

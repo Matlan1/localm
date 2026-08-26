@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The exit-code oracle in interactive REPL/GUI sessions.
 
-Goal mode's un-gameable judge (the HARNESS runs a command, its exit code decides)
-used to run only in the one-shot CLI ``--until`` flow. These tests cover it at the
-pre-done boundary of an interactive session, plus the project-check auto-detection
-that supplies the command when the user gives none.
+Goal mode's judge is the HARNESS running a command, with its exit code deciding.
+These tests cover it at the pre-done boundary of an interactive session, plus
+the project-check auto-detection that supplies the command when the user gives
+none.
 
-The verification commands here are REAL subprocesses with real exit codes - the
-oracle is the thing under test, so mocking it out would prove nothing. Only the
-LLM backend is scripted.
+The verification commands here are REAL subprocesses with real exit codes; only
+the LLM backend is scripted.
 """
 
 from __future__ import annotations
@@ -101,9 +100,8 @@ def runners_installed(monkeypatch):
 
     Detection gates on the runner actually resolving and carries its resolved
     path, so without this the branch-order tests would assert one thing on a box
-    with cargo and another on a box without - a suite whose result depends on
-    what happens to be installed. Availability itself is the subject of
-    TestDetectionConfirmsTheRunnerCanRun; these tests are about which branch
+    with cargo and another on a box without. Availability itself is the subject
+    of TestDetectionConfirmsTheRunnerCanRun; these tests are about which branch
     wins and what shape it returns."""
     monkeypatch.setattr(
         "localm.plugins.coder.tools.shell.resolve_runner",
@@ -160,11 +158,8 @@ class TestInconclusive:
 
 
 class TestLaunchFailureIsInconclusive:
-    """A command that never started is not a code defect to bill the model for.
-
-    X4: auto-detection handed back `npm test` on a box where an argv-list npm
-    cannot start; run_verify returned 125; 125 was not inconclusive, so it took
-    the FAILURE branch and correct work ended "NOT verified"."""
+    """A command that never started is not a code defect to bill the model for:
+    it takes the INCONCLUSIVE branch, not the FAILURE one."""
 
     def test_the_launch_fact_travels_on_the_outcome_not_in_the_exit_code(
             self, tmp_path):
@@ -186,13 +181,11 @@ class TestLaunchFailureIsInconclusive:
 
     @pytest.mark.parametrize("code", [1, 2, 5, 125, 126, 127, 124, 128])
     def test_no_exit_code_alone_makes_a_run_inconclusive(self, code):
-        """THE CORRECTION. 125/126/127 are POSIX's "could not execute" codes, but
-        a command that ran perfectly well can return them: npm exits 127 when a
-        test script's binary is missing, and `npm test` is exactly what
-        auto-detection produces. Reading the code as evidence would report a real
-        failure as "nothing was verified" - the same dishonesty as X4, pointed
-        the other way. Only the out-of-band fact counts (exit 5 stays a separate,
-        pytest-specific rule and is covered above)."""
+        """125/126/127 are POSIX's "could not execute" codes, but a command that
+        ran perfectly well can return them: npm exits 127 when a test script's
+        binary is missing, and `npm test` is what auto-detection produces. Only
+        the out-of-band launch failure counts as inconclusive (exit 5 is a
+        separate, pytest-specific rule, covered above)."""
         assert verify.is_inconclusive(["npm", "test"], code) is False
 
     def test_the_reason_distinguishes_the_two_inconclusive_cases(self):
@@ -332,11 +325,10 @@ class TestDetectionConfirmsTheRunnerCanRun:
 
     def test_npm_is_used_at_its_resolved_path_not_its_bare_name(
             self, tmp_path, monkeypatch):
-        """THE X4 BUG. `shutil.which('npm')` finds `npm.CMD` on Windows, but an
-        argv list naming it "npm" still cannot start: argv execution goes
-        through CreateProcess, which will not launch a .CMD shim. The resolved
-        path
-        does. So detection must carry the path, not the name."""
+        """`shutil.which('npm')` finds `npm.CMD` on Windows, but an argv list
+        naming it "npm" still cannot start: argv execution goes through
+        CreateProcess, which will not launch a .CMD shim. The resolved path
+        does, so detection carries the path, not the name."""
         (tmp_path / "package.json").write_text(
             json.dumps({"scripts": {"test": "jest"}}))
         self._fake_which(monkeypatch, {"npm": r"Z:\Program Files\nodejs\npm.CMD"})
@@ -376,9 +368,7 @@ class TestDetectionConfirmsTheRunnerCanRun:
     def test_whatever_is_detected_here_can_actually_be_launched(self, tmp_path):
         """The invariant, against the REAL environment rather than a fake: for
         every project shape, detection returns either None or a command whose
-        argv[0] this platform can genuinely start. This is the assertion that
-        fails on the pre-fix code on Windows, where npm resolves but `['npm',
-        ...]` raises WinError 2."""
+        argv[0] this platform can genuinely start."""
         import shutil
         import subprocess
         (tmp_path / "package.json").write_text(
@@ -531,15 +521,10 @@ class TestVerifyGate:
 
     def test_a_run_that_collected_nothing_is_never_reported_as_a_pass(
             self, tmp_path):
-        """FALSE-GREEN fires-control. A mangled invocation (args split wrong, a
-        filter matching nothing) makes pytest collect zero tests and exit 5 in
-        about a second, and the wrapper log looks clean. Nothing about that run
-        verified anything, so the machine-readable answer must say so - "the
-        harness did not fall over" is not evidence of a passing check.
-
-        Before the third state existed this could only be asserted negatively
-        (last_run_ok stayed True either way, so a consumer could not tell this
-        from a green run). Now it is a positive assertion."""
+        """A mangled invocation (args split wrong, a filter matching nothing)
+        makes pytest collect zero tests and exit 5 in about a second, and the
+        wrapper log looks clean. Nothing about that run verified anything, so
+        the machine-readable answer reports INCONCLUSIVE rather than a pass."""
         agent = _make_agent(
             tmp_path,
             verify_cmd=[sys.executable, "-c",
@@ -579,7 +564,7 @@ class TestVerifyGate:
 
     def test_verify_state_is_per_run_like_last_run_ok(self, tmp_path):
         """A later clean turn must not keep reporting the earlier turn's verdict
-        (the #792 defect, applied to the new field before it can happen)."""
+        (the same per-run reset last_run_ok has)."""
         agent = _make_agent(tmp_path, self._SCRIPT_THEN_ANSWER,
                             verify_cmd="exit 1", verify_max_retries=1)
         agent.chat("write mod.py")
@@ -624,10 +609,10 @@ class TestInteractiveSessionEndToEnd:
         assert (tmp_path / "mod.py").exists()      # the write really happened
 
     def test_failed_verification_is_recorded_session_wide(self, tmp_path):
-        """Coexistence with the per-run last_run_ok reset (#792): the gate's write
+        """Coexistence with the per-run last_run_ok reset: the gate's write
         happens mid-run, inside _handle_no_tool_calls, so _loop's finally still
         folds it into the session-level _had_any_failure the close-time episodic
-        reflection reads. Verified as a call chain, not by line position."""
+        reflection reads. Asserted as a call chain, not by line position."""
         agent = _make_agent(tmp_path, self._SCRIPT,
                             verify_cmd="exit 1", verify_max_retries=1)
         agent.chat("write mod.py")
@@ -635,7 +620,7 @@ class TestInteractiveSessionEndToEnd:
         assert agent._had_any_failure is True
 
     def test_clean_turn_after_a_failed_verification_reports_ok(self, tmp_path):
-        """The other half of that coexistence: #792's per-run reset must still
+        """The other half of that coexistence: the per-run reset must still
         clear a PREVIOUS turn's verification failure, while the session-level
         record of it survives."""
         agent = _make_agent(tmp_path, self._SCRIPT,
@@ -726,7 +711,7 @@ class TestSessionWiring:
 
     def test_final_event_distinguishes_unverified_from_a_clean_finish(
             self, tmp_path):
-        """X7: the GUI is the consumer that reads the gate's verdict as a
+        """The GUI is the consumer that reads the gate's verdict as a
         boolean. A check that could not run leaves ok true, so without a second
         field the one machine-readable answer says "clean finish" about a task
         nothing verified."""

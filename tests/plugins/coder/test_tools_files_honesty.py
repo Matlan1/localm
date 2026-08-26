@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Honesty and edge-case guards in the coder file tools (2026-07-02 sweep).
+"""Honesty and edge-case guards in the coder file tools.
 
-Three confirmed findings from the fresh-eyes non-security audit:
-- search_replace: a write failure mid-loop left earlier files modified on disk
-  while the error read as if nothing changed.
-- edit_file: an empty `old` silently prepended `new` ('' is "in" every string)
-  and reported a bogus occurrence count.
-- read_file: offset/limit on an empty file produced a backwards range label
-  ("1-0 of 1") because splitlines() disagrees with _line_count about empty."""
+Three properties:
+- search_replace: a write failure mid-loop must not leave earlier files modified
+  on disk while the error reads as if nothing changed.
+- edit_file: an empty `old` must not prepend `new` ('' is "in" every string) and
+  report an occurrence count for it.
+- read_file: offset/limit on an empty file must not produce a backwards range
+  label ("1-0 of 1"); splitlines() disagrees with _line_count about empty."""
 
 from unittest.mock import patch
 
@@ -26,7 +26,7 @@ def _norm(raw: bytes) -> str:
     reports (deliberately unnormalised, matching execution.py's own
     snapshot convention) differ by platform even though the file's logical
     content does not. Normalise before comparing so the assertion holds on
-    both, the same way CI's own two platforms would each see it."""
+    both."""
     return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 

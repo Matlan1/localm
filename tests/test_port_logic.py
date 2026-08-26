@@ -76,8 +76,8 @@ class TestPickPort:
             s.close()
 
     def test_default_port_auto_bumps_when_busy(self, monkeypatch):
-        # No explicit port: the configured default still auto-bumps to a free
-        # port when busy (the behavior an unspecified port should keep).
+        # No explicit port: the configured default auto-bumps to a free port
+        # when busy.
         import localm.config as cfg
         s = socket.socket()
         s.bind(("127.0.0.1", 0))

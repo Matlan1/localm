@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Built-in TLS for network binds (NET-1).
+"""Built-in TLS for network binds.
 
 localm serves HTTPS itself the moment it binds past loopback, so the API key and
 all traffic are encrypted out of the box - no reverse proxy, no tailscale, no
-manual certificate wrangling. We run a tiny local certificate authority: a
+manual certificate wrangling. It runs a tiny local certificate authority: a
 long-lived CA whose certificate the user installs ONCE per device (one tap),
 plus a short-lived leaf certificate that the server actually presents.
 
@@ -12,8 +12,7 @@ install. Because the CA is REUSED when the leaf is regenerated, a device trusted
 once stays trusted even if this machine's LAN IP later changes. That reuse is
 not unconditional: ``_load_or_make_ca`` mints a NEW CA when the old one has
 reached its own expiry or its files are missing/unreadable, and every device
-then has to trust the new one. Say "when", never "whenever" - the unconditional
-version of this sentence is what made ``docs/tls.md`` wrong.
+then has to trust the new one.
 
 This is the same model as Caddy's ``tls internal`` and mkcert. The CA and leaf
 private keys are stored as unencrypted PEM under ``<LOCALM_HOME>/tls/`` (uvicorn
@@ -47,8 +46,7 @@ _TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
 
 # Adapter-name markers for a VPN/tunnel virtual interface rather than a physical
 # LAN NIC. Matched on word boundaries and case-insensitively, so a real NIC whose
-# name merely contains these letters does not match. "ppp" is not a marker: it is
-# used by both PPPoE links and legacy VPNs. Best-effort, not exhaustive.
+# name merely contains these letters does not match. Best-effort, not exhaustive.
 _VPN_ADAPTER_NAME_RE = re.compile(
     r"\b(?:tap|tun|utun|wintun|vpn|wireguard|nordlynx|openvpn|globalprotect"
     r"|anyconnect|zscaler)\d*\b",
@@ -534,17 +532,13 @@ def _leaf_is_reusable(home: Path, hostnames: list[str], ips: list[str]) -> bool:
     covers every required SAN. Anything else (missing, an expired leaf OR CA,
     a signature that does not verify, a missing SAN) forces a regenerate.
 
-    LM-DA-043: the issuer check used to be ``cert.issuer != ca.subject`` -
-    this module mints EVERY CA with the identical constant subject
-    (``CN=localm local CA, O=localm``), so that compared a fixed string to
-    itself and could never tell a rotated CA keypair from the one on disk.
-    Verifying the signature is the same check a TLS client performs when it
-    validates the chain, so "reusable" and "will validate" cannot diverge -
-    and because this is the ONLY gate that reaches ensure_cert's early return,
-    it is also the only place that can force a CA regenerated in place (e.g.
-    restored from a partial backup) to bring its leaf along with it, and the
-    only place that notices the CA itself has reached expiry (the leaf's own
-    _RENEW_MARGIN_DAYS check never looked at the CA it was signed by)."""
+    The chain is checked by verifying the SIGNATURE, not by comparing
+    ``cert.issuer`` to ``ca.subject``: every CA this module mints carries the
+    identical constant subject (``CN=localm local CA, O=localm``), so a name
+    comparison cannot tell a rotated CA keypair from the one on disk. This is
+    the ONLY gate that reaches ensure_cert's early return, so it is also the
+    only place that forces a CA regenerated in place to bring its leaf along,
+    and the only place that notices the CA itself has reached expiry."""
     from cryptography import x509
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric import padding
@@ -606,8 +600,7 @@ def ensure_cert(
     The CA survives an ordinary leaf regeneration, but NOT unconditionally:
     ``_load_or_make_ca`` reuses it only while it is unexpired and its files are
     readable, and mints a fresh one otherwise. A new CA means every device
-    repeats the one-time trust step, which is why the distinction is worth
-    stating here rather than leaving a reader to infer "always".
+    repeats the one-time trust step.
     """
     home = Path(home)
     _lock_down_dir(tls_dir(home))

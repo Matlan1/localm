@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Speech-to-text for the GUI chat: Whisper via faster-whisper (CPU int8).
 
-faster-whisper was chosen over openai-whisper/torch because it runs well on
-CPU with int8 quantization and ships as plain wheels - no torch required, so
-it works on the GGUF-only base install. It is still optional:
+faster-whisper runs on CPU with int8 quantization and ships as plain wheels, so
+no torch is required and it works on the GGUF-only base install. It is
+optional:
 
     pip install "localm[voice]"
 
@@ -25,22 +25,17 @@ routine load never touches the network at all.
 Text-to-speech needs no backend at all: the GUI uses Kokoro in the browser
 (see the ``tts`` plugin) or the browser's built-in speechSynthesis.
 
-VOICE-1 - why transcription runs in a SEPARATE PROCESS
-------------------------------------------------------
+TRANSCRIPTION RUNS IN A SEPARATE PROCESS
+----------------------------------------
 faster-whisper's native engine (ctranslate2) and the PyAV decoder are C/C++
-libraries. On some inputs and some builds they do not raise a Python exception
-- they fault at the C level (an abort()/access-violation). A native fault
-cannot be caught by ``try/except``: it terminates the whole interpreter, which
-took the entire localm server down with it (the reported "speech to text
-crashed the server"). An empty/undecodable-blob guard does not help, because
-the fault is in the real transcription path, not in obviously-bad input.
+libraries that, on some inputs and some builds, fault at the C level (an
+abort()/access-violation) rather than raising a Python exception. A native
+fault cannot be caught by ``try/except``: it terminates the whole interpreter.
 
-The only robust containment for an uncatchable native fault is process
-isolation. So the entire native pipeline (decode -> load -> transcribe) runs in
-a dedicated worker process. If it crashes or hangs, only the worker dies; the
+So the entire native pipeline (decode -> load -> transcribe) runs in a
+dedicated worker process. If it crashes or hangs, only the worker dies; the
 server process detects the dead/stuck worker, returns a clean ``VoiceError``,
-and respawns the worker for the next request. STT can therefore never take the
-server down.
+and respawns the worker for the next request.
 """
 
 from __future__ import annotations
@@ -61,8 +56,8 @@ import multiprocessing as mp
 _WORKER_TIMEOUT = 120.0
 
 # Fault-injection hook, honoured by the worker only when this environment
-# variable is set, and used only by the test suite. Values: "abort" (the
-# default), "exit" (a hard process exit), or "hang" (a wedged native call).
+# variable is set. Values: "abort" (the default), "exit" (a hard process exit),
+# or "hang" (a wedged native call).
 _FAULT_ENV = "LOCALM_VOICE_FAULT_FOR_TEST"
 
 
@@ -222,21 +217,19 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
     * net_mode="off" ALWAYS refuses, even with ``allow_download=True``: off is
       the kill switch and stays absolute.
 
-    The authorization is deliberately nothing but this function argument - not
-    a config key, not module state, not an env var - so a one-time grant dies
-    with this call and structurally cannot persist or leak into any other
-    net_mode-gated path.
+    The authorization is nothing but this function argument - not a config key,
+    not module state, not an env var - so a one-time grant dies with this call
+    and cannot persist into any other net_mode-gated path.
 
-    Downloads via huggingface_hub directly (the embedder's ``_download_known``
-    precedent) instead of through the STT worker: it needs no native code, so
-    it works at plugin-install time BEFORE the faster-whisper pip extra is
-    installed, and it never holds the worker lock for the length of a download.
-    The repo and cache root come from the same helpers the cached-probe reads
-    (``_stt_repo_for`` / ``stt_cache_dir``), so a successful prefetch always
-    flips ``stt_model_cached()`` to True.
+    Downloads via huggingface_hub directly rather than through the STT worker,
+    so it needs no native code and works at plugin-install time BEFORE the
+    faster-whisper pip extra is installed, and never holds the worker lock for
+    the length of a download. The repo and cache root come from the same helpers
+    the cached-probe reads (``_stt_repo_for`` / ``stt_cache_dir``), so a
+    successful prefetch flips ``stt_model_cached()`` to True.
 
     NOT import-free (huggingface_hub is a heavy import): call from a job or a
-    background thread, never from an async status handler (R24)."""
+    background thread, never from an async status handler."""
     from localm.debuglog import logger
     cached, name = stt_model_cached()
     if cached:
@@ -245,8 +238,7 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
     if allow_download is None:
         allow_download = network_mode() == "allow"
     if not allow_download:
-        # Expected states (an unset policy, a deliberately offline box), not
-        # defects: INFO, mirroring _download_known's level choice.
+        # Expected states (an unset policy, an offline box), not defects: INFO.
         reason = _stt_download_blocked_reason(name, network_mode())
         logger.info(reason)
         return False, reason
@@ -408,7 +400,7 @@ def _spawn_worker() -> None:
     """Start a fresh worker. Caller holds ``_mgr_lock``."""
     global _proc, _req_q, _resp_q
     from localm._mp_spawn import ensure_spawn_uses_venv_python
-    ensure_spawn_uses_venv_python()   # #617: avoid a renamed-launcher WinError 2
+    ensure_spawn_uses_venv_python()   # a renamed launcher would spawn WinError 2
     ctx = mp.get_context("spawn")               # explicit: identical on every OS
     _req_q = ctx.Queue()
     _resp_q = ctx.Queue()
@@ -531,8 +523,7 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
         if blocked_reason:
             # The load ran offline because the network policy refused the
             # download, so the policy is reported as the cause with the loader
-            # detail kept. Dispatched rather than refused up front: the
-            # cached-probe can false-negative and the offline load is the truth.
+            # detail kept.
             raise VoiceError(f"{blocked_reason} (offline load failed: {detail})",
                              code="download-blocked")
         raise VoiceError(

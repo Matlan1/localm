@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-RAG-DIM-NO-REEMBED item 3: switching the embedding model
-(``POST /api/rag/embedding``) used to end with a generic "click reindex on a
-collection below" - it never enumerated collections, never compared any
-stored dimension, and never named what it was about to invalidate. A
-collection built under the OLD model still shows "hybrid" in
+"""Switching the embedding model (``POST /api/rag/embedding``) must enumerate the
+collections it is about to invalidate, comparing each stored dimension, rather
+than ending with a generic "click reindex on a collection below".
+
+A collection built under the OLD model still shows "hybrid" in
 ``/api/rag/collections`` right after the switch (``has_vectors`` is a purely
 offline fact, never compared against the live model) - only an actual query
 discovers the mismatch and silently drops to BM25.
 
-Covers, bottom-up: ``Collection.vector_dim()`` (the new accessor), then
+Covers, bottom-up: ``Collection.vector_dim()`` (the accessor), then
 ``_collection_dim_report()`` (the enumeration/comparison), then the real
-``POST /api/rag/embedding`` job end to end with only the embedder mocked, so
-the wiring between them - not just each piece in isolation - is exercised.
+``POST /api/rag/embedding`` job end to end with only the embedder mocked, so the
+wiring between them - not just each piece in isolation - is exercised.
 """
 from __future__ import annotations
 
@@ -174,9 +174,9 @@ class TestCollectionDimReport:
     def test_an_unreadable_collection_directory_is_reported_unknown_not_dropped(
             self, rag_home):
         """A hand-placed or half-deleted directory that fails to even
-        construct as a Collection must not silently vanish from the report -
-        AGENTS rule 5: best-effort here means naming the failure, not folding
-        it into a false "nothing to see"."""
+        construct as a Collection must not silently vanish from the report:
+        best-effort here means naming the failure, not folding it into a
+        false "nothing to see"."""
         rogue = rag_home / "not a valid name!"
         rogue.mkdir(parents=True)
         (rogue / "meta.json").write_text("{}", encoding="utf-8")
@@ -289,10 +289,10 @@ class TestEmbeddingSwitchRouteEndToEnd:
 
 # --------------------------------------------------------------------------- #
 #  POST /api/rag/embedding without confirm=True is a DRY RUN: the warning      #
-#  lands BEFORE the switch takes effect. No embedder mocking here on purpose:  #
-#  an unconfirmed request must never touch                                     #
-#  resolve_embedding_model_path/get_embedder at all - it answers from          #
-#  meta.json alone (embedding_model()), same as _collection_dim_report.        #
+#  lands BEFORE the switch takes effect. No embedder mocking here: an           #
+#  unconfirmed request must never touch                                         #
+#  resolve_embedding_model_path/get_embedder at all - it answers from           #
+#  meta.json alone (embedding_model()), same as _collection_dim_report.         #
 # --------------------------------------------------------------------------- #
 
 class TestEmbeddingSetConfirmGate:
@@ -359,15 +359,13 @@ class TestEmbeddingSetConfirmGate:
 
     def test_unconfirmed_names_an_unreadable_collection_without_leaking_the_exception(
             self, embedding_route_app, rag_home, caplog):
-        """CodeQL py/stack-trace-exposure (alert #292): a construction failure
-        must still be NAMED in the response (rule 5 - not silently dropped,
-        mirroring _collection_dim_report's own 'unknown' bucket), but the raw
-        exception text must never reach the HTTP response body - only the
-        server-side log. _collection_dim_report's identical 'reason' field
-        never had this problem because its only reader is _setup(), which logs
-        just the collection NAME, never re-serializes 'reason' into a
-        response; this route serializes its whole report straight into JSON,
-        so the exception text itself must be kept out of the field it returns."""
+        """A construction failure must still be NAMED in the response, not
+        silently dropped (mirroring _collection_dim_report's own 'unknown'
+        bucket), but the raw exception text must never reach the HTTP response
+        body - only the server-side log. _collection_dim_report's identical
+        'reason' field has no such exposure because its only reader is _setup(),
+        which logs just the collection NAME and never re-serializes 'reason';
+        this route serializes its whole report straight into JSON."""
         rogue = rag_home / "not a valid name!"
         rogue.mkdir(parents=True)
         (rogue / "meta.json").write_text("{}", encoding="utf-8")
@@ -386,7 +384,7 @@ class TestEmbeddingSetConfirmGate:
         body_text = r.text
         assert "ValueError" not in body_text
         assert "Traceback" not in body_text
-        # The failure is still surfaced, just server-side (rule 5: noted, not muted).
+        # The failure is still surfaced, just server-side: noted, not muted.
         assert "not a valid name!" in caplog.text
         assert "ValueError" in caplog.text
 

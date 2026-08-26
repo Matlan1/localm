@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""M13: `localm add/pull <some-part>.gguf` pointed directly at a non-first split
-part must normalise to the first part.
+"""`localm add/pull <some-part>.gguf` pointed directly at a non-first split part
+normalises to the first part.
 
 llama.cpp loads a split GGUF set from its ``*-00001-of-N`` part. The folder
-branch (_gguf_first_parts) and sync_models_dir already normalise, and
-get_model_info normalises at read time, but a directly-supplied single-file
-part was registered verbatim (wrong key, path pointing at part 2), so the model
-could not load. These tests pin the single-file normalisation.
+branch (_gguf_first_parts) and sync_models_dir normalise, and get_model_info
+normalises at read time; these tests pin the single-file path.
 """
 
 import pytest
@@ -35,8 +33,8 @@ def _gguf(d, name):
 
 
 def test_direct_non_first_part_normalizes_to_first(tmp_path, isolated_home):
-    """NEGATIVE: pre-fix this registers key 'big-00002-of-00002' pointing at
-    part 2; post-fix it registers 'big' pointing at part 1."""
+    """Registers key 'big' pointing at part 1, not 'big-00002-of-00002'
+    pointing at part 2."""
     d = tmp_path / "models"
     d.mkdir()
     _gguf(d, "big-00001-of-00002.gguf")

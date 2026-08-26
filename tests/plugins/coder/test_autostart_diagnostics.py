@@ -2,9 +2,8 @@
 """When the coder auto-starts a `localm gui` server and it dies fast (a busy
 --port, or any other quick non-zero exit), the CLI must surface the real reason
 instead of waiting out the full attach timeout and reporting the generic
-"Failed to attach to the auto-started server." (see PR #740 follow-up: the
-child's own refusal message prints to its own console/process, which this
-process never reads)."""
+"Failed to attach to the auto-started server." The child's own refusal message
+prints to its own console/process, which this process never reads."""
 
 import socket
 import subprocess
@@ -82,11 +81,9 @@ class TestAutoStartedServerDiesFast:
 
 class TestHeadlessAutoStartSurfacesChildError:
     """Driven headlessly (MCP's run_coder_task, CI, a script - stdin is not a
-    TTY, exactly how CliRunner invokes main), the auto-start must not route
-    the child's output into a NEW CONSOLE WINDOW nobody can see: the child's
-    real refusal (e.g. gui's "Model not found: X" - the exact failure
-    reproduced live 2026-07-21, where the MCP caller could only be told
-    "exit code 1, check the console window") must reach THIS process's error
+    TTY, exactly how CliRunner invokes main), the auto-start must not route the
+    child's output into a NEW CONSOLE WINDOW nobody can see: the child's real
+    refusal (e.g. gui's "Model not found: X") must reach THIS process's error
     output, and no console window may be requested."""
 
     def test_child_error_reaches_the_error_message(self, monkeypatch):

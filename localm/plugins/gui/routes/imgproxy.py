@@ -3,33 +3,24 @@
 
 A model reply can link an image (`![alt](https://host/pic.png)`). The shell's CSP
 is `img-src 'self' data: blob:`, so the browser refuses to fetch it and the user
-sees a broken image. Every comparable UI renders it by letting the BROWSER fetch
-it, which hands the remote host the user's IP, User-Agent and referrer, and is the
-standard model-driven exfiltration channel.
+sees a broken image.
 
-This route closes the capability gap without taking that trade: the client
-rewrites the `<img src>` to point here, and localm fetches the bytes SERVER-side
-through the same `netpolicy` path every other outbound request uses. The browser
-never contacts the remote origin.
+The client rewrites the `<img src>` to point here, and localm fetches the bytes
+SERVER-side through the same `netpolicy` path every other outbound request uses.
+The browser never contacts the remote origin.
 
-OFF BY DEFAULT (`gui_proxy_remote_images`), and the setting's help text says
-plainly what it does and does not buy: proxying decides WHO makes the request,
-not WHETHER it is made. A crafted URL still reaches the attacker's server the
-moment the reply renders. Closing that channel is a separate decision (a per-image
-affordance, or an allowlist) and is deliberately not attempted here.
+OFF BY DEFAULT (`gui_proxy_remote_images`). Proxying decides WHO makes the
+request, not WHETHER it is made: a crafted URL still reaches the remote server
+the moment the reply renders.
 
-ONE INTERACTION WORTH KNOWING, recorded rather than left silent. The URL here
-comes straight off a query parameter, which makes this the first caller to feed
-`safe_fetch_bytes` a value the BROWSER chose rather than one the model or localm
-built. It is still bounded by exactly the same `netpolicy` decisions as every
-other outbound request, including the private-address guard - but that guard is
-what `net_allow_private` turns OFF. So an owner who has BOTH switched this on and
-separately disabled the SSRF guard (a setting whose own label reads "disables the
-SSRF guard") has a rendered reply able to make this machine fetch a private
-address. netpolicy is deliberately left as the single authority on that rather
-than second-guessing it here, because overriding a setting the owner explicitly
-chose is its own failure mode. If that combination should be refused outright,
-refuse it in ONE place - `check_url` - so every caller inherits it, not here.
+The URL here comes straight off a query parameter, so this is the one caller
+that feeds `safe_fetch_bytes` a value the BROWSER chose. It is bounded by the
+same `netpolicy` decisions as every other outbound request, including the
+private-address guard - which is what `net_allow_private` turns OFF. So an owner
+who has BOTH switched this on and separately disabled the SSRF guard has a
+rendered reply able to make this machine fetch a private address. netpolicy is
+the single authority on that; if the combination should be refused outright,
+refuse it in `check_url` so every caller inherits it, not here.
 """
 
 from __future__ import annotations
@@ -54,31 +45,23 @@ def _fetch_budget_s() -> float:
     rather than written as a literal.
 
     run_in_threadpool_bounded must never fire for a slow-but-working call, only
-    for a wedged one, so the budget has to sit above safe_fetch_bytes' real
-    worst case - and that case is not one timeout. netpolicy applies its timeout
-    separately to the connect and to each read, and follows redirects MANUALLY
-    (so every hop re-pays both), up to ``_MAX_REDIRECTS``. A literal 40.0 - the
-    first version of this - covered a single connect+read pair and would have
-    expired part-way down a legitimate three-hop CDN chain, turning a working
-    image into a 504.
+    for a wedged one, so the budget sits above safe_fetch_bytes' worst case -
+    which is not one timeout. netpolicy applies its timeout separately to the
+    connect and to each read, and follows redirects MANUALLY (so every hop
+    re-pays both), up to ``_MAX_REDIRECTS``.
 
-    Computed from the two constants so the relation cannot break silently when
-    either is retuned: the numbers live in netpolicy and the arithmetic here,
-    which is exactly the shape that goes wrong quietly.
-    ``test_the_fetch_budget_stays_above_netpolicy_s_own_worst_case`` asserts the
-    RELATION rather than the number. Falls back to the same arithmetic on
-    today's values if either private name ever disappears, rather than to an
-    unrelated guess."""
+    Computed from those two constants so the relation holds when either is
+    retuned. Falls back to the same arithmetic on today's values if either
+    private name disappears."""
     from localm import netpolicy
     per_call = float(getattr(netpolicy, "_DEFAULT_TIMEOUT", 15))
     hops = int(getattr(netpolicy, "_MAX_REDIRECTS", 5)) + 1
     return hops * 2 * per_call + 20.0        # connect + read per hop, plus slack
 
-# image/svg+xml is DELIBERATELY ABSENT and it is the sharpest edge in this file.
-# An SVG is an image in an <img>, but served from OUR origin it renders as a
-# DOCUMENT if the URL is opened directly, and SVG can carry script - so allowing
-# it would turn a model-chosen URL into script execution on localm's own origin.
-# Every other raster type is inert under any interpretation.
+# image/svg+xml is DELIBERATELY ABSENT: served from OUR origin an SVG renders as
+# a DOCUMENT when the URL is opened directly, and SVG can carry script, so
+# allowing it would turn a model-chosen URL into script execution on localm's
+# own origin. Every other type listed is inert under any interpretation.
 _ALLOWED_TYPES = frozenset({
     "image/png", "image/jpeg", "image/gif", "image/webp",
     "image/avif", "image/bmp", "image/x-icon", "image/vnd.microsoft.icon",
@@ -115,24 +98,18 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "Only http and https images can be proxied.")
 
         from localm import netpolicy
-        # OFF THE EVENT LOOP, like /api/gpus, /api/backend and /api/stats, and
-        # for a sharper reason than any of them: safe_fetch_bytes is a blocking
-        # urlopen whose worst case is a 15s connect plus a 15s read plus up to
-        # _MAX_BYTES of transfer, AND the URL comes from a model-authored
-        # `<img src>`. Called inline, a rendered reply chose how long the whole
-        # server stalled. MEASURED before this offload: GET /api/activity went
-        # from 0.018s to 13.76s with ONE in-flight proxy fetch to an unroutable
-        # host, and the hang alarm fired independently with this frame on top.
-        # The budget is derived from netpolicy's own bounds - see
-        # _fetch_budget_s - so it cannot silently fall under the legitimate
-        # worst case when either of those constants is retuned.
+        # OFF THE EVENT LOOP, like /api/gpus, /api/backend and /api/stats:
+        # safe_fetch_bytes is a blocking urlopen whose worst case is a 15s
+        # connect plus a 15s read plus up to _MAX_BYTES of transfer, AND the URL
+        # comes from a model-authored `<img src>`. The budget is derived from
+        # netpolicy's own bounds - see _fetch_budget_s - so it cannot fall under
+        # the legitimate worst case when either of those constants is retuned.
         #
         # A CLOSURE, not `run_in_threadpool_bounded(safe_fetch_bytes, url,
-        # max_bytes=..., timeout=...)`, and that is not style: safe_fetch_bytes
-        # has its OWN `timeout` keyword, while the wrapper's `timeout` is
-        # keyword-only. Passing one `timeout=` would silently be eaten by the
-        # wrapper and leave the fetch on its 15s default - two different waits
-        # sharing one name, with no error either way.
+        # max_bytes=..., timeout=...)`: safe_fetch_bytes has its OWN `timeout`
+        # keyword, while the wrapper's `timeout` is keyword-only, so a single
+        # `timeout=` would be eaten by the wrapper and leave the fetch on its 15s
+        # default.
         def _fetch():
             return netpolicy.safe_fetch_bytes(url, max_bytes=_MAX_BYTES)
 
@@ -142,20 +119,18 @@ def register(app: FastAPI, ctx) -> None:
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Fetching the image timed out: {e}")
         except netpolicy.NetworkPolicyError as e:
-            # The SSRF guard, the domain lists and the redirect re-check all land
-            # here. Surface the reason rather than a bare failure: this is the one
-            # a user hits when their own allow/deny list is the cause.
+            # The SSRF guard, the domain lists and the redirect re-check all
+            # land here. The reason is surfaced rather than a bare failure: an
+            # owner's own allow/deny list is a common cause.
             raise HTTPException(403, f"Refused by the network policy: {e}")
         except Exception as e:
             raise HTTPException(502, f"Could not fetch the image: {e}")
 
-        # safe_fetch_bytes TRUNCATES at the cap rather than refusing: it breaks out
-        # of the chunk loop and returns what it has (netpolicy.py, `if size >=
-        # max_bytes: break`). For a text fetch a clipped body is degraded but
-        # usable; for an IMAGE it is a corrupt file, and serving it with a 200 and
-        # a valid image/* type would be a step that failed reporting success. The
-        # browser would render a half-decoded strip or nothing, with no way for the
-        # client to tell that apart from a small image. Refuse instead.
+        # safe_fetch_bytes TRUNCATES at the cap rather than refusing: it breaks
+        # out of the chunk loop and returns what it has (netpolicy.py, `if size
+        # >= max_bytes: break`). For an IMAGE that is a corrupt file, and a 200
+        # with a valid image/* type would report success for a step that failed,
+        # so this refuses instead.
         if len(body) >= _MAX_BYTES:
             raise HTTPException(
                 413, f"That image is larger than the {_MAX_BYTES // 1_000_000} MB "
@@ -172,19 +147,14 @@ def register(app: FastAPI, ctx) -> None:
             content=body,
             media_type=base_type,
             headers={
-                # These bytes are attacker-choosable, served from our own origin.
-                # nosniff is already global; this pins the response to being inert
-                # even if something downstream mis-reads it, and costs nothing for
-                # an image.
+                # These bytes are attacker-choosable and are served from our own
+                # origin. nosniff is already global; this pins the response to
+                # being inert even if something downstream mis-reads it.
                 "Content-Security-Policy": "default-src 'none'; sandbox",
-                # no-store, and this was MEASURED rather than chosen on taste.
-                # An earlier `private, max-age=300` meant turning the feature OFF
-                # did not take effect for five minutes: the browser kept serving
-                # the cached image, so the switch the user had just used appeared
-                # to do nothing. It also wrote model-influenced bytes into the
-                # on-disk HTTP cache of an offline-first product. The client keeps
-                # its own in-page blob cache, so a streaming re-render still does
-                # not refetch - the HTTP cache was buying almost nothing.
+                # no-store: a cached image would keep being served after the
+                # feature is switched OFF, and would write model-influenced bytes
+                # into the on-disk HTTP cache. The client keeps its own in-page
+                # blob cache, so a streaming re-render still does not refetch.
                 "Cache-Control": "no-store",
                 # An image is never a download prompt and never a page.
                 "X-Content-Type-Options": "nosniff",

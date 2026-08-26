@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Background sub-agents: non-blocking delegation that keeps every safety
-property the synchronous path has (work item C3).
+property the synchronous path has.
 
 ``spawn_agent`` runs its child to completion INSIDE the parent's tool call, so a
 10-turn child costs the parent all of that wall-clock time doing nothing.
@@ -9,9 +9,8 @@ worker thread, in its OWN git worktree.
 
 Several tests here assert that something did NOT happen (no confirmation, no
 launch, no foreign hunk, no race). Every one of those is paired with a sibling
-showing the SAME detector FIRING on a case where it DOES happen - otherwise a
-detector that is broken or observing nothing passes green forever and the
-absence proves only that nobody was looking.
+showing the SAME detector FIRING on a case where it DOES happen, so a detector
+that is broken or observing nothing cannot pass green.
 """
 
 from __future__ import annotations
@@ -282,8 +281,8 @@ class TestAbsorptionOrdering:
     def test_SIBLING_the_same_observer_DOES_see_a_worker_thread_mutation(self, repo):
         """Live detector. If the observer above cannot notice a worker thread
         writing to parent._changed_files, its 'no race' result is meaningless.
-        Here a deliberately misbehaving child does exactly that, and the SAME
-        assertion must fail."""
+        Here a misbehaving child does exactly that, and the SAME assertion must
+        fail."""
         done = threading.Event()
 
         def _misbehaving(self, task):
@@ -468,8 +467,7 @@ class TestScopeInheritance:
 
     def test_background_child_rejects_a_path_outside_the_parent_scope(self, repo):
         """BEHAVIOUR, not the kwarg. Asserting child.scope == parent.scope only
-        proves a value was copied, not that enforcement runs on this path - it
-        would have passed on pre-#781 code for the wrong reason."""
+        proves a value was copied, not that enforcement runs on this path."""
         child = self._capture_child(repo, scope="src/**")
         res = child._execute_tool(
             _call("write_file", path="secrets.txt", content="x"), interactive=False)
@@ -494,8 +492,9 @@ class TestScopeInheritance:
         assert "coder-child-" in str(child.cwd)
 
     def test_background_child_inherits_role_narrowing(self, repo):
-        """#786's role must reach this construction path too - a background
-        reviewer that came back full-capability is the bug roles exist to stop."""
+        """The role narrowing must reach this construction path too: a
+        background reviewer that came back full-capability is what roles exist
+        to stop."""
         captured = {}
 
         def _capture(self, task):
@@ -711,15 +710,11 @@ def test_background_agent_tools_are_registered_and_unscoped():
 class TestLateWriteCannotFlipATerminalJob:
     """The AgentJob half of the abandoned-child invariant.
 
-    ``dispatch_parallel``'s ``_ChildOutcome`` needed a seal added for this
-    (tools/parallel.py). This path already holds the equivalent guard - ``_watch``
-    and ``kill`` both re-check ``state != "running"`` while holding the job lock
-    before calling ``_finish``, and the worker publishes ``_outcome`` under that
-    same lock - so these are REGRESSION tests pinning behaviour that is already
-    correct, not a second bug being fixed. They are here because the guard is one
-    unremarkable early-return away from being deleted, and because a background
-    sub-agent cannot be preempted: its worker genuinely does outlive the terminal
-    verdict, so the window is real on this path too.
+    ``_watch`` and ``kill`` both re-check ``state != "running"`` while holding
+    the job lock before calling ``_finish``, and the worker publishes
+    ``_outcome`` under that same lock. A background sub-agent cannot be
+    preempted: its worker genuinely outlives the terminal verdict, so the window
+    is real on this path.
     """
 
     def _hung_job(self, monkeypatch, release: threading.Event):

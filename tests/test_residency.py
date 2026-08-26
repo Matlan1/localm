@@ -3,10 +3,10 @@
 Tests for the shared multi-model residency policy (inference/residency.py).
 
 This module is the single source of truth both serving layers ask "may this
-model load alongside the resident ones, and if not who is the safe victim", so
-its PERMIT direction is where a wrong answer costs a native OOM or a driver TDR
-rather than a tidy error. The permit tests below are therefore adversarial: each
-one takes an otherwise-fitting load and breaks exactly one precondition.
+model load alongside the resident ones, and if not who is the safe victim". A
+wrong answer in the PERMIT direction costs a native OOM or a driver TDR rather
+than a tidy error, so the permit tests below are adversarial: each one takes an
+otherwise-fitting load and breaks exactly one precondition.
 """
 
 from types import SimpleNamespace
@@ -61,14 +61,12 @@ class TestFitsAlongsideResidents:
         assert self._fits(free_vram=6 * GB, headroom=3 * GB) is False
 
     def test_process_scoped_reading_refuses_despite_plenty_of_free_vram(self):
-        """Regression case from FINDING-vram-load-gate-process-scope-2026-08-05.md.
-        Every resident model lives in its OWN isolated worker subprocess, so a
+        """Every resident model lives in its OWN isolated worker subprocess, so a
         PROCESS-scoped reading is structurally blind to a resident peer's VRAM and
-        can only ever OVER-report free space. Before this guard, exactly this
-        shape (a fresh, "sufficient" 15GB/10GB reading) returned True even though
-        only ~7GB was genuinely free once an 8GB resident model - invisible to a
-        process-scoped probe - was accounted for. Kept as the literal call from
-        the diagnosis, not a paraphrase of it."""
+        can only ever OVER-report free space. Without this guard, exactly this
+        shape (a fresh, "sufficient" 15GB/10GB reading) returns True even though
+        only ~7GB is genuinely free once an 8GB resident model - invisible to a
+        process-scoped probe - is accounted for."""
         assert residency.fits_alongside_residents(
             free_vram=15 * GB, vram_required=10 * GB, probe_ok=True,
             is_process_scoped=True) is False
@@ -81,16 +79,15 @@ class TestFitsAlongsideResidents:
 
     def test_device_scoped_reading_admits_exactly_as_before(self):
         """The PERMIT-only guardrail: an explicit is_process_scoped=False (an
-        ordinary device-wide reading) must behave IDENTICALLY to the pre-existing
-        behavior - this guard must never turn a previously-permitted load into a
-        refusal on a genuinely trustworthy reading."""
+        ordinary device-wide reading) must admit exactly as it does with the
+        guard absent - a genuinely trustworthy reading must never be turned into
+        a refusal."""
         assert self._fits(is_process_scoped=False) is True
 
     def test_process_scoped_flag_defaults_to_false(self):
-        """A caller that does not know about scope yet (or omits the keyword
-        entirely, as every test above this one does) must see IDENTICAL behavior
-        to before this parameter existed - no silent behavior change for an
-        unaware caller."""
+        """A caller that omits the keyword entirely, as every test above this
+        one does, must see the same behavior as an explicit
+        is_process_scoped=False: the parameter defaults to False."""
         assert self._fits() is True
 
 

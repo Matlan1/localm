@@ -1,41 +1,36 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Filesystem confinement on the media plugins' caller-supplied paths, and on the
-log-export destination (CodeQL WS8: alerts 2, 54, 55, 56, 58, 64).
+log-export destination.
 
-Three routes reached the filesystem outside any meaningful confinement, all of
-them reachable by a scoped NON-owner key:
+Three routes reach the filesystem, all of them reachable by a scoped NON-owner
+key:
 
-(a) ``input_image`` was confined to the whole data dir - which is localm's
-    credential store (auth.key, the plaintext owner key; auth.json;
-    sessions.json; rag/; coder/; bug-reports/) - and the img2img path UPLOADS
-    the file to ComfyUI before any image validation, over an api_url
-    sanitize_comfy_url deliberately permits to be a LAN or public host on
-    plaintext http. So the confinement did not remove the arbitrary-file
-    read-and-transmit primitive its own docstring named, it retargeted it at
-    localm's own secrets.
+(a) ``input_image`` must not be confined to the whole data dir - which is
+    localm's credential store (auth.key, the plaintext owner key; auth.json;
+    sessions.json; rag/; coder/; bug-reports/) - because the img2img path
+    UPLOADS the file to ComfyUI before any image validation, over an api_url
+    sanitize_comfy_url permits to be a LAN or public host on plaintext http.
 
-(b) ``POST /api/{imagine,video,music}/file/{name}/move`` took ``dest`` verbatim
-    into mkdir(parents=True) + shutil.move, gated only on gallery.require_owner
-    - which proves ARTIFACT ownership, and passes for ANY caller when the
-    artifact has no recorded owner (open mode, legacy or hand-placed files).
+(b) ``POST /api/{imagine,video,music}/file/{name}/move`` takes ``dest`` verbatim
+    into mkdir(parents=True) + shutil.move, gated only on gallery.require_owner -
+    which proves ARTIFACT ownership, and passes for ANY caller when the artifact
+    has no recorded owner (open mode, legacy or hand-placed files).
 
-(c) ``POST /api/logs/export`` had no require_fs_host even though the
-    /api/fs/dirs picker that supplies its ``dest`` does, so a config:write key
-    with fs_access="none" could mkdir + write anywhere, and the exists-or-not
-    400 was a directory-existence oracle for the whole disk.
+(c) ``POST /api/logs/export`` needs require_fs_host, like the /api/fs/dirs picker
+    that supplies its ``dest``: a config:write key with fs_access="none" could
+    otherwise mkdir + write anywhere, and the exists-or-not 400 is a
+    directory-existence oracle for the whole disk.
 
 On the /move tests the dest-not-created assertions are load-bearing twice over:
-they are the real security property, AND mkdir(parents=True) means a regression
-would otherwise litter the test tree with directories it was not supposed to
-make. That is NOT true of the log-export denials - export_logs 400s on a missing
-dest before it mkdirs anything, so "the folder was not created" would hold with
-or without the gate. Those tests therefore point at a dest that EXISTS and
-assert nothing was written INTO it, which is the only falsifiable form.
+they are the security property, AND mkdir(parents=True) means a regression would
+litter the test tree with directories it was not supposed to make. That is NOT
+true of the log-export denials - export_logs 400s on a missing dest before it
+mkdirs anything - so those tests point at a dest that EXISTS and assert nothing
+was written INTO it, which is the only falsifiable form.
 
-Every path in this file is built from tmp_path, never a real location. That is a
-safety requirement, not a style choice: proving this oracle works means reverting
-the fix and re-running, and a negative pass executes the unsafe path for real. A
-sibling lane's negative pass named C:/Users/Public and emptied it via shutil.rmtree.
+Every path in this file is built from tmp_path, never a real location. Proving
+this oracle works means reverting the fix and re-running, and a negative pass
+executes the unsafe path for real.
 """
 
 from pathlib import Path
@@ -91,12 +86,11 @@ def _no_upload(monkeypatch):
     already bound in their own namespace and patching the source module would
     silently miss.
 
-    NOTE ON WHAT THIS CAN AND CANNOT PROVE. Generation is dispatched to a
-    JobManager worker thread (gui/jobs.py start_fn), and _upload_image is
-    reached only deep inside it, so an assertion on this list right after the
-    HTTP response returns is INERT - it would be empty even if confinement had
-    let the file through. It is kept as a cheap tripwire, not as the check.
-    ``_job_count`` below is the assertion that can actually fail."""
+    Generation is dispatched to a JobManager worker thread (gui/jobs.py
+    start_fn) and _upload_image is reached only deep inside it, so an assertion
+    on this list right after the HTTP response returns is INERT - it would be
+    empty even if confinement had let the file through. A cheap tripwire, not
+    the check. ``_job_count`` below is the assertion that can actually fail."""
     calls = []
 
     def _record(image_path, api_url):
@@ -115,17 +109,15 @@ def _dead_backend(monkeypatch):
 
     CONTAINMENT FOR THE NEGATIVE PASS, not for the passing run. Proving this
     oracle works means reverting the fix and re-running, and a negative pass
-    executes the UNSAFE path for real - that is its entire purpose. Against
-    unfixed source these input_image requests do NOT 400; they return 200 and
-    ``jobs.start_fn`` dispatches a real generation on a worker thread, which
-    calls ``_backend.ensure_available`` -> ComfyUI probe/launch. The passing run
-    never reaches it, so nothing here would ever reveal that. Stubbing
+    executes the UNSAFE path for real. Against unfixed source these input_image
+    requests do NOT 400; they return 200 and ``jobs.start_fn`` dispatches a real
+    generation on a worker thread, which calls ``_backend.ensure_available`` ->
+    ComfyUI probe/launch. The passing run never reaches it. Stubbing
     ensure_available to a hard False means the worker returns immediately on
     either source, so the negative pass cannot dial or spawn anything.
 
-    (Payload containment is separate and already handled: every path in this
-    file is built from tmp_path, never a real location - see the sibling lane's
-    C:/Users/Public incident, where a negative pass rmtree'd a real directory.)"""
+    Payload containment is separate and already handled: every path in this file
+    is built from tmp_path, never a real location."""
     from localm.plugins.builtin.image import backend as _ib
     from localm.plugins.builtin.video import backend as _vb
     for mod in (_ib, _vb):
@@ -221,13 +213,11 @@ def test_allowed_input_roots_excludes_the_data_dir_root(tmp_path, monkeypatch):
 def test_the_install_directory_is_not_an_allowed_root():
     """The localm install tree must NOT be readable through this route.
 
-    An earlier version allowed the repo root "for a reference image kept in the
-    checkout", guarded on pyproject.toml. That guard never narrowed anything
-    (pyproject.toml is release-include, so an installed copy has one too), and
-    the allowance was wrong even when it worked: README documents `git clone` as
-    the install path, so on the primary topology it admitted the whole tree -
-    including the gitignored issues/ and qa/ directories that hold bug-report
-    screenshots. This test pins its removal; do not reintroduce it."""
+    A repo-root allowance guarded on pyproject.toml narrows nothing (pyproject.toml
+    is release-include, so an installed copy has one too), and on a `git clone`
+    install it admits the whole tree - including the gitignored issues/ and qa/
+    directories that hold bug-report screenshots. This test pins its absence; do
+    not reintroduce it."""
     install_root = Path(media_paths.__file__).resolve().parents[2]
     assert (install_root / "pyproject.toml").is_file(), "test runs from a checkout"
     roots = {p.resolve() for p in media_paths.allowed_input_roots()}
@@ -238,9 +228,9 @@ def test_the_install_directory_is_not_an_allowed_root():
 
 
 def test_unresolvable_data_dir_fails_closed_with_its_own_reason(tmp_path, monkeypatch):
-    """Rule 5: a security step that cannot RUN must not read as a routine policy
-    refusal, and must not widen the policy. With every allowed root a subdir OF
-    the data dir, losing the data dir means nothing is permitted."""
+    """A security step that cannot RUN must not read as a routine policy refusal,
+    and must not widen the policy. With every allowed root a subdir OF the data
+    dir, losing the data dir means nothing is permitted."""
     monkeypatch.setattr(media_paths, "_resolved_home", lambda: None)
     assert media_paths.allowed_input_roots() == []
     with pytest.raises(Exception) as ei:
@@ -251,7 +241,7 @@ def test_unresolvable_data_dir_fails_closed_with_its_own_reason(tmp_path, monkey
 
 
 _UNC_FORMS = [
-    "\\\\192.0.2.1\\share\\x.png",     # canonical UNC (RFC5737 TEST-NET-1)
+    "\\\\192.0.2.1\\share\\x.png",     # canonical UNC (RFC5737 documentation address)
     "//192.0.2.1/share/x.png",         # forward-slash UNC
     "\\/192.0.2.1\\share\\x.png",      # mixed separators, form 1
     "/\\192.0.2.1/share/x.png",        # mixed separators, form 2
@@ -264,11 +254,10 @@ _UNC_FORMS = [
 def test_unc_input_is_refused_without_ever_touching_the_filesystem(
         tmp_path, monkeypatch, raw):
     """A UNC dest would be refused by the allowlist anyway - but only AFTER
-    .resolve() had dialled SMB. Measured here: a probe of \\\\192.0.2.1\\share
-    did not return within 120 seconds, and these handlers are async, so that is
-    a whole-server stall per request; against a REACHABLE share Windows also
-    surrenders the host net-NTLMv2 credential. So the refusal must happen on the
-    STRING, before any syscall.
+    .resolve() had dialled SMB, which can stall a whole async handler for
+    minutes, and against a REACHABLE share Windows also surrenders the host
+    net-NTLMv2 credential. So the refusal must happen on the STRING, before any
+    syscall.
 
     All four separator mixes are covered: ntpath parses //h/s, \\/h/s and /\\h/s
     to the same drive, so a check that only looks for a leading \\\\ is bypassed
@@ -313,8 +302,8 @@ def test_is_unc_or_device_path_does_not_over_match(raw):
 def test_a_symlink_out_of_an_allowed_root_is_rejected(tmp_path, monkeypatch):
     """confined_input_image's docstring promises symlinks are resolved first, so
     a link INSIDE an allowed root that targets outside it is still rejected.
-    That property rests entirely on the single .resolve() call; nothing else in
-    the function would notice if it stopped resolving links, so pin it."""
+    That property rests entirely on the single .resolve() call, and nothing else
+    in the function would notice if it stopped resolving links."""
     home = tmp_path / ".localm"
     (home / "uploads").mkdir(parents=True)
     monkeypatch.setenv("LOCALM_HOME", str(home))
@@ -358,7 +347,7 @@ def test_input_image_from_the_gallery_and_uploads_still_accepted(tmp_path, monke
 
 def test_upload_image_refuses_a_non_image_before_transmitting(tmp_path, monkeypatch):
     """The backstop that also covers the CLI and an owner-key caller, for whom
-    the path policy above is deliberately wider. Nothing may be read into a
+    the path policy above is wider. Nothing may be read into a
     request body or a socket opened for a file that is not an image."""
     import localm.media.comfy_client as cc
     secret = tmp_path / "auth.key"
@@ -386,12 +375,11 @@ def test_upload_image_transmits_a_real_webp_end_to_end(tmp_path, monkeypatch):
     """Drive _upload_image PAST the gate with a real file, not just the pure
     signature function.
 
-    Without this, narrowing the read window at comfy_client.py (`head =
-    f.read(16)`) to 8 bytes would break every real WebP upload - WebP's second
-    signature window is at offset 8..12 - and the whole suite would stay green,
-    because every other test either asserts a REFUSAL or calls looks_like_image
-    directly. WebP is chosen precisely because it is the format that needs the
-    wider window."""
+    Narrowing the read window at comfy_client.py (`head = f.read(16)`) to 8 bytes
+    would break every real WebP upload - WebP's second signature window is at
+    offset 8..12 - while every other test in this file either asserts a REFUSAL
+    or calls looks_like_image directly. WebP is the format that needs the wider
+    window."""
     import localm.media.comfy_client as cc
     img = tmp_path / "ref.webp"
     img.write_bytes(b"RIFF\x24\x00\x00\x00WEBPVP8 " + b"\x00" * 32)
@@ -460,9 +448,8 @@ _MOVE_CASES = [
                          ids=[c[0] for c in _MOVE_CASES])
 def test_move_dest_outside_the_data_dir_denied_for_a_non_host_key(
         tmp_path, monkeypatch, plugin, subdir, fname, route):
-    """An UNOWNED artifact deliberately: require_owner passes for any caller
-    then, which is exactly why it was never an authorization gate for the
-    destination."""
+    """An UNOWNED artifact: require_owner passes for any caller then, so it is
+    not an authorization gate for the destination."""
     app, home = _media_app(tmp_path, monkeypatch, plugin)
     art = home / subdir / fname
     art.parent.mkdir(parents=True, exist_ok=True)
@@ -524,26 +511,24 @@ def test_move_anywhere_still_allowed_for_a_host_fs_key(
 def test_move_dest_alias_does_not_clobber_a_different_real_file(
         tmp_path, monkeypatch, plugin, subdir, fname, route):
     """confined_move_dest's own containment check (media.paths._under) has no
-    name-preservation walk, unlike pathsafe.confined_under/
+    name-preservation walk, unlike pathsafe.confined_under /
     confined_absolute_or_under - so an OS-level short-name alias resolving the
-    caller's dest string to a DIFFERENT real directory than it names would
-    defeat containment-by-string the same way #1086/#1091 fixed elsewhere,
-    IF anything downstream trusted the caller's own spelling for the write.
+    caller's dest string to a DIFFERENT real directory than it names would defeat
+    containment-by-string IF anything downstream trusted the caller's own
+    spelling for the write.
 
-    It does not here, and this proves why: the eventual write target is built
-    from the ALREADY-.resolve()d destination directory (no attacker alias
-    syntax survives that step) joined with the SOURCE artifact's own
-    basename - which reached this handler via pathsafe.confined_file (the
-    #1086-hardened primitive), never from caller text. The exists-check and
-    the move then act on that one concrete object; there is no second,
-    divergent resolution for the check to lie about. So an aliased dest can
-    only relocate the write to a REAL directory inside the confined data
-    dir - it cannot desynchronize the collision check from the write.
+    It does not: the eventual write target is built from the ALREADY-.resolve()d
+    destination directory (no attacker alias syntax survives that step) joined
+    with the SOURCE artifact's own basename - which reached this handler via
+    pathsafe.confined_file, never from caller text. The exists-check and the move
+    then act on that one concrete object; there is no second, divergent
+    resolution for the check to lie about. So an aliased dest can only relocate
+    the write to a REAL directory inside the confined data dir - it cannot
+    desynchronize the collision check from the write.
 
-    Deterministic simulation (same technique as test_pathsafe_confined_under.py
-    and web.py's alias tests): monkeypatch Path.resolve so a typed alias
-    component substitutes for the real directory's name, exactly as an actual
-    8.3 short name would."""
+    Deterministic simulation: monkeypatch Path.resolve so a typed alias component
+    substitutes for the real directory's name, exactly as an actual 8.3 short
+    name would."""
     app, home = _media_app(tmp_path, monkeypatch, plugin)
     art = home / subdir / fname
     art.parent.mkdir(parents=True, exist_ok=True)
@@ -590,8 +575,7 @@ def test_logs_export_denied_without_fs_host(tmp_path, monkeypatch):
     (home / "logs" / "server.log").write_text("secret-ish log content")
     key = _key([S.CONFIG_WRITE], privileged=True)          # fs_access="none"
     # dest must EXIST: export_logs 400s on a missing dest before it ever mkdirs,
-    # so a nothing-was-written assertion against a missing directory would be
-    # vacuous. An existing dest is the only way to exercise the write.
+    # so only an existing dest exercises the write.
     dest = tmp_path / "logsteal"
     dest.mkdir()
 

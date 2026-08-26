@@ -31,8 +31,8 @@ def test_warm_call_uses_single_time_form():
 
 
 def test_single_token_omits_rate_but_shows_load():
-    # One token has no decode interval; omit tok/s rather than print a bogus huge
-    # number, but still surface the load so a cold start is visible.
+    # One token has no decode interval, so tok/s is omitted; the load time is
+    # still shown, so a cold start is visible.
     line = _perf_line(1, t0=0.0, first_at=5.0, end=5.5)
     assert "tok/s" not in line
     assert "1 tokens" in line

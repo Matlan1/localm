@@ -195,11 +195,12 @@ class TestPrefillWithReuse:
         assert llm._cached_tokens == [1, 2, 3]
 
     def test_empty_cache_clears_stale_native_kv_before_reuse(self):
-        """U-1: an image turn (_generate_image never appends its tokens) and a
+        """An image turn (_generate_image never appends its tokens) and a
         mid-generate decode failure empty _cached_tokens but leave the NATIVE KV
-        populated. Reusing the context must drop that residual KV first (prefix=0,
-        so seq_rm(0, 0, -1)), else the new prompt decodes onto stale KV at shifted
-        positions and the model attends to the previous turn's context."""
+        populated. Reusing the context must drop that residual KV first
+        (prefix=0, so seq_rm(0, 0, -1)), else the new prompt decodes onto stale
+        KV at shifted positions and the model attends to the previous turn's
+        context."""
         llm = _bare_llama()
         llm._cached_tokens = []                 # bookkeeping says empty...
         ctx, mock_api = self._patch_api()       # ...native KV still holds a prior turn
@@ -283,10 +284,9 @@ class TestFreshContextPath:
         assert llm._cached_tokens == []
 
     def test_long_prompt_prefill_is_chunked(self):
-        """Regression: a fresh-context prefill larger than n_batch must be
-        split into n_batch-sized decode calls. A single oversized batch
-        aborts the process inside the native library (crash reported after
-        long chat histories forced a context rebuild)."""
+        """A fresh-context prefill larger than n_batch must be split into
+        n_batch-sized decode calls: a single oversized batch aborts the process
+        inside the native library."""
         llm = _bare_llama()
         mock_api = MagicMock()
         cp = MagicMock()
@@ -319,9 +319,8 @@ class TestFreshContextPath:
 # ---------------------------------------------------------------------------
 
 class TestRepeatPenaltySampler:
-    """Regression: repeat_penalty was accepted everywhere but never added to
-    the sampler chain, so models prone to looping repeated marker lines
-    until max_tokens."""
+    """repeat_penalty must reach the sampler chain, not merely be accepted as a
+    parameter."""
 
     def _mock_api(self, has_penalties=True, n_vocab=32000, needs_n_vocab=False):
         mock_api = MagicMock()
@@ -351,7 +350,7 @@ class TestRepeatPenaltySampler:
             "n_vocab"] == 151936
 
     def test_skipped_when_build_needs_n_vocab_and_none_is_available(self):
-        """Rather than call a 5-argument penalties sampler with n_vocab=0."""
+        """The penalties sampler is skipped, never called with n_vocab=0."""
         mock_api = self._mock_api(n_vocab=0, needs_n_vocab=True)
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             _build_sampler(vocab=0, repeat_penalty=1.1)

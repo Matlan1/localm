@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""KEY-SCOPE: the GUI /api/* capability routes must be gated on their scope, not
-just "any valid key" (_require_auth). Policy: chat is BASELINE (any valid key may
-chat); every OTHER capability is optional and gated by its own scope. The owner
-key (admin) and the owner-paired companion imply every scope and are unaffected;
-only deliberately under-scoped non-owner keys lose access.
+"""The GUI /api/* capability routes must be gated on their scope, not just "any
+valid key" (_require_auth). Policy: chat is BASELINE (any valid key may chat);
+every OTHER capability is optional and gated by its own scope. The owner key
+(admin) and the owner-paired companion imply every scope and are unaffected; only
+under-scoped non-owner keys lose access.
 
 Also covers GET /api/capabilities - the baseline endpoint that tells the GUI which
 tabs the CURRENT key may show (so a tab the key can't use is never rendered).
@@ -142,9 +142,9 @@ class TestConfigTierRoutes:
             assert r.status_code != 403
 
     def test_config_write_without_fs_host_denied_logs_export(self, scoped_app, tmp_path):
-        """CodeQL WS8 (alert 2): config:write alone is NOT enough - the route
-        writes into a caller-named host directory, and its does-it-exist 400
-        was a directory-existence oracle for the whole disk."""
+        """config:write alone is NOT enough: the route writes into a caller-named
+        host directory, and its does-it-exist 400 is a directory-existence oracle
+        for the whole disk."""
         from localm import auth
         writer = auth.create_key("cfgwrite-nofs", [S.CONFIG_WRITE],
                                  allow_privileged=True)["key"]   # fs_access="none"

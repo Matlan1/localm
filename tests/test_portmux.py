@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Issue 8: a TLS bind must catch a plain-http request on the same port with an
-https redirect (not a bare connection reset), while still serving HTTPS normally.
+"""A TLS bind must catch a plain-http request on the same port with an https
+redirect (not a bare connection reset), while still serving HTTPS normally.
 
 Spins up localm.portmux in a real subprocess (so the asyncio demux + internal
 uvicorn run exactly as in production) and checks both schemes on the one port.

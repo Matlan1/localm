@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.plugins.loader - the legacy plugin manifest ("entry =")
-discovery/import machinery. install/remove and the CLI-command-wiring half of
-this module were dead for every shipped plugin and have been removed (see
-PATHFINDER-2026-07-11); what remains (parse_manifest/discover_plugins/
-import_plugin_module) is still live: it is how
+discovery/import machinery. The live surface is parse_manifest /
+discover_plugins / import_plugin_module: it is how
 localm.plugins.coder.plugin_tools.register_plugin_tools() discovers and loads
 third-party coder-agent tool exports."""
 
@@ -151,9 +149,8 @@ class TestDiscover:
         assert "name is required" in errs[0]
 
     def test_unknown_manifest_key_warned_not_fatal(self, tmp_path):
-        """LM-DA-007: a typoed [plugin] key must not fail the plugin (it still
-        parses and loads) but must be surfaced via discover_warnings, not
-        silently ignored."""
+        """A typoed [plugin] key does not fail the plugin (it still parses and
+        loads) and is surfaced via discover_warnings."""
         toml = textwrap.dedent("""\
             [plugin]
             name = "demo"
@@ -173,8 +170,8 @@ class TestDiscover:
         assert "unknown [plugin] key(s) ignored" in ws[0]
 
     def test_engine_contract_key_not_warned(self, tmp_path):
-        """A key valid in the ENGINE manifest format (e.g. ``register``) must
-        not false-alarm here: both formats share the installed dir."""
+        """A key valid in the ENGINE manifest format (e.g. ``register``) raises
+        no warning here; both formats share the installed dir."""
         toml = textwrap.dedent("""\
             [plugin]
             name = "demo"

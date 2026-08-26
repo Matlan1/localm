@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Owner-only settings gate (REC-OWNER-SETTINGS).
+"""Owner-only settings gate.
 
 The RAG indexing settings (rag_indexing_mode / rag_allowed_roots /
 rag_denied_roots) are flagged ``admin_only`` because they define a filesystem-READ
@@ -105,9 +105,7 @@ def test_net_allow_private_is_owner_only(app_env):
     to loopback / private / link-local / cloud-metadata targets), so - exactly like
     the rag_* folder settings - it widens a trust boundary and must be owner-only.
     A non-owner config:write key must be refused at the API, or it could flip the
-    guard off and then reach internal services via any model-initiated fetch.
-    Regression for pentest finding LM-PT-001 (net_allow_private was config:write,
-    not admin_only, unlike every other trust-widening key)."""
+    guard off and then reach internal services via any model-initiated fetch."""
     c, scoped, _ = app_env
     # PATCH is refused for the non-owner config:write key (the guard-disable is
     # owner-only).
@@ -150,9 +148,7 @@ def test_cors_origins_is_owner_only(app_env):
     http_server.py) out of the cross-origin refusal too. A non-owner
     config:write key must not be able to set it, or it could widen the origin
     trust boundary itself and then read /whoami cross-origin to disclose
-    root_dir (the OS username). Regression for the security-checkup finding
-    2026-07-23 (cors_origins was config:write, not admin_only, unlike every
-    other trust-widening key)."""
+    root_dir (the OS username)."""
     c, scoped, _ = app_env
     denied = c.patch("/v1/config", headers=_scoped(scoped),
                      json={"cors_origins": "*"})
@@ -168,8 +164,8 @@ def test_cors_origins_is_owner_only(app_env):
 
 
 def test_patch_response_hides_admin_only_field_values_from_a_scoped_writer(app_env):
-    """Regression for pentest finding LM-PT-001: update_config() returns the
-    FULL merged config (every key, not just the ones this call changed), so
+    """update_config() returns the FULL merged config (every key, not just the
+    ones this call changed), so
     PATCH /v1/config's response must apply the same admin_only_keys() filter
     GET /v1/config already applies above - otherwise a config:write-scoped,
     non-owner key's response echoes back an admin_only secret's CURRENT value

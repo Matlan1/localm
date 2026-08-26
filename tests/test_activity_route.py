@@ -1,25 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GET /api/activity: discover what a server is doing WITHOUT holding a job id.
 
-ADR-0008 U3. Every other way to reach a job needs an id the caller already has,
-and that id is handed out exactly once - in the body of the POST that started
-the job. A second browser tab, a second device, or the same tab after a reload
-therefore could not learn that a model pull was running, even though the server
-had the whole record. This route is the only one that answers "what is
-happening" without being told what to look for.
+Every other way to reach a job needs an id the caller already has, and that id
+is handed out exactly once - in the body of the POST that started the job. A
+second browser tab, a second device, or the same tab after a reload therefore
+cannot learn that a model pull is running, even though the server has the whole
+record. This route answers "what is happening" without being told what to look
+for.
 
-Two properties get equal weight here, because getting either wrong is a defect
-this ADR exists to prevent:
+Two properties get equal weight here:
 
-* A caller that never saw the id MUST find the operation (the reported bug).
+* A caller that never saw the id MUST find the operation.
 * A caller must NOT see another principal's operation on a keyed server, and
   the same 404-style silence the events route uses applies - absence from the
   list, never a redacted entry proving one exists.
 
-And the default configuration is open mode, where there are no owners at all,
-so the filter admits everyone. That is correct for a single-owner local server
-and is pinned below so nobody "fixes" it into a per-principal list that would
-show a user nothing on their own machine.
+The default configuration is open mode, where there are no owners at all, so
+the filter admits everyone. That is correct for a single-owner local server and
+is pinned below: a per-principal list would show a user nothing on their own
+machine.
 """
 
 from __future__ import annotations
@@ -59,7 +58,7 @@ def app(tmp_path, monkeypatch):
 @pytest.fixture
 def headless_app(tmp_path, monkeypatch):
     """A bare `localm serve`: attach_engine only, no GUI. The route must exist
-    here too, which is the whole point of the U2 relocation."""
+    here too."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -93,7 +92,7 @@ def _inject(app, *, owner=None, kind="pull", label=None, status="running"):
 # ------------------------------------------- finding an operation by listing
 
 def test_a_client_that_never_saw_the_id_finds_the_operation(app):
-    """THE HEADLINE. The id is never given to this caller; it still finds it."""
+    """The id is never given to this caller; it still finds it."""
     job = _inject(app, label="Model pull owner/repo")
     with TestClient(app) as c:
         r = c.get("/api/activity")
@@ -118,8 +117,8 @@ def test_a_discovered_id_can_then_be_streamed(app):
 
 
 def test_the_route_exists_on_a_headless_server(headless_app):
-    """U2 put the registry at kernel level; a bare `localm serve` must be able
-    to answer this too, or the CLI and MCP surfaces have nothing to read."""
+    """The registry is at kernel level, so a bare `localm serve` answers this
+    too; the CLI and MCP surfaces read it."""
     _inject(headless_app, label="Indexing docs")
     with TestClient(headless_app) as c:
         r = c.get("/api/activity")
@@ -179,10 +178,9 @@ def test_open_mode_shows_unowned_operations_to_any_caller(app):
     """With no owner key and no keystore - how localm runs out of the box -
     principal_id() returns None, so jobs are unowned and everyone sees them.
 
-    This is CORRECT for a single-owner local server, and it is pinned because
-    the opposite mistake is easy and silent: a filter that demanded a matching
-    principal would show the user an empty list on their own machine while the
-    pull they just started was running.
+    This is CORRECT for a single-owner local server: a filter that demanded a
+    matching principal would show the user an empty list on their own machine
+    while the pull they just started was running.
     """
     from localm import auth
 
@@ -199,8 +197,8 @@ def test_open_mode_shows_unowned_operations_to_any_caller(app):
 # ------------------------------------------------------------ payload shape
 
 def test_pct_is_absent_until_something_reports_progress(app):
-    """R1: a pull that has not read a byte count is at an UNKNOWN percentage,
-    not at 0 percent. A client must be able to tell those apart."""
+    """A pull that has not read a byte count is at an UNKNOWN percentage, not
+    at 0 percent. A client must be able to tell those apart."""
     _inject(app)
     with TestClient(app) as c:
         op = c.get("/api/activity").json()["operations"][0]
@@ -220,9 +218,7 @@ def test_pct_appears_once_progress_is_reported(app):
 def test_the_response_never_carries_argv(app):
     """argv holds the resolved model spec and any host path the caller passed.
     Injected unowned, because an owned job is correctly INVISIBLE to an
-    unauthenticated open-mode caller - an earlier version of this test asserted
-    the leak against a job the filter was busy hiding, and passed for the wrong
-    reason right up until it did not."""
+    unauthenticated open-mode caller."""
     _inject(app, owner=None)
     with TestClient(app) as c:
         body = c.get("/api/activity").text
@@ -281,11 +277,10 @@ def test_an_idle_server_reports_an_empty_list_not_an_error(app):
 def test_the_reply_carries_the_server_clock(app):
     """A client must not compute an operation's age against its OWN clock.
 
-    created_at exists so a user can tell a six-second operation from a
-    six-hour one, so durations get rendered - and a client subtracting a
-    server epoch from its local Date.now() is wrong by however much the two
-    clocks disagree, which on a phone is not small. Shipping the reference
-    clock alongside makes the honest computation the easy one.
+    created_at exists so a user can tell a six-second operation from a six-hour
+    one, and a client subtracting a server epoch from its local Date.now() is
+    wrong by however much the two clocks disagree. The reference clock ships
+    alongside it.
     """
     job = _inject(app)
     job.created_at = time.time() - 120

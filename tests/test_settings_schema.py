@@ -60,12 +60,11 @@ def test_schema_json_serializable_with_defaults():
 
 
 class TestShippedDefaultAnnotation:
-    """NEW-DEFAULT-VALUE-PLACEHOLDER: `default` is the CURRENT value (base=
-    load_config() in the real server route), which after a save is the user's
-    own override - so the GUI needs a SEPARATE, always-factory value to tell
-    "still shipped default" apart from "user set it to this". `shipped_default`
-    is that value: always from DEFAULT_CONFIG, regardless of what `values` the
-    caller passed."""
+    """`default` is the CURRENT value (base=load_config() in the real server
+    route), which after a save is the user's own override - so the GUI needs a
+    SEPARATE, always-factory value to tell "still shipped default" apart from
+    "user set it to this". `shipped_default` is that value: always from
+    DEFAULT_CONFIG, regardless of what `values` the caller passed."""
 
     def test_shipped_default_matches_default_config_regardless_of_override(self):
         overridden = dict(DEFAULT_CONFIG)
@@ -108,11 +107,10 @@ class TestMediaPerPluginAnnotation:
     """schema_json's media_per_plugin annotation: the GUI's Media section skips
     group="Media" fields in the flat form and renders per-plugin-mapped globals
     ONLY in the per-plugin boxes - so it must be able to tell, from the schema
-    alone, which Media fields those are. Before this annotation the client
-    special-cased two keys by name and every other Media field silently
-    rendered NOWHERE (comfy_launch_timeout / comfy_disable_auto_launch /
-    comfy_func_shim were GUI-invisible; 2026-07-22 settings-exposure audit).
-    MEDIA_PLUGIN_FIELDS is the single source of truth."""
+    alone, which Media fields those are. Without the annotation a client has to
+    special-case keys by name, and every other Media field
+    (comfy_launch_timeout / comfy_disable_auto_launch / comfy_func_shim) renders
+    NOWHERE. MEDIA_PLUGIN_FIELDS is the single source of truth."""
 
     def test_media_fields_carry_the_annotation(self):
         js = ss.schema_json()
@@ -126,9 +124,9 @@ class TestMediaPerPluginAnnotation:
                 f"{f['key']}: media_per_plugin must mirror MEDIA_PLUGIN_FIELDS")
 
     def test_the_previously_orphaned_fields_are_not_per_plugin(self):
-        """The three fields the Media section historically dropped: global-only
-        reads (media/comfy_client.py), so they must be annotated for the
-        SHARED box, never left to the per-plugin boxes that cannot show them."""
+        """Three fields the Media section can drop: global-only reads
+        (media/comfy_client.py), so they must be annotated for the SHARED box,
+        never left to the per-plugin boxes that cannot show them."""
         js = {f["key"]: f for f in ss.schema_json()}
         for key in ("comfy_launch_timeout", "comfy_disable_auto_launch",
                     "comfy_func_shim"):
@@ -142,11 +140,11 @@ class TestMediaPerPluginAnnotation:
 
 class TestComfyFloatTypeGlobalKey:
     """The per-plugin float_type field (MEDIA_PLUGIN_FIELDS) and the media
-    backends both fall back to a GLOBAL comfy_float_type key - which did not
-    exist in DEFAULT_CONFIG or the schema, so the documented fallback could
-    only ever be set by hand-editing config.json (the validated PATCH/CLI
-    paths reject unknown keys). Make the fallback real: present, typed, and
-    validated with the same options as the per-plugin field."""
+    backends both fall back to a GLOBAL comfy_float_type key. Absent from
+    DEFAULT_CONFIG and the schema, that fallback can only be set by hand-editing
+    config.json, since the validated PATCH/CLI paths reject unknown keys. The
+    key must be present, typed, and validated with the same options as the
+    per-plugin field."""
 
     def test_key_exists_with_a_null_default(self):
         assert "comfy_float_type" in DEFAULT_CONFIG
@@ -176,8 +174,8 @@ def test_fields_by_owner_partitions():
 
 
 def test_every_visible_field_has_a_description():
-    """The settings overhaul requires EVERY rendered field to carry a clear
-    description (HIDDEN fields are not rendered, so they are exempt)."""
+    """EVERY rendered field must carry a clear description (HIDDEN fields are
+    not rendered, so they are exempt)."""
     missing = [f.key for f in ss.CORE_FIELDS
                if f.widget != ss.Widget.HIDDEN and not (f.help or "").strip()]
     assert not missing, f"fields missing a description: {missing}"
@@ -190,7 +188,7 @@ def test_every_field_has_a_label():
 
 def test_binary_dir_schema_exposes_auto_resolved_path():
     """Blank binary_dir must surface the auto-detected path so the GUI can show
-    it (the 'blank autodetect leaves the field empty' complaint)."""
+    it rather than leaving the field empty."""
     by_key = {f["key"]: f for f in ss.schema_json()}
     assert "auto" in by_key["binary_dir"], "binary_dir must carry an 'auto' value"
 
@@ -272,10 +270,8 @@ def test_admin_only_keys_lists_the_owner_only_settings():
     # authenticated API, and hf_trust_remote_code lets a downloaded model
     # directory run its OWN Python inside the localm process.
     #
-    # EXACT SET EQUALITY - not to be weakened to a subset check. This file and
-    # localm/settings_schema.py are edited TOGETHER, by one owner, and never
-    # split across branches; resolve any conflict here ADDITIVELY, keeping the
-    # keys from both sides.
+    # EXACT SET EQUALITY, not a subset check. Resolve any conflict here
+    # ADDITIVELY, keeping the keys from both sides.
     assert ss.admin_only_keys() == (
         RAG_OWNER_KEYS | OUTBOUND_OWNER_KEYS | EXEC_OWNER_KEYS
         | PRIVACY_OWNER_KEYS | GUARD_OWNER_KEYS | LOAD_PATH_OWNER_KEYS

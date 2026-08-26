@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LM-DA-025 regression: the F12b correction sidecars (`.corrections.jsonl`,
-`.forgotten.jsonl`, `.corrections-dismissed.json`) carry the same
-`"v": FORMAT_VERSION` stamp the main record store gained for LM-DA-002, and load
-tolerates its absence exactly like the main store tolerates a pre-stamp file.
+"""The correction sidecars (`.corrections.jsonl`, `.forgotten.jsonl`,
+`.corrections-dismissed.json`) carry the same `"v": FORMAT_VERSION` stamp the
+main record store does, and load tolerates its absence exactly like the main
+store tolerates a pre-stamp file.
 """
 
 from __future__ import annotations

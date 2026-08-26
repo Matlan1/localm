@@ -1,26 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``_model_file_size()`` (localm/inference/http_server.py) - the size feeding
 ``_gpu_registry_sync``'s ``vram_estimate_bytes``, a field OTHER localm
-instances read as "how much VRAM does this peer hold" (see
-gpu_registry.py's docstring and its one consumer's
-``isinstance(e, int) and e > 0`` guard in this same file).
+instances read as "how much VRAM does this peer hold".
 
 The one property under test: a directory resolve that finds NO files (an
 empty directory, or one whose real weights sit somewhere ``rglob`` does not
-reach - a plausible shape for a split/sharded model whose registry entry
-points at the wrong level) must report None ("not measured"), never a
-suspiciously-precise 0 ("measured as zero bytes") - the two mean different
-things to a reader of the registry, and collapsing them was flagged as a
-correctness gap during the NEW-GPU-REGISTRY-ZERO-BYTE-ENTRY investigation
-(a literal empty registry FILE, the separate bug that investigation was
-actually about, is covered in tests/test_instances.py instead - this file is
-about the VALUE this function computes, not the JSON entry).
+reach) must report None ("not measured"), never a 0 ("measured as zero
+bytes") - the two mean different things to a reader of the registry.
 
-Deliberately narrower than residency.model_footprint_bytes (the function
-switch_engine's own eviction-admission math uses): that one intentionally
-keeps returning int (never None) because its caller always needs a numeric
-decision input. The two are NOT expected to agree on the empty-directory
-case - see _model_file_size's docstring.
+Narrower than residency.model_footprint_bytes, which always returns an int
+because its caller needs a numeric decision input. The two are NOT expected to
+agree on the empty-directory case.
 """
 
 from localm.inference import http_server as hs
@@ -40,9 +30,9 @@ def test_single_file_returns_its_real_size(tmp_path, monkeypatch):
 
 
 def test_single_file_that_is_genuinely_empty_returns_zero_not_none(tmp_path, monkeypatch):
-    """A single FILE that stat() confirms is 0 bytes is a real, measured
-    answer (unlike the directory case below, where 0 means "found nothing to
-    sum") - it must stay 0, not be papered over into None."""
+    """A single FILE that stat() confirms is 0 bytes is a real answer (unlike
+    the directory case below, where 0 would mean "found nothing to sum") and
+    must stay 0, never become None."""
     model = tmp_path / "model.gguf"
     model.write_bytes(b"")
     _patch_get_model_info(monkeypatch, model)
@@ -59,10 +49,9 @@ def test_directory_sums_real_shard_sizes(tmp_path, monkeypatch):
 
 
 def test_empty_directory_returns_none_not_a_suspicious_zero(tmp_path, monkeypatch):
-    """The regression this file exists for: an empty directory (or one whose
-    weights rglob never reaches) must report "not measured" (None), not a
-    zero that a reader could mistake for "this peer legitimately holds 0
-    bytes of model on GPU"."""
+    """An empty directory (or one whose weights rglob never reaches) must
+    report "not measured" (None), not a zero that a reader could mistake for
+    "this peer legitimately holds 0 bytes of model on GPU"."""
     d = tmp_path / "empty-model-dir"
     d.mkdir()
     _patch_get_model_info(monkeypatch, d)

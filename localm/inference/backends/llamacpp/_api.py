@@ -119,8 +119,7 @@ def llama_load_model_from_file(
     if not isinstance(params, cls):
         # Passing the other layout's class by value would marshal main_gpu and
         # the load/mmap flags into the wrong native fields with no error from
-        # ctypes and no crash from llama.cpp - the exact silent corruption the
-        # two-layout split exists to prevent. Refuse loudly instead.
+        # ctypes and no crash from llama.cpp, so this refuses instead.
         raise TypeError(
             f"model params are {type(params).__name__} but the loaded llama "
             f"runtime uses {cls.__name__}; build them with "
@@ -153,7 +152,7 @@ def llama_init_from_model(
         # above, on the other params struct: marshaling the wrong
         # context_params layout by value lands rope_scaling_type/pooling_type/
         # attention_type/... at the wrong native offsets with no error from
-        # ctypes and no crash from llama.cpp. Refuse loudly instead.
+        # ctypes and no crash from llama.cpp, so this refuses instead.
         raise TypeError(
             f"context params are {type(params).__name__} but the loaded "
             f"llama runtime uses {cls.__name__}; build them with "
@@ -215,9 +214,8 @@ def llama_model_meta_val_str(model: ctypes.c_void_p, key: str) -> Optional[str]:
     or unreadable. Only call after has_model_meta_api().
 
     A missing key is a NORMAL answer, not a failure: most GGUFs declare only a
-    subset of keys (verified 2026-07-15 - bge-small declares bert.pooling_type,
-    a Qwen2.5 chat GGUF declares no pooling key at all), so the caller must
-    distinguish "not declared" (None) from a declared value."""
+    subset of keys, so the caller must distinguish "not declared" (None) from a
+    declared value."""
     fn = _bind("llama_model_meta_val_str", ctypes.c_int32, LlamaModel,
                ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t)
     buf = ctypes.create_string_buffer(256)
@@ -607,7 +605,7 @@ def has_penalties_sampler() -> bool:
     """True when this llama.dll exports llama_sampler_init_penalties AND localm
     can determine which of its two signatures the build uses.
 
-    The symbol alone is not enough: upstream #26520 prepended an ``int32_t
+    The symbol alone is not enough: a newer upstream prepended an ``int32_t
     n_vocab`` without renaming it or adding any other symbol, and calling either
     arity against the other corrupts the arguments (see
     ``_abi.penalties_arity``). A build whose arity cannot be PROVEN reports
@@ -620,10 +618,9 @@ def has_penalties_sampler() -> bool:
     from ._abi import penalties_arity
     if penalties_arity() == 0:
         # WARN ONCE. This function runs inside _build_sampler, i.e. once per
-        # GENERATION REQUEST, so an unconditional warning here would emit a line
-        # per request for the life of the server - and a flooded log is how a
-        # real warning gets ignored. The condition is a property of the loaded
-        # library and cannot change while the process holds it.
+        # GENERATION REQUEST, so an unconditional warning would emit a line per
+        # request for the life of the server. The condition is a property of the
+        # loaded library and cannot change while the process holds it.
         global _warned_penalties_arity
         if not _warned_penalties_arity:
             _warned_penalties_arity = True
@@ -655,11 +652,11 @@ def llama_sampler_init_penalties(
     """Repetition penalty sampler, dispatched on the build's argument list.
 
     Two live signatures (see ``_abi.penalties_arity`` for how they are told
-    apart and why guessing is unsafe):
+    apart):
 
-      upstream <= b10269 / lemonade b1288:
+      older builds:
           (penalty_last_n, repeat, freq, present)
-      >= upstream 935cad6497e8 / lemonade b1307:
+      newer builds:
           (n_vocab, penalty_last_n, repeat, freq, present)
 
     *n_vocab* is ignored by the 4-argument form. Callers on the 5-argument form

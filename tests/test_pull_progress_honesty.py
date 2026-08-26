@@ -1,30 +1,30 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0009 P1-P4/P16: the download progress stream must not state anything the
-download does not know.
+"""The download progress stream must not state anything the download does not
+know.
 
 Five defects, one function cluster, all in the pull progress path:
 
-* P1  a terminal 100% was emitted from `finally`, so EVERY exit claimed
-      completion - including the `return False` a failed part takes from inside
-      the `with` block, which unwinds cleanly and defeats exception detection.
-* P16 the opening event hardcoded `0` instead of calling the numerator the poll
-      loop uses 0.7s later. True on a fresh pull, FALSE on every resume.
-* P2  `_pull_url` derived its total from the resume offset, so a resumed
-      chunked download ran to completion at a stuck, confident 100%.
-* P3  the single-file path emitted NOTHING when it could not size the download,
-      where its sibling deliberately streams an honest indeterminate stream.
-* P4  the in-flight byte scan was hardcoded to MODELS_DIR and unfiltered, so it
-      read the wrong tree for a --comfy-dest-dir pull and added a CONCURRENT
-      pull's temp file to this job's numerator.
+* a terminal 100% emitted from `finally`, so EVERY exit claims completion -
+  including the `return False` a failed part takes from inside the `with`
+  block, which unwinds cleanly and defeats exception detection.
+* the opening event hardcoding `0` instead of calling the numerator the poll
+  loop uses 0.7s later. True on a fresh pull, FALSE on every resume.
+* `_pull_url` deriving its total from the resume offset, so a resumed chunked
+  download runs to completion at a stuck, confident 100%.
+* the single-file path emitting NOTHING when it cannot size the download,
+  where its sibling streams an honest indeterminate stream.
+* the in-flight byte scan hardcoded to MODELS_DIR and unfiltered, so it reads
+  the wrong tree for a --comfy-dest-dir pull and adds a CONCURRENT pull's temp
+  file to this job's numerator.
 
 A NOTE ON THE ASSERTIONS, because the obvious ones are unsound here. Each
 context manager starts its poll thread BEFORE emitting the opening event, and
 the thread's first iteration runs immediately - so which of the two lands first
 is a race. A test phrased as "the first event reports the measurement" can
 therefore PASS against the unfixed code whenever the poll thread wins, which is
-a test that cannot reliably fail. The P16 tests below assert instead that NO
+a test that cannot reliably fail. The seed tests below assert instead that NO
 event reports zero while bytes are on disk. That is race-proof, and it fails
-deterministically on the old code because the seed ALWAYS emitted 0.
+deterministically on a seed that always emits 0.
 """
 
 import json
@@ -39,16 +39,15 @@ def _events(capsys, phase=None):
     """Every progress payload emitted so far, in order.
 
     *phase* filters to one stage. It exists because the channel carries more
-    than one: since ADR-0009 P9/P10 the pull path also emits a ``verify`` stage
-    while it hashes the finished file. A test about what the DOWNLOAD knows must
-    therefore say so, or it reads the verifier's events as the downloader's -
-    and those are legitimately different, since a file on disk has a size even
-    when the transfer that produced it never advertised one.
+    than one: the pull path also emits a ``verify`` stage while it hashes the
+    finished file. A test about what the DOWNLOAD knows must therefore say so,
+    or it reads the verifier's events as the downloader's - and those are
+    legitimately different, since a file on disk has a size even when the
+    transfer that produced it never advertised one.
 
-    Catalogue item 20: a harness that identifies its subject by a property
-    several producers share cannot tell them apart. Here the shared property was
-    "is a progress event", and it stopped being discriminating the moment a
-    second phase existed."""
+    A harness that identifies its subject by a property several producers share
+    cannot tell them apart. Here the shared property is "is a progress event",
+    and it stops being discriminating the moment a second phase exists."""
     out = capsys.readouterr().out
     evs = [json.loads(line.split(mm.PROGRESS_SENTINEL, 1)[1])
            for line in out.splitlines() if mm.PROGRESS_SENTINEL in line]
@@ -146,8 +145,9 @@ class TestTheOpeningEventComesFromTheMeasurement:
 
 class TestAnUnknownTotalStreamsRatherThanGoingSilent:
     def test_the_single_file_path_still_emits_with_no_total(self, gui, capsys, tmp_path):
-        """One failed HEAD zeroes total_size. That used to make the ENTIRE
-        progress mechanism a no-op, so a multi-GB pull went completely silent."""
+        """One failed HEAD zeroes total_size. Gating the whole progress mechanism
+        on a nonzero total makes it a no-op there, so a multi-GB pull goes
+        completely silent."""
         part = tmp_path / "m.gguf"
         part.write_bytes(b"y" * 7)
         with mm._download_progress([part], 0) as prog:
@@ -181,8 +181,8 @@ class TestTheInFlightScanIsScopedToThisJob:
         return f
 
     def test_a_concurrent_pulls_temp_file_is_not_counted(self, gui, capsys, tmp_path):
-        """The scan used to be an unfiltered rglob, so every other download in
-        flight inflated this job's numerator."""
+        """An unfiltered rglob scan lets every other download in flight inflate
+        this job's numerator."""
         from huggingface_hub._local_folder import _short_hash
         from huggingface_hub._local_folder import get_local_download_paths
         base = tmp_path / "models"
@@ -298,14 +298,14 @@ class TestAResumeOffsetIsNotATotal:
             self, url_env, monkeypatch, capsys):
         """THE DEFECT: `total_display = (already_have + content_length) or None`.
         A chunked response carries no content-length, so on a RESUME the total
-        became already_have - the first poll read already_have of already_have,
-        i.e. 100%, and the change-gate suppressed every later event. The whole
-        real transfer then ran at a stuck, confident 100%.
+        becomes already_have - the first poll reads already_have of already_have,
+        i.e. 100%, and the change-gate suppresses every later event. The whole
+        real transfer then runs at a stuck, confident 100%.
 
-        A FRESH download collapsed to None correctly, so only the resume path
-        was ever wrong - the one the .part machinery exists for. The fixture
-        must therefore set BOTH a non-empty .part file and a zero
-        content-length; either alone cannot reproduce it.
+        A FRESH download collapses to None correctly, so only the resume path is
+        ever wrong - the one the .part machinery exists for. The fixture must
+        therefore set BOTH a non-empty .part file and a zero content-length;
+        either alone cannot reproduce it.
         """
         models = url_env
         (models / "model.gguf.part").write_bytes(b"01234")   # 5 already on disk

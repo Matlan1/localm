@@ -4,12 +4,9 @@ video): a key scoped to ONLY that plugin must not be able to enumerate, read,
 delete, move, or rename another principal's generated media, and the history
 listing must not leak another principal's items.
 
-Mirrors jobs' test_jobs_owner_binding.py - the sibling plugin family that
-already had this gate (job_owner_ok / owned_job); image/music/video did
-not (HIGH-6 in CONSOLIDATED-FINDINGS-2026-07-09.md, #19 in
-QUALITY-ARCHITECTURE-REVIEW-2026-07-09.md - independently found by three
-separate audit methods). Fixed via localm.media.gallery, shared by all three
-plugins' plug.py.
+Mirrors the jobs family's own gate (job_owner_ok / owned_job) in
+test_jobs_owner_binding.py. The media half lives in localm.media.gallery,
+shared by all three plugins' plug.py.
 """
 
 import json
@@ -125,10 +122,9 @@ class TestImageGalleryOwnership:
 
     def test_legacy_untracked_file_stays_visible_to_any_scoped_key(
             self, tmp_path, monkeypatch):
-        """A file that never went through stamp_owner (placed directly on disk,
-        or generated before this fix shipped) has no recorded owner - matching
-        jobs' "no recorded owner is unrestricted" rule, so it must NOT become
-        invisible/undeletable to every scoped key after this change."""
+        """A file that never went through stamp_owner (placed directly on disk)
+        has no recorded owner and stays reachable by any scoped key, matching
+        jobs' "no recorded owner is unrestricted" rule."""
         app = _gallery_app(tmp_path, monkeypatch, "image")
         (a,) = _mk_keys(["image"])
         images_dir = Path.home() / ".localm" / "gui_images"
@@ -141,12 +137,10 @@ class TestImageGalleryOwnership:
 
 
 class TestCorruptIndexFailsClosed:
-    """An owner index that EXISTS but is unreadable/corrupt must FAIL CLOSED -
-    deny a non-owner - not collapse to an empty index that reports every artifact
-    as unowned (job_owner_ok treats owner=None as unrestricted). That collapse
-    was the HON-01 fail-open: a corrupt/locked/truncated gallery_index/<kind>.json
-    granted require_owner + history to EVERY caller. A genuinely-ABSENT index
-    stays open/untracked (the benign case), so the two must not be conflated."""
+    """An owner index that EXISTS but is unreadable or corrupt FAILS CLOSED and
+    denies a non-owner, rather than collapsing to an empty index that reports
+    every artifact as unowned (job_owner_ok treats owner=None as unrestricted).
+    A genuinely-ABSENT index stays open/untracked, so the two are distinct."""
 
     def _corrupt_index(self, kind: str) -> Path:
         from localm.media import gallery
@@ -183,9 +177,9 @@ class TestCorruptIndexFailsClosed:
                             headers=_h("ownersecret")).json()["images"])
 
     def test_absent_index_stays_open(self, tmp_path, monkeypatch):
-        """The distinction the fix turns on: an ABSENT index (never created, or
-        deleted) is the benign open/untracked case, so any scoped key still
-        reaches the media - unlike the corrupt case above."""
+        """An ABSENT index (never created, or deleted) is the open/untracked
+        case, so any scoped key still reaches the media, unlike the corrupt case
+        above."""
         app = _gallery_app(tmp_path, monkeypatch, "image")
         a, b = _mk_keys(["image"], ["image"])
         with TestClient(app) as c:
@@ -226,9 +220,8 @@ class TestGalleryIndexReadContract:
 
     @pytest.mark.parametrize("body", ["[1, 2, 3]", "null", '"x"', "42"])
     def test_non_dict_json_fails_closed(self, tmp_path, monkeypatch, body):
-        # An index that PARSES but is not an object still exists without being a
-        # usable owner map, so it fails closed like a truncated one. Returning {}
-        # here would make owner_of() report every artifact unowned.
+        # An index that PARSES but is not an object exists without being a
+        # usable owner map, so it fails closed like a truncated one.
         self._home(tmp_path, monkeypatch)
         from localm.media import gallery
         p = gallery._index_path("image")

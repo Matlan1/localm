@@ -29,19 +29,15 @@ Routes (mounted by the engine, auto-scoped to the ``coder`` capability):
   GET    /api/coder/history/{name}              - read one past audit log
   GET    /api/coder/episodes                    - stored lessons for a project
 
-The REPL's own session controls have a web form here for the same reason
-(parity audit O6): /approve, /scope and /verify are the settings route, /cd is
-the cwd route, /remember + /forget + /memory are the three memory routes, /bg is
-and /bg is the background route. Until now a GUI session could not revoke its
-own auto-approve, and the workaround suggested for the others (start again with
-resume) does not exist in privacy mode, which is the DEFAULT on both surfaces.
+The REPL's own session controls map onto these routes: /approve, /scope and
+/verify are the settings route, /cd is the cwd route, /remember + /forget +
+/memory are the three memory routes, and /bg is the background route.
 
-Six options that were CLI-only until now have a web form here, per the standing
-CLI/GUI parity rule: --estimate (the estimate route), --patch-mode (the
-patch_mode field + the two patch routes), --native-tools (the native_tools
-field, with the effective value reported back), --output-format json (the result
-route), --episodes (the episodes route), and --until (unified onto the existing
-verify/auto_verify oracle, whose retry cap verify_max_retries now exposes).
+Six CLI options have a web form here: --estimate (the estimate route),
+--patch-mode (the patch_mode field + the two patch routes), --native-tools (the
+native_tools field, with the effective value reported back), --output-format
+json (the result route), --episodes (the episodes route), and --until (unified
+onto the verify/auto_verify oracle, whose retry cap is verify_max_retries).
 
 The agentic coder runs shell commands and writes files, so the engine gates every
 route above on the ``coder`` capability scope. Live sessions need the kernel GUI's
@@ -130,9 +126,8 @@ class EpisodeTargetRequest(BaseModel):
     """Which project's lessons an episode WRITE operation applies to.
 
     A body rather than a query parameter, unlike the two read routes: these are
-    state-changing, so they must be unsafe methods, and an unsafe method is what
-    the CSRF check applies to. A destructive operation reachable by a URL alone
-    is one someone can be walked into.
+    state-changing, so they use unsafe methods, which is what the CSRF check
+    applies to.
     """
     cwd: str
 
@@ -147,8 +142,7 @@ class SessionSettingsRequest(BaseModel):
     Every field is optional, and ABSENT is not the same as NULL: a field the
     caller did not send is left alone, a field sent as null is CLEARED. That
     distinction is read off ``model_fields_set``, so one PATCH-shaped call can
-    say "turn scope off" without also having to restate the verify command, and
-    "leave scope as it is" without a magic sentinel string.
+    say "turn scope off" without restating the verify command.
     """
     auto_approve: bool | None = None
     scope: str | None = None
@@ -464,16 +458,10 @@ async def session_estimate(session_id: str, req: EstimateRequest, request: Reque
     """Plan a task without running it: the web form of the CLI's --estimate.
 
     One planning turn, zero tool calls, and NOTHING added to the conversation
-    (see ``coder.estimate.estimate_task`` for why that matters more here than in
-    the CLI, which exits immediately afterwards). Refused while the session is
-    busy: an estimate is a pre-flight on work you have not started, and running
-    one against the shared engine mid-task would both queue behind the running
-    turn and read as if it described it.
+    (see ``coder.estimate.estimate_task``). Refused while the session is busy.
 
     The busy/closed decision is the SESSION's, taken under its own lock in
-    ``run_estimate``, not a check made here - reading ``session.busy`` from the
-    route and acting on it afterwards is check-then-act with a real window, and
-    this route is a SECOND trigger for a backend that until now had exactly one.
+    ``run_estimate``, not a check made here.
 
     The plan is pushed into the session feed as well as returned, so every open
     tab sees it - the same contract every other session event has."""
@@ -516,11 +504,9 @@ async def session_patch(session_id: str, request: Request):
     """The unified diff a patch-mode session has captured instead of writing.
 
     Reading NEVER consumes it (``session.current_patch()``, not
-    ``agent.flush_patch()``): a reloaded tab, a retry or a second reader must
-    see the same patch, and a drain-on-read would look identical the first time
-    and be empty ever after. 409 when the session is not in patch mode, because
-    an empty diff there means "everything was written to disk", which is the
-    opposite of what this endpoint reports."""
+    ``agent.flush_patch()``): a reloaded tab, a retry or a second reader sees
+    the same patch. 409 when the session is not in patch mode, where an empty
+    diff would mean "everything was written to disk"."""
     session = _get_session(request, session_id)
     if not session.patch_mode:
         raise HTTPException(
@@ -534,11 +520,9 @@ async def session_patch(session_id: str, request: Request):
 @_router.get("/api/coder/sessions/{session_id}/patch/download")
 async def session_patch_download(session_id: str, request: Request):
     """The same patch as a .patch attachment - the web form of the CLI's
-    ``--patch-mode FILE``, where the file lands on the CLIENT's disk because
-    that is the only disk a browser can write to.
+    ``--patch-mode FILE``, where the file lands on the CLIENT's disk.
 
-    Streamed from memory, never through a server-side temp file: the whole point
-    of patch mode is that this content did not touch a disk."""
+    Streamed from memory, never through a server-side temp file."""
     session = _get_session(request, session_id)
     if not session.patch_mode:
         raise HTTPException(
@@ -626,19 +610,12 @@ async def session_stop(session_id: str, request: Request):
 async def session_set_model(session_id: str, req: SetModelRequest, request: Request):
     """Repoint an existing session's pinned model.
 
-    Without this route a session's model is fixed forever at creation time
-    (CoderSession.set_model's docstring in sessions.py has the full story of
-    why that is a bug, not just a limitation) - the GUI's model switcher had no
-    way to reach an already-running coder session at all, so it kept sending
-    the ORIGINAL model on every request and could reload it right back into
-    VRAM after the user deliberately switched away from it.
-
     Same trust model as create_session's optional model switch above: a
     per-session model change repoints the ONE shared engine for EVERYONE, so a
-    scoped key must not trigger it (DoS / interfering with the owner's
-    session) - mirrored here rather than factored out, since the "did the
-    caller actually ask for a change" gate differs (there it is optional and
-    compared against active_model(); here it is the whole point of the call)."""
+    scoped key must not trigger it. Mirrored here rather than factored out,
+    since the "did the caller actually ask for a change" gate differs (there it
+    is optional and compared against active_model(); here it is the whole point
+    of the call)."""
     session = _get_session(request, session_id)
     if session.busy:
         # Fail fast, before the expensive, globally-visible switch_model call below.
@@ -686,18 +663,10 @@ async def session_settings(session_id: str, req: SessionSettingsRequest,
                            request: Request):
     """Change auto-approve, scope or verification on a LIVE session.
 
-    The REPL has had /approve, /scope and /verify since the beginning; the web
-    surface had none of them, and the workaround on record (start again with
-    resume) needs a checkpoint, which privacy mode never writes - and privacy is
-    the default on both surfaces. So for a default GUI session there was no
-    route to any of this at all.
-
-    DELIBERATELY NOT BUSY-GUARDED, unlike the model route. The safety-relevant
-    half of this is REVOKING auto-approve, and the moment a user reaches for
-    that is precisely the moment the agent is mid-run doing something they want
-    stopped. A 409 there would refuse the control in the only case it exists
-    for. Tightening a scope is the same shape. These are attribute writes read
-    at the next tool dispatch, not state a running turn can tear.
+    NOT BUSY-GUARDED, unlike the model route: revoking auto-approve and
+    tightening a scope must work while the agent is mid-run. These are
+    attribute writes read at the next tool dispatch, not state a running turn
+    can tear.
     """
     session = _get_session(request, session_id)
     if session.closed:
@@ -731,16 +700,10 @@ async def session_set_cwd(session_id: str, req: SessionCwdRequest,
                           request: Request):
     """Move a live session to another project directory (the REPL's /cd).
 
-    Unreachable from the web surface in EVERY mode until now, including the
-    resume workaround, because a checkpoint is looked up by cwd - so there was
-    no shape of request that could move a conversation to another project.
-
-    REFUSED for a restricted (scoped-key) session, and that is the whole
-    containment: create_session forces such a session into the instance's
-    project root and ignores the cwd it was given, so a route that moved it
-    afterwards would hand back exactly what was taken away. Refused on the
-    SESSION's restriction rather than the caller's, so an owner cannot move a
-    shared key's session out of the root either.
+    REFUSED for a restricted (scoped-key) session: create_session forces such a
+    session into the instance's project root and ignores the cwd it was given.
+    Refused on the SESSION's restriction rather than the caller's, so an owner
+    cannot move a shared key's session out of the root either.
 
     Busy-guarded where /settings is not: this rebuilds the project map and the
     system prompt, so applying it under a running turn would change the prompt
@@ -783,12 +746,10 @@ async def session_set_cwd(session_id: str, req: SessionCwdRequest,
 async def session_memory(session_id: str, request: Request):
     """The project-memory file (LOCALCODER.md) this session injects.
 
-    NOT owner-gated, unlike history and episodes, and the difference is real
-    rather than an oversight: those are the owner's own records held in the
-    localm home directory, while this is a file in the session's own project
-    directory that a restricted session's confined write_file/edit_file can
-    already read and rewrite (SAFE_RESTRICTED_TOOLS). Gating it would refuse
-    through the front door what stays open at the side, which is theatre.
+    NOT owner-gated, unlike history and episodes: those are the owner's own
+    records held in the localm home directory, while this is a file in the
+    session's own project directory that a restricted session's confined
+    write_file/edit_file can already read and rewrite (SAFE_RESTRICTED_TOOLS).
     """
     session = _get_session(request, session_id)
     return session.memory()
@@ -798,11 +759,9 @@ async def session_memory(session_id: str, request: Request):
 async def session_remember(session_id: str, req: MemoryRequest, request: Request):
     """Append a bullet to the project memory (the REPL's /remember).
 
-    The RELOAD is the point, not the write. A GUI session loads and injects
-    LOCALCODER.md but had no way to change it, and asking the agent to edit the
-    file does not call reload_memory - so an edit made that way sat in the file
-    without reaching the running session, taking effect only next session. This
-    goes through the agent, so the system prompt is rebuilt now.
+    Goes through the agent, so the system prompt is rebuilt immediately. An
+    edit made by asking the agent to rewrite the file does not call
+    reload_memory and only takes effect next session.
     """
     session = _get_session(request, session_id)
     if session.closed:
@@ -822,8 +781,8 @@ async def session_forget(session_id: str, req: MemoryForgetRequest,
     """Drop memory bullets matching a substring (the REPL's /forget).
 
     ``removed`` and ``had_file`` come back alongside the new memory so a caller
-    can tell "there is no memory file" from "no entry matched" - both leave the
-    memory unchanged, and they call for different next steps.
+    can tell "there is no memory file" from "no entry matched"; both leave the
+    memory unchanged.
     """
     session = _get_session(request, session_id)
     if session.closed:
@@ -841,16 +800,15 @@ async def session_forget(session_id: str, req: MemoryForgetRequest,
 async def session_background(session_id: str, request: Request):
     """Background jobs THIS session started (the REPL's /bg).
 
-    An owner GUI session can start background shell jobs and sub-agents through
-    run_shell_background / spawn_agent_background, and had nowhere to enumerate
-    them - it could only poll an id the model happened to mention.
+    An owner GUI session starts background shell jobs and sub-agents through
+    run_shell_background / spawn_agent_background.
 
     Scoped to this session's own jobs, never the whole registry: get_registry()
     is process-wide, and a GUI server runs many sessions in one process, so an
     unfiltered list would show one session another's work - and job labels are
-    full command lines, so it would also read the owner's commands out to a
-    scoped key. ``supported`` is reported because a restricted session has no
-    background tools at all, and "none yet" must not look the same as "never".
+    full command lines. ``supported`` is reported separately because a
+    restricted session has no background tools at all, so "none yet" must not
+    look the same as "never".
     """
     session = _get_session(request, session_id)
     return {**session.background(), "supported": not session.restricted}
@@ -944,7 +902,7 @@ async def coder_history_entries(name: str, request: Request):
 
 @_router.get("/api/coder/resumable")
 async def coder_resumable(request: Request, cwd: str = ""):
-    """Is there a saved conversation to resume for *cwd*? (CODER-2)
+    """Is there a saved conversation to resume for *cwd*?
 
     Owner-only: resuming restores the OWNER's prior conversation, so a scoped /
     shared key is never told one exists (and create_session also refuses resume
@@ -983,13 +941,11 @@ def _dormant_for(path_str: str) -> list:
     """Past conversations saved for one project, newest first.
 
     Checkpoints are keyed on a digest of the project path and live under the
-    data dir, NOT inside the project - so this still answers for a project
-    directory that has been moved or deleted, which is exactly when a user most
-    wants their conversation back.
+    data dir, NOT inside the project, so this still answers for a project
+    directory that has been moved or deleted.
 
     Privacy-mode sessions cannot appear: that mode writes no checkpoint at all
-    (see Agent.save_checkpoint), so the omission is structural here rather than
-    a filter this route could get wrong.
+    (see Agent.save_checkpoint), so nothing here filters them out.
     """
     from localm.plugins.coder.agent.checkpoint import list_checkpoints
     try:
@@ -1008,10 +964,8 @@ async def coder_dormant(request: Request, cwd: str = ""):
     the user's own words about their own work, so a scoped or shared key is
     never shown one.
 
-    *cwd* is optional and only decides which group is marked ``current`` - the
-    listing spans every remembered project either way, which is the point: a
-    past session is reachable without first typing its project path back into
-    the form.
+    *cwd* is optional and only decides which group is marked ``current``; the
+    listing spans every remembered project either way.
     """
     is_owner, _ = _principal_from_request(request)
     if not is_owner:
@@ -1067,9 +1021,8 @@ async def coder_dormant(request: Request, cwd: str = ""):
 def _is_owner(request: Request) -> bool:
     """Owner-only is the gate for EVERY episode operation, read or write.
 
-    Lessons are the owner's own record of their own projects, and a restricted
-    (scoped-key) session is excluded from episodic memory entirely - it neither
-    recalls a lesson nor writes one - so nothing here can belong to a shared key.
+    A restricted (scoped-key) session is excluded from episodic memory entirely:
+    it neither recalls a lesson nor writes one.
     """
     is_owner, _ = _principal_from_request(request)
     return is_owner
@@ -1078,23 +1031,16 @@ def _is_owner(request: Request) -> bool:
 def _episode_root(cwd: str) -> Path:
     """Validate a caller-supplied project path and return the key to file under.
 
-    ONE helper rather than a copy per route: five near-identical guards is five
-    chances for one to drift, and the one that drifts is the one that stops
-    refusing UNC.
+    ONE helper shared by all five episode routes.
 
-    Deliberately NO is_dir() check, and that is a correctness decision rather
-    than a relaxation. Lessons live under the localm data dir keyed by the
-    RESOLVED project path (measured: delete the project and its lessons are still
-    there), so a directory that has been moved or removed still has an entry -
-    and that is precisely when someone wants to reach it. Refusing on is_dir()
-    would hide it.
+    NO is_dir() check: lessons live under the localm data dir keyed by the
+    RESOLVED project path, so a directory that has been moved or removed still
+    has an entry.
 
-    That leaves resolve() as the ONLY filesystem touch on a client-supplied
-    string, and resolve() is required: the CLI derives the very same key by
-    resolving the same way, so the two surfaces would otherwise disagree about
-    which project they are looking at. UNC and device syntax is refused
-    LEXICALLY, before that call - a GET carries no CSRF check, and a UNC string
-    reaching the filesystem is an SMB dial.
+    resolve() is the ONLY filesystem touch on a client-supplied string, and it
+    is required: the CLI derives the same key by resolving the same way. UNC and
+    device syntax is refused LEXICALLY, before that call - a GET carries no CSRF
+    check, and a UNC string reaching the filesystem is an SMB dial.
     """
     if not cwd.strip():
         raise HTTPException(400, "cwd is required")
@@ -1126,12 +1072,9 @@ async def _episode_op(fn):
 async def coder_episodes(request: Request, cwd: str = ""):
     """The episodic-memory lessons stored for *cwd*: the CLI's ``--episodes``.
 
-    OWNER-ONLY, for the same reason ``/api/coder/resumable`` is: these are the
-    owner's own past sessions on their own projects, and a restricted (scoped-
-    key) session is excluded from episodic memory entirely - it neither recalls
-    a lesson nor writes one - so there is nothing here that belongs to a shared
-    key. A non-owner gets an empty list rather than a 403, matching resumable:
-    the answer carries no information either way.
+    OWNER-ONLY, like ``/api/coder/resumable``: a restricted (scoped-key) session
+    is excluded from episodic memory entirely - it neither recalls a lesson nor
+    writes one. A non-owner gets an empty list rather than a 403.
 
     Read-only. Forgetting, restoring and consolidating a lesson are separate CLI
     flags with their own destructive semantics and are not exposed here.
@@ -1169,12 +1112,8 @@ async def coder_episodes(request: Request, cwd: str = ""):
 async def coder_episodes_archive(request: Request, cwd: str = ""):
     """Lessons this project has DROPPED and can get back: ``--episodes-archive``.
 
-    An unreadable archive is NOT an empty one, and that difference is the whole
-    point of this endpoint: the lesson you are looking for may be sitting in
-    there, recoverable, while a 200 with an empty list would tell you it is gone.
-    The CLI refuses that collapse by exiting non-zero; here it is a 503, because
-    the condition is transient (another process holding the file) and a retry is
-    the right next move.
+    An unreadable archive is NOT an empty one: it answers 503 rather than a 200
+    with an empty list. The CLI reports the same condition by exiting non-zero.
     """
     if not _is_owner(request):
         return {"archived": [], "cwd": None}
@@ -1200,10 +1139,9 @@ async def coder_episode_forget(episode_id: str, request: Request,
                                req: EpisodeTargetRequest):
     """Drop ONE lesson from recall: ``--forget-episode``.
 
-    Reversible by design - the record is archived first - which is why this is a
-    plain POST rather than something the UI has to frighten anyone about. If the
-    archiving half failed, the lesson is still gone from recall, so that is
-    reported as a caveat on a real outcome rather than swallowed.
+    Reversible: the record is archived first. If the archiving half failed, the
+    lesson is still gone from recall, and that is reported as a caveat on the
+    outcome rather than swallowed.
     """
     if not _is_owner(request):
         raise HTTPException(404, "No such episode")
@@ -1233,10 +1171,9 @@ async def coder_episode_restore(episode_id: str, request: Request,
                                 req: EpisodeTargetRequest):
     """Put an archived lesson back into recall: ``--restore-episode``.
 
-    Carries the CLI's two caveats, because both describe a restore that
-    SUCCEEDED and is still not what the user pictured: the archive may not have
-    been updated (so the lesson is live AND still listed as forgotten), and a
-    store at its cap may have evicted it again immediately.
+    Carries the CLI's two caveats, both describing a restore that SUCCEEDED: the
+    archive may not have been updated (so the lesson is live AND still listed as
+    forgotten), and a store at its cap may have evicted it again immediately.
     """
     if not _is_owner(request):
         raise HTTPException(404, "No such episode")
@@ -1280,10 +1217,9 @@ async def coder_episodes_clear(request: Request, req: EpisodeTargetRequest):
     """Erase ALL episodic memory for a project, archive included:
     ``--forget-episodes``.
 
-    NOT reversible, and the archive goes too on purpose: "cleared episodic
-    memory" while the lesson text still sat in a sidecar would be a privacy claim
-    that is not true. The counts are read BEFORE the erase so the response can
-    say what was actually destroyed - afterwards there is nothing left to count.
+    NOT reversible; the archive is erased too, so no lesson text survives in a
+    sidecar. The counts are read BEFORE the erase so the response can say what
+    was destroyed.
     """
     if not _is_owner(request):
         raise HTTPException(403, "Owner only")
@@ -1312,13 +1248,11 @@ async def coder_episodes_clear(request: Request, req: EpisodeTargetRequest):
 async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest):
     """Ask the model to merge related lessons into one: ``--consolidate-episodes``.
 
-    OPT-IN and manual only, never automatic - a local model rewriting stored
-    memory is exactly where one bad merge poisons every future run. Every input
-    is archived, so a merge it gets wrong is reversible with restore.
+    OPT-IN and manual only, never automatic. Every input is archived, so a merge
+    is reversible with restore.
 
-    Reports what it DID (groups, merged, replaced, archived, skipped) rather than
-    mutating silently, and a group whose merge came back unusable is counted as
-    skipped and left alone.
+    Reports what it DID (groups, merged, replaced, archived, skipped), and a
+    group whose merge came back unusable is counted as skipped and left alone.
     """
     if not _is_owner(request):
         raise HTTPException(403, "Owner only")

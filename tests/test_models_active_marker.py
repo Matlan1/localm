@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GET /v1/models must mark the active model, and remote_model_status must read
-that instead of data[0] (Antigravity-audit HIGH-4).
+that marker, never data[0].
 
-12e9f59 changed GET /v1/models from returning just the one live engine to
-returning EVERY registered model (sorted), with a per-model `loaded` flag but no
-"which one is active" marker. The pre-existing client probe remote_model_status
-still read data[0] as "the loaded model" - now the alphabetically-first
-REGISTERED model, regardless of what is loaded. `localm run <model>` attaching to
-a running server then chats with (and force-loads) the wrong model.
+GET /v1/models returns EVERY registered model (sorted) with a per-model `loaded`
+flag, so data[0] is the alphabetically-first REGISTERED model regardless of what
+is loaded. Reading it as "the loaded model" makes `localm run <model>` attach to
+a running server and chat with (and force-load) the wrong model.
 """
 
 from unittest.mock import MagicMock

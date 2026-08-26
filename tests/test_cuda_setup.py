@@ -356,16 +356,14 @@ def test_main_threads_detection_from_warn_off_profile_into_cuda_dialogue(monkeyp
 
 
 def test_main_threads_cuda_line_detection_on_linux(monkeypatch, tmp_path):
-    """The bug this pins: nvidia_preflight()/_cuda_setup_dialogue() used to be
-    reached only on win32, so a real Blackwell (or any cuda-13-line) GPU on
-    Linux silently got the cuda-12 line - a build with no kernels for that
-    architecture - and no with_cudart, skipping the PyPI cudart runtime fetch
-    too. The runtime still LOADS (it is a valid cuda-12 binary, so the ABI
-    check passes) but registers zero usable GPU devices - found live,
-    2026-08-11, on a real 3x-Blackwell Linux box ('GPU: none in the loaded
-    runtime (cuda)'). _resolve_backend_asset/_fetch_cuda_runtime_libs already
-    handle cuda-13 correctly on Linux (test_linux_cuda_runtime_provisioning.py)
-    - what was missing is main() ever detecting and passing it through."""
+    """nvidia_preflight()/_cuda_setup_dialogue() must be reached on Linux, not
+    only win32. Without it a cuda-13-line GPU gets the cuda-12 line - a build
+    with no kernels for that architecture - and no with_cudart, skipping the
+    PyPI cudart runtime fetch. That runtime still LOADS (a valid cuda-12
+    binary, so the ABI check passes) and registers zero usable GPU devices.
+    _resolve_backend_asset/_fetch_cuda_runtime_libs already handle cuda-13 on
+    Linux (test_linux_cuda_runtime_provisioning.py); this covers main()
+    detecting and passing it through."""
     monkeypatch.setattr(sl.sys, "platform", "linux")
     # A real Blackwell compute capability; NvidiaInfo.cuda_line resolves it to
     # "cuda-13".
@@ -645,12 +643,10 @@ def test_clear_target_missing_dir_does_not_raise(tmp_path):
 def test_clear_target_preserves_git_sentinels(tmp_path):
     """runtime/localm_llama_runtime/lib/ is a real directory in the git
     checkout, tracked only via its .gitignore ("*" / "!.gitkeep" /
-    "!.gitignore") that keeps setup-llama's downloaded native binaries out of
-    version control. _clear_target used to delete EVERY file in the target
-    dir with no exclusion, so every `setup-llama` run against a git checkout
-    deleted both tracked sentinel files from the working tree - emptying the
-    .gitignore and leaving a later `git add -A` free to stage hundreds of MB
-    of DLLs into git."""
+    "!.gitignore"), which keeps setup-llama's downloaded native binaries out of
+    version control. _clear_target must leave both sentinel files in place;
+    deleting them empties the .gitignore and lets a later `git add -A` stage
+    hundreds of MB of DLLs."""
     gitignore = tmp_path / ".gitignore"
     gitkeep = tmp_path / ".gitkeep"
     gitignore.write_text("*\n!.gitkeep\n!.gitignore\n", encoding="utf-8")

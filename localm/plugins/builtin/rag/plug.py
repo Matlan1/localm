@@ -19,17 +19,14 @@ converts an uploaded attachment to text entirely in memory, so privacy-mode
 chats can use documents without leaving traces.
 
 Background indexing uses the kernel's background-job registry
-(``request.app.state.jobs``), which since ADR-0008 is created by ``attach_engine``
-rather than ``attach_gui`` - so a bare ``localm serve`` has one too, and indexing,
-upload and embedding-model setup all run as streamed background jobs there exactly
-as they do under the GUI. They previously did not: ``jobs`` was absent headless, so
-add/upload ran synchronously on the plugin pool and setup returned a 503 telling
-the caller to "run `localm gui`". Both of those are gone, and the headless response
-shape for add/upload is now ``{"job_id": ...}`` like the GUI's.
+(``request.app.state.jobs``), created by ``attach_engine``, so a bare ``localm
+serve`` has one too and indexing, upload and embedding-model setup all run as
+streamed background jobs there exactly as they do under the GUI. The headless
+response shape for add/upload is ``{"job_id": ...}`` like the GUI's.
 
-Self-embedding still derives its URL from the kernel's own advertised bind
-coordinates + live engine (``_kernel_self_services``) when the GUI never published
-``.self_url`` / ``.active_model``. Query never needed a job; with no embedder
+Self-embedding derives its URL from the kernel's own advertised bind coordinates
+plus the live engine (``_kernel_self_services``) when the GUI never published
+``.self_url`` / ``.active_model``. Query never needs a job; with no embedder
 reachable it falls back to lexical-only search (embed_fn=None), the same degrade
 path used when embed=False or the embedder itself is unavailable. The background
 job stream is served by the kernel's /api/jobs/* endpoints.
@@ -55,17 +52,15 @@ _router = APIRouter()
 
 def _neutralise_hits(hits: list) -> list:
     """Defang chat control / frame tokens in each retrieved chunk's text before it
-    leaves the retrieval boundary (LM-DA-SEC-03, indirect prompt injection).
+    leaves the retrieval boundary (indirect prompt injection).
 
     A retrieved chunk is UNTRUSTED content: the owner indexed the file, but its
     CONTENT is not trusted - a crafted or malicious document could embed control
     tokens (``<|im_start|>system ...``) or frame markers to forge a role or inject
-    instructions when the chunk is spliced into the chat prompt. Untrusted tool
-    output (fetch_url / web_search / MCP) is already neutralised via the coder
-    provenance layer; RAG retrieval had no equivalent gate. Neutralising here means
-    EVERY consumer (the GUI's chat injection, the KB search view, any future tool)
-    gets defanged content by construction. Non-text fields (source / pos / score)
-    are metadata and left untouched."""
+    instructions when the chunk is spliced into the chat prompt. Neutralising here
+    means EVERY consumer (the GUI's chat injection, the KB search view, any future
+    tool) gets defanged content by construction. Non-text fields (source / pos /
+    score) are metadata and left untouched."""
     for h in hits:
         if isinstance(h, dict) and isinstance(h.get("text"), str):
             h["text"] = neutralise(h["text"])
@@ -267,11 +262,10 @@ def _dim_mismatch(stats: dict, active_dim) -> "bool | None":
 
     None whenever an honest comparison cannot be made - no vectors to compare,
     this collection's own dimension is unknown, or no embedder happens to be
-    loaded right now - never folded into a false "matches" (AGENTS rule 5).
-    Mirrors ``_collection_dim_report``'s own three-way split, just answered
-    from whatever is already resident instead of loading the target model,
-    which is what makes this cheap enough to run on every listing/detail
-    request instead of only at switch time."""
+    loaded right now - never folded into a false "matches". Mirrors
+    ``_collection_dim_report``'s own three-way split, answered from whatever is
+    already resident instead of loading the target model, which is what makes
+    this cheap enough to run on every listing or detail request."""
     dim = stats.get("vector_dim")
     if not stats.get("has_vectors") or dim is None or active_dim is None:
         return None
@@ -280,37 +274,32 @@ def _dim_mismatch(stats: dict, active_dim) -> "bool | None":
 
 def _collection_dim_report(target_dim: int) -> dict:
     """Compare every existing collection's currently stored vector dimension
-    against *target_dim* (a newly selected embedding model's own dimension),
-    so switching models can name exactly what it is about to invalidate
-    instead of a generic "click reindex" pointer that says which collections
-    need it for no one (NEW-RAG-DIM-NO-REEMBED item 3).
+    against *target_dim* (a newly selected embedding model's own dimension), so
+    switching models can name exactly what it is about to invalidate instead of a
+    generic "click reindex" pointer that says which collections need it for no
+    one.
 
-    ``/api/rag/collections`` reports ``has_vectors`` as a purely OFFLINE fact
-    (are >=80% of this collection's chunks embedded), never compared against
-    the model actually active right now - so a collection built under a
-    now-replaced model still shows "hybrid" with no badge; only an actual
-    query discovers the dimension mismatch and quietly drops to BM25 (see
-    Collection._vector_scores' own guard, which this mirrors by reading the
-    same ``vector_dim()``). That silent gap is what this closes.
+    ``/api/rag/collections`` reports ``has_vectors`` as a purely OFFLINE fact (are
+    >=80% of this collection's chunks embedded), never compared against the model
+    actually active right now, so a collection built under a now-replaced model
+    still shows "hybrid" with no badge and only an actual query discovers the
+    dimension mismatch and quietly drops to BM25 (see Collection._vector_scores'
+    own guard, which this mirrors by reading the same ``vector_dim()``).
 
-    Three buckets; a collection with no vectors at all lands in none of
-    them - there is nothing for a model switch to invalidate:
+    Three buckets; a collection with no vectors at all lands in none of them -
+    there is nothing for a model switch to invalidate:
       "degrades": has vectors at a KNOWN dimension that no longer matches
-                  target_dim - falls back to BM25/lexical the moment it is
-                  next queried, unless re-embedded first.
-      "unknown":  has vectors, but the stored dimension cannot be
-                  established (a legacy index, or one _load() already found
-                  unusable) - NEVER folded into "fine" or "degrades", since
-                  neither is actually known.
+                  target_dim - falls back to BM25/lexical the moment it is next
+                  queried, unless re-embedded first.
+      "unknown":  has vectors, but the stored dimension cannot be established (a
+                  legacy index, or one _load() already found unusable) - NEVER
+                  folded into "fine" or "degrades", since neither is known.
     Collections whose dimension already matches are only counted
-    (``unaffected``), not named - there is nothing actionable to say about
-    them.
+    (``unaffected``), not named.
 
     Best-effort per collection: one that fails to even construct (a stale
     directory mid-delete, an OS error) is counted into "unknown" rather than
-    aborting the model switch this report is secondary to (AGENTS rule 5:
-    best-effort is fine here as long as the failure is named, not folded into
-    a false "fine")."""
+    aborting the model switch this report is secondary to."""
     from localm.rag import Collection, collection_names
     degrades: list = []
     unknown: list = []
@@ -342,16 +331,12 @@ def _collection_dim_report(target_dim: int) -> dict:
 def _require_jobs(request: Request):
     """The background job manager.
 
-    Present on any app built through ``attach_engine``, which since ADR-0008
-    creates it - including a bare ``localm serve``. It used to be created by
-    ``attach_gui`` alone, so this raised a 503 telling the caller that indexing
-    "needs the localm GUI server (run `localm gui`)"; that sentence stopped
-    being true the moment the registry moved to kernel level, so it is gone
-    rather than reworded, along with its *needs* parameter.
+    Present on any app built through ``attach_engine``, which creates it -
+    including a bare ``localm serve``.
 
-    The guard itself stays, because it now catches a CONSTRUCTION error (a
-    router mounted on an app that never ran attach_engine) and a clean 503
-    still beats the unguarded AttributeError -> opaque 500 of audit item 8."""
+    The guard stays because it catches a CONSTRUCTION error (a router mounted on
+    an app that never ran attach_engine), where a clean 503 beats an unguarded
+    AttributeError turning into an opaque 500."""
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
         raise HTTPException(503, "This server has no background job registry, "
@@ -362,10 +347,10 @@ def _require_jobs(request: Request):
 def _kernel_self_services(request: Request):
     """Derive ``(self_url, active_model)`` from the KERNEL's own state when the GUI
     shell never published them. ``attach_gui`` is the only setter of
-    ``app.state.self_url`` / ``.active_model``, so a bare ``localm serve`` (api-mode)
-    would otherwise have no way to self-embed - every headless index silently
-    degrading to lexical-only (memory-audit cluster 24). But ``localm serve`` still
-    advertises its bind coordinates (``instance_scheme`` / ``instance_port``, set by
+    ``app.state.self_url`` / ``.active_model``, so a bare ``localm serve``
+    (api-mode) would otherwise have no way to self-embed and every headless index
+    would silently degrade to lexical-only. But ``localm serve`` still advertises
+    its bind coordinates (``instance_scheme`` / ``instance_port``, set by
     ``instances.advertise`` before uvicorn accepts a request), and the live engine
     is ``http_server._engine`` - the same two sources ``mount_gui_surface`` uses to
     build these very callables. Returns ``(None, None)`` when the coordinates are
@@ -392,11 +377,11 @@ def _self_services(request: Request):
     server's own /v1/* endpoints, or a matching trio of ``None`` when neither the
     GUI shell nor the kernel's bind coordinates are available. The GUI shell
     publishes ``self_url`` / ``active_model`` via ``attach_gui``; a bare ``localm
-    serve`` (api-mode) does not, so we fall back to deriving them from the kernel's
-    own advertised coordinates (see ``_kernel_self_services``) rather than degrading
-    every headless index to lexical-only (memory-audit cluster 24). ``embed_fn=None``
-    etc. are already-supported degrade paths in the store layer (lexical-only search,
-    no format tie-break, no image description) - the same fallback used when
+    serve`` (api-mode) does not, so they are derived from the kernel's own
+    advertised coordinates instead (see ``_kernel_self_services``) rather than
+    degrading every headless index to lexical-only. ``embed_fn=None`` etc. are
+    already-supported degrade paths in the store layer (lexical-only search, no
+    format tie-break, no image description) - the same fallback used when
     embed=False or the embedder itself is unavailable, so this never crashes the
     request."""
     self_url = getattr(request.app.state, "self_url", None)
@@ -414,7 +399,7 @@ def _self_services(request: Request):
 
 
 def _log_progress(text: str) -> None:
-    """Route an indexing progress line to the debug logger (LM-DA-015).
+    """Route an indexing progress line to the debug logger.
 
     The line that matters is the "embeddings unavailable ... indexing
     lexical-only" degrade warning (store.py add_paths/add_uploads): a doc that
@@ -423,29 +408,23 @@ def _log_progress(text: str) -> None:
     the always-on in-memory activity ring buffer (see debuglog.py) so it shows
     up in a bug report even without --debug.
 
-    Was headless-only, when headless indexed synchronously with no job to stream
-    into. Since ADR-0008 every mode indexes through a job, so this is paired
-    with the stream push instead of replaced by it - see ``_job_progress``."""
+    Paired with the job stream push rather than replaced by it - see
+    ``_job_progress``."""
     logger.warning("rag index: %s", text)
 
 
 def _job_progress(job):
     """``on_progress`` for an indexing job: each line goes to the job's event
     stream AND to the log, and any call that also carries done/total (reembed's
-    batch loop) additionally reports it through ``Job.progress`` (ADR-0009 P6).
+    batch loop) additionally reports it through ``Job.progress``.
 
     Both, not either. The stream is what a watching client sees live, but it is
     ephemeral, per-job and bounded; the log is what a bug report carries.
-    Headless used to log the degrade and not stream it, the GUI streamed it and
-    did not log it, so each mode was missing the other's copy. Folding headless
-    onto the job path would have dropped the logged copy entirely, which is the
-    regression LM-DA-015 exists to prevent - so the job path now does both, and
-    the GUI gains the bug-report copy it never had.
 
-    The structured branch reuses the SAME ``done``/``total``/``unit`` the text
-    was already formatted from - store.py builds both from one set of numbers
-    in a single call - rather than a second, independent computation here that
-    could drift from the line a viewer reads."""
+    The structured branch reuses the SAME ``done``/``total``/``unit`` the text was
+    already formatted from - store.py builds both from one set of numbers in a
+    single call - rather than a second, independent computation here that could
+    drift from the line a viewer reads."""
     def _cb(text: str, *, phase=None, done=None, total=None, unit=None) -> None:
         job.push({"type": "line", "text": text})
         _log_progress(text)
@@ -458,13 +437,12 @@ async def _write_off_loop(call):
     """Run a blocking collection WRITE on the plugin pool and map a lock refusal
     to 409.
 
-    Every write now waits a bounded time for any other process holding the
-    collection (localm.rag.collection_lock), so what used to be a quick
-    load-modify-save can legitimately sit for seconds. On the single-worker event
-    loop that would stall the whole server, so these calls go to the same pool
-    /extract and the headless index path already use. 409 (not 500) because
-    "someone else is writing this collection, try again shortly" is exactly a
-    conflict, and the message names the holder."""
+    Every write waits a bounded time for any other process holding the collection
+    (localm.rag.collection_lock), so a load-modify-save can legitimately sit for
+    seconds. On the single-worker event loop that would stall the whole server, so
+    these calls go to the same pool /extract and the headless index path use. 409
+    (not 500) because "someone else is writing this collection, try again shortly"
+    is exactly a conflict, and the message names the holder."""
     from localm.rag import CollectionLockedError
     loop = asyncio.get_running_loop()
     try:
@@ -477,50 +455,32 @@ async def _write_off_loop(call):
 async def rag_collections():
     """List every collection's stats.
 
-    ``Collection(n).stats()`` used to be called directly here, on the event
-    loop, for every collection: construction runs ``_load()``, which parses
-    ALL of chunks.jsonl and vectors.json just to report counts - measured at
-    2.7-3.8s on a real tree, freezing every other in-flight request for that
-    long on the single-worker loop (this endpoint has no write to protect, so
-    nothing here needed that cost in the first place).
+    ``Collection.peek_stats()`` answers from meta.json alone (see its docstring
+    and the cache _save() writes), which is both cheap AND correct - not a coarser
+    approximation, the SAME numbers a full load would produce, just already known.
+    That is what every collection uses once it has been saved even once under this
+    code. Calling ``Collection(n).stats()`` directly instead would run ``_load()``
+    for every collection, parsing ALL of chunks.jsonl and vectors.json just to
+    report counts, and freeze every other in-flight request on the single-worker
+    loop for seconds; this endpoint has no write to protect, so nothing here needs
+    that cost.
 
-    ``Collection.peek_stats()`` answers from meta.json alone (see its
-    docstring and the cache _save() writes), which is both cheap AND correct -
-    not a coarser approximation, the SAME numbers a full load would produce,
-    just already known. This is the real fix, and it is what every collection
-    uses once it has been saved even once under this code (measured: 6
-    collections / 3500 chunks each, eager 3.28s -> cached 0.003s, byte-
-    identical output).
+    A collection that predates the cache (never resaved under this code) falls
+    back to the real, full stats(), run OFF the loop so it no longer stalls the
+    loop completely. That fallback is not free even off the loop: json.loads on a
+    large vectors.json is CPU-bound C code that does not release the GIL, so it
+    still slows other requests through GIL contention.
 
-    A collection that predates this cache (never resaved under this code)
-    falls back to the real, full stats() - moved off the loop, so it no
-    longer stalls the loop COMPLETELY the way every collection used to
-    (measured live, real server + an independent /health poller: the old
-    direct call starves the poller entirely, zero responses for the full
-    span; the executor-wrapped fallback still lets ~4 through instead of the
-    ~25 an unaffected 50ms poller would get - a real server measurement, not
-    just the in-process one). It is NOT a complete fix for that fallback case
-    by itself: json.loads on a large vectors.json is CPU-bound C code that
-    does not release the GIL, so even off the loop it still visibly slows
-    other requests via GIL contention (measured up to 641ms for a single
-    /health round trip while it ran) - much better than a total freeze, not
-    as good as the cache path.
-
-    FORMERLY A KNOWN GAP, now closed: ``_load()`` (which builds the full
-    ``stats()``) never calls ``_save()``, so a collection that is written
-    once and only ever LISTED after that (a common RAG pattern: index once,
-    query many times) used to stay on this fallback on every single listing,
-    indefinitely, until something else wrote to it. The cold path below now
-    goes through ``Collection.load_and_maybe_backfill()`` instead of a plain
-    ``Collection(n)`` construction - same full load, same cost this call was
-    already paying, plus an opportunistic attempt (under a non-blocking
-    ``collection_write_lock(..., timeout=0)``, skipping quietly if busy) to
-    write the ``_stats_cache`` block from what THIS load just read, so the
-    NEXT listing of the same collection is cheap. See that method's own
-    docstring for why the lock is acquired before the load rather than
-    after, which is what makes the backfilled values provably consistent
-    with disk rather than a snapshot that could have been overtaken by a
-    concurrent real write."""
+    The cold path goes through ``Collection.load_and_maybe_backfill()`` rather
+    than a plain ``Collection(n)`` construction - same full load, same cost this
+    call was already paying, plus an opportunistic attempt (under a non-blocking
+    ``collection_write_lock(..., timeout=0)``, skipping quietly if busy) to write
+    the ``_stats_cache`` block from what THIS load just read, so the NEXT listing
+    of the same collection is cheap. Without it a collection that is written once
+    and only ever LISTED afterwards would stay on the fallback indefinitely. See
+    that method's own docstring for why the lock is acquired before the load
+    rather than after, which is what makes the backfilled values provably
+    consistent with disk."""
     from localm.inference.embedder import loaded_dim
     from localm.rag import Collection, collection_names
     loop = asyncio.get_running_loop()
@@ -559,14 +519,11 @@ async def rag_create(req: RagCreateRequest):
 
 @_router.get("/api/rag/collections/{name}")
 async def rag_detail(name: str):
-    """Same shape as before (``stats()`` fields plus ``docs``), same cheap-vs-
-    fall-back split as rag_collections above - see its docstring, including
-    the same ``load_and_maybe_backfill()`` cold path (this route had the
-    identical gap: a collection only ever viewed here, never listed, was
-    equally cold and equally never backfilled by the old plain-load
-    fallback). ``docs()`` was already meta.json-only and cheap; it was
-    ``stats()``'s eager ``Collection(name)`` construction that paid the
-    full-corpus read just for this page."""
+    """Same shape as rag_collections (``stats()`` fields plus ``docs``), with the
+    same cheap-versus-fallback split and the same
+    ``load_and_maybe_backfill()`` cold path - see its docstring. ``docs()`` is
+    meta.json-only and cheap; it is ``stats()``'s eager ``Collection(name)``
+    construction that would pay a full-corpus read just for this page."""
     from localm.inference.embedder import loaded_dim
     from localm.rag import Collection
     loop = asyncio.get_running_loop()
@@ -866,31 +823,29 @@ async def rag_reembed(name: str, request: Request):
 @_router.post("/api/rag/collections/{name}/repair")
 async def rag_repair(name: str, req: RagRepairRequest, request: Request):
     """The GUI's answer to a "needs repair" badge: re-index every rebuildable
-    document in *name*, exactly like ``localm rag repair`` (add with
-    force=True from ``coll.documents()``). Job-backed and collection-locked
-    the same way as add/upload/reembed - ``coll.add_paths`` takes both locks
-    itself.
+    document in *name*, exactly like ``localm rag repair`` (add with force=True
+    from ``coll.documents()``). Job-backed and collection-locked the same way as
+    add/upload/reembed - ``coll.add_paths`` takes both locks itself.
 
-    Two things the CLI already gets right that this mirrors rather than
-    reinvents (NEW-RAG-INDEX-WARN-SPAM):
+    Two things this mirrors from the CLI rather than reinvents:
 
-    Embeddings-loss guard (cli/rag.py:163-178). Repairing without embeddings
-    REMOVES them for every re-indexed document. *embed* defaults True so the
-    common case (an embedder is loaded) never loses anything silently; when
-    that would still drop existing vectors (no embedder available, or *embed*
-    is False, and the collection currently has vectors), this returns a
-    ``needs_confirm`` dry-run response instead of starting a job - the GUI
-    shows it and re-POSTs with ``confirm: true``, the same two-step shape
-    ``rag_embedding_set`` already uses for its own data-risk confirmation.
+    Embeddings-loss guard. Repairing without embeddings REMOVES them for every
+    re-indexed document. *embed* defaults True so the common case (an embedder is
+    loaded) never loses anything silently; when that would still drop existing
+    vectors (no embedder available, or *embed* is False, and the collection
+    currently has vectors), this returns a ``needs_confirm`` dry-run response
+    instead of starting a job - the GUI shows it and re-POSTs with
+    ``confirm: true``, the same two-step shape ``rag_embedding_set`` uses for its
+    own data-risk confirmation.
 
-    Upload-only documents cannot be rebuilt (residual C). The uploaded BYTES
-    are never retained (see ``add_uploads``'s docstring), so an
-    ``upload:<name>`` key has no source to re-extract from - add_paths()
-    silently drops it (``Path('upload:x').is_file()`` is always False). A
-    collection with NO rebuildable document at all is refused up front with an
-    honest reason, instead of running a job that reports "0 re-indexed" as if
-    it had fixed something; a MIXED collection proceeds on what it can rebuild
-    and the job log names how many upload-only documents were left untouched.
+    Upload-only documents cannot be rebuilt. The uploaded BYTES are never retained
+    (see ``add_uploads``'s docstring), so an ``upload:<name>`` key has no source to
+    re-extract from - add_paths() silently drops it (``Path('upload:x').is_file()``
+    is always False). A collection with NO rebuildable document at all is refused
+    up front with an honest reason, instead of running a job that reports
+    "0 re-indexed" as if it had fixed something; a MIXED collection proceeds on
+    what it can rebuild and the job log names how many upload-only documents were
+    left untouched.
     """
     coll = _get_collection(name)
     docs = coll.documents()
@@ -1127,35 +1082,32 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     offers the internal default.
 
     Refuses (409) when an ``embed-setup`` job is already running: a second one
-    cannot proceed anyway (both block on the embedder's unbounded load locks),
-    and queueing it silently is what produced two jobs stuck at "Loading and
-    testing the model..." with no error. See the comment above ``start_fn``.
+    cannot proceed anyway (both block on the embedder's unbounded load locks), and
+    queueing it silently leaves two jobs stuck at "Loading and testing the
+    model..." with no error. See the comment above ``start_fn``.
 
-    Two-step by *confirm* (NEW-RAG-DIM-NO-REEMBED item 3). Without it (the
-    default), this is a DRY RUN: no config write, no embedder reset, no job -
-    just ``localm.rag.collection_provenance_report()``'s honest "these
-    collections have semantic search today and may be invalidated" answered
-    synchronously and fast (see that function's docstring for why it does
-    not, and cannot cheaply, assert the NEW dimension). The same report backs
-    the identical dry-run/confirm gate on ``PATCH /v1/config`` and
-    ``localm setup-embeddings``, the other two writers of this key. With
-    ``confirm: true``, this makes the
-    switch exactly as before this change. The caller (the GUI) is expected to
-    show the dry-run report, let the user confirm, and only then re-POST with
-    ``confirm: true`` - so the warning lands BEFORE the switch takes effect,
-    not after, which the single-step version could never do (the config write
-    and embedder reset used to be the very first thing this route did).
+    Two-step by *confirm*. Without it (the default), this is a DRY RUN: no config
+    write, no embedder reset, no job - just
+    ``localm.rag.collection_provenance_report()``'s honest "these collections have
+    semantic search today and may be invalidated" answered synchronously and fast
+    (see that function's docstring for what it does not assert about the NEW
+    dimension). The same report backs the identical dry-run/confirm gate on
+    ``PATCH /v1/config`` and ``localm setup-embeddings``, the other two writers of
+    this key. With ``confirm: true``, the switch is made. The caller (the GUI) is
+    expected to show the dry-run report, let the user confirm, and only then
+    re-POST with ``confirm: true``, so the warning lands BEFORE the switch takes
+    effect.
 
     OWNER-ONLY. This writes the `embedding_model` config key, which names a FILE
     THIS PROCESS OPENS and is flagged admin_only in the schema. The route's own
     mount gate is the plugin's `rag` scope, and `rag` is NOT in
-    scopes.PRIVILEGED_SCOPES - `--scope chat --scope rag` is offered in
-    docs/cli.md as the canonical restricted key - so without this check the
-    plugin route is a back door around the owner gate on PATCH /v1/config. Same
-    shape and placement as the rag_allowed_roots widening check above: open mode
-    is the trusted local owner (caller_scopes None) and passes. The dry-run
-    branch is gated identically - it names collections and chunk counts, which
-    is exactly the same information the confirmed switch already discloses."""
+    scopes.PRIVILEGED_SCOPES - `--scope chat --scope rag` is offered in docs/cli.md
+    as the canonical restricted key - so without this check the plugin route is a
+    back door around the owner gate on PATCH /v1/config. Same shape and placement
+    as the rag_allowed_roots widening check above: open mode is the trusted local
+    owner (caller_scopes None) and passes. The dry-run branch is gated identically:
+    it names collections and chunk counts, the same information the confirmed
+    switch discloses."""
     model = req.model.strip()
     if not model:
         raise HTTPException(400, "No model given")

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Pre-submit model validation against ComfyUI /object_info (I3 / MEDIA-1).
+"""Pre-submit model validation against ComfyUI /object_info.
 
 The preflight confirms each loader's model file exists BEFORE the chat model is
 unloaded: it names a genuinely-missing file, auto-substitutes a single unambiguous
@@ -56,10 +56,10 @@ class TestComboHelpers:
         assert comfy._looks_like_model_files([]) is False
 
     def test_looks_like_model_files_falls_back_to_current_when_options_empty(self):
-        """ComfyUI reporting zero live options (nothing of this type installed) must
-        not be indistinguishable from "this is an enum, not a model slot" - the
-        workflow's own current value (a real filename regardless of what is
-        installed) is the fallback signal."""
+        """With zero live options (nothing of this type installed), the
+        workflow's own current value - a real filename regardless of what is
+        installed - is the fallback signal, so the slot is not read as an
+        enum."""
         assert comfy._looks_like_model_files([], current="flux1-dev-Q8_0.gguf") is True
         assert comfy._looks_like_model_files([], current="euler") is False
         assert comfy._looks_like_model_files([], current=None) is False
@@ -68,17 +68,16 @@ class TestComboHelpers:
     def test_looks_like_model_files_falls_back_when_the_lone_option_is_not_a_file(self):
         """A loader whose only live choice is a non-file sentinel (e.g. a VAE
         loader offering just its built-in pixel-space passthrough when no
-        external VAE is installed) is exactly as under-informative as an empty
-        list - current is the fallback signal there too."""
+        external VAE is installed) is as under-informative as an empty list, so
+        current is the fallback signal there too."""
         assert comfy._looks_like_model_files(["pixel_space"], current="ae.safetensors") is True
         assert comfy._looks_like_model_files(["pixel_space"], current="default") is False
 
     def test_looks_like_model_files_ignores_current_when_options_has_2plus_real_choices(self):
-        """A genuine multi-choice enum (sampler_name, scheduler, ...) must NEVER be
-        misread as a model-file slot because of an unrelated/off-list *current*
-        value that happens to end in a tracked extension (e.g. a hand-edited or
-        corrupted workflow) - 2+ live options is enough of a sample to decide from
-        options alone, exactly as before *current* existed as a parameter."""
+        """A genuine multi-choice enum (sampler_name, scheduler, ...) is never
+        misread as a model-file slot because of an off-list *current* value that
+        happens to end in a tracked extension: with 2+ live options the answer
+        comes from options alone."""
         assert comfy._looks_like_model_files(["euler", "dpmpp_2m"], current="custom.pt") is False
         assert comfy._looks_like_model_files(["euler", "dpmpp_2m", "heun"],
                                               current="custom.safetensors") is False
@@ -147,10 +146,9 @@ class TestPreflight:
         assert wf["1"]["inputs"]["unet_name"] == "wan2.2_ti2v_5B_fp16.safetensors"
 
     def test_missing_with_zero_live_options_still_names_the_file(self):
-        """ComfyUI has NONE of this file type installed at all (live options == []),
-        not just missing this specific one. preflight_models() must still name it
-        and fail BEFORE the caller unloads the chat model - not silently pass
-        because _looks_like_model_files([]) alone can never recognize the slot."""
+        """ComfyUI has NONE of this file type installed at all (live options ==
+        []), not just missing this specific one. preflight_models() still names
+        it and fails BEFORE the caller unloads the chat model."""
         wf = _wan_unet_workflow()
         info = _object_info([])
         with patch.object(comfy_client, "comfy_object_info", return_value=info):
@@ -195,9 +193,9 @@ class TestPreflight:
 
 class TestDescribeMissingModels:
     """describe_missing_models() is the read-only sibling of preflight_models(),
-    used by the GUI pre-check BEFORE a user clicks Generate. It must report the
-    same missing slots preflight_models would, WITHOUT mutating the caller's
-    workflow - neither applying a substitution nor anything else."""
+    used by the GUI pre-check BEFORE a user clicks Generate. It reports the same
+    missing slots preflight_models would, WITHOUT mutating the caller's
+    workflow."""
 
     def test_reports_same_missing_slot_as_preflight(self):
         wf = _wan_unet_workflow()

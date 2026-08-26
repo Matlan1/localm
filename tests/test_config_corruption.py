@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A config.json that parses as valid JSON but is NOT an object (a list, a bare
-string, a number, null) used to be silently ignored -> defaults, discarding the
-user's saved settings with no warning. (A genuinely unparseable file DID warn via
-_read_json; only the valid-JSON-wrong-shape case was silent.)
+string, a number, null) resolves to defaults, discarding the user's saved
+settings. A genuinely unparseable file warns via _read_json; the
+valid-JSON-wrong-shape case would otherwise be silent.
 
-`_merge_stored_config` now surfaces that discard once per process, while a MISSING
-file stays the benign silent default (AUD-CFGNONDICT)."""
+`_merge_stored_config` surfaces that discard once per process, while a MISSING
+file stays the benign silent default."""
 
 import pytest
 
@@ -80,17 +80,12 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
     replacing every setting the user had while the caller reported success.
 
     These assert on the FILE before the exception, and catch by hand rather
-    than with `pytest.raises`, deliberately: as a context manager `pytest.raises`
-    fails at the end of its `with` block, so a regression reports "DID NOT RAISE
-    ConfigUnreadable" and never reaches the file check. That is a proxy, and a
-    proxy invites adjusting the assertion. Catching by hand lets the data
-    assertion speak first, so a regression reports that the user's config was
-    destroyed - which cannot be talked away. (Measured: the first version of
-    these tests used `pytest.raises` and reported exactly the useless message.)
+    than with `pytest.raises`: as a context manager `pytest.raises` fails at the
+    end of its `with` block, so a regression reports "DID NOT RAISE
+    ConfigUnreadable" and never reaches the file check.
 
-    Distinct from the valid-JSON-wrong-shape case above, which is deliberately
-    still tolerated: a JSON string or list holds nothing recoverable, whereas an
-    unreadable file may be hiding settings that still exist.
+    Distinct from the valid-JSON-wrong-shape case above, which is still
+    tolerated.
     """
 
     def test_update_config_refuses_and_leaves_the_file_alone(self, cfg_home):

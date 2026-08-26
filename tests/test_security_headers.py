@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""R41 defense-in-depth: every response carries X-Content-Type-Options: nosniff,
-and the GUI carries an ENFORCING Content-Security-Policy (R41 D1) whose
-script-src is pinned to a per-request nonce. See dev-notes/SECURITY-xss-render-
-review and dev-notes/W3-CSP-ENFORCING-2026-08-13.md.
+"""Defense in depth: every response carries X-Content-Type-Options: nosniff, and
+the GUI carries an ENFORCING Content-Security-Policy whose script-src is pinned
+to a per-request nonce.
 """
 
 import re
@@ -80,9 +79,8 @@ def test_csp_enforcing_and_locked_down():
 def _directive(csp: str, name: str) -> str:
     """The source list for one CSP directive, or "" when it is absent.
 
-    Membership has to be tested PER DIRECTIVE. `"x" in csp` is true when x sits
-    in any directive at all, which is exactly how the outage below survived a
-    green test.
+    Membership has to be tested PER DIRECTIVE: `"x" in csp` is true when x sits
+    in any directive at all.
     """
     for part in csp.split(";"):
         part = part.strip()
@@ -94,23 +92,18 @@ def _directive(csp: str, name: str) -> str:
 def test_no_cdn_origin_is_granted_anywhere_in_the_policy():
     """The onnxruntime runtime is VENDORED, so no CDN origin belongs in the CSP.
 
-    HISTORY, and it is why this is asserted per directive rather than as a
-    substring of the whole header. The tts plugin's Kokoro bundle pulls the
-    onnxruntime backend with a dynamic import(), which is a MODULE SCRIPT and is
-    therefore governed by script-src, not connect-src. When that runtime came
-    off cdn.jsdelivr.net the origin had to sit in BOTH directives, and a spell
-    where it sat in connect-src alone killed neural TTS outright ("no available
-    backend found"): measured from a live page, fetch() of that exact URL
-    returned 200 while import() of the same URL was refused.
+    Asserted per directive rather than as a substring of the whole header. The
+    tts plugin's Kokoro bundle pulls the onnxruntime backend with a dynamic
+    import(), which is a MODULE SCRIPT and is therefore governed by script-src,
+    not connect-src, so an origin sitting in connect-src alone still refuses the
+    import ("no available backend found") while fetch() of the same URL
+    succeeds.
 
-    Vendoring the runtime removed the need for either grant, so this now asserts
-    the ABSENCE. That is the stronger property: an origin nothing uses is pure
-    attack surface, and re-adding one is the cheap-looking "fix" whenever a TTS
-    load error appears - which would hide a broken vendored path rather than
-    repair it.
+    Vendoring the runtime removed the need for either grant, so this asserts the
+    ABSENCE: an origin nothing uses is pure attack surface, and re-adding one is
+    the cheap-looking "fix" whenever a TTS load error appears.
 
-    Checked in EVERY directive, not just the two that carried it, because the
-    next reader reaching for a CDN grant has no reason to pick the same two.
+    Checked in EVERY directive, not just the two that carried it.
     """
     with TestClient(create_app(_engine())) as c:
         r = c.get("/health")
@@ -137,14 +130,13 @@ def test_no_cdn_origin_is_granted_anywhere_in_the_policy():
 def test_script_src_still_admits_wasm_compilation_and_blob_workers():
     """Vendoring moved the runtime, it did not remove WebAssembly.
 
-    Guards against over-cleaning the directive that the CDN token was removed
-    from. Both of these were separately measured as REQUIRED and are unrelated
-    to where the runtime is hosted: 'wasm-unsafe-eval' because compiling any
-    WebAssembly needs an explicit grant (onnxruntime-web is WebAssembly on both
-    its wasm and webgpu paths), and blob: because a cross-origin-isolated page
-    gives onnxruntime SharedArrayBuffer, so it loads its THREADED build whose
-    worker arrives as a blob: module - and a dynamic import of that blob is
-    governed by script-src, not worker-src.
+    Both grants are required and are unrelated to where the runtime is hosted:
+    'wasm-unsafe-eval' because compiling any WebAssembly needs an explicit grant
+    (onnxruntime-web is WebAssembly on both its wasm and webgpu paths), and
+    blob: because a cross-origin-isolated page gives onnxruntime
+    SharedArrayBuffer, so it loads its THREADED build whose worker arrives as a
+    blob: module - and a dynamic import of that blob is governed by script-src,
+    not worker-src.
     """
     with TestClient(create_app(_engine())) as c:
         r = c.get("/health")
@@ -159,9 +151,8 @@ def test_cross_origin_isolation_headers_are_present():
     """Both are needed, on the DOCUMENT, or the page is not isolated at all.
 
     Without isolation SharedArrayBuffer is unavailable and onnxruntime-web drops
-    to numThreads=1. Measured on a 12-core box: 12883 ms vs 4762 ms for the same
-    6.3 s of audio (2.04x vs 0.76x realtime), i.e. neural TTS went from stalling
-    on every sentence to streaming ahead of playback.
+    to numThreads=1, which is the difference between neural TTS stalling on
+    every sentence and streaming ahead of playback.
 
     COOP alone or COEP alone does NOT isolate, which is why this asserts both
     rather than either.
@@ -188,15 +179,14 @@ def test_coep_is_credentialless_not_require_corp():
 def test_script_src_allows_webassembly_compilation():
     """onnxruntime-web is WebAssembly, and compiling it needs its own CSP grant.
 
-    SECOND, INDEPENDENT block found live 2026-08-13 only after fixing the origin
-    above: with the backend downloadable but WebAssembly compilation still
-    refused, the load died with
+    With the backend downloadable but WebAssembly compilation still refused, the
+    load dies with
 
         CompileError: WebAssembly.instantiate() violates the following Content
         Security policy directive ... is not an allowed source of script
 
-    so NO backend could start - neither wasm nor webgpu, since onnxruntime-web is
-    WebAssembly on both paths. The narrow CSP3 token for this permits WebAssembly
+    so NO backend can start - neither wasm nor webgpu, since onnxruntime-web is
+    WebAssembly on both paths. The narrow CSP3 token permits WebAssembly
     compilation WITHOUT permitting dynamic JavaScript evaluation, so it must be
     the one present and the broader token must NOT be.
     """
@@ -226,12 +216,12 @@ def test_csp_nonce_is_per_request_not_per_process():
 
 
 def test_every_inline_script_in_the_served_shell_carries_the_nonce():
-    """O2, the mechanical nonce-coverage check.
+    """The mechanical nonce-coverage check.
 
     Parses the SERVED shell rather than trusting the placeholder substitution,
     so a newly added inline <script> that nobody remembered to mark is caught
     here instead of white-screening the GUI. One uncovered inline script is the
-    whole failure mode of this change.
+    whole failure mode.
     """
     with TestClient(_shell_app()) as c:
         r = c.get("/")
@@ -257,19 +247,18 @@ def test_every_inline_script_in_the_served_shell_carries_the_nonce():
 
 
 def test_substitution_does_not_eat_the_nonce_global():
-    """REGRESSION, and it was a live-browser find, not a unit-test one.
+    """The placeholder must not eat the JS global of the same name.
 
-    The placeholder was first spelled __LOCALM_CSP_NONCE__, which is ALSO the
-    name of the JS global the shell publishes for the artifact canvas. A plain
-    str.replace therefore rewrote
+    The placeholder is spelled __LOCALM_CSP_NONCE__, which is ALSO the name of
+    the JS global the shell publishes for the artifact canvas, so a plain
+    str.replace rewrites
 
         window.__LOCALM_CSP_NONCE__ = ...   ->   window.<nonce> = ...
 
     a subtraction on the left of an assignment: "SyntaxError: Invalid left-hand
-    side in assignment", which killed the entire bootstrap script. Every unit
-    test still passed, because the placeholder HAD been substituted - just in
-    one place too many - so nothing that only looks for a surviving placeholder
-    can see this. Assert the global itself survives.
+    side in assignment", which kills the entire bootstrap script. A check that
+    only looks for a surviving placeholder cannot see this, so this asserts the
+    global itself survives.
     """
     with TestClient(_shell_app()) as c:
         body = c.get("/").text
@@ -297,21 +286,20 @@ def test_shell_token_snippet_is_nonced_too():
 
 def test_media_and_fetch_of_blob_urls_are_permitted():
     """The GUI mints blob: URLs from its OWN responses and then plays or reads
-    them back. Two directives have to allow that, and neither did.
+    them back, and two directives have to allow that.
 
-    Found live 2026-08-13 against master 1eb79919. `media-src` was absent
-    ENTIRELY, so media fell back to `default-src 'self'` and every <video>/<audio>
-    fed a blob: URL died with MEDIA_ELEMENT_ERROR "Media load rejected by URL
-    safety check". `connect-src` had no blob:, so "send to chat" and "copy image"
-    failed with "Failed to fetch".
+    With `media-src` absent ENTIRELY, media falls back to `default-src 'self'`
+    and every <video>/<audio> fed a blob: URL dies with MEDIA_ELEMENT_ERROR
+    "Media load rejected by URL safety check". With no blob: in `connect-src`,
+    "send to chat" and "copy image" fail with "Failed to fetch".
 
-    The media half is the dangerous one because it is SILENT: a blocked src fires
-    an error EVENT on the element rather than throwing, so the try/catch around
-    the assignment cannot see it and the player sits there dead with no toast.
-    That is a step failing while reporting success.
+    The media half is the dangerous one because it is SILENT: a blocked src
+    fires an error EVENT on the element rather than throwing, so the try/catch
+    around the assignment cannot see it and the player sits there dead with no
+    toast. That is a step failing while reporting success.
 
-    Asserting on the HEADER, not on a browser, deliberately - this is the cheap
-    durable check that would have caught it, and it cannot regress silently.
+    Asserted on the HEADER rather than through a browser, so it cannot regress
+    silently.
     """
     with TestClient(create_app(_engine())) as c:
         r = c.get("/health")
@@ -340,19 +328,17 @@ def test_media_and_fetch_of_blob_urls_are_permitted():
 def test_form_action_is_locked_down_because_it_has_no_default_src_fallback():
     """A model-authored <form> survives sanitisation; form-action is what stops it.
 
-    R41 review, 2026-08-18. DOMPurify's default ALLOWED_TAGS includes `form`, so
-    a reply rendering
+    DOMPurify's default ALLOWED_TAGS includes `form`, so a reply rendering
         <form action="https://elsewhere/" method="post"><input name="apikey">
-    reaches the DOM intact - measured in a real browser, where the action
-    resolved to that remote origin and submitting raised NO CSP violation. No
-    script is involved, so neither DOMPurify nor the script-src nonce sits in
-    that path, and for an offline-first product that was a way for a rendered
-    reply to post what the user typed into it off the machine.
+    reaches the DOM intact, the action resolves to that remote origin, and
+    submitting raises no CSP violation of its own. No script is involved, so
+    neither DOMPurify nor the script-src nonce sits in that path, and for an
+    offline-first product that is a way for a rendered reply to post what the
+    user typed into it off the machine.
 
-    The reason it was missing is the interesting half and is why this test
-    asserts PRESENCE rather than a value: form-action is a NAVIGATION directive
-    with no default-src fallback, so `default-src 'self'` looks like it covers
-    submissions and does not. Omitting it allows submission anywhere.
+    This asserts PRESENCE rather than a value: form-action is a NAVIGATION
+    directive with no default-src fallback, so `default-src 'self'` looks like
+    it covers submissions and does not. Omitting it allows submission anywhere.
     """
     with TestClient(create_app(_engine())) as c:
         r = c.get("/health")

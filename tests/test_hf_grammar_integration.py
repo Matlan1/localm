@@ -2,14 +2,14 @@
 """REAL grammar-constrained-decoding test for the HuggingFace backend.
 
 No mocks: a tiny ungated causal LM (sshleifer/tiny-gpt2, full GPT-2 tokenizer)
-is loaded for real under transformers 5, and we assert that a GBNF/EBNF grammar
-passed through ``HFBackend.chat_stream`` actually constrains the generated
-tokens via xgrammar. The negative assertion (same prompt, no grammar -> NOT a
-legal value) is what proves the grammar caused the constraint, not the model.
+is loaded for real under transformers 5, and a GBNF/EBNF grammar passed through
+``HFBackend.chat_stream`` must actually constrain the generated tokens via
+xgrammar. The negative assertion (same prompt, no grammar -> NOT a legal value)
+is what proves the grammar caused the constraint, not the model.
 
 Marked @integration so the default `pytest -m "not integration"` skips it (it
-downloads ~2.5 MB on first run and needs the optional [grammar] extra). A mock
-here would be theater - the whole point is that the masking is exercised for real.
+downloads a few MB on first run and needs the optional [grammar] extra). A mock
+here would prove nothing: the property is that the masking runs for real.
 """
 
 from __future__ import annotations

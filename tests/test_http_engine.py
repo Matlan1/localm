@@ -56,11 +56,11 @@ def _sse_reasoning(*deltas):
 
 
 def test_chat_stream_surfaces_reasoning_content(monkeypatch):
-    """AUD-HIGH-17: the server splits <think> reasoning into its own
-    `reasoning_content` SSE field (H4); HttpEngine must re-wrap it in inline
-    <think>...</think> markers (like the in-process Engine's raw stream) so
-    cli/chat.py's ThinkSplitter/_ThinkPrinter dims it instead of silently
-    dropping it in localm run's default attach mode."""
+    """The server splits <think> reasoning into its own `reasoning_content` SSE
+    field; HttpEngine must re-wrap it in inline <think>...</think> markers (like
+    the in-process Engine's raw stream) so cli/chat.py's ThinkSplitter and
+    _ThinkPrinter dim it instead of dropping it in localm run's default attach
+    mode."""
     deltas = [
         {"reasoning_content": "because "},
         {"reasoning_content": "reasons"},
@@ -160,11 +160,11 @@ def test_remote_active_model(monkeypatch):
 
 
 def test_remote_model_status_distinguishes_no_model_from_cannot_read(monkeypatch):
-    """The bug: `localm run` attaching to a live, model-loaded server printed
-    'no model loaded' because /v1/models needs the models scope and a chat-scoped
-    attach token gets a 403 - which the old code (returning None) could not tell
-    apart from a genuinely model-less server. remote_model_status must distinguish
-    'empty' (server says none) from 'unknown' (we could not read it)."""
+    """`localm run` attaching to a live, model-loaded server must not print 'no
+    model loaded': /v1/models needs the models scope and a chat-scoped attach
+    token gets a 403, which returning None cannot tell apart from a genuinely
+    model-less server. remote_model_status must distinguish 'empty' (server says
+    none) from 'unknown' (it could not be read)."""
     def _resp(status, payload):
         m = MagicMock()
         m.status_code = status

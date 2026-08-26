@@ -3,19 +3,19 @@
 embedder._maybe_swap_for_embedder -> vram.decide_embedder_swap /
 vram.evict_chat_for_embedder).
 
-Root cause this closes: the shared embedder (localm.inference.embedder) lives
-entirely outside the chat model's VRAM lifecycle in localm/inference/http_server.py
-(_engines, switch_engine). get_embedder() never called the swap-out mechanism the
-image/music/video plugins already use before their own model load, so a resident
-chat model and the embedder were both asked to be resident simultaneously -
+The shared embedder (localm.inference.embedder) lives entirely outside the chat
+model's VRAM lifecycle in localm/inference/http_server.py (_engines,
+switch_engine). Without get_embedder() calling the swap-out mechanism the
+image/music/video plugins already use before their own model load, a resident
+chat model and the embedder are both asked to be resident simultaneously -
 VRAM/RAM pressure, most visible with a large embedding model (e.g.
 Qwen3-Embedding-8B, ~7.5 GB) alongside a large chat model.
 
-evict_chat_for_embedder's cross-thread eviction path mirrors
-jobs/runner.py's _evict_shared_engine_for_media (see test_jobs_shared_engine_free.py):
-it must route the unload through the guarded http_server.unload_all_models() ON
-the server's event loop, not a raw off-loop engine.unload(), so it honors the
-in-flight-request pin and serializes with get_engine.
+evict_chat_for_embedder's cross-thread eviction path mirrors jobs/runner.py's
+_evict_shared_engine_for_media: it must route the unload through the guarded
+http_server.unload_all_models() ON the server's event loop, not a raw off-loop
+engine.unload(), so it honors the in-flight-request pin and serializes with
+get_engine.
 """
 
 from __future__ import annotations
@@ -42,8 +42,7 @@ def _reset_embedder():
 @pytest.fixture
 def hsclean():
     """Clear the http_server engine-registry globals this test mutates, and
-    restore them to empty/None afterwards so no state leaks to another test
-    (mirrors test_jobs_shared_engine_free.py's fixture of the same name)."""
+    restore them to empty/None afterwards so no state leaks to another test."""
     hs._engines.clear()
     hs._engines_lru.clear()
     hs._inference_sems.clear()
@@ -169,7 +168,7 @@ def test_evict_degrades_safely_when_server_loop_unreachable(hsclean, monkeypatch
 
 def test_evict_reports_error_on_timeout(hsclean, monkeypatch):
     """A wedged/slow server loop must not hang the caller forever or raise -
-    the degrade is reported, never a crash (AGENTS.md rule 5)."""
+    the degrade is reported, never a crash."""
     class _StuckLoop:
         def is_running(self):
             return True
@@ -287,8 +286,7 @@ def test_get_embedder_invokes_swap_check_before_native_load(monkeypatch, tmp_pat
 
 
 def test_get_embedder_swap_check_does_not_deadlock_cross_thread_lock_use(monkeypatch, tmp_path):
-    """Regression (2026-07-14 adversarial review, CONFIRMED BLOCKER, live-reproduced):
-    _maybe_swap_for_embedder must run OUTSIDE embedder._LOCK, not inside the
+    """_maybe_swap_for_embedder must run OUTSIDE embedder._LOCK, not inside the
     `with _LOCK:` block get_embedder() holds for its state checks.
 
     The real eviction path (evict_chat_for_embedder) submits
@@ -299,9 +297,9 @@ def test_get_embedder_swap_check_does_not_deadlock_cross_thread_lock_use(monkeyp
     ACROSS threads) - so if get_embedder() still held it while blocking on that
     coroutine, this is a genuine cross-thread deadlock: the calling thread
     waits on the coroutine, the coroutine's thread waits on the calling
-    thread's lock. It only ever resolved via evict_chat_for_embedder's
-    eviction timeout (300s in production) - a real multi-minute hang of
-    /v1/embeddings under tight VRAM, not a permanent hang, but a severe DoS.
+    thread's lock. It resolves only via evict_chat_for_embedder's eviction
+    timeout (300s in production) - a multi-minute hang of /v1/embeddings under
+    tight VRAM rather than a permanent one, but a severe DoS.
 
     This simulates the cross-thread call the real coroutine makes (a second
     thread calling embedder.loaded_dim(), which needs _LOCK) inside a fake
@@ -358,11 +356,10 @@ def test_get_embedder_swap_check_does_not_deadlock_cross_thread_lock_use(monkeyp
 
 class TestChooseEmbedderGpuLayers:
     """When eviction cannot or should not free room (per-turn memory recall
-    pins the chat engine, so evict_chat_for_embedder returns "in_use"), the
-    embedder used to force-load all layers onto a card that could not hold it,
-    thrashing the resident chat model (measured live: 34 -> 5.0 tok/s).
-    The placement chooser must degrade to CPU instead - without ever
-    overriding an explicit user choice."""
+    pins the chat engine, so evict_chat_for_embedder returns "in_use"),
+    force-loading all layers onto a card that cannot hold it thrashes the
+    resident chat model. The placement chooser must degrade to CPU instead -
+    without ever overriding an explicit user choice."""
 
     @staticmethod
     def _gguf(tmp_path, size=4096):
@@ -431,10 +428,9 @@ class TestChooseEmbedderGpuLayers:
         load to CPU (see test_auto_does_not_fit_goes_cpu_with_reason above),
         but the SAME reading under GPU_PROBE_TIMEOUT/BUSY is not a current
         measurement, so it must fall back to "unmeasurable" and keep the
-        historical full-GPU-offload attempt - exactly like an unreadable file
-        or a None reading above. This is the freshness gap the fix closed:
-        the default previously called vram_capacity() bare (no
-        return_status), so a stale reading was used exactly like a fresh one."""
+        full-GPU-offload attempt - exactly like an unreadable file or a None
+        reading above. Calling vram_capacity() bare (no return_status) would
+        use a stale reading exactly like a fresh one."""
         import localm.discover as disc
         from localm.inference.embedder import _choose_embedder_gpu_layers
         monkeypatch.setattr(

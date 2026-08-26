@@ -219,14 +219,8 @@ class TestScrubHistoryFile:
 
 class TestScrubHistoryFileFailureWarnings:
     """A failure to scrub a history file must always be surfaced, on both the
-    read and the write path - a silent failure here means secret-bearing
-    command lines stay on disk with no indication anything went wrong
-    (AGENTS.md rule 5: privacy/security steps must never fail quietly).
-
-    The write-failure branch already warns (localm/plugins/coder/privacy.py
-    ~204-213); the read-failure branch (~171-174) did not - it returned False
-    with zero output, an asymmetry a prior "codebase honesty pass" (commit
-    5296e13) fixed on the write side and missed on the read side."""
+    read and the write path: a silent failure means secret-bearing command lines
+    stay on disk with no indication anything went wrong."""
 
     _PATCH = "localm.plugins.coder.privacy.console"
 

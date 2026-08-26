@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""QA 2026-08-20 item 8: a model load stalled forever, with no error and no
-timeout, whenever the out-of-process torch GPU probe timed out (7/7 correlation
-in the field). The console stopped after "Loading <model> (backend: Gguf)", no
-native loader output ever appeared, and ``/health`` reported ``loaded: false``
-indefinitely.
+"""A model load stalled forever, with no error and no timeout, whenever the
+out-of-process torch GPU probe timed out. The console stopped after "Loading
+<model> (backend: Gguf)", no native loader output ever appeared, and ``/health``
+reported ``loaded: false`` indefinitely.
 
 Root cause: ``VramSizingMixin._free_total_vram_bytes`` - which the load-sizing
 preflight reaches before the native load's own bounded timeout can apply - did
@@ -21,8 +20,8 @@ passing alone would let the other rot:
 
 Every "torch does not answer" fixture here wedges via a ``find_spec`` meta-path
 finder or a blocking attribute call, i.e. it models a wait, not a raise - a
-fixture that RAISED could not fail on this defect at all, since the old code
-already handled exceptions perfectly well (diff-review-discipline item 19).
+fixture that RAISED could not fail on this defect at all, since exceptions were
+already handled.
 """
 from __future__ import annotations
 
@@ -54,18 +53,16 @@ class WedgedTorchImport(importlib.abc.MetaPathFinder):
 
     ``find_spec``, never ``find_module``: the latter was removed in Python
     3.12, so a finder written that way is never consulted and "torch was not
-    imported" would be true for a reason that has nothing to do with the code
-    under test.
+    imported" would be true for something other than the code under test.
 
-    RELEASABLE on purpose, and this is not tidiness. An abandoned thread stuck
+    RELEASABLE, and not merely for tidiness. An abandoned thread stuck
     mid-import holds CPython's per-module import lock for ``torch``, so a wedge
     that outlives its own test hangs the NEXT one that touches torch - on the
     test runner's main thread, where nothing bounds it. That is the same
     abandoned-import hazard ``gpu_usage.raw_reading_is_process_scoped``
-    documents in the product; here it made a first draft of this file hang
-    pytest outright. Raising on release (rather than falling through to the
-    real finders) keeps the outcome deterministic and never imports real torch
-    into the test process."""
+    documents in the product. Raising on release, instead of falling through to
+    the real finders, keeps the outcome deterministic and never imports real
+    torch into the test process."""
 
     def __init__(self):
         self.attempted = threading.Event()

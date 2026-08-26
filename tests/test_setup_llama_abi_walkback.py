@@ -1,35 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The installer must never hand the user a runtime our OWN ABI gate rejects.
 
-An install used to resolve upstream's newest release at RUNTIME, so localm could
-be handed a build it refuses to load without any localm change at all - upstream
-publishes, and the next `setup-llama` on any installed version picks it up. That
-happened three times in one week. The default is now `_PINNED_TAG`, a build
-confirmed to load AND generate, so that path only exists for a user who opted in
-with `--tag latest`.
+Resolving upstream's newest release at RUNTIME means localm can be handed a build
+it refuses to load with no localm change at all: upstream publishes, and the next
+`setup-llama` on any installed version picks it up. The default is `_PINNED_TAG`,
+a build confirmed to load AND generate, so that path only exists for a user who
+opted in with `--tag latest`.
 
-This is a SAFETY NET, not the remedy. The remedy is binding the new struct
-layout. NOTHING HERE NAMES A TAG NUMBER, and none of it should - for two reasons
-now. The property is "never ship a runtime our gate rejects", whichever tag and
-whatever the cause; and a test keyed on a tag number stops being able to fail the
-moment the pin moves, which it is meant to do often. Tests reference
+This is a SAFETY NET, not the remedy; the remedy is binding the new struct
+layout. NOTHING HERE NAMES A TAG NUMBER. The property is "never ship a runtime
+our gate rejects", whichever tag and whatever the cause, and a test keyed on a
+tag number stops being able to fail the moment the pin moves. Tests reference
 `sl._PINNED_TAG`, never its value.
 
-WHAT CHANGED WITH THE PIN, since these tests were reshaped rather than written
-fresh: the recovery WAS a bounded WALK that tried up to three older releases and
-kept whichever loaded. That selects a version while setup is running - the thing
-the pin exists to stop - and its destination was "an older build that LOADS",
-which is a build nobody has generated a token with. It is now a FLOOR: exactly
-one destination, `_PINNED_TAG`, reachable only from a tracking install, and loud
-in every branch including the three that install nothing.
+The recovery is a FLOOR, not a walk: exactly one destination, `_PINNED_TAG`,
+reachable only from a tracking install, and loud in every branch including the
+three that install nothing.
 
-Why the recovery is over TAGS and not backends: an ABI rejection means the BUILD
-is wrong for this code, so every backend from that release fails identically
-(field issue 1208 reports cuda, vulkan AND cpu all AbiMismatch together, and the
-structural reason is that one shared llama library carries the struct). The
-existing backend fallback cannot help, and running it first would move the user
-off the backend they asked for to fix something that was never the backend's
-fault.
+The recovery is over TAGS and not backends: an ABI rejection means the BUILD is
+wrong for this code, so every backend from that release fails identically (one
+shared llama library carries the struct). The existing backend fallback cannot
+help, and running it first would move the user off the backend they asked for to
+fix something that was never the backend's fault.
 """
 
 from __future__ import annotations
@@ -61,10 +53,8 @@ def _flat(capsys) -> str:
     """Captured console output with whitespace collapsed.
 
     Rich hard-wraps to the terminal width, so a phrase can arrive split across a
-    line break - measured here as "does not match this " / "build of localm".
-    Asserting on the raw text would pin the WRAPPING rather than the message, and
-    would go red on a different console width: a test failing for a reason
-    unrelated to the property it defends."""
+    line break. Asserting on the raw text would pin the WRAPPING rather than the
+    message, and would go red on a different console width."""
     return " ".join(capsys.readouterr().out.split())
 
 
@@ -272,11 +262,10 @@ def test_floor_installs_the_confirmed_pin_when_tracking_upstream(
 
 
 def test_floor_never_selects_an_arbitrary_older_release(monkeypatch, home):
-    """The whole reshape in one assertion. The predecessor walked up to three
-    OTHER releases, choosing at setup time whichever happened to load - a version
-    decided while setup ran, on the ABI gate alone, landing the user on a build
-    nobody had generated a token with. The floor has exactly one destination and
-    it is a constant, so it cannot reach a release a human did not choose."""
+    """The floor has exactly one destination and it is a constant, so it cannot
+    reach a release a human did not choose. A walk over other releases would
+    select a version while setup is running, on the ABI gate alone, landing the
+    user on a build nobody has generated a token with."""
     called: list = []
     monkeypatch.setattr(sl, "_recent_tags",
                         lambda *a, **k: called.append("recent") or ["b299", "b298"])
@@ -328,9 +317,8 @@ def test_floor_refuses_when_the_install_is_not_tracking_upstream(
 def test_floor_reports_a_provision_error_rather_than_hunting_elsewhere(
         monkeypatch, home, capsys):
     """If the confirmed build cannot be fetched, that is the end of the recovery.
-    The predecessor moved on to the next candidate here; there is no next
-    candidate now, and inventing one would be the dynamic selection this
-    replaced."""
+    There is no next candidate, and inventing one would be the dynamic selection
+    the floor replaces."""
     sl.set_pinned_tag(sl._TRACK_LATEST)
     tried: list = []
 
@@ -401,8 +389,8 @@ def test_an_abi_rejection_floors_at_the_pin_and_keeps_the_users_backend(
 
 
 def test_a_non_abi_failure_still_falls_back_by_backend(monkeypatch, tmp_path, home):
-    """The discriminator's other side, and the reason it is not 'any load
-    failure': a too-old driver is about this MACHINE, so an older release cannot
+    """The discriminator's other side: it is not 'any load failure'. A
+    too-old driver is about this MACHINE, so an older release cannot
     help and the vulkan fallback must still happen."""
     provisioned = _wire(monkeypatch, tmp_path,
                         [(False, "libcuda.so.1: cannot open shared object file"),

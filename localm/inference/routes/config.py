@@ -31,9 +31,9 @@ _COMFY_STOP_TIMEOUT_S = 90.0
 def _scrub_media_admin_only(cfg: dict) -> None:
     """Remove owner-only PER-PLUGIN media values from *cfg* in place.
 
-    Driven off MEDIA_PLUGIN_FIELDS rather than a hardcoded name list, so a field
-    that gains admin_only later is scrubbed here automatically instead of quietly
-    staying readable. Mutates the per-request dict from load_config(), never disk.
+    Driven off MEDIA_PLUGIN_FIELDS, not a hardcoded name list, so a field that
+    gains admin_only later is scrubbed here automatically. Mutates the
+    per-request dict from load_config(), never disk.
     """
     from localm.settings_schema import MEDIA_PLUGIN_FIELDS
     plugins = cfg.get("plugins")
@@ -233,10 +233,10 @@ def register(app: FastAPI, ctx) -> None:
         shared global comfy_* fallback). The GUI 'Media' section renders one
         subsection per plugin so the three are configured independently.
 
-        REC-MEDIA-CMD: launch_cmd/api_url are admin_only (a shell command / a
-        render target), so their resolved value is OMITTED for a non-owner
-        config:read caller - mirrors the write-side owner gate below, and the
-        same admin_only_keys() treatment GET /v1/config gives the core schema."""
+        launch_cmd/api_url are admin_only (a shell command / a render target), so
+        their resolved value is OMITTED for a non-owner config:read caller -
+        mirroring the write-side owner gate below and the admin_only_keys()
+        treatment GET /v1/config gives the core schema."""
         from localm.config import load_config
         from localm.settings_schema import MEDIA_PLUGINS, media_schema_json
         cfg = load_config()
@@ -322,10 +322,9 @@ def register(app: FastAPI, ctx) -> None:
 
     def _tts_payload(request: Request) -> dict:
         """Shared by GET and POST /v1/tts/config, so the same admin_only filter
-        (library/wasm_paths - REC-MEDIA-CMD's tts counterpart) applies to both
-        the plain read and whatever a write response echoes back: a non-owner
-        config:read/write caller must not learn the script/wasm path it is not
-        allowed to set either."""
+        (library/wasm_paths) applies to both the plain read and whatever a write
+        response echoes back: a non-owner config:read/write caller must not learn
+        the script/wasm path it is not allowed to set either."""
         from localm.config import load_config
         from localm.settings_schema import TTS_PLUGIN, tts_schema_json
         cfg = load_config()
@@ -522,7 +521,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/comfy/stop", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_stop():
-        """Stop ComfyUI (NEW-STOPCOMFY): abort the in-flight render + clear the
+        """Stop ComfyUI: abort the in-flight render + clear the
         queue + free VRAM, and terminate the process localm launched (a ComfyUI the
         user started themselves is only aborted, never killed)."""
         from localm.media.comfy_client import stop_comfy
@@ -535,14 +534,13 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/comfy/restart", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_restart():
-        """Restart the ComfyUI localm launched (NEW-STOPCOMFY): stop it, then
+        """Restart the ComfyUI localm launched: stop it, then
         re-launch via the configured comfy_launch_cmd/comfy_workdir."""
         from localm.config import load_config
         from localm.media.comfy_client import comfy_launch_wait_seconds, restart_comfy
         # restart_comfy() is stop_comfy() (bounded by _COMFY_STOP_TIMEOUT_S) then
         # ensure_comfy()'s own launch wait, so the budget reads the same
-        # comfy_launch_timeout ensure_comfy honours (comfy_launch_wait_seconds)
-        # rather than an independent value.
+        # comfy_launch_timeout ensure_comfy honours (comfy_launch_wait_seconds).
         budget = _COMFY_STOP_TIMEOUT_S + comfy_launch_wait_seconds(load_config()) + 30.0
         try:
             ok, message = await run_in_threadpool_bounded(restart_comfy, timeout=budget)

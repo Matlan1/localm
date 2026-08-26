@@ -2,12 +2,10 @@
 """Background shell execution (run_shell_background / check_shell_job /
 kill_shell_job) and the generic job registry behind them.
 
-These drive the REAL tools against REAL OS processes - the point of the feature
-is process lifecycle, and a mocked subprocess would prove nothing about the two
-things that actually break: whether a kill reaps the process TREE, and whether
-the buffer stays bounded. The only mock here is a spy on ShellJob's constructor,
-used to assert the argv-vs-shell ROUTING decision (checking a security decision,
-not standing in for the thing under test).
+These drive the REAL tools against REAL OS processes, so the two properties that
+matter - a kill reaping the process TREE, and the buffer staying bounded - are
+exercised for real. The only mock here is a spy on ShellJob's constructor, used
+to assert the argv-vs-shell ROUTING decision.
 """
 
 import inspect
@@ -67,9 +65,8 @@ def _py(tmp_path):
     The code goes to a script file rather than ``-c "..."`` because on Windows
     these commands are routed through ``cmd /C`` (any absolute path contains
     backslashes, which force shell mode), and cmd cannot parse a command line
-    with two separately-quoted tokens. That is pre-existing ``run_shell``
-    behaviour, not something the background variant introduces - verified by
-    running the same command string through tool_run_shell.
+    with two separately-quoted tokens. That is ``run_shell`` behaviour, not
+    something the background variant introduces.
     """
     if sys.platform == "win32" and " " in sys.executable:
         pytest.skip(
@@ -117,14 +114,11 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _unexplained_taskkill_failures(warnings: list) -> list:
-    """taskkill "exited" warnings whose reason is NOT the one known-benign
-    race documented at background.py:593-608 (and its grandchild variant,
-    background.py's later comment in the same method): a descendant that
-    legitimately exits between taskkill's tree snapshot and taskkill
-    reaching that specific pid, reported as "There is no running instance
-    of the task" even though the whole tree ends up fully dead. Anything
-    else (access-denied, a reason we have never seen) is a genuine,
-    unexplained taskkill failure.
+    """taskkill "exited" warnings whose reason is NOT the known-benign race: a
+    descendant that legitimately exits between taskkill's tree snapshot and
+    taskkill reaching that specific pid, reported as "There is no running
+    instance of the task" even though the whole tree ends up fully dead.
+    Anything else (access-denied, an unseen reason) counts as unexplained.
     """
     benign = "there is no running instance of the task"
     return [w for w in warnings if "taskkill exited" in w and benign not in w.lower()]
@@ -321,8 +315,8 @@ def test_cap_is_enforced_before_the_process_starts(tmp_path, make_registry):
 class _FakeAgentJob(BackgroundJob):
     """A non-shell job kind, standing in for a background sub-agent.
 
-    Deliberately has no process, no exit code and no stdout: if the registry
-    only works for ShellJob, these tests fail.
+    Has no process, no exit code and no stdout, so a registry that only works
+    for ShellJob fails these tests.
     """
 
     kind = "agent"
@@ -452,9 +446,8 @@ def test_drain_can_filter_by_kind(tmp_path, make_registry):
 def test_pruning_evicts_drained_jobs_before_undrained_ones(make_registry):
     """A completion nobody has collected must outlive one already handed over.
 
-    The drained job is deliberately NOT the oldest. If it were, "evict drained
-    first" and plain "evict oldest first" would pick the same victim and this
-    test would pass either way - proving nothing about the ordering it names.
+    The drained job is NOT the oldest. If it were, "evict drained first" and
+    plain "evict oldest first" would pick the same victim.
     """
     reg = make_registry(kind_caps={"agent": 50}, keep_finished=2)
 
@@ -572,7 +565,7 @@ def test_privacy_mode_zeroes_shell_history_env(tmp_path, _py):
 
 
 def test_disabling_run_shell_also_disables_the_background_variant():
-    """Otherwise a shareable, deliberately shell-less session keeps RCE."""
+    """A shareable, shell-less session must lose the whole shell family."""
     from localm.plugins.coder.agent.constants import expand_shell_disable
     expanded = expand_shell_disable(frozenset({"run_shell"}))
     for name in ("run_shell", "run_shell_background",
@@ -583,12 +576,9 @@ def test_disabling_run_shell_also_disables_the_background_variant():
 
 
 def test_disabling_the_shell_family_yields_a_clean_system_prompt(tmp_path):
-    """The prompt builders must honour the same intent as the Agent.
-
-    The expansion originally lived only in Agent.__init__, so a direct
-    build_system_prompt(disabled_tools={"run_shell"}) still advertised
-    run_shell_background - whose NAME contains 'run_shell'. Caught by the
-    existing safe-share/security tests.
+    """The prompt builders must expand the shell family the same way the Agent
+    does: build_system_prompt(disabled_tools={"run_shell"}) must not advertise
+    run_shell_background, whose NAME contains 'run_shell'.
     """
     from localm.plugins.coder.prompts import (
         build_subagent_system_prompt, build_system_prompt,
@@ -667,18 +657,13 @@ def test_all_background_tools_are_unscoped():
 
 
 def test_starting_and_killing_are_gated_but_polling_is_not(tmp_path):
-    """The confirmation gate belongs on the capability, not on observing it.
-
-    Starting a job is arbitrary code execution and killing one tears down a
+    """Starting a job is arbitrary code execution and killing one tears down a
     process tree, so both must be confirmed. check_shell_job only reads a status
-    field and an output buffer: gating it would put a card in front of every poll
-    of a running build, and an unattended run (where the gate fails closed) could
-    start a job it could then never observe.
+    field and an output buffer, and is not gated.
 
-    Drives the REAL dispatch gate rather than reading ToolDef.destructive back:
-    a flag assertion only restates the declaration and would still pass if
-    _execute_tool stopped consulting it. Every call is REJECTED, so the gate is
-    observed without starting or killing anything.
+    Drives the REAL dispatch gate rather than reading ToolDef.destructive back,
+    so the gate is observed rather than the declaration. Every call is REJECTED,
+    so nothing is started or killed.
     """
     from localm.plugins.coder.agent import Agent
     from localm.plugins.coder.parser import ToolCall
@@ -825,8 +810,7 @@ class _FakeShellJob(_FakeAgentJob):
     """A process-less job of the SHELL kind, for registry-level retention tests.
 
     The retention rules under test are registry bookkeeping, not process
-    lifecycle, and using 17+ real processes to exercise a budget would be slow
-    without testing anything the real-process tests above do not already cover.
+    lifecycle.
     """
 
     kind = "shell"
@@ -835,9 +819,8 @@ class _FakeShellJob(_FakeAgentJob):
 class _UnkillableJob(BackgroundJob):
     """A job that nothing can stop.
 
-    The point is the REPORTING channel: kill() signals this failure by RETURN
-    VALUE ("kill FAILED - ..."), never by raising, so a caller that reads "did
-    not raise" as "the process died" is wrong exactly when it matters.
+    kill() signals this failure by RETURN VALUE ("kill FAILED - ..."), never by
+    raising.
     """
 
     kind = "shell"
@@ -902,11 +885,9 @@ def test_shutdown_reports_a_kill_that_raised_instead_of_discarding_it(
 
 def test_shutdown_still_counts_a_kill_that_WORKED_and_stays_quiet(
         tmp_path, make_registry, capsys):
-    """Fires-control for the two tests above.
-
-    Without it, ``shutdown_all() == 0`` would also pass with a counter that is
-    simply broken, and "something was printed" would pass with code that warns
-    unconditionally.
+    """A kill that WORKS is counted and prints nothing, so ``shutdown_all() ==
+    0`` cannot be satisfied by a broken counter and "something was printed"
+    cannot be satisfied by code that warns unconditionally.
     """
     reg = make_registry(kind_caps={"shell": 4})
     job = reg.submit(lambda: ShellJob(
@@ -940,11 +921,11 @@ def test_exit_teardown_is_silent_when_there_is_nothing_to_stop(make_registry, ca
 # -- one kind's undrained pile-up must not evict another kind's result ------- #
 
 def test_one_kind_cannot_evict_another_kinds_uncollected_completion(make_registry):
-    """#796 added a kind whose completions ARE drained, while nothing drains the
-    shell kind at all (both drain call sites filter kind="agent"). Against ONE
-    global budget the undrained shell pile-up evicts the sub-agent completion the
-    parent is about to absorb - and absorption is drain-only, so that child's
-    summary, branch and diff are then unrecoverable.
+    """The agent kind's completions ARE drained, while nothing drains the shell
+    kind at all (both drain call sites filter kind="agent"). Against ONE global
+    budget the undrained shell pile-up would evict the sub-agent completion the
+    parent is about to absorb, and absorption is drain-only, so that child's
+    summary, branch and diff would be unrecoverable.
     """
     reg = make_registry(kind_caps={"agent": 4, "shell": 50}, keep_finished=2)
 
@@ -1059,11 +1040,9 @@ def test_the_turn_boundary_note_tells_the_MODEL_what_it_lost(
 
 def test_bg_calls_a_lost_sub_agent_a_LOSS_and_shell_pruning_HOUSEKEEPING(
         monkeypatch, capsys, make_registry):
-    """The two kinds do not mean the same thing, so /bg must not render them the
-    same way. A shell completion aged out of the table is NOT a silent loss -
-    check_shell_job answers "No background job with id ...", listing the ids that
-    do exist. Alarming about routine pruning would train the reader to ignore the
-    line that does matter."""
+    """/bg renders the two kinds differently. A shell completion aged out of the
+    table is NOT a silent loss - check_shell_job answers "No background job with
+    id ...", listing the ids that do exist."""
     from localm.plugins.coder.cli.repl import _handle_command_extended
 
     reg = make_registry(kind_caps={"agent": 50, "shell": 50}, keep_finished=1)
@@ -1167,13 +1146,12 @@ def test_a_taskkill_that_SUCCEEDED_is_silent(tmp_path, make_registry, monkeypatc
 
 def test_the_benign_taskkill_descendant_race_is_not_flagged_unexplained(
         tmp_path, make_registry, monkeypatch):
-    """Regression for a real flake under `pytest -n auto`: taskkill's /T walk
-    snapshots the tree once and terminates each pid in turn, so a descendant
-    can legitimately exit in that gap. Windows then reports exit 255 naming
-    that one pid as "There is no running instance of the task" even though
-    the fallback sweep (asserted below) still runs and the tree ends up fully
-    dead - this is background.py:593-608's documented race recurring against
-    a descendant instead of the root pid, not a partial failure."""
+    """taskkill's /T walk snapshots the tree once and terminates each pid in
+    turn, so a descendant can legitimately exit in that gap. Windows then
+    reports exit 255 naming that one pid as "There is no running instance of
+    the task" even though the fallback sweep (asserted below) still runs and
+    the tree ends up fully dead. That is the benign race, not a partial
+    failure."""
     import subprocess as _sp
 
     reg = make_registry()
@@ -1229,11 +1207,9 @@ def test_kill_reports_descendants_that_outlived_the_direct_child(
     """_wait_for_exit only ever observes the direct child, so a descendant that
     handles SIGTERM and then hangs satisfies it while still holding its port.
 
-    Deliberately NOT using _fast_kill: this kills a REAL process, and _KILL_GRACE
-    also bounds the real SIGTERM-then-SIGKILL wait. Shrinking it to 50ms to speed
-    up the stubbed survivor loop would make a real kill race a 50ms window on a
-    box that is documented as load-flaky. Costs a few seconds; buys a test that
-    fails only when the code is wrong.
+    Does NOT use _fast_kill: this kills a REAL process, and _KILL_GRACE also
+    bounds the real SIGTERM-then-SIGKILL wait, so shrinking it would race the
+    real kill.
     """
     reg = make_registry()
     job = reg.submit(lambda: ShellJob(_argv("import time; time.sleep(120)"),

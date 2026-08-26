@@ -130,8 +130,8 @@ class TestAuditLog:
         assert llm_evts[0]["data"]["tokens"] == 500
 
     def test_llm_event_records_reasoning_separately(self, tmp_path):
-        """AUD-HIGH-17-3: a thinking model's reasoning is stored in its OWN
-        field, never appended to the visible-answer 'content' field."""
+        """A thinking model's reasoning is stored in its OWN field, never
+        appended to the visible-answer 'content' field."""
         with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
             log = AuditLog(label="t")
         log.llm("The answer.", tokens=10, reasoning="because reasons")
@@ -275,8 +275,8 @@ class TestAgentClose:
 
     def test_full_markdown_summarises_a_fenced_json_tool_call(self, tmp_path):
         """```json fences are one of the 5 shapes parse_tool_calls recognises
-        (name-gated); before this fix the raw fence markers and JSON leaked
-        verbatim into the transcript instead of being summarised."""
+        (name-gated); unsummarised, the raw fence markers and JSON leak
+        verbatim into the transcript."""
         agent = _make_agent(tmp_path, SessionMode.FULL)
         agent._messages = [
             {"role": "assistant", "content": (
@@ -296,7 +296,7 @@ class TestAgentClose:
 
     def test_full_markdown_summarises_a_bare_json_tool_call(self, tmp_path):
         """A bare top-level {"name":...,"args":...} object with no wrapper at
-        all is the other shape that used to leak raw JSON into the transcript."""
+        all is the other shape that can leak raw JSON into the transcript."""
         agent = _make_agent(tmp_path, SessionMode.FULL)
         agent._messages = [
             {"role": "assistant", "content": (

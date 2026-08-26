@@ -1,32 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-638 (regression audit 2026-07-14): the three /comfy-models picker
-endpoints ran a blocking ComfyUI /object_info fetch directly on the event loop.
+"""The three /comfy-models picker endpoints must not run their blocking ComfyUI
+/object_info fetch on the event loop.
 
 ``imagine_comfy_models`` (image/plug.py), ``music_comfy_models`` and
-``video_comfy_models`` are all ``async def`` handlers that call
-``_backend._comfy_model_slots(s)`` INLINE. That reaches
+``video_comfy_models`` are ``async def`` handlers whose backend call reaches
 ``comfy_client.comfy_object_info()``, a synchronous
 ``urllib.request.urlopen('/object_info', timeout=10.0)`` that reads and
-json.loads the entire body - a ComfyUI /object_info payload is commonly several
-MB. On an async handler that blocking read runs ON the uvicorn event loop.
-
-Concrete trigger: ComfyUI is reachable but slow (cold, or serving a large node
-graph). A user is streaming a chat completion or watching a job's progress SSE,
-then opens the Images/Music/Video workflow panel; workflow.js
-refreshWorkflowPanel -> comfyModelPicker fires GET /api/imagine/comfy-models. The
-whole server stalls for the duration of that fetch - up to the 10s timeout -
-freezing every other concurrent request, every chat stream, and all portmux-muxed
-traffic.
-
-The authors knew the pattern: the adjacent /comfy-launch endpoints explicitly
-wrap their slow call in ``await run_in_threadpool(...)`` "off the event loop".
-The equally-blocking /comfy-models path was simply left inline.
+json.loads the entire body - commonly several MB. Run inline, that read stalls
+the whole uvicorn event loop for up to the 10s timeout.
 
 Oracle: ``asyncio.get_running_loop()`` succeeds only on the event-loop thread and
-raises RuntimeError in a threadpool worker. So this detects the defect
-structurally - no sleeps, no timing, nothing load-sensitive. TestClient runs each
-handler to completion in isolation and never measures loop responsiveness, which
-is exactly why the original suite stayed green through this.
+raises RuntimeError in a threadpool worker, so this is structural - no sleeps, no
+timing, nothing load-sensitive.
 """
 
 from __future__ import annotations
@@ -54,9 +39,9 @@ def _installed_backend(plugin: str):
     PluginManager loads a plugin under a synthetic package name
     (``_localm_plugin_image``), so ``_localm_plugin_image.backend`` is a
     DIFFERENT module object from ``localm.plugins.builtin.image.backend``.
-    Patching the canonical path silently does nothing: the real
-    _comfy_model_slots then runs, returns None (no ComfyUI in the test env), and
-    an "unreachable" assertion passes for entirely the wrong reason.
+    Patching the canonical path does nothing: the real _comfy_model_slots then
+    runs and returns None (no ComfyUI in the test env), so an "unreachable"
+    assertion would pass for the wrong reason.
     """
     import sys
     mod = sys.modules.get(f"_localm_plugin_{plugin}.backend")
@@ -120,8 +105,8 @@ def test_comfy_models_does_not_fetch_on_the_event_loop(tmp_path, monkeypatch,
 @pytest.mark.parametrize("plugin,route", PICKERS, ids=[p[0] for p in PICKERS])
 def test_comfy_models_still_reports_unreachable_honestly(tmp_path, monkeypatch,
                                                          plugin, route):
-    """Offloading must not change the contract: None from the backend still means
-    an honest "not running" answer, never a silently-empty picker (rule 5)."""
+    """The offload does not change the contract: None from the backend still
+    means a "not running" answer, never a silently-empty picker."""
     app = _media_app(tmp_path, monkeypatch, plugin)
     backend = _installed_backend(plugin)
     called: list = []
@@ -141,16 +126,11 @@ def test_comfy_models_still_reports_unreachable_honestly(tmp_path, monkeypatch,
 @pytest.mark.parametrize("plugin,route", PICKERS, ids=[p[0] for p in PICKERS])
 def test_comfy_models_returns_the_slots_it_resolved(tmp_path, monkeypatch,
                                                     plugin, route):
-    """What the backend resolved must survive the offload unchanged.
+    """What the backend resolved survives the offload unchanged.
 
-    Asserted as a SUBSET rather than by equality: the route now also annotates
-    each slot with its localm model_type and the plugin role it fills (see
-    tests/test_media_model_roles.py). Equality would make this test fail on any
-    added field, which is not what it is here to catch - the property it owns is
-    that moving the resolution into a threadpool does not alter or drop what the
-    backend returned. So it pins exactly that, and separately pins that the
-    annotation did happen, rather than being weakened to let new keys through
-    unchecked."""
+    Asserted as a SUBSET rather than by equality, because the route also
+    annotates each slot with its localm model_type and the plugin role it
+    fills. The annotation itself is pinned separately."""
     app = _media_app(tmp_path, monkeypatch, plugin)
     backend = _installed_backend(plugin)
     slots = [{"node": "4", "input": "ckpt_name", "value": "m.safetensors",

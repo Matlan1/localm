@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""save_config / update_config persist only the user-set delta (LM-DA-001).
+"""save_config / update_config persist only the user-set delta.
 
-The old scheme wrote the full defaults-merged dict to config.json, freezing
-every default at its then-current value on the user's first save; a later
-change to a DEFAULT_CONFIG value (e.g. commit cfa25d5's max_tokens
-1024 -> 4096 fix) never reached an existing install. Now a key equal to the
-current default is dropped at save time and reconstructed by load_config(),
-so shipped default-value fixes propagate; a differing value (user-set, or a
-frozen old default whose provenance was destroyed by the old scheme) is kept.
+Writing the full defaults-merged dict to config.json would freeze every default
+at its then-current value on the user's first save, so a later change to a
+DEFAULT_CONFIG value never reaches an existing install. A key equal to the
+current default is dropped at save time and reconstructed by load_config(), so
+shipped default-value fixes propagate; a differing value is kept.
 """
 
 import json

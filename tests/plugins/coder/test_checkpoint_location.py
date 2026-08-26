@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CODER-4: the resume checkpoint lives under HOME/checkpoints/<digest>.json, not
-in the project tree (<cwd>/.localcoder/checkpoint.json). The legacy in-project
-path is still READ (back-compat) and cleared. Project-local config.toml,
-LOCALCODER.md, and full-mode transcripts are unaffected (not exercised here)."""
+"""The resume checkpoint lives under HOME/checkpoints/<digest>.json, not in the
+project tree (<cwd>/.localcoder/checkpoint.json). The legacy in-project path is
+still READ (back-compat) and cleared. Project-local config.toml, LOCALCODER.md,
+and full-mode transcripts are unaffected (not exercised here)."""
 
 import json
 from unittest.mock import patch
@@ -106,9 +106,8 @@ def test_distinct_projects_get_distinct_checkpoint_dirs(tmp_path, monkeypatch):
 
 def test_distinct_sessions_in_one_project_get_distinct_checkpoint_files(
         tmp_path, monkeypatch):
-    """NEW-CODER-RESUME-DESTROYS-SESSIONS: two sessions in the SAME project
-    must land in two different files, not the one file every session used to
-    share (and silently overwrite)."""
+    """Two sessions in the SAME project must land in two different files. One
+    shared file per project means each session silently overwrites the last."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     from localm.plugins.coder.agent import _checkpoint_path_for

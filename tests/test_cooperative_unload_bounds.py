@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Cooperative cross-instance unload must be bounded and worth its cost (REG-454).
+"""Cooperative cross-instance unload must be bounded and worth its cost.
 
 When two localm instances share a GPU and this one's local eviction candidates
 are all busy, switch_engine asks a sibling to release VRAM instead of 503-ing at
@@ -15,16 +15,15 @@ consequences this pins down:
    forever, holding the per-model semaphore and re-probing VRAM, never
    progressing. Each peer must be asked at most once per load attempt.
 
-2. YANKING A SIBLING FOR NOTHING. Nothing checked that freeing the peer would
-   actually make this model fit: if the model needs far more than the card has,
-   or a third-party app (ComfyUI) holds the bulk of VRAM, the sibling loses
-   every model and this load still 503s.
+2. YANKING A SIBLING FOR NOTHING. Freeing the peer must be checked to actually
+   make this model fit: if the model needs far more than the card has, or a
+   third-party app (ComfyUI) holds the bulk of VRAM, the sibling loses every
+   model and this load still 503s.
 
-The suite never drove any of this: _attempt_cooperative_unload returns False
-immediately unless the module global _gpu_coord is set, and _gpu_coord is
-populated ONLY in the lifespan startup of a real, non-isolated, advertised
-server - so under pytest the entire cooperative branch is dead code. These tests
-set _gpu_coord explicitly to reach it.
+_attempt_cooperative_unload returns False immediately unless the module global
+_gpu_coord is set, and _gpu_coord is populated ONLY in the lifespan startup of a
+real, non-isolated, advertised server, so under pytest the entire cooperative
+branch is dead code. These tests set _gpu_coord explicitly to reach it.
 """
 
 from __future__ import annotations
@@ -196,8 +195,8 @@ def test_split_instance_still_asks_a_peer_on_its_other_split_device(
     decision weighs is vram_capacity()'s COMBINED split total, so part of the
     shortfall IS on GPU 1 and freeing that peer is exactly what makes the load
     fit. Comparing peers against a single index while comparing VRAM against the
-    combined total contradicts itself: the peer was dropped, holders went empty,
-    and the load 503'd where it used to succeed.
+    combined total contradicts itself: the peer is dropped, holders go empty, and
+    the load 503s.
     """
     from localm.config import load_config as real_load_config
     base = real_load_config()

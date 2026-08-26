@@ -1,23 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RAG data-robustness hardening found by an adversarial hostile-input sweep.
 
-Seven distinct bugs, each independently reproduced before the fix:
+Seven distinct bugs:
 
-B1  _extract_docx `<w:t>` run extraction was O(n^2) backtracking (a tiny docx with
-    many unclosed <w:t> openers pinned a CPU for minutes).
+B1  _extract_docx `<w:t>` run extraction backtracked quadratically (a tiny docx
+    with many unclosed <w:t> openers pinned a CPU).
 B2  _extract_tar_members called sorted(getmembers()), materialising every member of
-    a compressed tarball BEFORE the member cap applied (a .tgz of 500k empty members
-    ran ~22s, far under the size cap).
+    a compressed tarball BEFORE the member cap applied, so a .tgz of hundreds of
+    thousands of empty members ran far under the size cap.
 B3  Collection._expand walked with rglob(), which follows Windows NTFS junctions
     (is_symlink() is False for them), so a self-referential junction looped forever.
 B4  _extract_ipynb caught only json.JSONDecodeError, so deeply-nested JSON raised
-    RecursionError past the guard -> HTTP 500.
+    RecursionError past the guard and answered HTTP 500.
 B5  Collection._load appended chunk lines with no shape check, so a non-dict or
     missing-"text" line crashed query()/remove_doc()/add_paths() and stats() lied.
 B6  A non-finite (NaN/inf) embedding component made _cosine return nan; the blended
-    score dropped the chunk from results with no surfaced degrade reason (rule 5).
+    score dropped the chunk from results with no surfaced degrade reason.
 B7  chunk_text recorded a paragraph's pos one line too low when preceded by an odd
-    number of blank lines (the citation pointed at a blank line).
+    number of blank lines, so the citation pointed at a blank line.
 """
 
 import io
@@ -225,8 +225,7 @@ def test_malformed_chunk_line_warning_logs_once_per_process(tmp_path, caplog):
     request for a collection with any corrupt lines at all. Must warn on the
     first Collection() for this directory and stay silent on a second one for
     the SAME directory/count, matching the sibling _note_vector_degrade
-    warn-once pattern (test_rag.py's test_malformed_vectors_json_degrades_
-    not_crashes). self.corrupt must still be set on EVERY load regardless -
+    warn-once pattern. self.corrupt must still be set on EVERY load regardless -
     only the duplicate LOG LINE is suppressed, not the actual state."""
     base = _seed(tmp_path)
     chunks_file = base / "kb" / "chunks.jsonl"
@@ -249,9 +248,8 @@ def test_malformed_chunk_line_warning_logs_once_per_process(tmp_path, caplog):
 def test_malformed_chunk_line_warning_still_fires_for_a_different_collection(tmp_path, caplog):
     """The dedup key must include the collection directory - two DIFFERENT
     collections each having their own corruption must both be reported, never
-    collapsed into "one warning covers every collection" (the coordinator's
-    explicit caution: a flood fix must not hide a genuinely broken SECOND
-    collection behind the first one's already-logged warning)."""
+    collapsed into "one warning covers every collection", which would hide a
+    genuinely broken SECOND collection behind the first one's warning."""
     (tmp_path / "one").mkdir()
     (tmp_path / "two").mkdir()
     base1 = _seed(tmp_path / "one")
@@ -344,7 +342,7 @@ def test_nan_in_vectors_json_degrades_with_reason(tmp_path):
     vf = base / "kb" / "vectors.json"
     vf.write_text('{"dim": 3, "vectors": [[1.0, NaN, 0.0]]}', encoding="utf-8")
     c2 = Collection("kb", base=base)
-    # Must still answer (degraded to BM25) and SURFACE the reason, not silently
+    # Must still answer (degraded to BM25) and SURFACE why, not silently
     # score NaN.
     assert c2.query("mitochondria"), "must still answer lexically"
     assert c2.stats()["vector_degrade_reason"], "non-finite vectors must be surfaced"

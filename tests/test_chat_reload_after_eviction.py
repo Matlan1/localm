@@ -1,33 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """An evicted chat model must come back on the next turn, unnamed turns included.
 
-Reported against the 0.1.4 candidate: "chat wasnt able to automatically reload
-the model after it was evicted by vram manager for embedding tests". The user
-had to load it by hand from the Models page.
-
-The mechanism, live-reproduced on a real server with a real GGUF before this
-test was written:
-
-    chat before eviction            -> 200
-    unload every loaded model       -> 200 (what vram.evict_chat_for_embedder
-                                       does, via http_server.unload_all_models)
-    chat, model ""                  -> 400 in 4 ms, no reload   <-- the bug
-    chat, model named               -> 200 in 9.7 s (reloaded)
+After every loaded model is unloaded (what vram.evict_chat_for_embedder does,
+via http_server.unload_all_models), a chat request that does not name a model
+must still reload it instead of returning 400.
 
 get_engine already knows how to recover: it resolves an unnamed request through
 ``_active_model_name or _default_model_name`` and reloads the result, and its
 own 503 documents "the transient window during an active-model eviction/unload
-where _active_model_name was just cleared". None of that was reachable, because
-the route refused an empty model on its first line, before get_engine ran.
+where _active_model_name was just cleared". None of that is reachable if the
+route refuses an empty model on its first line, before get_engine runs.
 
-FIXTURE PREMISE (diff-review-discipline.md item 19). The failing case needs
-THREE things at once: a server that CAN resolve a model, the active pointer
-CLEARED by a real eviction, and a request that does not name the model. The
-pre-existing empty-model test builds its app with ``create_app(None)``, so
-``_default_model_name`` is None and nothing is resolvable - that fixture can
-never take the value this defect needs, which is why it stayed green through
-the bug. These tests start from an app that HAS a startup model and run the real
-unload_all_models coroutine to clear the pointer.
+FIXTURE PREMISE: the failing case needs THREE things at once: a server that CAN
+resolve a model, the active pointer CLEARED by a real eviction, and a request
+that does not name the model. A fixture that builds its app with
+``create_app(None)`` has ``_default_model_name`` None and nothing resolvable, so
+it can never take the value this defect needs. These tests start from an app
+that HAS a startup model and run the real unload_all_models coroutine to clear
+the pointer.
 """
 
 from __future__ import annotations
@@ -43,8 +33,7 @@ from tests.conftest import probe_double
 
 class FakeEngine:
     """Stands in for the model backend only. What is under test is the ROUTE's
-    name resolution and the reload handoff, not llama.cpp - the end-to-end
-    behaviour with a real GGUF is covered by the live reproduction quoted above."""
+    name resolution and the reload handoff, not llama.cpp."""
 
     def __init__(self, display_name: str):
         self.display_name = display_name
@@ -86,7 +75,7 @@ class FakeEngine:
 
 @pytest.fixture
 def server(monkeypatch):
-    """A server started WITH a model - the setup the report came from."""
+    """A server started WITH a model."""
     engines: dict[str, FakeEngine] = {}
 
     def factory(name):
@@ -121,13 +110,12 @@ def server(monkeypatch):
 def _evict():
     """The real eviction, through the real function.
 
-    vram.evict_chat_for_embedder does NOT round-trip over HTTP - its docstring
-    is explicit that it submits ``http_server.unload_all_models`` onto the
-    server's captured loop, precisely so the unload honours the in-flight
-    request pin and serialises with get_engine. Calling that same coroutine here
-    reproduces the eviction the report came from; driving the
-    ``/v1/models/unload`` ROUTE instead would test a management-auth path the
-    embedder never takes."""
+    vram.evict_chat_for_embedder does NOT round-trip over HTTP - it submits
+    ``http_server.unload_all_models`` onto the server's captured loop, so the
+    unload honours the in-flight request pin and serialises with get_engine.
+    Calling that same coroutine here reproduces that eviction; driving the
+    ``/v1/models/unload`` ROUTE instead would exercise a management-auth path
+    the embedder never takes."""
     result = asyncio.run(hs.unload_all_models())
     # Eviction clears the active pointer.
     assert hs._active_model_name is None, (
@@ -155,8 +143,8 @@ def test_unnamed_turn_reloads_the_evicted_model(server):
 
 
 def test_named_turn_still_reloads_the_evicted_model(server):
-    """The half that already worked. Kept so a fix that recovers the unnamed
-    case by breaking the named one cannot pass."""
+    """The named-turn half, kept so a fix that recovers the unnamed case by
+    breaking the named one cannot pass."""
     client, engines = server
     _evict()
 
@@ -169,7 +157,7 @@ def test_named_turn_still_reloads_the_evicted_model(server):
 
 
 def test_completions_route_recovers_too(server):
-    """/v1/completions carried the identical premature refusal."""
+    """/v1/completions recovers on the same path."""
     client, engines = server
     _evict()
 
@@ -186,11 +174,9 @@ def test_a_chat_hook_sees_the_model_actually_in_use(server):
     """A plugin hook that branches on ctx.model_id must not be handed "".
 
     chat/plug.py's thinking inlet does exactly that
-    (`is_thinking_model(getattr(ctx, "model_id", "") or "")`). Before this
-    change an unnamed request could not reach a hook at all, so letting one
-    through with the raw empty string would have silently disabled that
-    handling on the very recovery path being added here - a capability lost
-    with nothing reporting it."""
+    (`is_thinking_model(getattr(ctx, "model_id", "") or "")`), so an unnamed
+    request reaching a hook with the raw empty string would silently disable
+    that handling on the recovery path."""
     client, engines = server
     _evict()
 
@@ -218,9 +204,9 @@ def test_a_chat_hook_sees_the_model_actually_in_use(server):
 
 
 def test_empty_model_is_still_400_when_nothing_can_be_resolved(monkeypatch):
-    """The contract that must NOT change: with no model loaded and none ever
-    configured, an unnamed request is genuinely unserveable and the caller does
-    have to name one. Only the RECOVERABLE case moved."""
+    """With no model loaded and none ever configured, an unnamed request is
+    genuinely unserveable and the caller does have to name one. Only the
+    RECOVERABLE case is served."""
     monkeypatch.setattr("localm.config.load_registry", lambda: {})
     hs._engines.clear()
     hs._engines_lru.clear()

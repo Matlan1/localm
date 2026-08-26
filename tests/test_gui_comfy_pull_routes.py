@@ -153,8 +153,7 @@ class TestPreflightRoute:
         tokenizes on any non-alphanumeric character - including whitespace - so
         a padded and unpadded filename normalize to the SAME base and an
         untrimmed value would still resolve as "not missing" even without the
-        strip. That made an earlier version of this test pass whether or not
-        stripping actually happened - this asserts the value itself instead."""
+        strip, so the value itself is asserted."""
         fake_wf = tmp_path / "wf.json"
         fake_wf.write_text(json.dumps({}))
         captured = {}
@@ -224,14 +223,12 @@ class TestPullComfySourceRoute:
 
     def test_curated_filename_with_plugin_only_workdir_and_plugin_hint_starts_a_job(
             self, scoped_app, tmp_path):
-        """NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR, end to end through
-        the real route + request model: a workdir set ONLY via the per-plugin
-        comfy.workdir field (no global comfy_workdir at all - the shape the
-        modern Settings UI produces) resolves correctly when the request
-        names which plugin is asking, exactly what the real browser flow now
-        sends (helpers.js's checkModelsBeforeGenerate -> _offerModelDownload).
-        This is the maintainer's own reported "can't find working dir" error,
-        reproduced and closed at the route level."""
+        """End to end through the real route and request model: a workdir set
+        ONLY via the per-plugin comfy.workdir field (no global comfy_workdir at
+        all, the shape the Settings UI produces) resolves correctly when the
+        request names which plugin is asking, which is what the browser flow
+        sends (helpers.js's checkModelsBeforeGenerate ->
+        _offerModelDownload)."""
         import localm.config as _cfg
         cfg = _cfg.load_config()
         cfg["plugins"] = {"image": {"comfy": {"workdir": str(tmp_path / "per-plugin-comfy")}}}
@@ -293,26 +290,19 @@ class TestComfyRoutesAreScoped:
         assert r1.status_code != 403
 
     def test_pull_comfy_source_now_needs_host_fs_access(self, scoped_app):
-        """REVISED CONTRACT. This test previously asserted that a plain
-        models:write key REACHES this route (`!= 403`, "400 for uncurated, not
-        403"). That is no longer true, deliberately.
+        """A plain models:write key does NOT reach this route.
 
         The route downloads into comfy_models_dest_dir(), which resolves through
-        `comfy_workdir` whenever the managed ComfyUI instance is not active - the
-        default on a fresh install. `comfy_workdir` is admin_only now, so a plain
-        config:write key cannot CHOOSE that folder - but an admin may have
-        already configured it, and this route's own caller only needs
-        MODELS_WRITE. Without its own gate, any MODELS_WRITE key could still
-        stream a multi-gigabyte download into whatever host directory an admin
-        previously set, with no host-fs privilege of its own; the route then
-        mkdir -p's it and streams the download from the server process. Picking
-        the directory the server writes gigabytes into is host filesystem reach,
-        and a UNC value there draws outbound SMB authentication from the server -
-        the same capability /api/fs/dirs is gated on, and the same reason the
-        sibling /api/models/scan route is gated.
+        `comfy_workdir` whenever the managed ComfyUI instance is not active, the
+        default on a fresh install. `comfy_workdir` is admin_only, but an admin
+        may have configured it already and this route's own caller only needs
+        MODELS_WRITE, so without its own gate any MODELS_WRITE key could stream
+        a multi-gigabyte download into that host directory. Picking the
+        directory the server writes gigabytes into is host filesystem reach, and
+        a UNC value there draws outbound SMB authentication from the server.
 
-        models:write governs WHICH MODELS may be added; it does not govern WHERE
-        ON THE DISK the server may write. Those came apart here."""
+        models:write governs WHICH MODELS may be added, not WHERE ON THE DISK
+        the server may write."""
         from localm import auth
         writer = auth.create_key("writer", [S.MODELS_WRITE])["key"]
         with TestClient(scoped_app) as c:
@@ -321,10 +311,10 @@ class TestComfyRoutesAreScoped:
         assert r.status_code == 403
 
     def test_pull_comfy_source_reaches_the_route_with_host_fs_access(self, scoped_app):
-        """Fires-control for the test above: with host filesystem access the
+        """The control for the test above: with host filesystem access the
         request gets PAST the gate and is answered on its merits (400 for an
-        uncurated name). Without this, the 403 above would also pass against a
-        route that had simply become unreachable for everyone."""
+        uncurated name). The 403 above would otherwise also pass against a route
+        that had become unreachable for everyone."""
         from localm import auth
         writer = auth.create_key("hostwriter", [S.MODELS_WRITE], fs_access="host")["key"]
         with TestClient(scoped_app) as c:

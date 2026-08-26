@@ -11,9 +11,9 @@ PATH so a broken ``localm`` package cannot stop the rollback. Run it via
 ``rollback.bat`` / ``rollback.sh`` in the install root, or
 ``python scripts/rollback_update.py``.
 
-It NEVER reports success it did not achieve (do-not-hide-problems): if there is no
-backup, the restore helper cannot load, or a restore step fails, it says so, keeps the
-backup intact, and exits non-zero, pointing at the backup dir for a manual copy.
+It NEVER reports success it did not achieve: if there is no backup, the restore
+helper cannot load, or a restore step fails, it says so, keeps the backup intact,
+and exits non-zero, pointing at the backup dir for a manual copy.
 """
 
 from __future__ import annotations

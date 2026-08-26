@@ -126,15 +126,10 @@ class _ParamsFn:
     reinterpreting the same bytes as whatever type the binding declared,
     right or wrong.
 
-    This matters beyond the raw-vs-typed split above: if a fake instead
-    always handed back the original fixture object unconditionally (a
-    tempting shortcut, and the previous behaviour of this class), a caller
-    would receive a correctly-typed object no matter what class it actually
-    requested - so a test proving verify_abi() picks the WRONG layout for
-    mismatched bytes could pass by construction, never having exercised
-    whether the selected restype actually reached the returned struct. See
-    test_ctx_v2_bytes_read_as_v1_would_have_been_missed_before_and_are_caught_now
-    and its model_params sibling above, which found exactly this gap."""
+    A fake that always handed back the original fixture object would give a
+    caller a correctly-typed object no matter what class it requested, so a
+    test proving verify_abi() picks the WRONG layout for mismatched bytes
+    would pass by construction."""
 
     def __init__(self, value):
         self._value = value
@@ -186,16 +181,11 @@ def _reset_layout_cache(monkeypatch):
     different fake library each time, so a leaked cache would make later tests
     assert against an earlier test's build.
 
-    The second half is a bug this file already shipped once. ``_ggml_version``
-    correctly falls back to the loader's ggml handles when the passed lib does
-    not export ``ggml_version`` - in production that is REQUIRED, because the
-    symbol lives in ggml-base.dll rather than llama.dll. But it means a fake lib
-    constructed WITHOUT a version silently read the machine's actually-installed
-    runtime. That made ``(good_model_v2, None) -> 0`` pass for the wrong reason
-    while this box had lemonade b1288 (ggml 0.13.1, below every threshold), and it
-    flipped to 5 the moment the box was upgraded to lemonade b1307 (ggml 0.18.1). A unit test must
-    not change its answer because someone provisioned a different DLL, so the
-    fallback is stubbed out here and "no version" means no version."""
+    ``_ggml_version`` falls back to the loader's ggml handles when the passed lib
+    does not export ``ggml_version`` - required in production, because the symbol
+    lives in ggml-base.dll rather than llama.dll - so a fake lib constructed
+    WITHOUT a version would read the machine's actually-installed runtime. The
+    fallback is stubbed out here, and "no version" means no version."""
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(_loader, "_ggml_dev_handles", lambda: [], raising=False)
     _abi._detected_layout = None
@@ -382,20 +372,19 @@ def test_detects_v1_and_v2_layouts():
 
 
 def test_v2_bytes_read_as_v1_would_have_been_missed_before_and_are_caught_now():
-    """The exact silent-corruption case this whole split exists for.
+    """The silent-corruption case the model_params split covers.
 
-    A lemonade b1307 build's default-params bytes, forced through the OLD V1 class. Both
-    structs are 72 bytes so nothing about the size trips, and split_mode at
-    offset 20 - previously the ONLY model_params check - is 1 either way. What
-    now catches it is that V1's `main_gpu` reads V2's `load_mode`... which is
-    also in range, so the DECIDING signal is the probe contradiction: the
-    library exports llama_load_mode_* while its bytes are being read as V1.
+    V2 default-params bytes forced through the V1 class. Both structs are 72
+    bytes so the size check does not trip, and split_mode at offset 20 is 1
+    either way; V1's `main_gpu` reads V2's `load_mode`, which is also in range.
+    The deciding signal is the probe contradiction: the library exports
+    llama_load_mode_* while its bytes are being read as V1.
     """
     v2_bytes = good_model_v2()
     as_v1 = LlamaModelParamsV1()
     ctypes.memmove(ctypes.byref(as_v1), ctypes.byref(v2_bytes),
                    ctypes.sizeof(v2_bytes))
-    # The pre-existing checks alone do not notice the misread.
+    # The size and split_mode checks alone do not notice the misread.
     assert as_v1.split_mode == 1
 
     # markers=True + V1-shaped bytes is the contradiction: symbols say v2, the
@@ -416,8 +405,8 @@ def test_v2_load_mode_out_of_range_refuses():
 
 @pytest.mark.parametrize("builder", [good_model_v1, good_model_v2])
 def test_main_gpu_garbage_refuses(builder):
-    """A pointer low-word landing in main_gpu is what a shifted layout looks
-    like; before this check model_params had no bound on that field at all."""
+    """A main_gpu holding a pointer low-word, which is what a shifted layout
+    looks like, is refused as a mismatch."""
     mp = builder()
     mp.main_gpu = 0x7FFF0000
     v = evaluate(mp, good_ctx())
@@ -460,18 +449,16 @@ def test_detects_ctx_v1_and_v2_layouts():
 
 
 def test_ctx_v2_bytes_read_as_v1_would_have_been_missed_before_and_are_caught_now():
-    """The exact silent-corruption case the context_params split exists for -
-    same shape as test_v2_bytes_read_as_v1_..._are_caught_now above, one axis
-    over. A real (post-insertion) build's default-params bytes, forced through
-    the OLD V1 class: rope_scaling_type would be read from offset 40, which on
-    V1 is actually pooling_type - so a real n_ctx/n_batch/etc. would marshal
-    fine but the keystone read would drift from the true field.
+    """The silent-corruption case the context_params split covers, one axis over
+    from the model_params one above. A real (post-insertion) build's
+    default-params bytes, forced through the OLD V1 class: rope_scaling_type
+    would be read from offset 40, which on V1 is actually pooling_type - so a
+    real n_ctx/n_batch/etc. would marshal fine but the keystone read would drift
+    from the true field.
 
-    This is also the ORIGINAL bug this whole fix started from: before the V1/V2
-    split existed, localm bound ONE hardcoded context_params class - correct
-    for whichever build happened to match it, silently reading the wrong
-    offsets on the other. Detection here is what prevents that from being a
-    coin flip."""
+    With ONE hardcoded context_params class there is no detection at all: the
+    class is correct for whichever build happens to match it and silently reads
+    the wrong offsets on the other."""
     v2_bytes = good_ctx_v2()
     as_v1 = LlamaContextParamsV1()
     ctypes.memmove(ctypes.byref(as_v1), ctypes.byref(v2_bytes),
@@ -491,15 +478,11 @@ def test_ctx_v2_bytes_read_as_v1_would_have_been_missed_before_and_are_caught_no
 def test_ctx_layout_detection_survives_a_drift_the_fingerprint_never_READS():
     """A drift in a field OUTSIDE the fingerprint's window must not disturb it.
 
-    NOTE WHAT THIS DOES AND DOES NOT COVER, because the gap was expensive: it
-    drifts n_ctx, which _CONTEXT_FINGERPRINT does not read at ANY offset. So
-    it can never fail on a scoring defect, and while it was the only
-    "survives a drifted default" test here, a legitimate ctx_v2 build with one
-    of the five FINGERPRINTED defaults drifted was being hard-refused with a
-    message about a field whose real value was fine. Those five fields are
-    covered by test_ctx_v2_detection_survives_a_drift_in_each_fingerprinted_
-    field and its ctx_v1 sibling below; keep both, they answer different
-    questions."""
+    WHAT THIS DOES AND DOES NOT COVER: it drifts n_ctx, which
+    _CONTEXT_FINGERPRINT does not read at ANY offset, so it can never fail on a
+    scoring defect. The five FINGERPRINTED fields are covered by
+    test_ctx_v2_detection_survives_a_drift_in_each_fingerprinted_field and its
+    ctx_v1 sibling below."""
     cp = good_ctx_v2()
     cp.n_ctx = 4096                      # unrelated drift, not part of the fingerprint
     v = verify_abi(_FakeLib(good_model(), cp))
@@ -522,9 +505,7 @@ def test_ctx_v2_detection_survives_a_drift_in_each_fingerprinted_field(
 
     This is the scoring itself, asserted below verify_abi so a refusal that
     comes from evaluate() (correct, for a genuine keystone drift) cannot be
-    confused with a detection failure. Before the graded ctx_type, the
-    ctx_v1 hypothesis scored a free point at offset 32 - where ctx_v2 keeps
-    n_threads_batch, never -1 - and drifting flash_attn_type tied it 4-4."""
+    confused with a detection failure."""
     cp = good_ctx_v2()
     setattr(cp, field, badval)
     layout, notes, assumed = _abi.detect_context_params_layout(
@@ -537,8 +518,8 @@ def test_ctx_v2_detection_survives_a_drift_in_each_fingerprinted_field(
 @pytest.mark.parametrize("badval", [0, 1, 2, 512])
 def test_ctx_v1_detection_survives_a_drift_in_each_fingerprinted_field(
         field, badval):
-    """The ctx_v1 side of the same property, so the fix cannot be a ctx_v2
-    special case that quietly costs ctx_v1 builds their determination.
+    """The ctx_v1 side of the same property, so ctx_v1 builds keep their
+    determination too.
 
     rope_scaling_type is EXCLUDED and covered separately below: it is the one
     offset where the two hypotheses make opposite predictions, so drifting it
@@ -570,21 +551,16 @@ def test_ctx_v1_with_a_drifted_rope_scaling_type_stays_inconclusive():
 
 
 def test_ctx_v2_with_a_drifted_flash_attn_type_is_not_falsely_refused():
-    """THE REGRESSION. A legitimate ctx_v2 build, one drifted default, refused.
+    """A legitimate ctx_v2 build with one drifted default must not be refused.
 
-    flash_attn_type is the field evaluate() itself lists as NON-FATAL ("a
-    legitimate build changed a default - we still load, but note it"), so
-    every part of this module except the fingerprint already treated this
-    build as fine. The old binary scoring tied 4-4, went inconclusive, fell
-    back to CONTEXT_PARAMS_V1, and evaluate() then read V1's offsets over V2's
-    bytes and reported
+    flash_attn_type is the field evaluate() lists as NON-FATAL ("a legitimate
+    build changed a default - we still load, but note it"). A binary score ties
+    4-4 on it, goes inconclusive, falls back to CONTEXT_PARAMS_V1, and
+    evaluate() then reads V1's offsets over V2's bytes and reports
 
         context_params.rope_scaling_type = 0 (expected -1, ...)
 
-    about a runtime whose rope_scaling_type IS -1, telling the user to
-    re-provision or set LOCALM_SKIP_ABI_CHECK over a build that is completely
-    fine. Exactly the false refusal the module docstring calls worse than the
-    status quo, on hardware nobody here owns."""
+    about a runtime whose rope_scaling_type IS -1."""
     cp = good_ctx_v2()
     cp.flash_attn_type = 0
     v = verify_abi(_FakeLib(good_model(), cp))          # must not raise
@@ -600,15 +576,9 @@ def test_ctx_v2_with_a_drifted_flash_attn_type_is_not_falsely_refused():
 @pytest.mark.parametrize("field", ["rope_scaling_type", "pooling_type",
                                    "attention_type"])
 def test_ctx_v2_keystone_drift_still_refuses_and_names_the_real_field(field):
-    """The complement, so the fix cannot have bought its silence by weakening
-    the gate: the three keystones evaluate() hard-refuses on still refuse when
-    they genuinely drift, and the message names the field that actually moved.
-
-    Pins a CONTRACT rather than guarding the regression - these three resolved
-    to ctx_v2 under the old scoring too (only flash_attn_type tied), so
-    reverting the scoring leaves this green. It is here because "stop refusing
-    legitimate builds" and "still refuse broken ones" are one requirement, and
-    a reader needs to see both asserted."""
+    """The complement: the three keystones evaluate() hard-refuses on still
+    refuse when they genuinely drift, and the message names the field that
+    actually moved."""
     cp = good_ctx_v2()
     setattr(cp, field, 0)
     with pytest.raises(AbiMismatch) as ei:
@@ -642,9 +612,9 @@ def test_context_fingerprint_still_says_inconclusive_when_it_genuinely_is():
 
 def test_context_params_layout_falls_back_to_v1_when_inconclusive():
     """detect_context_params_layout has no second (symbol) signal to fall back
-    on, unlike model_params - an inconclusive fingerprint goes straight to the
-    V1 fallback (the layout localm shipped before this field existed anywhere),
-    with `assumed=True` so callers know not to treat it as a determination."""
+    on, unlike model_params - an inconclusive fingerprint returns the V1
+    layout with `assumed=True` so callers know not to treat it as a
+    determination."""
 
     class _BlankLib:
         def llama_context_default_params(self):
@@ -670,15 +640,11 @@ def test_unknown_third_layout_still_fails_safe():
     at the same position n_outputs_max_per_seq already occupies, shifting
     everything from n_threads onward one more +4 than V2 already does.
 
-    The fingerprint CONFIDENTLY (not inconclusively) misdetects this as V2 -
-    proving layout DETECTION alone is not the safety net here - but
-    evaluate()'s independent re-check of the actual keystone values at V2's
-    assumed offsets still catches the resulting garbage and refuses. This is
-    the defense-in-depth verify_abi()'s docstring describes; if this test
-    ever goes green with a non-raising, "ok" verdict, that guarantee has been
-    lost. Proven empirically (a live probe, not just this synthetic
-    reconstruction) 2026-08-11 - see dev-notes/FIX-2026-08-11-llama-context-
-    params-abi-mismatch.md."""
+    The fingerprint CONFIDENTLY (not inconclusively) misdetects this as V2, so
+    layout DETECTION alone is not the safety net here; evaluate()'s independent
+    re-check of the actual keystone values at V2's assumed offsets catches the
+    resulting garbage and refuses. This is the defense-in-depth verify_abi()'s
+    docstring describes."""
     cp = good_ctx_v2()
     raw_v2 = bytes(bytearray(
         (ctypes.c_uint8 * ctypes.sizeof(cp)).from_buffer_copy(cp)))
@@ -689,9 +655,9 @@ def test_unknown_third_layout_still_fails_safe():
     raw_v3 = raw_v2[:24] + b"\x00\x00\x00\x00" + raw_v2[24:-4]
     assert len(raw_v3) == len(raw_v2)
 
-    # The fingerprint alone actively (and wrongly) picks V2 here rather than
-    # falling back to V1 as inconclusive, which is the case evaluate() must still
-    # catch. The inconclusive path is covered by
+    # The fingerprint alone picks V2 here rather than falling back to V1 as
+    # inconclusive, which is the case evaluate() must still catch. The
+    # inconclusive path is covered by
     # test_context_params_layout_falls_back_to_v1_when_inconclusive.
     layout = _abi._fingerprint_context_layout(raw_v3)
     assert layout == CONTEXT_PARAMS_V2, (
@@ -881,10 +847,8 @@ def test_evaluate_cannot_discriminate_the_two_layouts():
     both: V2's load_mode=1 read as V1's main_gpu is a valid device index, and
     V1's main_gpu=0 read as V2's load_mode is a valid LLAMA_LOAD_MODE_NONE.
 
-    That is why the layout DECISION lives in detect_model_params_layout and why
-    the probe contradiction, not evaluate(), is what catches a wrong choice. If
-    someone later strengthens evaluate() into a real discriminator, this test
-    should be REPLACED deliberately, not deleted quietly."""
+    The layout DECISION therefore lives in detect_model_params_layout, and the
+    probe contradiction, not evaluate(), is what catches a wrong choice."""
     as_v1 = _reinterpret(good_model_v2(), LlamaModelParamsV1)
     assert evaluate(as_v1, good_ctx()).status == "ok"
     as_v2 = _reinterpret(good_model_v1(), LlamaModelParamsV2)
@@ -894,26 +858,16 @@ def test_evaluate_cannot_discriminate_the_two_layouts():
 def test_unknown_third_model_params_layout_is_not_caught():
     """Pins the LIMIT of verify_abi's fail-safe on the model_params axis.
 
-    test_unknown_third_layout_still_fails_safe proves the context_params axis
-    survives a CONFIDENTLY misdetected unknown layout, because evaluate()
-    re-reads the -1 keystones at wherever the bound class puts them. It is
-    tempting to read that as a property of the module. It is not: it is a
-    property of that ONE axis, and this is its counter-example.
+    test_unknown_third_layout_still_fails_safe covers the context_params axis,
+    where evaluate() re-reads the -1 keystones at wherever the bound class puts
+    them. That is a property of that ONE axis; this is its counter-example.
 
     A hypothetical third model_params layout (one more 4-byte field inserted
     directly before split_mode) is detected as v2 CONFIDENTLY - both signals
     agree, so there is no contradiction to refuse on - and then sails through
     evaluate(), because every model_params check is a RANGE check and every
-    shifted value here is still in range. The struct is bound and crossed
-    over the FFI by value. That is a silent misbind, on the axis the module
-    docstring itself calls out as causing "silent corruption or a hard crash
-    inside the GPU driver".
-
-    So this test must KEEP PASSING as written. If it ever fails because
-    verify_abi refused, someone has added a real model_params discriminator -
-    replace this deliberately (and narrow verify_abi's docstring the other
-    way), do not delete it quietly. Same treatment as
-    test_evaluate_cannot_discriminate_the_two_layouts above."""
+    shifted value here is still in range. The struct is bound and crossed over
+    the FFI by value: a silent misbind."""
     v2 = _raw(good_model_v2())[:72]
     raw3 = v2[:20] + b"\x00\x00\x00\x00" + v2[20:68]
     assert len(raw3) == 72, "the receptacle hands back a fixed-size buffer"
@@ -949,13 +903,10 @@ def test_ctx_v2_with_a_minus_one_ctx_type_is_a_known_undetectable_misbind():
     wins CONFIDENTLY and wrongly, and evaluate() cannot object because every
     keystone it reads at V1's offsets is a -1 belonging to V2's run.
 
-    Undecidable from these bytes rather than a scoring flaw - no reading of
-    the six offsets involved can locate a boundary inside a longer run - and
-    unchanged by the graded-ctx_type fix (the old binary scoring produced the
-    same 5-4). It needs ctx_type to adopt the -1 UNSPECIFIED convention its
-    four neighbours use, which is exactly the premise _CONTEXT_FINGERPRINT
-    documents as false. Pinned so the limit is visible rather than folded
-    into a blanket 'never a silent misbind'."""
+    Undecidable from these bytes rather than a scoring flaw: no reading of the
+    six offsets involved can locate a boundary inside a longer run. It needs
+    ctx_type to adopt the -1 UNSPECIFIED convention its four neighbours use,
+    which _CONTEXT_FINGERPRINT documents as false."""
     cp = good_ctx_v2()
     cp.ctx_type = -1
     v = verify_abi(_FakeLib(good_model(), cp))
@@ -974,11 +925,8 @@ def test_evaluate_does_catch_a_misaligned_read():
     """The capability the checks above DO have: a pointer low-word, or a -1 in a
     field whose valid range excludes it, is refused - in either layout.
 
-    THE -1-IN-load_mode CASE USED TO BE HERE AND DELIBERATELY IS NOT ANY MORE.
-    Upstream added LLAMA_LOAD_MODE_AUTO = -1 between b10361 and b10373 and made
-    it the default, so -1 in that field is now a CORRECT value and refusing it
-    took every current build offline. That is a real, narrow loss of tripwire
-    reach and it is recorded rather than papered over - see
+    The -1-IN-load_mode case is NOT here: LLAMA_LOAD_MODE_AUTO = -1 is a
+    CORRECT value, so -1 in that field is accepted. See
     test_load_mode_auto_is_accepted_and_costs_the_tripwire_one_value.
     """
     mp = good_model_v2()
@@ -996,28 +944,22 @@ def test_evaluate_does_catch_a_misaligned_read():
 def test_load_mode_auto_is_accepted_and_costs_the_tripwire_one_value():
     """LLAMA_LOAD_MODE_AUTO (-1) must pass, and the price must stay visible.
 
-    THE OUTAGE: upstream added AUTO between b10361 and b10373 and made it the
-    new default, so `llama_model_default_params()` on every build from b10373 on
-    reports load_mode = -1. localm's hardcoded valid set predated it and refused
-    the value, taking out any install that resolved to a current upstream
-    release - and `_latest_tag()` resolves at runtime, so no localm change was
-    needed to break a shipped install.
+    `llama_model_default_params()` on a current upstream build reports
+    load_mode = -1, and `_latest_tag()` resolves at runtime, so a valid set that
+    excluded -1 would refuse a shipped install.
 
-    THIS IS NOT THE GATE BEING RELAXED. The set mirrors llama.h's enumerators;
-    -1 belongs in it because upstream defines it, which is the only reason any
-    value belongs in it. Widening it to a RANGE, or dropping the check, would be
-    the forbidden move.
+    The set mirrors llama.h's enumerators; -1 belongs in it because upstream
+    defines it. Widening it to a RANGE, or dropping the check, is the forbidden
+    move.
 
-    THE COST, stated because a bound that is quietly given up is worse than one
-    that is argued: load_mode can no longer flag -1 as a misaligned read. NO
-    STRUCTURAL DISCRIMINATOR IS AVAILABLE TO NARROW THIS TO NEW BUILDS ONLY -
-    MEASURED, not assumed: the two tags export an IDENTICAL 240-function
-    LLAMA_API surface (nothing added, nothing removed), so there is no marker
-    symbol in the `llama_load_mode_*` spirit to key on; and the two obvious
-    runtime probes are unsafe on a build that lacks the mode, because
+    THE COST: load_mode can no longer flag -1 as a misaligned read, and there is
+    no structural discriminator that would narrow this to new builds only. The
+    two tags export an IDENTICAL 240-function LLAMA_API surface, so there is no
+    marker symbol in the `llama_load_mode_*` spirit to key on, and both obvious
+    runtime probes are unsafe on a build that lacks the mode:
     llama_load_mode_name(-1) falls off its switch into GGML_ABORT and kills the
-    process (hit live on b10361) while llama_load_mode_from_str throws
-    std::invalid_argument across the C ABI.
+    process, while llama_load_mode_from_str throws std::invalid_argument across
+    the C ABI.
     """
     from localm.inference.backends.llamacpp._structs import (
         LLAMA_LOAD_MODE_AUTO, _VALID_LOAD_MODES)
@@ -1090,11 +1032,9 @@ def test_assumed_layout_does_not_prove_the_penalties_arity():
     """An ASSUMED v1 is not a determined v1.
 
     detect_model_params_layout falls back to v1 when neither probe is
-    conclusive. The "v1 implies 4-arg" inference rests on the measured upstream
-    ORDERING of two changes, which says nothing about a build whose layout was
-    never actually determined - so reasoning onward from the fallback would be
-    treating an assumption as evidence, and could produce exactly the
-    mis-marshalled 4-arg call this module exists to avoid."""
+    conclusive. The "v1 implies 4-arg" inference rests on the upstream ORDERING
+    of two changes, which says nothing about a build whose layout was never
+    determined, so the arity stays unknown there."""
     # Partially-present markers + a fingerprint matching NEITHER layout is the
     # state that forces the fallback.
     mp = good_model_v2()
@@ -1118,9 +1058,9 @@ def test_assumed_layout_does_not_prove_the_penalties_arity():
 
 
 def test_determined_v1_still_proves_4arg():
-    """The complement, so the guard above cannot silently cost real lemonade b1288 users
-    their repetition penalty: a genuine pre-reorder build exports no
-    llama_load_mode_* symbols and fingerprints cleanly as v1."""
+    """The complement, so a real lemonade b1288 build keeps its repetition
+    penalty: a genuine pre-reorder build exports no llama_load_mode_* symbols
+    and fingerprints cleanly as v1."""
     lib = _FakeLib(good_model_v1(), good_ctx(), ggml_version="0.13.1")
     layout, _notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
     assert (layout, contradiction, assumed) == (MODEL_PARAMS_V1, None, False)
@@ -1135,9 +1075,9 @@ def test_determined_v1_still_proves_4arg():
     (good_model_v1, MODEL_PARAMS_V1), (good_model_v2, MODEL_PARAMS_V2)])
 def test_fingerprint_survives_one_drifted_default(builder, want):
     """Inconclusive is the state where localm binds on the symbol probe alone,
-    with nothing able to corroborate OR contradict it - so it must be rare. A
-    single changed default used to collapse the whole probe; now the wrong
-    layout still scores 0 and the right one 2, leaving a clear winner."""
+    with nothing able to corroborate OR contradict it, so it must be rare. With
+    one changed default the wrong layout still scores 0 and the right one 2,
+    leaving a clear winner."""
     mp = builder()
     mp.use_extra_bufts = False          # drift one long-stable default
     raw = bytes(bytearray(
@@ -1175,9 +1115,9 @@ def test_fingerprint_drift_no_longer_forces_the_symbol_probe_to_stand_alone():
 
 
 def test_penalties_arity_boundary_is_exact():
-    """The two ggml bounds are load-bearing and adjacent, so pin the exact edges
-    rather than only sampling the middle of each band. 0.18.0 is the one version
-    that must stay undecidable; the versions either side of it must not."""
+    """The two ggml bounds are adjacent, so the exact edges are pinned. 0.18.0
+    is the one version that must stay undecidable; the versions either side of
+    it must not."""
     def arity(v):
         _abi._detected_layout = None
         _abi._layout_assumed = False
@@ -1212,12 +1152,9 @@ def test_unparseable_ggml_version_is_unknown_not_guessed():
 def test_abi_report_preserves_a_skipped_verdict(monkeypatch):
     """`localm doctor` must not claim a bypassed check succeeded.
 
-    abi_report used to throw away verify_abi's verdict and re-run evaluate(),
-    which can only return ok/mismatch. So with LOCALM_SKIP_ABI_CHECK set, doctor
-    printed "native ABI: struct layout matches this build" - an affirmative claim
-    that the layout was VERIFIED - for a check that never ran, and its own
-    "check skipped" branch was unreachable. Reporting success for a step that did
-    not happen is exactly what AGENTS.md rule 5 forbids."""
+    abi_report reports verify_abi's own verdict; re-running evaluate() would only
+    ever return ok/mismatch, so with LOCALM_SKIP_ABI_CHECK set doctor would print
+    "native ABI: struct layout matches this build" for a check that never ran."""
     from localm.inference.backends.llamacpp import _loader
 
     lib = _FakeLib(good_model_v2(), good_ctx())

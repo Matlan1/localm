@@ -19,11 +19,10 @@ from ..verify import (
     verify_feedback as _goal_feedback,
 )
 
-# _run_verify and _goal_feedback moved to ../verify.py when the oracle stopped
-# being CLI-only (the agent loop runs the same check at its pre-done boundary in
-# REPL/GUI sessions). They are re-bound here under their original names because
-# the CLI package re-exports them and test_goal_loop patches `cli._run_verify`;
-# _run_goal_loop below reads that patched name live, so both keep working.
+# _run_verify and _goal_feedback live in ../verify.py (the agent loop runs the same
+# check at its pre-done boundary in REPL/GUI sessions) and are re-bound here under
+# their original names: the CLI package re-exports them, and _run_goal_loop below
+# reads the name live so a patched `cli._run_verify` takes effect.
 __all__ = ["_run_verify", "_goal_feedback", "_goal_task_wrap", "_run_goal_loop"]
 
 
@@ -68,12 +67,10 @@ def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
             # Not success either: nothing was verified, and for a caller reading
             # the exit code that has to stay distinct from a green run.
             #
-            # This is deliberately narrow. A missing script or a missing
-            # dependency surfaces as an ordinary non-zero exit, NOT as this
-            # branch, and keeps its retries - the model has a shell and can
-            # create the script, chmod +x, or install the dep. Short-circuiting
-            # on those would throw the whole iteration budget away on exactly
-            # the failures goal mode exists to fix.
+            # Narrow: a missing script or a missing dependency surfaces as an
+            # ordinary non-zero exit, NOT as this branch, and keeps its retries -
+            # the model has a shell and can create the script, chmod +x, or
+            # install the dep.
             print_error(
                 f"Goal NOT verified: `{until_cmd}` "
                 f"{_inconclusive_reason(until_cmd, code, did_not_start)} "

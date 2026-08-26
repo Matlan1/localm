@@ -905,8 +905,8 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
 
 def _warn_sensitive_changes(agent: Agent) -> None:
     """Surface test / CI-config edits so a green check over rewritten tests is
-    reviewed, not trusted (R19, agentic code review). Best-effort: never let this
-    advisory break the session."""
+    reviewed, not trusted. Best-effort: never let this advisory break the
+    session."""
     try:
         from ..review_guard import classify_sensitive_changes, render_warning
         message = render_warning(classify_sensitive_changes(agent.changed_files()))
@@ -919,10 +919,10 @@ def _warn_sensitive_changes(agent: Agent) -> None:
 def console_main() -> None:
     """The ``localcoder`` console-script entry point (pyproject [project.scripts]).
 
-    Guards that we are inside the project venv, then runs the coder command. Kept
+    Guards that this is inside the project venv, then runs the coder command. Kept
     SEPARATE from ``main`` so the ``localm coder`` route and the test suite invoke
     the command directly, without the venv gate; only a stray global ``localcoder``
-    (a separate ``pip install``) hits it (NEW-J / NEW-J-CODER)."""
+    (a separate ``pip install``) hits it."""
     from localm._venvguard import require_venv
     require_venv()
     main()

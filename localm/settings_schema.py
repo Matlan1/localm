@@ -2,18 +2,15 @@
 """
 Settings schema: typed metadata for every configurable value.
 
-The legacy settings page renders the raw config dict with no metadata, which is
-why it is a flat, unfriendly grid. This module attaches per-field metadata
-(widget, label, help, group, allowed values, secret flag, when-it-applies,
-owner) so the redesigned page can render the right control - a dropdown for a
-fixed set of choices, free text for URLs, a folder picker for directories, a
-masked input for secrets - and so each plugin can contribute its own section.
+This module attaches per-field metadata (widget, label, help, group, allowed
+values, secret flag, when-it-applies, owner) so the settings page can render the
+right control - a dropdown for a fixed set of choices, free text for URLs, a
+folder picker for directories, a masked input for secrets - and so each plugin
+can contribute its own section.
 
 `owner` records which surface a setting belongs to ("core" or a plugin scope).
-Plugin-owned core keys (comfy_*, net_*, voice_*, coder_*) migrate
-to those plugins in Phase 3 - this field is the migration map.
-
-Phase 0 ships the schema + the core fields. The renderer (GUI) lands in Phase 5.
+Plugin-owned core keys (comfy_*, net_*, voice_*, coder_*) carry the scope of the
+plugin they belong to.
 """
 
 from __future__ import annotations
@@ -60,8 +57,8 @@ class Applies:
 _PRIVACY = ["privacy", "log", "full"]
 _PRIVACY_INHERIT = ["", "privacy", "log", "full"]   # "" = inherit the global mode
 # Embedding pooling choices, default first (see config.py embedding_pooling).
-# Spelled out here rather than imported so this module stays free of the
-# inference stack. Must stay identical to embedder.POOLING_CHOICES.
+# Spelled out here, not imported, so this module stays free of the inference
+# stack. Must stay identical to embedder.POOLING_CHOICES.
 _EMBEDDING_POOLING = ["mean", "auto", "cls", "last", "none"]
 # Sidebar wordmark treatments (see config.py logo_style). Shared by the web GUI
 # logo picker and the desktop launcher; kept here so PATCH /v1/config validates.
@@ -1258,11 +1255,10 @@ def engine_managed_keys() -> set:
 
     Without this gate the generic route outranks the specific one: a non-owner
     config:write key could write the same state and skip both the value check and
-    the stronger scope (X8, dev-notes/review-drain-merges-2026-07-22.md).
+    the stronger scope.
 
-    Unlike admin_only_keys these are WRITE-gated only - the values stay readable,
-    because the finding is an escalation on write and nothing reads them off
-    GET /v1/config anyway. Keep this derived from the flag, not a literal set."""
+    Unlike admin_only_keys these are WRITE-gated only - the values stay readable
+    off GET /v1/config. Keep this derived from the flag, not a literal set."""
     return {f.key for f in CORE_FIELDS if f.engine_managed}
 
 
@@ -1371,8 +1367,8 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
                "Only needed if 'Remove ComfyUI's copy' is on; blank derives it."),
-    # R14: dropdowns before checkboxes - the swap_policy SELECT sits ahead of the
-    # toggle fields so all dropdowns render before all checkboxes in each subsection.
+    # Dropdowns before checkboxes: the swap_policy SELECT sits ahead of the toggle
+    # fields so all dropdowns render before all checkboxes in each subsection.
     MediaField("swap_policy", ("model_swap_policy",), "model_swap_policy",
                Widget.SELECT, "Media VRAM swap",
                "auto = keep chat if it fits; always = unload chat; never = keep chat hot.",
@@ -1418,8 +1414,8 @@ def media_fields_for(name: str) -> list:
 def media_admin_only_fields() -> set:
     """Field keys (across all media plugins) flagged owner-only (today:
     launch_cmd, api_url). A non-owner config:write key must not set them
-    (set_media_config's REC-MEDIA-CMD gate) and must not see their resolved
-    value either (media_schema_json). The single source of truth for both."""
+    (set_media_config's gate) and must not see their resolved value either
+    (media_schema_json). The single source of truth for both."""
     return {f.key for f in MEDIA_PLUGIN_FIELDS if f.admin_only}
 
 
@@ -1692,8 +1688,7 @@ def _tts_relative_asset(key: str, value: str) -> str:
 
     The browser resolves these against /plugins/tts/, so an absolute, remote, or
     traversing value would make every client load code from somewhere else. The
-    existence check is deliberate too: a typo here silently breaks text-to-speech
-    for everyone, and a 400 at set time beats a mystery failure later.
+    file must also EXIST, so a typo is a 400 at set time.
     """
     if ":" in value:
         raise ValueError(

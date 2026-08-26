@@ -5,19 +5,17 @@ process booted with - and GET /health must agree with that same resolution
 instead of reporting a flat 503 during a state chat can already recover from
 by itself.
 
-ROOTCAUSE (dev-notes/ROOTCAUSE-2026-08-05-chat-no-reload-after-embedder-eviction.md):
-switch_engine updates _active_model_name on every load but never
+switch_engine updates _active_model_name on every load but not
 _default_model_name, so get_engine's fallback (_active_model_name or
-_default_model_name) silently reverted to the STARTUP model once an eviction
-cleared the active pointer. Grep-verified there: _default_model_name had
-exactly two assignments in the whole tree, both inside create_app.
+_default_model_name) reverts to the STARTUP model once an eviction clears the
+active pointer. _default_model_name has exactly two assignments in the whole
+tree, both inside create_app.
 
-FIXTURE PREMISE (diff-review-discipline.md item 19). The failing case needs a
-server that switched to a SECOND model before the eviction. A fixture that
-only ever loads one model can never distinguish "resolved to the right model"
-from "resolved to the only model there is" - both read identically. These
-tests switch to model-b before evicting, so a fix that quietly falls back to
-model-a (the startup model) instead cannot pass.
+FIXTURE PREMISE: the failing case needs a server that switched to a SECOND
+model before the eviction. A fixture that only ever loads one model cannot
+distinguish "resolved to the right model" from "resolved to the only model
+there is" - both read identically. These tests switch to model-b before
+evicting, so a fix that falls back to model-a instead cannot pass.
 """
 
 from __future__ import annotations
@@ -32,7 +30,7 @@ from tests.conftest import probe_double
 
 
 class FakeEngine:
-    """Stands in for the model backend only - see test_chat_reload_after_eviction.py."""
+    """Stands in for the model backend only."""
 
     def __init__(self, display_name: str):
         self.display_name = display_name
@@ -105,9 +103,7 @@ def two_model_server(monkeypatch):
 
 
 def _evict():
-    """The real eviction, through the real function - see
-    test_chat_reload_after_eviction.py's identical helper and its docstring
-    on why this is called directly rather than via vram.evict_chat_for_embedder."""
+    """The real eviction, through the real function."""
     result = asyncio.run(hs.unload_all_models())
     assert hs._active_model_name is None, (
         "test premise: eviction must clear the active model pointer")
@@ -150,9 +146,8 @@ def test_health_reports_switched_model_not_startup_model(two_model_server):
 
 
 def test_health_recoverable_after_plain_eviction_no_switch(monkeypatch):
-    """The minimal case, no switch involved: FINDINGS-2026-08-05 section 4's
-    observation that /health 503s after an eviction even though the very
-    next chat turn reloads the model successfully (PR #1139)."""
+    """The minimal case, no switch involved: /health must not 503 after an
+    eviction when the very next chat turn reloads the model successfully."""
     engines: dict[str, FakeEngine] = {}
 
     def factory(name):
@@ -184,9 +179,9 @@ def test_health_recoverable_after_plain_eviction_no_switch(monkeypatch):
 
 
 def test_health_still_503_when_nothing_is_recoverable(monkeypatch):
-    """The contract that must NOT change: a server with no model loaded and
-    none ever configured is genuinely unserveable, and /health must still say
-    so plainly rather than inventing a fake 200."""
+    """A server with no model loaded and none ever configured is genuinely
+    unserveable, and /health must still say so plainly rather than inventing a
+    fake 200."""
     monkeypatch.setattr("localm.config.load_registry", lambda: {})
     _reset_server_state()
 

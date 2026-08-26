@@ -1,29 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A jobs-scoped key must not choose an arbitrary working directory.
 
-The coder ROUTE already draws this line deliberately: a restricted caller is
-forced into the project root, "ignoring req.cwd, so a scoped key cannot point the
-(confined) file tools at arbitrary paths" (builtin/coder/plug.py). The SCHEDULER
-had no equivalent - ``cwd`` was validated only for UNC/device SHAPE, never for who
-chose it - so a plain ``jobs``-scoped key got read plus confined-write on any
-directory on the server simply by scheduling a coder job there.
+The coder ROUTE already draws this line: a restricted caller is forced into the
+project root, "ignoring req.cwd, so a scoped key cannot point the (confined)
+file tools at arbitrary paths" (builtin/coder/plug.py). The SCHEDULER has no
+equivalent unless one is added - ``cwd`` is validated only for UNC/device SHAPE,
+never for who chose it - so a plain ``jobs``-scoped key gets read plus confined
+write on any directory on the server simply by scheduling a coder job there.
 
-Two gates, deliberately both: the route CONFINES on the way in, and the runner
-CONFINES again at run time because the route is not the only writer - the CLI and
-rows persisted by older builds reach the scheduler without passing through it.
+Two gates, both needed: the route CONFINES on the way in, and the runner
+CONFINES again at run time, because the route is not the only writer - the CLI
+and rows persisted by older builds reach the scheduler without passing through
+it.
 
 Confined rather than REFUSED, which is the opposite of how ``allow_shell`` is
-handled at the same route, and the asymmetry is deliberate: ``allow_shell`` is an
-optional opt-in, so refusing it still leaves a working job. ``cwd`` is MANDATORY
-for a coder job (Job.validate), so refusing it would not restrict the capability,
-it would delete it. The first draft of this fix did exactly that, and the test
-below named for it is what caught it.
+handled at the same route: ``allow_shell`` is an optional opt-in, so refusing it
+still leaves a working job, while ``cwd`` is MANDATORY for a coder job
+(Job.validate), so refusing it would not restrict the capability, it would
+delete it.
 
-The run-time answer is RE-DERIVED, not stamped, which is the opposite choice from
-the neighbouring ``owner_is_owner_key``. That is deliberate and better here: unlike
-"was this the owner key", "may this principal choose a directory" is still
-answerable later, so narrowing or revoking a key removes the freedom on the next
-tick instead of leaving a months-old grant stamped on the row.
+The run-time answer is RE-DERIVED, not stamped, which is the opposite choice
+from the neighbouring ``owner_is_owner_key``. Unlike "was this the owner key",
+"may this principal choose a directory" is still answerable later, so narrowing
+or revoking a key removes the freedom on the next tick instead of leaving a
+months-old grant stamped on the row.
 """
 
 from __future__ import annotations
@@ -289,10 +289,10 @@ def test_an_owner_created_job_keeps_its_directory(home, tmp_path, monkeypatch):
 
 def test_an_owner_session_job_keeps_its_directory_across_a_key_roll(
         home, tmp_path, monkeypatch):
-    """Reuses the REG-509 stamp rather than adding a second field. This is the
-    one case run-time re-derivation cannot reach: after a roll the recorded hash
-    matches nothing, so without the stamp the owner's own job would be confined -
-    exactly the silent degrade REG-509 was about."""
+    """Reuses the owner-session stamp rather than adding a second field. This is
+    the one case run-time re-derivation cannot reach: after a roll the recorded
+    hash matches nothing, so without the stamp the owner's own job would be
+    confined."""
     from localm import auth
     from localm.plugins.builtin.jobs.store import Job
     runner, captured = _fake_agent_capture(monkeypatch)
@@ -330,7 +330,7 @@ def test_an_unowned_open_mode_job_keeps_its_directory(home, tmp_path, monkeypatc
 
 def test_revoking_the_key_removes_the_directory_freedom_on_the_next_run(
         home, tmp_path, monkeypatch):
-    """The payoff of re-deriving instead of stamping: a coder:full job that was
+    """The freedom is re-derived, not stamped: a coder:full job that was
     legitimately allowed a directory loses it the moment its key is revoked,
     rather than keeping a grant recorded at creation."""
     from localm import auth

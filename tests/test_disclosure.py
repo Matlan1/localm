@@ -1,29 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""WS9: what a lower-privileged or anonymous reader is allowed to learn.
+"""What a lower-privileged or anonymous reader is allowed to learn.
 
-Four disclosure defects, each with its own class below:
+Four disclosure surfaces, each with its own class below:
 
-* ``/debug/stacks`` (CodeQL 97) is fs-host gated, but in DEFAULT KEYLESS mode
-  ``effective_fs_access`` returns "host" for everyone, so that gate is a
-  TAUTOLOGY; and the open-mode shell-token gate only covers ``/api/`` and
-  ``/v1/`` prefixes, so the route was one of only two fully unauthenticated
-  reads. It emits ``traceback.format_stack`` (absolute paths -> the OS username
-  and the install dir, plus source lines) and thread names naming the installed
-  plugins.
-* ``GET /api/rag/embedding`` (CodeQL 98) returned ``last_error()`` /
-  ``gpu_fallback_reason()`` verbatim, and those carry
+* ``/debug/stacks`` emits ``traceback.format_stack`` (absolute paths naming the
+  OS username and the install dir, plus source lines) and thread names naming
+  the installed plugins. Its fs-host gate is a tautology in DEFAULT KEYLESS mode
+  (``effective_fs_access`` returns "host" for everyone) and the open-mode
+  shell-token gate only covers the ``/api/`` and ``/v1/`` prefixes, so it needs
+  its own token gate.
+* ``GET /api/rag/embedding`` returns ``last_error()`` /
+  ``gpu_fallback_reason()``, which carry
   "failed to load embedding model: <absolute path>" across the isolated-child
   boundary - the data dir, hence the OS username, to a rag-scoped caller.
-* ``POST /api/rag/collections/{name}/add`` (CodeQL 59) ran the ``p.exists()``
-  sweep BEFORE ``confine_index_path`` and echoed the expanded path in the 400,
-  a path-existence oracle for any absolute path.
-* ``sessions.json`` / ``jobs.json`` (CodeQL 88) store the SHA-256 digest of API
-  keys, while only ``auth.key`` (the PLAINTEXT) got the Windows icacls
-  treatment - so the digest was readable where the plaintext was not.
+* ``POST /api/rag/collections/{name}/add`` must run ``confine_index_path``
+  before any ``p.exists()`` sweep, or the 400 is a path-existence oracle for any
+  absolute path.
+* ``sessions.json`` / ``jobs.json`` store the SHA-256 digest of API keys, so
+  they need the same Windows icacls treatment ``auth.key`` (the PLAINTEXT) gets.
 
-Rule 5 runs through all of it: every assertion below that checks a path is gone
-is paired with one checking the CAUSE survived. Redact the path, keep the
-reason; a scrub must never become a mute.
+Every assertion below that checks a path is gone is paired with one checking the
+CAUSE survived: redact the path, keep the reason.
 """
 
 from __future__ import annotations
@@ -55,10 +52,8 @@ def _engine():
 def _strings(payload) -> str:
     """Every string leaf of a decoded JSON body, joined.
 
-    Deliberately NOT ``response.text``: JSON escapes ``\\`` as ``\\\\``, so a
-    Windows path assertion against the raw text can NEVER match and the test
-    passes whether or not the leak is real. Two of these assertions were
-    false-greens against pre-fix source until this walked the DECODED values.
+    NOT ``response.text``: JSON escapes ``\\`` as ``\\\\``, so a Windows path
+    assertion against the raw text can never match.
     """
     out: list[str] = []
 
@@ -106,8 +101,8 @@ def _shell(app):
 
 class TestDebugStacksGate:
     def test_keyless_mode_really_is_the_tautology_case(self, open_app):
-        """Guard the PREMISE: if this ever stops being true the gate below is
-        testing nothing, and the test would keep passing anyway."""
+        """The premise of the gate tests below: this fixture really is in
+        keyless mode."""
         from localm.auth import any_key_configured
         assert not any_key_configured()
 
@@ -141,7 +136,7 @@ class TestDebugStacksGate:
         assert "line " in text
 
     def test_still_404s_off_loopback(self, monkeypatch):
-        """The pre-existing bind_host gate is untouched by the new token gate."""
+        """The bind_host gate still applies alongside the token gate."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
         app = create_app(_engine())
@@ -154,11 +149,10 @@ class TestDebugStacksGate:
     def test_off_loopback_no_credential_still_404s_not_403(self, monkeypatch, host):
         """The token gate must NOT answer 403 off loopback.
 
-        /debug/stacks is deliberately hidden (404) on a network bind, and an
-        unknown path under /debug/ also 404s - so a 403 here would tell an
-        unauthenticated network caller that this endpoint exists, opening a new
-        existence oracle while closing a disclosure. It must stay
-        indistinguishable from a path that is not there."""
+        /debug/stacks is hidden (404) on a network bind, and an unknown path
+        under /debug/ also 404s, so a 403 would tell an unauthenticated network
+        caller that this endpoint exists. It stays indistinguishable from a path
+        that is not there."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
         app = create_app(_engine())
@@ -175,8 +169,7 @@ class TestDebugStacksGate:
 
 @pytest.fixture
 def rag_app(tmp_path, monkeypatch):
-    """Minimal app with the builtin rag plugin mounted (mirrors the fixture in
-    tests/test_rag_confinement.py)."""
+    """Minimal app with the builtin rag plugin mounted."""
     from localm.plugins.engine import PluginManager
     from localm.plugins.gui.web import attach_gui
     home = tmp_path
@@ -205,23 +198,16 @@ class TestEmbeddingStatusScrub:
     """The load-failure reason must reach the caller WITHOUT the absolute path."""
 
     def _poison(self, monkeypatch, home):
-        """Plant a failure message shaped exactly like the real one at
-        embedder.py:997 - a genuine cause plus a machine-identifying path.
+        """Plant a failure message shaped like a real one: a genuine cause plus
+        a machine-identifying path.
 
-        Also latches ``_LOAD_FAILED_SPEC``, matching what get_embedder()'s own
-        exception handler actually sets alongside ``_LAST_ERROR`` on a real
-        load failure (see its ``except Exception as e:`` branch) - the two
-        are never set independently in production. Set to the fixture's
-        actual CURRENT spec (``DEFAULT_EMBEDDING_MODEL`` - ``rag_app`` never
-        overrides ``embedding_model``), not an arbitrary sentinel: the guard
-        is spec-aware now, so a latch for a spec that does not match what is
-        actually configured would not suppress anything, and the route's own
-        ``resolve_embedding_model_path(allow_download=False)`` call (made to
-        compute ``installed``) would walk into a DIFFERENT, unrelated resolve
-        outcome for the fixture's un-downloaded default model and overwrite
-        this poisoned value before ``last_error()`` is ever read - not a
-        wording nit, a genuinely incomplete simulation of the state this test
-        means to represent."""
+        Also latches ``_LOAD_FAILED_SPEC``, which get_embedder()'s own exception
+        handler sets alongside ``_LAST_ERROR`` on a real load failure, to the
+        fixture's CURRENT spec (``DEFAULT_EMBEDDING_MODEL``; ``rag_app`` never
+        overrides ``embedding_model``). The guard is spec-aware, so a latch for
+        a different spec would suppress nothing and the route's own
+        ``resolve_embedding_model_path(allow_download=False)`` call would
+        overwrite the poisoned value before ``last_error()`` is read."""
         from localm.config import home_dir
         import localm.inference.embedder as emb
         secret_path = str(home_dir() / "models" / "embeddings" / "bge.gguf")
@@ -269,13 +255,10 @@ class TestEmbeddingStatusScrub:
 
     def test_scrubs_a_data_dir_that_is_not_under_the_home_dir(self, tmp_path,
                                                               monkeypatch):
-        """The two tests above cannot prove _machine_prefixes does anything.
-
-        Their fixture puts the data dir INSIDE the patched Path.home(), so
-        scrub_user_paths' home -> "~" replacement alone already removes the
-        asserted string - stubbing _machine_prefixes() to [] leaves them green.
-        A portable install puts LOCALM_HOME nowhere near the home dir, and that
-        is the case that needs the data-dir prefix."""
+        """A portable install puts LOCALM_HOME nowhere near the home dir, which
+        is the case that needs _machine_prefixes' data-dir prefix. The two tests
+        above put the data dir INSIDE the patched Path.home(), where
+        scrub_user_paths' home -> "~" replacement alone already covers it."""
         elsewhere = tmp_path / "portable" / "localm-data"
         elsewhere.mkdir(parents=True)
         monkeypatch.setenv("LOCALM_HOME", str(elsewhere))
@@ -295,9 +278,7 @@ class TestEmbeddingStatusScrub:
 
         localm provisions its interpreter with uv, whose directory is a
         version-less alias that Path.resolve() follows to the versioned real
-        path. Registering only the resolved form matched nothing, so every
-        stdlib frame in /debug/stacks came back with a full absolute path while
-        the scrubber reported success."""
+        path, so the resolved form alone matches nothing in a stdlib frame."""
         from localm.pathscrub import scrub_paths
         for prefix in {sys.prefix, sys.base_prefix}:
             frame = f'  File "{prefix}{os.sep}Lib{os.sep}threading.py", line 1, in x'
@@ -345,10 +326,9 @@ class TestRagAddExistenceOracle:
 
     def test_secret_named_path_does_not_leak_existence_either(
             self, rag_app, tmp_path_factory):
-        """The secret-material refusal used to consult is_file(), so an EXISTING
-        .pem answered 400 secret_file while a missing one fell through to the
-        whitelist branch (409/403) - the oracle survived for exactly the
-        interesting targets. Both must now answer the same."""
+        """The secret-material refusal must not consult is_file(), or an
+        EXISTING .pem answers 400 secret_file while a missing one falls through
+        to the whitelist branch. Both answer the same."""
         app, _ = rag_app
         outside = tmp_path_factory.mktemp("ws9_secret")
         real = outside / "server.key"
@@ -362,9 +342,7 @@ class TestRagAddExistenceOracle:
             f"existence leaked: {r_real.status_code} vs {r_ghost.status_code}")
 
     def test_secret_named_directory_is_still_walkable(self, rag_app):
-        """Not over-blocked: the is_file() guard existed so a real directory
-        NAMED like a secret stays indexable. Replacing it with is_dir() must
-        keep that true."""
+        """A real DIRECTORY named like a secret stays indexable."""
         app, home = rag_app
         d = home / "credentials"
         d.mkdir()
@@ -376,7 +354,7 @@ class TestRagAddExistenceOracle:
 
     def test_confinement_still_refuses_a_credential_dir(self, rag_app,
                                                         tmp_path_factory):
-        """Moving the confinement earlier must not weaken it."""
+        """Confinement still refuses a credential directory."""
         app, _ = rag_app
         outside = tmp_path_factory.mktemp("ws9_cred")
         ssh = outside / ".ssh"
@@ -388,8 +366,8 @@ class TestRagAddExistenceOracle:
         assert r.status_code == 400, r.text
 
     def test_in_policy_missing_path_still_explains_itself(self, rag_app):
-        """Rule 5: inside the allowed roots the caller is entitled to the real
-        reason, so a genuinely absent file must still say so."""
+        """Inside the allowed roots the caller gets the real reason, so a
+        genuinely absent file still says so."""
         app, home = rag_app
         with TestClient(app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
@@ -424,11 +402,10 @@ def _icacls(path: Path) -> str:
 def _has_explicit_user_ace(out: str) -> bool:
     """True when icacls shows an ACE for the current user that is NOT inherited.
 
-    This, not the absence of ``BUILTIN\\Users``, is the discriminator. Inside
-    pytest's basetemp the ambient ACL ALREADY lacks ``BUILTIN\\Users``, so an
-    absence check passes whether or not the fix ran (it did, against pre-fix
-    source, until this replaced it). ``icacls /inheritance:r /grant:r user:F``
-    leaves an explicit ``USER:(F)``; an inherited grant would read ``USER:(I)(F)``.
+    This, not the absence of ``BUILTIN\\Users``, is the discriminator: inside
+    pytest's basetemp the ambient ACL already lacks ``BUILTIN\\Users``.
+    ``icacls /inheritance:r /grant:r user:F`` leaves an explicit ``USER:(F)``,
+    while an inherited grant reads ``USER:(I)(F)``.
     """
     user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
     if not user:
@@ -441,14 +418,13 @@ def _has_explicit_user_ace(out: str) -> bool:
                            "sessions.py already chmod 0600s on POSIX")
 class TestKeyDigestFilePermsWindows:
     """sessions.json / jobs.json hold the SAME sha256 the keystore stores
-    (``http_server.principal_id`` returns ``key_hash``), so they need auth.key's
-    ACL. Pre-fix only auth.key - the PLAINTEXT - got the icacls treatment, so
-    the digest was readable where the plaintext was not."""
+    (``http_server.principal_id`` returns ``key_hash``), so they get auth.key's
+    ACL."""
 
     def test_the_check_can_actually_fire(self, tmp_path):
-        """Fires-control. A file written into the same directory WITHOUT the
-        restriction must NOT show the explicit ACE, or the two tests below prove
-        nothing about their subject."""
+        """A file written into the same directory WITHOUT the restriction must
+        NOT show the explicit ACE, so the two tests below can distinguish
+        restricted from unrestricted."""
         control = tmp_path / "control.json"
         control.write_text("{}", encoding="utf-8")
         assert not _has_explicit_user_ace(_icacls(control)), (
@@ -484,15 +460,11 @@ class TestKeyDigestFilePermsWindows:
         assert "Everyone" not in out, out
 
     def test_corrupt_backup_is_owner_only(self, tmp_path, monkeypatch):
-        """The quarantine copy still describes the user's jobs, so restricting
-        only the live file would leave that behind on the first corrupt read.
+        """The quarantine copy written on a corrupt read describes the user's
+        jobs, and carries the same owner-only ACL as the live file.
 
-        This covers the ACL half only. The copy is NO LONGER verbatim: issue
-        #859 redacts the owner digest out of it, so the original premise line
-        here ("the backup really does carry the digest") now asserts the very
-        bug that fixed - it is replaced below, and the digest's absence is
-        covered by tests/test_jobs_quarantine_digest.py. The ACL is still
-        needed: redaction removes the credential, not the job data."""
+        Covers the ACL half only. The copy is not verbatim: the owner digest is
+        redacted out of it, while the job data is kept."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "h"))
         import localm.config as cfg
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "h")

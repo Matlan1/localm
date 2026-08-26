@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-CODER-NO-TOOLCALL-SILENT residual (E): a GUI coder session the user
-abandons without an explicit DELETE - a closed tab, a killed browser - never
-triggered close(), so it never wrote the "session ended" audit record a
-normally-ended session gets. No idle reaper existed at all.
+"""SessionManager.reap_idle() closes and removes a session that has gone idle (no
+_push() activity) past a threshold, so a GUI coder session the user abandons
+without an explicit DELETE - a closed tab, a killed browser - still writes the
+"session ended" audit record a normally-ended session gets.
 
-SessionManager.reap_idle() closes and removes a session that has gone idle
-(no _push() activity) past a threshold, called opportunistically from list()
-so no new background thread or shutdown hook is needed.
+It is called opportunistically from list(), so no background thread or shutdown
+hook is involved.
 """
 
 from __future__ import annotations
@@ -38,8 +37,8 @@ def test_reap_idle_leaves_a_recently_active_session_alone(tmp_path):
 
 
 def test_reap_idle_closes_and_removes_a_session_past_the_threshold(tmp_path):
-    """THE DEFECT. Before reap_idle existed, nothing ever called close() on an
-    abandoned session - it just sat in SessionManager._sessions forever."""
+    """An abandoned session is closed and removed from
+    SessionManager._sessions."""
     mgr = SessionManager()
     s = mgr.create(_session(tmp_path))
     now = s.last_activity_at + _IDLE_REAP_SECONDS + 1
@@ -49,9 +48,9 @@ def test_reap_idle_closes_and_removes_a_session_past_the_threshold(tmp_path):
 
 
 def test_reap_idle_never_touches_a_busy_session(tmp_path):
-    """A long-running task (a slow model, a big verify) is still very much
-    alive even though it has pushed no NEW event in a while at the exact
-    moment reap_idle runs - reaping it mid-task would corrupt the run."""
+    """A session running a long task (a slow model, a big verify) is not
+    reaped, even when it has pushed no new event for longer than the
+    threshold."""
     mgr = SessionManager()
     s = mgr.create(_session(tmp_path))
     s.busy = True
@@ -69,8 +68,8 @@ def test_a_push_resets_the_idle_clock(tmp_path):
 
 
 def test_list_opportunistically_reaps_without_a_background_thread(tmp_path):
-    """No timer to start or stop: an ordinary list() call (the GUI already
-    polls this for the sidebar) is what performs the sweep."""
+    """An ordinary list() call performs the sweep; there is no timer to start
+    or stop."""
     mgr = SessionManager()
     s = mgr.create(_session(tmp_path))
     s.last_activity_at -= (_IDLE_REAP_SECONDS + 1)   # force idle, no real wait

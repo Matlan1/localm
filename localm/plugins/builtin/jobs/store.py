@@ -55,18 +55,17 @@ _ID_RE = re.compile(r"[^A-Za-z0-9_.-]")
 # How many corrupt-copies to keep.
 _QUARANTINE_KEEP = 3
 
-# `owner` holds the sha256 of the creating key, the same digest the keystore stores.
-# A quarantine copy is made from a file that FAILED to parse, so it cannot be
-# re-serialised through json and the redaction works on raw text. It matches the
-# digest SHAPE (64 hex), so a mangled or truncated value is left alone.
+# `owner` holds the sha256 of the creating key, the same digest the keystore
+# stores. A quarantine copy is made from a file that FAILED to parse, so the
+# redaction works on raw text. It matches the digest SHAPE (64 hex), so a mangled
+# or truncated value is left alone.
 _OWNER_DIGEST_RE = re.compile(r'("owner"\s*:\s*)"[0-9a-fA-F]{64}"')
 
-# What the digest is replaced with. Dropping or nulling the field would not work:
-# job_owner_ok (inference/http_server.py) treats owner=None as unrestricted, so every
-# job in a restored copy would become streamable, cancellable and runnable by any
-# caller. A non-null, non-hex sentinel can never equal a principal_id() (always 64
-# hex), so a restored job resolves to nobody and fails CLOSED: unreachable to a
-# scoped key, still reachable to an admin/owner key.
+# What the digest is replaced with. It must be non-null and non-hex:
+# job_owner_ok (inference/http_server.py) treats owner=None as unrestricted, and
+# a principal_id() is always 64 hex, so this sentinel resolves to nobody and
+# fails CLOSED - unreachable to a scoped key, still reachable to an admin/owner
+# key.
 _REDACTED_OWNER = "redacted-on-quarantine"
 
 
@@ -74,17 +73,12 @@ def _redact_owner_digests(raw: str) -> str:
     """Strip owner key digests out of a corrupt jobs.json before it is copied
     aside, keeping everything the copy exists to preserve.
 
-    The copy's whole purpose is that a corrupt store does not silently lose the
-    user's scheduled jobs, so only the ACCESS-CONTROL field goes: schedule,
-    prompt, model, cwd and name are left exactly as they were. Scrubbing more
-    would protect the artefact by destroying the recovery data it exists to be.
+    Only the ACCESS-CONTROL field goes: schedule, prompt, model, cwd and name are
+    left exactly as they were, so the copy still holds the user's scheduled jobs.
 
-    Reports at warning when a digest-shaped value survives - a partially
-    corrupt file can hold one in a position this does not match, and a
-    redaction that silently half-happened must not look like one that fully
-    did (rule 5). The outer quarantine WARNING ("backed up to ... your
-    scheduled jobs are preserved") says nothing about a residual credential,
-    so this has to be operator-visible on its own, not buried at debug."""
+    Logs a WARNING when a digest-shaped value survives: a partially corrupt file
+    can hold one in a position this does not match, so a half-completed redaction
+    is reported rather than looking like a complete one."""
     if not raw:
         return raw
     out, n = _OWNER_DIGEST_RE.subn(rf'\1"{_REDACTED_OWNER}"', raw)
@@ -121,11 +115,10 @@ class Job:
     scope: Optional[str] = None        # coder file-access glob, optional
     # rag jobs: the knowledge collection to re-sync.
     collection: Optional[str] = None
-    # Coder jobs run RESTRICTED by default (read plus confined edit, no shell, no
-    # network, no sub-agents), so an unattended run that ingests hostile content
-    # cannot be steered into run_shell. The owner opts a specific job into the full,
-    # shell-capable coder by setting allow_shell; the API route gates that opt-in to
-    # owner / coder:full callers.
+    # Coder jobs run RESTRICTED by default: read plus confined edit, no shell, no
+    # network, no sub-agents. The owner opts a specific job into the full,
+    # shell-capable coder by setting allow_shell; the API route gates that opt-in
+    # to owner / coder:full callers.
     allow_shell: bool = False
     enabled: bool = True
     id: str = ""
@@ -139,14 +132,12 @@ class Job:
     # another principal's scheduled jobs. Persisted so it survives a restart;
     # stripped from the API response.
     owner: Optional[str] = None
-    # Whether the credential that created this job was the OWNER KEY itself (or an
-    # owner session) rather than a minted keystore key. Stamped at creation because it
-    # is not recoverable later: revoking a keystore key deletes its record, so at run
-    # time a revoked scoped key and a rotated-away owner key both hash to no keystore
-    # entry. The runner needs the difference to re-validate shell without punishing an
-    # owner-key rotation, since the owner key is not a keystore entry and is not
-    # revocable or expirable the way a scoped key is. Legacy jobs default to False and
-    # fall back to the runner's key-value comparison. Internal, like `owner`: never
+    # Whether the credential that created this job was the OWNER KEY itself (or
+    # an owner session) rather than a minted keystore key. Stamped at creation
+    # because it is not recoverable later: at run time a revoked scoped key and a
+    # rotated-away owner key both hash to no keystore entry, and the runner needs
+    # the difference to re-validate shell. Legacy jobs default to False and fall
+    # back to the runner's key-value comparison. Internal, like `owner`: never
     # sent to a client.
     owner_is_owner_key: bool = False
 
@@ -191,10 +182,9 @@ class Job:
         if self.task_kind == "rag":
             if not (self.collection and str(self.collection).strip()):
                 raise ValueError("rag jobs require a collection")
-            # Validate the NAME here, not just at run time, so a typo is refused when
-            # the job is created rather than failing on every unattended tick.
-            # Existence is not checked: a collection may be created after the
-            # schedule, and the runner reports a missing one.
+            # The NAME is validated here as well as at run time. Existence is
+            # NOT checked: a collection may be created after the schedule, and
+            # the runner reports a missing one.
             from localm.rag.store import check_collection_name
             self.collection = check_collection_name(str(self.collection).strip())
 
@@ -212,11 +202,9 @@ def cwd_unc_error(cwd) -> Optional[str]:
     """None when *cwd* is safe to use as a coder job's working directory, else
     a ready-to-show refusal message.
 
-    Mirrors model_manager.unregistered_model_error's shape: ONE function that
-    owns the wording, called identically by every writer (plug.py's POST/PUT,
+    ONE function owning the wording, called by every writer (plug.py's POST/PUT,
     cli.py's job_add) and by the runner's authoritative run-time re-check
-    (runner.py's _run_coder), so a future wording change has exactly one place
-    to happen rather than three copies that can drift apart."""
+    (runner.py's _run_coder)."""
     if cwd and is_unc_or_device_path(str(cwd)):
         return "cwd must be a local directory path, not a UNC or device path."
     return None
@@ -227,8 +215,8 @@ def cwd_unc_error(cwd) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 
 def jobs_dir() -> Path:
-    """The jobs data dir (``<data dir>/jobs``), resolved at call time so a test
-    that monkeypatches the home dir is honoured."""
+    """The jobs data dir (``<data dir>/jobs``), resolved at call time so a
+    relocated home dir is honoured."""
     from localm.config import home_dir
     return (home_dir() / "jobs").resolve()
 
@@ -287,8 +275,8 @@ class JobStore:
             raise RuntimeError(
                 f"jobs store unreadable ({self._defs_file}): {e}") from e
         except json.JSONDecodeError as e:
-            # Corrupt JSON: back it up so a subsequent write cannot destroy it, warn
-            # loudly, and start empty (distinct from the absent case).
+            # Corrupt JSON: back it up so a subsequent write cannot destroy it,
+            # warn, and start empty (distinct from the absent case).
             self._quarantine_corrupt(raw, e)
             return {}
         jobs = data.get("jobs", []) if isinstance(data, dict) else []
@@ -311,12 +299,10 @@ class JobStore:
         return out
 
     def _quarantine_corrupt(self, raw, err) -> None:
-        """Copy a corrupt defs file aside before anything overwrites it, and
-        warn (rule 5: a data-loss risk must be visible, never silent).
+        """Copy a corrupt defs file aside before anything overwrites it, and warn.
 
-        The copy is redacted and the older copies pruned - see
-        ``_redact_owner_digests`` and ``_prune_quarantine`` for why each is
-        needed and why neither replaces the other (issue #859)."""
+        The copy is redacted (``_redact_owner_digests``) and the older copies
+        pruned (``_prune_quarantine``)."""
         from localm.debuglog import logger
         try:
             stamp = int(time.time())
@@ -324,10 +310,8 @@ class JobStore:
                 f"{self._defs_file.name}.corrupt-{stamp}")
             if raw is not None:
                 backup.write_text(_redact_owner_digests(raw), encoding="utf-8")
-                # The backup still describes the user's jobs, so it is restricted the
-                # way the live file is; the ACL and the redaction cover different
-                # halves. Check-and-retry like _write_all, so a failed first attempt
-                # is not the single point of failure for this file's ACL.
+                # The backup still describes the user's jobs, so it is restricted
+                # the way the live file is. Check-and-retry, like _write_all.
                 from localm.config import restrict_file_perms
                 if not restrict_file_perms(backup):
                     restrict_file_perms(backup)
@@ -337,27 +321,18 @@ class JobStore:
                 "the backup, not lost", self._defs_file, err, backup.name)
             self._prune_quarantine()
         except OSError as e:
-            # Nothing is refused here: the caller still proceeds with an empty job
-            # list exactly as on success, so the message says what actually occurs.
+            # The caller still proceeds with an empty job list, exactly as on
+            # success.
             logger.warning("jobs store: corrupt defs file could not be backed "
                            "up (%s); the corrupt content may be lost on the "
                            "next write", e)
 
     def _prune_quarantine(self) -> None:
-        """Keep only the newest ``_QUARANTINE_KEEP`` corrupt-copies.
+        """Keep only the newest ``_QUARANTINE_KEEP`` corrupt-copies, bounding
+        older ones that still carry unredacted digests.
 
-        Redaction only reaches copies written from now on. Copies already on
-        disk from before it keep their digests forever, because nothing ever
-        deleted these - that durability, not the permissions, is what made a
-        legacy digest able to outlive the alert-88 migration. A cap bounds them
-        without needing to understand what is inside, so it stays correct for
-        any future credential-shaped field rather than going stale the next time
-        the digest scheme changes.
-
-        Best-effort by design: failing to delete an old backup must never break
-        the recovery path that just successfully wrote a new one. Reported at
-        debug rather than silently, so a directory that never prunes is
-        discoverable."""
+        Best-effort: a failure to delete an old backup does not break the
+        recovery path that just wrote a new one, and is logged at debug."""
         from localm.debuglog import logger
         try:
             backups = sorted(
@@ -378,21 +353,17 @@ class JobStore:
         self._ensure_root()
         payload = {"version": 1,
                    "jobs": [j.to_dict() for j in jobs.values()]}
-        # Unique temp name (pid + thread + uuid) so concurrent writers never share a
-        # temp path; os.replace is atomic, so the last writer wins cleanly rather than
-        # corrupting or clobbering the file.
+        # Unique temp name (pid + thread + uuid) so concurrent writers never
+        # share a temp path; os.replace is atomic, so the last writer wins.
         tmp = self._defs_file.with_name(
             f"{self._defs_file.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}")
         tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                        encoding="utf-8")
-        # Each job def records `owner`, the sha256 of the creating key. The file is
-        # restricted to this account the way auth.key is, so the digest is not readable
-        # where the plaintext is not. The TEMP file is what gets restricted: it already
-        # holds the whole payload, its name is unique per writer so one left behind by
-        # a crash is never overwritten, and os.replace carries the source's ACL onto
-        # the destination. That is one spawn instead of two, which matters because job
-        # writes happen in async handlers. The destination is retried only if the first
-        # attempt did not happen.
+        # Each job def records `owner`, the sha256 of the creating key, so the
+        # file is restricted to this account the way auth.key is. The TEMP file
+        # is what gets restricted: it already holds the whole payload, and
+        # os.replace carries the source's ACL onto the destination. The
+        # destination is retried only when the first attempt did not happen.
         from localm.config import restrict_file_perms
         ok = restrict_file_perms(tmp)
         os.replace(tmp, self._defs_file)
@@ -482,10 +453,9 @@ class JobStore:
                 try:
                     self._write_all(jobs)
                 except Exception as e:
-                    # The result file IS persisted (result_id above); only the job's
-                    # last_run/last_status stamp failed. The inconsistency is surfaced,
-                    # because the API would otherwise report this run as never having
-                    # run despite the result on disk.
+                    # The result file IS persisted (result_id above); only the
+                    # job's last_run/last_status stamp failed, so the API will
+                    # under-report this run until the next successful write.
                     from localm.debuglog import logger
                     logger.warning(
                         "jobs: result %s for job %s is persisted but its metadata "
@@ -498,11 +468,9 @@ class JobStore:
         """Run results for *job_id*, newest first. Each entry is the stored
         record dict (prompt + output + status + timing).
 
-        With *limit* / *offset*, only that page of files is READ into memory (the
-        page is selected before reading, not sliced after loading everything), so
-        a job with a huge result history does not OOM the caller
-        (CHK-JOBS-RESULTS-PAGE). limit=None keeps the full-list behaviour for
-        internal/CLI callers."""
+        With *limit* / *offset*, only that page of files is READ into memory: the
+        page is selected before reading, not sliced after loading everything.
+        limit=None reads the whole history."""
         try:
             d = self._result_dir(job_id)
         except ValueError:

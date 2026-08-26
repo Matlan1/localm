@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GUI job-progress SSE must fan out to every concurrent viewer independently.
 
-A job's event queue used to be a single ``queue.Queue`` shared by every reader
-of ``/api/jobs/{id}/events``. ``queue.Queue`` is single-consumer: two concurrent
-SSE connections to the same job id split its events between them - whichever
-reader happened to be waiting when an item was pushed got it, the other did not.
-Live-reproduced with 20 line-events + 1 end-event pre-loaded: one reader got ALL
-events including the terminating 'end' frame, the other got ZERO and hung with
-no 'end' frame to break its read loop on. This triggers on ordinary use: reload
-the page during a model pull/comfy-setup/image-gen job, or open the same job in
-two tabs/devices.
+A job's event queue must not be a single ``queue.Queue`` shared by every reader of
+``/api/jobs/{id}/events``. ``queue.Queue`` is single-consumer: two concurrent SSE
+connections to the same job id split its events between them - whichever reader
+happens to be waiting when an item is pushed gets it, the other does not, so one
+reader can receive every event including the terminating 'end' frame while the
+other receives none and hangs with no 'end' frame to break its read loop on. That
+is ordinary use: reload the page during a model pull/comfy-setup/image-gen job, or
+open the same job in two tabs/devices.
 """
 
 from __future__ import annotations
@@ -65,8 +64,8 @@ async def _read_events(client, job_id):
 
 @pytest.mark.anyio
 async def test_two_concurrent_readers_each_get_the_full_preloaded_stream(app):
-    """Mirrors the original live reproduction: events are already queued up
-    (as if two clients open the same in-flight job) before either connects."""
+    """Events are already queued up (as if two clients open the same in-flight
+    job) before either connects."""
     job = Job(id=uuid.uuid4().hex[:12], kind="test", argv=[])
     app.state.jobs._jobs[job.id] = job
     for ev in _line_events(20):

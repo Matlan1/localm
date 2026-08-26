@@ -25,8 +25,8 @@ def _minimal_png(width: int, height: int) -> bytes:
 
 class TestImageDimensions:
     def test_png_dimensions_read_correctly(self, tmp_path):
-        """Regression: Path.read_bytes(32) raised TypeError and silently
-        forced every img2img run to 1024x1024."""
+        """PNG dimensions are read from the real header, so an img2img run is
+        not silently forced to 1024x1024."""
         p = tmp_path / "img.png"
         p.write_bytes(_minimal_png(640, 480))
         assert comfy._image_dimensions(p) == (640, 480)
@@ -56,7 +56,7 @@ class TestComfyAlive:
 
 
 class TestHistoryExecutionError:
-    """I2: surface a ComfyUI node crash from /history instead of the generic
+    """Surface a ComfyUI node crash from /history instead of the generic
     'no output found' that just sends the user to read the ComfyUI console."""
 
     def test_surfaces_node_crash(self):
@@ -191,14 +191,14 @@ class TestSidecarContent:
 
 
 class TestRenderHeartbeat:
-    """ADR-0009 P8: imagine's render tick must reach on_progress (the job
-    stream / GUI's SSE feed), throttled every 15s, matching
-    generate_music/generate_video's ``_tick`` shape byte-for-byte - not just
-    the local Rich console spinner, which lives only inside this function's
-    own Console() and never reaches a GUI-triggered job. Before this, an
-    image job pushed via ``on_progress=lambda t: job.push(...)`` (see
-    plugins/builtin/image/plug.py) sat silent on the wire for as long as
-    max_poll_seconds, indistinguishable from a hang."""
+    """imagine's render tick must reach on_progress (the job stream, the GUI's
+    SSE feed), throttled every 15s, matching generate_music and
+    generate_video's ``_tick`` shape byte-for-byte - not only the local Rich
+    console spinner, which lives inside this function's own Console() and never
+    reaches a GUI-triggered job. Without it an image job pushed via
+    ``on_progress=lambda t: job.push(...)`` (see plugins/builtin/image/plug.py)
+    sits silent on the wire for as long as max_poll_seconds,
+    indistinguishable from a hang."""
 
     def _capture_tick(self, tmp_path, monkeypatch, on_progress):
         """Drive generate_image to the poll step for real (workflow load,

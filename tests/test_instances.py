@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Instance discovery registry (H6 phase 3, advertise-only): localm/instances.py
-+ the GET /whoami endpoint.
+"""Instance discovery registry: localm/instances.py + the GET /whoami endpoint.
 
 Covers root-dir resolution, atomic register/unregister, stale reaping (dead PID
 removed, live + self kept, corrupt removed), the identity payload (no token/pid
@@ -253,19 +252,13 @@ def _wait_until_reads_dead(pid: int, timeout: float = 10.0) -> bool:
     not exit-code-based: OpenProcess + GetExitCodeProcess already report the
     real exit code while psutil still answers True. Sampling pid_alive ONCE
     right after wait() therefore samples inside that window and is inherently
-    racy. Measured on a 12-core Windows box under a loaded parallel run: the
-    enumeration window is ~0.12 ms at the median, 0.37 ms at p90 and 2.0 ms at
-    worst, which made the old single-sample assertion fail 3.3% of the time
-    (150 failures in 4573 runs). The same harness, polling, failed 0 times in
-    4573 runs, and a live process was never once misreported as dead.
+    racy.
 
     The contract under test is that a pid which has exited stops reading as
     alive, not that the OS process table updates synchronously with exit, so
-    poll for it. This returns in ~0.3 ms at the median; the worst observed wait
-    was 27.6 ms, which is sleep granularity and scheduler delay under load
-    rather than the window itself. The timeout is ~360x that worst case, so a
-    genuine regression (a pid that never stops reading as alive) still fails
-    hard rather than being waited away.
+    this polls for it. The timeout is orders of magnitude larger than the
+    enumeration window, so a genuine regression (a pid that never stops reading
+    as alive) still fails hard rather than being waited away.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -348,8 +341,8 @@ def test_advertise_project_override(tmp_path):
 
 
 def test_advertise_sets_bind_coordinates_on_state(tmp_path):
-    """Phase 5: the instance records its own port + scheme on app.state so it can
-    build its loopback /v1 self-url when it mounts a surface on demand."""
+    """The instance records its own port + scheme on app.state so it can build
+    its loopback /v1 self-url when it mounts a surface on demand."""
     app = _FakeApp()
     with instances.advertise(app, tmp_path, host="0.0.0.0", port=8651,
                              mode="api", scheme="https"):
@@ -358,7 +351,7 @@ def test_advertise_sets_bind_coordinates_on_state(tmp_path):
 
 
 def test_set_mode_rewrites_entry_in_place(tmp_path):
-    """Phase 5: an on-demand GUI mount flips this instance's registry mode."""
+    """An on-demand GUI mount flips this instance's registry mode."""
     iid = instances.new_instance_id()
     instances.register_instance(
         tmp_path, instance_id=iid, port=8642, host="127.0.0.1",
@@ -424,8 +417,8 @@ def test_whoami_endpoint_before_wiring_returns_nulls():
 def test_whoami_omits_root_dir_on_a_network_bind(tmp_path):
     """root_dir is an absolute host path (it can carry the OS username); it must
     not leak to LAN clients. It is disclosed only on a loopback bind - discovery
-    matches root_dir from the registry file, not /whoami, so identity still works
-    (security review 2026-06-20)."""
+    matches root_dir from the registry file, not /whoami, so identity still
+    works."""
     from fastapi.testclient import TestClient
     from localm.inference.http_server import create_app
 
@@ -541,8 +534,7 @@ def test_default_probe_missing_scheme_tries_both(monkeypatch):
 def test_default_probe_forwards_the_recorded_bind_host(monkeypatch):
     """The entry's bind host must reach _try_whoami, or an IPv6-bound server is
     probed on an IPv4 loopback it is not listening on and reported DEAD while
-    it is serving. Measured before the fix: a live ``-H ::1`` server showed
-    alive=False and `localm status` said nothing was serving."""
+    it is serving."""
     seen = []
     monkeypatch.setattr(instances, "_try_whoami",
                         lambda s, p, i, t, h=None: (seen.append(h), True)[1])

@@ -1,20 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REAL end-to-end proof of the MoE VRAM preflight fix (n_cpu_moe blindness in
+"""REAL end-to-end proof of the MoE VRAM preflight (n_cpu_moe blindness in
 _check_vram/_auto_gpu_layers/_auto_ctx_max - see _sizing.py's
 _effective_model_bytes_for_vram and model_manager/gguf.py's
 gguf_moe_pinned_expert_bytes).
 
 No mocks for the header parsing or the load itself: downloads a small real
 Mixture-of-Experts model (granite-3.0-1b-a400m-instruct, ~784 MB Q4_K_M, 24
-layers x 32 experts) and drives GgufBackend against it. VRAM readings ARE
-mocked (_free_vram_bytes/_total_vram_bytes) to reliably simulate a tight
-budget regardless of what GPU (or lack of one) runs this test - this repo's
-own established pattern for the identical class of test, see
-test_kv_bytes_from_gguf.py's TestAutoGpuLayersUsesTheRealShape.
+layers x 32 experts) and drives GgufBackend against it. VRAM readings ARE mocked
+(_free_vram_bytes/_total_vram_bytes) to simulate a tight budget regardless of
+what GPU (or lack of one) runs this test.
 
 @integration so the default `pytest -m "not integration"` skips it: it needs
-~784 MB of network on first run. Skips cleanly (does not fail) when the
-model cannot be fetched.
+~784 MB of network on first run. Skips cleanly (does not fail) when the model
+cannot be fetched.
 """
 
 from __future__ import annotations
@@ -118,11 +116,10 @@ def test_check_vram_refuses_without_n_cpu_moe_but_fits_with_it(moe_facts, capsys
 
 def test_real_load_with_n_cpu_moe_generates_coherent_text(moe_facts):
     """End to end on whatever real GPU (if any) runs this test: the native
-    tensor_buft_overrides pinning this fix's estimate is now based on must
-    still produce a working, coherent model - proves the import refactor
-    (llama.py's _apply_cpu_moe now sources its pattern from
-    model_manager.gguf instead of a local copy) didn't break the real
-    pinning mechanism, not just the preflight arithmetic around it."""
+    tensor_buft_overrides pinning this estimate is based on must still produce a
+    working, coherent model, so the real pinning mechanism is exercised and not
+    just the preflight arithmetic around it (llama.py's _apply_cpu_moe sources
+    its pattern from model_manager.gguf)."""
     from localm.inference.backends.gguf import GgufBackend
     from localm.inference.backends.llamacpp._loader import load_lib
     try:

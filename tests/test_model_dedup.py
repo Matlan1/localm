@@ -16,8 +16,8 @@ from localm import model_manager as mm
 
 
 def _backdate(path, seconds=60):
-    """Set path's mtime `seconds` in the past, so sync_models_dir's R45
-    settle check reads it as settled rather than possibly still mid-copy."""
+    """Set path's mtime `seconds` in the past, so sync_models_dir's settle check
+    reads it as settled rather than possibly still mid-copy."""
     old = time.time() - seconds
     os.utime(path, (old, old))
 
@@ -35,8 +35,8 @@ def fake_registry(tmp_path, monkeypatch):
         store.clear()
         store.update(reg)
     monkeypatch.setattr(mm, "save_registry", _save)
-    # _register goes through update_registry (atomic read-modify-write); route it
-    # at the in-memory store so the fake stays faithful.
+    # _register goes through update_registry (atomic read-modify-write), routed
+    # here at the in-memory store.
     def _update(mutator):
         reg = dict(store)
         mutator(reg)
@@ -225,11 +225,11 @@ class TestAddLocalDedup:
 
     def test_move_registry_update_is_atomic_on_failure(
             self, fake_registry, tmp_path, monkeypatch):
-        """L7: a move updates the registry in ONE atomic write. If that write
+        """A move updates the registry in ONE atomic write. When that write
         fails after the file is physically moved, the registry is left FULLY
-        pre-move - never a half-update where the pre-existing alias is repointed
-        but the new name is missing. The file still lands under MODELS_DIR, where
-        a launch-time sync_models_dir recovers it."""
+        pre-move, never half-updated with the pre-existing alias repointed and
+        the new name missing. The file still lands under MODELS_DIR, where a
+        launch-time sync_models_dir recovers it."""
         store, models_dir = fake_registry
         f = _file(tmp_path, "m.gguf")
         mm.add_local(str(f), "first", on_duplicate="register")   # 'first' -> external f
@@ -250,11 +250,10 @@ class TestAddLocalDedup:
         assert "moved" not in store
 
     def test_move_crash_state_is_recovered_by_sync(self, fake_registry, tmp_path):
-        """L7 end to end: the state a crash mid-move leaves behind - the file
-        already under MODELS_DIR, the registry still pointing the alias at the
-        vanished old path - is reconciled by sync_models_dir (which runs on
-        launch): the moved file is re-registered (not lost) and the stale entry
-        is flagged missing (not silently dropped)."""
+        """The state a crash mid-move leaves behind - the file already under
+        MODELS_DIR, the registry still pointing the alias at the vanished old
+        path - is reconciled by sync_models_dir, which runs on launch: the moved
+        file is re-registered and the stale entry is flagged missing."""
         store, models_dir = fake_registry
         gone = tmp_path / "downloads" / "m.gguf"        # external path, file moved away
         store["first"] = {"path": str(gone.resolve()), "source": "local"}
@@ -300,8 +299,8 @@ class TestAddLocalDedup:
 
     # ---- --store move/copy checks the name collision BEFORE moving or copying
     #      the file into MODELS_DIR, and reports the collision rather than
-    #      success. test_name_conflict_different_file_skipped_non_tty above covers
-    #      the same collision WITHOUT --store, where there is nothing to move.
+    #      success. test_name_conflict_different_file_skipped_non_tty above
+    #      covers the same collision WITHOUT --store.
     #      ---------------------------------------------------------------------
     def test_store_move_name_conflict_does_not_touch_file_non_tty(
             self, fake_registry, tmp_path):
@@ -345,8 +344,8 @@ class TestAddLocalDedup:
 
     def test_store_move_still_succeeds_without_a_collision(
             self, fake_registry, tmp_path):
-        """The new pre-move gate must not false-positive on an ordinary,
-        non-colliding --store move - it only refuses a GENUINE name conflict."""
+        """The pre-move gate refuses only a GENUINE name conflict, so an
+        ordinary non-colliding --store move still succeeds."""
         store, models_dir = fake_registry
         external = _file(tmp_path, "mymodel.gguf")
 
@@ -362,9 +361,8 @@ class TestAddLocalDedup:
     def test_store_move_name_conflict_interactive_decline_reports_failure(
             self, fake_registry, tmp_path):
         """Interactively declining an overwrite still leaves the file moved
-        (there IS a real prompt here, unlike the non-tty case) - add_local
-        must report that honestly (False) rather than claiming success, since
-        this used to unconditionally return True regardless of the answer."""
+        (there IS a real prompt here, unlike the non-tty case), so add_local
+        reports False rather than success."""
         store, models_dir = fake_registry
         existing = _file(tmp_path, "existing.gguf", b"one")
         mm.add_local(str(existing), "collision", on_duplicate="register")
@@ -380,9 +378,8 @@ class TestAddLocalDedup:
 
 
 class TestNameCollision:
-    """_name_collision: the pure, shared predicate add_local's pre-move gate
-    and _register_with_dedup's own conflict check both use - one definition,
-    so they can never drift apart on what counts as a conflict."""
+    """_name_collision: the shared predicate add_local's pre-move gate and
+    _register_with_dedup's conflict check both use."""
 
     def test_no_entry_at_all_is_no_conflict(self, fake_registry, tmp_path):
         from localm.model_manager.registry import _name_collision

@@ -1,18 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""AGENTS.md rule 5: POST /v1/models/load reported unqualified success even
-when the backend's own sizing (_auto_gpu_layers, llamacpp/_sizing.py)
-deferred to a partial or zero GPU offload (a model too big to fully fit VRAM
-still loads, deliberately, but entirely on CPU or split CPU/GPU) - the API
-caller had no way to tell that apart from a full GPU load.
+"""POST /v1/models/load must not report unqualified success when the backend's
+own sizing (_auto_gpu_layers, llamacpp/_sizing.py) settled on a partial or zero
+GPU offload. A model too big to fully fit VRAM still loads, entirely on CPU or
+split CPU/GPU, and the API caller has to be able to tell that apart from a full
+GPU load.
 
-GgufBackend now records gpu_layers_offloaded/gpu_layers_total in
-_load_native (mirroring how applied_gpu_split is recorded, see
-test_gpu_split_status_display.py, whose _load() helper this borrows), so
-Engine.gpu_placement (tests/test_engine.py), switch_engine's returned dict,
-and the /v1/models/load response (tests/test_http_server.py) can all report
-it. This file tests the backend-level recording itself: the exact arithmetic
-against the model's TRUE layer count reported back by the native worker this
-load, not a re-guess.
+GgufBackend records gpu_layers_offloaded/gpu_layers_total in _load_native, the
+same way applied_gpu_split is recorded, so Engine.gpu_placement, switch_engine's
+returned dict and the /v1/models/load response can all report it. This file
+covers the backend-level recording: the arithmetic against the model's TRUE
+layer count reported back by the native worker for this load.
 """
 
 import asyncio

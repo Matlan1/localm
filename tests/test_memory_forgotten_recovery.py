@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LM-DA-024 regression: `_archive_forgotten()` has always written evicted/
-superseded records to a recoverable `.forgotten.jsonl` sidecar, but nothing read
-that sidecar back - recovery was filesystem-only. This covers the read-back half:
+"""`_archive_forgotten()` writes evicted and superseded records to a recoverable
+`.forgotten.jsonl` sidecar. This covers the read-back half:
 `MemoryStore.forgotten()` / `restore_forgotten()` and the
 GET/POST /api/memory/forgotten[...] routes built on them.
 """
@@ -128,11 +127,10 @@ def _accept_update(s, old_text, new_text):
 
 
 def test_restore_reverts_a_superseded_update_correction_in_place(tmp_path):
-    """The core LM-DA-024 bug: an id-collision-only guard made this path
-    permanently unrestorable, even though GET /api/memory/forgotten kept
-    listing it - resolve_correction's accept branch archives the OLD text
-    under the SAME id it then keeps live under the NEW text, so the id never
-    frees up and `self.get(mem_id) is not None` was always true."""
+    """resolve_correction's accept branch archives the OLD text under the SAME
+    id it keeps live under the NEW text, so the id never frees up and
+    `self.get(mem_id) is not None` stays true. Restoring must still revert the
+    live record rather than treating the collision as "already restored"."""
     s = MemoryStore("owner", "chat", root=tmp_path)
     rid = _accept_update(s, "User lives in Berlin", "User moved to Munich")
 
@@ -181,9 +179,9 @@ def test_restore_steps_back_through_repeated_supersessions(tmp_path):
 
 
 def test_restore_recomputes_vector_with_embed_fn(tmp_path):
-    """Analogous to resolve_correction's own accept path (which re-embeds the
-    new text), a restored/reverted record must regain a semantic vector, not
-    silently keep serving a stale or absent one."""
+    """Like resolve_correction's own accept path (which re-embeds the new text),
+    a restored or reverted record regains a semantic vector rather than keeping
+    a stale or absent one."""
     calls = []
 
     def fake_embed(texts):

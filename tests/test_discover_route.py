@@ -2,8 +2,8 @@
 """The GUI /api/discover/search route: the `formats` toggle CSV must reach
 hf_search, and the response must carry `hf_backend_available` so the search page
 can warn (without blocking) that a transformers model needs the .[gpu] extra to
-run. hf_search itself (the format merge) is unit-tested in test_discover.py; this
-covers the thin route plumbing end to end through the mounted GUI app."""
+run. This covers the thin route plumbing end to end through the mounted GUI
+app."""
 
 from pathlib import Path
 
@@ -33,7 +33,7 @@ def _vram_dict_stub(payload):
 def gui_app(tmp_path, monkeypatch):
     """GUI mounted on a throwaway home with an owner key, so MODELS_READ passes
     and no real HuggingFace call or GPU probe happens (both are monkeypatched per
-    test). Mirrors tests/test_key_scope_gui.py's scoped_app."""
+    test)."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")   # owner = admin (all scopes)
@@ -194,10 +194,8 @@ def test_hf_result_gets_fit_from_size(gui_app, monkeypatch):
 
 def test_vram_free_withheld_when_reading_is_untrusted(gui_app, monkeypatch):
     """_vram_total() must gate `vram.free` on sysstats._vram_reading_trusted()
-    (fresh AND device-global) exactly like /api/vram-estimate and /api/stats
-    already do - forwarding an untrusted free verbatim would let this route's
-    own API contract present the same wrong-number-as-fact this repo already
-    fixed on the CLI/GUI VRAM surfaces (AGENTS.md rule 5). `total` is a static
+    (fresh AND device-global), exactly like /api/vram-estimate and /api/stats do,
+    so an untrusted free is never forwarded verbatim. `total` is a static
     hardware fact and stands regardless."""
     app, disc = gui_app
 
@@ -251,10 +249,10 @@ def _configure_split(monkeypatch, gpu_split_indices):
 
 
 def test_hf_result_fit_reflects_combined_split_capacity(gui_app, monkeypatch):
-    """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, the fit badge must
-    weigh a result against the COMBINED capacity, not just vram_info()'s
-    single main-GPU number - a model too big for one GPU alone but that fits
-    split across both must badge "fits", not "too-big"."""
+    """With a configured 2-GPU split, the fit badge must weigh a result against
+    the COMBINED capacity, not just vram_info()'s single main-GPU number: a model
+    too big for one GPU alone but that fits split across both must badge "fits",
+    not "too-big"."""
     app, disc = gui_app
 
     def spy(query, limit=20, formats=("gguf",), model_types=None):

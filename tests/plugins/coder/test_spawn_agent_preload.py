@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """spawn_agent file preloading fails loudly instead of poisoning the child.
 
-The preload loop used to append tool_read_file's output without checking
-r.ok, so a missing file's ERROR TEXT was silently fed to the child agent as
-"file content" (2026-07-02 coder tool sweep). Unreadable preloads must fail
-the call before any child is spawned - the parent is the one who can fix the
-path and retry."""
+The preload loop checks tool_read_file's r.ok, so a missing file's ERROR TEXT
+is never fed to the child agent as "file content". An unreadable preload fails
+the call, naming every unreadable file, before any child is spawned."""
 
 from unittest.mock import MagicMock, patch
 

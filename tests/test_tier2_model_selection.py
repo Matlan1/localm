@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Offline tests for scripts/tier2_gpu_split/model_selection.py's pure
-candidate-picking logic (the Tier 2 GPU-split harness - see
-scripts/tier2_gpu_split/README.md and issues/issues.txt's GPU-SPLIT-TESTING
-entry). No network, no GPU: sizes are fabricated, exactly what
-tests/test_gpu_split_real_hardware.py cannot do (it needs a live HF lookup and
-real hardware) - this is the one piece of the harness's own logic provable in
-full without the Tier 2 rental.
+candidate-picking logic (the Tier 2 GPU-split harness). No network, no GPU:
+sizes are fabricated, so this covers the part of the harness's own logic that is
+provable without a live HF lookup or real hardware.
 """
 
 from __future__ import annotations

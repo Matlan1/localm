@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SSRF-REBIND: the DNS-rebinding TOCTOU is closed by pinning the validated IP.
+"""The DNS-rebinding TOCTOU is closed by pinning the validated IP.
 
 netpolicy.check_url resolves+validates a host, but a plain requests.get
 re-resolves at connect time - a TTL-0 attacker can answer public for the check
@@ -203,14 +203,12 @@ def test_pinned_session_disables_trust_env():
 
 
 def test_pinned_session_ignores_an_environment_proxy(monkeypatch):
-    """The proxy-environment SSRF-pin bypass this closes. When a proxy is
-    selected for a plain-HTTP request, requests.adapters.HTTPAdapter routes
-    it through a DIFFERENT connection pool (proxy_manager_for's own plain
-    urllib3.ProxyManager) that never sees _pinned_ip at all - so with
-    trust_env=True an HTTP_PROXY env var bypasses the pin completely, not
-    merely weakens it. Proven live: a "trap" server stands in for the env
-    proxy and a "real" server stands in for the pinned target; the trap must
-    never be hit."""
+    """When a proxy is selected for a plain-HTTP request,
+    requests.adapters.HTTPAdapter routes it through a DIFFERENT connection pool
+    (proxy_manager_for's own plain urllib3.ProxyManager) that never sees
+    _pinned_ip at all, so with trust_env=True an HTTP_PROXY env var bypasses the
+    pin completely. A "trap" server stands in for the env proxy and a "real"
+    server for the pinned target; the trap must never be hit."""
     trap_hits = {"n": 0}
     real_hits = {"n": 0}
 

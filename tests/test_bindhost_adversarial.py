@@ -12,16 +12,11 @@ refusal and expose an unauthenticated, host-privileged API to the network.
 A false UNSAFE is only an availability annoyance (the CLI demands
 --insecure/an API key for a bind that was actually loopback-only).
 
-Every case below was checked against the real stdlib ``ipaddress`` module AND
-a live ``socket.getaddrinfo()`` + ``socket.bind()`` (the same mechanism
-uvicorn's asyncio server ultimately uses to interpret a --host string) on
-BOTH Windows and Linux (this repo's CI platform) before being pinned here -
-not assumed. Where the two platforms disagree (e.g. bracket-wrapped IPv6
-literals, or an empty host string), the comments say so; the assertions
-below only pin behavior that was confirmed to be platform-INDEPENDENT
-(is_loopback_host's own return value never changes across platforms, since
-it does no OS calls itself - only the live cross-check test further below
-depends on what the OS resolves).
+Where the platforms disagree (e.g. bracket-wrapped IPv6 literals, or an empty
+host string), the comments say so; the assertions below pin only
+platform-INDEPENDENT behavior. is_loopback_host's own return value never
+changes across platforms, since it makes no OS calls itself - only the live
+cross-check test further below depends on what the OS resolves.
 """
 
 from __future__ import annotations

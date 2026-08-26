@@ -14,7 +14,7 @@ from ..indexer import _BUILD_DEADLINE_S
 
 def _project_digest(cwd) -> str:
     """Stable per-project id: sha256 of the case-normalised, resolved cwd, so
-    each project's resume checkpoint gets its own file under HOME (CODER-4)."""
+    each project's resume checkpoint gets its own file under HOME."""
     import hashlib
     import os
     key = os.path.normcase(str(Path(cwd).resolve()))
@@ -30,11 +30,10 @@ def _project_dir_for(cwd) -> Path:
 def _project_map_path_for(cwd) -> Path:
     """Where the cross-session project-map cache lives for *cwd*:
     ``HOME/checkpoints/<project-digest>/projectmap.json`` - a SIBLING of this
-    project's per-session checkpoint files, not one of them: the map
-    describes the filesystem, not a conversation, so every coder session in
-    this project shares and refreshes the SAME cache file (see
-    ProjectMap.save_cache's docstring for why that is written atomically).
-    See ``localm.plugins.coder.indexer.ProjectMap.load_cached_and_reconcile``/
+    project's per-session checkpoint files, not one of them: the map describes
+    the filesystem, not a conversation, so every coder session in this project
+    shares and refreshes the SAME cache file. See
+    ``localm.plugins.coder.indexer.ProjectMap.load_cached_and_reconcile`` and
     ``save_cache`` for the read/write side."""
     return _project_dir_for(cwd) / "projectmap.json"
 
@@ -48,14 +47,13 @@ def is_valid_checkpoint_id(checkpoint_id: str) -> bool:
     accepts the slightly wider word-character set so a hand-migrated or
     future-format id is not rejected, while excluding every separator and dot.
 
-    It exists because the id is concatenated into a path by
-    _checkpoint_path_for, and a checkpoint id now arrives from an HTTP request
-    body (the web resume_id). MEASURED before this guard: an id of
-    ``../../../../windows/win.ini`` resolved clean outside the checkpoints tree,
-    and load_checkpoint RETAINS the id it was given, so the next
-    save_checkpoint - and the cwd-change migration - would mkdir and write
-    there. Validated at the path helper rather than only at the route, so every
-    caller is covered by construction.
+    The id is concatenated into a path by _checkpoint_path_for and can arrive
+    from an HTTP request body (the web resume_id): an id of
+    ``../../../../windows/win.ini`` resolves clean outside the checkpoints tree,
+    and load_checkpoint RETAINS the id it was given, so the next save_checkpoint
+    - and the cwd-change migration - would mkdir and write there. Validated at
+    the path helper rather than only at the route, so every caller is covered by
+    construction.
     """
     return bool(_ID_OK.match(checkpoint_id or ""))
 
@@ -64,42 +62,38 @@ def _checkpoint_path_for(cwd, checkpoint_id: str) -> Path:
     """One session's resume checkpoint:
     ``HOME/checkpoints/<project-digest>/<checkpoint-id>.json``.
 
-    Keyed on (project, session), not project alone (NEW-CODER-RESUME-DESTROYS-
-    SESSIONS): a second coder session started in the same project used to
-    overwrite the FIRST session's saved conversation at its very next save -
-    not "hard to recover", destroyed outright, because the old path
-    (``<digest>.json``) named the project only and every session in it wrote
-    the exact same file. *checkpoint_id* is generated once per Agent (see
-    ``Agent._checkpoint_id`` in core.py) and carried across resume, so
+    Keyed on (project, session), not project alone: a path naming the project
+    only has every session in it write the exact same file, so a second coder
+    session started in the same project destroys the first session's saved
+    conversation at its next save. *checkpoint_id* is generated once per Agent
+    (``Agent._checkpoint_id`` in core.py) and carried across resume, so
     continuing a restored session keeps writing to the SAME file rather than
     minting a new one every save.
 
-    Session DATA belongs in HOME, not the project tree (CODER-4) - the checkpoint
-    used to land in ``<cwd>/.localcoder/checkpoint.json``, leaving a stray folder
-    in the user's repo. Project-local config (.localcoder/config.toml), memory
-    (LOCALCODER.md), and full-mode transcripts (.localcoder/sessions/) stay put;
-    only the checkpoint moves."""
+    Session DATA lives in HOME, not the project tree. Project-local config
+    (.localcoder/config.toml), memory (LOCALCODER.md), and full-mode transcripts
+    (.localcoder/sessions/) stay in the project; only the checkpoint is in
+    HOME."""
     if not is_valid_checkpoint_id(checkpoint_id):
         raise ValueError(f"Invalid checkpoint id: {checkpoint_id!r}")
     return _project_dir_for(cwd) / (checkpoint_id + ".json")
 
 def _legacy_checkpoint_path_for(cwd) -> Path:
-    """The pre-CODER-4 in-project checkpoint path, still READ for back-compat so
-    a session saved by an older build can still be resumed and cleaned up.
+    """The legacy in-project checkpoint path, still READ for back-compat so a
+    session saved by an older build can still be resumed and cleaned up.
 
-    Also the pre-NEW-CODER-RESUME-DESTROYS-SESSIONS single-file-per-project HOME
-    path collapses onto this same read-only role once a session using it is
-    next loaded: ``Agent.load_checkpoint()`` migrates it into the new
-    per-session layout instead of leaving it to be silently clobbered again -
-    see ``_PersistenceMixin.load_checkpoint``."""
+    The older single-file-per-project HOME path collapses onto this same
+    read-only role once a session using it is next loaded:
+    ``Agent.load_checkpoint()`` migrates it into the per-session layout - see
+    ``_PersistenceMixin.load_checkpoint``."""
     return Path(cwd) / ".localcoder" / "checkpoint.json"
 
 def _legacy_home_checkpoint_path_for(cwd) -> Path:
-    """The pre-NEW-CODER-RESUME-DESTROYS-SESSIONS single checkpoint per
-    project: ``HOME/checkpoints/<project-digest>.json`` (a FILE, sibling to the
-    new per-project DIRECTORY of the same base name - the two can never
-    collide on disk, a directory and a file cannot share one path). Read once
-    for migration; never written again."""
+    """The legacy single checkpoint per project:
+    ``HOME/checkpoints/<project-digest>.json`` (a FILE, sibling to the new
+    per-project DIRECTORY of the same base name - the two can never collide on
+    disk, a directory and a file cannot share one path). Read once for
+    migration; never written again."""
     from localm.config import HOME_DIR
     return HOME_DIR / "checkpoints" / (_project_digest(cwd) + ".json")
 
@@ -148,20 +142,16 @@ def _entry_from_checkpoint(checkpoint_id: str, data: dict) -> dict:
     }
 
 def list_checkpoints(cwd) -> list:
-    """Every saved checkpoint for *cwd*, NEWEST first - the "pick any of them"
-    half of NEW-CODER-RESUME-DESTROYS-SESSIONS (item 3): several interrupted
-    sessions in one project now coexist instead of the second silently erasing
-    the first, so resume needs a way to choose among them, not just "the"
-    checkpoint.
+    """Every saved checkpoint for *cwd*, NEWEST first, so a resume can choose
+    among several interrupted sessions in one project.
 
-    Sorted by file mtime (not ``interrupted_at``): mtime is stamped by the
-    filesystem on every save, so it can never be missing or hand-edited wrong
-    the way a JSON field could - and it is what "newest" means here (when this
-    file was last written), not when the interruption inside it happened.
+    Sorted by file mtime, not ``interrupted_at``: mtime is stamped by the
+    filesystem on every save, so it cannot be missing or hand-edited wrong the
+    way a JSON field could, and it is what "newest" means here - when this file
+    was last written, not when the interruption inside it happened.
 
-    Best-effort per file (AGENTS rule 5): one unreadable/corrupt checkpoint is
-    skipped, not raised - a listing that crashes on one bad file hides every
-    good one along with it."""
+    Best-effort per file: one unreadable or corrupt checkpoint is skipped, not
+    raised."""
     d = _project_dir_for(cwd)
     if not d.is_dir():
         return []
@@ -181,12 +171,9 @@ def list_checkpoints(cwd) -> list:
 def checkpoint_info(cwd) -> Optional[dict]:
     """Summary of the MOST RECENT saved checkpoint for *cwd* across every
     session id, then the legacy single-file locations - used by the GUI resume
-    probe without building an Agent (CODER-2). Resuming "my last conversation
-    here" is unaffected by several sessions now being able to coexist (see
-    ``list_checkpoints`` for "any of them"): the zero-argument default stays
-    exactly what it always answered, and stays the DEFAULT (per the NEW-CODER-
-    RESUME-DESTROYS-SESSIONS brief: the common case must not get worse to
-    enable the rare one)."""
+    probe without building an Agent. The zero-argument default answers "my last
+    conversation here"; see ``list_checkpoints`` for choosing among all of
+    them."""
     entries = list_checkpoints(cwd)
     if entries:
         return entries[0]
@@ -202,9 +189,8 @@ def checkpoint_info(cwd) -> Optional[dict]:
     return None
 
 def _first_user_text(messages: list) -> str:
-    """The first user message's raw text, or "" - the same fallback title
-    source ``resume_checkpoint`` uses for a checkpoint saved before "title"
-    existed (pre-item-3, or a freshly migrated legacy file)."""
+    """The first user message's raw text, or "" - the fallback title source
+    ``resume_checkpoint`` uses for a checkpoint saved before "title" existed."""
     for m in messages:
         if isinstance(m, dict) and m.get("role") == "user":
             content = m.get("content")
@@ -213,17 +199,15 @@ def _first_user_text(messages: list) -> str:
     return ""
 
 def migrate_legacy_checkpoint(cwd, legacy_path: Path, data: dict) -> str:
-    """Adopt a checkpoint found at a pre-item-3 legacy location into the new
-    per-session layout: mint a fresh id, write *data* under it (backfilling
-    "title" when the legacy file predates that field too), and remove the
-    legacy file so it is migrated ONCE, not re-read and re-copied on every
-    future load. Returns the new checkpoint id.
+    """Adopt a checkpoint found at a legacy location into the per-session
+    layout: mint a fresh id, write *data* under it (backfilling "title" when the
+    legacy file predates that field too), and remove the legacy file so it is
+    migrated ONCE, not re-read and re-copied on every future load. Returns the
+    new checkpoint id.
 
-    Never raises: a migration is best-effort exactly like save_checkpoint
-    itself (AGENTS rule 5 - losing the NEW copy to a write failure is one
-    thing, but the caller must still get usable in-memory data back either
-    way, so this leaves *legacy_path* alone on any I/O error rather than
-    deleting the only copy before confirming the new one landed)."""
+    Never raises: on any I/O error it leaves *legacy_path* alone rather than
+    deleting the only copy before the new one is confirmed, and the caller still
+    gets usable in-memory data back."""
     import uuid
     new_id = uuid.uuid4().hex[:12]
     if not data.get("title"):
@@ -239,8 +223,8 @@ def migrate_legacy_checkpoint(cwd, legacy_path: Path, data: dict) -> str:
     return new_id
 
 def _index_deadline() -> Optional[float]:
-    """Wall-clock cap (seconds) for the startup project scan (CODER-1). Reads
-    the registered ``coder_index_timeout`` setting (``localm config
+    """Wall-clock cap (seconds) for the startup project scan. Reads the
+    registered ``coder_index_timeout`` setting (``localm config
     coder_index_timeout N``, or the Settings page); a value <= 0 disables the
     deadline. Falls back to ``_BUILD_DEADLINE_S`` only if config itself is
     unreadable (this function must never raise)."""

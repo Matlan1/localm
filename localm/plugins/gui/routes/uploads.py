@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI upload routes (R37): accept files into <home>/uploads/, list them, delete one.
+"""GUI upload routes: accept files into <home>/uploads/, list them, delete one.
 
-Extracted verbatim from attach_gui(); behavior unchanged. The multipart parser,
-the uploads-dir confinement, the unique-target helper, and the size cap stay in
-``web.py``; they are reached via ``import ... as _web`` (not imported by value) so
-that a test which reassigns e.g. ``web._MAX_UPLOAD_BYTES`` is still seen here -
-the same live-attribute access the inference routes use for ``http_server``.
+The multipart parser, the uploads-dir confinement, the unique-target helper, and
+the size cap stay in ``web.py``; they are reached via ``import ... as _web`` (not
+imported by value) so that a test which reassigns e.g. ``web._MAX_UPLOAD_BYTES``
+is still seen here - the same live-attribute access the inference routes use for
+``http_server``.
 """
 
 from __future__ import annotations

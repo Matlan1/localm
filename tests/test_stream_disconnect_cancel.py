@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A mid-stream client disconnect must not orphan the producer thread.
 
-Regression guard: `_stream_sse` / `_stream_sse_completion` run
-`engine.chat_stream(...)` on a daemon thread. llama.py's `_generate` holds the
-per-model `_inference_lock` across its whole generator body. Before the fix, a
-disconnect released the request SEMAPHORE but left the producer thread running to
-end-of-generation, so it kept holding `_inference_lock` and the NEXT request to
-the same model blocked on it.
+`_stream_sse` / `_stream_sse_completion` run `engine.chat_stream(...)` on a
+daemon thread, and llama.py's `_generate` holds the per-model `_inference_lock`
+across its whole generator body. Releasing only the request SEMAPHORE on
+disconnect would leave the producer thread running to end-of-generation, still
+holding `_inference_lock`, blocking the NEXT request to the same model.
 
 These tests drive the REAL streaming coroutines. The engine stand-in's
 `chat_stream` holds a REAL `threading.Lock` for the whole generator body and
-releases it on exhaustion OR on close() - exactly the lock discipline of
+releases it on exhaustion OR on close() - the same lock discipline as
 `_generate`'s `with self._inference_lock:`. The only faked piece is native token
-production, which is not what the fix changed: the fix is the cancel path in the
-HTTP layer plus the generator-close cascade, and both run for real here.
+production; the cancel path in the HTTP layer and the generator-close cascade
+both run for real.
 """
 
 from __future__ import annotations
@@ -410,14 +409,12 @@ def test_real_gguf_midstream_close_releases_inference_lock(gguf_backend):
     start and produce output promptly. This is the production mechanism the
     disconnect fix relies on.
 
-    Cannot inspect the real `_inference_lock` object directly anymore - the
-    real LlamaCpp instance (and its lock) now live inside an isolated worker
-    PROCESS (see llamacpp/_runner.py), not in this one, so no Python object in
-    THIS process can observe its state. The property this test actually cares
-    about - "closing mid-stream doesn't leave the model unusable for the next
-    request" - is proven instead by timing: a bounded wall-clock assertion
-    that the next generation starts promptly rather than hanging behind a
-    still-held lock in the child."""
+    The real `_inference_lock` object cannot be inspected directly: the real
+    LlamaCpp instance (and its lock) live inside an isolated worker PROCESS
+    (see llamacpp/_runner.py), so no Python object in THIS process can observe
+    its state. The property is asserted by timing instead: a bounded wall-clock
+    assertion that the next generation starts promptly rather than hanging
+    behind a still-held lock in the child."""
     import time
 
     be = gguf_backend

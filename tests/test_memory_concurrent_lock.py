@@ -1,25 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-MEM-LOCK regression suite (checkup 2026-07-09, item 13): MemoryStore had no
-per-namespace write lock, so concurrent writers silently lost data.
+"""Concurrent-write regression suite: with no per-namespace write lock,
+MemoryStore's concurrent writers silently lose data.
 
-Mirrors rag/store.py's test_concurrent_add_paths_no_data_loss (CHK-RAG-LOCK, the
-identical bug already fixed there): each writer constructs its OWN MemoryStore
-instance (exactly how every HTTP request/plugin call does it - see
+Mirrors rag/store.py's test_concurrent_add_paths_no_data_loss, the identical
+bug already fixed there: each writer constructs its OWN MemoryStore instance
+(exactly how every HTTP request/plugin call does it - see
 localm/plugins/builtin/memory/plug.py's ``_chat_store``), so a per-instance lock
-cannot help. Pre-fix, each instance ``_load()``s the same on-disk state, appends
-its own record, and ``_save()``s - last writer wins and the rest are silently
-dropped; ``_atomic_write`` also reused a fixed ``.tmp`` filename per namespace, so
-concurrent saves could collide on the SAME temp path (PermissionError on Windows).
+cannot help. Unlocked, each instance ``_load()``s the same on-disk state,
+appends its own record, and ``_save()``s - last writer wins and the rest are
+silently dropped; a fixed ``.tmp`` filename per namespace also lets concurrent
+saves collide on the SAME temp path (PermissionError on Windows).
 
-Also covers CHK-MEM-WINRESOLVE, a separate and narrower Windows-only race found
-while testing the fix above: namespace_file()'s path-safety check compared
-Path.resolve() output directly, which two DIFFERENT namespaces of the same agent
-(distinct ns_hash -> distinct per-namespace lock, so they do not serialise
-against each other) racing on their SHARED, not-yet-existing agent directory
-(e.g. ``<home>/memory/chat/``) could make return mismatched \\?\\-prefixed vs.
-unprefixed forms for the identical location, spuriously raising ValueError - loud,
-not silent, and only on a true cold start (see test_cold_start_concurrent_
-namespaces_no_path_safety_race below).
+Also covers a separate and narrower Windows-only race: namespace_file()'s
+path-safety check compares Path.resolve() output directly, and two DIFFERENT
+namespaces of the same agent (distinct ns_hash -> distinct per-namespace lock,
+so they do not serialise against each other) racing on their SHARED,
+not-yet-existing agent directory (e.g. ``<home>/memory/chat/``) can make it
+return mismatched \\?\\-prefixed vs. unprefixed forms for the identical
+location, spuriously raising ValueError - loud, not silent, and only on a true
+cold start (see test_cold_start_concurrent_namespaces_no_path_safety_race
+below).
 """
 
 from __future__ import annotations
@@ -77,24 +77,23 @@ def test_concurrent_add_no_data_loss(tmp_path):
 
 
 def test_cold_start_concurrent_namespaces_no_path_safety_race(tmp_path):
-    """CHK-MEM-WINRESOLVE: the per-namespace lock MemoryStore.__init__ takes
-    around namespace_file() (CHK-MEM-LOCK) only serialises writers to the SAME
-    namespace - it cannot serialise DIFFERENT namespaces of the same agent
-    (distinct scope_key -> distinct ns_hash -> distinct lock) against each
-    other. Those namespaces share one parent directory (``<root>/chat/``), so
-    when it does not exist yet, one namespace's first _save() (its mkdir) can
-    race a sibling namespace's concurrent namespace_file() call resolving a
-    file under that same directory. On Windows this can make Path.resolve()
-    return a \\?\\-prefixed extended-length path for one and an unprefixed
-    path for the other, even though both denote the identical location, so the
-    path-safety comparison spuriously raised ValueError. Confirmed via an
-    isolated repro (not just this pytest run): the old comparison hit this on
-    the majority of rounds when racing 40 distinct cold namespaces; a
-    same-single-namespace race (as in test_concurrent_add_no_data_loss above)
-    does NOT reach this code path, because CHK-MEM-LOCK's lock already
-    serialises same-namespace construction - hence a SEPARATE, DISTINCT-
-    namespace test is required to exercise it, unlike the sibling tests above
-    which warm the namespace first specifically to avoid this race."""
+    """The per-namespace lock MemoryStore.__init__ takes around
+    namespace_file() only serialises writers to the SAME namespace - it cannot
+    serialise DIFFERENT namespaces of the same agent (distinct scope_key ->
+    distinct ns_hash -> distinct lock) against each other. Those namespaces
+    share one parent directory (``<root>/chat/``), so when it does not exist
+    yet, one namespace's first _save() (its mkdir) can race a sibling
+    namespace's concurrent namespace_file() call resolving a file under that
+    same directory. On Windows this can make Path.resolve() return a
+    \\?\\-prefixed extended-length path for one and an unprefixed path for the
+    other, even though both denote the identical location, so the path-safety
+    comparison spuriously raises ValueError.
+
+    A same-single-namespace race (as in test_concurrent_add_no_data_loss above)
+    does NOT reach this code path, because the namespace lock already serialises
+    same-namespace construction - hence a SEPARATE, DISTINCT-namespace test is
+    required to exercise it, unlike the sibling tests above which warm the
+    namespace first specifically to avoid this race."""
     n = 40
     start = threading.Barrier(n)
     errors: list = []
@@ -172,9 +171,9 @@ def test_concurrent_add_update_delete_no_data_loss(tmp_path):
 
 def test_atomic_write_unique_tmp_path_survives_concurrent_saves(tmp_path):
     """Two threads saving the SAME namespace concurrently must not collide on
-    _atomic_write's temp file (pre-fix: both used ``<file>.tmp`` verbatim, so one
-    thread's ``tmp.replace()`` could race the other's ``tmp.write_text()`` and
-    raise PermissionError on Windows)."""
+    _atomic_write's temp file: with both using ``<file>.tmp`` verbatim, one
+    thread's ``tmp.replace()`` races the other's ``tmp.write_text()`` and raises
+    PermissionError on Windows."""
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="seed", source="user"))   # warm the namespace dir
     s.delete(s.all()[0].id)
@@ -199,23 +198,23 @@ def test_atomic_write_unique_tmp_path_survives_concurrent_saves(tmp_path):
 
 
 def test_concurrent_consolidation_and_add_no_data_loss(tmp_path, monkeypatch):
-    """CHK-MEM-LOCK (adversarial review finding, round 2): run_consolidation()
-    snapshots store.all(), then for each candidate that near-but-not-exactly
-    matches an existing record calls the SLOW per-candidate _decide() LLM step,
-    before finally overwriting the whole namespace via replace(). A concurrent
-    add() landing during THAT decide call must block on the namespace lock and
-    survive, not be silently discarded by the stale snapshot's overwrite.
+    """run_consolidation() snapshots store.all(), then for each candidate that
+    near-but-not-exactly matches an existing record calls the SLOW per-candidate
+    _decide() LLM step, before finally overwriting the whole namespace via
+    replace(). A concurrent add() landing during THAT decide call must block on
+    the namespace lock and survive, not be silently discarded by the stale
+    snapshot's overwrite.
 
-    The delay is deliberately placed inside _decide() (identified by the
-    "EXISTING:" marker unique to _DECIDE_PROMPT), not extract(): a version of
-    this test that only blocks during extract() (before store.all() is even
-    read) stays green even with consolidate.py's outer store.lock() removed,
-    because replace()'s own lock+reload already covers that narrower window - it
-    would not catch a regression that re-acquires the lock only around the final
-    replace() rather than across the whole decide loop. The seeded record's text
-    is a difflib near-duplicate of the extracted candidate (ratio in
-    (MATCH_THRESHOLD, NEAR_DUP_RATIO)), so _nearest() routes it to _decide()
-    instead of a deterministic ADD/NO_OP shortcut that would skip the LLM call."""
+    The delay is placed inside _decide() (identified by the "EXISTING:" marker
+    unique to _DECIDE_PROMPT), not extract(): a version of this test that only
+    blocks during extract() (before store.all() is even read) stays green even
+    with consolidate.py's outer store.lock() removed, because replace()'s own
+    lock+reload already covers that narrower window - it would not catch a
+    regression that re-acquires the lock only around the final replace() rather
+    than across the whole decide loop. The seeded record's text is a difflib
+    near-duplicate of the extracted candidate (ratio in (MATCH_THRESHOLD,
+    NEAR_DUP_RATIO)), so _nearest() routes it to _decide() instead of a
+    deterministic ADD/NO_OP shortcut that would skip the LLM call."""
     monkeypatch.setenv("LOCALM_MODE", "log")
     from localm.memory import run_consolidation
     store = MemoryStore("owner", "chat", root=tmp_path)
@@ -270,10 +269,10 @@ def test_concurrent_consolidation_and_add_no_data_loss(tmp_path, monkeypatch):
 
 
 def test_reinforce_recall_does_not_resurrect_concurrent_delete(tmp_path):
-    """CHK-MEM-LOCK (adversarial review finding): recall(reinforce=True) is
-    called on every chat turn and used to save this instance's whole
-    self._records unlocked - a concurrent delete() landing in that window would
-    be silently reverted (the deleted record resurrected) by recall's save."""
+    """recall(reinforce=True) is called on every chat turn. Saving this
+    instance's whole self._records unlocked would let a concurrent delete()
+    landing in that window be silently reverted, resurrecting the deleted
+    record."""
     store = MemoryStore("owner", "chat", root=tmp_path)
     rec = store.add(MemoryRecord(text="a fact about the user's editor preference",
                                  source="user", importance=0.8))
@@ -312,11 +311,11 @@ def test_reinforce_recall_does_not_resurrect_concurrent_delete(tmp_path):
 
 
 def test_concurrent_restore_forgotten_no_duplicate(tmp_path):
-    """CHK-MEM-LOCK (LM-DA-024): restore_forgotten's read-matches-then-write-once
-    sequence must not let two concurrent restores of the SAME archived id both
-    succeed - exactly one may actually apply the snapshot; the loser finds
-    nothing left to restore (the archive entry was already consumed, or by the
-    time it acquires the lock a live record with that id already exists)."""
+    """restore_forgotten's read-matches-then-write-once sequence must not let
+    two concurrent restores of the SAME archived id both succeed - exactly one
+    may actually apply the snapshot; the loser finds nothing left to restore
+    (the archive entry was already consumed, or by the time it acquires the lock
+    a live record with that id already exists)."""
     seed = MemoryStore("owner", "chat", root=tmp_path)
     for i in range(20):
         seed.add(MemoryRecord(text=f"user fact {i}", source="user", importance=0.8,

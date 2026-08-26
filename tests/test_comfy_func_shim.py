@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Oracle for the reactive, opt-in ComfyUI ``__func__`` regression shim (MEDIA-1).
+"""Oracle for the reactive, opt-in ComfyUI ``__func__`` regression shim.
 
 The shim is a localm-owned ``sitecustomize.py`` that localm puts on the PYTHONPATH
-of a ComfyUI process it SPAWNS ITSELF, to patch a ComfyUI core regression in memory
-(Comfy-Org/ComfyUI #12116). The absolute invariant: localm writes NOTHING into the
-user's ComfyUI install and only ever shims a ComfyUI it launched.
+of a ComfyUI process it SPAWNS ITSELF, to patch a ComfyUI core regression in
+memory. The absolute invariant: localm writes NOTHING into the user's ComfyUI
+install and only ever shims a ComfyUI it launched.
 
 Four checks, each with a built-in negative case so it fails on known-bad work:
   1. DEFAULT no-op: a normal spawn never puts the shim dir on the child PYTHONPATH.

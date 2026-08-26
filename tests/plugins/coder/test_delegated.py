@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the shared delegated-work presentation (localm.plugins.coder.delegated).
 
-The invariant under test is not cosmetic: session_diff() is an INPUT to the
-self-reviewer (agent/loop.py:381) and to episodic memory (agent/session.py:190),
-so foreign content there would corrupt two model-facing loops. These tests pin
-that delegated work is POINTED AT and never merged in.
+session_diff() is an INPUT to the self-reviewer (agent/loop.py) and to episodic
+memory (agent/session.py), so delegated work is POINTED AT there and never
+merged in.
 """
 
 from __future__ import annotations

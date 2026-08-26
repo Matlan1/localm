@@ -1,20 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """`localm doctor` must prove the HF (transformers) backend is actually USABLE,
-not merely importable - found during the 0.1.2 release verification: transformers
-5.14 hard-imports `distributed/fsdp.py` on the ordinary
+not merely importable.
+
+transformers 5.14 hard-imports `distributed/fsdp.py` on the ordinary
 `transformers.AutoTokenizer` attribute access (transformers is a LAZY module, so
 `import transformers` alone never touches that path), and fsdp needs
-`torch._C._distributed_c10d`, absent from the pinned ROCm/Windows torch build. That
-made EVERY HF model load die at "loading processor..." while `localm doctor`
-reported both `torch` and `transformers` OK - a version/presence probe, not a
-usability one (see tests/test_gpu_extra_pins.py for the version-pin guard this
-backs up with a functional check of doctor's OWN diagnosis).
+`torch._C._distributed_c10d`, absent from the pinned ROCm/Windows torch build.
+That makes EVERY HF model load die at "loading processor..." while a
+version/presence probe reports both `torch` and `transformers` OK.
 
 These tests exercise `_check_hf_backend_usable` directly (real success path,
 against whatever transformers/torch is actually installed in this venv - skipped
-if absent) and via a synthetic broken lazy-import chain (the regression shape,
-reproduced without needing to actually install a broken transformers/torch
-combo), plus the full `cli.doctor` wiring end to end.
+if absent) and via a synthetic broken lazy-import chain, plus the full
+`cli.doctor` wiring end to end.
 """
 
 from __future__ import annotations
@@ -38,20 +36,19 @@ _FAIL = "✗"
 
 
 class _BrokenLazyModule(types.ModuleType):
-    """Stands in for transformers' `_LazyModule` when attribute resolution hits
-    the exact 0.1.2 regression shape: a chain of `ModuleNotFoundError("Could not
-    import module 'X'") from <next layer down>`, several layers deep, bottoming
-    out in the real cause (`torch._C._distributed_c10d` missing). Reproduces the
-    shape verified against transformers 5.13.1's actual `_LazyModule.__getattr__`
-    source (`raise ModuleNotFoundError(...) from e`), without needing a real
-    broken transformers/torch install.
+    """Stands in for transformers' `_LazyModule` when attribute resolution fails:
+    a chain of `ModuleNotFoundError("Could not import module 'X'") from <next
+    layer down>`, several layers deep, bottoming out in the real cause
+    (`torch._C._distributed_c10d` missing). Matches the shape of the real
+    `_LazyModule.__getattr__` (`raise ModuleNotFoundError(...) from e`) without
+    needing a broken transformers/torch install.
 
     A REAL ModuleType subclass (not a bare object): a plain object's
     `__getattr__` would also intercept dunder lookups like `__spec__` that
     `importlib.import_module` itself needs when a name is already cached in
-    `sys.modules`, raising before doctor's own code is ever reached. Setting a
-    real `__spec__` here means only the Auto* names doctor actually touches
-    fall through to `__getattr__` - the same way the real `_LazyModule` only
+    `sys.modules`, raising before doctor's own code is reached. Setting a real
+    `__spec__` here means only the Auto* names doctor actually touches fall
+    through to `__getattr__`, the same way the real `_LazyModule` only
     intercepts names it does not already have as a normal attribute."""
 
     def __init__(self):
@@ -89,17 +86,14 @@ def test_reports_ok_for_the_real_installed_combo(monkeypatch):
     the check must actually resolve AutoTokenizer/AutoProcessor/
     AutoModelForCausalLM and report OK - not just that they import.
 
-    Skips rather than crashes when llama.cpp's native runtime is already
-    loaded in this process (test_doctor_gpu_verdict.py's own real
-    compute-device probe does this in-process when run earlier in the same
-    pytest worker): a FRESH `import torch` here is the documented
-    known-doomed DLL-identity conflict
+    Skips rather than crashes when llama.cpp's native runtime is already loaded
+    in this process (test_doctor_gpu_verdict.py's own real compute-device probe
+    does this in-process when run earlier in the same pytest worker): a FRESH
+    `import torch` there is the known-doomed DLL-identity conflict
     (VramSizingMixin._free_total_vram_bytes's docstring), which
-    `pytest.importorskip` cannot turn into a skip - it only catches
-    ImportError, and this raises OSError: [WinError 127] instead, failing the
-    test outright rather than an environmental skip. Genuinely reproducing
-    this test's own subject (the REAL installed combo) is not possible under
-    this precondition; a targeted single-file run is unaffected."""
+    `pytest.importorskip` cannot turn into a skip - it only catches ImportError,
+    and this raises OSError: [WinError 127]. A targeted single-file run is
+    unaffected."""
     from localm.inference.backends.llamacpp import _loader
     if _loader.native_lib_loaded():
         pytest.skip("llama.cpp's native runtime is already loaded in this "
@@ -121,11 +115,10 @@ def test_reports_ok_for_the_real_installed_combo(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_reports_fail_and_digs_to_the_real_root_cause(monkeypatch):
-    """The exact 0.1.2 regression: transformers imports fine, but resolving
-    AutoTokenizer dies several layers down. Doctor must report FAIL (not the
-    silent OK a mere `import transformers` would give) and must surface the
-    REAL bottom-of-chain cause, not just the generic top-level wrapper message
-    that hid this regression in the first place."""
+    """transformers imports fine, but resolving AutoTokenizer dies several layers
+    down. Doctor must report FAIL (not the silent OK a mere `import
+    transformers` would give) and must surface the REAL bottom-of-chain cause,
+    not just the generic top-level wrapper message."""
     torch_stub = object()
     out = _run_check_capturing_output(monkeypatch, torch_stub, _BrokenLazyModule())
 

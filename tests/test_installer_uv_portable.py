@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """setup.bat/setup.sh must never install uv itself outside the clone without
-asking. Both used to ask "Portable vs Shared" for the Python runtime + downloads
-AFTER already installing uv (via Astral's official installer) unconditionally to
-its default per-user location - so "Portable - everything in this folder" was a
-broken promise for uv's own binary. This asserts the fix: the portable/shared
-choice is asked BEFORE uv is ever installed, and a Portable pick sets Astral's own
-UV_INSTALL_DIR override so uv itself lands inside the clone too, tracked in the
-install manifest for a symmetric uninstall (see AGENTS.md rule 4: self-contained,
-nothing installed globally without being asked)."""
+asking. The portable/shared choice is asked BEFORE uv is ever installed, and a
+Portable pick sets Astral's own UV_INSTALL_DIR override so uv itself lands
+inside the clone too, tracked in the install manifest for a symmetric
+uninstall."""
 
 from pathlib import Path
 

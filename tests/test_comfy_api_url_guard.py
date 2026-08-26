@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-COMFY-APIURL: a link-local / cloud-metadata comfy_api_url is refused so an
-ADMIN-set api_url cannot turn the comfy control calls into an SSRF probe of cloud
+"""A link-local / cloud-metadata comfy_api_url is refused so an ADMIN-set
+api_url cannot turn the comfy control calls into an SSRF probe of cloud
 metadata. Loopback / LAN / public are allowed - a real ComfyUI runs on any."""
 
 from localm.media import comfy_client as c

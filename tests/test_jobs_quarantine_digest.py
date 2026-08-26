@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Issue #859: a quarantined jobs.json copy must not keep the owner key digest.
+"""A quarantined jobs.json copy must not keep the owner key digest.
 
 When jobs.json is corrupt, JobStore copies it aside as
 ``jobs.json.corrupt-<ts>`` so the user's scheduled jobs are not silently lost.
-That copy was VERBATIM, so it carried every job's ``owner`` field - the same
-sha256 the keystore stores (``http_server.principal_id`` returns ``key_hash``).
-#841 made the copy owner-only on disk, but permission-restricted is not the
-same as digest-free, and nothing ever pruned these, so one legacy bare-sha256
-digest could outlive the alert-88 KDF migration indefinitely.
+A VERBATIM copy carries every job's ``owner`` field - the same sha256 the
+keystore stores (``http_server.principal_id`` returns ``key_hash``). The copy is
+owner-only on disk, but permission-restricted is not the same as digest-free,
+and nothing prunes these, so one legacy bare-sha256 digest could outlive a KDF
+migration indefinitely.
 
 Two independent halves, both covered here:
 
@@ -15,11 +15,9 @@ Two independent halves, both covered here:
   sentinel: ``job_owner_ok`` (http_server.py) returns True when ``owner is
   None`` - "a job with NO recorded owner is unrestricted" - so dropping the
   field or nulling it would make every job in a restored copy reachable by any
-  caller. That trades a digest that is already owner-only on disk for an open
-  ACL on the recovery path, which is strictly worse than doing nothing.
+  caller.
 * A RETENTION CAP bounds the copies already on disk, which redaction can never
-  reach, and stays correct for any future credential-shaped field rather than
-  going stale the next time the digest scheme changes.
+  reach, and stays correct for any future credential-shaped field.
 
 The copy must stay usable for recovery either way: schedule, prompt, model and
 name are what it exists to preserve, and only the access-control field goes.
@@ -117,7 +115,7 @@ class TestQuarantineRedactsTheDigest:
             assert expected in text, f"recovery data lost: {expected!r}"
 
     def test_still_owner_only_on_disk(self, store):
-        """#841's ACL is not regressed by the redaction change."""
+        """The quarantine copy's owner-only ACL is not regressed by the redaction change."""
         import os
         import subprocess
         _corrupt_keeping_content(store)
@@ -175,8 +173,8 @@ class TestQuarantineRetentionCap:
 
 class TestQuarantineStillDoesItsJob:
     def test_a_corrupt_store_still_warns_and_does_not_discard(self, store, caplog):
-        """Rule 5: the data-loss risk must stay visible, and the copy must
-        still be written. Redaction must not turn this into a silent path."""
+        """The data-loss risk must stay visible, and the copy must still be
+        written. Redaction must not turn this into a silent path."""
         _corrupt_keeping_content(store)
         with caplog.at_level("WARNING"):
             jobs = store._read_all()
@@ -187,12 +185,12 @@ class TestQuarantineStillDoesItsJob:
 
 
 class TestResidualDigestIsWarningVisible:
-    """Checkup finding #1: `_redact_owner_digests` only reports a surviving
-    digest-shaped value at DEBUG, so the operator never sees it - the outer
-    "backed up to ... your scheduled jobs are preserved" WARNING says nothing
-    about a residual credential. A digest that dodges the regex (odd key
-    casing/whitespace in an already-malformed file) must still surface at
-    WARNING, the level an operator is actually watching."""
+    """`_redact_owner_digests` reports a surviving digest-shaped value at DEBUG,
+    where the operator never sees it, and the outer "backed up to ... your
+    scheduled jobs are preserved" WARNING says nothing about a residual
+    credential. A digest that dodges the regex (odd key casing or whitespace in
+    an already-malformed file) must surface at WARNING, the level an operator is
+    actually watching."""
 
     def test_case_mismatched_owner_key_survives_and_warns(self, caplog):
         from localm.plugins.builtin.jobs.store import _redact_owner_digests
@@ -215,11 +213,9 @@ class TestResidualDigestIsWarningVisible:
 
 
 class TestQuarantineBackupPermsRetryOnFailure:
-    """Checkup finding #2: `restrict_file_perms(backup)` was a single
-    best-effort call with no return-value check, unlike `_write_all` which
-    checks the return and retries when the first attempt fails. The
-    quarantine copy holds the same owner digests as the live file and
-    deserves the same robustness."""
+    """`restrict_file_perms(backup)` must check its return value and retry when
+    the first attempt fails, like `_write_all` does. The quarantine copy holds
+    the same owner digests as the live file and deserves the same robustness."""
 
     def test_first_failure_is_retried(self, store, monkeypatch):
         import localm.config as cfg
@@ -244,10 +240,10 @@ class TestQuarantineBackupPermsRetryOnFailure:
 
 
 class TestQuarantineBackupFailureMessageStatesReality:
-    """Checkup finding #3: the "refusing to silently discard it" wording
-    claims a refusal that never happens - the code logs a WARNING and
-    returns normally, and the caller proceeds exactly as on success. The
-    message must describe what actually occurs instead."""
+    """The "refusing to silently discard it" wording would claim a refusal that
+    never happens - the code logs a WARNING and returns normally, and the caller
+    proceeds exactly as on success. The message must describe what actually
+    occurs."""
 
     def test_message_does_not_claim_a_refusal_that_never_happens(
             self, store, monkeypatch, caplog):

@@ -7,22 +7,18 @@ call is only ever a defect in the first shape, and when it happens EVERY client
 of the server stalls, not just the one making the request - every chat stream,
 every SSE job feed, every poll.
 
-This class has now been found four times: the GPU probes (#541), then
-`POST /api/embedding/warmup`, `GET /api/image-proxy` and `GET /api/rag/embedding`
-in one QA run. Each was found by a hang alarm firing in the field rather than by
-anything in the tree, which is why this exists: a grep cannot find them (the
-blocking call is usually two or three hops down a helper chain) and coverage
-cannot either (the line executes, it is simply executing in the wrong thread).
+A grep cannot find these: the blocking call is usually two or three hops down a
+helper chain. Coverage cannot either: the line executes, it is simply executing
+in the wrong thread.
 
 WHAT COUNTS AS BLOCKING, and why it is not "any lock"
 -----------------------------------------------------
 Flagging every `with some_lock:` reached from a handler produces roughly 180 of
 this repo's 208 async routes, because the auth path alone takes several
-short-lived dict guards on every single request. That is the shape of gate
-people switch off. So a lock is only interesting when its critical section can
-be held for a long time, and that is computed rather than declared: pass 1 walks
-every `with <lock>:` body in the tree and asks whether it transitively reaches a
-slow primitive.
+short-lived dict guards on every single request. So a lock is only interesting
+when its critical section can be held for a long time, and that is computed
+rather than declared: pass 1 walks every `with <lock>:` body in the tree and
+asks whether it transitively reaches a slow primitive.
 
     UNBOUNDED   the body spawns a child and waits for it, or loads a native
                 library. `localm.inference.embedder._LOCK` is the worked
@@ -30,13 +26,11 @@ slow primitive.
                 construction, i.e. a process spawn plus a native model load,
                 whose own ceiling is 300s. A status probe that takes that lock
                 to read one integer therefore blocks the loop for as long as a
-                cold load takes. That is exactly what the hang alarm caught at
-                47s and climbing.
+                cold load takes.
     BOUNDED     the body runs a short subprocess or writes a file.
                 `localm.sessions._LOCK` is the worked example: its writes reach
                 `restrict_file_perms`, which shells out to `icacls` on Windows.
-                Real, measurable, and a completely different severity from the
-                first kind - so it is reported, and it does not fail the gate.
+                Reported, but it does not fail the gate.
 
 A network call is always UNBOUNDED: the timeouts in this tree are 10-60s, and
 `socket.getaddrinfo` takes no timeout at all.
@@ -47,29 +41,24 @@ Work handed to a worker thread. The analyzer follows the same boundaries the
 code does: `run_in_threadpool`, `run_in_threadpool_bounded`, `run_in_executor`,
 `anyio.to_thread.run_sync`, a `jobs.start_fn` callback, an explicit
 `Thread(target=...)`. A nested `def` that is passed to any of those is not
-walked, because its body runs off the loop. Getting that wrong in either
-direction is the whole difficulty: an early version of this file counted a
-nested closure as part of its parent and reported `GET /v1/comfy/status`, which
-is correctly offloaded and says so in its own comment, as blocking.
+walked, because its body runs off the loop.
 
 CONFIDENCE
 ----------
 A call of the form `x.method(...)`, where `x` is a local whose type this file
 cannot know, is resolved by unique method name across the tree and marked
-UNCONFIRMED (`~>` in the printed chain). That heuristic is worth keeping and
-worth marking: dropping it lost a real finding (`store.record_result`), and
-trusting it invented one (`sidecar.rename`, which is `pathlib.Path.rename`,
-resolved to the CLI's `rename` command and manufactured a network call on three
-media routes that make none). Read the chain before acting on an UNCONFIRMED
-hop.
+UNCONFIRMED (`~>` in the printed chain). Dropping the heuristic loses real
+findings (`store.record_result`); trusting it invents them (`sidecar.rename`,
+which is `pathlib.Path.rename`, resolves to the CLI's `rename` command and
+manufactures a network call on three media routes that make none). Read the
+chain before acting on an UNCONFIRMED hop.
 
 USAGE
 -----
     python scripts/check_event_loop_offload.py            # full report
     python scripts/check_event_loop_offload.py --gate     # exit 1 on a NEW unbounded finding
 
-`tests/test_event_loop_offload.py` pins the gate and, more importantly, proves
-this file FIRES: a check that has never been red proves nothing.
+`tests/test_event_loop_offload.py` pins the gate and proves this file FIRES.
 """
 
 from __future__ import annotations
@@ -299,9 +288,8 @@ class Analyzer:
         """func's own statements, with directly-nested def/async def removed.
 
         A nested def is a separate Func and is usually the thread-side closure,
-        so counting its body as part of the parent reports correctly-offloaded
-        handlers as blocking. That was a real false positive on
-        `GET /v1/comfy/status` before this existed."""
+        so counting its body as part of the parent would report a
+        correctly-offloaded handler as blocking."""
         out: list[ast.stmt] = []
         for stmt in func.node.body:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):

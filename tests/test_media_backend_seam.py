@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The media backend seam (I1).
+"""The media backend seam.
 
 Each media plugin (image/music/video) dispatches to the backend named by the
 ``backend`` config key: ``"comfy"`` (default) is the inline ComfyUI reference,
 any other name loads ``backends/<name>.py`` via ``media_config.load_backend``.
-These tests prove the seam actually SWITCHES implementations - it was previously a
-config value that was read and then ignored (every call hard-wired to ComfyUI)."""
+These tests check the seam actually SWITCHES implementations rather than reading
+the config value and hard-wiring ComfyUI anyway."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -106,15 +106,8 @@ def test_instance_token_survives_the_backend_seam(
     """The plug.py route's instance_token must reach the per-plugin comfy.py
     generate_* call THROUGH the backend seam (plug.py -> backend.generate ->
     backend.py's _comfy_generate -> comfy.py), not just when comfy.py is
-    called directly.
-
-    Distinct from tests/test_comfy_containment.py, tests/test_music_gen.py
-    and tests/test_video_gen.py's instance_token tests, which call
-    comfy.generate_image/music/video directly and would stay green even if
-    backend.py's adapter silently dropped instance_token on the floor between
-    the seam and comfy.py - the exact one-layer-removed blind spot
-    diff-review-discipline.md item 23 describes. This test goes through the
-    actual public seam (backend_mod.generate) plug.py calls."""
+    called directly. The call under test goes through the public seam
+    plug.py uses, backend_mod.generate."""
     spy = MagicMock(return_value=(True, "ok"))
     monkeypatch.setattr(underlying_mod, underlying_fn, spy)
 

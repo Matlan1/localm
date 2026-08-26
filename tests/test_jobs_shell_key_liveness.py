@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LM-DA-014 (adversarially-confirmed HIGH finding): a scheduled coder job's
-``allow_shell`` was captured at creation time and never re-validated against the
-creating key's live state - runner.py's own comment said "the runner trusts the
-stored flag." A revoked or expired coder:full key's scheduled shell job kept
-running with shell access indefinitely, because the autonomous scheduler tick
-has no request/caller to re-check (unlike run-now, which already re-validates
-the CALLER via _caller_can_allow_shell).
+"""A scheduled coder job's ``allow_shell`` is re-validated against the creating
+key's live state on every run, not captured once at creation time. The
+autonomous scheduler tick has no request or caller to re-check, unlike run-now,
+which re-validates the CALLER via _caller_can_allow_shell.
 
-Fix: runner._shell_still_authorized(job) re-checks the OWNING key (job.owner,
+runner._shell_still_authorized(job) re-checks that the OWNING key (job.owner,
 the same sha256 hash auth.key_hash_live() checks for cookie sessions) is still
-live - not revoked, not expired - every run. A dead key downgrades the run to
-RESTRICTED (read + confined edit, no run_shell), the same safe-by-default a
-coder job with no opt-in already gets; it is never silently skipped.
+live - not revoked, not expired. A dead key downgrades the run to RESTRICTED
+(read plus confined edit, no run_shell), the same safe default a coder job with
+no opt-in gets; it is never silently skipped.
 """
 
 from __future__ import annotations

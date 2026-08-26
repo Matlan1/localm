@@ -1,23 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""VRAM eviction safety (Antigravity-audit CRIT-1 / CRIT-2 / MED-11).
+"""VRAM eviction safety.
 
 These exercise the multi-model switch/eviction path in http_server.switch_engine:
 
-  CRIT-1  A request must PIN its engine (active_requests>=1) the instant it takes
-          ownership - synchronously after get_engine, before any await - so a
-          concurrent model load can never evict an engine out from under an
-          in-flight request. Proven by observing active_requests from a chat
-          inlet hook (which runs after get_engine): 0 on the broken code, 1 once
-          the pin is moved early.
+  A request must PIN its engine (active_requests>=1) the instant it takes
+  ownership - synchronously after get_engine, before any await - so a
+  concurrent model load can never evict an engine out from under an
+  in-flight request. Observed via active_requests from a chat inlet hook,
+  which runs after get_engine.
 
-  CRIT-2  When vram_info() reports no measurable "free" (the default GGUF-only
-          non-NVIDIA install), model switching must fall back to single-resident
-          (evict idle before load) instead of stacking models until the driver
-          OOMs. Proven by loading a->b->c with unmeasurable VRAM: broken code
-          leaves all three loaded, the fix leaves exactly model-c.
+  When vram_info() reports no measurable "free" (the default GGUF-only
+  non-NVIDIA install), model switching must fall back to single-resident
+  (evict idle before load) instead of stacking models until the driver
+  OOMs. Loading a->b->c with unmeasurable VRAM must leave exactly model-c.
 
-  MED-11  After an eviction the loop must wait for the native VRAM free to land
-          before re-checking, so it does not over-evict on a stale-low reading.
+  After an eviction the loop must wait for the native VRAM free to land
+  before re-checking, so it does not over-evict on a stale-low reading.
 """
 
 import asyncio
@@ -231,7 +229,7 @@ def test_unmet_cap_never_yanks_a_sibling_instance(monkeypatch):
     asks a SIBLING localm instance to dump ITS models - destroying another
     instance's work to satisfy a local preference, over VRAM that was never
     short - and then logs the miss as a whole-model VRAM shortfall, a reason
-    the readings do not support (AGENTS.md rule 5).
+    the readings do not support.
     """
     _install_fakes(monkeypatch, free=10 * 1024 ** 3)
     _knobs(monkeypatch, max_resident_models=1, pinned_models=["model-a"])
@@ -307,10 +305,9 @@ def test_busy_chat_peer_not_evicted_but_new_load_still_succeeds(monkeypatch):
     busy CHAT peer instead of the shared embedder: with a resident engine
     pinned (active_requests>0) so local eviction cannot free it, and no
     cooperative peer configured, local+cooperative eviction is fully
-    exhausted - exactly the case the (now-removed) "VRAM exhausted, all
-    other loaded models are busy" hard refusal used to catch. The incoming
-    load must still succeed via the backend's own partial offload rather
-    than refuse, and the busy peer must survive untouched."""
+    exhausted. The incoming load must still succeed via the backend's own
+    partial offload rather than refuse, and the busy peer must survive
+    untouched."""
     _install_fakes(monkeypatch, free=3 * 1024 ** 3)
     app = hs.create_app(None)
     client = TestClient(app)
@@ -411,27 +408,24 @@ def test_idle_embedder_evicted_to_make_room_for_chat_load(monkeypatch):
 
 
 def test_busy_embedder_not_evicted_for_chat_load(monkeypatch):
-    """AUDIT-CRIT-1 for the embedder: a request mid-embed() (active_requests>0)
-    must not have its embedder freed out from under it just because a chat
-    load is short on VRAM.
+    """The embedder pin: a request mid-embed() (active_requests>0) must not
+    have its embedder freed out from under it just because a chat load is
+    short on VRAM.
 
-    The chat load itself still SUCCEEDS despite the pin: switch_engine no
-    longer hard-refuses on its own crude whole-model estimate once local +
-    cooperative eviction is exhausted (see the "let the backend try" fix) -
-    it defers to the backend, which fits the model via partial GPU-layer
-    offload using whatever is left (3 GB here), without ever needing the
-    embedder's VRAM. Proves the pin-respecting fix (PR #752) and the
-    partial-offload fallthrough fix compose correctly: a resource the pin
+    The chat load itself still SUCCEEDS despite the pin: switch_engine does
+    not hard-refuse on its own crude whole-model estimate once local +
+    cooperative eviction is exhausted - it defers to the backend, which fits
+    the model via partial GPU-layer offload using whatever is left (3 GB
+    here), without ever needing the embedder's VRAM. So a resource the pin
     protects stays protected, AND the request the pin would have starved
-    still gets served anyway.
+    still gets served.
 
     Asserts reset_calls == 1, not just embedder_loaded staying True: a
     reset_embedder(force=False) call that correctly declines because the
     embedder is busy is indistinguishable, via embedder_loaded alone, from
     the eviction branch never having been reached at all (e.g. code with no
     embedder-eviction feature) - both leave embedder_loaded True. reset_calls
-    proves the branch actually executed and consulted the pin, not merely
-    that eviction did not happen to occur."""
+    proves the branch actually executed and consulted the pin."""
     state = _install_embedder_fakes(
         monkeypatch, free_with_embedder=3 * 1024 ** 3,
         free_after_evict=9 * 1024 ** 3, embedder_active=1)
@@ -451,16 +445,15 @@ def test_busy_embedder_not_evicted_for_chat_load(monkeypatch):
 
 
 def test_idle_embedder_evicted_for_split_per_device_shortfall(monkeypatch, tmp_path):
-    """Combines the two previously-unverified pieces (flagged in review): the
-    shared embedder is resident on a GPU that is also part of a configured
-    chat-model split, and it is specifically its PER-DEVICE share
+    """The shared embedder is resident on a GPU that is also part of a
+    configured chat-model split, and it is specifically its PER-DEVICE share
     (discover.gpu_split_shortfall), not just the aggregate, that goes from
-    short to sufficient once the embedder is evicted - proving the
-    embedder-eviction branch composes correctly with the split-aware gate,
-    not just the plain single-GPU path the other embedder tests here use.
-    Ratios are PINNED equal: with them unset the auto free-VRAM-proportional
-    split shrinks GPU 0's share below its free and no per-device pressure
-    exists to drive this eviction (see tests/test_gpu_split_auto_ratios.py)."""
+    short to sufficient once the embedder is evicted - so the
+    embedder-eviction branch composes with the split-aware gate, not just the
+    plain single-GPU path the other embedder tests here use. Ratios are PINNED
+    equal: with them unset the auto free-VRAM-proportional split shrinks GPU
+    0's share below its free and no per-device pressure exists to drive this
+    eviction."""
     model_a_file = tmp_path / "model-a.gguf"
     fake_registry = {"model-a": {"path": str(model_a_file), "source": "local"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
@@ -525,19 +518,19 @@ def test_idle_embedder_evicted_for_split_per_device_shortfall(monkeypatch, tmp_p
 
 
 def _mb_figure_in(text):
-    """True if *text* quotes a concrete free-VRAM figure ('<N> MB free'). The gate
-    must quote one only for a reading it actually measured (AGENTS.md rule 5)."""
+    """True if *text* quotes a concrete free-VRAM figure ('<N> MB free'). The
+    gate must quote one only for a reading it actually measured."""
     import re
     return re.search(r"\d+\s*MB free", text) is not None
 
 
 class TestInconclusiveProbeDoesNotSkipTheGate:
-    """The root-cause split: `measurable` conflated 'this box CANNOT measure free
-    VRAM' (permanent -> best-effort load is correct) with 'this PROBE did not
-    complete' (transient -> NOT a licence to skip the VRAM check). On master a
-    timed-out probe served free=None -> measurable=False -> on a fresh server
-    (nothing to evict) `if not measurable: break` loaded with NO VRAM CHECK - the
-    first load after every server start on any box whose cold driver init overruns
+    """`measurable` must not conflate 'this box CANNOT measure free VRAM'
+    (permanent -> best-effort load is correct) with 'this PROBE did not
+    complete' (transient -> NOT a licence to skip the VRAM check). A timed-out
+    probe serving free=None -> measurable=False -> `if not measurable: break`
+    loads with NO VRAM CHECK on a fresh server with nothing to evict - the
+    first load after a server start on any box whose cold driver init overruns
     the probe cap. These pin the fixed behaviour by forcing the probe status.
     """
 
@@ -559,7 +552,7 @@ class TestInconclusiveProbeDoesNotSkipTheGate:
             "the model must NOT have loaded on an unmeasured probe")
 
     def test_inconclusive_refusal_quotes_no_figure(self, monkeypatch):
-        """rule 5: the inconclusive 503 must not state a free-VRAM figure it never
+        """The inconclusive 503 must not state a free-VRAM figure it never
         measured. Contrast test_measured_refusal_quotes_the_figure below."""
         from localm.discover import GPU_PROBE_TIMEOUT
         _install_fakes(monkeypatch, free=None, status=GPU_PROBE_TIMEOUT)
@@ -591,12 +584,11 @@ class TestInconclusiveProbeDoesNotSkipTheGate:
         """Contrast with the stale-HIGH-reading test above: a genuinely
         MEASURED (probe_ok) reading, even a low one, is trustworthy enough to
         let the backend attempt the load - switch_engine's own crude
-        whole-model estimate (~5.8 GB) is not met by 2 GB free, but that no
-        longer means refuse outright: the backend's own sizing (already
-        proven by test_auto_gpu_layers.py) can still fit a partial-offload
-        load in 2 GB, and this GPU's 16 GB total easily covers it. The stale
-        case above must still refuse (an untrustworthy reading); this one,
-        being trustworthy, gets to try."""
+        whole-model estimate (~5.8 GB) is not met by 2 GB free, but that does
+        not mean refuse outright: the backend's own sizing can still fit a
+        partial-offload load in 2 GB, and this GPU's 16 GB total easily covers
+        it. The stale case above must still refuse (an untrustworthy reading);
+        this one, being trustworthy, gets to try."""
         from localm.discover import GPU_PROBE_OK
         _install_fakes(monkeypatch, free=2 * 1024 ** 3, status=GPU_PROBE_OK)
         client = TestClient(hs.create_app(None))
@@ -613,10 +605,10 @@ class TestInconclusiveProbeDoesNotSkipTheGate:
         failure must still reach the caller as a clean, specific message, not
         a raw/generic error. Hits /v1/chat/completions specifically: this
         OpenAI-compatible route does NOT wrap switch_engine/get_engine in its
-        own try/except (unlike the GUI's load-model button), so before this
-        fix's RuntimeError->HTTPException(503) conversion in switch_engine,
-        this exact case fell through to Starlette's generic "Internal server
-        error" handler, discarding the real reason (AGENTS.md rule 5)."""
+        own try/except (unlike the GUI's load-model button), so without
+        switch_engine's RuntimeError->HTTPException(503) conversion this exact
+        case falls through to Starlette's generic "Internal server error"
+        handler, discarding the real reason."""
         from localm.discover import GPU_PROBE_OK
         _install_fakes(monkeypatch, free=2 * 1024 ** 3, status=GPU_PROBE_OK,
                        fails_to_fit=True)
@@ -651,16 +643,12 @@ def _fake_stat_size(monkeypatch, path: Path, size_bytes: int):
     swapped out; every other field (including ``st_mode``) comes from the
     real underlying stat of the real tiny file.
 
-    A prior version of this test truncated a real file to the full target
-    size (15-40 GB) to drive switch_engine's real ``p.stat().st_size`` code
-    path. A code review caught that ``truncate()`` is NOT sparse on this
-    platform (verified directly: allocated blocks matched the apparent size
-    exactly) - each run wrote tens of GB for real, took minutes, and an
-    interrupted run (Ctrl-C, a CI timeout, an OOM-kill) orphaned multi-GB
-    files permanently since the cleanup ``finally`` block never got to run.
-    Faking just the stat result proves the exact same code path
-    (``p.is_file()`` True, ``file_size = p.stat().st_size``) with zero real
-    disk cost and nothing to orphan."""
+    Drives the exact same code path (``p.is_file()`` True,
+    ``file_size = p.stat().st_size``) with zero real disk cost and nothing to
+    orphan. Truncating a real file to the target size is not an option here:
+    ``truncate()`` is NOT sparse on this platform, so a 15-40 GB target
+    writes that many bytes for real and an interrupted run leaves them
+    behind."""
     path.touch()
     real_stat = Path.stat
 
@@ -677,8 +665,8 @@ def _fake_stat_size(monkeypatch, path: Path, size_bytes: int):
 
 
 class TestSplitAwareCapacityGate:
-    """AUDIT-GPU-SPLIT-1: vram_info() alone is single-GPU (see discover.py), so
-    the pre-load refusal gate (switch_engine) must weigh a load against
+    """vram_info() alone is single-GPU (see discover.py), so the pre-load
+    refusal gate (switch_engine) must weigh a load against
     discover.vram_capacity() - the COMBINED total/free across a configured
     multi-GPU split - not just the single main GPU. A model too big for one
     GPU alone but that fits split across 2+ configured devices must load, not
@@ -688,9 +676,8 @@ class TestSplitAwareCapacityGate:
     Uses a real (but tiny) model file with a FAKED stat().st_size (see
     _fake_stat_size) to actually drive file_size = p.stat().st_size through
     switch_engine's real code path, rather than the "unregistered path ->
-    fixed 4 GB" fallback other tests in this file rely on - this proves the
-    fix against the same real, size-derived vram_required arithmetic the
-    maintainer's original bug report hit, not just a hardcoded default."""
+    fixed 4 GB" fallback other tests in this file rely on, so the assertions
+    run against the same real, size-derived vram_required arithmetic."""
 
     # free_scope=device: resolve_auto_split_ratios() requires a device-global
     # reading on every configured device before computing a real proportion; an
@@ -757,13 +744,12 @@ class TestSplitAwareCapacityGate:
         """Guard: the fix must not regress to 'always assume combined capacity
         even with no split configured' - with NO split configured (single GPU
         only), this model is judged against that ONE GPU's real free VRAM
-        (14 GB), not a fictional combined figure. It is no longer refused
-        outright, though: switch_engine's own crude whole-model estimate
-        (~19 GB) exceeds that 14 GB, but the backend's own partial-offload
-        sizing (already proven by test_auto_gpu_layers.py) can still fit this
-        model on the ONE real GPU by putting some layers on CPU - exactly the
-        behavior the reported bug broke. fails_to_fit=False (the fake's
-        default) stands in for that real capability."""
+        (14 GB), not a fictional combined figure. It is not refused outright,
+        though: switch_engine's own crude whole-model estimate (~19 GB)
+        exceeds that 14 GB, but the backend's own partial-offload sizing can
+        still fit this model on the ONE real GPU by putting some layers on
+        CPU. fails_to_fit=False (the fake's default) stands in for that real
+        capability."""
         self._install(monkeypatch, tmp_path, size_bytes=15 * 1024 ** 3,
                       gpus=self._SPLIT_GPUS[:1], gpu_split_indices=None)
         app = hs.create_app(None)
@@ -777,14 +763,13 @@ class TestSplitAwareCapacityGate:
     def test_exceeds_even_the_combined_split_defers_to_backend(
             self, monkeypatch, tmp_path):
         """Combined capacity is a bigger ceiling, not an unlimited one - but
-        exceeding it is no longer a gate-level 503 with UNSET ratios: the
-        auto free-VRAM-proportional split defers to the backend's own
-        split-aware sizing (#770), which partial-offloads or refuses with
-        the accurate figure - the same #753 posture as the single-GPU
-        too-big case above. FakeEngine's default load() stands in for a
-        successful partial offload; the pinned-ratio hard refusal and the
-        backend's own clean refusal are covered in
-        tests/test_gpu_split_auto_ratios.py's TestSwitchEngineAutoDefer."""
+        exceeding it is not a gate-level 503 with UNSET ratios: the auto
+        free-VRAM-proportional split defers to the backend's own split-aware
+        sizing, which partial-offloads or refuses with the accurate figure -
+        the same posture as the single-GPU too-big case above. FakeEngine's
+        default load() stands in for a successful partial offload; the
+        pinned-ratio hard refusal and the backend's own clean refusal are
+        covered by the auto-ratio suite."""
         # 40 GB file -> needs ~49 GB, exceeds the 28 GB combined free.
         self._install(monkeypatch, tmp_path, size_bytes=40 * 1024 ** 3,
                       gpus=self._SPLIT_GPUS, gpu_split_indices=[0, 1])
@@ -800,11 +785,11 @@ class TestSplitAwareCapacityGate:
             self, monkeypatch, tmp_path):
         """A gpu_split_indices referencing a device that vanished (e.g. it was
         unplugged) must degrade to single-GPU capacity (resolve_gpu_split's own
-        contract - rule 5, do-not-hide-problems), not silently keep using a
-        combined number for hardware that is no longer there - proven by the
-        SAME real-single-GPU outcome as the no-split test above (this model
-        loads via partial offload against the ONE real 14 GB GPU), not the
-        28 GB a still-combined (stale) reading would have granted."""
+        contract), not silently keep using a combined number for hardware that
+        is no longer there - proven by the SAME real-single-GPU outcome as the
+        no-split test above (this model loads via partial offload against the
+        ONE real 14 GB GPU), not the 28 GB a still-combined (stale) reading
+        would have granted."""
         self._install(monkeypatch, tmp_path, size_bytes=15 * 1024 ** 3,
                       gpus=self._SPLIT_GPUS[:1],   # device 1 no longer detected
                       gpu_split_indices=[0, 1])
@@ -819,21 +804,20 @@ class TestSplitAwareCapacityGate:
 
 
 class TestPerDeviceSplitFitGate:
-    """AUDIT-GPU-SPLIT-2: vram_capacity()'s AGGREGATE check alone is not
-    enough for a GGUF-backend load - apply_gpu_split() divides a model by a
-    STATIC per-config ratio with no live per-device capacity awareness of its
-    own when gpu_split_ratios is PINNED (unlike the HF backend's
-    device_map="auto", which self-corrects from live per-device free VRAM
-    instead). An asymmetric split - e.g. another already-loaded model sits on
-    one configured device more than another - can then pass the aggregate
-    check while one device's actual pinned share is short, reaching the
-    native loader with too little room on that device.
+    """vram_capacity()'s AGGREGATE check alone is not enough for a GGUF-backend
+    load - apply_gpu_split() divides a model by a STATIC per-config ratio with
+    no live per-device capacity awareness of its own when gpu_split_ratios is
+    PINNED (unlike the HF backend's device_map="auto", which self-corrects from
+    live per-device free VRAM instead). An asymmetric split - e.g. another
+    already-loaded model sits on one configured device more than another - can
+    then pass the aggregate check while one device's actual pinned share is
+    short, reaching the native loader with too little room on that device.
     discover.gpu_split_shortfall() is the per-device gate that catches this
     before the native load, refusing cleanly instead of risking a native
     crash (llama.cpp can hard-abort rather than raise). With ratios UNSET
     the loader adapts (auto free-VRAM-proportional split), so the
     static-share cases here pin ratios explicitly; the auto behavior is
-    covered below and in tests/test_gpu_split_auto_ratios.py."""
+    covered below."""
 
     def _install(self, monkeypatch, tmp_path, *, filename, gpus, gpu_split_indices,
                  gpu_split_ratios=None, fails_to_fit=False):
@@ -1072,24 +1056,19 @@ class TestPerDeviceSplitFitGate:
 
 @pytest.mark.anyio
 async def test_switch_engine_vram_probe_does_not_block_event_loop(monkeypatch):
-    """Regression guard for the diagnosed idle-hang root cause PR #541 fixed
-    elsewhere: switch_engine's pre-load eviction loop calls
+    """switch_engine's pre-load eviction loop calls
     discover.vram_capacity()/gpu_split_shortfall(), which route through the
     deadline-bounded discover.list_gpus() probe - but a bounded (up to ~4s)
     block is still a block if it runs directly on the single event loop,
     freezing every OTHER concurrent coroutine for that long. This loop can
-    re-probe multiple times per eviction, so it is exposed to exactly the
-    same hang class the other call sites were fixed for.
+    re-probe multiple times per eviction.
 
     Proven with an independent heartbeat coroutine ticking on a fixed
     interval, NOT by racing against switch_engine's own request-completion
-    timing (which depends on how many other awaits happen to run first and is
-    not a reliable signal - confirmed by hand: an httpx/ASGI-based version of
-    this test kept passing even with the fix reverted, because enough
-    incidental await points elsewhere let it interleave anyway). If the event
-    loop is genuinely blocked, the heartbeat CANNOT tick during that window -
-    a deterministic, unambiguous signal regardless of switch_engine's
-    internal scheduling."""
+    timing, which depends on how many other awaits happen to run first and is
+    not a reliable signal. If the event loop is genuinely blocked, the
+    heartbeat CANNOT tick during that window - a deterministic, unambiguous
+    signal regardless of switch_engine's internal scheduling."""
     fake_registry = {"model-a": {"path": "models/model-a.gguf", "source": "local"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
     monkeypatch.setattr("localm.model_manager.get_model_info",
@@ -1177,8 +1156,8 @@ async def test_switch_engine_vram_probe_does_not_block_event_loop(monkeypatch):
 
 
 def test_eviction_waits_for_vram_release(monkeypatch):
-    """MED-11: an eviction under measurable VRAM pressure waits for the freed
-    VRAM to land (wait_for_vram_release) before re-checking / loading."""
+    """An eviction under measurable VRAM pressure waits for the freed VRAM to
+    land (wait_for_vram_release) before re-checking / loading."""
     _install_fakes(monkeypatch, free=None)
     # MEASURABLE, dynamic: total 6GB, ~4.8GB used per loaded model. One model
     # fits; a second needs the first evicted first. After the unload lands, free

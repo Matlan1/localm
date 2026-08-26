@@ -39,10 +39,10 @@ class TestSplitGgufParts:
         assert len(parts) == 2
 
     def test_path_with_directory(self):
-        # A path with a leading directory still reduces to the bare part names.
-        # Use the platform's own separator: split_gguf_parts strips the dir via
-        # Path(...).name, which only recognises the NATIVE separator, so a
-        # hardcoded Windows "D:\\..." path would not split on POSIX.
+        # A path with a leading directory still reduces to the bare part
+        # names. split_gguf_parts strips the dir via Path(...).name, which
+        # recognises only the NATIVE separator, so the path is built with the
+        # platform's own.
         import os
         p = os.path.join("models", "m-00001-of-00002.gguf")
         parts = split_gguf_parts(p)
@@ -93,10 +93,11 @@ class TestGgufBackendSplitCheck:
             (tmp_path / f"m-0000{i}-of-00002.gguf").write_bytes(b"GGUF")
         backend = GgufBackend(str(tmp_path / "m-00001-of-00002.gguf"))
         # The split check must pass; the native load itself is mocked out.
-        # _check_vram is mocked too: load() calls it unconditionally, which reaches
-        # the real _total_vram_bytes()/_free_total_vram_bytes() and a genuine
-        # `import torch` in a venv without the [gpu] extra, latching
-        # VramSizingMixin._torch_rocm_init_broken for the rest of the process.
+        # _check_vram is mocked too: load() calls it unconditionally, which
+        # reaches the real _total_vram_bytes()/_free_total_vram_bytes() and a
+        # genuine `import torch`. Only if that import RAISES (a venv without
+        # the [gpu] extra) does VramSizingMixin._torch_rocm_init_broken latch
+        # for the rest of the process.
         with patch.object(backend, "_check_vram"), \
              patch.object(backend, "_load_native") as mock_native:
             backend.load()
@@ -105,8 +106,8 @@ class TestGgufBackendSplitCheck:
 
 class TestGetModelInfoSplitNormalisation:
     # allow_direct_path=True throughout: split normalisation lives in the
-    # resolve-a-path-on-disk branch, which is now opt-in and reached only from a
-    # command line (`localm run <path>`). See get_model_info's docstring.
+    # resolve-a-path-on-disk branch, which is opt-in and reached only from a
+    # command line (`localm run <path>`).
     def test_later_part_path_resolves_to_first(self, tmp_path):
         from localm import model_manager
         for i in (1, 2):

@@ -91,9 +91,9 @@ def test_store_atomic_write_leaves_no_tmp(home):
 
 
 def test_record_result_survives_metadata_stamp_failure(home, monkeypatch):
-    """CHK-JOBS-META: if stamping the job metadata fails AFTER the result file is
-    written, record_result must still persist the result and return its id (not
-    orphan it or propagate) - the failure is surfaced via a warning, not silence."""
+    """If stamping the job metadata fails AFTER the result file is written,
+    record_result still persists the result and returns its id rather than
+    orphaning it or propagating, and warns about the stamp failure."""
     from localm.plugins.builtin.jobs.store import JobStore
     store = JobStore()
     job = store.add(_make_job(name="j"))
@@ -110,8 +110,8 @@ def test_record_result_survives_metadata_stamp_failure(home, monkeypatch):
 
 
 def test_list_results_paginates(home):
-    """CHK-JOBS-RESULTS-PAGE: list_results reads only the requested page, so a huge
-    history cannot OOM the caller; limit=None keeps the full list."""
+    """list_results reads only the requested page; limit=None keeps the full
+    list."""
     from localm.plugins.builtin.jobs.store import JobStore
     store = JobStore()
     job = store.add(_make_job(name="j"))
@@ -131,8 +131,7 @@ def test_list_results_paginates(home):
 
 
 def test_scheduler_prunes_cron_fired_for_deleted_jobs(home):
-    """CHK-JOBS-CRONLEAK: a tick drops _cron_fired entries for jobs that no longer
-    exist, so a long-running server with churny cron jobs does not leak forever."""
+    """A tick drops _cron_fired entries for jobs that no longer exist."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     sched = JobScheduler(run_job=lambda *a, **k: {})
     sched._cron_fired["ghost-job"] = 12345           # a fired cron job since deleted
@@ -238,7 +237,7 @@ def _at(y, mo, d, h, mi):
     pytest.param("0,30 * * * *", 2026, 6, 17, 4, 0, True, id="list-first"),
     pytest.param("0,30 * * * *", 2026, 6, 17, 4, 30, True, id="list-second"),
     pytest.param("0,30 * * * *", 2026, 6, 17, 4, 15, False, id="list-not_in_list"),
-    # 2026-06-15 is a Monday; dow Monday == 1.
+    # June 15 2026 is a Monday; dow Monday == 1.
     pytest.param("0 0 * * 1", 2026, 6, 15, 0, 0, True, id="day_of_week-monday"),
     pytest.param("0 0 * * 1", 2026, 6, 16, 0, 0, False, id="day_of_week-tuesday"),
 ])
@@ -519,9 +518,8 @@ def test_cli_add_cron_and_every_conflict(home):
 # --------------------------------------------------------------------------- #
 
 def test_cli_show_full_definition(home):
-    """`job show` is the CLI's only window onto allow_shell/cwd/scope - the
-    audit's 'sharpest loss' (a CLI operator could not audit which unattended
-    jobs run the shell-capable coder, nor in which cwd/scope)."""
+    """`job show` is the CLI's window onto allow_shell/cwd/scope: which
+    unattended jobs run the shell-capable coder, and in which cwd/scope."""
     from click.testing import CliRunner
     from localm.plugins.builtin.jobs.cli import main
     from localm.plugins.builtin.jobs.store import JobStore
@@ -545,15 +543,14 @@ def test_cli_show_full_definition(home):
     assert "prompt:      run the tests" in r.output
     assert "last_run:    -" in r.output           # never run yet
     assert "last_result: -" in r.output
-    # `_job_dict` strips the internal principal-binding fields; `show` must
-    # not re-derive them from the raw Job object and leak them back out.
+    # `show` renders the fields `_job_dict` exposes; the internal
+    # principal-binding fields are not re-derived from the raw Job object.
     assert "owner" not in r.output.lower()
 
 
 def test_cli_show_defaults_for_non_coder_job(home):
-    """A plain chat job has no cwd/scope/collection/allow_shell - `show` must
-    render that as '-'/'no', not omit the lines (this command's whole point is
-    a complete, predictable definition, never a kind-conditional one)."""
+    """A plain chat job has no cwd/scope/collection/allow_shell: `show` renders
+    those as '-'/'no' rather than omitting the lines."""
     from click.testing import CliRunner
     from localm.plugins.builtin.jobs.cli import main
     from localm.plugins.builtin.jobs.store import JobStore
@@ -607,9 +604,8 @@ def test_cli_results_reports_status_and_output(home):
 
 
 def test_cli_results_empty_is_not_unknown_job(home):
-    """A job with zero runs and a job that does not exist must print
-    DIFFERENT things - collapsing them would hide a typo'd id behind an
-    'ok, nothing happened yet' reading."""
+    """A job with zero runs and a job that does not exist print DIFFERENT
+    things: "No results." at exit 0 versus "No such job" at exit 1."""
     from click.testing import CliRunner
     from localm.plugins.builtin.jobs.cli import main
     from localm.plugins.builtin.jobs.store import JobStore
@@ -651,9 +647,8 @@ def test_cli_results_limit_and_offset(home):
 
 
 def test_cli_run_then_results_round_trip(home, monkeypatch):
-    """A run recorded through the pre-existing `job run` command must be
-    readable back through the new `job results` - the two compose against the
-    same store, exactly like the GUI's run-now + results panel do."""
+    """A run recorded through `job run` reads back through `job results`: the
+    two commands compose against the same store."""
     from click.testing import CliRunner
     from localm.plugins.builtin.jobs import runner
     from localm.plugins.builtin.jobs.cli import main
@@ -698,8 +693,7 @@ def test_plugin_routes_via_engine(home, monkeypatch):
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
 
     # Mock the runner so run-now needs no engine/server. plug.py calls through
-    # the runner MODULE, so patching the canonical path reaches the route even
-    # though the engine imports plug.py under a synthetic module name.
+    # the runner MODULE, so patching the canonical path reaches the route.
     import localm.plugins.builtin.jobs.runner as runner
     monkeypatch.setattr(
         runner, "run_job",
@@ -758,8 +752,8 @@ def test_jobs_in_catalog():
 
 
 def test_jobs_client_entry_is_served(home, monkeypatch):
-    """The GUI imports the Jobs view from /plugins/jobs/jobs.js; the plugin must
-    mount its static assets or the view 404s and silently never loads."""
+    """The GUI imports the Jobs view from /plugins/jobs/jobs.js, so the plugin
+    mounts its static assets there."""
     from pathlib import Path
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -843,7 +837,7 @@ def test_cron_step_fires_at_interval():
 def test_cron_dow_7_is_sunday():
     """Standard cron accepts 7 as Sunday; it must parse and normalise to 0."""
     from localm.plugins.builtin.jobs.scheduler import parse_cron
-    assert parse_cron("0 0 * * 7")[4] == {0}          # was: raised out-of-range
+    assert parse_cron("0 0 * * 7")[4] == {0}
     assert parse_cron("0 0 * * 0")[4] == {0}
     assert parse_cron("0 0 * * 1-5")[4] == {1, 2, 3, 4, 5}
 
@@ -874,8 +868,8 @@ def test_store_concurrent_adds_lose_nothing(home):
 
 
 def test_localm_job_wired_into_top_level_cli(home):
-    """`localm job ...` must be reachable from the top-level CLI (the manifest
-    cli_entry alone does not mount it; cli.py wires it like coder/mcp/gui)."""
+    """`localm job ...` is reachable from the top-level CLI: cli.py wires the
+    command in; the manifest cli_entry alone does not mount it."""
     from click.testing import CliRunner
     from localm.cli import main
     assert "job" in main.commands
@@ -931,9 +925,8 @@ def _fake_agent_capture(monkeypatch):
 
 
 def test_runner_coder_is_restricted_by_default(home, tmp_path, monkeypatch):
-    """A scheduled coder job with no opt-in must build a RESTRICTED Agent (no
-    run_shell/network). Negative-testable: pre-fix the runner never set
-    restricted, so this assertion failed."""
+    """A scheduled coder job with no opt-in builds a RESTRICTED Agent (no
+    run_shell/network)."""
     work = tmp_path / "proj"; work.mkdir()
     runner, captured = _fake_agent_capture(monkeypatch)
     job = _make_job(task_kind="coder", prompt="x", cwd=str(work), schedule=60)
@@ -1058,10 +1051,9 @@ def _install_jobs_into(home):
 
 def test_scheduler_starts_via_server_lifespan(home, monkeypatch):
     """Build the app the way `localm serve` does (create_app -> attach_engine
-    inside it -> uvicorn lifespan) and assert the scheduler actually starts
-    and a due job actually RUNS. Pre-fix, register() ran before the loop
-    existed, start() no-opped, and no scheduled job ever fired on a stock
-    server (the audit's live 3.7-minute silence)."""
+    inside it -> uvicorn lifespan): the scheduler starts and a due job RUNS.
+    register() runs before the loop exists, so the start is queued for the
+    lifespan rather than attempted immediately."""
     from fastapi.testclient import TestClient
 
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -1104,8 +1096,8 @@ def test_scheduler_starts_via_server_lifespan(home, monkeypatch):
 
 
 def test_on_startup_runs_immediately_when_loop_is_up(home):
-    """Runtime enable (management API, loop already running) must keep the old
-    behavior: the callback runs right away, nothing is queued."""
+    """Runtime enable (management API, loop already running): the callback runs
+    right away and nothing is queued."""
     import asyncio
     from types import SimpleNamespace
 
@@ -1125,7 +1117,7 @@ def test_on_startup_runs_immediately_when_loop_is_up(home):
 
 
 def test_unmount_discards_queued_startup_callbacks(home):
-    """A plugin disabled before the lifespan ran must not have its deferred
+    """A plugin disabled before the lifespan ran does not have its deferred
     startup work fire later."""
     from types import SimpleNamespace
 
@@ -1146,9 +1138,8 @@ def test_unmount_discards_queued_startup_callbacks(home):
 # --------------------------------------------------------------------------- #
 
 def test_coder_backend_uses_configured_port_not_8080(home, monkeypatch):
-    """The old hardcoded :8080 never matched the default :8642 bind, so a
-    shipped coder job could not reach the server. With no LOCALM_SELF_URL the
-    backend must target the configured port."""
+    """With no LOCALM_SELF_URL the coder backend targets the configured port,
+    not a hardcoded :8080."""
     monkeypatch.delenv("LOCALM_SELF_URL", raising=False)
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     import localm.config as cfg
@@ -1213,8 +1204,8 @@ def test_publish_self_url_does_not_override_env(monkeypatch):
 
 
 def test_cron_catch_up_fires_a_slot_missed_while_down(home):
-    """A cron slot that passed while the server was down runs ONCE on restart
-    (the docs promise it; cron used to silently skip it)."""
+    """A cron slot that passed while the server was down runs ONCE on
+    restart."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     from localm.plugins.builtin.jobs.store import JobStore
     sched = JobScheduler(JobStore())

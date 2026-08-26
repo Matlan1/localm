@@ -3,8 +3,7 @@
 
 A non-LLM registry entry (an embedding / text-encoder / LoRA / VAE / diffusion
 component, or an unclassified 'unknown') is not something you launch as the chat
-model, so it must never appear in the launcher dropdown. Regression for
-"non-LLM models show up in launcher model selector".
+model, so it must never appear in the launcher dropdown.
 """
 
 import importlib.machinery

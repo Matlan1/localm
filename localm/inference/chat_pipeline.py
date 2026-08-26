@@ -4,11 +4,9 @@ Chat-pipeline hooks: an ordered inlet / stream / outlet chain that loaded
 plugins use to intercept and transform a chat turn server-side, in the kernel
 ``/v1/chat/completions`` path.
 
-This is the convergence primitive behind cross-ecosystem chat extensions (see
+It is the convergence primitive behind cross-ecosystem chat extensions (see
 ``docs/plugin-interop.md``): Open WebUI "Filter" functions (inlet/stream/outlet)
-and oobabooga input/output text modifiers both want to mutate the prompt and the
-response, and one hook chain serves both. It is also good architecture on its
-own: a single, ordered, observable place for "transform every chat turn" logic.
+and oobabooga input/output text modifiers both map onto this one chain.
 
 Scope and layering:
   - The chain runs for EVERY client of ``/v1/chat/completions`` (the GUI, raw
@@ -19,9 +17,8 @@ Scope and layering:
     content text, not model-internal control markers. A stream hook therefore
     receives a scrubbed text piece (possibly several characters), not a raw
     model token.
-  - It is independent of localm's existing client-side context injection (RAG /
-    memory / web are assembled in the SPA before the request is sent). This is
-    the server-side seam those could migrate onto later, not a replacement.
+  - It is independent of localm's client-side context injection (RAG, memory
+    and web are assembled in the SPA before the request is sent).
 
 Phases (a hook is any callable):
   - ``inlet(messages, ctx) -> messages``    pre-inference; transform the message

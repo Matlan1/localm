@@ -1,21 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A session revocation that FAILED must never report success (AGENTS.md rule 5).
+"""A session revocation that FAILED must never report success.
 
-The sibling file tests/test_key_clear_honesty.py closed this for the CREDENTIAL
-half of the same commands. The SESSION half was left fail-silent: every revocation
-helper swallowed a store-write error and returned a value indistinguishable from
-the benign "there was nothing to revoke" case (``0`` / ``False``), so all three
-callers reported a completed sign-out while every session stayed live.
-
-``localm key recover`` is the sharpest instance and the reason this is HIGH rather
-than MEDIUM: its whole stated purpose is locking a compromised owner out, and
-unlike ``key clear`` it always configures a NEW key, so a surviving ADMIN cookie is
-not inert residue - it resolves against the fresh key immediately.
+Every revocation helper distinguishes a store-write failure from the benign
+"there was nothing to revoke" case (``0`` / ``False``), so a caller cannot
+report a completed sign-out while the sessions stay live. ``localm key recover``
+is the sharpest instance: unlike ``key clear`` it always configures a NEW key,
+so a surviving ADMIN cookie resolves against the fresh key immediately.
 
 These drive the real functions and assert from OUTSIDE the call. The failure is
-injected at the lowest honest point - the store WRITE raising OSError, which is
-exactly what a locked or read-only file does - rather than by patching the function
-under test, so every layer above it runs for real.
+injected at the lowest point - the store WRITE raising OSError, which is what a
+locked or read-only file does - rather than by patching the function under test,
+so every layer above it runs for real.
 """
 
 from __future__ import annotations
@@ -42,8 +37,7 @@ def _store_writes_fail(monkeypatch):
     """Make the session store's write raise, as a locked/read-only file does.
 
     Patches the lowest layer that actually touches the disk, NOT the revocation
-    functions under test - patching those would delete the very behaviour these
-    tests exist to measure (diff-review item 21).
+    functions under test, which would delete the behaviour being measured.
     """
     from localm import sessions
 
@@ -119,9 +113,9 @@ class TestRevocationReportsFailureDistinguishably:
 
     def test_none_stays_falsy_so_existing_truthiness_callers_are_unchanged(
             self, runner, monkeypatch):
-        """The signal is added WITHOUT inverting any existing check: None is
-        falsy, so `if revoked:` still means "say devices were signed out" and
-        never fires on a failure. Only an `is None` test learns the difference."""
+        """None is falsy, so `if revoked:` still means "say devices were signed
+        out" and never fires on a failure. Only an `is None` test learns the
+        difference."""
         from localm import sessions
         _mint_owner_session()
         _store_writes_fail(monkeypatch)
@@ -165,9 +159,9 @@ class TestClearRouteDoesNotClaimSuccess:
 
     def test_a_failed_session_revocation_is_not_reported_as_cleared(
             self, runner, monkeypatch):
-        """The credential half succeeds and the SESSION half fails. The route
-        used to return cleared:true here, which the GUI renders as open mode
-        while a live ADMIN cookie still has full access."""
+        """The credential half succeeds and the SESSION half fails: the route
+        must not return cleared:true, which the GUI renders as open mode while a
+        live ADMIN cookie still has full access."""
         from localm import auth
         _mint_owner_session()
         auth.set_api_key(KEY)
@@ -186,9 +180,9 @@ class TestClearRouteDoesNotClaimSuccess:
 
     def test_the_route_discloses_no_path_and_no_exception_text(
             self, runner, monkeypatch):
-        """Honest does not mean verbose. The store path carries the account name
-        (rule 2) and raw OS text is stack-trace exposure; neither may ride out on
-        an HTTP response, exactly as the credential half already guarantees."""
+        """The store path carries the account name and raw OS text is
+        stack-trace exposure; neither rides out on an HTTP response, matching the
+        credential half."""
         from localm import auth, sessions
         _mint_owner_session()
         auth.set_api_key(KEY)
@@ -204,9 +198,8 @@ class TestClearRouteDoesNotClaimSuccess:
 
     def test_logout_reports_a_failed_server_side_revocation(self, runner,
                                                             monkeypatch):
-        """Deleting the cookie alone leaves a replayable server session - the
-        exact state server-side revocation exists to improve on. So a logout
-        whose store write failed must not read as a clean sign-out."""
+        """Deleting the cookie alone leaves a replayable server session, so a
+        logout whose store write failed does not read as a clean sign-out."""
         from localm import auth, sessions
         from localm.inference import http_server as hs
         auth.set_api_key(KEY)
@@ -320,13 +313,9 @@ class TestKeyCliDoesNotClaimSessionsWereSignedOut:
 # --------------------------------------------------------------------------- #
 
 def test_a_key_roll_still_leaves_sessions_alone(runner):
-    """Guard against "fixing" revocation by making everything revoke.
-
-    A key ROLL (regenerate_key) must NOT sign the browser out - that is
-    deliberate, and a scheduled job created over the surviving session depends on
-    it. Revocation must only happen when something ASKED for it (clear / recover /
-    logout). Opposite triggers, opposite intents, asserted together so a later
-    change cannot satisfy one by breaking the other."""
+    """A key ROLL (regenerate_key) does NOT sign the browser out; a scheduled
+    job created over the surviving session depends on that. Revocation happens
+    only when something ASKED for it (clear / recover / logout)."""
     from localm import auth, sessions
     sid = _mint_owner_session()
 

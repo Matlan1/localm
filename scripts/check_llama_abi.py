@@ -13,18 +13,12 @@ this exits non-zero; a purely trailing field ADDITION is reported as a note (it
 is absorbed safely by the structs' reserved pad and the default_params round-trip,
 but is worth naming).
 
-IT ALSO CHECKS ENUM DOMAINS, AND THAT IS A SEPARATE QUESTION FROM LAYOUT. An
-offset check reads WHERE a field sits; it is structurally blind to WHICH VALUES
-are legal in it. Upstream added ``LLAMA_LOAD_MODE_AUTO = -1`` between b10361 and
-b10373 and made it the new default, so ``llama_model_default_params()`` began
-returning -1 into a field whose offset had not moved by one byte. localm's own
-``_VALID_LOAD_MODES`` did not list -1, so localm refused every build from b10373
-on. The layout gate was GREEN throughout, and it was not broken: it was answering
-an adjacent question. Hence the rule this file now enforces - "passes the ABI
-gate" is not the definition of a confirmed build.
+IT ALSO CHECKS ENUM DOMAINS, WHICH IS A SEPARATE QUESTION FROM LAYOUT. An
+offset check reads WHERE a field sits and is blind to WHICH VALUES are legal in
+it: a new enum member can become a function's default return without moving any
+field by a byte.
 
-The two enum outcomes are deliberately DISTINCT, and collapsing them would be the
-defect rather than the fix:
+The two enum outcomes are DISTINCT:
 
   * a NEW member appearing upstream is ADDITIVE. Reported loudly, exit code
     unchanged. It only becomes dangerous when it becomes the DEFAULT, which a
@@ -42,8 +36,6 @@ Usage:
     python scripts/check_llama_abi.py --header path/to/llama.h   # a local header
 
 Stdlib only (urllib + re + ctypes), so it runs anywhere without extra installs.
-A fuller cross-check with clang2py/ctypeslib2 is possible but needs libclang; for
-these few POD structs the lightweight parse here is sufficient and dependency-free.
 """
 
 from __future__ import annotations
@@ -73,10 +65,8 @@ class _EnumBinding(NamedTuple):
     """One upstream enum whose DOMAIN localm binds, and where it binds it.
 
     The member VALUES are never restated here - they are read live out of the
-    localm module named below. A second copy of an upstream enumerator list is a
-    second thing to forget to update, and forgetting it once already cost a live
-    outage (see the module docstring). This registry records only WHERE localm's
-    copy lives, so the verifier reads the same constants the runtime does.
+    localm module named below. This registry records only WHERE localm's copy
+    lives, so the verifier reads the same constants the runtime does.
     """
     c_enum: str      # the enum type's name in llama.h
     module: str      # the localm module holding the bound constants
@@ -373,13 +363,10 @@ def _localm_enum_binding(binding: _EnumBinding):
 def _check_enum(binding: _EnumBinding, header: str, additive: list) -> int:
     """Diff one bound enum's DOMAIN against *header*; return the problem count.
 
-    Additive findings are APPENDED to *additive* instead of counted, which is the
-    whole point of this function: a new upstream enumerator is safe on its own,
-    and hard-failing on it would train people to widen localm's accept-sets to
-    silence the gate - destroying the misaligned-read tripwire that reads them.
-    A changed value for a name localm already binds is counted, because that one
-    means localm is passing or accepting a number that no longer means what it
-    used to.
+    Additive findings are APPENDED to *additive* instead of counted: a new
+    upstream enumerator is safe on its own. A changed value for a name localm
+    already binds IS counted - localm would be passing or accepting a number
+    that no longer carries the meaning it binds.
     """
     gate_struct, gate_field = binding.gate
     struct_body = _extract_block_body(header, "struct", gate_struct)

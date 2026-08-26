@@ -31,14 +31,10 @@ def comfy_home(tmp_path, monkeypatch):
 
 
 class TestGetComfyWorkdirManagedAwareness:
-    """get_comfy_workdir()/get_comfy_api_url() used to have ZERO managed-
-    instance awareness - they resolved a per-plugin/global override the same
-    way regardless of whether localm's own ComfyUI was the actual active
-    target, so the GUI's "Scan for ComfyUI models" button could silently scan
-    the wrong folder (same bug family as
-    NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD, found
-    independently while auditing every comfy_workdir/comfy_api_url resolver
-    for the same class of gap)."""
+    """get_comfy_workdir()/get_comfy_api_url() must be managed-instance aware:
+    resolving a per-plugin or global override regardless of whether localm's
+    own ComfyUI is the active target makes the GUI's "Scan for ComfyUI models"
+    button scan the wrong folder."""
 
     def _install_managed(self, home_dir):
         from localm.media import managed_comfy as mc
@@ -60,9 +56,8 @@ class TestGetComfyWorkdirManagedAwareness:
         assert get_comfy_workdir() == r"D:\deliberate\video-comfy"
 
     def test_workdir_routes_to_managed_instance_ignoring_stale_plugin_value(self, comfy_home):
-        """The actual bug: managed is active AND installed, but a per-plugin
-        workdir left over from an unrelated custom install used to still win
-        because get_comfy_workdir() never checked managed routing at all."""
+        """Managed is active AND installed, so a per-plugin workdir left over
+        from an unrelated custom install must not win."""
         import localm.config as cfg
         paths = self._install_managed(comfy_home)
         cfg.save_config({**cfg.load_config(), "comfy_target": "own",

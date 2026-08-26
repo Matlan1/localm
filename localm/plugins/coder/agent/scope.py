@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 
-# Cache compiled scope patterns - the same scope is matched many times per run.
+# Compiled scope patterns, keyed by the scope string.
 _SCOPE_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
 
 def _glob_to_regex(pattern: str) -> "re.Pattern[str]":

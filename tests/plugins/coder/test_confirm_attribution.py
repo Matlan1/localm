@@ -1,22 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A sub-agent's label reaches the human who has to approve its tool call.
 
-#794 serialised concurrent children's confirmations and named the asker on the
-terminal, but the label stopped at the server console: a GUI user got a serialised
-yet ANONYMOUS approval card and could not tell which child was asking. These tests
-drive the REAL chain - real Agent instances, the real ``_execute_tool``
-confirmation branch, the real serialising wrapper, a real ``CoderSession`` and its
-real event queue - and pin both halves: the GUI prompt now CARRIES the label, and
-the terminal keeps the announcement line it already had.
+Concurrent children's confirmations are serialised and the asker is named on both
+surfaces. These tests drive the REAL chain - real Agent instances, the real
+``_execute_tool`` confirmation branch, the real serialising wrapper, a real
+``CoderSession`` and its real event queue - and pin both halves: the GUI prompt
+CARRIES the label, and the terminal keeps its announcement line.
 
-Only the LLM backend is substituted (no model call is ever made here), following
-the same shape as test_spawn_agent_confirmation.py, so the code under test is the
-shipped code and not a stand-in for it.
+Only the LLM backend is substituted (no model call is ever made here), the same
+shape as test_spawn_agent_confirmation.py.
 
 Every labelling assertion has a FIRES-CONTROL: the same assertion against the
-top-level agent's OWN prompt, which must stay unlabelled. Without it a test that
-merely finds the string would also pass on a build that stamped a label onto every
-prompt - which would attribute the user's own action to a child.
+top-level agent's OWN prompt, which must stay unlabelled, so a build that
+stamped a label onto every prompt fails here.
 """
 
 from __future__ import annotations
@@ -85,9 +81,9 @@ def test_only_handlers_that_opt_in_are_offered_the_label(handler, accepts):
 def test_a_handler_is_invoked_exactly_once_even_when_it_raises_typeerror():
     """A TypeError from INSIDE a handler must not be read as a signature mismatch.
 
-    A try/except fallback would re-invoke a handler that may already have prompted,
-    asking the human twice and taking the second answer. Signature inspection cannot
-    confuse the two, and this pins it: one call, and the error propagates.
+    A try/except fallback would re-invoke a handler that may already have
+    prompted, asking the human twice and taking the second answer. Signature
+    inspection is used instead: one call, and the error propagates.
     """
     calls = []
 
@@ -110,10 +106,10 @@ def test_the_answer_is_relayed_verbatim_and_never_invented():
 def test_a_callable_without_an_introspectable_signature_falls_back_safely():
     """No signature to read -> treat it as the original protocol, never guess.
 
-    ``type`` and ``dict`` genuinely raise ValueError from inspect.signature on
-    CPython; ``len`` does NOT (it reports ``(obj, /)``), so it exercises the
-    ordinary no-such-parameter path instead. Both are pinned, because a test that
-    only used ``len`` would claim to cover the except branch without entering it.
+    ``type`` and ``dict`` raise ValueError from inspect.signature on CPython;
+    ``len`` does NOT (it reports ``(obj, /)``), so it exercises the ordinary
+    no-such-parameter path instead. Both are pinned, so the except branch is
+    genuinely entered.
     """
     import inspect
     for uninspectable in (type, dict):
@@ -128,8 +124,7 @@ def test_a_handler_whose_agent_argument_is_required_works_unlabelled_too():
 
     Passing it only when a label EXISTS would make the call shape depend on the
     value, so a handler written ``def handler(call, agent)`` would work for a
-    sub-agent's prompt and raise TypeError on the top-level agent's own - an
-    intermittent break landing on the commonest case.
+    sub-agent's prompt and raise TypeError on the top-level agent's own.
     """
     seen = []
 
@@ -158,9 +153,8 @@ def test_a_child_with_no_usable_name_is_still_marked_as_a_sub_agent(tmp_path, em
     """``spawn_agent``'s name comes from the MODEL, so it can arrive empty.
 
     A falsy label would collapse to "no label" and make a delegated request look
-    exactly like the user's own - the precise confusion this path exists to stop.
-    Not knowing which child is asking is tolerable; a child's prompt passing for
-    the human's own is not.
+    exactly like the user's own, so an unnamed child still gets a generic
+    sub-agent marker.
     """
     parent = Agent(_StubBackend(), cwd=tmp_path)
     child = Agent(_StubBackend(), cwd=tmp_path, name=empty, parent=parent)
@@ -286,9 +280,8 @@ def test_fires_control_the_parents_own_gui_prompt_carries_no_child_label(tmp_pat
 def test_a_real_child_of_a_gui_session_is_named_on_the_browser_event(tmp_path):
     """The whole chain, unmocked: child Agent -> confirm chain -> GUI event.
 
-    This is the #794 scenario as a GUI user meets it. The child inherits the
-    session's handler (REG-507 precedence), so the only question is whether its
-    identity survives the trip - which is exactly what used to be lost.
+    The child inherits the session's handler, and its identity must survive the
+    trip to the browser event.
     """
     session = _gui_session(tmp_path)
     try:
@@ -363,7 +356,7 @@ def test_a_timed_out_child_confirmation_says_which_child_it_was(tmp_path, monkey
 # --------------------------------------------------------------------------
 
 def test_the_console_announcement_still_names_the_child(monkeypatch):
-    """#794's terminal half is unchanged: the line still precedes the prompt."""
+    """The terminal half: the announcement line still precedes the prompt."""
     printed: list[str] = []
     order: list[str] = []
 

@@ -80,9 +80,9 @@ class TestSplitThink:
 
 
 class TestNativeReasoningTags:
-    """CHAT-2: native reasoning tags emitted WITHOUT a channel wrapper
-    (<reasoning>, <thinking>, <thought>, <reflection>) must normalise to canonical
-    <think> so the reasoning/content split routes them instead of leaking."""
+    """Native reasoning tags emitted WITHOUT a channel wrapper (<reasoning>,
+    <thinking>, <thought>, <reflection>) must normalise to canonical <think>, so
+    the reasoning/content split routes them instead of letting them leak."""
 
     def test_bare_reasoning_becomes_think(self):
         assert scrub_text("<reasoning>why</reasoning>The answer.") == \

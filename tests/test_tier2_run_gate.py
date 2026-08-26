@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Offline tests for scripts/tier2_gpu_split/run_gate.py's timeout arithmetic
-(the Tier 2 GPU-split harness - see scripts/tier2_gpu_split/README.md). No
-network, no ssh, no GPU: a fake monotonic clock and mocked ssh_run/sleep let
-this run instantly while still proving the real invariant that matters here -
-a sub-call's own timeout must never exceed what is actually left of its
-caller's deadline. A fixed literal sub-timeout larger than the caller's
-remaining budget (e.g. a 20s per-attempt ssh timeout invoked from inside a
-loop whose own deadline is only a few seconds away) lets that single call
-overshoot silently, and enough of those compound into the run's overall
---timeout-minutes ceiling not actually holding - exactly the failure mode this
-harness exists to prevent (a wedged run must not bill open-ended).
+"""Offline tests for scripts/tier2_gpu_split/run_gate.py's timeout arithmetic.
+
+No network, no ssh, no GPU: a fake monotonic clock and mocked ssh_run/sleep
+exercise the invariant that a sub-call's own timeout never exceeds what is left
+of its caller's deadline. A fixed literal sub-timeout larger than the caller's
+remaining budget lets that single call overshoot silently, and enough of those
+compound into the run's overall --timeout-minutes ceiling not holding.
 """
 
 from __future__ import annotations
@@ -122,13 +118,12 @@ def test_lambda_wait_for_active_bounds_every_poll_by_its_own_remaining_deadline(
 
 
 def test_run_exits_3_and_warns_by_name_on_a_possible_launch_orphan(monkeypatch, tmp_path):
-    """Regression test for a confirmed review finding: if the Lambda launch
-    POST fails AFTER potentially creating a billable instance server-side (a
-    network read error/reset while parsing the launch response, not a clean
-    pre-launch failure), teardown() has no instance id to call terminate() on
-    - so the harness must still exit 3 (a billing risk) and print an
-    actionable by-NAME dashboard-check warning, not silently fall through to
-    a generic exit 2 with zero guidance for the operator."""
+    """When the Lambda launch POST fails AFTER potentially creating a billable
+    instance server-side (a network read error or reset while parsing the launch
+    response, not a clean pre-launch failure), teardown() has no instance id to
+    call terminate() on - so the harness still exits 3 (a billing risk) and
+    prints an actionable by-NAME dashboard-check warning rather than falling
+    through to a generic exit 2."""
     fake_key_file = tmp_path / "fake_key"
     fake_key_file.write_text("not a real key")
 

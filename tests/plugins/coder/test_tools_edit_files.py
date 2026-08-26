@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""edit_files - the multi-file exact-string batch edit (WORKITEMS B3).
+"""edit_files - the multi-file exact-string batch edit.
 
 The contract worth testing is ATOMICITY: a batch either applies completely or
 leaves every target byte-identical to how it started. Two distinct failure
@@ -10,8 +10,8 @@ points have to hold that line:
 - a FAILED WRITE partway through the batch. The already-written files must be
   restored from the pre-batch snapshots.
 
-Both are tested against real files on disk and asserted on BYTES, not on the
-tool's own report - a tool that says "rolled back" is not evidence that it did.
+Both are tested against real files on disk and asserted on BYTES, never on the
+tool's own report.
 """
 
 from unittest.mock import patch
@@ -144,8 +144,8 @@ class TestAllOrNothing:
             assert (project / name).read_bytes() == original, f"{name} not restored"
 
     def test_a_failed_rollback_is_reported_never_claimed_clean(self, project):
-        """RULE 5: if the restore itself fails, the tool must say so - a caller
-        told 'rolled back' while a file holds a partial edit is the worst case."""
+        """If the restore itself fails, the tool must say so: a caller told
+        'rolled back' while a file holds a partial edit is the worst case."""
         real_write_text = type(project).write_text
 
         def failing_write_text(self, *args, **kwargs):

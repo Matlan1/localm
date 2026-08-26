@@ -88,8 +88,8 @@ class TestExposedBindWarning:
         assert _exposed_bind_warning("0.0.0.0") is None
 
     def test_lan_bind_with_weak_key_warns(self, monkeypatch):
-        # A too-short key (e.g. via the env var, bypassing the set-time floor)
-        # must NOT silence the warning - it is effectively unauthenticated.
+        # A too-short key (via the env var, bypassing the set-time floor) does
+        # NOT silence the warning.
         monkeypatch.setenv("LOCALM_API_KEY", "1")
         w = _exposed_bind_warning("0.0.0.0")
         assert w is not None and "WEAK" in w

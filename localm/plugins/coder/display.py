@@ -110,18 +110,16 @@ def print_assistant_response(text: str, name: str = "Agent") -> None:
 
 
 def print_streaming_token(token: str) -> None:
-    # R31 (CLI half): append-only streaming with end="" - styling escapes only, never
-    # cursor repositioning / alt-screen / a Live region. The terminal owns scrolling,
-    # so scrolling up mid-stream pauses auto-follow natively (the CLI analogue of the
-    # GUI's chat.stick latch; no latch needed because we never re-pin the viewport).
-    # Guarded by tests/test_cli_stream_scroll.py.
+    # Append-only streaming with end="" - styling escapes only, never cursor
+    # repositioning / alt-screen / a Live region. The terminal owns scrolling, so
+    # scrolling up mid-stream pauses auto-follow natively; the viewport is never
+    # re-pinned.
     console.print(token, end="", highlight=False)
 
 
 def print_reasoning_token(token: str) -> None:
     """Stream a thinking model's reasoning dimmed, so it reads as an aside next
-    to the visible answer rather than being indistinguishable from it (H4,
-    AUD-HIGH-17-3) - mirrors the chat REPL's ``_ThinkPrinter`` styling."""
+    to the visible answer. Mirrors the chat REPL's ``_ThinkPrinter`` styling."""
     console.print(token, end="", style="dim", highlight=False)
 
 

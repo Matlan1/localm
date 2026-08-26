@@ -202,13 +202,12 @@ def search_cmd(query, limit, list_files):
                 sys.exit(1)
             total = vram_capacity().get("total")
             if total:
-                # Name what the number is: vram_capacity() sums across a configured
-                # 2+ GPU split, otherwise it is the single main GPU's ceiling - so
-                # do not call a one-GPU number the machine "total" (a 2x16 GB box
-                # with no split has a 16 GB main-GPU ceiling, not 32). Gate on the
-                # DETECTED split device count (split_device_count), the same signal
-                # vram_capacity() used, not the raw config length - a stale index or
-                # a GGUF-only box leaves a 2-entry split resolving to one device.
+                # Name what the number is: vram_capacity() sums across a
+                # configured 2+ GPU split, otherwise it is the single main GPU's
+                # ceiling. The wording is gated on the DETECTED split device count
+                # (split_device_count, the signal vram_capacity() itself used), not
+                # the raw config length: a stale index or a GGUF-only box leaves a
+                # 2-entry split resolving to one device.
                 from ..discover import split_device_count
                 n_split = split_device_count()
                 basis = (f"{total / 1024**3:.0f} GB combined across your "
@@ -326,8 +325,8 @@ def rm(model, yes):
             epath = _entry_path(reg[model])
             if epath is None:
                 # A malformed / corrupt entry: no valid file to describe, and
-                # reg[model]["path"] would itself raise. Confirm a plain drop -
-                # remove_model then clears the corrupt name (CLI recovery path).
+                # reg[model]["path"] would itself raise. Confirm a plain drop;
+                # remove_model then clears the corrupt name.
                 click.confirm(
                     f"Remove corrupt registry entry '{model}'?", abort=True)
             else:
@@ -336,10 +335,9 @@ def rm(model, yes):
                 if others:
                     detail = (f"unregisters the name only - file kept, "
                               f"still registered as: {', '.join(others)}")
-                # Same predicate as remove_model's delete gate, via the one
-                # shared helper, so this prompt can never promise a deletion the
-                # gate will not perform (a sibling <data dir>/models-old file
-                # used to be announced as "PERMANENTLY deletes").
+                # Same predicate as remove_model's delete gate, through the one
+                # shared helper, so this prompt never promises a deletion the gate
+                # will not perform.
                 elif is_owned_model_path(path):
                     if path.exists():
                         size = path.stat().st_size / 1024**3 if path.is_file() else None
@@ -348,8 +346,7 @@ def rm(model, yes):
                     else:
                         # Owned but already gone: remove_model's `owned and
                         # path.exists()` gate skips the delete, so this is a
-                        # name-only drop - and calling it "outside <data
-                        # dir>/models" would be false.
+                        # name-only drop.
                         detail = "unregisters the name only (the file is already missing)"
                 else:
                     detail = "unregisters the name only (file is outside <data dir>/models)"
@@ -399,8 +396,8 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
       localm add D:\\models\\mymodel.gguf --store copy   # copy into <data dir>/models
       localm add D:\\models\\mymodel.gguf --store move   # move into <data dir>/models
     """
-    # Resolve add_local from the package at call time so tests that monkeypatch
-    # localm.cli.add_local affect this call site.
+    # Resolve add_local from the package at call time, so a rebound
+    # localm.cli.add_local is used here.
     from localm import cli as _cli
     add_local = _cli.add_local
     model_type = None if type == "auto" else type
@@ -437,13 +434,6 @@ def _rename_on_running_server(old_name: str, new_name: str):
     Returns True on success, False when the server refused the rename ITSELF
     (already reported to the user, and renaming locally would fail the same
     way), or None when the caller should go ahead and rename locally.
-
-    Why this exists: a rename done in THIS process moves the registry entry
-    while a running server keeps its loaded engine keyed under the OLD name -
-    two processes, no shared memory. The server then believes it is serving a
-    model the registry no longer lists, requests naming the NEW name reload the
-    same file into a second engine, and every name-keyed check on the server
-    side is asking about a name nothing is under.
     """
     import os
 
@@ -467,22 +457,16 @@ def _rename_on_running_server(old_name: str, new_name: str):
                              params={"model": old_name, "new_name": new_name},
                              timeout=60, verify=tls.requests_verify(url))
     except requests.ConnectionError as e:
-        # Never established, so the server certainly did not act. Usually a
-        # stale registry entry for a process that has gone. Say so at the
-        # altitude it deserves and fall back, rather than refusing a rename
-        # because of a dead entry. (ConnectTimeout subclasses this, and it
-        # belongs here: no connection means no request.)
+        # The connection was never established, so the server did not act; fall
+        # back to the local rename. ConnectTimeout subclasses this, and belongs
+        # here: no connection means no request.
         console.print(f"[dim]No reachable server at {show_url(url)} ({e}) - "
                       f"renaming locally.[/dim]")
         return None
     except requests.RequestException as e:
-        # The request WAS sent and the reply did not arrive (a read timeout
-        # while the plugin executor is busy is the realistic one). Whether the
-        # rename was applied is now unknown, and BOTH wrong answers cost the
-        # user something: renaming locally on top of a rename that succeeded
-        # reports "Not found" for work that actually completed, and reporting
-        # success for one that did not is a rule 5 violation. The registry is
-        # the ground truth, so read it rather than guess.
+        # The request WAS sent and no reply arrived, so whether the rename was
+        # applied is unknown. Read the registry, which is the ground truth, and
+        # report from that rather than guessing.
         from ..config import load_registry
         from ..model_manager import _sanitize_name
         safe = _sanitize_name(new_name)
@@ -510,23 +494,19 @@ def _rename_on_running_server(old_name: str, new_name: str):
         detail = resp.json().get("detail", "")
     except Exception:
         pass
-    # Match the two verdicts the rename route itself raises, NOT the status
-    # code alone: a server too old to have this route answers 404 as well, with
-    # FastAPI's bare "Not Found", and treating that as "model not registered"
-    # would refuse a rename the user is perfectly entitled to. Falling through
-    # to the local rename is the safe direction; refusing is not.
+    # Match the two verdicts the rename route itself raises, not the status code
+    # alone: a server with no such route answers 404 too, with FastAPI's bare
+    # "Not Found". Anything unmatched falls through to the local rename.
     _verdict = detail.lower()
     if resp.status_code in (404, 409) and (
             "not registered" in _verdict or "already taken" in _verdict):
-        # The server's own verdict on the rename itself. Renaming locally would
-        # fail identically, so report it and stop rather than going behind its
-        # back.
+        # The server's own verdict on the rename itself. Report it and stop; a
+        # local rename would fail identically.
         console.print(f"[red]{detail}[/red]")
         return False
-    # Anything else (401 without a key, a server too old to have the route, a
-    # 5xx) leaves the rename undone, and the user asked for a rename. Do it
-    # locally and say plainly what the running server now believes - a silent
-    # fallback here is how the server ends up serving an orphaned name.
+    # Anything else (401 without a key, a server with no such route, a 5xx)
+    # leaves the rename undone: do it locally and state what the running server
+    # still believes.
     console.print(f"[yellow]The running server declined the rename "
                   f"({resp.status_code}{': ' + detail if detail else ''}).[/yellow]")
     console.print("[yellow]Renaming locally; that server will keep the model "
@@ -626,10 +606,9 @@ def ps_cmd():
         alive = r.get("alive")
         status = "[green]live[/green]" if alive else "[yellow]no answer[/yellow]"
         scheme = r.get("scheme", "http")
-        # The BIND address, as this column has always shown (0.0.0.0 for a
-        # wildcard bind), only bracketed now so an IPv6 literal is legible.
-        # Deliberately NOT self_connect_host: this column answers "what did this
-        # instance bind", and the sibling `localm status` line says the same.
+        # The BIND address (0.0.0.0 for a wildcard bind), bracketed so an IPv6
+        # literal is legible. Not self_connect_host: this column answers what the
+        # instance bound.
         addr = show_url(f"{scheme}://"
                         f"{url_host(r.get('host') or '127.0.0.1')}"
                         f":{r.get('port', '?')}")
@@ -644,9 +623,8 @@ def ps_cmd():
 
 
 def _fmt_age(seconds) -> str:
-    """A coarse human age. Coarse deliberately: this is "how long has this been
-    going", not a stopwatch, and a precise-looking figure invites the reader to
-    trust a precision the poll interval does not have."""
+    """A coarse human age ("45s", "12m", "3h07m") for how long something has
+    been going. Returns "" for None or a negative *seconds*."""
     if seconds is None or seconds < 0:
         return ""
     s = int(seconds)
@@ -667,12 +645,9 @@ def _print_activity(scheme: str, port, instance_token=None,
                       f"doing ({payload}). It may have just stopped.")
         return
     if state == "unauthorized":
-        # #953: lead with the SAME "could not ask" framing as the unreachable
-        # branch above, not with "needs a key" - that phrasing reads as an
-        # optional hardening tip rather than what it actually is, a genuine
-        # inability to answer. B1/B2 are the reminder this exists for: a busy
-        # and an idle server print this identical message, so it must never
-        # imply "nothing is running" - it means this client cannot tell.
+        # Lead with the same "could not ask" framing as the unreachable branch
+        # above. A busy and an idle server print this identical message, so it
+        # must never imply nothing is running: it means this client cannot tell.
         console.print("[yellow]![/yellow]  Could not ask this server what it "
                       "is doing: it requires an API key this client does not "
                       "have.")
@@ -698,12 +673,11 @@ def _print_activity(scheme: str, port, instance_token=None,
     for op in ops:
         label = op.get("label") or op.get("kind") or "operation"
         pct = op.get("pct")
-        # Absent, not zero: an operation that has not reported progress is at an
-        # UNKNOWN percentage, so print nothing rather than a confident 0%.
+        # An operation that has not reported progress is at an UNKNOWN
+        # percentage: print nothing rather than 0%.
         pct_s = f"  {pct:.0f}%" if isinstance(pct, (int, float)) else ""
-        # Age against the SERVER's clock, never this machine's: the two can
-        # disagree, and a wrong duration is exactly the kind of confident
-        # falsehood this command exists to avoid.
+        # Age against the SERVER's clock, never this machine's; the two can
+        # disagree.
         age = ""
         if isinstance(now, (int, float)) and isinstance(op.get("created_at"), (int, float)):
             age = _fmt_age(now - op["created_at"])
@@ -711,10 +685,8 @@ def _print_activity(scheme: str, port, instance_token=None,
         status = op.get("status") or "?"
         colour = {"running": "cyan", "done": "green",
                   "failed": "red", "cancelled": "yellow"}.get(status, "white")
-        # The id and the cancellable flag were both already in this payload and
-        # both were dropped on the floor here, which left the terminal able to
-        # WATCH a two-hour re-embed and unable to name it, let alone stop it.
-        # Job ids are 12 hex chars, short enough to print whole and type.
+        # Job ids are 12 hex chars, printed whole so they can be typed back into
+        # `localm cancel`.
         op_id = op.get("id")
         id_s = f"  [dim]{op_id}[/dim]" if op_id else ""
         if op.get("cancellable") and op_id:
@@ -747,11 +719,9 @@ def status_cmd(project):
     console.print(f"  [bold]surface  [/bold]  {entry.get('mode')}")
     console.print(f"  [bold]pid      [/bold]  {entry.get('pid')}")
     console.print(f"  [bold]version  [/bold]  {entry.get('version')}")
-    # The one place a terminal can learn what a running server is actually
-    # doing. Everything above is read from the on-disk instance registry and is
-    # fixed at process start; none of it can tell you a model pull is halfway
-    # through. Printed last so the identity block still renders when the server
-    # cannot be reached.
+    # Everything above is read from the on-disk instance registry and is fixed at
+    # process start; this asks the server what it is doing now. Printed last, so
+    # the identity block still renders when the server cannot be reached.
     _print_activity(scheme, entry.get("port"), entry.get("token"),
                     entry.get("host"))
     console.print()
@@ -763,10 +733,9 @@ def status_cmd(project):
 def _match_operation(ops, wanted: str):
     """The one operation whose id is *wanted* or starts with it.
 
-    Returns ``(op, error)``; exactly one is None. Prefix matching mirrors
-    ``localm stop``, which takes an instance-id prefix for the same reason -
-    an id is a copy-paste target, and refusing a unique prefix buys nothing.
-    An AMBIGUOUS prefix is an error, never a silent pick of the first match.
+    Returns ``(op, error)``; exactly one is None. *error* is ``"none"`` when
+    nothing matches, and ``"ambiguous"`` when a prefix matches more than one
+    operation - never resolved by picking the first match.
     """
     exact = [o for o in ops if str(o.get("id") or "") == wanted]
     if exact:
@@ -798,12 +767,10 @@ def cancel_cmd(operation_id):
         sys.exit(1)
     url, headers = server
 
-    # Resolve the id against what the server says it is doing, BEFORE posting.
-    # Two reasons, and neither is convenience: it is what lets a prefix work,
-    # and it is what lets this command tell "already finished" apart from
-    # "cancelling" - POSTing blind to a finished job returns the same
-    # {"status": "cancelling"} as a real cancellation, so reporting that back
-    # would claim to have stopped something that had already stopped.
+    # Resolve the id against what the server says it is doing BEFORE posting:
+    # that is what makes a prefix work, and what tells "already finished" apart
+    # from "cancelling", since POSTing to a finished job returns the same
+    # {"status": "cancelling"} as a real cancellation.
     state, payload = server_call(url, headers, "GET", "/api/activity", timeout=10)
     if state != "ok":
         report_server_failure(state, payload, "ask the server what it is doing")
@@ -839,8 +806,7 @@ def cancel_cmd(operation_id):
     label = op.get("label") or op.get("kind") or "operation"
     # "cancelling", not "cancelled": the server sets a cooperative flag and
     # terminates any subprocess, and an in-process job stops at its next
-    # checkpoint. Claiming it is already stopped would be a state this command
-    # never observed.
+    # checkpoint, which this command does not wait for.
     console.print(f"[green]Cancelling[/green] {label} [dim]({op['id']})[/dim]")
     console.print("[dim]Confirm with[/dim] localm status")
 
@@ -863,9 +829,9 @@ def config_cmd(key, value):
         validated = validate_update({key: value})
     except ValueError as e:
         raise click.ClickException(str(e))
-    # APP-LIFECYCLE-1: update_config() is the atomic read-modify-write helper
-    # (a bare load_config()/save_config() pair has an unlocked window where a
-    # concurrent config write can be silently lost).
+    # update_config() is the atomic read-modify-write helper; a bare
+    # load_config()/save_config() pair has an unlocked window in which a
+    # concurrent config write is lost.
     update_config(lambda cfg: cfg.update(validated))
     console.print(f"[green]✓[/green] {key} = {validated[key]}")
 
@@ -890,13 +856,12 @@ def gpus_cmd():
     cfg = load_config()
     configured = cfg.get("main_gpu_index")
     split = cfg.get("gpu_split_indices") or []
-    # A one-shot CLI must wait out a slow COLD GPU driver init (the first
-    # torch.cuda / HIP call, measured up to ~6.5s) rather than misreport it as
-    # "no GPU" - the retired 4.0s default did exactly that (#581). The deadline
-    # is passed explicitly (an alias of today's cold-init-tolerant default) to
-    # pin that tolerance against any future default change. The status tells a
-    # genuine empty result apart from a timeout so the message never blames "no
-    # torch" for a probe that simply had not finished (AGENTS.md rule 5).
+    # The deadline is passed explicitly, pinning a cold-init-tolerant value
+    # against any change to the probe's default: a one-shot CLI has to wait out a
+    # cold GPU driver init (the first torch.cuda / HIP call) instead of reporting
+    # "no GPU". The returned status separates a genuine empty result from a
+    # timeout, so the message below never blames "no torch" for a probe that had
+    # not finished.
     gpus, status = discover.list_gpus(
         deadline=discover._GPU_PROBE_CLI_DEADLINE, return_status=True)
     if not gpus:
@@ -918,30 +883,24 @@ def gpus_cmd():
             markers.append("[cyan](split)[/cyan]")
         marker = "  " + " ".join(markers) if markers else ""
         free = g.get("free")
-        # Trustworthy only when THIS reading is both fresh and device-global -
-        # the same two-part definition sysstats._vram_reading_trusted() already
-        # applies for the GUI/MCP stats surface:
-        #   * fresh - status == GPU_PROBE_OK. list_gpus() can return a non-empty
-        #     `gpus` that is really a served LAST-KNOWN-GOOD value from an
-        #     EARLIER successful probe when THIS call timed out / was busy /
-        #     inconclusive (see its own docstring) - a stale reading is not a
-        #     current measurement even when it looks like one.
-        #   * device-global - not PROCESS-scoped, and not an untagged reading on
-        #     a platform known to be blind to other processes' VRAM (Windows +
-        #     AMD ROCm/HIP): a process-scoped free counts only this process's
-        #     own allocations and overstates what is actually available.
+        # A free reading counts as trustworthy only when it is both fresh and
+        # device-global, the same two-part test sysstats._vram_reading_trusted()
+        # applies:
+        #   * fresh - status == GPU_PROBE_OK. A non-empty `gpus` can otherwise be
+        #     a served last-known-good value from an earlier probe when this call
+        #     timed out, was busy or was inconclusive.
+        #   * device-global - not PROCESS-scoped, and not an untagged reading on a
+        #     platform blind to other processes' VRAM (Windows + AMD ROCm/HIP). A
+        #     process-scoped free counts only this process's own allocations and
+        #     overstates what is available.
         untrusted = isinstance(free, int) and (
             status != discover.GPU_PROBE_OK
             or g.get("free_scope") == discover.FREE_SCOPE_PROCESS
             or (g.get("free_scope") != discover.FREE_SCOPE_DEVICE
                 and gpu_usage.raw_reading_is_process_scoped()))
-        # AGENTS.md rule 5: a caveat beside a wrong number is not a correction.
-        # This used to print the untrusted free figure anyway, with only a DIM
-        # parenthetical beside it - easy to miss, and still a wrong number
-        # presented as fact (e.g. "15.9 GB free" on a card that is nearly
-        # full). Show total-only instead, exactly like sysstats._vram() already
-        # does for the GUI/MCP surface: omitting a number this cannot stand
-        # behind is not a loss of information, printing a wrong one is.
+        # An untrusted free reading is omitted, not printed with a caveat: the
+        # row shows the total only, as sysstats._vram() does for the GUI/MCP
+        # surface.
         if isinstance(free, int) and not untrusted:
             free_s = f"{free / 1024**3:.1f} GB free / "
             note = ""
@@ -997,12 +956,11 @@ def unload_cmd(model):
         scheme = entry.get("scheme", "http")
         url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
-    # Owner key (env, else persisted auth.key) wins; else the discovered
-    # instance's own attach token (0600 per-instance registry file) - what
-    # _origin_guard's open-mode management gate accepts in place of a key.
-    # Only available when the server was found via discovery (find_attachable,
-    # above); an explicit LOCALM_URL override has no registry entry to read a
-    # token from.
+    # The owner key (env, else persisted auth.key) wins; otherwise the discovered
+    # instance's own attach token, which _origin_guard's open-mode management gate
+    # accepts in place of a key. A token exists only when the server was found via
+    # discovery: an explicit LOCALM_URL override has no registry entry to read one
+    # from.
     headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
 
     try:
@@ -1027,20 +985,17 @@ def unload_cmd(model):
 
     data = resp.json()
     if data.get("status") == "already_unloaded":
-        # A targeted unload on a registered-but-not-loaded model is a no-op
-        # success (idempotent, matches the unload-everything "nothing to do"
-        # case) - say so plainly rather than claiming something was unloaded.
+        # A targeted unload on a registered-but-not-loaded model is an idempotent
+        # no-op success, reported as such rather than as an unload.
         console.print(f"[dim]'{data.get('model', model)}' was not loaded - nothing to do.[/dim]")
         return
     unloaded = data.get("unloaded_models")
     if unloaded is None:
         unloaded = [data["model"]] if data.get("model") not in (None, "none") else []
     else:
-        # unload-all's unloaded_models lists only chat engines; the shared
-        # embedding model (a separate lifecycle - see localm.inference.embedder)
-        # is reported via embedder_unloaded, so it needs naming here too or a
-        # resident embedder alone prints "Nothing was loaded" despite actually
-        # freeing VRAM.
+        # unload-all's unloaded_models lists chat engines only. The shared
+        # embedding model has its own lifecycle and is reported separately via
+        # embedder_unloaded, so it is named here too.
         unloaded = list(unloaded)
         if data.get("embedder_unloaded"):
             unloaded.append("embedding model")
@@ -1122,10 +1077,9 @@ def stop_cmd(instance_id, stop_all, timeout):
         scheme = entry.get("scheme", "http")
         url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
-        # Per-target: --all / an id prefix can span several instances, each
-        # with its OWN attach token, so the open-mode fallback must be
-        # resolved inside the loop (the owner key, if any, is process-wide
-        # and resolve_bearer_headers re-reads it identically each time).
+        # Resolved per target: --all or an id prefix can span several instances,
+        # each with its OWN attach token. The owner key, if any, is process-wide
+        # and resolve_bearer_headers re-reads it identically each time.
         headers = resolve_bearer_headers(entry.get("token"))
 
         stopped = False
@@ -1134,13 +1088,10 @@ def stop_cmd(instance_id, stop_all, timeout):
             resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,
                                  timeout=5, verify=tls.requests_verify(url))
             if resp.status_code in (401, 403):
-                # The open-mode management gate refuses an unauthenticated
-                # POST from a bare local client with no shell/API-key credential -
-                # this is the DEFAULT case for a plain `localm run`/`gui`/`serve`
-                # with no LOCALM_API_KEY configured (the same gate `localm unload`
-                # hits unauthenticated), not a rare misconfiguration. Fall back to
-                # a direct kill rather than hard-failing, or `stop` would not work
-                # for the common case this command exists for.
+                # The open-mode management gate refuses an unauthenticated POST
+                # from a local client with no shell or API-key credential, which
+                # is the default for a plain `localm run`/`gui`/`serve` with no
+                # LOCALM_API_KEY. Fall back to a direct kill.
                 graceful_denied = True
             elif resp.status_code == 200:
                 deadline = time.monotonic() + timeout
@@ -1161,13 +1112,10 @@ def stop_cmd(instance_id, stop_all, timeout):
             stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
             if stopped:
                 # A direct kill bypasses the server's own clean-shutdown path
-                # (_do_shutdown), which is what normally clears the crash
-                # marker - without this, the next `localm` start would
-                # misreport this INTENTIONAL stop as a crash and file a
-                # spurious bug report. Only after confirming the process is
-                # actually gone (never before attempting the kill): if the
-                # kill had failed, the still-running process must keep its
-                # marker so a later genuine crash is still caught.
+                # (_do_shutdown), which normally clears the crash marker, so clear
+                # it here or the next `localm` start reports this stop as a crash.
+                # Runs only after the process is confirmed gone, never before the
+                # kill is attempted: a still-running process must keep its marker.
                 try:
                     from localm import bugreport
                     bugreport.disarm_crash_guard(

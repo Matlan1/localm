@@ -2,12 +2,11 @@
 """Per-key ownership for the generated-media galleries (image/music/video).
 
 Each media plugin's file/delete/move/rename/history routes serve artifacts off a
-flat directory on disk with no per-request auth check of their own - the
-generation JOB is owner-stamped (`localm.plugins.builtin.jobs.plug`'s pattern:
-`job_owner_ok` / `owned_job` in `localm.inference.http_server`), but the
-resulting FILE never was. This module gives the media plugins the same
-stamp-at-creation + check-at-access pattern jobs already has, applied to
-filesystem artifacts instead of JobStore records.
+flat directory on disk with no per-request auth check of their own. This module
+gives them the same stamp-at-creation + check-at-access pattern jobs uses
+(`localm.plugins.builtin.jobs.plug`'s `job_owner_ok` / `owned_job` in
+`localm.inference.http_server`), applied to filesystem artifacts instead of
+JobStore records.
 
 The owner index lives OUTSIDE the served gallery directory (a sibling file under
 the data dir), so it is never reachable through the gallery's own confined
@@ -33,10 +32,9 @@ class GalleryIndexUnreadable(Exception):
     truncated, locked, or a permission error), so ownership is INDETERMINATE.
 
     Callers must FAIL CLOSED - deny a non-owner - rather than treat every
-    artifact as unowned/open. This is deliberately distinct from a genuinely
-    ABSENT index (the benign open/untracked case): collapsing "corrupt" into
-    "empty dict" is a fail-OPEN of an authorization gate, exactly the
-    missing-vs-corrupt conflation AGENTS.md rule 5 forbids."""
+    artifact as unowned/open. Distinct from a genuinely ABSENT index (the benign
+    open/untracked case): collapsing "corrupt" into "empty dict" would be a
+    fail-OPEN of an authorization gate."""
 
 
 def _index_path(media_kind: str) -> Path:
@@ -47,10 +45,8 @@ def _index_path(media_kind: str) -> Path:
 def _read_index(media_kind: str) -> dict:
     """The owner map for *media_kind*. Returns {} ONLY when the index is
     genuinely absent (the benign open/untracked case). When the file EXISTS but
-    cannot be read or parsed, raise GalleryIndexUnreadable instead of returning
-    {}: an empty map makes owner_of() report EVERY artifact as unowned, which
-    job_owner_ok() treats as unrestricted - a silent fail-open of the ownership
-    gate. The callers on the auth path translate the exception into a deny."""
+    cannot be read or parsed, raises GalleryIndexUnreadable instead of returning
+    {}. The callers on the auth path translate the exception into a deny."""
     p = _index_path(media_kind)
     if not p.is_file():
         return {}
@@ -64,12 +60,8 @@ def _read_index(media_kind: str) -> dict:
             "rather than treating every artifact as unowned", p, e, media_kind)
         raise GalleryIndexUnreadable(str(p)) from e
     if not isinstance(data, dict):
-        # Whether json.loads() SUCCEEDED is an implementation detail, not the
-        # security property. A file that parses to a list/null/scalar is still
-        # "exists but is not a usable owner map", so it fails closed exactly
-        # like a truncated one: returning {} here would make owner_of() report
-        # every artifact unowned -> job_owner_ok() -> unrestricted, which is
-        # the very fail-open this function exists to prevent.
+        # A file that parses to a list/null/scalar is still "exists but is not
+        # a usable owner map", so it fails closed exactly like a truncated one.
         from localm.debuglog import logger
         logger.warning(
             "gallery ownership index %s parsed as %s, not an object; failing "
@@ -80,24 +72,14 @@ def _read_index(media_kind: str) -> dict:
 
 
 def _write_index(media_kind: str, data: dict) -> None:
-    """Persist the owner map ATOMICALLY (unique temp file + replace, the same
-    crash- and concurrency-safe pattern jobs' store and comfy_patches already
-    use). A plain in-place write could leave a half-written index that the next
-    read would have to reject; the atomic swap removes that routine corruption
-    trigger so the fail-closed read path stays a rare last resort.
+    """Persist the owner map ATOMICALLY (unique temp file + replace), so no
+    half-written index the next read would have to reject is ever left behind.
 
     Delegates to ``storekit.atomic_write``, the shared kernel helper rag's and
-    memory's stores already use, rather than hand-rolling a third copy of the
-    same swap - storekit exists precisely because independent copies drifted
-    (CF-9/CF-10: one had the Windows retry, the other did not). This one had
-    drifted the same way: a bare os.replace with NO bounded retry, so an external
-    handle on the index at the swap instant (an AV mid-scan, the Search Indexer, a
-    backup agent, the user's file browser) raised PermissionError and 500'd the
-    request even though the media file was already on disk - leaving the caller
-    told that generation/delete failed and the new file un-stamped, hence
-    untracked. The prior in-place write needed only write access and so SUCCEEDED
-    in exactly those cases, making this a Windows-only regression on the happy
-    path (REG-631). storekit rides out the transient lock and cleans up its temp.
+    memory's stores also use. It rides out a transient external handle on the
+    index at the swap instant (an AV mid-scan, the Search Indexer, a backup
+    agent, the user's file browser), which a bare os.replace answers with
+    PermissionError, and it cleans up its own temp file.
     """
     p = _index_path(media_kind)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -115,17 +97,12 @@ def stamp_owner(media_kind: str, name: str, owner: Optional[str]) -> None:
         try:
             idx = _read_index(media_kind)
         except GalleryIndexUnreadable:
-            # Never clobber a corrupt index with a fresh one-entry map - that
-            # would silently drop every prior owner record. Skip the stamp
-            # (already warned in _read_index): while the index stays unreadable
-            # the read path denies non-owners anyway, so nothing is exposed then.
-            # Known residual: if the index is later REPAIRED, this one file has no
-            # recorded owner and so reverts to the open/untracked default (the
-            # same rule legacy/hand-placed files follow) - a strictly smaller
-            # exposure than the pre-fix bug that exposed EVERY file, and
-            # unavoidable here since the file is already on disk (failing the
-            # generation would not un-write it). Atomic _write_index keeps an
-            # unreadable index rare to begin with.
+            # Never clobber a corrupt index with a fresh one-entry map, which
+            # would drop every prior owner record. The stamp is skipped (already
+            # warned in _read_index); while the index stays unreadable the read
+            # path denies non-owners. If the index is later REPAIRED this one
+            # file has no recorded owner and reverts to the open/untracked
+            # default, the same rule legacy/hand-placed files follow.
             return
         idx[name] = owner
         _write_index(media_kind, idx)
@@ -170,9 +147,7 @@ def forget_owner(media_kind: str, name: str) -> None:
 def _privileged(request: Request) -> bool:
     """True for a caller that may still reach media when ownership CANNOT be
     determined: the open-mode loopback owner (no key configured anywhere) or an
-    ADMIN/owner key. For them there is no cross-owner boundary to protect, so an
-    unreadable index must not lock them out of their own gallery (they are the
-    ones who repair it). A scoped non-owner key is NOT privileged and is denied -
+    ADMIN/owner key. A scoped non-owner key is NOT privileged and is denied -
     fail closed. Mirrors job_owner_ok's admin bypass, plus the open mode where
     caller_scopes() is None yet the loopback owner is fully trusted."""
     from localm.auth import any_key_configured
@@ -187,11 +162,10 @@ def _privileged(request: Request) -> bool:
 def require_owner(media_kind: str):
     """FastAPI dependency factory: gate a route on ownership of the gallery
     artifact named by its ``name`` path param. Depends()-injectable (use as
-    ``dependencies=[Depends(gallery.require_owner("image"))]``), so a new
-    per-owner media route cannot omit the check by construction (design-audit
-    LM-DA-020). Raises the SAME 404 a missing artifact would (never 403), so a
-    foreign key cannot even confirm another principal's media exists. Mirrors
-    jobs' `owned_job` / http_server's `require_owner` factory pattern.
+    ``dependencies=[Depends(gallery.require_owner("image"))]``). Raises the SAME
+    404 a missing artifact would (never 403), so a foreign key cannot even
+    confirm another principal's media exists. Mirrors jobs' `owned_job` /
+    http_server's `require_owner` factory pattern.
 
     If the owner index is unreadable (GalleryIndexUnreadable), ownership cannot
     be proven, so a non-privileged caller gets that same 404 (fail closed); a

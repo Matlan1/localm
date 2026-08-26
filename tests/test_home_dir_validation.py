@@ -2,13 +2,11 @@
 """LOCALM_HOME pointing at a regular FILE (not a directory) is user
 misconfiguration, not a localm bug.
 
-Before this fix, ``ensure_dirs()`` let ``HOME_DIR.mkdir(exist_ok=True)`` raise a
-raw ``FileExistsError`` (WinError 183 on Windows), which the CLI's cross-cutting
-handler turned into the generic "Sorry - localm hit an unexpected error" + a
-bug-report prompt. That wastes the user's time filing a bug for something they
-can fix in one step. It must instead produce a clean, actionable message via a
-``click.ClickException`` (the documented pass-through the graceful handler never
-routes to the reporter).
+``ensure_dirs()`` raises a ``click.ClickException`` - the pass-through the CLI's
+graceful handler never routes to the bug reporter - rather than letting
+``HOME_DIR.mkdir(exist_ok=True)`` surface a raw ``FileExistsError`` (WinError
+183 on Windows) as "Sorry - localm hit an unexpected error" plus a bug-report
+prompt.
 """
 
 from __future__ import annotations
@@ -51,8 +49,8 @@ def test_ensure_dirs_rejects_home_that_is_a_file(tmp_path, monkeypatch):
 
 
 def test_ensure_dirs_still_creates_dirs_when_home_is_a_directory(tmp_path, monkeypatch):
-    # The guard must not disturb the normal case: a home directory that does not
-    # yet exist is created, along with its models subdir.
+    # The normal case: a home directory that does not yet exist is created,
+    # along with its models subdir.
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setattr(cfg, "HOME_DIR", home)
@@ -84,9 +82,9 @@ def test_ensure_dirs_rejects_models_path_that_is_a_file(tmp_path, monkeypatch):
 
 
 def test_cli_info_gives_clean_message_not_bug_report(tmp_path, monkeypatch):
-    # End-to-end through the REAL `localm info` command and the graceful handler:
-    # the misconfiguration must surface as a clean error, never the
-    # "Sorry - unexpected error" + bug-report path (exit 1, no report written).
+    # End-to-end through the REAL `localm info` command and the graceful
+    # handler: the misconfiguration surfaces as a clean error (exit 1, no report
+    # written), never the "Sorry - unexpected error" + bug-report path.
     from localm.cli import main
 
     home_file = _point_home_at_file(tmp_path, monkeypatch)

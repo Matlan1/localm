@@ -1,30 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A VRAM number we could not actually measure must never be reported as fact.
 
-Builds on PR #693, which made the 'before' reading own up to a timed-out probe.
-These cover the half it left open: the 'AFTER' end.
+These cover the 'AFTER' end of the before/after pair.
 
 discover.list_gpus() is deadline-bounded, and on an overrun serves its
-last-known-good reading with status GPU_PROBE_TIMEOUT/BUSY. #693 checks only the
-before-read's freshness, and wait_for_vram_release() polled a status-blind reader
-that happily returned the frozen value. So when the before-read ANSWERS and only
-the after-polls lose the driver, after == before, no rise, and the endpoint
-reported "vram_freed": false with before_fresh=True and therefore NO uncertainty
-flag - the original lie, intact.
+last-known-good reading with status GPU_PROBE_TIMEOUT/BUSY. When the before-read
+ANSWERS and only the after-polls lose the driver, after == before and no rise is
+observed; a status-blind poll reader would report "vram_freed": false with
+before_fresh=True and therefore NO uncertainty flag.
 
-That shape is the ordinary one, not a contrived one: the before-probe is itself
-what warms the driver, and the native unload between the two reads is exactly the
-kind of work that wedges it. Once ANY probe overruns, discover._gpu_probe_inflight
-stays True until the abandoned thread returns, so every later poll is served the
-frozen value the before-read just cached. Reproduced over real HTTP against #693
-on an RX 6900 XT: {"vram_freed": false, "vram_before_bytes": 17015111680,
-"vram_after_bytes": 17015111680} with no flag, while the engine had in fact
-unloaded and the OS counters showed VRAM genuinely reclaimed.
+The before-probe is itself what warms the driver, and the native unload between
+the two reads is the kind of work that wedges it. Once ANY probe overruns,
+discover._gpu_probe_inflight stays True until the abandoned thread returns, so
+every later poll is served the frozen value the before-read just cached.
 
 These assert the OBSERVABLE - the response body the endpoint returns, and the
-value the reader hands back - never merely that a log line appeared (bug #637
-shipped a dead module-scope logger.debug() green because caplog attaches a root
-handler at level 0).
+value the reader hands back - never merely that a log line appeared.
 """
 
 import unittest
@@ -56,10 +47,9 @@ def _list_gpus_double(gpus, status):
 
 def _impatient_wait(read_free, **kw):
     """The REAL wait_for_vram_release with its clock compressed - same logic, same
-    branches, without spending the endpoint's full 5s poll budget per test.
-    Wrapping beats stubbing: the outcome under test (released=None) is produced BY
-    that function, so a stub would assert only that the test's own fake returns
-    what the test told it to."""
+    branches, without spending the endpoint's full 5s poll budget per test. The
+    outcome under test (released=None) is produced BY that function, so it is
+    wrapped rather than stubbed."""
     kw["timeout_s"] = 0.05
     kw["sleep"] = lambda _s: None
     return wait_for_vram_release(read_free, **kw)
@@ -164,10 +154,8 @@ def _probe_dies_after_first_read():
 
 class TestUnloadAllEndpointHonesty(_UnloadCase):
     def test_reading_lost_after_a_live_before_is_not_reported_as_not_freed(self):
-        """THE REGRESSION ORACLE (release blocker; the half #693 left open).
-
-        Goes red on #693, which flags only `not before_fresh` - here before IS
-        fresh, so it emitted vram_freed: false with no flag at all."""
+        """Before IS fresh, so a check that flags only `not before_fresh`
+        emits vram_freed: false with no flag at all."""
         double, calls = _probe_dies_after_first_read()
         with patch("localm.discover.list_gpus", side_effect=double), \
              patch("localm.vram.wait_for_vram_release", _impatient_wait):
@@ -217,9 +205,8 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
 
         The blind case - a process-scoped reading, where a fresh no-rise proves
         nothing because the model's VRAM is in another process - is its own test
-        (test_process_scoped_no_rise_is_flagged_not_an_honest_false), and there the
-        SAME no-rise MUST be flagged uncertain. Freshness is necessary but not
-        sufficient; scope is the axis that separates the two."""
+        (test_process_scoped_no_rise_is_flagged_not_an_honest_false), and there
+        the SAME no-rise MUST be flagged uncertain."""
         with patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double(
                        [dict(_IDLE, free=10 * GB, free_scope="device")],
@@ -232,19 +219,15 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
         self.assertNotIn("vram_reading_uncertain", body)
 
     def test_process_scoped_no_rise_is_flagged_not_an_honest_false(self):
-        """The complement, and the whole reason scope had to be added: on a
-        PROCESS-SCOPED reading a no-rise is NOT proof that nothing was freed.
+        """On a PROCESS-SCOPED reading a no-rise is NOT proof that nothing was
+        freed.
 
-        Measured on an RX 6900 XT: torch.cuda.mem_get_info reports
-        `total - THIS process's own allocations` and is blind to every other
-        process (a child holding 1 GB moved the parent reading by exactly 0 bytes
-        while the OS counter moved 1.7 GB). Since every GGUF model loads in an
-        isolated worker subprocess (#606), the server's own reading cannot see the
-        model's VRAM, so a real unload produces this identical no-rise. Reporting a
-        bare vram_freed=false there would be the exact rule-5 lie this whole change
-        exists to kill: telling the user a measurement property held when it could
-        not have. So the SAME reading and the SAME no-rise as the test above, but
-        tagged process-scoped, MUST carry the uncertainty flag."""
+        torch.cuda.mem_get_info reports `total - THIS process's own allocations`
+        and is blind to every other process. Every GGUF model loads in an
+        isolated worker subprocess, so the server's own reading cannot see the
+        model's VRAM and a real unload produces this identical no-rise. The SAME
+        reading and the SAME no-rise as the test above, but tagged
+        process-scoped, MUST carry the uncertainty flag."""
         with patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double(
                        [dict(_IDLE, free=10 * GB, free_scope="process")],
@@ -258,11 +241,9 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
         self.assertIn("worker process", body["vram_note"])
 
     def test_box_with_no_vram_telemetry_says_nothing_at_all(self):
-        """The benign case must NOT be dressed up as the fault. A CPU-only box (or
-        the Windows registry tier, which reports total but never free) has a probe
-        that COMPLETES and simply has no free reading to give. That is normal and
-        permanent, so the honest answer is silence - not an uncertainty flag that
-        would fire on every unload and every media generation forever."""
+        """A CPU-only box (or the Windows registry tier, which reports total but
+        never free) has a probe that COMPLETES and has no free reading to give.
+        The answer there is silence, not an uncertainty flag."""
         with patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double([], GPU_PROBE_OK)), \
              patch("localm.discover.vram_info", return_value={}):
@@ -276,15 +257,13 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
 
 
 class TestUnloadOneEndpointHonesty(_UnloadCase):
-    """unload_one_model() carries its own reader + reporter - the per-model Unload
-    button. Fixing only unload_all_models() would leave this one lying.
+    """unload_one_model() carries its own reader + reporter - the per-model
+    Unload button.
 
-    `model` is a QUERY param on POST /v1/models/unload (a bare `str | None` with no
-    Body()), so it MUST go through params=; a json body is silently ignored and the
-    route falls through to unload_all_models(), which flags on its own reader and
-    makes these pass WITHOUT touching unload_one_model at all. The mutation oracle
-    (revert unload_one_model's reader / drop its before_scope -> exactly the matching
-    test below goes red, nothing else) is what proves they reach the intended path."""
+    `model` is a QUERY param on POST /v1/models/unload (a bare `str | None` with
+    no Body()), so it MUST go through params=; a json body is silently ignored
+    and the route falls through to unload_all_models(), which flags on its own
+    reader and would make these pass WITHOUT touching unload_one_model at all."""
 
     def test_reading_lost_after_a_live_before_is_not_reported_as_not_freed(self):
         from localm.inference import http_server as hs
@@ -300,10 +279,9 @@ class TestUnloadOneEndpointHonesty(_UnloadCase):
         self.assertNoUnqualifiedNotFreed(body)
 
     def test_process_scoped_no_rise_is_flagged_here_too(self):
-        """The per-model button must not lie where "unload all" is honest. All three
-        unload paths thread before_scope through the same _add_vram_fields, so a
-        refactor that wires it for one path and forgets this one would silently
-        reopen the blindness on the per-model button - this pins it shut."""
+        """The per-model button must not lie where "unload all" is honest. All
+        three unload paths thread before_scope through the same
+        _add_vram_fields; this pins the per-model one."""
         from localm.inference import http_server as hs
         with patch.dict(hs._engines, {"test-model": self.engine}, clear=False), \
              patch("localm.discover.list_gpus",
@@ -323,17 +301,11 @@ class TestUnloadEmbedderEndpointHonesty(_UnloadCase):
     """_unload_embedder_if_matches() is the THIRD unload path, and the one the two
     classes above do not exercise: the per-row Unload button for a resident
     EMBEDDING model, which lives outside _engines on its own lifecycle. It carries
-    its own copy of the reader + _add_vram_fields call, so - exactly as
-    unload_one_model would lie if only unload_all_models were fixed - this path can
-    lie while the other two are honest. unload_one_model reaches it only when
-    _engines has no live engine for the name, so these install NO engine and stand
-    the embedder up instead (contrast TestUnloadOneEndpointHonesty, which puts an
-    engine in _engines and therefore never gets here).
-
-    Its docstring in http_server claims "all three unload paths thread before_scope
-    through the same _add_vram_fields"; before these tests, two of the three were
-    pinned and this one was not - a reader/scope regression here would have been
-    caught by nothing."""
+    its own copy of the reader + _add_vram_fields call, so it can lie while the
+    other two are honest. unload_one_model reaches it only when _engines has no
+    live engine for the name, so these install NO engine and stand the embedder
+    up instead (contrast TestUnloadOneEndpointHonesty, which puts an engine in
+    _engines and therefore never gets here)."""
 
     _EMB = "/models/embedding-model.gguf"
 
@@ -358,14 +330,9 @@ class TestUnloadEmbedderEndpointHonesty(_UnloadCase):
         return r
 
     def test_reading_lost_after_a_live_before_is_not_reported_as_not_freed(self):
-        """#694's shape (fresh device-scoped BEFORE, driver lost for the AFTER
-        polls) on the embedder path. The poll reader must return None so vram_freed
-        is null-and-flagged, never a bare false.
-
-        MUTATION ORACLE: revert this path's `_free` to a staleness-blind reader
-        (`_free = lambda: _vram_free_reading()[0]`, i.e. #693's read) and only this
-        test goes red - the whole rest of the suite stays green, which is exactly
-        the coverage gap it fills."""
+        """Fresh device-scoped BEFORE, driver lost for the AFTER polls, on the
+        embedder path. The poll reader must return None so vram_freed is
+        null-and-flagged, never a bare false."""
         calls = {"n": 0}
 
         def _double(*, deadline=None, return_status=False):
@@ -388,10 +355,7 @@ class TestUnloadEmbedderEndpointHonesty(_UnloadCase):
     def test_process_scoped_no_rise_is_flagged_here_too(self):
         """The embedder button must not lie where the other two unload paths are
         honest. All three thread before_scope through the same _add_vram_fields;
-        this pins the third shut.
-
-        MUTATION ORACLE: drop `before_scope=before_scope` from this path's
-        _add_vram_fields call and only this test goes red."""
+        this pins the third."""
         r = self._drive(_list_gpus_double(
             [dict(_IDLE, free=10 * GB, free_scope="process")], GPU_PROBE_OK))
         self.assertEqual(r.status_code, 200)
@@ -403,10 +367,9 @@ class TestUnloadEmbedderEndpointHonesty(_UnloadCase):
 
 
 class TestMediaSwapMessageHonesty(unittest.TestCase):
-    """The media VRAM handover is where a user actually SEES this. #693 fixed the
-    API body but not this line, so image/music/video generation still told the
-    user "VRAM has not dropped yet" on the strength of a reading the server had
-    just flagged as possibly stale."""
+    """The media VRAM handover is where a user actually SEES this: image/music/
+    video generation must not tell the user "VRAM has not dropped yet" on the
+    strength of a reading the server has flagged as possibly stale."""
 
     def _push_lines(self, body):
         from localm import vram as vram_mod
@@ -445,14 +408,11 @@ class TestMediaSwapMessageHonesty(unittest.TestCase):
         self.assertIn("has not dropped", " ".join(lines))
 
     def test_in_use_is_not_reported_as_unloaded(self):
-        """Regression: a pinned chat engine (mid-generation) makes
-        unload_all_models() return {"status": "in_use", "vram_freed": 0} without
-        raising and without a non-2xx - so resp.ok is True and the old code fell
-        straight through the already_unloaded check into the generic "Chat model
-        unloaded." branch (0 is not False, so `vram_freed is False` never matched
-        either). That told the image/music/video caller VRAM was free when the
-        chat model was still fully resident - the exact driver-hang hazard this
-        module exists to prevent (see the module docstring)."""
+        """A pinned chat engine (mid-generation) makes unload_all_models()
+        return {"status": "in_use", "vram_freed": 0} without raising and without
+        a non-2xx, so resp.ok is True and `vram_freed is False` does not match
+        either. The image/music/video caller must not read that as "VRAM is
+        free" while the chat model is still fully resident."""
         ok, lines = self._push_lines({
             "status": "in_use", "model": "none", "vram_freed": 0,
             "vram_before_bytes": 10 * GB, "vram_after_bytes": 10 * GB,
@@ -466,13 +426,12 @@ class TestMediaSwapMessageHonesty(unittest.TestCase):
         self.assertIn("busy", joined)
 
     def test_partial_unload_with_pinned_chat_is_not_reported_as_unloaded(self):
-        """Regression: unload_all_models() reports {"status": "unloaded"} whenever
-        ANYTHING was freed (an idle embedding model is enough - released_anything
-        wins the status), even when the chat model itself was skipped as in-use.
-        The consumer matched only status == "in_use", so this partial shape fell
-        through to "Chat model unloaded - freed X GB" + True and the media model
-        loaded on top of the still-resident chat model: the same driver-hang
-        hazard as the fully-pinned case, hidden behind a freed bystander."""
+        """unload_all_models() reports {"status": "unloaded"} whenever ANYTHING
+        was freed (an idle embedding model is enough - released_anything wins
+        the status), even when the chat model itself was skipped as in-use. A
+        consumer matching only status == "in_use" would read this partial shape
+        as chat-model success and load a media model on top of the still-
+        resident chat model."""
         ok, lines = self._push_lines({
             "status": "unloaded", "model": "none", "unloaded_models": [],
             "vram_freed": True,
@@ -489,9 +448,9 @@ class TestMediaSwapMessageHonesty(unittest.TestCase):
 
 
 class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
-    """The regression test above hand-crafts the {"status": "in_use", ...} body -
-    it pins the CONTRACT but not that unload_all_models() actually produces that
-    body for a genuinely pinned engine. This drives the REAL
+    """The test above hand-crafts the {"status": "in_use", ...} body, pinning
+    the CONTRACT but not that unload_all_models() actually produces that body
+    for a genuinely pinned engine. This drives the REAL
     ``POST /v1/models/unload`` route (via the same TestClient the other endpoint
     tests in this file use) with an engine whose ``active_requests`` is set like
     an in-flight request would, so both halves of the bug are exercised together:
@@ -575,9 +534,8 @@ def _mcp_engine_double(name):
     engine reads as ``active_requests != 0`` and ``unloading is True`` to the
     eviction policy - it is never selected as a victim, the cache logs "no
     resident model could be evicted", and the unload + wait_for_vram_release
-    cycle these tests exist to guard NEVER RUNS. The stub has to model the
-    attributes the policy reads (engine.py:181-191), or the tests silently
-    stop testing anything.
+    cycle these tests guard never runs. The stub models the attributes the
+    policy reads.
     """
     engine = MagicMock(display_name=name)
     engine.active_requests = 0
@@ -587,14 +545,12 @@ def _mcp_engine_double(name):
 
 
 class TestMcpModelSwitchHonesty(unittest.TestCase):
-    """The MCP server's model switch runs the same before/after cycle, and made
-    the same false "VRAM free did not rise" claim.
+    """The MCP server's model switch runs the same before/after cycle.
 
     It also guards the GPU driver against a TDR: it must WAIT for the previous
-    model's native free to land before loading the next one. Those two duties pull
-    in opposite directions on a stale probe, which is exactly what these pin down -
-    seeding the wait from the live-only reader silently turned the wait into a
-    0-second no-op (caught in review, measured 5.06s -> 0.00s)."""
+    model's native free to land before loading the next one. Those two duties
+    pull in opposite directions on a stale probe - seeding the wait from the
+    live-only reader turns the wait into a 0-second no-op."""
 
     def _switch(self, status, scope="device"):
         from localm.plugins.mcpserver.server import EngineCache
@@ -651,10 +607,9 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
         self.assertIn("did not rise", logs)
 
     def test_process_scoped_no_rise_cannot_claim_it_did_not_rise(self):
-        """The scope complement (#697 follow-up): a fresh but PROCESS-scoped reading
-        cannot see the previous model's VRAM in its isolated worker, so a no-rise
-        proves nothing. This path had dropped the scope, so it logged the same false
-        'did not rise' the /v1/models/unload paths were fixed for."""
+        """The scope complement: a fresh but PROCESS-scoped reading cannot see
+        the previous model's VRAM in its isolated worker, so a no-rise proves
+        nothing and this path must not log 'did not rise'."""
         _waits, logs = self._switch(GPU_PROBE_OK, scope="process")
         self.assertNotIn("did not rise", logs,
                          f"claimed VRAM did not rise from a blind reading: {logs}")
@@ -663,12 +618,11 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
                       f"(rule 5), not silently dropped: {logs}")
 
     def test_stale_before_with_a_recovered_after_still_cannot_claim_no_rise(self):
-        """The INVERSE shape, and just as ordinary: the before-read times out on a
-        cold driver init - which is itself what WARMS the driver - so the
-        after-polls answer. Now 'after' is live but 'before' is a frozen value
-        from who-knows-when, so their delta means nothing: it can hide a real rise
-        or invent one. 'did not rise' is unsupportable here even though both
-        released is False and the after-reading is genuine."""
+        """The INVERSE shape: the before-read times out on a cold driver init -
+        which is itself what WARMS the driver - so the after-polls answer. With
+        'after' live and 'before' a frozen value, their delta means nothing, so
+        'did not rise' is unsupportable even though released is False and the
+        after-reading is genuine."""
         from localm.plugins.mcpserver.server import EngineCache
         calls = {"n": 0}
 

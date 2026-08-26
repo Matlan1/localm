@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Inference routes: chat completions, embeddings, and raw completions.
 
-Extracted verbatim from create_app(); behavior unchanged. These are the heaviest
-routes - they read the live engine and inference semaphore from the http_server
-module globals, the session-scoped audit/transcript from ctx, and call the
-streaming/completion helpers that stay on http_server (_stream_sse,
-_stream_sse_completion, _complete, _audit_exchange, _messages_prompt_text,
-_protocol_messages_to_dicts).
+These are the heaviest routes - they read the live engine and inference semaphore
+from the http_server module globals, the session-scoped audit/transcript from
+ctx, and call the streaming/completion helpers that stay on http_server
+(_stream_sse, _stream_sse_completion, _complete, _audit_exchange,
+_messages_prompt_text, _protocol_messages_to_dicts).
 
 NOTE on the local ``ctx``: each handler builds its own per-request
-``ChatHookContext`` named ``ctx`` (the chat-pipeline turn context). To keep those
-bodies byte-for-byte identical, the session-scoped audit/transcript are unpacked
-from the register ``ctx`` into module-style locals (``_audit`` / ``_transcript``)
-once at the top of register(), before any handler body shadows ``ctx``.
+``ChatHookContext`` named ``ctx`` (the chat-pipeline turn context), so the
+session-scoped audit/transcript are unpacked from the register ``ctx`` into
+module-style locals (``_audit`` / ``_transcript``) once at the top of
+register(), before any handler body shadows ``ctx``.
 """
 
 from __future__ import annotations
@@ -509,8 +508,8 @@ def register(app: FastAPI, ctx) -> None:
                     from localm.debuglog import logger as _dbg
                     _dbg.exception("non-streaming completion generation failed")
                     gen_error = e
-                    # The shared renderer also scrubs machine paths out of the reason,
-                    # which a model-load RuntimeError carries verbatim.
+                    # The shared renderer also scrubs machine paths out of the
+                    # text, which a model-load RuntimeError carries verbatim.
                     text = _hs.inference_error_text(e)
 
             # The outlet controls the returned content on the non-streaming path,

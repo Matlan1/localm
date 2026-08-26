@@ -5,13 +5,8 @@ localm/inference/backends/llamacpp/_api.py, plus discover._tensor_split_capacity
 (the sole caller, via apply_gpu_split) which decides between the live native
 answer and the documented fallback constant.
 
-_api.py's own probes (has_memory_api, has_penalties_sampler) are normally
-exercised indirectly by mocking the whole ``llama.api`` module object at call
-sites (see test_kv_cache.py). These two are new enough, and load-bearing
-enough (an under-sized tensor_split allocation is a real out-of-bounds read -
-see _tensor_split_capacity's docstring), to also warrant testing the bindings
-themselves: mock only load_lib() (what has_max_devices/llama_max_devices
-actually call) and exercise the real hasattr/getattr + ctypes-bind logic."""
+Only load_lib() is mocked - what has_max_devices/llama_max_devices actually
+call - so the real hasattr/getattr and ctypes-bind logic is exercised."""
 
 from unittest.mock import MagicMock, patch
 

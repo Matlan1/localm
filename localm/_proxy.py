@@ -3,9 +3,8 @@
 
 The bug-report upload, the issues list, and the update check all talk to the same
 Worker. Stdlib only (urllib). A non-2xx response, a network error, or non-JSON
-raises :class:`~localm.bugreport.LocalmError` so callers surface the failure rather
-than reporting a false success ("we do not hide problems"). The *opener* is
-injectable for tests.
+raises :class:`~localm.bugreport.LocalmError`, so callers surface the failure
+rather than reporting a false success. The *opener* is injectable for tests.
 """
 
 from __future__ import annotations

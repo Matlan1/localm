@@ -1,16 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""O6: the coder controls that existed only as REPL slash commands now have a
-web form, per the standing rule that anything available in the CLI must be
-available in SOME form in GUI mode.
+"""The coder controls that exist as REPL slash commands, exercised through their
+web-form routes:
 
   /approve /scope /verify   POST /api/coder/sessions/{id}/settings
   /cd                       POST /api/coder/sessions/{id}/cwd
   /memory /remember /forget GET + POST .../memory, POST .../memory/forget
   /bg                       GET  .../background
-
-The workaround previously on record for the first group (start again with
-resume) needs a checkpoint, and privacy mode never writes one - and privacy is
-the DEFAULT on both surfaces, so a default GUI session had no route at all.
 
 The properties pinned here are the ones that fail SILENTLY:
 
@@ -103,9 +98,8 @@ def _start(client, headers, proj, **extra):
 def _scoped(app):
     """Headers for a MINTED, non-owner coder-scoped key - the shareable session.
 
-    Minted through localm.auth directly, the same way test_coder_safe_share.py
-    does: the HTTP mint route has a lockout guard that behaves differently on a
-    keystore's first key, which is not what any of these tests are about.
+    Minted through localm.auth directly rather than the HTTP mint route, which
+    has a lockout guard on a keystore's first key.
     """
     from localm import auth
     made = auth.create_key("shared", ["coder"])
@@ -123,15 +117,11 @@ def _stub(app, sid):
 # --------------------------------------------------------------------------- #
 
 def test_revoking_auto_approve_installs_a_confirmation_channel(tmp_path, monkeypatch):
-    """The flag alone is not the fix.
+    """Revoking auto-approve must also install a confirmation handler.
 
     A GUI session runs _loop(interactive=False). When a destructive tool needs
     confirmation and confirm_handler is None the agent takes its fail-closed
-    branch and DENIES the call - correct as a default, useless as a revoke: the
-    user gets no approval card and the session can no longer do anything at
-    all. Flipping auto_approve without installing the handler would hand back a
-    session that only refuses, which from the outside is indistinguishable from
-    one that is waiting to be answered.
+    branch and DENIES the call, so the user gets no approval card at all.
     """
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
@@ -151,9 +141,8 @@ def test_revoking_auto_approve_installs_a_confirmation_channel(tmp_path, monkeyp
 
 def test_revoking_auto_approve_is_not_refused_while_the_agent_is_busy(
         tmp_path, monkeypatch):
-    """The moment a user reaches for this is the moment the agent is mid-run
-    doing something they want stopped. A busy guard would refuse the control in
-    the only case it exists for - so, unlike the model route, there is none."""
+    """The settings route has no busy guard, unlike the model route: revoking
+    auto-approve is accepted while the agent is mid-run."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         sid = _start(client, owner, proj, auto_approve=True)
@@ -214,11 +203,7 @@ def test_interactive_confirm_at_creation_reaches_the_same_channel(
     must ASK, not refuse.
 
     That combination sets always_confirm={run_shell, run_shell_background} while
-    __init__ leaves confirm_handler None because auto_approve is on - so the
-    confirmation gate reached the fail-closed branch and denied the command,
-    under a checkbox whose own tooltip promises it "still stops for you". Same
-    wiring as the revoke above, which is why one assignment covers both; pinned
-    separately because it is reachable WITHOUT ever calling the settings route.
+    auto_approve is on, and is reachable WITHOUT ever calling the settings route.
     """
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
@@ -258,8 +243,8 @@ def test_interactive_confirm_at_creation_reaches_the_same_channel(
 # --------------------------------------------------------------------------- #
 
 def test_absent_field_is_left_alone_and_explicit_null_clears(tmp_path, monkeypatch):
-    """One call changes one control. A field the caller did not send must not be
-    silently reset to its default, or every control would clobber the others."""
+    """One call changes one control: a field the caller did not send is left
+    alone, while an explicit null clears it."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         sid = _start(client, owner, proj, scope="src/**", verify="pytest -q")
@@ -288,14 +273,10 @@ def test_absent_field_is_left_alone_and_explicit_null_clears(tmp_path, monkeypat
 
 def test_the_settings_response_reports_the_scope_a_client_must_render(
         tmp_path, monkeypatch):
-    """A control that can SET a value and never SHOW it is half a control.
-
-    Every other test in this file asserts `sess.agent.scope` - the internal
-    attribute - which a browser never sees. `info()` carried no `scope` key at
-    all, so the settings panel would have rendered an empty box however many
-    times the scope was set, and nothing here would have gone red. Found by the
-    live end-to-end run, pinned here because the response a client reads back is
-    the actual contract.
+    """The response body a client reads back is the contract, not the internal
+    `sess.agent.scope` attribute every other test in this file asserts: `info()`
+    must carry `scope` and `restricted` keys so the settings panel can render
+    them.
     """
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
@@ -392,9 +373,8 @@ def test_verify_and_auto_verify_together_are_refused(tmp_path, monkeypatch):
 def test_a_restricted_session_cannot_be_given_a_verify_command(
         tmp_path, monkeypatch):
     """A restricted session has no process execution at all, and a verify
-    command IS process execution - accepting one would hand a scoped key back
-    exactly what the restriction removes. __init__ already refuses it at
-    creation; this keeps the two paths agreeing."""
+    command IS process execution. __init__ refuses one at creation; the settings
+    route refuses it too."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         shared = _scoped(app)
@@ -413,13 +393,9 @@ def test_a_restricted_session_cannot_be_given_a_verify_command(
 # --------------------------------------------------------------------------- #
 
 def test_cwd_moves_the_session_and_its_saved_checkpoint(tmp_path, monkeypatch):
-    """THE REKEY DECISION.
-
-    A checkpoint is filed under <digest(cwd)>/<checkpoint_id>.json, so changing
-    the cwd changes where the next save lands. Leaving the old file behind gives
-    ONE conversation TWO resumable entries, and the abandoned one is frozen at
-    the moment of the move while still being offered by "continue last session"
-    - a phantom that can never catch up. So it moves with the session.
+    """A checkpoint is filed under <digest(cwd)>/<checkpoint_id>.json, so
+    changing the cwd changes where the next save lands. The existing checkpoint
+    MOVES with the session and no copy is left under the old project.
     """
     app, proj, owner = _owner(tmp_path, monkeypatch)
     other = tmp_path / "other"
@@ -450,9 +426,9 @@ def test_cwd_moves_the_session_and_its_saved_checkpoint(tmp_path, monkeypatch):
 
 
 def test_cwd_is_refused_for_a_restricted_session(tmp_path, monkeypatch):
-    """create_session forces a shared-key session into the project root and
-    ignores the cwd it was given. A route that moved it afterwards would hand
-    back exactly what was taken away."""
+    """create_session forces a shared-key session into the project root, and the
+    cwd route refuses to move it afterwards - for the scoped key AND the
+    owner."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     other = tmp_path / "other"
     other.mkdir()
@@ -505,13 +481,11 @@ def test_cwd_refuses_unc_and_a_non_directory_and_a_busy_session(
 
 def test_remember_writes_the_file_and_reloads_it_into_the_prompt(
         tmp_path, monkeypatch):
-    """THE RELOAD IS THE POINT, not the write.
+    """A memory write must RELOAD, not only land on disk.
 
-    A GUI session loads and injects LOCALCODER.md but had no way to change it,
-    and asking the agent to edit the file does not call reload_memory - so an
-    edit made that way sits on disk without reaching the running session, taking
-    effect only next session. Asserting the file exists would pass either way;
-    the system prompt is what discriminates.
+    A GUI session loads and injects LOCALCODER.md; an edit that does not call
+    reload_memory takes effect only next session. The system prompt is what
+    discriminates, so that is what is asserted.
     """
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
@@ -589,9 +563,8 @@ def test_memory_rejects_an_empty_write(tmp_path, monkeypatch):
 def _fake_job_cls():
     """A registrable job with no process behind it.
 
-    Built at call time rather than at import so this file does not import
-    background.py at module scope, matching how the sibling suites keep the
-    coder's heavier modules lazy.
+    Built at call time rather than at import, so this file does not import
+    background.py at module scope.
     """
     from localm.plugins.coder.background import BackgroundJob
 
@@ -640,9 +613,8 @@ def test_background_lists_only_this_sessions_jobs(tmp_path, monkeypatch):
 
 def test_a_spawned_child_agents_jobs_belong_to_the_parent_session(
         tmp_path, monkeypatch):
-    """A sub-agent is an implementation detail of the call that spawned it. If
-    its background work were attributed to the child, the parent's /bg would
-    silently stop listing work it started - and nothing else can query a child.
+    """A sub-agent's background work is attributed to the PARENT session's
+    job_owner, so the parent's /bg lists it. Nothing can query a child directly.
     """
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
@@ -673,9 +645,9 @@ def test_background_says_a_restricted_session_can_never_have_any(
 
 
 def test_dropped_completions_are_counted_per_owner(tmp_path, monkeypatch):
-    """A bounded table that says nothing about what it discarded is the silent
-    truncation rule 5 forbids - and reporting the WHOLE process's losses inside
-    one session would over-report to a session that lost nothing."""
+    """The bounded finished-job table reports what it discarded, PER OWNER: the
+    per-owner counts sum to the process-wide count, and an owner that lost
+    nothing is charged nothing."""
     from localm.plugins.coder.background import JobRegistry
 
     Job = _fake_job_cls()
@@ -732,15 +704,8 @@ def _child_of(sess, proj):
 
 def test_revoking_auto_approve_reaches_a_sub_agent_already_running(
         tmp_path, monkeypatch):
-    """The revoke has to reach DELEGATED work, or it is not the control the UI
-    says it is.
-
-    A child is built with the parent's settings copied in at construction, and
-    nothing propagates a later change - so before this, revoking auto-approve
-    on the session returned 200 while a spawned child carried on writing files
-    without asking anyone. The panel says "it stops a run already under way",
-    the route docstring says the same, and the changelog says it in public
-    product text; this is the test that makes those true.
+    """The revoke reaches DELEGATED work: a child spawned with the parent's
+    auto-approve follows a later revoke on the session.
 
     A child cannot be addressed from outside - there is no route to it, no
     confirmation channel of its own, and Stop sets only the parent's flag - so
@@ -898,9 +863,9 @@ def test_cwd_refuses_to_move_a_recording_session_into_a_private_project(
 
 def test_cwd_allows_a_move_into_an_equally_or_more_recording_project(
         tmp_path, monkeypatch):
-    """The guard only blocks the LOSSY direction. A privacy session may move
-    anywhere, and a move between equal modes is unaffected - otherwise the
-    refusal would be a blanket ban dressed as a privacy control."""
+    """The guard blocks only the LOSSY direction: a session may move into a
+    project that declares an equal or more-recording mode, and into one that
+    declares nothing."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     # DECLARES a mode, and a more-recording one than the session's, so the rank
     # comparison is the line that decides. A destination that declares nothing
@@ -938,9 +903,7 @@ def test_a_checkpoint_id_cannot_escape_the_checkpoint_directory(tmp_path):
     """A checkpoint id arrives in an HTTP body and is concatenated into a path.
 
     A loaded id is also RETAINED (`self._checkpoint_id`), so the next
-    save_checkpoint - and the cwd-change migration - would write wherever it
-    pointed. Measured before the guard: `../../../../windows/win.ini` resolved
-    clean outside the checkpoints tree.
+    save_checkpoint - and the cwd-change migration - writes wherever it points.
     """
     from localm.plugins.coder.agent.checkpoint import (
         _checkpoint_path_for, is_valid_checkpoint_id,
@@ -960,11 +923,9 @@ def test_a_checkpoint_id_cannot_escape_the_checkpoint_directory(tmp_path):
 
 def test_a_background_shell_job_is_stamped_with_the_running_sessions_owner(
         tmp_path, monkeypatch):
-    """The per-session /bg list rests on an INJECTED hidden argument, and the
-    other background tests construct jobs with an explicit owner= - so a
-    regression in the injection itself would leave them green while every real
-    job became unattributed and invisible to the session that started it. This
-    drives the real dispatcher."""
+    """The per-session /bg list rests on an INJECTED hidden argument. The other
+    background tests construct jobs with an explicit owner=, so this one drives
+    the real dispatcher and asserts the injection itself."""
     from localm.plugins.coder.background import get_registry, reset_registry
     from localm.plugins.coder.parser import ToolCall
 
@@ -1001,11 +962,8 @@ def test_a_background_shell_job_is_stamped_with_the_running_sessions_owner(
 
 
 def test_the_repl_cd_refuses_the_same_move(tmp_path, monkeypatch):
-    """The CLI must not diverge from the web surface on this.
-
-    The whole point of this unit is that the two agree, so fixing the privacy
-    hole only on the route would have opened a NEW divergence in the same
-    change. Both call the one helper; this drives the REPL's /cd handler.
+    """The CLI and the web surface agree on the privacy refusal: both call the
+    one helper. This drives the REPL's /cd handler.
     """
     from localm.plugins.coder.cli import repl as _repl
 

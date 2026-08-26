@@ -68,7 +68,7 @@ def _console_progress(line: str) -> None:
 def _install_deps(mgr, name) -> bool:
     """Install *name*'s declared pip extras on this host. Returns True on success
     (including the no-op case where the plugin declares none / all are present).
-    Surfaces the real installer error on failure (never a hollow success)."""
+    Surfaces the real installer error on failure."""
     if not mgr.plugin_missing_deps(name):
         return True                     # nothing declared, or already satisfied
     console.print(f"[dim]Installing dependencies for {name}...[/dim]")
@@ -122,8 +122,8 @@ def plugin_install_engine(target, force, with_deps):
                       f"(every route/tool it registers is gated on this "
                       f"capability)")
         _warn_missing_requires(mgr, spec.name)
-        # A third-party plugin's extras are its own (not localm's); we do not
-        # auto-resolve those here. Point the user at its own instructions.
+        # A third-party plugin's extras are its own, not localm's, and are not
+        # auto-resolved here.
         if spec.requires_extras:
             console.print(f"[dim]{spec.name} declares extra dependencies "
                           f"({', '.join(spec.requires_extras)}); install per its "
@@ -178,8 +178,8 @@ def _parse_plugin_selection(raw, available):
             out.append(t)
         elif t.count("-") == 1 and all(p.strip().isdecimal() for p in t.split("-")):
             # A numeric range like "2-5": expand to the valid indices it covers.
-            # isdecimal (not isdigit) so an exotic Unicode digit that int() would
-            # reject never slips through and raises here.
+            # The guard is isdecimal, not isdigit, so every token reaching int()
+            # below is one int() can parse.
             lo, hi = (int(p) for p in t.split("-"))
             matched = [by_idx[str(n)] for n in range(lo, hi + 1) if str(n) in by_idx]
             if matched:
@@ -223,11 +223,9 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None):
         chosen = [e.name for e in available]
     elif plugins_csv is not None:
         chosen = _parse_plugin_selection(plugins_csv, available)
-        # Non-interactive: a non-empty --plugins that resolved to NOTHING is a
-        # typo, not a deliberate skip. Fail loudly so an install/CI script does
-        # not read a no-op as success (the per-token "Ignoring unknown selection"
-        # notes above already name which tokens were bad). A blank/whitespace
-        # value is a deliberate skip and is left to the generic path below.
+        # A non-empty --plugins that resolved to NOTHING exits non-zero; the
+        # per-token "Ignoring unknown selection" notes above name the bad tokens.
+        # A blank or whitespace value falls through to the generic path below.
         if plugins_csv.strip() and not chosen:
             console.print(
                 f"[red]No known plugins in --plugins {plugins_csv!r}.[/red] "
@@ -254,9 +252,8 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None):
         console.print(
             "[dim]This ADDS the features you pick; anything already installed "
             "stays. Remove one later with: localm plugin uninstall <name>.[/dim]")
-        # Re-ask on an entry that matched nothing (e.g. junk like "ewew"), so we
-        # never silently leave zero plugins after the user clearly tried to pick
-        # something. A blank entry is a deliberate "skip" and breaks the loop.
+        # Re-ask on an entry that matched nothing. A blank entry skips and
+        # breaks the loop.
         while True:
             raw = click.prompt("Install", default="", show_default=False)
             chosen = _parse_plugin_selection(raw, available)
@@ -412,10 +409,9 @@ def plugin_refresh(name):
     """Re-sync installed first-party plugins with the bundled store.
 
     A localm upgrade ships newer plugin code, but an already-installed copy in
-    your data dir keeps shadowing it until refreshed - so you silently run stale
-    plugin code (including missing fixes). With no NAME, refreshes every
-    installed first-party plugin whose code changed; with a NAME, just that one.
-    A running GUI server picks the new code up on its next start.
+    your data dir keeps shadowing it until refreshed. With no NAME, refreshes
+    every installed first-party plugin whose code changed; with a NAME, just
+    that one. A running GUI server picks the new code up on its next start.
     """
     from localm import cli as _cli
     mgr = _cli._engine_manager()
@@ -469,14 +465,12 @@ def plugin_status():
 #  Plugin-scoped settings (`localm plugin config`)                     #
 #                                                                      #
 #  The terminal counterpart to the GUI's three plugin settings routes. #
-#  See settings_schema.plugin_config_kind for WHY this has two paths:  #
-#  the media and tts blocks are static schemas this process can read   #
-#  offline, while a host.add_settings() block only exists inside a     #
-#  process that has LOADED that plugin - which the CLI deliberately    #
-#  never is (set_enabled_state and friends exist to keep it that way,  #
-#  and _load would fire the on_first_use hook for what is only a read).#
-#  So the generic case asks a RUNNING localm, and when there is none   #
-#  it says exactly that rather than reporting an empty field list.     #
+#  Two paths, split by settings_schema.plugin_config_kind: the media   #
+#  and tts blocks are static schemas this process reads offline, while #
+#  a host.add_settings() block exists only inside a process that has   #
+#  LOADED that plugin, which the CLI never is. The generic case asks a #
+#  RUNNING localm, and when there is none it reports that rather than  #
+#  an empty field list.                                                #
 # ------------------------------------------------------------------ #
 
 def _plugin_install_state(name):
@@ -490,10 +484,11 @@ def _plugin_install_state(name):
 
 def _attached_server():
     """``(url, headers, None)`` for a running localm serving this directory, or
-    ``(None, None, reason)``. LOCALM_URL targets a different instance, in which
-    case there is no registry entry to read an attach token from and only an
-    owner key (LOCALM_API_KEY / the persisted one) authenticates - the same
-    trade `localm unload` documents."""
+    ``(None, None, reason)``.
+
+    With LOCALM_URL set the target is a different instance, so there is no
+    registry entry to read an attach token from and only an owner key
+    (LOCALM_API_KEY, or the persisted one) authenticates."""
     import os
 
     from .. import instances
@@ -524,8 +519,8 @@ def _fmt_field_value(f) -> str:
     """One field's resolved value for the listing."""
     if "value" not in f:
         # A SECRET field's value never round-trips out of the server in
-        # plaintext (plugin_settings_schema_json omits it deliberately), so
-        # report whether it is configured, never what it is.
+        # plaintext (plugin_settings_schema_json omits it), so this reports
+        # whether it is configured, never what it is.
         return "[dim](set)[/dim]" if f.get("is_override") else "[dim](not set)[/dim]"
     val = f.get("value")
     if isinstance(val, bool):
@@ -562,9 +557,12 @@ def _runtime_fields(name):
     from .. import tls
 
     def _explain_from_local_state():
-        """Why this plugin has no fields, read from THIS machine's install set.
-        Only sound when the server we would ask is this home's own - see the
-        remote note below."""
+        """Print why this plugin has no fields, read from THIS machine's
+        install set. Exits 1 when the plugin is not installed or not enabled;
+        returns when it is both, leaving the caller to report the empty set.
+
+        Valid only when the server being asked is this home's own; the local
+        install set says nothing about a remote instance."""
         installed, active = _plugin_install_state(name)
         if not installed:
             console.print(f"[red]No such plugin:[/red] {name}")
@@ -579,16 +577,13 @@ def _runtime_fields(name):
 
     url, headers, why = _attached_server()
     # LOCALM_URL points at an instance that is NOT this home, so the local
-    # installed/enabled set says nothing about what IT has loaded. Asking the
-    # wrong machine's plugin list would produce a confident "No such plugin"
-    # about a plugin the target is running perfectly well.
+    # installed/enabled set says nothing about what IT has loaded.
     remote = bool(os.environ.get("LOCALM_URL", "").strip())
     if url is None:
         _explain_from_local_state()
-        # AGENTS.md rule 5: this is "could not ask", NOT "there is nothing
-        # there". A plugin declares its settings while it LOADS, so only a
-        # running localm knows this one's field list - reporting an empty
-        # section here would be a different, and false, answer.
+        # "Could not ask", NOT "there is nothing there": a plugin declares its
+        # settings while it LOADS, so only a running localm knows this one's
+        # field list.
         console.print(f"[yellow]{name}'s settings are declared when the plugin "
                       f"loads[/yellow], so a running localm is needed to list "
                       f"them, and {why}.")
@@ -610,8 +605,8 @@ def _runtime_fields(name):
         if section.get("plugin") == name:
             return url, headers, section.get("fields") or []
     # The server DID answer and has no section for this plugin. Locally that is
-    # worth explaining (not installed / not enabled); against a remote instance
-    # this machine's install set cannot say, so report only what was observed.
+    # explained from the install set (not installed / not enabled); against a
+    # remote instance only what was observed is reported.
     if not remote:
         _explain_from_local_state()
     else:
@@ -658,9 +653,8 @@ def plugin_config(name, key, value):
     installed, active = _plugin_install_state(name)
     note = None
     if not active:
-        # Not a refusal: the settings routes deliberately accept a write for an
-        # inactive plugin so it can be configured BEFORE being enabled (see
-        # _tts_payload's `active` note). Say so instead of failing.
+        # The settings routes accept a write for an inactive plugin, so it can
+        # be configured BEFORE being enabled. Noted rather than refused.
         state = "installed but not enabled" if installed else "not installed"
         note = (f"[dim]{name} is {state}; these settings are stored either way "
                 f"and apply once it runs.[/dim]")
@@ -734,11 +728,9 @@ def _runtime_plugin_config(name, key, value):
     if not saved.get("is_override"):
         _report_set(name, key, None)
     elif "value" not in saved:
-        # A SECRET field's value is deliberately never echoed back
-        # (plugin_settings_schema_json omits it), so confirm the write without
-        # inventing a value - and, the reason this branch exists, without
-        # reading that absence as "cleared", which is what a plain
-        # saved.get("value") did: it reported a successful SET as a CLEAR.
+        # A SECRET field's value is never echoed back
+        # (plugin_settings_schema_json omits it), so an is_override carrying no
+        # "value" key is a completed SET, never a clear.
         console.print(f"[green]OK[/green] {name}.{key} set [dim](not shown)[/dim]")
     else:
         _report_set(name, key, saved.get("value"))

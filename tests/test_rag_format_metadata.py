@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RAG format labeling (audit Branch F: classify-burns -> metadata-only).
-
-The old behavior computed an LLM format guess inside ``extract_bytes`` and threw
-it away, while firing a 10s chat call during embedding-only indexes. This suite
-pins the fixed contract:
+"""RAG format labeling contract:
 
   * a document's format is labeled heuristic-FIRST (free, deterministic) and the
-    label is carried into chunk metadata (used, not discarded);
+    label is carried into chunk metadata;
   * the LLM tie-break runs ONLY when the heuristic is unsure AND a chat model is
-    loaded - never an unconditional chat call that stalls an embedding-only index.
+    loaded, so an embedding-only index fires no chat call.
 """
 
 import requests
@@ -50,8 +46,8 @@ def test_odd_ext_json_labeled_via_heuristic_no_chat(tmp_path):
 
 
 def test_embedding_only_index_does_not_call_chat_path(tmp_path, monkeypatch):
-    """With no chat model loaded, indexing an ambiguous odd-extension file must
-    NOT fire the (10s-timeout) chat endpoint - no stall - and labels "text"."""
+    """With no chat model loaded, indexing an ambiguous odd-extension file does
+    not fire the (10s-timeout) chat endpoint and labels the chunks "text"."""
     posted = []
     def fake_request(*args, **kwargs):
         posted.append((args, kwargs))
@@ -67,7 +63,7 @@ def test_embedding_only_index_does_not_call_chat_path(tmp_path, monkeypatch):
     coll = Collection("kb2", base=tmp_path)
     coll.create()
     # Content the structural heuristic cannot pin down (mid-line braces, no CSV /
-    # YAML / markdown shape) -> the tie-break is *attempted*, and must short out.
+    # YAML / markdown shape) -> the tie-break is *attempted*, and shorts out.
     payload = b"function add(a, b) { return a + b }\nconst x = 1\n"
     result = coll.add_uploads(
         [{"filename": "snippet.zzz", "data": payload}],
@@ -80,7 +76,7 @@ def test_embedding_only_index_does_not_call_chat_path(tmp_path, monkeypatch):
 
 
 def test_known_extension_labels_from_suffix(tmp_path):
-    """A known text extension is labeled from its suffix (authoritative, free)."""
+    """A known text extension is labeled from its suffix."""
     coll = Collection("kb3", base=tmp_path)
     coll.create()
     coll.add_uploads([{"filename": "readme.md", "data": b"# Title\n\nbody text"}])
@@ -196,9 +192,8 @@ def test_classify_format_config_disables_tiebreak(monkeypatch):
 
 def test_classify_format_tiebreak_attempted_at_most_once_per_ext(monkeypatch):
     # Simulate a resident NON-chat engine: classify_fn is actually invoked (not
-    # short-circuited) but returns None because it cannot classify. The outcome
-    # must be cached so a SECOND same-extension unclear file does NOT re-invoke
-    # it.
+    # short-circuited) but returns None because it cannot classify. That outcome
+    # is cached, so a SECOND same-extension unclear file does not re-invoke it.
     from localm.rag.extract import classify_format, _EXT_CLASSIFICATION_CACHE
     import localm.config as cfg
     _EXT_CLASSIFICATION_CACHE.clear()

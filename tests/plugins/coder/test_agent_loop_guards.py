@@ -195,13 +195,9 @@ class TestRepairTurn:
         repair re-prompt fires; then the model RE-EMITS it correctly and that
         call runs; then a plain final answer, which is accepted.
 
-        The middle step used to be missing - the old script went straight from
-        the broken call to "Done.", so nothing in it was ever reformatted and
-        the test did not check what its name claims. It also meant the model
-        never called a tool at all on a "read a file" request, which
-        NEW-CODER-NO-TOOLCALL-SILENT now escalates rather than accepting in
-        silence (correctly: nothing had been read). Scripting the reformatted
-        call makes the test match its own name AND exercises the real path."""
+        The middle step is load-bearing: without a scripted reformatted call
+        the model never calls a tool at all on a "read a file" request, which
+        the loop escalates rather than accepting in silence."""
         agent = _make_agent(tmp_path)
         (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
         responses = iter([
@@ -234,21 +230,17 @@ class TestRepairTurn:
         assert self._repairs(agent) == []
 
     def test_hallucinated_xml_tool_tag_repairs_instead_of_silently_finishing(self, tmp_path):
-        """NEW-CODER-NO-TOOLCALL-SILENT: a real, live-reproduced failure (2026-08-05,
-        a "thinking" heretic-abliterated model given a file-edit task) - the model
-        hallucinates <edit_file>/<read_file path="..."> tags (an Anthropic-invoke-
-        adjacent convention) using this project's REAL tool names, instead of its
-        own <tool_call>{"name":...} wrapper. parse_tool_calls() recovers nothing,
-        and the OLD looks_like_tool_attempt() (no tool_names) also missed it - it
-        checks only for the literal "tool_call"/"tool_code" markers and a
-        "name"+"args" JSON key pair, and this response has neither. Before the fix,
-        this fell straight through _handle_no_tool_calls's final branch and was
-        silently accepted as the finished answer (verified: 1 turn used, the raw
-        garbled text returned verbatim, no notice of any kind). After the fix, it
-        is recognised via the tool-name-tagged form and routed through the SAME
-        repair-then-surface path proven above, so the user is told plainly that
-        nothing was run or written instead of receiving a misleading "final
-        answer" full of stray XML tags."""
+        """The model hallucinates <edit_file>/<read_file path="..."> tags using
+        this project's REAL tool names, instead of its own
+        <tool_call>{"name":...} wrapper. parse_tool_calls() recovers nothing,
+        and a looks_like_tool_attempt() without tool_names also misses it: that
+        form checks only for the literal "tool_call"/"tool_code" markers and a
+        "name"+"args" JSON key pair, and this response has neither. Such a
+        response must NOT fall through _handle_no_tool_calls's final branch and
+        be accepted as the finished answer; it is recognised via the
+        tool-name-tagged form and routed through the SAME repair-then-surface
+        path proven above, so the user is told plainly that nothing was run or
+        written."""
         agent = _make_agent(tmp_path)
         raw = (
             '<edit_file>\n{"path": "sample.py", "old": "def add(a, b): pass", '
@@ -264,7 +256,7 @@ class TestRepairTurn:
         assert raw in result                           # the raw attempt is not lost
 
     def test_bare_json_call_parses_without_repair(self, tmp_path):
-        """A well-formed bare JSON call now parses and runs - no repair turn."""
+        """A well-formed bare JSON call parses and runs, with no repair turn."""
         agent = _make_agent(tmp_path)
         responses = iter([
             '{"name": "read_file", "args": {"path": "a.py"}}',
@@ -285,22 +277,20 @@ class TestPartialParseSurfacing:
     that parses fine must not vanish silently.
 
     parse_tool_calls only signals a parse problem via an EMPTY calls list
-    (which routes to TestRepairTurn's mechanism above) - it has no way to
-    say "N calls were attempted, only N-1 recovered". Measured live against
-    qwen2.5-coder-7b-instruct: an edit_file on an existing file (larger,
-    more escaping-prone content) silently vanished while a sibling
-    write_file and run_shell in the SAME turn executed for real - the model
-    never found out its edit never happened, and neither did anything else
-    in the session. loop.py now checks the text NOT consumed by the calls
-    that did parse (split_response) for a leftover tool-call-shaped
-    fragment and, if found, appends a notice to the results fed back.
+    (which routes to TestRepairTurn's mechanism above) - it has no way to say
+    "N calls were attempted, only N-1 recovered", so an edit_file that fails to
+    parse alongside a sibling write_file and run_shell that execute for real
+    would vanish with nothing in the session recording it. loop.py checks the
+    text NOT consumed by the calls that did parse (split_response) for a
+    leftover tool-call-shaped fragment and, if found, appends a notice to the
+    results fed back.
 
-    The first <tool_call> below brace-balances fine (so it is NOT a #895-
-    style pairing/scan failure - deliberately, since that class of failure
-    is now recovered by the marker-variant fallback) but is semantically
-    rejected by _try_parse_body (name=123 is not a string), which no pass
-    in parser.py can ever recover - a stable, fix-independent way to force
-    exactly one call in a batch to be unrecoverable.
+    The first <tool_call> below brace-balances fine, so it is NOT a
+    pairing/scan failure (that class is recovered by the marker-variant
+    fallback), but it is semantically rejected by _try_parse_body (name=123 is
+    not a string), which no pass in parser.py can recover - a stable,
+    fix-independent way to force exactly one call in a batch to be
+    unrecoverable.
     """
     def _partial_notices(self, agent):
         return [
@@ -371,9 +361,9 @@ class TestPartialParseSurfacing:
 
     def test_partial_notice_cap_logs_every_drop_even_once_silent_to_the_model(self, tmp_path):
         """The turns AFTER the one-time cap announcement must still leave a
-        durable trace - going fully silent (nothing in the fed-back message,
-        nothing logged) would be exactly the invisible-drop bug #920 fixed,
-        recurring inside the very mechanism built to surface it."""
+        durable trace: going fully silent (nothing in the fed-back message,
+        nothing logged) would be an invisible drop inside the very mechanism
+        built to surface one."""
         from localm.plugins.coder.agent.constants import _MAX_TOOL_REPAIRS
 
         def _broken_and_good(i):
@@ -442,14 +432,12 @@ class TestGroundingFooter:
     from the session's own record, unconditionally - never gated on what the
     response text itself claims.
 
-    Researched before implementing (not invented from scratch): every
-    coding-agent tool that actually closes this gap grounds on the
-    observable artifact (a diff, an exit code) rather than the model's own
-    self-report - a model confirming its own claim, or a keyword scan over
-    its prose, inherits the same unreliability being guarded against. This
-    reuses changed_files() and _last_verify_state (already tracked for the
-    self-verify nudge and the exit-code oracle), never reads the response
-    text, so it cannot be gamed by phrasing.
+    The footer grounds on the observable artifact (a diff, an exit code)
+    rather than the model's own self-report: a model confirming its own claim,
+    or a keyword scan over its prose, inherits the same unreliability being
+    guarded against. It reuses changed_files() and _last_verify_state (already
+    tracked for the self-verify nudge and the exit-code oracle) and never reads
+    the response text, so it cannot be gamed by phrasing.
     """
 
     def test_footer_reports_no_files_changed_when_nothing_was_written(self, tmp_path):
@@ -475,14 +463,13 @@ class TestGroundingFooter:
         assert (tmp_path / "app.py").read_text(encoding="utf-8") == "x = 1\n"
 
     def test_footer_reports_search_replace_changes(self, tmp_path):
-        """THE ORIGINAL GAP THIS FOOTER WAS BUILT TO CLOSE, closing the loop
-        on itself: a task that used ONLY search_replace to edit a real file
-        used to leave changed_files() - and so this footer - empty, because
-        search_replace's targets are a glob+regex sweep rather than a `path`
-        arg the pre-call snapshot tracker could see. A false "no files
-        changed" is exactly the under-claiming mirror of the over-claiming
-        bug this footer exists to catch. Fixed via ToolResult.changes (see
-        execution.py's search_replace branch in _post_tool_success)."""
+        """A task that uses ONLY search_replace to edit a real file must not
+        leave changed_files() - and so this footer - empty. search_replace's
+        targets are a glob+regex sweep rather than a `path` arg the pre-call
+        snapshot tracker can see, so the changes are carried on
+        ToolResult.changes (see execution.py's search_replace branch in
+        _post_tool_success). A false "no files changed" is the under-claiming
+        mirror of the over-claiming the footer exists to catch."""
         (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
         agent = _make_agent(tmp_path, auto_approve=True, self_verify=False)
         responses = iter([
@@ -531,9 +518,7 @@ class TestGroundingFooter:
         history (the actual property under test). A test that only checked
         history-is-clean would pass identically whether the footer feature
         works, is broken, or was never implemented - which is exactly what
-        this test's own first draft did, caught red/green: reverting to the
-        pre-footer code left this one green while the other four correctly
-        went red."""
+        a footer feature that works, is broken, or was never implemented."""
         agent = _make_agent(tmp_path)
         with patch.object(agent, "_call_llm", return_value="Here is the answer."):
             result = agent.run_task("what does this function do?")
@@ -545,8 +530,8 @@ class TestGroundingFooter:
 
     def test_footer_includes_verify_state_when_verify_cmd_configured(self, tmp_path):
         """_last_verify_state is reset at the start of every _loop() call (it
-        is per-RUN, deliberately - "this run has not been verified until its
-        own gate says so"), so it cannot be pre-set before run_task() and
+        is per-RUN: "this run has not been verified until its own gate says
+        so"), so it cannot be pre-set before run_task() and
         must instead be earned for real within the same run: write a file
         (so _write_total() moves), then let the REAL exit-code oracle run a
         trivially-passing command on the next no-tool-calls turn - the exit-
@@ -596,16 +581,13 @@ class TestGroundingFooter:
         assert agent._last_verify_state == "inconclusive"
 
     def test_a_failed_verify_still_gets_the_footer(self, tmp_path):
-        """_run_verify_gate's exhausted-retries branch (loop.py, the
-        "Retries exhausted" block) used to return its own explicit
-        "[verification FAILED] ... NOT verified" notice directly, bypassing
-        _handle_no_tool_calls's later fall-through entirely - making a
-        verified FAILURE the one case with no session record at all, which
-        is backwards: it is the case where a user most needs the file facts
-        alongside the verdict. Fixed to append the footer there too.
-        _last_verify_state is already "failed" by this point, so the SAME
-        _grounding_footer() call naturally includes "verify: failed" - no
-        separate "footer without the verify clause" variant needed."""
+        """_run_verify_gate's exhausted-retries branch (loop.py, the "Retries
+        exhausted" block) returns its own explicit "[verification FAILED] ...
+        NOT verified" notice, bypassing _handle_no_tool_calls's later
+        fall-through, so it must append the footer itself or a verified FAILURE
+        would be the one case with no session record. _last_verify_state is
+        already "failed" by this point, so the SAME _grounding_footer() call
+        includes "verify: failed"."""
         import sys
         agent = _make_agent(tmp_path, auto_approve=True, verify_max_retries=0)
         agent.verify_cmd = [sys.executable, "-c", "import sys; sys.exit(1)"]
@@ -666,9 +648,9 @@ class TestNoProgressBreaker:
 
 
 class TestLazyToolGrammar:
-    """The LAZY tool-call grammar is ON by default (2026-07-02): free text and
-    thinking flow, a started <tool_call> must be valid. Off when the user
-    disables the flag or the backend cannot enforce grammar."""
+    """The LAZY tool-call grammar is ON by default: free text and thinking
+    flow, and a started <tool_call> must be valid. Off when the user disables
+    the flag or the backend cannot enforce grammar."""
 
     def test_on_by_default_when_supported(self, tmp_path, monkeypatch):
         agent = _make_agent(tmp_path)
@@ -781,9 +763,9 @@ class TestTurnBudgetEscalation:
 
 
 class TestEventSinkFailureIsVisible:
-    """A sink that raises must not kill the agent loop, but the event must not
+    """A sink that raises must not kill the agent loop, and the event must not
     vanish in silence either: a consumer wired up before it is ready would drop
-    every event with nothing left in the log to find it by (AGENTS.md rule 5)."""
+    every event with nothing left in the log to find it by."""
 
     @staticmethod
     def _agent_with_broken_sink(tmp_path):

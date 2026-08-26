@@ -1,25 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Instance discovery registry (H6 server-rework, phases 3-4).
+"""Instance discovery registry.
 
-Each running localm server advertises itself (phase 3) so a future launch can
-DISCOVER and attach to it (phase 4) instead of spinning a second server that
-double-loads the model - the "why is the coder an extra CLI / why a second
-server" smell. ``find_attachable`` returns the live, identity-verified instance
-serving a project dir (or None to spawn); ``advertise`` writes/reaps the registry
-and serves ``GET /whoami``.
+Each running localm server advertises itself so a later launch can DISCOVER and
+attach to it instead of spinning a second server that double-loads the model.
+``find_attachable`` returns the live, identity-verified instance serving a
+project dir (or None to spawn); ``advertise`` writes/reaps the registry and
+serves ``GET /whoami``.
 
 Registry: one JSON file per instance under ``<LOCALM_HOME>/run/<instance_id>.json``::
 
     {instance_id, pid, port, host, root_dir, mode, version, started, token}
 
-Modeled on Jupyter's ``runtime/*.json`` + Ollama's identity handshake. Liveness is
-ultimately a ``GET /whoami`` returning ``app == "localm"`` (added in phase 4); this
-phase reaps by process liveness and ownership. ``mode`` here is the SURFACE mode
-(``api`` = bare OpenAI API, ``full`` = API + GUI) - distinct from the session
-persistence mode (privacy|log|full), which is a different concept that happens to
-share the word "full". The per-instance ``token`` lets a local client authenticate
-when it attaches (phase 4); it stays in the 0600 registry file and is NEVER served
-by ``/whoami``.
+Liveness is ultimately a ``GET /whoami`` returning ``app == "localm"``; the
+reaper here falls back to process liveness and ownership. ``mode`` is the
+SURFACE mode (``api`` = bare OpenAI API, ``full`` = API + GUI), distinct from the
+session persistence mode (privacy|log|full), which happens to share the word
+"full". The per-instance ``token`` lets a local client authenticate when it
+attaches; it stays in the 0600 registry file and is NEVER served by
+``/whoami``.
 """
 
 from __future__ import annotations
@@ -37,8 +35,8 @@ from localm.debuglog import logger
 
 APP_NAME = "localm"
 
-# Markers that identify a project root, walked up from cwd (decision 2). Mirrors
-# the coder's existing .localcoder model; .git covers most repos.
+# Markers that identify a project root, walked up from cwd. Mirrors the coder's
+# .localcoder model; .git covers most repos.
 _ROOT_MARKERS = (".git", ".localcoder")
 
 
@@ -48,10 +46,9 @@ def _version() -> str:
     Prefers the LIVE VERSION file (localm/_version.py:read_version()) over
     installed dist-info: the install is editable and .venv is never touched by a
     file-swap update (_apply_update.py's NEVER_TOUCH), so a reboot-class update
-    (the common case) changes VERSION on disk but does not refresh dist-info.
-    /whoami's version is what the post-update health watchdog compares against
-    the just-applied version (LM-DA-011); the stale dist-info path would make
-    every good reboot-class update look like a failed health check."""
+    changes VERSION on disk but does not refresh dist-info. /whoami's version is
+    what the post-update health watchdog compares against the just-applied
+    version."""
     try:
         from localm._version import read_version
         v = read_version()
@@ -94,14 +91,14 @@ def new_instance_id() -> str:
 
 
 def new_token() -> str:
-    """A per-instance attach token (used by local clients in phase 4)."""
+    """A per-instance attach token, used by a local client when it attaches."""
     return secrets.token_urlsafe(32)
 
 
 def resolve_root_dir(start: Optional[str] = None, override: Optional[str] = None) -> str:
-    """The project root that keys this instance (decision 2): the nearest ancestor
-    of *start* (default cwd) containing a ``.git`` or ``.localcoder`` marker, else
-    *start* itself. *override* (a future ``--project`` flag) wins outright."""
+    """The project root that keys this instance: the nearest ancestor of *start*
+    (default cwd) containing a ``.git`` or ``.localcoder`` marker, else *start*
+    itself. *override* wins outright."""
     if override:
         return str(Path(override).expanduser().resolve())
     try:
@@ -125,7 +122,7 @@ def resolve_root_dir(start: Optional[str] = None, override: Optional[str] = None
 def whoami_payload(instance_id: Optional[str], root_dir: Optional[str],
                    mode: Optional[str]) -> dict:
     """The public identity a discovering client reads to confirm this really is a
-    localm instance (and which one). Deliberately omits the token and pid."""
+    localm instance (and which one). Omits the token and the pid."""
     return {
         "app": APP_NAME,
         "version": _version(),
@@ -189,7 +186,7 @@ def unregister_instance(path) -> None:
 
 def set_mode(home: Path, instance_id: str, mode: str) -> bool:
     """Update the SURFACE mode of this instance's registry entry in place
-    (e.g. ``api`` -> ``full`` after an on-demand GUI mount, phase 5), atomically.
+    (e.g. ``api`` -> ``full`` after an on-demand GUI mount), atomically.
 
     Best-effort: returns True if the entry was rewritten, False if it is missing
     or unwritable. Only the owning process should call this for its own id (it
@@ -232,16 +229,10 @@ def read_entry(path) -> Optional[dict]:
     reap that deletes a live-but-unreadable entry is at least discoverable under
     --debug instead of looking identical to "no such file".
 
-    The size/mtime in that log line are diagnostic instrumentation, not
-    incidental: a live "Expecting value: line 1 column 1 (char 0)" (json
-    failing on an EMPTY string) has been observed with the writer's own
-    temp-file + os.replace pattern present in every commit that has ever
-    written this file - so the exact mechanism that produced a 0-byte entry
-    is still unknown. size=0 confirms "genuinely empty" (as observed);
-    size>0 here would instead mean a TRUNCATED write, a materially different
-    cause the read alone cannot distinguish. Do not remove this once the next
-    occurrence is explained - it costs nothing on the (normal) missing-file
-    path, which returns before ever reaching it."""
+    The size/mtime in that log line separate a genuinely EMPTY entry (size=0)
+    from a TRUNCATED write (size>0), which the read alone cannot distinguish.
+    They cost nothing on the normal missing-file path, which returns before
+    reaching them."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
@@ -277,7 +268,7 @@ def list_entries(home: Path) -> list[dict]:
 def pid_alive(pid: int) -> bool:
     """Best-effort: is *pid* a live process? Conservative - when we genuinely
     cannot tell (e.g. Windows without psutil), return True so reaping never
-    deletes a live instance's entry. PID reuse is handled by phase 4's /whoami
+    deletes a live instance's entry. PID reuse is handled by the /whoami
     handshake, not here."""
     if not isinstance(pid, int) or pid <= 0:
         return False
@@ -335,7 +326,7 @@ def reap_stale(home: Path, *, self_id: Optional[str] = None,
                is_alive: Optional[Callable[[dict], bool]] = None) -> list[str]:
     """Remove registry entries for processes that are gone (or whose file is
     corrupt). Never reaps *self_id* or a live entry. Returns the instance_ids
-    removed. *is_alive* lets phase 4 swap in a /whoami handshake; the default is
+    removed. *is_alive* lets a caller swap in a /whoami handshake; the default is
     process liveness."""
     d = run_dir(home)
     if not d.is_dir():
@@ -391,10 +382,9 @@ def _try_whoami(scheme: str, port: int, instance_id: Optional[str],
 
     WHICH loopback comes from the entry's recorded *bind_host*. "Loopback" is
     two addresses, not one: a server bound on ``::1`` has nothing listening on
-    127.0.0.1, so hardcoding the IPv4 one reported a healthy IPv6-bound server
-    as DEAD - measured, with the process listening and answering requests while
-    ``localm status`` said no server was serving this directory. Omitted, it
-    still dials 127.0.0.1, which is what every pre-IPv6 entry wants."""
+    127.0.0.1, so hardcoding the IPv4 one reports a healthy IPv6-bound server as
+    DEAD. Omitted, it still dials 127.0.0.1, which is what an entry with no
+    recorded bind host wants."""
     import requests
     from localm.bindhost import self_connect_host, url_host
     host = url_host(self_connect_host(bind_host))
@@ -488,9 +478,9 @@ def attach_target(home: Path, root_dir: str,
     """The thin-client attach point for the instance serving *root_dir*, or None.
 
     A CLI chat / coder client uses this to talk to the running instance's ``/v1``
-    (with its registry ``token``) instead of starting its own server + model -
-    the H6 "one server handles chat + coder" fix. Returns
-    ``{base_url, token, port, scheme, mode}`` (loopback - same machine)."""
+    (with its registry ``token``) instead of starting its own server + model.
+    Returns ``{base_url, token, port, scheme, mode}`` (loopback - same
+    machine)."""
     entry = find_attachable(home, root_dir, probe=probe)
     if not entry:
         return None
@@ -516,7 +506,7 @@ def snapshot(home: Path, probe: Optional[Callable[[dict], bool]] = None,
     ``include_token``: keep the attach token in each row instead of stripping
     it. Default False (every DISPLAY caller, e.g. ``localm ps``). Set True only
     for an INTERNAL caller that needs the token to authenticate its OWN request
-    to that instance (#953's MCP ``server_activity`` tool, which asks each
+    to that instance (the MCP ``server_activity`` tool, which asks each
     discovered instance over HTTP) - never for anything a human reads."""
     probe = probe or default_probe
     if reap:
@@ -559,7 +549,7 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
     app.state.instance_mode = mode
     app.state.instance_token = token
     # The instance's own bind coordinates, so it can build its loopback /v1
-    # self-url when it mounts a surface on demand (phase 5 on-demand GUI mount).
+    # self-url when it mounts a surface on demand.
     app.state.instance_port = port
     app.state.instance_scheme = scheme
     # Exposed so other discovery-shaped features can honour --isolated too.

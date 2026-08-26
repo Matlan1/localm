@@ -39,11 +39,11 @@ async def voice_status(request: Request):
     ``can_download`` tells the GUI whether to offer the one-time "download the
     model now" action: the model is missing, the faster-whisper package is
     there (without it the download would produce a model nothing can load yet,
-    and the reason correctly says to install the extra first), net_mode is not
-    "off" (off has no bypass, by design), and the caller could authorize it -
-    open mode, or a key granting config:write, the same scope that governs
-    net_mode itself. The flag only drives UI; POST /api/voice/model/download
-    re-checks all of it server-side."""
+    and the reason says to install the extra first), net_mode is not "off" (off
+    has no bypass), and the caller could authorize it - open mode, or a key
+    granting config:write, the same scope that governs net_mode itself. The
+    flag only drives UI; POST /api/voice/model/download re-checks all of it
+    server-side."""
     import importlib.util
     from localm.voice import stt_available, stt_model_cached
     ok, reason = stt_available()
@@ -116,10 +116,9 @@ async def voice_model_download(request: Request):
 
 
 def _voice_error_status(e: VoiceError) -> tuple[int, str]:
-    """Branch on the structured failure class, not the human message: rewording
-    a message must never flip a status code. 501 = the capability is not
-    installed; 409 = the model download is blocked by the network policy (a
-    state conflict another request - the download action, a config change -
+    """Map the structured failure class to a status code. 501 = the capability
+    is not installed; 409 = the model download is blocked by the network policy
+    (a state conflict another request - the download action, a config change -
     can resolve, not a defect in this recording); everything else is a 422 on
     this input."""
     code = getattr(e, "code", "")
@@ -157,21 +156,19 @@ def register(host) -> None:
 
 
 def on_install() -> None:
-    """Prefetch the configured Whisper model when the plugin is installed, so
-    it does not install fine and then stall on a surprise download the first
-    time someone clicks the mic.
+    """Prefetch the configured Whisper model when the plugin is installed, so a
+    first click on the mic does not stall on a surprise download.
 
     Installing the plugin is itself an explicit user action, so the prefetch
-    bypasses net_mode=ask for this one download (``allow_download=True`` is a
-    call argument; nothing is persisted). net_mode=off still refuses - the
-    kill switch stays absolute - and the install succeeds either way, with
-    /api/voice/status carrying the honest reason until the model is fetched.
+    passes ``allow_download=True`` for this one download and nothing is
+    persisted. net_mode=off still refuses, and the install succeeds either way,
+    with /api/voice/status carrying the honest reason until the model is
+    fetched.
 
-    Runs on a background thread because the install route invokes this hook on
-    the server's event loop, and because the pip extras may still be
-    installing: the prefetch needs only huggingface_hub (a core dependency),
-    not faster-whisper, so it can run before or alongside the dependency
-    install (see prefetch_stt_model)."""
+    Runs on a background thread: the install route invokes this hook on the
+    server's event loop, and the pip extras may still be installing. The
+    prefetch needs only huggingface_hub (a core dependency), not
+    faster-whisper."""
     import threading
 
     def _run() -> None:
@@ -179,8 +176,8 @@ def on_install() -> None:
             from localm.voice import prefetch_stt_model
             prefetch_stt_model(allow_download=True)   # logs its own outcome
         except Exception as e:
-            # The engine's hook wrapper cannot see this thread; never let the
-            # outcome vanish (rule 5).
+            # The engine's hook wrapper cannot see this thread, so the failure is
+            # logged here.
             from localm.debuglog import logger
             logger.warning("voice: Whisper model prefetch failed: %s", e)
 

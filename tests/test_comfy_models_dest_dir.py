@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""comfy_models_dest_dir(): the destination-routing fix (gap B) for a downloaded
-ComfyUI model file. Must land wherever resolve_comfy_target() says the ACTIVE
-ComfyUI instance actually is - managed, external-with-workdir, or (correctly)
-nowhere known-safe when external mode has no comfy_workdir configured."""
+"""comfy_models_dest_dir(): destination routing for a downloaded ComfyUI model
+file. Must land wherever resolve_comfy_target() says the ACTIVE ComfyUI instance
+actually is - managed, external-with-workdir, or nowhere known-safe when external
+mode has no comfy_workdir configured."""
 
 from pathlib import Path
 
@@ -72,12 +72,10 @@ class TestComfyModelsDestDir:
 
 
 class TestComfyModelsDestDirPerPlugin:
-    """NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR: resolve_comfy_target()'s
-    non-managed branch used to read ONLY the bare global comfy_workdir - the
-    modern Settings UI writes the per-plugin comfy.workdir field instead, so a
-    real user's download destination resolved to None ("no known folder")
-    despite having a folder visibly set. Fixed by threading a `plugin` param
-    through resolve_comfy_target()/comfy_models_dest_dir()."""
+    """resolve_comfy_target()'s non-managed branch reads the per-plugin
+    comfy.workdir field, threaded in through the `plugin` param of
+    resolve_comfy_target()/comfy_models_dest_dir(), as well as the bare global
+    comfy_workdir."""
 
     def test_plugin_only_workdir_resolves_with_the_plugin_arg(self, home):
         cfg_dict = {"managed_comfy_enabled": False,

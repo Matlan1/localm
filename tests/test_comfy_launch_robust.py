@@ -270,13 +270,12 @@ def test_ensure_comfy_reports_launcher_immediate_exit(tmp_path):
 
 
 def test_ensure_comfy_immediate_exit_includes_the_launch_log_tail(tmp_path):
-    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: an immediate-exit failure must say WHY,
-    not just the exit code - the real reason (a traceback) is what the launcher
-    wrote to its own captured output before dying, and the caller should not have
-    to go find comfy-launch.log by hand. Writes through the SAME stdout handle
-    ensure_comfy itself opened and passed to Popen (mirroring how a real launcher
-    process's output actually lands there), so this proves the file is read back,
-    not merely that some string was appended."""
+    """An immediate-exit failure must say WHY, not just the exit code - the real
+    reason (a traceback) is what the launcher wrote to its own captured output
+    before dying, and the caller should not have to go find comfy-launch.log by
+    hand. Writes through the SAME stdout handle ensure_comfy itself opened and
+    passed to Popen, so this proves the file is read back rather than that some
+    string was appended."""
     from localm.config import home_dir
     home_dir().mkdir(parents=True, exist_ok=True)  # ensure_comfy expects this to exist
 
@@ -306,11 +305,10 @@ def test_ensure_comfy_immediate_exit_includes_the_launch_log_tail(tmp_path):
 
 
 def test_ensure_comfy_timeout_message_includes_the_launch_log_tail(monkeypatch, tmp_path):
-    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: the "did not come up within N minutes"
-    message already names the log FILE; it must also fold in the file's own tail
-    so the reason is visible without a second trip to disk. Fast-forwards the
-    deadline poll loop to zero iterations via a fake monotonic clock rather than
-    waiting out a real 30s timeout."""
+    """The "did not come up within N minutes" message already names the log FILE;
+    it must also fold in the file's own tail so the reason is visible without a
+    second trip to disk. Fast-forwards the deadline poll loop to zero iterations
+    via a fake monotonic clock rather than waiting out a real 30s timeout."""
     import time as time_mod
     from localm.config import home_dir
     home_dir().mkdir(parents=True, exist_ok=True)  # ensure_comfy expects this to exist
@@ -397,17 +395,15 @@ def test_disable_auto_launch_absent_by_default(tmp_path):
 
 
 def test_ensure_comfy_launches_the_managed_instance_when_active(tmp_path):
-    """#621 follow-up: when localm's own managed ComfyUI is installed and
-    selected, ensure_comfy must launch IT (its own venv + main.py) - the
-    managed install is a raw checkout with no bundled launcher script for
-    discovery to find, so before this fix it fell through to "not reachable,
-    configure your own ComfyUI install" even with a working managed instance.
+    """When localm's own managed ComfyUI is installed and selected, ensure_comfy
+    must launch IT (its own venv + main.py): the managed install is a raw
+    checkout with no bundled launcher script for discovery to find, so without
+    managed routing it falls through to "not reachable, configure your own
+    ComfyUI install" even with a working managed instance.
 
-    Only managed_comfy_paths() is faked (not managed_comfy_launch_cmd() /
-    managed_comfy_workdir() themselves), so the REAL command-building/quoting
-    logic in managed_comfy.py actually runs and is asserted on - a prior
-    version of this test mocked managed_comfy_launch_cmd() directly and so
-    never exercised it (confirmed gap from the conserve-mode review)."""
+    Only managed_comfy_paths() is faked (not managed_comfy_launch_cmd() or
+    managed_comfy_workdir() themselves), so the REAL command-building and
+    quoting logic in managed_comfy.py actually runs and is asserted on."""
     comfy_client._confirmed_alive.clear()
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
            "comfy_launch_timeout": 30}
@@ -478,19 +474,17 @@ def test_ensure_comfy_caller_override_beats_managed_routing(tmp_path):
 
 def test_managed_workdir_resolution_is_atomic_if_launch_cmd_raises(tmp_path):
     """If managed_comfy_workdir() succeeds but managed_comfy_launch_cmd() then
-    raises, workdir must NOT stay pointed at the managed folder - it must fall
-    back to the ordinary (non-managed) resolution cleanly, not leave a
-    workdir-with-no-matching-launch_cmd inconsistent state (low-severity but
-    real gap found by the conserve-mode review).
+    raises, workdir must NOT stay pointed at the managed folder - it falls back
+    to the ordinary (non-managed) resolution cleanly rather than leaving a
+    workdir-with-no-matching-launch_cmd inconsistent state.
 
     managed_root is populated with a real main.py + venv/Scripts/python.exe
     (discover_launch_cmd's own fallback-detection targets) so this test
-    actually DISCRIMINATES the two behaviors: under the bug, a leaked
-    workdir makes discover_launch_cmd(managed_root) wrongly succeed and
-    launch a ComfyUI missing --listen/--port (defaulting to the WRONG port,
-    8188, while ensure_comfy keeps polling 8189) - an empty managed_root
-    would make both the fixed and buggy code return the same "not reachable"
-    outcome for the wrong reason, silently failing to catch the regression."""
+    DISCRIMINATES the two behaviours: with a leaked workdir,
+    discover_launch_cmd(managed_root) wrongly succeeds and launches a ComfyUI
+    missing --listen/--port (defaulting to the WRONG port, 8188, while
+    ensure_comfy keeps polling 8189). An empty managed_root would make both
+    outcomes read as "not reachable"."""
     comfy_client._confirmed_alive.clear()
     managed_root = tmp_path / "comfyui"
     (managed_root / "venv" / "Scripts").mkdir(parents=True)
@@ -517,15 +511,13 @@ def test_managed_workdir_resolution_is_atomic_if_launch_cmd_raises(tmp_path):
 
 
 def test_concurrent_ensure_comfy_calls_spawn_only_one_process(tmp_path):
-    """NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK: two independent triggers for the
-    SAME api_url (a generate submission and the separate "Launch ComfyUI"
-    button, at minimum - confirmed live on the maintainer's own machine, right
-    after a reboot ruled out any leftover process) must not each independently
+    """Two independent triggers for the SAME api_url (a generate submission and
+    the separate "Launch ComfyUI" button, at minimum) must not each independently
     decide ComfyUI is down and spawn a competing process. Fires two genuinely
     concurrent ensure_comfy() calls at a dead api_url, with a mocked
     slow-but-eventually-successful launch, and asserts only ONE subprocess is
-    actually spawned - the double-checked _launch_lock_for() must serialize
-    the decision, not just the bookkeeping."""
+    actually spawned - the double-checked _launch_lock_for() must serialize the
+    decision, not just the bookkeeping."""
     import threading
 
     comfy_client._confirmed_alive.clear()

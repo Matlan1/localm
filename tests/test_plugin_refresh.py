@@ -2,13 +2,12 @@
 """Refreshing stale installed builtin-plugin copies on upgrade.
 
 Enabling a first-party plugin copies it from the bundled store into the data
-dir. Before this, the copy was never refreshed: after a localm upgrade the
-installed copy kept SHADOWING the newer store source, so the user silently ran
-stale plugin code (including missing bug/security fixes). These tests cover the
-content-hash + provenance-marker refresh: a stale copy is re-synced, user config
-survives, an externally-installed plugin is never clobbered, and an up-to-date
-copy is left alone. They also pin the sys.modules submodule purge that lets a
-reload pick up freshly written code.
+dir. A copy that is never refreshed keeps SHADOWING the newer store source after
+a localm upgrade, so the user silently runs stale plugin code (including missing
+bug and security fixes). These tests cover the content-hash + provenance-marker
+refresh: a stale copy is re-synced, user config survives, an externally-installed
+plugin is never clobbered, and an up-to-date copy is left alone. They also pin
+the sys.modules submodule purge that lets a reload pick up freshly written code.
 """
 
 import textwrap
@@ -35,7 +34,7 @@ def _valued_plugin(root, name, value, *, with_backend=True):
     """A minimal plugin whose GET /api/<name>/val returns *value*. When
     *with_backend* the value comes from a sibling ``backend.py`` imported as
     ``from . import backend`` - exercising the submodule import path that the
-    real image plugin uses (and that the original stale-shadow bug rode in on)."""
+    real image plugin uses."""
     pdir = root / name
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "plugin.toml").write_text(
@@ -206,9 +205,8 @@ def test_legacy_identical_copy_adopts_marker_without_recopy(env):
 
 def test_unload_purges_submodules_from_sys_modules(env):
     """_unload must drop the WHOLE plugin namespace - the top-level module AND
-    its submodules (e.g. '<uniq>.backend'). The old code popped only the
-    top-level name, leaving a stale '.backend' cached that shadowed a later load
-    - the exact leak behind the original image-plugin failure."""
+    its submodules (e.g. '<uniq>.backend'). Popping only the top-level name
+    leaves a stale '.backend' cached that shadows a later load."""
     import sys
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"

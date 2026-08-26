@@ -1,11 +1,9 @@
 """Changing the embedding model must not be a dead end, and a chunk whose text
 contains an exotic line separator must not vanish.
 
-Both defects were reported by the maintainer against a real 1192-chunk collection.
-The second is the root cause of the first's whole symptom cluster, and it had been
-"fixed" repeatedly by treating downstream symptoms, so each test here asserts the
-BEHAVIOUR (records survive, vectors get rebuilt) rather than the wording of a
-warning.
+The separator defect is the root cause of the first's whole symptom cluster, so
+each test here asserts the BEHAVIOUR (records survive, vectors get rebuilt), never
+the wording of a warning.
 """
 import json
 import os
@@ -258,13 +256,13 @@ def _unusable_numpy():
     ("_vectors_finite", ([[1.0, 2.0]],)),
 ])
 def test_numpy_present_but_unusable_falls_back_at_every_site(monkeypatch, fn, args):
-    """The shared Windows-CI red: numpy is PARTIALLY INITIALISED, so `import numpy`
-    SUCCEEDS while np.asarray is absent. Both sites caught only ImportError.
+    """numpy can be PARTIALLY INITIALISED, so `import numpy` SUCCEEDS while
+    np.asarray is absent. Catching only ImportError is not enough at either site.
 
-    _vectors_finite is the worse of the two - it returns the boolean deciding
-    whether the vector store is TRUSTED, so an escaping AttributeError errors the
-    whole query instead of degrading to BM25 with a surfaced reason. CI only ever
-    pointed at _cosine because it was reached first."""
+    _vectors_finite is the more consequential of the two: it returns the boolean
+    deciding whether the vector store is TRUSTED, so an escaping AttributeError
+    errors the whole query instead of degrading to BM25 with a surfaced
+    reason."""
     from localm.rag import store as store_mod
 
     monkeypatch.setattr(store_mod, "_numpy", _unusable_numpy())
@@ -296,9 +294,7 @@ def test_a_namespace_stub_numpy_is_reported_as_a_broken_environment(monkeypatch,
     `__file__` is None. That is NOT "numpy is missing" - something has put a fake
     one on the path, which breaks anything else here that imports numpy.
 
-    Collapsing that into a routine "numpy unavailable" message is the same rule-5
-    error as collapsing missing-vs-corrupt into one code path, made in the message
-    instead of the branch."""
+    It must not be collapsed into a routine "numpy unavailable" message."""
     import types
 
     from localm.rag import store as store_mod
@@ -365,17 +361,14 @@ def test_a_usable_numpy_failing_for_a_real_reason_still_propagates(monkeypatch):
 
 
 def test_numpy_is_never_imported_lazily_inside_a_function():
-    """THE RACE GUARD, and the reason the module-level binding exists.
+    """Both numpy users run on the shared plugin ThreadPoolExecutor. CPython's
+    import lock is PER-MODULE, so a thread finding numpy already in sys.modules
+    does NOT wait for it to finish initialising - it gets the module as it stands,
+    possibly with no asarray. numpy must therefore stay a module-level binding.
 
-    Both numpy users run on the shared plugin ThreadPoolExecutor. CPython's import
-    lock is PER-MODULE since 3.3, so a thread finding numpy already in sys.modules
-    does NOT wait for it to finish initialising - it gets the module as it stands.
-    That is what produced a numpy with no asarray, and it is why the failure is
-    nondeterministic on identical trees.
-
-    A future edit re-introducing `import numpy` inside one of these functions would
-    silently restore the race while every other test here still passed, because the
-    state-handling fallback would keep masking it. This pins the absence."""
+    An edit re-introducing `import numpy` inside one of these functions restores
+    that race while every other test here still passes, because the
+    state-handling fallback masks it. This pins the absence."""
     import ast
     import inspect
     import textwrap
@@ -440,9 +433,9 @@ def test_validation_errors_keep_the_structured_form_under_errors():
 
 
 def test_a_non_finite_number_still_renders_a_422_not_a_500():
-    """Regression guard on the existing protection: JSONResponse serializes with
-    allow_nan=False, so a NaN in the error detail used to crash the handler into
-    a 500. Reformatting the message must not reintroduce that."""
+    """JSONResponse serializes with allow_nan=False, so a NaN reaching the error
+    detail crashes the handler into a 500. Reformatting the message must not
+    let one through."""
     r = _post(_api(), _MSGS + '"temperature":NaN}')
     assert r.status_code == 422, f"got {r.status_code}, the 422 handler crashed"
     assert "temperature" in r.json()["detail"]
@@ -573,12 +566,10 @@ def test_a_failed_reembed_leaves_the_index_intact_across_MULTIPLE_batches(tmp_pa
 
     test_a_failed_reembed_leaves_the_previous_index_intact embeds 4 chunks at the
     default batch of 32, so the whole run is ONE embed_fn call: the embedder
-    raises INSIDE it, before any result is ever appended. A write-as-you-go
-    implementation would therefore never reach a write, and that test stays green
-    against it - measured, by reverting reembed to save inside the loop. Only a
-    failure in a LATER batch, after an earlier one has already succeeded, can tell
-    the two apart, and that is exactly the shape that leaves a half-written
-    mixed-dimension index behind.
+    raises INSIDE it, before any result is ever appended, and a write-as-you-go
+    implementation never reaches a write there. Only a failure in a LATER batch,
+    after an earlier one has already succeeded, can tell the two apart, and that
+    is the shape that leaves a half-written mixed-dimension index behind.
     """
     coll = _uploads_only(tmp_path)
     vf = tmp_path / "eng" / "vectors.json"

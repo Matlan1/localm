@@ -50,11 +50,11 @@ def test_is_newer_edge_cases():
 
 
 def test_is_newer_prerelease_truth_table():
-    """The full truth table this fix is built from - drive is_newer() directly
-    rather than asserting on the parser's internals, so a future refactor of
-    _parse/_prerelease_suffix is free as long as this table still holds."""
-    # A stable release always outranks a prerelease of the SAME numeric version -
-    # the filed bug: upgrading FROM an rc TO the matching final release.
+    """The full truth table, driving is_newer() directly rather than asserting on
+    the parser's internals, so a future refactor of _parse/_prerelease_suffix is
+    free as long as this table still holds."""
+    # A stable release always outranks a prerelease of the SAME numeric version:
+    # upgrading FROM an rc TO the matching final release.
     assert _version.is_newer("0.1.4", "0.1.4-rc1") is True
     # ...and never the other direction (never "downgrade" final -> rc automatically).
     assert _version.is_newer("0.1.4-rc1", "0.1.4") is False
@@ -74,9 +74,9 @@ def test_is_newer_prerelease_truth_table():
 def test_is_newer_prerelease_never_more_permissive_than_before():
     """Anti-rollback load-bearing property (updater._refuse_downgrade calls
     is_newer directly): the prerelease tie-break must only ADD resolution to
-    cases that previously tied at False, never flip an already-correct numeric
-    verdict. A malformed/adversarial version must still never be treated as
-    newer than a well-formed one it is not actually ahead of."""
+    cases the numeric compare alone leaves tied at False, never flip an
+    already-correct numeric verdict. A malformed or adversarial version must
+    never be treated as newer than a well-formed one it is not ahead of."""
     assert _version.is_newer("0.1.3", "0.1.4") is False          # plain older candidate
     assert _version.is_newer("0.1.3-rc1", "0.1.4") is False      # older AND a prerelease
     assert _version.is_newer("not-a-version", "0.1.3") is False  # malformed candidate

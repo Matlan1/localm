@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm.bindhost: the loopback-host predicate hoisted out of five copies
-(2026-07-09 quality audit finding #1) - one of which had already drifted to a
-non-identical inline variant (routes/system.py). Regression: every former
-definition site must re-export the SAME function object, not a fresh copy that
-can drift again."""
+"""localm.bindhost holds the single loopback-host predicate. Every site that once
+defined its own must re-export the SAME function object, not a copy that can
+drift."""
 
 import pytest
 

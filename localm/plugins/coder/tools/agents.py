@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The ``spawn_agent`` tool: launch a focused child Agent for a sub-task.
 
-The ``Agent`` class is imported lazily inside the call so a test that
-monkeypatches ``localm.plugins.coder.agent.Agent`` is honoured, and so the
-tools package has no import-time dependency on the agent module."""
+The ``Agent`` class is imported lazily inside the call, so the tools package has
+no import-time dependency on the agent module and a monkeypatched
+``localm.plugins.coder.agent.Agent`` is honoured."""
 
 from __future__ import annotations
 
@@ -14,23 +14,12 @@ from .base import ToolResult
 from .files import tool_read_file
 
 # Sentinel meaning no explicit scope was given, so inherit the parent's. None
-# cannot serve: it is itself a meaningful scope value (no confinement).
+# cannot serve as one: it is itself a meaningful scope value (no confinement).
 _INHERIT = object()
 
 
 def _inherited_confirm_handler(parent: Any):
     """The channel the CHILD asks for approval on: the parent's REAL one.
-
-    A child always runs ``run_task`` -> ``_loop(interactive=False)``, so it can
-    never use execution.py's own interactive prompt branch. Inheriting only the
-    parent's ``confirm_handler`` therefore left the default interactive REPL
-    (``localm coder`` without ``--yes``: auto_approve=False AND
-    confirm_handler=None, because the terminal REPL confirms via ``_confirm_tool``
-    rather than a handler) with no channel at all - so every delegated
-    write/shell/git hit the fail-closed branch and was DENIED, even though the
-    user was sitting at the terminal that the parent's own tools prompt on
-    (REG-507). "Inherit the parent's confirmation posture" was meant to ASK, not
-    to block.
 
     Precedence:
     - the parent's own handler when it has one (GUI/web routes to the browser);
@@ -38,10 +27,12 @@ def _inherited_confirm_handler(parent: Any):
       interactive loop. spawn_agent runs synchronously inside the parent's own
       tool call, so that terminal is free and the answer returns up the same
       stack;
-    - else None: a genuinely unattended parent (a scheduled job, a non-interactive
-      run_task) has nobody to ask, so the child keeps failing CLOSED. That is the
-      2026-07-09 bypass fix and it stays intact - this never self-approves, it
-      only reaches a real human.
+    - else None: a genuinely unattended parent (a scheduled job, a
+      non-interactive run_task) has nobody to ask, so the child keeps failing
+      CLOSED. This never self-approves; it only ever reaches a real human.
+
+    A child always runs ``run_task`` -> ``_loop(interactive=False)``, so it can
+    never use execution.py's own interactive prompt branch.
     """
     handler = getattr(parent, "confirm_handler", None)
     if handler is not None:
@@ -64,50 +55,43 @@ def inherited_child_kwargs(
 ) -> dict:
     """The kwargs every child Agent is constructed with, in one place.
 
-    Shared by ``spawn_agent`` and by worktree-isolated parallel dispatch so the
-    two cannot drift: a safety property added to one path but not the other is
-    exactly the kind of gap that produced the scope hole this consolidates.
+    Shared by ``spawn_agent`` and by worktree-isolated parallel dispatch, so the
+    two cannot drift.
 
-    A child must be no LESS confirmed than its parent: inherit the parent's
-    confirmation posture instead of hardcoding auto_approve=True, or a parent that
-    requires confirmation (auto_approve=False), is running --dry-run, or has a GUI
-    confirm_handler wired up would still spawn a child that freely executes
-    write_file/run_shell/git_push/etc. with zero confirmation. confirm_handler is
-    a synchronous callback, so passing it through works even though the child runs
-    non-interactively (run_task -> _loop(interactive=False)): the child calls it in
-    the same call stack the parent's tool call is already on.
+    A child must be no LESS confirmed than its parent: the parent's confirmation
+    posture is inherited rather than hardcoding auto_approve=True.
+    confirm_handler is a synchronous callback, so passing it through works even
+    though the child runs non-interactively (run_task ->
+    _loop(interactive=False)): the child calls it in the same call stack the
+    parent's tool call is already on.
 
     A child must also be no MORE capable than its parent, along BOTH axes the
     parent is confined on:
-     - restricted / disabled_tools: a restricted session cannot spawn a child that
-       re-enables run_shell etc., which would be an RCE escape from a shareable
-       key. (spawn_agent is itself disabled for a restricted session, so that half
-       is belt-and-suspenders.)
-     - scope: scope and restricted are independent request fields, and spawn_agent
-       is only disabled for a RESTRICTED session, so a scoped, non-restricted
-       session (the owner working under --scope) would otherwise spawn a child with
-       no path confinement at all - the child could read and write anywhere under cwd.
+     - restricted / disabled_tools: a restricted session cannot spawn a child
+       that re-enables run_shell and the like. (spawn_agent is itself disabled
+       for a restricted session, so that half is belt-and-suspenders.)
+     - scope: scope and restricted are independent request fields, and
+       spawn_agent is only disabled for a RESTRICTED session, so a scoped,
+       non-restricted session would otherwise spawn a child with no path
+       confinement at all.
 
-    Note the two KINDS of argument here, because they behave differently:
-    everything derived from *parent* is INHERITED (and read with getattr AND a
-    default, because *parent* is whatever the caller passed and a duck-typed or
-    partial parent must fall back rather than raise). Everything else - backend,
-    cwd, name, max_turns, confirm_handler, role - is PER-SPAWN and belongs to the
-    individual call. *role* in particular is an argument of spawn_agent, not a
-    property of the parent, so it has no getattr form.
+    Two KINDS of argument: everything derived from *parent* is INHERITED, read
+    with getattr AND a default, because *parent* is whatever the caller passed
+    and a duck-typed or partial parent must fall back rather than raise.
+    Everything else - backend, cwd, name, max_turns, confirm_handler, role - is
+    PER-SPAWN and belongs to the individual call. *role* is an argument of
+    spawn_agent, not a property of the parent, so it has no getattr form.
 
-    This helper only ASSEMBLES kwargs. It deliberately does no toolset resolution:
-    a role's narrowing is applied inside ``Agent`` after ``_apply_restricted_toolset``
-    and after MCP/plugin/skill registration. Pre-computing a toolset here would move
-    the narrowing BEFORE dynamic registration and silently let MCP/plugin tools
-    through - a capability leak dressed as an optimisation.
+    This helper only ASSEMBLES kwargs and does no toolset resolution: a role's
+    narrowing is applied inside ``Agent`` after ``_apply_restricted_toolset``
+    and after MCP/plugin/skill registration. Pre-computing a toolset here would
+    move the narrowing BEFORE dynamic registration and let MCP/plugin tools
+    through.
 
     *scope* defaults to inheriting the parent's. A caller may pass an explicit
-    value, but note that OVERRIDING it with something broader would discard a
-    narrowing the parent had, which is a confinement regression dressed as
-    isolation. Worktree-isolated dispatch deliberately still inherits: cwd is what
-    confines the file tools there, so re-scoping would buy nothing and cost the
-    parent's narrowing.
+    value; overriding it with something broader would discard a narrowing the
+    parent had. Worktree-isolated dispatch still inherits, because cwd is what
+    confines the file tools there.
     """
     from ..audit import SessionMode as _SessionMode
     return dict(
@@ -159,11 +143,9 @@ def _prepare_child(
     Returns ``(child, full_task)`` on success or ``(None, ToolResult)`` on a
     failure the caller should return verbatim.
 
-    ONE construction path on purpose. Every safety property a child needs -
-    scope (#781), role (#786), restricted/disabled_tools, the confirmation
-    posture - flows through ``inherited_child_kwargs``. A second, parallel
-    construction site is precisely how the scope hole and then the role hole
-    were introduced, so the background variant reuses this rather than
+    ONE construction path: every safety property a child needs - scope, role,
+    restricted/disabled_tools, the confirmation posture - flows through
+    ``inherited_child_kwargs``. The background variant reuses this rather than
     assembling its own kwargs.
     """
     from ..roles import resolve_role
@@ -234,7 +216,7 @@ def tool_spawn_agent(
     child a focused mission AND narrows its toolset to that role's allowlist. The
     narrowing is strictly subtractive on top of everything the parent already
     forbids, so a role can only ever remove capability (see roles.py). Without a
-    role the child keeps the parent's full toolset, as before.
+    role the child keeps the parent's full toolset.
 
     Returns the child agent's final response as a string.
     """
@@ -256,25 +238,24 @@ def tool_spawn_agent(
     result_text = child.run_task(full_task)
     turns_used  = child.turns
 
-    # Fold the child's changed files and failure trace into the parent so a
-    # delegation-heavy session still reflects at close: the child is never close()d
-    # and shares this cwd. Best-effort - episodic bookkeeping never breaks the tool.
+    # Fold the child's changed files and failure trace into the parent: the child is
+    # never close()d and shares this cwd. Best-effort - episodic bookkeeping never
+    # breaks the tool.
     try:
         _parent_agent._absorb_child_state(child)
     except Exception:
         pass
 
-    # A sub-agent may have quoted untrusted web or MCP content verbatim in its
-    # summary, and that text re-enters the PARENT loop as a trusted spawn_agent
-    # result. Defang frame markers and chat-template control tokens in it so the
-    # child cannot forge a role or frame boundary in the parent. It is not wrapped
-    # in the untrusted fence, so the parent can still act on a legitimate delegated
-    # result; the child runs its own fence internally.
+    # Defang frame markers and chat-template control tokens in the child's summary,
+    # which may quote untrusted web or MCP content verbatim, so the child cannot
+    # forge a role or frame boundary in the parent. Not wrapped in the untrusted
+    # fence, so the parent can still act on a legitimate delegated result; the child
+    # runs its own fence internally.
     from ..provenance import neutralise
     # ASK THE CHILD whether it succeeded: run_task RETURNS its failure message
     # rather than raising, so arriving here is not success, and ToolResult.success
     # additionally CLEARS the parent's per-tool failure streak. The ToolResult stays
-    # a success (the delegation ran, and the child's own text carries the reason)
+    # a success (the delegation ran, and the child's own text states it)
     # while the summary reports the child's verdict.
     child_ok = getattr(child, "last_run_ok", True)
     verdict = ("finished in" if child_ok else
@@ -292,11 +273,8 @@ def _isolate_child(cwd: Path, name: str):
     parent's change-set record need; *error* is a ToolResult when isolation is
     impossible and the spawn must be refused.
 
-    A background child MUST be isolated. A synchronous child sharing the parent's
-    cwd is merely untidy - the parent is blocked, so nobody else is writing. A
-    BACKGROUND child writing into the parent's working tree while the parent keeps
-    editing is a data race on the user's files, which is exactly why worktree
-    isolation was a prerequisite for this feature rather than a nicety.
+    A background child MUST be isolated: it writes into the working tree while the
+    parent keeps editing, which is a data race on the user's files.
     """
     import uuid
 
@@ -345,9 +323,7 @@ def _finalize_isolated_child(info: dict):
     """Teardown closure: commit the child's work, capture its diff, remove its
     worktree. Runs on the JOB's worker thread; touches no parent state.
 
-    Branch durable, worktree transient - the same contract dispatch_parallel uses:
-    returning a path to a directory we just deleted would be useless, and leaving
-    worktrees behind is the scar this repo already has.
+    Branch durable, worktree transient - the same contract dispatch_parallel uses.
     """
     def _finalize(child) -> dict:
         from .base import _truncate
@@ -414,29 +390,23 @@ def tool_spawn_agent_background(
 
     CONFIRMATION HAPPENS ONCE, AT DISPATCH. This tool is destructive, so starting
     a background sub-agent goes through the confirmation gate exactly like
-    ``spawn_agent``. But a backgrounded child cannot come back and ask: the
-    single approval you give here covers EVERYTHING the child later does -
-    every write, shell command and git operation, for its whole run. That is a
-    real widening compared with the synchronous ``spawn_agent``, where a child
-    reaches the same human mid-run. It is the background extension of the
-    invariant already stated for the synchronous path: an unattended parent has
-    nobody to ask, so it must fail closed rather than self-approve (the
-    2026-07-09 bypass fix). Hence the refusal below when no confirmation channel
-    exists at all - this never self-approves, it declines to start.
+    ``spawn_agent``. A backgrounded child cannot come back and ask: the single
+    approval given here covers EVERYTHING the child later does - every write,
+    shell command and git operation, for its whole run. When no confirmation
+    channel exists at all the dispatch is refused rather than self-approved.
 
     A background sub-agent CANNOT be stopped once running (there is no
-    cooperative cancellation in ``Agent.run_task``), which is why there is no
-    kill tool for it.
+    cooperative cancellation in ``Agent.run_task``), so there is no kill tool for
+    it.
     """
     if _parent_agent is None:
         return ToolResult.error(
             "spawn_agent_background requires a running parent agent")
 
-    # REFUSE TO LAUNCH when there is no channel to ask on, rather than launching and
-    # relying on the child hitting the fail-closed branch later. A background child
-    # must not inherit the terminal prompt (_confirm_tool): the parent may be
-    # mid-turn or streaming to a browser. An explicit confirm_handler (GUI or web)
-    # is a real async channel and is accepted, and auto_approve means the user has
+    # REFUSE TO LAUNCH when there is no channel to ask on. A background child must
+    # not inherit the terminal prompt (_confirm_tool): the parent may be mid-turn or
+    # streaming to a browser. An explicit confirm_handler (GUI or web) is a real
+    # async channel and is accepted, and auto_approve means the user has
     # pre-approved everything.
     explicit_handler = getattr(_parent_agent, "confirm_handler", None)
     if explicit_handler is None and not getattr(_parent_agent, "auto_approve", True):
@@ -448,9 +418,8 @@ def tool_spawn_agent_background(
 
     # The AUTHORITATIVE ceiling: one shared gate across every kind of concurrent
     # child, so background jobs and worktree-isolated parallel dispatch cannot each
-    # admit their own quota. Taken BEFORE the worktree so a refusal costs no
-    # filesystem work; released when the job FINISHES (see AgentJob._finish), not
-    # when it is submitted.
+    # admit their own quota. Taken BEFORE the worktree, and released when the job
+    # FINISHES (see AgentJob._finish), not when it is submitted.
     from ..child_limit import describe_holders, release, try_acquire
     token = try_acquire("background", name)
     if token is None:
@@ -488,8 +457,7 @@ def tool_spawn_agent_background(
                              # child's own agent, so the session that asked for
                              # the work is the one that can list it. The child
                              # inherits the same id anyway via Agent.__init__'s
-                             # parent lookup; taking it from the parent here also
-                             # covers a child built some other way.
+                             # parent lookup.
                              owner=getattr(_parent_agent, "job_owner", None)),
             kind="agent")
     except Exception as exc:                          # noqa: BLE001 - reported

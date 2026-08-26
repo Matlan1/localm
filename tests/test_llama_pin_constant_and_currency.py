@@ -1,19 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The pin CONSTANT's own invariants, and the currency check that stops it rotting.
 
-tests/test_llama_runtime_version_pin.py covers how a tag is RESOLVED (pin vs
-tracking vs exact). This file covers the two things that make the pin worth
-having in the first place:
+This file covers two properties of the pin itself:
 
-  * the pin says honestly what it rests on, PER BACKEND. A confirmation that is
-    green because it silently skipped the backends it could not test would be
-    worse than none, because it would carry the word "confirmed";
-  * the pin is visibly compared against upstream. Staying close is half the
-    requirement - a pin nobody advances fails a user as surely as tracking
-    latest does, just more slowly.
+  * it states what it rests on, PER BACKEND, so a confirmation cannot read as
+    green while silently skipping backends it could not test;
+  * it is visibly compared against upstream, so a pin nobody advances is
+    detectable.
 
-Nothing here asserts the pin's VALUE. A test keyed on a tag number stops being
-able to fail the moment the pin moves, which it is meant to do often.
+Nothing here asserts the pin's VALUE.
 """
 
 from __future__ import annotations
@@ -31,9 +26,8 @@ _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check_llama_pin.
 
 @pytest.fixture(scope="module")
 def currency():
-    """scripts/check_llama_pin.py, loaded by path. It is deliberately not a
-    package module: it is stdlib-only so the CI job can run it with nothing
-    installed."""
+    """scripts/check_llama_pin.py, loaded by path. Not a package module: it is
+    stdlib-only so the CI job can run it with nothing installed."""
     spec = importlib.util.spec_from_file_location("check_llama_pin", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -57,10 +51,8 @@ def test_the_pin_is_a_tag_that_can_safely_reach_a_url():
 def test_every_backend_states_what_its_pin_rests_on():
     """A NEW BACKEND CANNOT BE ADDED WITHOUT SAYING WHAT ITS PIN RESTS ON.
 
-    That is the whole point of the entry being required rather than optional:
-    the honest default for an untested backend is silence, and silence here
-    reads to the next person as "covered by the confirmation like everything
-    else"."""
+    The entry is required, not optional: an absent entry would read as "covered
+    by the confirmation like everything else"."""
     backends = {b for plat in sl._ASSET_MATCH.values() for b in plat} | {"amd-rocm"}
     missing = sorted(backends - set(sl._PIN_CONFIRMATION))
     assert not missing, (
@@ -81,20 +73,14 @@ def test_no_backend_gets_to_be_vague_about_confirmation():
 
 
 def test_the_untested_backends_are_the_ones_needing_absent_hardware():
-    """Pins the actual asymmetry rather than a count, so this fails if someone
-    quietly downgrades a measured backend to save a test run - or upgrades an
-    unmeasured one without measuring it.
+    """Pins the actual asymmetry, not a count, so this fails if a measured backend
+    is downgraded to save a test run, or an unmeasured one is upgraded without
+    being measured.
 
     cpu and vulkan are measurable here (any machine; this project's own AMD box).
     cuda, sycl, hip and metal need hardware nobody here has. amd-rocm is NOT in
     the measured set even though this box could run it: it ships from a different
-    tag series (_ROCM_TAG), so this pin's confirmation never touched it, and
-    claiming otherwise would be the exact rounding-up this table exists to stop.
-
-    This assertion caught that claim being made. The first version of the table
-    said amd-rocm's generation had been measured 'on gfx1030 at b1307', which was
-    inferred from the box running that backend daily rather than from any run in
-    this unit."""
+    tag series (_ROCM_TAG), so this pin's confirmation never touched it."""
     measured = {b for b, note in sl._PIN_CONFIRMATION.items()
                 if "load + generate, measured" in note}
     assert measured == {"cpu", "vulkan"}, measured
@@ -147,12 +133,9 @@ def test_currency_does_not_call_a_lexically_larger_older_tag_newer(
         currency, monkeypatch, capsys):
     """THE COMPARISON ITSELF, on a value that DISCRIMINATES.
 
-    The test above cannot catch a lexical comparison and was proven not to:
-    reverting main() to `t > pin` left it green, because b99999 and b99998 are
-    both lexically AND numerically greater than the pin, so the two
-    implementations agree on that fixture. It is item 19 exactly - the fixture's
-    value space does not intersect the defect's trigger space, and the test reads
-    as covering the comparison while being structurally unable to fail on it.
+    The test above cannot catch a lexical comparison: b99999 and b99998 are both
+    lexically AND numerically greater than the pin, so a lexical and a numeric
+    implementation agree on that fixture.
 
     A tag needs FEWER DIGITS to discriminate: 'b9999' sorts AFTER 'b10375' as a
     string and is far older as a number. A lexical comparison reports the pin as

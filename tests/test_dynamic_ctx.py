@@ -103,15 +103,13 @@ class TestFreshContextUsesPolicy:
 
 
 class TestFreshContextVramCheck:
-    """CHK-KVCACHE-OVERFLOW (growth path): _prefill_fresh_context() recreates a
-    BIGGER context whenever a conversation outgrows the live one - which
-    happens on literally the first prompt for anyone on default settings,
-    since the default max_tokens (4096) already exceeds the default base n_ctx
-    (4096), forcing a grow to 8192. That native (re)allocation had NO VRAM
-    preflight at all before this fix - only a NULL-pointer check after the
-    fact - the same missing-check class of bug _check_vram() fixed for the
-    initial load, just at a different, unguarded call site. An optional
-    vram_check callback (wired by GgufBackend._check_context_fit) closes it."""
+    """_prefill_fresh_context() recreates a BIGGER context whenever a
+    conversation outgrows the live one - which happens on the first prompt for
+    anyone on default settings, since the default max_tokens (4096) already
+    exceeds the default base n_ctx (4096), forcing a grow to 8192. That native
+    (re)allocation needs a VRAM preflight, not just a NULL-pointer check after
+    the fact; an optional vram_check callback (wired by
+    GgufBackend._check_context_fit) provides it."""
 
     def test_vram_check_called_with_target_and_current_ctx_before_growing(self):
         llm = _llm()
@@ -256,10 +254,9 @@ class TestAutoCtxMax:
 
 
 class TestUnlimitedCtxMax:
-    """R04: n_ctx_max=0 ('unlimited') must lift the _AUTO_CTX_MAX safety clamp when
-    ctx_auto is on, so the window grows to the full VRAM-derived budget instead of being
-    capped at 65536. The maintainer set n_ctx_max=0 expecting 'grow until VRAM' and the
-    chat instead crashed at the 65536 cap."""
+    """n_ctx_max=0 ('unlimited') must lift the _AUTO_CTX_MAX safety clamp when
+    ctx_auto is on, so the window grows to the full VRAM-derived budget instead
+    of being capped at 65536."""
 
     def _backend(self, free_vram, model_bytes, *, n_ctx_max, ctx_auto, n_ctx=4096):
         from localm.inference.backends.gguf import GgufBackend

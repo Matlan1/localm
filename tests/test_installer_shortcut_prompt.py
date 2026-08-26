@@ -1,32 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-r"""The end of setup must describe what the user actually chose.
+r"""The end of setup must describe what the user actually chose. Four properties of
+the desktop-shortcut screen:
 
-Reported live, from a real install: the desktop-shortcut screen read
-
-    Building the LocaLM app launcher ...
-    Launcher ready: ...\.venv\localm-app
-    Launch it: "...\.venv\localm-app\LocaLM.exe" -m localm gui
-
-    Create desktop shortcut?
-      [1] Launcher
-      [2] Web GUI directly
-      [3] None
-
-Three separate faults in one screen:
-
-1. "launcher" named TWO different things four lines apart - the branded
-   LocaLM.exe built by `make-launcher`, and localm-launcher.bat (the mode
-   picker) that option [1] actually points at.
-2. "Web GUI directly" asserts a browser, but `localm gui` opens a NATIVE
-   WINDOW when the desktop extra is installed - which is decided by an
-   earlier prompt in this same script. For half of users the label is wrong.
-3. The closing line said "Run localm-launcher.bat to start" no matter which
-   shortcut was made, so the answer the user just gave was ignored.
-
-And one honesty fault behind them: the closing line and the install manifest
-both keyed on what was ASKED FOR (SCPICK), not on whether the shortcut was
-actually CREATED - so a failed .lnk write still produced "start it from the
-shortcut" and recorded a .lnk for uninstall to hunt.
+1. "launcher" names ONE thing. The branded LocaLM.exe built by `make-launcher`
+   and localm-launcher.bat (the mode picker) are distinguished.
+2. The web-GUI label does not assert a browser: `localm gui` opens a NATIVE
+   WINDOW when the desktop extra is installed, which an earlier prompt in this
+   same script decides.
+3. The closing line names the shortcut that was made, not a fixed command.
+4. The closing line and the install manifest key on whether the shortcut was
+   actually CREATED, not on what was ASKED FOR (SCPICK), so a failed .lnk write
+   does not produce "start it from the shortcut" or record a .lnk for uninstall
+   to hunt.
 
 These run against the REAL setup.bat, so they fail if the wording regresses.
 """

@@ -29,9 +29,9 @@ def _seed_hang(home, name=None, body=None):
     watchdog runs INSIDE the server process (http_server.py) and names the file
     hang_<date>_<os.getpid()>.log, and the only caller of save_user_report is a
     route in that same process. So the trace of the run being reported carries
-    THIS process's pid - seeding a foreign pid would test a file the product
-    never creates on this path (and one a report must NOT attach, since it would
-    belong to some other run - REG-542)."""
+    THIS process's pid. A foreign pid would be a file the product never creates
+    on this path, and one a report must NOT attach, since it belongs to some
+    other run."""
     logs = home / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     name = name or f"hang_2026-07-10_120000_{os.getpid()}.log"
@@ -127,8 +127,8 @@ def test_live_server_hang_trace_skips_a_dead_registered_server(tmp_path, monkeyp
 def test_bug_report_cli_bundles_live_server_hang_trace(cli_runner):
     """End-to-end through the REAL `localm bug-report` command: a live server has
     registered itself and captured a freeze; the generated report must carry the
-    hang-trace section. Drives the actual CLI + registry + collector, no mock of
-    the collector (the 0.1.2 defect was exactly this integration silently missing).
+    hang-trace section. Drives the actual CLI + registry + collector, with no
+    mock of the collector.
     """
     from localm import instances
     from localm.cli import main

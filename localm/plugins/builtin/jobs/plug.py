@@ -86,10 +86,10 @@ def _check_model_name(model) -> None:
     """Refuse a job whose ``model`` is not a registered model name.
 
     The jobs scope is NOT in scopes.PRIVILEGED_SCOPES, so a deliberately
-    restricted key reaches this field, and the field used to flow verbatim into
-    get_model_info -> Engine(...). That let any jobs-scoped caller name an
-    arbitrary path on disk and have the server stat it, walk it, read it, and -
-    for a HuggingFace directory - execute its bundled .py through transformers.
+    restricted key reaches this field, and an unchecked field flows verbatim into
+    get_model_info -> Engine(...): any jobs-scoped caller could name an arbitrary
+    path on disk and have the server stat it, walk it, read it, and - for a
+    HuggingFace directory - execute its bundled .py through transformers.
     Registry membership is checked HERE, at the write, so a poisoned row never
     reaches disk in the first place (the runner re-checks at run time for rows
     persisted by an older build)."""
@@ -104,26 +104,24 @@ def _effective_cwd(cwd, request: Request):
     the caller is allowed to choose one, else the instance's project root.
 
     ``_check_cwd`` below asks what SHAPE the path is; this asks WHO is choosing it.
-    The coder route already draws exactly this line - a restricted caller is forced
-    into the project root "so a scoped key cannot point the (confined) file tools at
-    arbitrary paths" - and the scheduler had no equivalent, so a plain
-    ``jobs``-scoped key got read plus confined-write anywhere on the server just by
-    scheduling a job there.
+    The coder route draws exactly this line - a restricted caller is forced into
+    the project root "so a scoped key cannot point the (confined) file tools at
+    arbitrary paths" - and without the same rule here a plain ``jobs``-scoped key
+    gets read plus confined-write anywhere on the server just by scheduling a job
+    there.
 
-    CONFINED rather than REJECTED, which is the opposite of how ``allow_shell`` is
-    handled two routes down, and the difference is the point: ``allow_shell`` is an
-    optional opt-in, so refusing it still leaves a working job and tells the caller
-    the opt-in was denied. ``cwd`` is MANDATORY for a coder job (Job.validate), so
-    refusing it would not restrict the feature, it would remove it - a jobs-scoped
-    key could no longer schedule a coder job at all. Confining matches the coder
-    route exactly and keeps the capability.
+    CONFINED rather than REJECTED, the opposite of how ``allow_shell`` is handled
+    two routes down: ``allow_shell`` is an optional opt-in, so refusing it still
+    leaves a working job. ``cwd`` is MANDATORY for a coder job (Job.validate), so
+    refusing it would remove the feature rather than restrict it - a jobs-scoped
+    key could no longer schedule a coder job at all.
 
-    Not silent either: the created/updated job is returned to the caller with its
-    effective ``cwd``, so the value that will actually be used is visible in the
-    response rather than assumed. The runner ALSO confines at run time
-    (``_cwd_trusted``), because this route is not the only writer - the CLI and rows
-    persisted by older builds reach the scheduler without passing here - and it
-    reports the confinement in the job's own output when it bites."""
+    Not silent either: the created or updated job is returned to the caller with
+    its effective ``cwd``, so the value that will actually be used is visible in
+    the response. The runner ALSO confines at run time (``_cwd_trusted``), because
+    this route is not the only writer - the CLI and rows persisted by older builds
+    reach the scheduler without passing here - and it reports the confinement in
+    the job's own output when it bites."""
     if cwd is None or not str(cwd).strip():
         return cwd                    # nothing chosen: let validate() have its say
     if _caller_can_allow_shell(request):
@@ -135,17 +133,15 @@ def _effective_cwd(cwd, request: Request):
 def _check_cwd(cwd) -> None:
     """Refuse a coder job's ``cwd`` when it is UNC or device syntax.
 
-    Same shape as _check_model_name above, sharing store.cwd_unc_error's
-    wording the same way _check_model_name shares unregistered_model_error's:
-    checked HERE, at the write, so a poisoned row never persists via this
-    route. This is early rejection only, not the authoritative guard - a row
-    written before this check existed (or added straight to the store) is
-    still on disk, and the autonomous scheduler tick has no caller to gate
-    here. _run_coder's own check is authoritative because it runs immediately
-    before the filesystem call, for every job regardless of when or how its
-    cwd was set (mirrors the model-name re-check in runner.py's _load_engine,
-    and PR #893's fix for the identical gap in the MCP server's
-    pull_model/run_coder_task/generate_image tools)."""
+    Same shape as _check_model_name above, sharing store.cwd_unc_error's wording
+    the same way _check_model_name shares unregistered_model_error's: checked
+    HERE, at the write, so a poisoned row never persists via this route. This is
+    early rejection only, not the authoritative guard - a row written before this
+    check existed (or added straight to the store) is still on disk, and the
+    autonomous scheduler tick has no caller to gate here. _run_coder's own check
+    is authoritative because it runs immediately before the filesystem call, for
+    every job regardless of when or how its cwd was set (mirroring the model-name
+    re-check in runner.py's _load_engine)."""
     err = cwd_unc_error(cwd)
     if err:
         raise HTTPException(400, err)
@@ -176,55 +172,50 @@ def _caller_is_owner_key(request: Request) -> bool:
     """True when the caller's credential IS the owner key, i.e. the one credential
     whose authority does not come from a revocable keystore entry.
 
-    This asks a POSITIVE question - "is this principal the current owner key?" -
-    and reads nothing but the owner key itself. An earlier version of this fix
-    asked the negative ("absent from the keystore, therefore the owner") via
-    ``not key_hash_live(h)``, and that was wrong twice over (both caught by the
-    pre-merge security review of REG-509):
+    A POSITIVE question - "is this principal the current owner key?" - reading
+    nothing but the owner key itself. The negative form ("absent from the
+    keystore, therefore the owner", via ``not key_hash_live(h)``) is wrong twice
+    over:
 
     - ``verify()`` rejects an EXPIRED key on the bearer path, but expiry (unlike
       ``revoke_key``) neither deletes the keystore record nor drops sessions, and
       ``_principal_from_token`` exempts an ADMIN session from ``key_hash_live``
       entirely. So an expired ADMIN-scoped keystore key over its still-live cookie
-      resolved a principal that ``key_hash_live`` called dead - and the negative
-      test read that as "the owner", handing a revoked-by-expiry key permanent
-      shell. That is precisely the LM-DA-014 hole this whole re-check exists to
-      close.
+      resolves a principal that ``key_hash_live`` calls dead, and the negative
+      test would read that as "the owner", handing a revoked-by-expiry key
+      permanent shell.
     - ``_load_keystore()`` swallows OSError/ValueError and returns ``[]``, so a
-      transient unreadable/corrupt auth.json makes ``key_hash_live`` say "not
-      live" for a perfectly live key. Deriving a PERMANENT, persisted privilege
-      stamp from a fail-open read is exactly backwards - and note the module's own
-      ``_keystore_configured()`` deliberately fails CLOSED on those same errors.
+      transient unreadable or corrupt auth.json makes ``key_hash_live`` say "not
+      live" for a perfectly live key. A PERMANENT, persisted privilege stamp must
+      not be derived from a fail-open read - the module's own
+      ``_keystore_configured()`` fails CLOSED on those same errors.
 
-    ADMIN is deliberately not consulted: it is in PRIVILEGED_SCOPES, so the owner
-    may mint an ADMIN-scoped keystore key, and that key is revocable and must stay
-    subject to the re-check.
+    ADMIN is not consulted: it is in PRIVILEGED_SCOPES, so the owner may mint an
+    ADMIN-scoped keystore key, and that key is revocable and stays subject to the
+    re-check.
 
     Returns False in open mode / for a tokenless caller: ``owner`` is then None,
     which the runner already treats as needing no re-check.
 
     TWO WAYS TO PROVE IT, because one of them cannot survive a roll:
 
-    1. The SESSION's own mint-time record (``caller_minted_by_owner_key``). This is
-       the authoritative answer for a cookie caller and closes what an earlier pass
-       had to leave open as a KNOWN GAP: an owner key ROLL deliberately leaves
+    1. The SESSION's own mint-time record (``caller_minted_by_owner_key``). This
+       is the authoritative answer for a cookie caller. An owner key ROLL leaves
        browser sessions alive (cli/keys.py: a GUI roll must not log the browser
        out), so a job created afterwards through that still-valid owner session
-       resolved the OLD key's hash - matching neither the new owner key nor any
-       keystore entry, i.e. indistinguishable from a REVOKED scoped key. It was
-       stamped False, and the runner then stripped shell from the owner's own
-       automation, silently and permanently. That is REG-509's own named trigger.
-    2. The key VALUE comparison below. Still needed, and not merely legacy: it is
-       the ONLY answer for a BEARER caller (no session exists to have recorded
-       anything), and it covers a cookie session minted before the flag existed.
+       resolves the OLD key's hash - matching neither the new owner key nor any
+       keystore entry, i.e. indistinguishable from a REVOKED scoped key, which
+       would strip shell from the owner's own automation.
+    2. The key VALUE comparison below. It is the ONLY answer for a BEARER caller
+       (no session exists to have recorded anything), and it covers a cookie
+       session minted before the flag existed.
 
     Both are positive proofs, and (1) adds no authority: the session it reads is
     already ADMIN-scoped and already exempt from ``key_hash_live``, so the same
     caller can already create this job and drive the coder route with shell
-    interactively - only the SCHEDULED path disagreed. The flag is an attribute of
-    the session, so it dies with it: logout, ``revoke_all`` (key clear / sign out
-    everywhere) and expiry all revoke it, leaving the containment path for a leaked
-    owner key exactly as it was.
+    interactively. The flag is an attribute of the session, so it dies with it:
+    logout, ``revoke_all`` (key clear / sign out everywhere) and expiry all revoke
+    it, leaving the containment path for a leaked owner key unchanged.
     """
     from localm.auth import _hash_key, _legacy_owner_identity, ct_equal, get_api_key
     from localm.inference.http_server import caller_minted_by_owner_key, principal_id
@@ -261,29 +252,26 @@ def _needs_owner_key_restamp(job: Job, request: Request) -> bool:
     """True when THIS request is provable proof that its caller now owns *job*
     the way ``owner_is_owner_key`` records, and the stamp has not been set yet.
 
-    Repairs the residual REG-509 gap: a shell-enabled job whose stamp is False
-    because it was created before #1171 over an owner COOKIE session, or before
-    #663 with no field at all, AND that never ran while the owner key still had
-    its creation-time value (disabled, long-cron, or created shortly before a
-    roll) - so ``_remember_owner_key_job`` (runner.py) never got a run to prove
-    it during. After a roll the runner alone can no longer tell that job apart
-    from a genuinely revoked scoped key (both hash to nothing live), and there
-    was no path back short of delete-and-recreate. An authenticated REQUEST is a
-    second, independent proof the runner cannot make: ``_caller_is_owner_key``
-    reads the session's own mint-time record (``caller_minted_by_owner_key``),
-    which survives a roll by design, precisely when the runner's key-VALUE
-    compare stops matching.
+    Repairs a shell-enabled job whose stamp is False because it was created over
+    an owner COOKIE session, or by a build with no such field at all, AND that
+    never ran while the owner key still had its creation-time value (disabled,
+    long-cron, or created shortly before a roll), so ``_remember_owner_key_job``
+    (runner.py) never got a run to prove it during. After a roll the runner alone
+    cannot tell that job apart from a genuinely revoked scoped key (both hash to
+    nothing live). An authenticated REQUEST is a second, independent proof:
+    ``_caller_is_owner_key`` reads the session's own mint-time record
+    (``caller_minted_by_owner_key``), which survives a roll, precisely when the
+    runner's key-VALUE compare stops matching.
 
-    The ``job.owner == principal_id(request)`` conjunction is load-bearing and
-    is NOT redundant with ``_caller_is_owner_key`` alone: ``owned_job`` (via
-    ``job_owner_ok``) lets an ADMIN caller reach ANOTHER principal's job, and
-    that caller must never be able to upgrade THAT job to permanent owner-key
-    shell just by running or editing it - only the job's own creator, proven as
-    the owner key, may. ``principal_id`` returns the SAME frozen identity a
-    cookie session was minted with (never re-derived from the current key
-    value), so for the exact pre-roll session that created (or was live when it
-    was created) *job*, this equality still holds after the roll - that is what
-    makes the repair reachable at all."""
+    The ``job.owner == principal_id(request)`` conjunction is load-bearing and is
+    NOT redundant with ``_caller_is_owner_key`` alone: ``owned_job`` (via
+    ``job_owner_ok``) lets an ADMIN caller reach ANOTHER principal's job, and that
+    caller must never be able to upgrade THAT job to permanent owner-key shell
+    just by running or editing it - only the job's own creator, proven as the
+    owner key, may. ``principal_id`` returns the SAME frozen identity a cookie
+    session was minted with (never re-derived from the current key value), so for
+    the exact pre-roll session that created *job* the equality still holds after
+    the roll."""
     if getattr(job, "owner_is_owner_key", False) or job.owner is None:
         return False
     if not _caller_is_owner_key(request):
@@ -304,7 +292,7 @@ def _engine_resolver():
             return _live_engine
     except Exception as e:
         # Fall through to the host resolver, but log so a persistently broken
-        # lookup is traceable rather than a silent degrade (AGENTS.md rule 5).
+        # lookup is traceable rather than a silent degrade.
         from localm.debuglog import logger
         logger.debug("jobs engine resolver: live-engine lookup failed: %s", e)
     if _host is None:
@@ -333,12 +321,11 @@ def owned_job(job_id: str, request: Request) -> Job:
     enforce per-principal ownership - only the creating key (or an
     admin/owner) may touch it. Depends()-injectable (``job: Job =
     Depends(owned_job)``), so a new per-job route cannot omit the ownership
-    check by construction (design-audit LM-DA-020). A mismatch returns the
-    SAME 404 as a missing id so a foreign jobs-scoped key cannot even confirm
-    another principal's job exists. owner=None (a tokenless / open-mode
-    creation) stays unrestricted. Imports http_server lazily (not at module
-    level) so this plugin still imports cleanly under a headless/no-engine
-    harness."""
+    check by construction. A mismatch returns the SAME 404 as a missing id so a
+    foreign jobs-scoped key cannot even confirm another principal's job exists.
+    owner=None (a tokenless / open-mode creation) stays unrestricted. Imports
+    http_server lazily (not at module level) so this plugin still imports
+    cleanly under a headless/no-engine harness."""
     from localm.inference.http_server import job_owner_ok
     job = _store().get(job_id)
     if job is None or not job_owner_ok(request, getattr(job, "owner", None)):
@@ -386,8 +373,8 @@ async def create_job(req: JobCreate, request: Request):
             owner=principal_id(request),    # bind the job to its creator
             # Capture WHAT KIND of credential that creator was, while it is still
             # resolvable: a rotated-away owner key is indistinguishable from a
-            # revoked scoped key at run time (REG-509). Stamped for every job, not
-            # just allow_shell ones, so a later PATCH that enables shell on an
+            # revoked scoped key at run time. Stamped for every job, not just
+            # allow_shell ones, so a later PATCH that enables shell on an
             # owner-created job inherits the right answer.
             owner_is_owner_key=_caller_is_owner_key(request),
         )
@@ -432,7 +419,7 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
         # without this the create-time confinement is simply routed around with an
         # update.
         changes["cwd"] = _effective_cwd(changes["cwd"], request)
-    # REG-509 repair: fold into this SAME write rather than a second one - see
+    # Fold the restamp into this SAME write rather than a second one - see
     # _needs_owner_key_restamp. "changes" has no such key from the request body
     # (JobUpdate carries no such field), so this can never be attacker-supplied.
     if _needs_owner_key_restamp(job, request):
@@ -465,10 +452,10 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
         raise HTTPException(
             403, "running a shell-enabled job on demand needs the owner key or a "
             "coder:full key.")
-    # REG-509 repair: a live, provable owner acting on their OWN job is a second
-    # proof the runner cannot make on its own after a key roll (see
-    # _needs_owner_key_restamp). Do this BEFORE the run so _shell_still_authorized
-    # sees the repaired stamp on this very run, not just the next one.
+    # A live, provable owner acting on their OWN job is a second proof the runner
+    # cannot make on its own after a key roll (see _needs_owner_key_restamp). Done
+    # BEFORE the run so _shell_still_authorized sees the repaired stamp on this
+    # very run, not just the next one.
     if _needs_owner_key_restamp(job, request):
         try:
             job = store.update(job_id, owner_is_owner_key=True)
@@ -505,7 +492,7 @@ async def job_results(job_id: str, limit: int = 100, offset: int = 0,
                       job: Job = Depends(owned_job)):
     store = _store()
     # Page the results so a high-frequency job's history cannot load every result
-    # file into memory and OOM the API (CHK-JOBS-RESULTS-PAGE). Default + hard cap.
+    # file into memory and OOM the API. Default plus a hard cap.
     limit = max(1, min(int(limit), 1000))
     offset = max(0, int(offset))
     return {"id": job_id, "limit": limit, "offset": offset,
@@ -532,10 +519,10 @@ def register(host) -> None:
                              engine=_engine_resolver)
     _scheduler = scheduler
     # Start via the host's startup hook: on a stock server, register() runs
-    # BEFORE uvicorn creates the event loop, so a direct start() no-opped and
-    # NO scheduled job ever fired (memory-audit 2026-07-02, critical C2). The
-    # hook runs the start once the loop exists (app lifespan), or immediately
-    # when the plugin is enabled at runtime with the loop already up.
+    # BEFORE uvicorn creates the event loop, so a direct start() no-ops and NO
+    # scheduled job ever fires. The hook runs the start once the loop exists
+    # (app lifespan), or immediately when the plugin is enabled at runtime with
+    # the loop already up.
     on_startup = getattr(host, "on_startup", None)
     if callable(on_startup):
         def _on_loop():

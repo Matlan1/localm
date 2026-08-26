@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared bounded thread pool for plugin/tool blocking work.
 
-WHY THIS LIVES AT THE ROOT and not under ``localm/plugins/``, where it began:
-it is a dependency-free leaf (stdlib only, zero localm imports) that BOTH the
-plugin layer and the inference layer consume. Under ``plugins/`` it was the sole
-cause of the only module-level import cycle in the package graph,
-``inference <-> plugins``, because of the deliberate carve-out described below.
-Moving it removed that cycle without changing a line of behaviour. The name still
-says "plugin executor" because it names the WORKLOAD it serves (plugin/tool
-blocking work), which is the split that actually matters here - not the directory
-it happens to sit in.
+It is a dependency-free leaf (stdlib only, zero localm imports) consumed by both
+the plugin layer and the inference layer, so it lives at the package root rather
+than under ``localm/plugins/``. The name says "plugin executor" because it names
+the WORKLOAD it serves (plugin/tool blocking work).
 
 Every plugin route that does blocking I/O or CPU work off the event loop -
 rag query/extract, web search/fetch, voice transcription, coder session
@@ -18,44 +13,32 @@ management, GUI model-listing routes - offloads it with
 chat/completion generation (``localm/inference/``) are NOT routed through this
 pool; they stay on the asyncio loop's own default executor.
 
-ONE CARVE-OUT to that workload rule, and it is the reason the old location
-created a cycle: the REGISTRY METADATA reads in
+ONE CARVE-OUT to that workload rule: the REGISTRY METADATA reads in
 ``localm/inference/routes/models.py`` (the per-model size probe behind
 ``GET /v1/models/{id}``) DO use this pool. They are blocking filesystem I/O on a
-path taken from registry.json, not inference: a registered UNC path can block in
-the Windows SMB redirector for minutes. Putting that on the default executor is
-exactly the cross-boundary starvation described below - a caller repeating a cheap
-metadata GET could occupy the same workers chat generation waits on. Sorting by
-WORKLOAD (blocking tool/IO work here, model work on the default pool) is what the
-directory rule is approximating, so where the two disagree, workload wins.
+path taken from registry.json, not inference, and a registered UNC path can block
+in the Windows SMB redirector for minutes, so a caller repeating a cheap metadata
+GET could otherwise occupy the same default-pool workers chat generation waits
+on. Where the directory rule and the workload rule disagree, workload wins.
 
-Why the split: before it existed, every ``loop.run_in_executor(None, ...)``
-call anywhere in the server drew from the SAME process-wide default pool
-(``min(32, cpu_count+4)`` workers) - including chat generation, which holds
-the per-model inference semaphore while it waits for a worker thread. A caller
+What the split buys: a single process-wide default pool
+(``min(32, cpu_count+4)`` workers) is shared by chat generation, which holds the
+per-model inference semaphore while it waits for a worker thread. A caller
 holding only a narrow plugin scope (or any loopback caller under open/no-key
-mode) could pipeline enough concurrent tool calls - archive extraction alone
-can legitimately run 8-30s+ per file - to occupy every worker thread in that
-pool. That starved the SAME pool's inference slot and stalled chat completions
-for every user of the server, including the admin: a cross-privilege-boundary
-denial of service. Giving plugin/tool work its own pool means no volume of
-plugin calls can compete with inference for a worker thread.
+mode) can pipeline enough concurrent tool calls - archive extraction alone can
+legitimately run 8-30s+ per file - to occupy every worker in that pool and stall
+chat completions for every user of the server. A separate pool means no volume of
+plugin calls competes with inference for a worker thread.
 
-This is ONE shared pool across every plugin, not one per plugin/scope: it
-removes the cross-boundary risk against inference (the severe case - narrow
-scope vs. every user), which is what actually motivated the split. Isolating
-plugins from each other too (e.g. a "web"-scoped caller unable to starve a
-"rag"-scoped caller) would need a pool per plugin and is a smaller, same-tier
-risk; revisit if it proves to matter in practice.
+ONE shared pool across every plugin, not one per plugin/scope: plugins are not
+isolated from each other here.
 
-Job runs (``localm/plugins/builtin/jobs``: the scheduler tick and the
-"run now" route) are deliberately NOT routed through this pool either, even
-though they live under ``localm/plugins/``: a job run loads/drives a model
-in-process, so it belongs with inference, not with tool calls. It is also
-already self-serialising (``jobs.runguard.run_slot``, a process-global
-non-reentrant lock) - at most one job run ever occupies a worker thread for
-any length of time, so it cannot be pipelined into pool exhaustion the way an
-unbounded burst of tool calls can.
+Job runs (``localm/plugins/builtin/jobs``: the scheduler tick and the "run now"
+route) are NOT routed through this pool either, even though they live under
+``localm/plugins/``: a job run loads and drives a model in-process, so it belongs
+with inference. It is also self-serialising (``jobs.runguard.run_slot``, a
+process-global non-reentrant lock), so at most one job run ever occupies a worker
+thread and it cannot be pipelined into pool exhaustion.
 """
 
 from __future__ import annotations
@@ -72,11 +55,10 @@ _executor: ThreadPoolExecutor | None = None
 def get_plugin_executor() -> ThreadPoolExecutor:
     """The shared bounded pool for plugin/tool blocking work.
 
-    Lazily created on first use and reused for the process lifetime. Sized
-    with the same formula asyncio uses for its own default executor
-    (``min(32, cpu_count+4)``), so splitting this pool out of the shared one
-    does not cut plugin capacity - the fix is isolation from inference, not a
-    smaller pool.
+    Lazily created on first use and reused for the process lifetime. Sized with
+    the same formula asyncio uses for its own default executor
+    (``min(32, cpu_count+4)``), so splitting this pool out of the shared one does
+    not cut plugin capacity.
     """
     global _executor
     if _executor is None:

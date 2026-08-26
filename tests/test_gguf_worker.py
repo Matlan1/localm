@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for GgufWorker - the child-process-resident class that owns the
 real native LlamaCpp instance (see llamacpp/_worker.py). No subprocess is
-involved here: these exercise the class directly, in-process, the same way
-GgufBackend's own unit tests always have - only the isolation BOUNDARY around
-this class is new (see test_gguf_runner_isolation.py for that), not its logic.
+involved here: these exercise the class directly, in-process. The isolation
+BOUNDARY around it is covered by test_gguf_runner_isolation.py.
 """
 
 import sys
@@ -55,10 +54,7 @@ class TestLoad:
         """End to end: GgufWorker.load() must pass ITS OWN bound
         _check_context_fit as LlamaCpp's vram_check (context-growth guard),
         and report back the metadata GgufBackend needs to cache
-        (n_layers/kv_bytes_per_token/supports_images) - this is the exact
-        wiring test retargeted from test_vram_preflight.py's
-        test_load_native_wires_check_context_fit_into_llamacpp, now that the
-        real LlamaCpp construction lives here instead of on GgufBackend."""
+        (n_layers/kv_bytes_per_token/supports_images)."""
         w = _worker(str(tmp_path / "m.gguf"))
         fake_llamacpp_module = MagicMock()
         fake_llamacpp_module.LlamaCpp.return_value = _StubLlm(
@@ -195,11 +191,9 @@ class TestLoadLibConsoleScope:
 
     def test_captured_diagnostics_survive_a_load_lib_failure(self, monkeypatch,
                                                                tmp_path):
-        """The trap this scope closes wrong if done carelessly: capturing
-        load_lib()'s native output must never SWALLOW the reason a genuine
-        failure happened (AGENTS.md rule 5). Whatever landed in the
-        suppressed stream must be appended to the propagated error, not
-        discarded with the temp file."""
+        """Capturing load_lib()'s native output must not swallow a genuine
+        failure: whatever landed in the suppressed stream is appended to the
+        propagated error, not discarded with the temp file."""
         events = []
         err = RuntimeError(
             "Cannot find llama.dll - the native inference runtime is not "
@@ -253,17 +247,13 @@ class TestTokenisation:
         assert args[1] == [{"role": "user", "content": "part one part two"}]
 
     def test_count_messages_tokens_passes_str_not_bytes_to_tokenize(self, tmp_path):
-        """#956 fast/always-run regression pin, paired with the slow real-model
-        test in test_gguf_smoke_integration.py (marked real_gguf, excluded
-        from every routine `-m "not integration"` selection - a real GGUF load
-        is not something every test run should pay for). _StubLlm.tokenize
-        above ignores its `text` argument entirely, so it would happily accept
-        bytes and never catch a regression of the original
-        `prompt.encode("utf-8")` bug (LlamaCpp.tokenize takes str, not bytes -
-        its _Tokenizer.encode does `text.encode(...)` itself, so bytes has no
-        such method). This stub asserts the type directly instead, so a
-        regression fails immediately here, in every test run, with no model
-        and no subprocess needed."""
+        """The fast, always-run pin, paired with the real-model test in
+        test_gguf_smoke_integration.py (marked real_gguf, excluded from every
+        `-m "not integration"` selection). _StubLlm.tokenize above ignores its
+        `text` argument entirely, so it would accept bytes; LlamaCpp.tokenize
+        takes str, not bytes (its _Tokenizer.encode does `text.encode(...)`
+        itself). This stub asserts the type directly, with no model and no
+        subprocess needed."""
         w = _worker(str(tmp_path / "m.gguf"))
 
         class _TypeCheckedLlm(_StubLlm):
@@ -335,11 +325,10 @@ class TestChatStream:
 
     def test_non_grammar_fault_propagates_uncaught(self, tmp_path):
         """A fault unrelated to grammar (or one after tokens were already
-        yielded) must NOT be softened here - it propagates out of the
-        generator uncaught, so the runner's dispatch loop (and ultimately the
-        whole child process) is allowed to die, matching voice.py's crash
-        containment philosophy: an unknown-state native fault should not
-        limp along in a possibly-corrupted context."""
+        yielded) is NOT softened here - it propagates out of the generator
+        uncaught, so the runner's dispatch loop (and ultimately the whole child
+        process) is allowed to die rather than continue in a possibly-corrupted
+        context."""
         w = _worker(str(tmp_path / "m.gguf"))
         w._llm = _ChatStreamLlm(fail_always=True)
         gen = w.chat_stream([{"role": "user", "content": "hi"}])

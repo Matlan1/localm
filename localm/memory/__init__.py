@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-localm agent-memory: a local-first, privacy-gated, scoped memory layer.
+"""localm agent-memory: a local-first, privacy-gated, scoped memory layer.
 
 Semantic (facts/preferences) + episodic (past interactions) memory that lets an
 agent recall across sessions with no cloud dependency. A small, auditable store
@@ -14,8 +13,7 @@ agent recall across sessions with no cloud dependency. A small, auditable store
   - poisoning defence: every recalled memory is neutralised (``localm.textguard``)
     and injected inside a fenced, labelled data-not-instructions block.
 
-Consumers: the chat plugin (server-side inlet injection + /api/memory routes) and,
-later, the coder. See ``dev-notes/agent-memory/DESIGN.md``.
+Consumers: the chat plugin (server-side inlet injection + /api/memory routes).
 """
 
 from __future__ import annotations
@@ -39,16 +37,14 @@ __all__ = [
     "TRUSTED_SOURCES", "MAX_INJECT", "INJECT_BLOCK_CHARS", "INJECT_LINE_CHARS",
 ]
 
-# How many memories to inject per turn, and the size caps on the injected block
-# (kept as module constants, not config keys, per the "no knob proliferation"
-# review - promote to config only if real use shows tuning is needed).
+# How many memories to inject per turn, and the size caps on the injected block.
+# Module constants, not config keys.
 MAX_INJECT = 6
 INJECT_BLOCK_CHARS = 1200
-# Per-line cap = the stored record cap, so a full fact renders whole and the 1200-char
-# BLOCK budget (not a mid-word 150-char slice) governs how much fits - a detailed fact
-# no longer silently loses up to 70% of its content at the only place it is used
-# (memory-audit 2026-07-02 [52]). A line over the cap truncates at a WORD boundary
-# with an ellipsis, never mid-word (see _truncate_line).
+# Per-line cap = the stored record cap, so a full fact renders whole and the
+# 1200-char BLOCK budget (not a mid-word 150-char slice) governs how much fits.
+# A line over the cap truncates at a WORD boundary with an ellipsis, never
+# mid-word (see _truncate_line).
 INJECT_LINE_CHARS = MAX_TEXT_LEN
 
 _INJECT_LABEL = (
@@ -75,9 +71,9 @@ def open_store(principal: Optional[str], agent: str, scope_key: str = "", *,
 
 def _truncate_line(text: str, limit: int) -> str:
     """Truncate *text* at a WORD boundary with a trailing ellipsis when it exceeds
-    *limit*, never mid-word (memory-audit 2026-07-02 [52]). Text within the limit is
-    returned unchanged. A single over-long word (no interior space) is hard-cut so
-    the result never runs away past the limit."""
+    *limit*, never mid-word. Text within the limit is returned unchanged. A single
+    over-long word (no interior space) is hard-cut so the result never runs away
+    past the limit."""
     text = (text or "").strip()
     if len(text) <= limit:
         return text

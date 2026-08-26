@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""dest_dir/register routing added to _pull_gguf_file() / pull_model() (gap B):
-a download routed to a ComfyUI models subfolder must land there (not
-MODELS_DIR), skip localm's own registry when asked, still run the traversal
-guard against the REAL destination, and refuse rather than silently fall back
-to MODELS_DIR when dest_dir is paired with a spec that doesn't dispatch to the
-single-file backend."""
+"""dest_dir/register routing in _pull_gguf_file() / pull_model(): a download
+routed to a ComfyUI models subfolder must land there (not MODELS_DIR), skip
+localm's own registry when asked, still run the traversal guard against the REAL
+destination, and refuse rather than silently fall back to MODELS_DIR when
+dest_dir is paired with a spec that does not dispatch to the single-file
+backend."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -181,8 +181,7 @@ class TestDestDirDuplicateSkip:
     def test_dest_dir_download_happens_even_when_the_sha256_is_registered(
             self, fake_registry, tmp_path, monkeypatch):
         """The file must physically land in dest_dir. Reporting success without
-        writing it is an AGENTS.md rule 5 violation (a step reporting success
-        after not doing the work)."""
+        writing it is a step reporting success after not doing the work."""
         store, models_dir = fake_registry
         # The very same bytes are already registered in localm's own registry...
         already = models_dir / "flux1-dev-Q8_0.gguf"

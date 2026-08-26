@@ -9,15 +9,11 @@ non-ComfyUI image backend is just another module selected by ``backend`` name.
 
 Legacy global keys (comfy_launch_cmd / comfy_workdir / comfy_output_dir /
 reload_llm_after_imagine) seed the defaults until the user saves per-plugin
-values, so existing setups keep working with no migration step. api_url /
-launch_cmd / workdir specifically - both the legacy global key AND this
-plugin's own per-plugin comfy_blk override - are suppressed entirely while
-the managed ComfyUI instance is active (comfy_target == "own" and installed;
-see managed_comfy.managed_comfy_active). A per-plugin value set before the
-user ever touched comfy_target, or before switching it back to "own", reads
-identically to a deliberate override and used to silently defeat managed
-routing (NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). Only
-comfy_target == "user" lets any of these three fields win - "own" means own.
+values. api_url / launch_cmd / workdir specifically - both the legacy global
+key AND this plugin's own per-plugin comfy_blk override - are suppressed
+entirely while the managed ComfyUI instance is active (comfy_target == "own"
+and installed; see managed_comfy.managed_comfy_active). Only comfy_target ==
+"user" lets any of these three fields win.
 """
 
 from __future__ import annotations
@@ -37,22 +33,19 @@ def settings(full_config: dict) -> dict:
     block, warning = media_config.resolve_config("image", full_config)
     comfy_blk = block.get("comfy") if isinstance(block.get("comfy"), dict) else {}
     backend_name = block.get("backend", "comfy")
-    # We do not hide problems: when the configured backend cannot be loaded the
-    # job still falls back to comfy (best-effort), but say so instead of silently
-    # pretending the chosen backend is active.
+    # When the configured backend cannot be loaded the job still falls back to
+    # comfy (best-effort), and says so rather than reporting the chosen backend
+    # as active.
     warning = media_config.combine_warnings(
         warning, media_config.backend_unavailable_warning(__package__, backend_name))
-    # NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD: when the managed
-    # ComfyUI instance is selected ("own"), NEITHER the per-plugin comfy.* fields
-    # NOR the legacy global comfy_api_url/comfy_launch_cmd/comfy_workdir may be
-    # honoured here - any of them, stale or deliberate, defeats
-    # ensure_comfy()'s managed-routing branch, which only engages when the
-    # caller passes NOTHING. legacy_comfy_value() already suppressed the global
-    # launch_cmd/workdir keys for this case; comfy_api_url and the per-plugin
-    # comfy_blk fields never got the same treatment. Only comfy_target ==
-    # "user" lets any of these win, matching what "own"/"user" is supposed to
-    # mean. _comfy.default_api_url() itself resolves to the managed instance's
-    # URL whenever own_active is True, so it is always the correct fallback.
+    # When the managed ComfyUI instance is selected ("own"), NEITHER the
+    # per-plugin comfy.* fields NOR the legacy global
+    # comfy_api_url/comfy_launch_cmd/comfy_workdir are honoured here - any of
+    # them defeats ensure_comfy()'s managed-routing branch, which only engages
+    # when the caller passes NOTHING. Only comfy_target == "user" lets any of
+    # these win. _comfy.default_api_url() itself resolves to the managed
+    # instance's URL whenever own_active is True, so it is always the correct
+    # fallback.
     own_active = managed_comfy_active(full_config)
     api_url = ("" if own_active else comfy_blk.get("api_url")) \
         or (None if own_active else full_config.get("comfy_api_url")) \
@@ -65,12 +58,12 @@ def settings(full_config: dict) -> dict:
         or legacy_comfy_value("comfy_workdir", full_config) or "")
     return {
         "backend": backend_name,
-        # sanitize_comfy_url on the RESOLVED value, not just the default_api_url
-        # fallback: a per-plugin comfy.api_url (or the global comfy_api_url) would
-        # otherwise short-circuit before default_api_url()'s own guard, letting an
-        # admin-set link-local/metadata host reach the outbound comfy calls
-        # (CHK-COMFY-APIURL residual). Sanitising here is idempotent for the
-        # already-guarded default path.
+        # sanitize_comfy_url on the RESOLVED value, not just the
+        # default_api_url fallback: a per-plugin comfy.api_url (or the global
+        # comfy_api_url) would otherwise short-circuit before
+        # default_api_url()'s own guard, letting an admin-set
+        # link-local/metadata host reach the outbound comfy calls. Sanitising
+        # here is idempotent for the already-guarded default path.
         "api_url": _comfy.sanitize_comfy_url(api_url.rstrip("/")),
         "launch_cmd": launch_cmd,
         "workdir": workdir,
@@ -118,14 +111,12 @@ def _comfy_model_roles(s: dict, roles: list) -> dict:
     localm registry's ``model_type`` slice and to the roles the plugin declared
     through ``host.register_model_role``.
 
-    The backend owns this seam (rather than the route) because resolving which
-    models exist IS backend work: a future non-ComfyUI backend for this media
-    type implements this one function and the route, the GUI and the role
-    contract are unchanged.
+    The backend owns this seam rather than the route: a non-ComfyUI backend for
+    this media type implements this one function, leaving the route, the GUI and
+    the role contract unchanged.
 
     One ComfyUI round trip and one registry read per call - both blocking, so the
-    caller runs it off the event loop exactly as it already does for
-    ``_comfy_model_slots``."""
+    caller runs it off the event loop, as it does for ``_comfy_model_slots``."""
     from localm.plugins import media_roles
     return media_roles.resolve_model_roles(_comfy_model_slots(s), roles)
 

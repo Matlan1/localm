@@ -93,14 +93,12 @@ class TestLoadProjectConfig:
     def test_raises_on_invalid_toml_rather_than_reading_as_absent(self, tmp_path):
         """A file that EXISTS but does not parse must not answer ``{}``.
 
-        This assertion used to demand ``{}``, which made the collapse a
-        specification: ``{}`` is byte-identical to "no project config here", and
-        the two keys it silently drops are SAFETY settings, not preferences.
-        ``always_confirm`` (the user's "prompt me before a shell command even
-        under --yes") empties at cli/_main.py:654-657, and ``mode = "privacy"``
-        is dropped at cli/_main.py:658-660 and audit.py:96-102, so a session the
-        user marked private falls through to the global coder_mode and a
-        transcript is written. A TOML typo is an extremely reachable input.
+        ``{}`` is byte-identical to "no project config here", and the two keys
+        it would silently drop are SAFETY settings: ``always_confirm`` (prompt
+        before a shell command even under --yes) empties in cli/_main.py, and
+        ``mode = "privacy"`` is dropped there and in audit.py, so a session the
+        user marked private would fall through to the global coder_mode and
+        write a transcript.
         """
         cfg_dir = tmp_path / ".localcoder"
         cfg_dir.mkdir()
@@ -129,9 +127,8 @@ class TestCliRefusesAnUnreadableProjectConfig:
     file's settings silently dropped.
 
     `always_confirm` is what keeps shell tools prompting under --yes, and
-    `mode = "privacy"` is what keeps a transcript off disk. Starting anyway runs
-    the session WITHOUT protections the user believes they configured, so a TOML
-    typo silently disarms them. Refusing costs one edit and is recoverable.
+    `mode = "privacy"` is what keeps a transcript off disk, so starting anyway
+    would run the session without protections the user configured.
     """
 
     def _corrupt(self, tmp_path):

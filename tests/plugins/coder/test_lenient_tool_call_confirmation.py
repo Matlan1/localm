@@ -4,14 +4,6 @@
 blob whose shape happens to match a real tool name) must not be allowed to
 silently execute a destructive tool under auto_approve, even though an
 ordinary, marker-carrying call still does.
-
-Root cause: a real session where an abliterated model with no tool-calling
-training never triggered the lazy-grammar constraint (gbnf.TOOL_CALL_TRIGGER
-only engages on the literal string "<tool_call>") and free-generated
-Lorem-Ipsum-filled edit_files arguments that the parser's bare-JSON fallback
-still recovered and would have executed via the exact same trust path as a
-real, grammar-constrained call. See ToolCall.lenient's own comment
-(localm/plugins/coder/parser.py) for the full mechanism.
 """
 
 from __future__ import annotations
@@ -34,10 +26,10 @@ def _write_call(lenient: bool, rel: str = "out.txt") -> ToolCall:
 
 
 def test_a_lenient_recovered_destructive_call_is_denied_under_auto_approve(tmp_path):
-    """THE FIX. auto_approve=True normally skips confirmation for a
-    destructive tool - but a call recovered with no marker of tool-call
-    intent at all must still be denied when nobody is available to confirm
-    it (fail-closed, the same path an explicit always_confirm entry takes)."""
+    """auto_approve=True normally skips confirmation for a destructive tool, but
+    a call recovered with no marker of tool-call intent at all is still denied
+    when nobody is available to confirm it (fail-closed, the same path an
+    explicit always_confirm entry takes)."""
     agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
     result = agent._execute_tool(_write_call(lenient=True), interactive=False)
     assert not result.ok
@@ -46,8 +38,8 @@ def test_a_lenient_recovered_destructive_call_is_denied_under_auto_approve(tmp_p
 
 
 def test_fires_control_the_same_call_not_flagged_lenient_still_auto_approves(tmp_path):
-    """THE CONTROL. Identical call, identical auto_approve=True, only the
-    lenient flag differs - the ordinary trusted path must be unaffected."""
+    """Identical call, identical auto_approve=True, only the lenient flag
+    differs: the ordinary trusted path is unaffected."""
     agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
     result = agent._execute_tool(_write_call(lenient=False), interactive=False)
     assert result.ok, result.output

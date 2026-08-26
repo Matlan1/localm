@@ -1,27 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The full life of a REJECTED vectors.json: preserved, reported, cleared.
 
-#795 (62013ffa) promised that a vector index localm refuses to use is never
-deleted to make the problem go away, and that the degrade keeps being reported
-until the index is rebuilt. An adversarial review of the drain merges found the
-promise fails on the commonest path, plus two ways the preserved copy itself can
-be lost or become a permanent nuisance. These are those three, and each one is
-paired with the fires-control that proves the test can fail: the assertions here
-all go RED against the pre-fix ``_save`` (verified by running this file's
-scenarios against ``git show origin/master:localm/rag/store.py``).
+A vector index localm refuses to use is never deleted to make the problem go
+away, and the degrade keeps being reported until the index is rebuilt. Three
+paths carry that:
 
-  X5  - any successful embed took the WRITE branch, which overwrote the rejected
-        file with a new vectors.json AND cleared vector_degrade_reason. The
-        quarantine lived inside the other branch, so on the commonest live path
-        (an embedder is available and one document changed) the evidence was
-        destroyed and an unattended re-sync reported a clean run over a
-        knowingly-degraded collection. Note the obvious `all()` fix would be
-        WRONG: partial vector coverage is a first-class supported state.
-  X12 - emptying a collection left the sidecar behind, pinning a degrade whose
-        prescribed remedy ('rag repair') returns early on a collection with no
-        documents, so it could never be cleared.
-  X13 - a second incident's os.replace overwrote the first preserved copy while
-        the log said "Nothing was deleted".
+  - a successful embed takes the WRITE branch, which must not overwrite the
+    rejected file or clear vector_degrade_reason. An `all()` guard on that
+    branch would be wrong: partial vector coverage is a first-class supported
+    state.
+  - emptying a collection must not leave the sidecar behind, pinning a degrade
+    whose prescribed remedy ('rag repair') returns early on a collection with no
+    documents.
+  - a second incident's os.replace must not overwrite the first preserved copy.
 """
 
 from __future__ import annotations
@@ -74,9 +65,9 @@ def _degrade_it(base, docs, name="kb"):
 
 
 def test_a_successful_embed_does_not_destroy_the_rejected_index(base, docs):
-    """X5, the headline. An embedder is available and ONE document changed - the
-    normal state of a live scheduled re-sync. The rejected bytes must survive and
-    the degrade must still be reported."""
+    """An embedder is available and ONE document changed - the normal state of a
+    live scheduled re-sync. The rejected bytes must survive and the degrade must
+    still be reported."""
     coll = _degrade_it(base, docs)
     (docs / "a.txt").write_text("alpha turbines maintenance, revised",
                                 encoding="utf-8")
@@ -94,7 +85,7 @@ def test_a_successful_embed_does_not_destroy_the_rejected_index(base, docs):
 def test_the_degrade_survives_a_cold_reload_after_a_partial_re_embed(base, docs):
     """The same case seen by the NEXT process. The mixed file (real vectors for
     the changed doc, nulls for the rest) is structurally valid and loads clean,
-    so without an independent check the fault becomes invisible for good."""
+    so the degrade must be carried independently of it."""
     coll = _degrade_it(base, docs)
     (docs / "a.txt").write_text("alpha turbines maintenance, revised",
                                 encoding="utf-8")
@@ -108,10 +99,8 @@ def test_the_degrade_survives_a_cold_reload_after_a_partial_re_embed(base, docs)
 
 
 def test_partial_coverage_alone_is_not_treated_as_a_fault(base, docs):
-    """The guard the routing note asked for: partial vector coverage is a
-    legitimate state (a collection mid-embed), NOT a degrade. Only a set-aside
-    sidecar makes it one. Without this, tightening the write branch to `all()`
-    would refuse to persist vectors for every partially embedded collection."""
+    """Partial vector coverage is a legitimate state (a collection mid-embed),
+    NOT a degrade. Only a set-aside sidecar makes it one."""
     coll = Collection("kb", base=base)
     coll.create()
     coll.add_paths([docs / "a.txt"], embed_fn=_embed)      # embedded
@@ -126,9 +115,8 @@ def test_partial_coverage_alone_is_not_treated_as_a_fault(base, docs):
 
 
 def test_a_full_rebuild_clears_the_degrade_but_keeps_the_evidence(base, docs):
-    """The prescribed remedy has to actually work, or the message that tells the
-    user to run it is a dead end (that is X12's real complaint). A COMPLETE index
-    is the all-clear; the preserved bytes stay on disk regardless."""
+    """The prescribed remedy has to actually work: a COMPLETE index is the
+    all-clear, and the preserved bytes stay on disk regardless."""
     coll = _degrade_it(base, docs)
     # A re-sync that indexes NOTHING does not rewrite anything, so it never
     # reaches _save and never quarantines. Change a file, so this run writes.
@@ -149,12 +137,10 @@ def test_a_full_rebuild_clears_the_degrade_but_keeps_the_evidence(base, docs):
 
 
 def test_emptying_a_collection_does_not_pin_an_unclearable_degrade(base, docs):
-    """X12. Two documents, so the collection goes degraded -> quarantined ->
-    empty (the PR's own test used ONE document, so it never quarantined and its
-    assertion passed vacuously). With no chunks there is nothing to realign the
-    vectors to, and 'rag repair' returns early on a collection with no documents,
-    so a sidecar kept here could never be cleared by any means the product
-    offers."""
+    """Two documents, so the collection goes degraded -> quarantined -> empty.
+    With no chunks there is nothing to realign the vectors to, and 'rag repair'
+    returns early on a collection with no documents, so a sidecar kept here
+    could never be cleared by any means the product offers."""
     coll = _degrade_it(base, docs)
     coll.remove_doc(coll.documents()[0])                   # chunks remain
     assert _sidecars(base), "setup: the first removal should have quarantined"
@@ -169,9 +155,9 @@ def test_emptying_a_collection_does_not_pin_an_unclearable_degrade(base, docs):
 
 
 def test_a_second_quarantine_does_not_destroy_the_first_copy(base, docs):
-    """X13. os.replace overwrites its destination silently, so a fixed sidecar
-    name meant incident two destroyed incident one's preserved bytes while the
-    log asserted "Nothing was deleted" - data loss plus a false safety claim."""
+    """os.replace overwrites its destination silently, so a fixed sidecar name
+    would let incident two destroy incident one's preserved bytes while the log
+    asserts "Nothing was deleted"."""
     coll = _degrade_it(base, docs)
     (docs / "a.txt").write_text("alpha turbines maintenance, revised",
                                 encoding="utf-8")          # so the run really writes
@@ -195,10 +181,9 @@ def test_a_second_quarantine_does_not_destroy_the_first_copy(base, docs):
 def test_the_scheduled_job_reports_the_degrade_it_would_have_hidden(base, docs,
                                                                     tmp_path,
                                                                     monkeypatch):
-    """End to end on the surface that matters: an unattended re-sync with an
-    embedder must SAY the collection is degraded. A job history showing a clean
-    run here is the "reported success after failing" AGENTS.md rule 5 forbids,
-    and it is the only place this run is ever seen."""
+    """End to end: an unattended re-sync with an embedder must SAY the collection
+    is degraded. The job history is the only place this run is ever seen, so a
+    clean run there would report success after failing."""
     import types
 
     from localm.plugins.builtin.jobs import runner

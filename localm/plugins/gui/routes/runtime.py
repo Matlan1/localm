@@ -12,37 +12,24 @@ NATIVE runtime `localm setup-llama` provisions, not the Python source tree.
                                load-test can take a while, same shape as
                                /api/comfy/update); returns {"job_id"} to stream.
 
-WHY THE POST TAKES A BACKEND, A TAG AND A ROLLBACK FLAG. It used to hardcode
-the INSTALLED backend and refuse (409) when nothing was installed, which left
-a user who has only the GUI unable to reach the CLI: installing a runtime in
-the first place, switching backend, choosing a build, and going back to the
-build that worked before a bad upstream release. `localm doctor` and the
-GUI's own Settings copy both told such a user to run a command they cannot
-reach.
-Dropping that 409 also removes a trap of its own: a box whose runtime failed to
-provision had NO route back, so the one surface still working refused the one
-action that would fix it.
+The POST takes a backend, a tag and a rollback flag, so a GUI-only user can
+install a runtime in the first place, switch backend, choose a build, and go
+back to the build that worked before a bad upstream release. It does not refuse
+when nothing is installed.
 
-Why a background job and not a blocking call like /api/update/apply: this is
-closer in shape to /api/comfy/update (a multi-step operation worth streaming
-progress for) than to the code-tree swap, which is comparatively quick.
-
-Nothing about provisioning is decided here. The route validates its two inputs
-and hands them to the EXISTING command, so the backend-resolution, load-test,
-fallback and pin rules stay in setup_llama.py with one implementation - notably
-_provision_with_fallback, which is what keeps a backend that cannot load on
-this machine from being left installed.
+Nothing about provisioning is decided here. The route validates its inputs and
+hands them to the EXISTING command, so the backend-resolution, load-test,
+fallback and pin rules stay in setup_llama.py - notably
+_provision_with_fallback, which keeps a backend that cannot load on this
+machine from being left installed.
 
 Safety: setup-llama's own _provisioning_lock (localm/setup_llama.py) is what
-actually serializes this against a concurrent `localm update` re-provision or
-a user's own terminal `setup-llama` run - a cross-process race this route
-introduces as a genuinely new, second trigger onto the same directory (see
-diff-review-discipline.md item 26, the identical hazard /api/comfy/update hit
-before its own lock existed). jobs.has_running() below is a fast, same-process
-UX guard for the common double-click case; the file lock is the real
-cross-process guarantee and needs no help from this route. The job KIND stays
-one string for every variant, so an install, a switch and an update cannot be
-started concurrently through this route either.
+serializes this against a concurrent `localm update` re-provision or a user's
+own terminal `setup-llama` run. jobs.has_running() below is a fast,
+same-process guard for the double-click case; the file lock is the
+cross-process guarantee. The job KIND is one string for every variant, so an
+install, a switch and an update cannot be started concurrently through this
+route either.
 """
 
 from __future__ import annotations
@@ -56,10 +43,9 @@ from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threa
 from localm.inference.http_server import principal_id, require_scope
 from localm.plugins.gui.web import RuntimeSetupRequest
 
-# check_runtime_update() makes a real network request (the same release
-# listing a bare `setup-llama` resolves against) when no pin is set, so it is
-# bounded like any other outbound call from a request handler rather than
-# trusted to return promptly.
+# check_runtime_update() makes a real network request (the same release listing
+# a bare `setup-llama` resolves against) when no pin is set, so the call is
+# bounded.
 _CHECK_TIMEOUT_S = 15.0
 
 
@@ -75,11 +61,9 @@ def register(app: FastAPI, ctx) -> None:
         (pin-aware, amd-rocm uses its fixed tag, never queries a release
         listing needlessly).
 
-        Unchanged by the POST below gaining a backend/tag body, deliberately:
-        the value set that POST accepts is a CONSTANT (setup_llama.BACKENDS),
-        so the Settings card carries the option list in its own markup and a
-        test binds that markup to the constant, rather than the card being
-        unable to offer a backend until a check has succeeded."""
+        The response carries no backend list: the set the POST accepts is the
+        constant setup_llama.BACKENDS, which the Settings card carries in its
+        own markup."""
         from localm import setup_llama
         try:
             return await run_in_threadpool_bounded(
@@ -94,29 +78,23 @@ def register(app: FastAPI, ctx) -> None:
         """Provision the llama.cpp runtime, by running the EXISTING `localm
         setup-llama` entry point as a background job (--force so it actually
         replaces the build; --yes so the unattended subprocess never blocks on
-        a prompt nothing will answer - see _apply_update.post_swap_command's
-        docstring for the same reasoning applied to the full updater's runtime
-        class).
+        a prompt nothing will answer).
 
         The backend is the one asked for, else the one already installed, else
-        'auto' - so an empty body still means exactly what it meant before this
-        route took one, and a box with nothing provisioned gets the same
-        hardware detection a bare `localm setup-llama` performs. `rollback`
-        pins and installs the previous build recorded for that backend
-        instead of `tag`'s explicit one; the two are mutually exclusive, same
-        as the CLI.
+        'auto', so an empty body gets the same hardware detection a bare
+        `localm setup-llama` performs. `rollback` pins and installs the previous
+        build recorded for that backend instead of `tag`'s explicit one; the two
+        are mutually exclusive, same as the CLI.
 
         Refuses (409) only when a runtime job is already running. A concurrent
-        `localm update` re-provision or a bare terminal `setup-llama` is
-        refused honestly by the job itself (setup-llama's own cross-process
-        provisioning lock), not by this route - see the module docstring."""
+        `localm update` re-provision or a bare terminal `setup-llama` is refused
+        by the job itself, via setup-llama's own cross-process provisioning
+        lock."""
         from localm import setup_llama
         req = req or RuntimeSetupRequest()
 
-        # Both inputs are validated HERE, against setup_llama's own definitions,
-        # so a bad value is a 400 the caller can read rather than a job that
-        # starts and then fails - and so the answer cannot differ from the one
-        # the command line gives for the same string.
+        # Both inputs are validated here against setup_llama's own definitions,
+        # so a bad value is a 400 rather than a job that starts and then fails.
         wanted = (req.backend or "").strip().lower() or None
         if wanted is not None and wanted not in setup_llama.BACKENDS:
             raise HTTPException(
@@ -134,23 +112,19 @@ def register(app: FastAPI, ctx) -> None:
                      "one. Rollback goes to the previous recorded build; "
                      "tag names one.")
 
-        # installed_backend() returns None for TWO different states - nothing
-        # provisioned, and provisioned by an install too old to have written the
-        # marker (or a hand-placed build). They are indistinguishable here, and
-        # the fallback to "auto" therefore re-detects hardware on the second one
-        # too, which can land on a different backend than the unmarked build on
-        # disk. That is deliberate rather than overlooked: it is exactly what a
-        # bare `localm setup-llama` does on the same box, the card has already
-        # told the user nothing is recorded as installed, and there is no
-        # recorded choice to override. An EXPLICIT backend always wins over both.
+        # installed_backend() returns None for TWO states - nothing provisioned,
+        # and provisioned by an install too old to have written the marker (or a
+        # hand-placed build) - which are indistinguishable here, so the fallback
+        # to "auto" re-detects hardware in both cases and can land on a
+        # different backend than an unmarked build on disk. An EXPLICIT backend
+        # always wins over both.
         installed = setup_llama.installed_backend()
         if rollback:
-            # "auto" is not a real backend to hold history for - it is the
-            # CLI's own hardware-detect default - so it is treated as "not
-            # named" here too, exactly like setup_llama._apply_version_request
-            # treats an explicit `--backend auto --rollback`: fall through to
-            # whatever is installed rather than looking up history for a
-            # backend called "auto" (which can never exist).
+            # "auto" is the CLI's hardware-detect default, not a real backend to
+            # hold history for, so it is treated as "not named" here and falls
+            # through to whatever is installed - the same as
+            # setup_llama._apply_version_request does for
+            # `--backend auto --rollback`.
             backend = wanted if wanted and wanted != "auto" else installed
             if not backend:
                 raise HTTPException(

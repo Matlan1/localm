@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Custom coder system-instructions (rec#584): a `.localcoder/system.md` file and
-the `--system` CLI flag inject user-authored guidance under "## User Instructions"
+"""Custom coder system-instructions: a `.localcoder/system.md` file and the
+`--system` CLI flag inject user-authored guidance under "## User Instructions"
 in the agent system prompt, distinct from LOCALCODER.md project memory.
 """
 
