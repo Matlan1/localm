@@ -558,16 +558,32 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   padding: 24px 0 12px;
 }
 .msg-row { max-width: var(--thread-max); margin: 0 auto 18px; padding: 0 24px; }
+.msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .msg-role {
   font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.8px;
-  margin-bottom: 6px;
   color: var(--text-dim);
 }
 .msg-row.user .msg-role { color: var(--accent); }
 .msg-row.assistant .msg-role { color: var(--green); }
+.msg-avatar {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--border);
+  overflow: hidden;
+  user-select: none;
+}
+.msg-avatar img { width: 100%; height: 100%; object-fit: cover; }
 
 /* Companion-app layout: the user's turn is a right-aligned chat bubble; the
    assistant's turn stays full width so code, tables and long markdown have room
