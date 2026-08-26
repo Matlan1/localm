@@ -113,8 +113,8 @@ test("media config renders one independent subsection per plugin", async () => {
   assert.ok(navLabels.includes("Media"), "the Media group appears in the settings nav");
 
   // The three subsections sit in the responsive grid.
-  const grid = media.querySelector(".media-grid");
-  assert.ok(grid, "the three subsections sit inside a .media-grid container");
+  const grid = media.querySelector(".media-settings-grid");
+  assert.ok(grid, "the three subsections sit inside a .media-settings-grid container");
   assert.equal(grid.querySelectorAll(".media-subsection").length, 3,
     "all three subsections are inside the grid");
 });

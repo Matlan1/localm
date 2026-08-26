@@ -1621,7 +1621,7 @@ export async function buildMediaSection(form, fields) {
   // and a later single-subsection re-render (R12) can find its node.
   _mediaSubs = {};
   _mediaControls = {};
-  const grid = el("div", "media-grid");
+  const grid = el("div", "media-settings-grid");
   panel.appendChild(grid);
   for (const name of MEDIA_PLUGIN_ORDER) {
     const p = byName[name];

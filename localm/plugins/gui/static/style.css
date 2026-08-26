@@ -1386,16 +1386,29 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 
 /* Media section: three per-plugin boxes (image/music/video) side by side on a
    wide screen, stacking on narrow/mobile - each keeps its own Save so the three
-   are clearly configured apart. */
-.media-grid {
+   are clearly configured apart. Own class, distinct from .media-grid/.img-grid
+   below (the media-gallery thumbnail grid): sharing one class name let the
+   gallery's auto-fill/160px rule silently override this auto-fit/210px one. */
+.media-settings-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px; margin-top: 12px;
 }
 .media-subsection {
   border: 1px solid var(--border); border-radius: 8px; border-left-width: 3px;
   border-left-color: var(--accent, var(--border));
-  padding: 10px 12px;
+  padding: 10px 12px; min-width: 0;
 }
+/* .settings-fields' page-wide 1fr-1fr split has no minimum column width, so it
+   does not know when ITS OWN container (one third-width media-subsection card)
+   is too narrow for two columns, independent of the page's own mobile
+   breakpoint below. Scoped to this nesting only; every other .settings-fields
+   on the page keeps its fixed two-column layout. */
+.media-subsection .settings-fields {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+/* .card .actions is a nowrap flex row page-wide; the same narrow-card reason
+   as .settings-fields above applies to the Copy-from/Save button row. */
+.media-subsection .actions { flex-wrap: wrap; }
 .media-sub-head { margin: 0; font-size: 14px; }
 /* A field inheriting the shared default (no per-plugin override yet): the whole
    row reads dimmer (label AND the value box) so an override clearly stands out

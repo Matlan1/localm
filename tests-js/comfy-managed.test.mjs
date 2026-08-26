@@ -169,7 +169,7 @@ test("installed + target field in schema -> the coexistence control renders insi
   assert.ok(targetCtrl, "comfy_target control renders inside the top box");
 
   // The compact box precedes the three-mode grid in DOM order.
-  const grid = doc.querySelector("#settings-sec-media .media-grid");
+  const grid = doc.querySelector("#settings-sec-media .media-settings-grid");
   assert.ok(grid, "the three-mode grid exists");
   const pos = box.compareDocumentPosition(grid);
   assert.ok(pos & win.Node.DOCUMENT_POSITION_FOLLOWING,
