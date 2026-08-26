@@ -43,6 +43,15 @@ def debug_enabled() -> bool:
     return bool(os.environ.get(_ENV_VAR))
 
 
+def native_fault_hint() -> str:
+    """Trailing parenthetical for a native-fault message that already logged
+    the full trace via ``logger.error``: names the debug log file when one
+    exists, or how to get one next time when it does not."""
+    if debug_enabled():
+        return "full trace in the debug log"
+    return "rerun with --debug to save the full trace to a log file"
+
+
 def debug_content_enabled() -> bool:
     """Whether the debug log may include raw CHAT CONTENT (a user prompt or a model
     reply). True only when the debug log is on AND no relevant session mode is
