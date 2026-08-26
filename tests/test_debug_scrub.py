@@ -166,16 +166,14 @@ class TestDebugLog:
         """_decode_stream always scrubs; debug mode logs the raw text in log/full
         mode, but NEVER in privacy mode (chat content is not persisted there)."""
         import logging as _logging
-        from localm.inference.backends.llamacpp.llama import LlamaCpp
-        from unittest.mock import MagicMock
+        from tests._bare_llama import make_bare_llama
 
         def _flush():
             for h in debuglog.logger.handlers:
                 if isinstance(h, _logging.FileHandler):
                     h.flush()
 
-        llm = LlamaCpp.__new__(LlamaCpp)
-        llm._tokenizer = MagicMock()
+        llm = make_bare_llama()
         # _decode_stream now decodes raw token BYTES through one UTF-8-safe
         # stream (R46), so the tokenizer mock yields bytes, not str.
         llm._tokenizer.token_to_piece_bytes.side_effect = \
@@ -202,5 +200,3 @@ class TestDebugLog:
             assert "SECRETWORD" not in path.read_text(encoding="utf-8")
         finally:
             llm._tokenizer = None
-            llm._model_ptr = None
-            llm._ctx_ptr = None

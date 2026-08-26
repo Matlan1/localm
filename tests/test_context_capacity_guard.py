@@ -22,6 +22,7 @@ from localm.inference.backends.base import (
 )
 from localm.inference.engine import Engine
 from localm.inference.http_server import create_app
+from tests._bare_llama import make_bare_llama
 
 
 class _MockBackend(BaseBackend):
@@ -208,10 +209,7 @@ class TestWorkerNonCrashingOnContextOverflow:
     """Worker error envelope handling must not unload model on ContextCapacityExceededError."""
 
     def test_llama_fit_generation_budget_raises_context_capacity_exceeded_error(self):
-        from localm.inference.backends.llamacpp.llama import LlamaCpp
-
-        llm = object.__new__(LlamaCpp)
-        llm._n_ctx_max = 4096
+        llm = make_bare_llama(_n_ctx_max=4096)
 
         # When n_prompt = 4686 > n_ctx_max, room = 4096 - 4686 - 64 = -654 < 32
         with pytest.raises(ContextCapacityExceededError) as excinfo:
