@@ -237,6 +237,10 @@ def test_sign_release_script_roundtrip(tmp_path, monkeypatch):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
+    # a dummy tmp_path key's real ACL is environment-dependent, so isolate it
+    # like every other gate in this orchestration test.
+    monkeypatch.setattr(mod, "check_key_permissions", lambda *a, **k: None)
+
     keyfile = tmp_path / "signing_key.pem"
     assert mod._gen(keyfile) == 0 and keyfile.is_file()
     priv = _ser.load_pem_private_key(keyfile.read_bytes(), password=None)
