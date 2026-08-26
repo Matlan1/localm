@@ -298,7 +298,7 @@ def memory_clear(yes: bool) -> None:
     store = _store()
     live = len(store.all())
     gone = len(store.forgotten())
-    if not live and not gone:
+    if not store.remnants():
         click.echo("Nothing to clear.")
         return
     if not yes:
@@ -313,10 +313,10 @@ def memory_clear(yes: bool) -> None:
     # so "erased" has to be a MEASURED claim: a partial erase reported as success
     # would leave remembered text on disk under a promise that was not kept.
     after = _store()
-    remaining = len(after.all()) + len(after.forgotten())
-    if remaining:
-        _fail(f"Erase did not fully complete: {remaining} record(s) remain. "
-              "This is NOT reported as cleared.")
+    remnants = after.remnants()
+    if remnants:
+        _fail(f"Erase did not fully complete: {', '.join(remnants)} still on "
+              "disk. This is NOT reported as cleared.")
     click.echo(f"Erased {live} remembered and {gone} forgotten fact(s).")
 
 

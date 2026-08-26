@@ -291,3 +291,76 @@ def test_an_unresolvable_correction_does_not_assert_it_does_not_exist(home):
     low = res.output.lower()
     assert "could not be read" in low, "must name the second possibility"
     assert "nothing was changed" in low
+
+
+# --------------------------------------------------------------------------- #
+#  clear vs the correction sidecars - NEW-MEMORY-CLEAR-LEAVES-TEXT             #
+# --------------------------------------------------------------------------- #
+
+def test_clear_erases_the_corrections_sidecars_too(home):
+    """MEASURED before this was written (reproduces the ticket exactly): `clear()`
+    took the forgotten archive but left two other sidecars holding the user's own
+    words completely untouched - `.corrections.jsonl` (`target_text` /
+    `proposed_text`) and `.corrections-dismissed.json` (a rejected proposal's text,
+    casefolded, inside its dedup key). `localm memory clear -y` still reported
+    "Erased N remembered and M forgotten fact(s)." and exited 0 while a grep of
+    the home directory returned the sentence verbatim - exactly what AGENTS.md
+    rule 5 forbids for a privacy step."""
+    _run("add", "My bank PIN reminder is my dog Rex birth year")
+    store = _cli_store()
+    target = store.all()[0].id
+    _propose(store, target, "a first proposed correction naming Rex")
+    first_id = store.corrections()[0].id
+    _run("reject", first_id)                      # populates the dismissed sidecar
+    _propose(store, target, "a second still-pending correction naming Rex")
+
+    corrections_file = store.path.with_suffix(".corrections.jsonl")
+    dismissed_file = store.path.with_suffix(".corrections-dismissed.json")
+    assert corrections_file.exists(), "precondition: a pending correction is on disk"
+    assert dismissed_file.exists(), "precondition: a dismissed correction is on disk"
+
+    out = _run("clear", "--yes").output
+    assert "Erased" in out
+    assert not corrections_file.exists(), (
+        "verbatim correction text survived a clear that reported success")
+    assert not dismissed_file.exists(), (
+        "a rejected proposal's casefolded text survived a clear that reported "
+        "success")
+    fresh = _cli_store()
+    assert fresh.remnants() == []
+
+
+def test_clear_does_not_wave_through_an_orphaned_corrections_sidecar(home):
+    """The fast path ("Nothing to clear") used to gate only on `all()` and
+    `forgotten()`. A pending correction whose target record was hard-deleted
+    (`forget`, not archived) is invisible to both: `all()` no longer has the
+    record and `forget` never writes the forgotten archive. So a namespace could
+    reach 0 live and 0 forgotten while `.corrections.jsonl` and
+    `.corrections-dismissed.json` still held verbatim text on disk, and `clear -y`
+    would print "Nothing to clear" and exit without even trying to erase it -
+    the same false-success bug through a second door."""
+    _run("add", "a rare sentence that must not survive")
+    store = _cli_store()
+    target = store.all()[0].id
+    _propose(store, target, "first proposal about the rare sentence")
+    first_id = store.corrections()[0].id
+    _run("reject", first_id)                      # populates the dismissed sidecar
+    _propose(store, target, "second, still-pending proposal about the rare sentence")
+    _run("forget", target, "--yes")                # hard delete: no forgotten archive
+
+    fresh = _cli_store()
+    assert fresh.all() == [], "precondition: nothing live"
+    assert fresh.forgotten() == [], "precondition: nothing archived (hard delete)"
+    corrections_file = fresh.path.with_suffix(".corrections.jsonl")
+    dismissed_file = fresh.path.with_suffix(".corrections-dismissed.json")
+    assert corrections_file.exists(), (
+        "precondition: the orphaned pending correction is still on disk")
+    assert dismissed_file.exists(), (
+        "precondition: the dismissed correction is still on disk")
+
+    out = _run("clear", "--yes").output
+    assert "Nothing to clear" not in out, (
+        "claimed there was nothing to clear while correction sidecars remained")
+    assert "Erased" in out
+    assert not corrections_file.exists()
+    assert not dismissed_file.exists()

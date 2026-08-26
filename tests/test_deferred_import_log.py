@@ -150,3 +150,59 @@ def test_no_direct_logger_call_at_import_scope_in_wiring(entry):
         f"{entry} inside _wire_plugin_cli_entries runs before any log handler "
         "exists and is dropped at the call - use defer_log() instead"
     )
+
+
+class TestGuiCliWiringDiagnostic:
+    def test_broken_gui_cli_import_is_recorded_not_silent(self, monkeypatch):
+        """NEW-GUI-CLI-WIRING-SWALLOWS-IMPORTERROR: a bare
+        `except ImportError: pass` made `localm gui` vanish with no trace on a
+        genuine import break (a syntax error, a missing dependency after a
+        partial install, a broken editable install) - Click then answers
+        "No such command 'gui'", indistinguishable from a typo. The GUI is
+        core kernel surface (no pip extra gates it, unlike `coder`), so an
+        ImportError here almost always means a broken install and must leave
+        the same trace the plugin-CLI wiring already leaves for the same
+        failure, above, plus a stub command naming what happened."""
+        import sys
+
+        from click.testing import CliRunner
+        from localm import debuglog
+        from localm.cli import maintenance
+
+        # main.commands is mutated in place by add_command(); swap in a copy
+        # so monkeypatch's teardown restores the real "gui" entry afterwards
+        # instead of leaving every later test in this worker stuck with the
+        # stub.
+        monkeypatch.setattr(maintenance.main, "commands",
+                            dict(maintenance.main.commands))
+        monkeypatch.setattr(debuglog, "_deferred_records", [])
+        # The standard idiom for forcing ImportError on an already-importable
+        # module without touching sys.path or the real install.
+        monkeypatch.setitem(sys.modules, "localm.plugins.gui.cli", None)
+
+        maintenance._wire_gui_cli()
+
+        assert debuglog._deferred_records, (
+            "a broken GUI CLI import vanished with no trace")
+        rendered = [msg % args for _lvl, msg, args in debuglog._deferred_records]
+        assert any("gui CLI not wired (import failed)" in r for r in rendered)
+
+        out = CliRunner().invoke(maintenance.main, ["gui"]).output
+        assert "no such command" not in out.lower(), (
+            "a real import failure must not read exactly like a typo")
+        assert "could not be loaded" in out.lower()
+
+
+@pytest.mark.parametrize("entry", ["logger.debug(", "logger.info(", "logger.warning("])
+def test_no_direct_logger_call_at_import_scope_in_gui_wiring(entry):
+    """The GUI wiring function runs at the same import-time scope as
+    _wire_plugin_cli_entries - same guard, same reason."""
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "localm" / "cli" / "maintenance.py"
+    body = src.read_text(encoding="utf-8")
+    start = body.index("def _wire_gui_cli")
+    end = body.index("_wire_gui_cli()", start)
+    assert entry not in body[start:end], (
+        f"{entry} inside _wire_gui_cli runs before any log handler exists "
+        "and is dropped at the call - use defer_log() instead"
+    )

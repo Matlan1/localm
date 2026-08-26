@@ -830,6 +830,41 @@ permanent public record of what shipped and are never rewritten; the in-progress
   skips the steps that need the command and finishes normally, and its
   closing summary says plainly which commands will not work until it is
   fixed (the graphical launcher is unaffected).
+- **`localm gui` no longer disappears without a trace when the GUI fails to
+  load.** A broken or partial install could make the GUI's own code fail to
+  import, and the command was then dropped entirely - Click answered "No
+  such command 'gui'", exactly what a typo would look like. It now tells you
+  the GUI could not be loaded and how to see the underlying error.
+- **`localm gui --api-mode` no longer points you at a web page it never
+  serves.** With no model loaded, the model line said "add one on the Models
+  page"; the address line was always labelled "Open the GUI" and carried a
+  browser-only deep link. `--api-mode` mounts no GUI at all, so both now
+  match: the hint points at `localm pull <name>`, and the address line shows
+  the plain API base under "API base".
+- **`localm run MODEL -p "..."` now exits non-zero when the model load
+  hard-fails.** A crashed or unreachable load printed the real error in red
+  but still exited 0 with empty output, so a script chaining on the exit
+  code (or piping the output to a next step) could not tell that call apart
+  from a normal reply that happened to be empty.
+- **A worker crash no longer points you at a debug log that was never
+  written.** The message after a native crash always said "full trace in
+  the debug log", even when nothing had turned debug mode on and no such
+  file existed. It now says so only when the log actually exists, and
+  otherwise tells you to rerun with `--debug` to get one.
+- **Setting `LOCALM_MTMD_CPU=1` to skip the GPU attempt for image
+  understanding no longer reports that as a GPU failure.** With the
+  variable set, the vision projector deliberately never tries the GPU -
+  but the log said "the vision projector could not be loaded onto the
+  GPU... Set LOCALM_MTMD_CPU=1 to skip the GPU attempt entirely", advising
+  you to set the exact variable you had already set. It now says plainly
+  that CPU encoding is being used as requested. A genuine GPU failure
+  (the variable unset) still gets the original message.
+- **`localm comfy status` no longer uses "own" for two opposite things.**
+  With nothing configured, "Preferred target : own" and "Target now : your
+  own ComfyUI" read as agreeing while naming opposite targets - the first
+  means localm's managed ComfyUI, the second means a separate install you
+  run yourself. The preferred-target line now spells out the same wording
+  the second line already uses.
 
 ### Security
 - **Two more model families' role markers are now defanged in untrusted text.**
@@ -912,6 +947,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   warning, and the matching message in the GUI's bind-fallback notice, now
   say the length is a floor and point at `localm key generate` for an
   actually strong, random key.
+- **`localm memory clear` now actually erases everything it reports erasing.**
+  It could print "Erased N remembered and M forgotten fact(s)" and exit
+  successfully while two records of your own words stayed on disk: a pending
+  suggestion to update or delete a saved fact, and the text of a suggestion
+  you had already turned down. Both are now removed by the same command, and
+  it refuses to report success if anything is still there afterward.
 
 ## [0.1.5rc3] - 2026-08-13
 

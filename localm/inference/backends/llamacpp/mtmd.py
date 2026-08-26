@@ -382,17 +382,25 @@ class MtmdContext:
                 "projector will use the default GPU device", gpu_index)
             self._gpu_index = 0
         self.on_gpu = True
+        _cpu_requested = bool(os.environ.get("LOCALM_MTMD_CPU"))
         self._ctx = self._open(use_gpu=True)
         if not self._ctx:
             # A GPU-side refusal at INIT (the backend cannot take this projector at
             # all) is exactly the case the old blanket CPU override existed for, so
             # degrade here rather than losing vision - but say so, and only after
-            # the real path was actually tried.
+            # the real path was actually tried. _open() itself returns None
+            # without trying anything when LOCALM_MTMD_CPU is set, which is a
+            # deliberate skip, not a failure, and gets a different message.
             from localm.debuglog import logger
-            logger.warning(
-                "mtmd: the vision projector could not be loaded onto the GPU; "
-                "falling back to CPU encoding, which is much slower on large "
-                "images. Set LOCALM_MTMD_CPU=1 to skip the GPU attempt entirely.")
+            if _cpu_requested:
+                logger.info(
+                    "mtmd: using CPU encoding for the vision projector, as "
+                    "requested by LOCALM_MTMD_CPU - much slower on large images.")
+            else:
+                logger.warning(
+                    "mtmd: the vision projector could not be loaded onto the GPU; "
+                    "falling back to CPU encoding, which is much slower on large "
+                    "images. Set LOCALM_MTMD_CPU=1 to skip the GPU attempt entirely.")
             self.on_gpu = False
             self._ctx = self._open(use_gpu=False)
         if not self._ctx:

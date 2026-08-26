@@ -315,6 +315,76 @@ class TestConstructorAppliesItInTime:
         assert any("unusable projector device index" in r.getMessage()
                    for r in caplog.records), "the bad index was swallowed silently"
 
+    def test_cpu_env_set_skips_gpu_without_claiming_failure(
+            self, monkeypatch, caplog):
+        """NEW-MTMD-CPU-ADVISES-A-VAR-ALREADY-SET: with LOCALM_MTMD_CPU=1, the
+        GPU attempt is a deliberate SKIP (``_open`` returns None without
+        calling the native lib at all - see ``lib.calls`` below), not a
+        failure. The message must not say the projector "could not be
+        loaded" and must not tell the user to set the exact variable they
+        already set."""
+        monkeypatch.setenv("LOCALM_MTMD_CPU", "1")
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU)])
+        lib = self._fake_lib_class(_FakeLib())
+        monkeypatch.setattr(mtmd_mod, "_load_lib", lambda: lib)
+        monkeypatch.setattr(mtmd_mod, "_input_text_class", mtmd_mod._MtmdInputTextV2)
+
+        with caplog.at_level("INFO", logger="localm"):
+            ctx = mtmd_mod.MtmdContext("/fake/mmproj.gguf", 0xBEEF, gpu_index=1)
+
+        assert ctx.on_gpu is False
+        assert lib.calls == 1, (
+            "the GPU attempt must be SKIPPED (no native call), only the CPU "
+            "retry actually calls the library")
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("could not be loaded" in m for m in messages), (
+            "a deliberate skip must not be reported as a GPU failure")
+        assert not any("Set LOCALM_MTMD_CPU=1" in m for m in messages), (
+            "must not advise setting a variable the user already set")
+        assert any("as requested" in m and "LOCALM_MTMD_CPU" in m
+                  for m in messages), messages
+        assert not any(r.levelname == "WARNING" for r in caplog.records), (
+            "a deliberate, user-requested skip is not a warning")
+
+    def test_genuine_gpu_failure_still_warns_and_suggests_the_var(
+            self, monkeypatch, caplog):
+        """Contrast case (not a blanket miss): WITHOUT LOCALM_MTMD_CPU set, a
+        real GPU init failure keeps the original warning wording, including
+        the suggestion to set the escape hatch - that advice is only wrong
+        when the user already took it."""
+        monkeypatch.delenv("LOCALM_MTMD_CPU", raising=False)
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU)])
+
+        class _FailFirstThenSucceed:
+            def __init__(self):
+                self.calls = 0
+
+            def mtmd_context_params_default(self):
+                return mtmd_mod._MtmdParams()
+
+            def mtmd_init_from_file(self, path, model_ptr, params):
+                self.calls += 1
+                return 0 if self.calls == 1 else 0x1234   # GPU fails, CPU works
+
+            def mtmd_support_vision(self, ctx):
+                return True
+
+            def mtmd_default_marker(self):
+                return b"<__media__>"
+
+        lib = _FailFirstThenSucceed()
+        monkeypatch.setattr(mtmd_mod, "_load_lib", lambda: lib)
+        monkeypatch.setattr(mtmd_mod, "_input_text_class", mtmd_mod._MtmdInputTextV2)
+
+        with caplog.at_level("WARNING", logger="localm"):
+            ctx = mtmd_mod.MtmdContext("/fake/mmproj.gguf", 0xBEEF, gpu_index=1)
+
+        assert ctx.on_gpu is False
+        assert lib.calls == 2, "both the failed GPU attempt and the CPU retry must run"
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("could not be loaded onto the GPU" in m for m in messages)
+        assert any("Set LOCALM_MTMD_CPU=1" in m for m in messages)
+
 
 class TestLlamaCppPassesTheResolvedDevice:
 

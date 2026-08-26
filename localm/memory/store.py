@@ -749,6 +749,11 @@ class MemoryStore:
         coder's episode store already draws exactly this line and says so in its own
         clear(); this brings the two into agreement.
 
+        Also erases the pending-corrections sidecar (target_text/proposed_text) and
+        the corrections-dismissed sidecar (a rejected proposal's text, casefolded,
+        inside its dedup key) - both hold the same verbatim user text as the
+        forgotten archive and were previously left untouched by this call.
+
         The default stays False so this is not a behaviour change for anything that
         existed before - and at the time of writing nothing else called clear() at
         all, so the only caller is the CLI, which passes True.
@@ -760,6 +765,31 @@ class MemoryStore:
             self._save()
             if include_forgotten:
                 self._forgotten_file().unlink(missing_ok=True)
+                self._corrections_file().unlink(missing_ok=True)
+                self._dismissed_file().unlink(missing_ok=True)
+
+    def remnants(self) -> list[str]:
+        """Names of the parts of this namespace that still hold something on
+        disk: any of "live records", "forgotten archive", "pending
+        corrections", "dismissed corrections". Empty means genuinely nothing
+        remains.
+
+        Checked by FILE PRESENCE for the three sidecars rather than through
+        corrections()'s live-target pruning, so a pending correction whose
+        target record was separately hard-deleted (forget, not archived)
+        still counts as something left to erase - `corrections()` would
+        report that same entry as stale and skip it.
+        """
+        out = []
+        if self._records:
+            out.append("live records")
+        if self._forgotten_file().is_file():
+            out.append("forgotten archive")
+        if self._corrections_file().is_file():
+            out.append("pending corrections")
+        if self._dismissed_file().is_file():
+            out.append("dismissed corrections")
+        return out
 
     def invalidate_vectors(self, ids) -> None:
         """Drop the cached vectors of *ids* so the next save/replace re-embeds

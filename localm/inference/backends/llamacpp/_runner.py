@@ -648,12 +648,12 @@ class ModelRunner:
         native = self._exit_was_native_fault(trace_captured=bool(trace))
         if not trace:
             return native, " No native fault trace was captured for this exit."
-        from localm.debuglog import logger
+        from localm.debuglog import logger, native_fault_hint
         # Logged as well as returned: the trace is multi-line and belongs in the
         # debug log the message points at, not inlined into an HTTP error body.
         logger.error("gguf worker native fault trace:\n%s", trace)
         first = trace.splitlines()[0].strip()
-        return native, f" Native fault: {first} (full trace in the debug log)."
+        return native, f" Native fault: {first} ({native_fault_hint()})."
 
     def _crash_detail(self) -> str:
         """Just the detail half of :meth:`_death_report`, for the load and
