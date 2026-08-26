@@ -6,7 +6,8 @@ per quantization, whether a file fits this machine's VRAM.
 Discovery is a user-initiated prelude to ``localm pull`` and sits in the same
 policy category (explicit user action - see docs/network.md): it is not
 routed through the net_allow/net_deny domain rules, but ``net_mode = off``
-still blocks it, so the one kill switch keeps its promise.
+still blocks it by default - ``net_allow_model_downloads`` exempts it, the
+same override an explicit ``localm pull`` respects.
 
 "Fits your VRAM" badges compare against TOTAL VRAM, not currently-free VRAM:
 the active chat model occupies the GPU while you browse, and it will be
@@ -99,15 +100,25 @@ _SPLIT_RE = re.compile(r"^(?P<stem>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf
 
 class DiscoverError(Exception):
     """Discovery failed - network off, HF unreachable, or repo unusable.
-    Messages are safe to show in the GUI."""
+
+    *off* is True specifically for the net_mode=off refusal, so a caller that
+    shows this to a GUI/API surface (a browser has no CLI to run) can
+    substitute its own remedy instead of this message's CLI-flavored one -
+    see ``localm/plugins/gui/routes/models.py``'s ``_run_discover``."""
+
+    def __init__(self, message: str, *, off: bool = False):
+        super().__init__(message)
+        self.off = off
 
 
 def _ensure_online() -> None:
-    from localm.netpolicy import network_mode
-    if network_mode() == "off":
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    if network_mode() == "off" and not downloads_allowed_when_off():
         raise DiscoverError(
             "Network access is disabled (net_mode=off). Enable it with: "
-            "localm config net_mode ask")
+            "localm config net_mode ask - or allow just downloads: "
+            "localm config net_allow_model_downloads true",
+            off=True)
 
 
 def _get(url: str, params: Optional[dict] = None) -> object:

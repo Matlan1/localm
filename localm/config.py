@@ -685,6 +685,7 @@ DEFAULT_CONFIG: dict = {
     "net_allow": [],            # domains; empty = any. "x.com" covers *.x.com
     "net_deny": [],             # domains always refused (wins over allow)
     "net_allow_private": False, # True = permit loopback/private targets (SSRF guard off)
+    "net_allow_model_downloads": False,  # True = explicit downloads bypass net_mode=off
     "net_search_url": None,     # SearXNG base URL; None = DuckDuckGo (no key)
     # Display a remote image a model links in a reply, by fetching it SERVER-side
     # and streaming it back, so the browser never contacts the remote origin.

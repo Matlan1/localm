@@ -61,7 +61,18 @@ _USER_AGENT = "Mozilla/5.0 (compatible; localm/0.1; +https://github.com/localm)"
 
 class NetworkPolicyError(Exception):
     """A request was refused by the network policy. The message says why
-    and how to change the policy - safe to show to the model and the user."""
+    and how to change the policy - safe to show to the model, and to a CLI
+    user (it names a CLI command).
+
+    *off* is True specifically for the net_mode=off refusal. A caller that
+    surfaces this to a browser (a GUI/API route, never the model) has no CLI
+    to run and should build its own remedy instead of showing this message's
+    CLI-flavored one, the same way DiscoverError.off is used in
+    localm/plugins/gui/routes/models.py's _run_discover."""
+
+    def __init__(self, message: str, *, off: bool = False):
+        super().__init__(message)
+        self.off = off
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +96,22 @@ def network_mode() -> str:
                        "cannot silently re-enable network access", exc)
         return "off"
     return mode if mode in NET_MODES else "ask"
+
+
+def downloads_allowed_when_off() -> bool:
+    """Whether an explicit user download (a model pull, HuggingFace search, or
+    a vision-projector/voice/embedding-model fetch) may proceed despite
+    network_mode() == "off", via settings_schema.py's
+    net_allow_model_downloads (admin_only, default False).
+
+    Never consulted by check_url's model-initiated choke point - that stays
+    governed by net_mode alone. Best-effort: an unreadable config resolves to
+    blocked, matching network_mode()'s own failure posture."""
+    try:
+        from localm.config import load_config
+        return bool(load_config().get("net_allow_model_downloads", False))
+    except Exception:
+        return False
 
 
 def _domain_list(value) -> list[str]:
@@ -194,7 +221,7 @@ def check_url(url: str) -> None:
     if mode == "off":
         raise NetworkPolicyError(
             "Network access is disabled (net_mode=off). Enable it with:  "
-            "localm config net_mode ask")
+            "localm config net_mode ask", off=True)
 
     host = check_url_shape(url)
 

@@ -39,11 +39,11 @@ async def voice_status(request: Request):
     ``can_download`` tells the GUI whether to offer the one-time "download the
     model now" action: the model is missing, the faster-whisper package is
     there (without it the download would produce a model nothing can load yet,
-    and the reason says to install the extra first), net_mode is not "off" (off
-    has no bypass), and the caller could authorize it - open mode, or a key
-    granting config:write, the same scope that governs net_mode itself. The
-    flag only drives UI; POST /api/voice/model/download re-checks all of it
-    server-side."""
+    and the reason says to install the extra first), net_mode is not "off" (or
+    net_allow_model_downloads exempts it), and the caller could authorize it -
+    open mode, or a key granting config:write, the same scope that governs
+    net_mode itself. The flag only drives UI; POST /api/voice/model/download
+    re-checks all of it server-side."""
     import importlib.util
     from localm.voice import stt_available, stt_model_cached
     ok, reason = stt_available()
@@ -51,8 +51,8 @@ async def voice_status(request: Request):
     cached, model_name = stt_model_cached() if have_pkg else (False, "")
     can_download = False
     if have_pkg and not cached:
-        from localm.netpolicy import network_mode
-        if network_mode() != "off":
+        from localm.netpolicy import downloads_allowed_when_off, network_mode
+        if network_mode() != "off" or downloads_allowed_when_off():
             import localm.inference.http_server as _hs
             from localm import scopes
             held = _hs.caller_scopes(request)
@@ -73,8 +73,9 @@ async def voice_model_download(request: Request):
     configured for every other network path. Gated on config:write - the same
     scope that could change net_mode itself - so a key that could not lift the
     policy cannot bypass it here either; open mode is the trusted local owner.
-    net_mode=off always refuses: off is the kill switch, and only a real
-    config change lifts it."""
+    net_mode=off refuses by default, and only a real config change lifts it -
+    either net_mode itself, or net_allow_model_downloads exempting explicit
+    downloads specifically."""
     import localm.inference.http_server as _hs
     from localm import scopes
     held = _hs.caller_scopes(request)
@@ -86,12 +87,13 @@ async def voice_model_download(request: Request):
     cached, name = stt_model_cached()
     if cached:
         return {"status": "already_cached", "model": name}
-    from localm.netpolicy import network_mode
-    if network_mode() == "off":
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    if network_mode() == "off" and not downloads_allowed_when_off():
         raise HTTPException(
             409, "Network access is disabled (net_mode=off), which blocks even "
                  "an explicitly requested model download. Set net_mode to ask "
-                 "or allow first.")
+                 "or allow, or turn on \"Allow model downloads while network "
+                 "access is off\", first.")
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
         raise HTTPException(503, "This server has no background job registry, "

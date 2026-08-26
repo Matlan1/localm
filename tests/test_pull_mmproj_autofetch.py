@@ -574,6 +574,26 @@ class TestSyncModelsDirBackfillsExistingEntry:
         assert "main" in result.note
         assert "net_mode" in result.note
 
+    def test_net_allow_model_downloads_bypasses_off_for_the_backfill(
+            self, fake_registry, monkeypatch):
+        """net_allow_model_downloads exempts the retroactive backfill from the
+        off floor too - the same override an explicit pull respects. Asserted
+        on the real fetch happening (not just a non-empty note), the same
+        discipline as the sibling test above."""
+        store, models_dir = fake_registry
+        self._preexisting_entry(store, models_dir)
+        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
+        _wire_download(monkeypatch, {"mmproj-main-f16.gguf": _CLIP_BYTES})
+        monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "off")
+        monkeypatch.setattr("localm.netpolicy.downloads_allowed_when_off", lambda: True)
+
+        result = mm.sync_models_dir()
+
+        assert store["main"]["mmproj"] == str(
+            (models_dir / "mmproj-main-f16.gguf").resolve())
+        assert result.mmproj_backfilled == 1
+        assert not result.note, "a successful backfill has nothing to warn about"
+
     def test_net_mode_ask_still_backfills_no_half_measure_behind_a_setting(
             self, fake_registry, monkeypatch):
         """The backfill must hold under the DEFAULT net_mode ("ask"), not only for

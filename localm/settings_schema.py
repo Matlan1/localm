@@ -1011,6 +1011,16 @@ CORE_FIELDS: list = [
                  # be able to set it (else it could reach loopback/metadata via any
                  # model-initiated fetch). See routes/config.py admin_only gate.
                  group="Network", owner="web", admin_only=True),
+    SettingField("net_allow_model_downloads", Widget.TOGGLE,
+                 "Allow model downloads while network access is off",
+                 "A model pull, HuggingFace search, or a vision-projector, voice, "
+                 "or embedding-model fetch proceeds even when Network access "
+                 "(net_mode) is off. net_mode=off still blocks everything a "
+                 "model itself could trigger.",
+                 # admin_only: same reasoning as net_allow_private - this loosens a
+                 # network-policy floor, so a non-owner config:write key must not be
+                 # able to set it.
+                 group="Network", owner="web", admin_only=True),
     # admin_only: this names WHERE every web search is sent, so without the gate
     # a non-owner could re-point the search channel at a host it controls and
     # receive the owner's queries - the same "where does data go" boundary that

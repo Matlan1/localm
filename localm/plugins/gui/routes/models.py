@@ -936,12 +936,21 @@ def register(app: FastAPI, ctx) -> None:
         return 422              # bad repo / no GGUF files / bad format token
 
     async def _run_discover(fn):
-        """Run *fn* off the event loop; map DiscoverError to its HTTP status."""
+        """Run *fn* off the event loop; map DiscoverError to its HTTP status.
+
+        A browser has no CLI to run, so a net_mode=off refusal (DiscoverError.off)
+        gets its own GUI-native remedy here rather than the message's own
+        CLI-flavored one (`localm config net_mode ask`)."""
         from localm.discover import DiscoverError
         loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(get_plugin_executor(), fn)
         except DiscoverError as e:
+            if e.off:
+                raise HTTPException(
+                    _discover_status(e),
+                    "Network access is off. Turn it on, or allow downloads "
+                    "only, in Settings → Network.")
             raise HTTPException(_discover_status(e), str(e))
 
     async def _vram_total():

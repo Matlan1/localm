@@ -188,8 +188,21 @@ class TestSearch:
 
     def test_net_off_blocks(self, monkeypatch):
         monkeypatch.setenv("LOCALM_NET_MODE", "off")
-        with pytest.raises(DiscoverError, match="net_mode=off"):
+        with pytest.raises(DiscoverError, match="net_mode=off") as ei:
             hf_search("anything")
+        assert ei.value.off is True
+
+    def test_net_off_but_downloads_allowed_proceeds(self, monkeypatch):
+        """net_allow_model_downloads exempts discovery (a user-initiated
+        prelude to a pull) from the off floor, same as an explicit pull."""
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        monkeypatch.setattr(
+            "localm.netpolicy.downloads_allowed_when_off", lambda: True)
+        _mock_fetch(monkeypatch, [
+            {"id": "org/g1", "tags": ["gguf"], "downloads": 5, "likes": 0},
+        ])
+        results = hf_search("x", formats=["gguf"])
+        assert [r["id"] for r in results] == ["org/g1"]
 
     def test_network_failure_wrapped(self, monkeypatch):
         def boom(url, **kw):

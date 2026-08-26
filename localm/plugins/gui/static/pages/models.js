@@ -2016,6 +2016,24 @@ $("pull-start").onclick = async () => {
       const code = end.returncode != null ? `, exit ${end.returncode}` : "";
       pct.textContent = `failed${code} - see log`;
       toast(`Pull failed (${end.status}${code}) - see log`, true);
+      // The job's own log is the CLI's console output verbatim (it streams a
+      // spawned `localm pull`), so a net_mode=off refusal in there names a
+      // terminal command a browser cannot run. Never rewritten in place
+      // (the log is a faithful transcript) - append a GUI-native pointer
+      // instead, whenever that state is actually true right now. Silently
+      // skipped without config:read scope; this is a hint, not the failure.
+      try {
+        const cr = await fetch("/v1/config", { headers: authHeaders() });
+        if (cr.ok) {
+          const c = await cr.json();
+          if (c.net_mode === "off" && !c.net_allow_model_downloads) {
+            log.textContent += "(if this failed because network access is " +
+              "off: turn it on, or allow downloads only, in Settings → " +
+              "Network)\n";
+            log.scrollTop = log.scrollHeight;
+          }
+        }
+      } catch { /* best-effort hint only */ }
     }
   } catch (e) {
     bar.classList.remove("indeterminate");

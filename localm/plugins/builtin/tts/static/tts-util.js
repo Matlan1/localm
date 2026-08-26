@@ -89,13 +89,14 @@ export function classifyLoadError(err, { cached = false, online = true } = {}) {
 // R-NET: the browser fetches the Kokoro model directly from Hugging Face, so
 // localm's server-side net_mode enforcement (netpolicy.py) never sees this
 // request. planModelFetch is the client-side gate: "allow" (already cached,
-// or net_mode=allow) proceeds with no prompt; "refuse" (net_mode=off) throws
-// without ever fetching; "confirm" (net_mode=ask, or any other value) needs
-// an explicit one-time user action before the fetch is allowed to proceed.
-export function planModelFetch(mode, cached) {
+// net_mode=allow, or net_mode=off with allowDownloadsWhenOff) proceeds with
+// no prompt; "refuse" (net_mode=off, not exempted) throws without ever
+// fetching; "confirm" (net_mode=ask, or any other value) needs an explicit
+// one-time user action before the fetch is allowed to proceed.
+export function planModelFetch(mode, cached, allowDownloadsWhenOff) {
   if (cached) return "allow";
   if (mode === "allow") return "allow";
-  if (mode === "off") return "refuse";
+  if (mode === "off") return allowDownloadsWhenOff ? "allow" : "refuse";
   return "confirm";
 }
 

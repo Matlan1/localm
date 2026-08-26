@@ -16,6 +16,22 @@ def test_pull_model_refused_when_net_mode_off(monkeypatch):
     assert pullmod.pull_model("https://example.com/model.gguf") is False
 
 
+def test_pull_model_proceeds_when_net_mode_off_but_downloads_allowed(monkeypatch):
+    """net_allow_model_downloads exempts an explicit pull from the off floor.
+    Asserted on dispatch: _pull_url is mocked to return a sentinel that pull_model
+    cannot produce on its own, so a True (the sentinel, coerced) proves execution
+    reached the dispatch, not just that no exception happened to be raised."""
+    import localm.netpolicy as netpolicy
+    from localm.model_manager import pull as pullmod
+    monkeypatch.setattr(netpolicy, "network_mode", lambda: "off")
+    monkeypatch.setattr(netpolicy, "downloads_allowed_when_off", lambda: True)
+    called = []
+    monkeypatch.setattr(pullmod, "_pull_url",
+                        lambda *a, **kw: called.append(1) or True)
+    assert pullmod.pull_model("https://example.com/model.gguf") is True
+    assert called == [1]
+
+
 @pytest.mark.parametrize("url", [
     pytest.param("http://127.0.0.1:8000/model.gguf", id="loopback"),
     pytest.param("http://169.254.169.254/latest/meta-data/", id="cloud-metadata"),
