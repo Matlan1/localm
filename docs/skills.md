@@ -34,8 +34,8 @@ only. Review any skill from an unknown source first (see [Security](#security)).
 ## The `SKILL.md` format
 
 YAML-style frontmatter (a flat `key: value` block) followed by the instruction
-body. `name` and `description` are used; `allowed-tools` is parsed and shown to the
-model:
+body. `name` and `description` are used; `allowed-tools` is parsed and
+**enforced** (see [Enforcement](#enforcement-of-allowed-tools) below):
 
 ```markdown
 ---
@@ -50,27 +50,71 @@ To fill a PDF form:
 3. ...
 ```
 
+`allowed-tools` is a comma-separated list (`a, b, c`, with or without a
+surrounding `[...]`). It is optional; most skills omit it, and an absent or
+empty list restricts nothing.
+
 ## How the agent uses skills
 
-When at least one skill is present, the coder agent gains two read-only tools and
-follows **progressive disclosure** - it only pulls in what a task needs:
+When at least one skill is present, the coder agent gains two tools and follows
+**progressive disclosure** - it only pulls in what a task needs:
 
-- `list_skills()` - names + descriptions of the available skills.
-- `use_skill(name)` - the skill's instruction body plus its folder path.
+- `list_skills()` - names + descriptions of the available skills. Read-only,
+  never gated.
+- `use_skill(name)` - the skill's instruction body plus its folder path. If the
+  skill declares `allowed-tools`, this call also **arms** the restriction (see
+  below) before the body is returned.
 - `use_skill(name, file="relpath")` - the contents of a bundled file inside the
-  skill folder (confined to that folder).
+  skill folder (confined to that folder). Reading a file does **not** arm the
+  restriction; only loading the body does.
 
 The agent runs bundled scripts with its normal `run_shell` using the folder path
 the skill reports. With no skills present, the feature is inactive until you add one.
+
+## Enforcement of `allowed-tools`
+
+A skill's `allowed-tools` is **hard-enforced**, not merely shown to the model.
+The moment `use_skill(name)` returns the skill's body, every tool call for the
+rest of the current turn is checked against that list; anything not on it is
+refused with an explanation naming the active skill and what it does allow.
+
+What this means in practice:
+
+- **Only narrowing, never widening.** The restriction is intersected with
+  whatever tools the session already disallows for other reasons, and with any
+  skill already active. Loading a second skill that declares its own
+  `allowed-tools` shrinks the effective set further; loading one with no
+  `allowed-tools` at all leaves the existing restriction untouched.
+- **No release the model can call.** There is no tool or argument that lifts an
+  active restriction early - not asking again, not loading an unrestricted
+  skill, not any other trick reachable from inside a turn.
+- **Expires on your next message.** The restriction is scoped to the current
+  user request; sending a new message to the agent clears it (a fresh
+  `use_skill` call re-arms it if the new turn loads a skill again).
+- **`list_skills` and `use_skill` are always exempt**, restriction or not - the
+  model must still be able to discover and read a skill's files even while
+  confined to it.
+- **A spawned sub-agent inherits the restriction.** If the coder can delegate to
+  a child agent (`spawn_agent`), the child starts with the same narrowed tool
+  set the parent had when it was spawned, so a skill cannot escape its own
+  declared limit by delegating the disallowed action to a fresh agent.
+- **Arming is ordered against the same model reply.** If a reply calls
+  `use_skill` alongside other tool calls, `use_skill` runs by itself: anything
+  requested before it in that reply finishes first, and nothing requested after
+  it starts until the restriction is in force. A skill's declared limit cannot
+  be outrun by a tool call batched alongside the load itself.
+
+If the restriction cannot be applied for some reason, the skill is not loaded at
+all and `use_skill` reports the failure - a skill whose declared limit cannot be
+enforced must not run unrestricted.
 
 ## Security
 
 A `SKILL.md` body is **untrusted content**. `list_skills` and `use_skill` only
 *read* files, so they never need confirmation - but anything a skill's instructions
 prescribe (writing files, running shell commands) still goes through the agent's
-normal capability scope and destructive-action confirmation. A skill can therefore
-*instruct* the agent, but cannot *act* without your consent. Treat skills from
-unknown sources like any other code you would run, and review them first.
-
-`allowed-tools` is currently surfaced to the model but not hard-enforced; enforcing
-it (restricting a skill to a tool subset) is planned future work.
+normal capability scope, `allowed-tools` enforcement, and destructive-action
+confirmation. A skill can therefore *instruct* the agent, but cannot *act* without
+your consent, and a skill that declares `allowed-tools` cannot reach outside that
+list even with auto-approve on. Treat skills from unknown sources like any other
+code you would run, and review them first.

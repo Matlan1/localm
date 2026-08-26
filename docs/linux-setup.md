@@ -3,9 +3,11 @@
 localm runs natively on Linux. The app code is platform-agnostic; only the
 native llama.cpp library and a few setup scripts differ from Windows.
 
-> **macOS is experimental and unverified.** `setup.sh` runs and will try to fetch
-> the Apple-Silicon (Metal) llama.cpp build, but this path has not been tested -
-> treat it as best-effort and expect rough edges.
+> **macOS is experimental and unverified.** `setup.sh`'s GPU detection does not
+> recognize Apple Silicon, so it always installs the CPU llama.cpp build during
+> setup. To try Metal instead, run `.venv/bin/localm setup-llama --backend
+> metal` afterward - this path has not been tested, so treat it as best-effort
+> and expect rough edges.
 
 ## One-click install (the lazy path)
 
@@ -16,9 +18,10 @@ curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | 
 This clones localm to `~/localm`, installs `uv` if needed, creates a private
 `.venv`, auto-detects your GPU, and runs a non-interactive setup that also
 provisions the matching llama.cpp backend (CUDA for NVIDIA, HIP for AMD when a
-system ROCm/HIP toolkit is present, Metal on Apple Silicon, Vulkan as the
-universal fallback otherwise, CPU with no GPU - see
-[gpu-setup.md](gpu-setup.md) for the full policy).
+system ROCm/HIP toolkit is present, Vulkan as the universal fallback otherwise,
+CPU with no GPU or on macOS - see [gpu-setup.md](gpu-setup.md) for the full
+policy). On Apple Silicon this installs the CPU backend; switch to Metal
+yourself afterward (see the macOS note above).
 Override the location with `LOCALM_DIR=...`.
 
 ## Manual install
@@ -30,13 +33,19 @@ bash setup.sh
 ```
 
 `setup.sh` is interactive: it installs `uv` for you if you do not have it,
-detects your accelerator, creates the venv, installs localm, optionally installs
-the PyTorch stack for your GPU, lets you copy in a llama.cpp build, picks a data
-directory, and adds an app-menu entry. Pass `--yes` for defaults.
+detects your accelerator, creates the venv, installs localm, lets you pick a
+llama.cpp backend (or copy in your own build), picks a data directory, and adds
+an app-menu entry. Pass `--yes` for defaults.
 
 The PyTorch stack is only needed to run HuggingFace (non-GGUF) Transformers
-models; GGUF chat through the llama.cpp backend needs none of it, so answer no
-if you only run GGUF models (you can add it later, see the README extras).
+models; GGUF chat through the llama.cpp backend needs none of it. There is no
+separate yes/no prompt for it - `setup.sh` installs a matching PyTorch build
+automatically for whichever GPU llama.cpp backend you pick, and skips it only
+if you pick the `cpu` llama.cpp backend, which also gives up
+GPU-accelerated GGUF chat. If you want GPU-accelerated GGUF chat but not
+PyTorch, uninstall it after setup finishes
+(`uv pip uninstall -p .venv torch torchvision`) - or add it back later
+yourself (see the README extras).
 
 Prerequisites:
 - `uv` - `setup.sh` installs it for you if missing; only needed by hand if you
@@ -104,6 +113,11 @@ uv pip install -p .venv torch torchvision --index-url https://download.pytorch.o
 Not sure which CUDA line your card needs? `.venv/bin/python -m localm.hwdetect
 torch-args cuda` prints the exact one for the GPU actually in this machine (see
 [gpu-setup.md](gpu-setup.md#huggingface-transformers-pytorch) for the full table).
+
+A HuggingFace AWQ (4-bit) checkpoint needs nothing beyond this PyTorch stack:
+localm dequantizes AWQ layers natively (no `gptqmodel`/`autoawq`/`torchao`
+compiled dependency), so it loads and runs the same way on Linux ROCm, CUDA,
+or CPU as it does elsewhere.
 
 ### `pip install "localm[gpu]"` is Windows-only
 

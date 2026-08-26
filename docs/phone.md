@@ -12,7 +12,7 @@ address*.
   a GUI that is already open, set *Settings > Server > Bind address* to
   `0.0.0.0` and click *Restart server*. Open the `https://localm.local:<port>/`
   it prints on your phone (or the `https://<your-ip>:<port>/` it prints next to
-  it; the Settings *Companion app* card shows the same addresses); trust the
+  it; the Settings *Companion app* card shows that same IP address); trust the
   certificate once (one tap on the key screen); enter your key; choose
   *Install app*.
 - **Anywhere else:** put the machine and the phone on a
@@ -31,8 +31,9 @@ address*.
      button), then
    - `localm gui -H 0.0.0.0`, **or** set *Settings > Server > Bind address* to
      `0.0.0.0` and click *Restart server* - no terminal needed. (Without a
-     strong key the server refuses the network bind and stays on `127.0.0.1`;
-     the *Companion app* card tells you why.)
+     strong key, `-H 0.0.0.0` on the command line refuses to start at all; the
+     Settings-driven bind instead falls back and stays on `127.0.0.1`, and the
+     *Companion app* card tells you why.)
 
    localm now serves **HTTPS automatically** on a network bind, so the key and
    your prompts are encrypted in transit. No reverse proxy, no extra tools.

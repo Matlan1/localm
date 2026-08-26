@@ -25,7 +25,7 @@ localm plugin install memory     # installs and enables the memory plugin
 Or install it from the GUI **Plugins** page. The memory plugin has no extra
 Python dependency to install. It adds no tab of its own: it contributes the
 `/api/memory*` routes plus the chat recall and consolidation hooks, and its
-settings render on the Plugins page.
+settings render under **Settings > Privacy & data**, not on the Plugins page.
 
 Memory only *grows* in `log` or `full` session mode. The default mode is
 `privacy`, which writes nothing and, by default, recalls nothing (see
@@ -47,24 +47,39 @@ Without it, recall still works but is lexical only (exact-word BM25). See
 
 `localm memory` manages the same store the app does - it was GUI-only until now,
 which mattered because `localm job add --memory` can schedule the consolidation
-that produces corrections you then had no way to review.
+that produces corrections you then had no way to review. The command reads and
+writes the on-disk store directly, so it works even when the memory plugin is
+not installed or enabled - installing the plugin only turns on the automatic
+chat-turn recall and consolidation hooks described below.
 
 ```bash
-localm memory list [--all] [--json]   # what localm has remembered about you
-localm memory show ID                 # one fact in full, with its provenance
-localm memory add "..."               # save a fact yourself
-localm memory forget ID               # delete one fact (not recoverable)
-localm memory forgotten               # facts localm archived on its own
-localm memory restore ID              # bring an archived fact back
-localm memory corrections             # proposals waiting for your review
-localm memory accept ID | reject ID   # resolve one proposal
-localm memory clear                   # erase everything, archive included
+localm memory list [--all] [--json]                  # what localm has remembered about you
+localm memory show ID                                # one fact in full, with its provenance
+localm memory add "..." [--kind K] [--importance F]  # save a fact yourself
+localm memory forget ID [-y]                         # delete one fact (not recoverable)
+localm memory forgotten                              # facts localm archived on its own
+localm memory restore ID                             # bring an archived fact back
+localm memory corrections [--json]                   # proposals waiting for your review
+localm memory accept ID | reject ID                  # resolve one proposal
+localm memory clear [-y]                             # erase everything, archive included
 ```
+
+`memory add` produces the same kind of record `POST /api/memory/append` does:
+`--kind` is `semantic` (a standing fact, the default) or `episodic` (something
+that happened), and `--importance` (default 0.8) is the weight recall and
+prune use. Source is always `user` - there is no `--source` flag - and an
+unrecognised `--kind` is silently coerced to `semantic` by the record's own
+validation.
 
 `forget` and `forgotten` are not two halves of one thing. `forget` deletes
 outright; the archive `forgotten` lists is filled only when localm drops a fact
 itself - evicting one at the record cap, or replacing one you accepted a
 correction for - and `restore` can only reach those.
+
+`clear` erases everything: live facts, the forgotten archive, and any pending
+or dismissed corrections, so no fact text survives it anywhere on disk. It
+reads its own result back afterward and refuses to report success if anything
+is still there.
 
 ## What it stores
 
@@ -134,8 +149,11 @@ model. There are three ways it fires:
 1. **Automatically after a chat turn** (the default). A debounced background pass
    runs at most once every 15 minutes (override with the
    `LOCALM_MEMORY_AUTO_INTERVAL` environment variable, in seconds). Controlled by
-   the `memory_auto_consolidate` setting. This is what makes memory grow with no
-   manual step: chat normally, and durable facts accumulate on their own.
+   the `memory_auto_consolidate` setting - and, since this pass fires from the
+   same chat-turn hook as recall, it also stays off while `memory_enabled` (the
+   🧠 toggle) is off, even with `memory_auto_consolidate` left on. This is what
+   makes memory grow with no manual step: chat normally, and durable facts
+   accumulate on their own.
 2. **The "Synthesize now" button** in the `/memory` manager, or
    `POST /api/memory/consolidate`, for immediate results.
 3. **A scheduled memory job** (needs the `jobs` plugin):
@@ -196,9 +214,12 @@ When memory injects facts, the server reports it so you are never guessing:
   memory manager.
 - `POST /v1/chat/completions` carries an `X-Localm-Memory` response header with
   the count, the injected items, and a **degrade reason** when the semantic
-  signal could not be used (such as `no_embedder`, `no_vectors`, `low_coverage`,
-  or `dim_mismatch`). `no_embedder` means you have not run
-  `localm setup-embeddings` yet, so recall is lexical only.
+  signal could not be used: `no_embedder` (no embedding model resolved -
+  you have not run `localm setup-embeddings` yet), `no_vectors` (records not
+  embedded yet), `low_coverage` (too few records carry a vector), `dim_mismatch`
+  (the vector sidecar mixes dimensions, usually from switching embedding
+  models), or `query_embed_failed` (the embedder itself failed on this turn's
+  query). Any of these means recall fell back to lexical BM25 for that turn.
 
 ## Forgetting and bounds
 
@@ -220,7 +241,7 @@ none are recalled, so nothing from a past session reaches the model.
 | Mode | Recall | Growth |
 |---|---|---|
 | **privacy** (default) | Off, unless you opt into read-only recall | Off (no writes) |
-| **log** / **full** | On (while `memory_enabled` and the 🧠 toggle are on) | On (while `memory_auto_consolidate` is on) |
+| **log** / **full** | On (while `memory_enabled` and the 🧠 toggle are on) | On (while `memory_auto_consolidate` is on; the automatic pass also needs `memory_enabled` - manual **Synthesize now** and a scheduled memory job are unaffected by it) |
 
 You can opt into recalling your existing memories during privacy-mode chats
 without ever writing new ones: turn on **Allow memory recall in privacy mode**

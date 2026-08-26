@@ -32,7 +32,19 @@ mint named, scope-limited keys with `localm key create --scope <scope>` - by
 default `key create` refuses to mint a privileged scope into a named key (pass
 `--allow-privileged` to override, since a terminal on this machine is already
 owner-equivalent trust); an owner-authenticated API call (`POST /v1/keys`) can
-mint one too (see *Capability scopes* below).
+mint one too (see *Capability scopes* below). A named key can also carry an
+expiry (`--expires-in` / `expires_in` on `POST /v1/keys`); `verify()` rejects it
+once it has passed.
+
+The owner key itself can be rolled or set from the GUI (Settings > Security)
+as well as the CLI: `POST /api/auth/key/rotate` requires the `admin` scope
+specifically (not just `config:write`, which governs the sibling clear route -
+setting a caller-chosen key is privilege-equivalent to minting yourself owner,
+so only an existing owner may do it). It is not loopback-restricted: reaching
+it already requires the owner credential, which grants no new authority.
+Rolling or setting the key does not revoke existing browser sessions (they are
+decoupled from the key's value by design); `localm key recover`, run locally,
+is the compromise-recovery path that does.
 
 A key you chose yourself (`localm key set`, `LOCALM_API_KEY`, or writing
 `auth.key` by hand) can be short or memorable, so its fingerprint - recorded in
@@ -40,14 +52,31 @@ A key you chose yourself (`localm key set`, `LOCALM_API_KEY`, or writing
 derivation (scrypt) rather than a fast hash, so it cannot be brute-forced
 offline from those files. A key localm generates for you is random and long
 enough that this does not matter, and keeps using the cheap path.
+`localm key set` / `POST /api/auth/key/rotate` refuse a key under 8 characters
+outright; that floor is enforced only when the key is CHOSEN through localm,
+not when it arrives via the `LOCALM_API_KEY` environment variable or a
+hand-edited `auth.key`, and even a key that clears it is only "not instantly
+guessable", never "strong" - only a randomly generated key is.
 
 Because the default is fail-open for reads, a network bind without a key is unsafe,
 so **both `localm gui` and `localm serve` refuse to bind past loopback unless an API
-key is set** (printing how to set one). `--insecure` overrides this for a trusted,
-isolated network - it then serves unauthenticated, the GUI's coder agent included. A
-network bind also gets built-in TLS automatically (see `docs/tls.md`), so the key and
-all traffic are encrypted. Exposing the GUI exposes the coder agent, which can run
-shell commands.
+key of at least 8 characters is set** (printing how to set one) - a configured key
+shorter than that is treated the same as no key at all. `--insecure` overrides this
+for a trusted, isolated network - it then serves unauthenticated, the GUI's coder
+agent included. A network bind also gets built-in TLS automatically (see
+`docs/tls.md`), so the key and all traffic are encrypted. Exposing the GUI exposes
+the coder agent, which can run shell commands.
+
+**The refusal above is a hard exit only for an explicit CLI bind.** The bind
+address and the TLS toggle/cert/key are also settable from the GUI (Settings >
+Server; `bind_host`, `tls_enabled`, `tls_cert`, `tls_key`, each `admin_only` -
+see [docs/tls.md](docs/tls.md)) and take effect on the next restart. `--insecure`
+has no config form, so it can only ever be supplied from a terminal; a
+Settings-driven bind that fails the key check (or whose TLS setup fails, or
+whose configured address is not bindable on this machine right now) therefore
+cannot be forced open the way a CLI bind can. It degrades LOUDLY to loopback
+instead of exiting: a browser-only user with no terminal would otherwise be
+locked out of a server that refuses to start, with no way back in.
 
 ### State-changing endpoints
 
@@ -59,11 +88,13 @@ allowlist-by-default: it covers plugin data routes (`/api/rag`, `/api/coder`,
 protected the moment it is added. Three groups are exempt from the check itself,
 each because it carries its own credential instead: the OpenAI-compatible
 inference API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`),
-left cross-origin callable so a local app can use it; `/v1/surfaces/*`
+left cross-origin callable so a local app can use it; `/v1/surfaces/gui`
 (on-demand GUI mount), gated on its own attach token or the owner key; and
-`/v1/instances/*` (multi-instance GPU coordination), gated on a
-per-coordination token. A configured `"cors_origins"` (or `"*"`) opts specific
-origins into cross-origin use for everything else.
+`/v1/instances/cooperate-unload` (multi-instance GPU coordination), gated on
+a per-coordination token. Each is an exact route, not a prefix - exempting a
+future sibling route needs its own deliberate addition. A configured
+`"cors_origins"` (or `"*"`) opts specific origins into cross-origin use for
+everything else.
 
 When **no key is configured** (open mode), those same state-changing routes also
 require a per-process **shell token**, served by `GET /` to whatever passes the
@@ -98,6 +129,20 @@ the loopback GUI shell's HTML (CORS trusts every `localhost:PORT` origin to read
 matching response) could lift the embedded token and replay it cross-origin against
 these routes. `GET /v1/models` and `GET /health` are exempt (unauthenticated by
 design, matching the inference API's own cross-origin posture).
+
+### Content Security Policy
+
+Every response from the GUI shell carries an **enforcing** (not report-only)
+Content-Security-Policy, plus `X-Content-Type-Options: nosniff`. `script-src`
+allows `'self'`, `blob:`, `'wasm-unsafe-eval'`, and a fresh, per-request nonce
+(no `'unsafe-inline'`), so an injected `<script>` in rendered chat content
+cannot execute even though chat content is otherwise sanitised with DOMPurify
+before it is inserted into the page - the CSP is the backstop, not the
+primary defence. `form-action 'none'` additionally blocks a
+sanitiser-surviving `<form>` from submitting anywhere, same-origin included.
+`connect-src` allows `'self'`, `blob:`, and the two hosts a first-party
+plugin fetches model weights from in-browser (`huggingface.co`, `*.hf.co`) -
+no CDN origin is allowed or needed.
 
 ## Capability scopes grant host access - only issue keys to trusted clients
 
@@ -168,7 +213,7 @@ clients you trust.
 - **A model's own bundled code does not run just because you loaded it.**
   Custom model code (`trust_remote_code`) is off by default; a model that
   needs it is refused with an explanation, and the owner-only "Allow
-  model-bundled custom code" setting (Settings -> Security) turns it back on
+  model-bundled custom code" setting (Settings > Model) turns it back on
   for a model you trust.
 - **A downloaded model or vision-projector filename** cannot resolve to
   something other than the plain file it appears to be: a repo-supplied name
@@ -193,11 +238,16 @@ this section states the security properties and, more importantly, their edges.
   ComfyUI has its own, narrower guards instead: a configured `comfy_api_url`
   that targets a link-local / cloud-metadata address is refused
   (CHK-COMFY-APIURL), and the connection itself refuses any HTTP redirect
-  outright (CHK-COMFY-REDIRECT), so a hostile or compromised ComfyUI cannot use
-  a 3xx response to steer the request elsewhere. Loopback and LAN are both
+  outright, so a hostile or compromised ComfyUI cannot use a 3xx response to
+  steer the request elsewhere. Loopback and LAN are both
   normal, unchecked ComfyUI deployments - treat the policy as governing the
   paths named above, not as a blanket statement about every socket localm
-  opens.
+  opens. The embedding-model and Whisper downloads described below are
+  another: they respect `net_mode` (including `off`) but fetch from a
+  **fixed, hardcoded repository** named by localm's own code rather than a
+  caller-supplied URL, so they never call `check_url` and are not subject to
+  the domain lists, the SSRF guard, or the DNS-rebinding pin - none of which
+  a fixed destination needs.
 - **No redirect off HTTPS, on any of them.** Separate from the policy above and
   narrower: every outbound client that uses localm's shared verified opener
   (setup-llama's runtime download and its GitHub and PyPI lookups, the update
@@ -212,9 +262,18 @@ this section states the security properties and, more importantly, their edges.
   you see for `ask` comes from the coder's own confirmation step, one layer up,
   and an auto-approve session does not show it. Do not read `ask` as a
   guarantee that something will stop and ask.
-- **`off` has one documented exception.** An admin-only setting
-  (`update_ignore_net_policy`, off by default) lets the update check run
-  regardless. Nothing else opts out.
+- **A one-time, explicit download is consent, not a policy exception.** Two
+  GUI actions (fetching the embedding model on the Knowledge page, the Whisper
+  speech-to-text model on the mic button) let a `config:write`-or-better caller
+  authorize exactly one fetch of the currently-configured internal model even
+  under `ask`, the same way `/web` or `localm pull` are consent by definition.
+  The authorization is a single call argument, never written to config or any
+  other state, and it changes nothing about `net_mode` for any other request.
+  `net_mode = off` still refuses it unconditionally - this bypasses `ask`'s
+  friction, never `off`'s kill switch.
+- **`off` has one documented exception, and it is not the one above.** An
+  admin-only setting (`update_ignore_net_policy`, off by default) lets the
+  update check run regardless of `off`. Nothing else opts out of `off`.
 - **Private-address guard.** Requests to loopback, link-local, CGNAT and
   private ranges are refused, and the check is re-applied to the resolved
   address rather than the name. It classifies by ADDRESS TYPE, so a service
@@ -231,9 +290,11 @@ this section states the security properties and, more importantly, their edges.
 - **Redirects.** Page fetches and model pulls re-validate each hop, so a
   permitted URL cannot redirect its way to a refused one. That re-validation is
   not present on every network path.
-- **Domain allow and deny lists.** These are read from config per call. If that
-  read fails, they are dropped for that call with a warning rather than failing
-  closed, so a denied host would pass.
+- **Domain allow and deny lists.** `net_mode` and the `net_deny`/`net_allow`
+  lists are read from config once, together, per call to `check_url`. If that
+  read fails, the request is refused outright (fail closed) rather than
+  falling back to a permissive default - a denied host cannot slip through
+  because the config happened to be unreadable that one time.
 - **Response size.** Fetches are capped, but the cap is a default that callers
   may raise; it is not a fixed ceiling.
 
@@ -249,16 +310,23 @@ and search snippets are untrusted input to the model, and
   loopback bind is plain HTTP and generates no certificate at all, which is why
   a normal local install has none.
 - **What the certificate covers.** The SANs are built from this host's own
-  addresses and its primary LAN address. Reaching localm over a VPN or overlay
-  network may therefore land on an address the certificate does not name.
-  Address enumeration also depends on the optional `[monitor]` extra; without
-  it, that set is empty.
+  addresses (via the OS resolver), its primary outbound LAN address, any
+  Tailscale address, and the mDNS/Tailscale MagicDNS names - all stdlib-only,
+  so this works with no optional dependency. Reaching localm over a VPN or
+  overlay network may therefore land on an address the certificate does not
+  name. A VPN's own tunnel adapter is deliberately excluded from the LAN
+  address (see [docs/tls.md](docs/tls.md)). The optional `[monitor]` extra
+  (psutil) widens a *different*, non-security-relevant address list - the
+  addresses shown on the phone-pairing card - not the certificate's SANs.
 - **Regeneration.** The leaf is regenerated when it no longer covers a required
   name, not on every address change.
-- **Key file permissions.** The private key is written with owner-only
-  permissions on POSIX. On Windows that call does no filtering, so the key
-  inherits the directory's own permissions; treat the data directory's access
-  control as the real boundary there.
+- **Key file permissions.** The CA and leaf private keys are written 0600 from
+  the moment they exist, then restricted to the current user: `chmod` on
+  POSIX, `icacls` (an explicit, sole full-control ACE, inherited entries
+  dropped) on Windows. Both are best-effort - a failure is logged as a
+  warning rather than blocking startup, and the data directory's own access
+  control is the fallback boundary if the OS-level restriction cannot be
+  applied (a non-NTFS volume, a missing `USERNAME`, `icacls` itself absent).
 - **Trusting the CA.** Clients need the generated CA to validate the connection.
   `GET /localm-ca.crt` serves it, and that route is deliberately public.
 - **A self-call caveat.** When the CA file is missing, localm's own internal
@@ -296,7 +364,14 @@ auto-rolls-back if it does not come up healthy within 90 seconds. `localm update
 from the CLI applies the same way but does not restart for you - you relaunch by
 hand, so a build that misbehaves after that manual restart has no automatic
 watchdog and is recovered with `localm update --rollback` (or by restoring the
-backup directory the update left behind).
+backup directory the update left behind). The GUI has the same rollback as a
+button (Settings > Updates), backed by `GET`/`POST /api/update/rollback`: the
+GET is a read-only check for whether a backup exists and which build it would
+restore; the POST requires the `admin` scope specifically (not merely
+`config:write`) and restores the previous build's files from the local backup
+with **no signature check and no network request** - it is not a download, so
+the signing model above does not apply to it. It restores files only, not a
+deps-class update's package installs.
 
 ## Supported versions
 

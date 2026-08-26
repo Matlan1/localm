@@ -63,6 +63,7 @@ localm video "a red fox running through fresh snow, low tracking shot"
 localm video "waves rolling in at dusk" --image beach.png        # image-to-video
 localm video "city timelapse" -d 1 --steps 20 --seed 7   # quick iteration (~7 min)
 localm video "gentle ocean waves" --width 1280 --height 704      # explicit resolution
+localm video "a fox running, camera tracking low" --cfg 6.0      # follow the prompt harder
 ```
 
 See the [CLI Reference](cli.md) for the full command syntax and options.
@@ -109,15 +110,38 @@ Generated clips are stored at `<data dir>/gui_video/` as MP4 files, each with an
 
 ## VRAM handover
 
-Same lifecycle as image and music generation: the chat model is unloaded before the workflow is queued, and after a successful render ComfyUI is asked to release its models (`/free`) and the chat model reloads. If ComfyUI is not running, the job tells you how to start it - or starts it automatically when `comfy_launch_cmd` is set in the config.
+**On the GUI Video page, the `/generate-video` chat command, and a direct `POST /api/video` call** (all three go through the same background job): the chat model is unloaded before the workflow is queued, and once the job finishes - whether it succeeded, failed, or was cancelled - ComfyUI is asked to release its models (`/free`) and the chat model reloads.
+
+**The `localm video` CLI does not do this on its own.** It talks to ComfyUI directly and has no server to hand the chat model back to unless you set the `LOCALM_URL` environment variable to a running localm server (and, for a keyless server, also pass a valid instance token); without it, `localm video` never unloads or reloads anything, and a co-running chat model stays resident in VRAM alongside ComfyUI's.
+
+If ComfyUI is not running, the job tells you how to start it - or starts it automatically when `comfy_launch_cmd` is set in the config. Interrupting a CLI generation with Ctrl-C tells ComfyUI to abort the render and free its VRAM instead of leaving it running.
 
 ## Using your own workflow
 
-The **Workflow** card on the Video page is the current way to do this: export your graph from ComfyUI (Save -> API format), upload it there, and select it - or keep the built-in default. Uploaded workflows are stored per-plugin under the localm data directory (`workflows/video/`), which models you run stays private, and the choice survives a self-update (the `localm/` package directory is whole-tree-replaced on update; the data directory is not).
+The **Workflow** card on the Video page is the current way to do this: export your graph from ComfyUI (Save -> API format), upload it there, and select it - or keep the built-in default. The same is available from the CLI, and works fully offline:
+
+```bash
+localm comfy workflow add video my_wan.json --use   # upload and select it
+localm comfy workflow list video                    # see what is uploaded and active
+localm comfy workflow use video --clear             # back to the built-in default
+```
+
+Either way, uploaded workflows are stored per-plugin under the localm data directory (`workflows/video/`), which models you run stays private, and the choice survives a self-update (the `localm/` package directory is whole-tree-replaced on update; the data directory is not). Whatever is selected governs `localm video` too, not just the GUI.
 
 Parameters are injected by role, so node ids do not matter: the graph just needs a `KSampler` wired with `positive` / `negative` / `latent_image` inputs and a `CreateVideo` node for fps.
 
 The older `wan_workflow_local.json` file dropped next to `localm/video_gen/wan_workflow.json` still works (it is gitignored) but is superseded by the Workflow card above: on first load, any existing override there is migrated into the new per-plugin store automatically, keeping it selected and preserving your current setup.
+
+## Picking models per slot
+
+The Video page shows a **Models** panel for the active workflow: one dropdown per
+model file the workflow uses, labeled by the role it fills (diffusion model,
+text encoder, VAE) rather than the raw ComfyUI field name. A slot whose file is
+not installed in ComfyUI is called out, and a model of that kind you already have
+registered in localm but ComfyUI is not offering gets a note saying where to move
+it. With ComfyUI unreachable the panel falls back to listing what the workflow
+needs and which of your registered models could fill each slot, instead of going
+blank.
 
 ## Privacy
 

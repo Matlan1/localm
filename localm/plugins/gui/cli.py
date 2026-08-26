@@ -431,9 +431,11 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                       f"(audit trail in <data dir>/sessions/)[/dim]")
     elif debug:
         console.print(
-            "[yellow]⚠  privacy mode + --debug:[/yellow] the debug log records "
-            "requests and raw model output - delete it after analysis if that "
-            "matters.")
+            "[yellow]⚠  privacy mode + --debug:[/yellow] the debug log still "
+            "records operational lines (requests, timings, errors) - never "
+            "raw model output or chat content, even with this flag on. "
+            "Delete it after analysis if the operational detail matters to "
+            "you.")
 
     # Attach-or-spawn: if a localm is already running for this project dir, open
     # ITS GUI instead of starting a second server that double-loads the model.

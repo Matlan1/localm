@@ -49,9 +49,9 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 ## Features
 
-- **Local model inference.** GGUF files load through a small ctypes binding to `llama.dll`, so there is no `llama-cpp-python` to build. HuggingFace models work too. The installer detects your GPU and picks the best backend it can run out of the box - **CUDA for NVIDIA, ROCm/HIP for AMD when a system toolkit is present, Vulkan as the universal fallback** (any AMD/NVIDIA/Intel GPU, no vendor toolkit needed), **CPU** when there is no GPU - and localm auto-detects the GPU at load.
+- **Local model inference.** GGUF files load through a small ctypes binding to `llama.dll`, so there is no `llama-cpp-python` to build. HuggingFace Transformers models work too, including native AWQ-quantized models with GPU inference and no extra dependency beyond the `[gpu]` extra. Some GGUF models get a free speed-up from built-in speculative decoding (Multi-Token Prediction) when the model and runtime support it - no extra setup, it just engages when it can. The installer detects your GPU and picks the best backend it can run out of the box - **CUDA for NVIDIA, ROCm/HIP for AMD when a system toolkit is present, Vulkan as the universal fallback** (any AMD/NVIDIA/Intel GPU, no vendor toolkit needed), **CPU** when there is no GPU - and localm auto-detects the GPU at load.
 
-- **Pick how you talk to it.** A browser GUI, a plain terminal chat, and an OpenAI-compatible server for when you want other apps to connect.
+- **Pick how you talk to it.** A browser GUI (optionally its own OS app window instead of a tab, see [native app](docs/native-app.md)), a plain terminal chat, and an OpenAI-compatible server for when you want other apps to connect.
 
 - **A coding agent that does the work (coder plugin).** `localm coder` works through a task with tools for files, the shell, search, and tests; you can redirect it mid-run or review what it touched with session diffs. It speaks MCP both ways, so localm can expose your models to clients like Claude Desktop, and the coder can pull in external MCP tool servers.
 
@@ -97,7 +97,17 @@ Clone anywhere and double-click `setup.bat`. It installs `uv` (the Python packag
 - **inside the clone** (`.\home`) - fully portable and self-contained; multiple clones on one machine are completely independent (this is the default), or
 - **a custom path** (recorded in `localm-home.cfg`) - e.g. a shared models drive.
 
-There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then builds a native `LocaLM.exe` launcher (so the running server shows as `LocaLM.exe` in Task Manager, not `python.exe`, and carries the LocaLM icon - see [native app](docs/native-app.md)), offers an optional desktop shortcut and global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). Nothing is installed globally, and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
+There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then builds a native `LocaLM.exe` launcher (so the running server shows as `LocaLM.exe` in Task Manager, not `python.exe`, and carries the LocaLM icon - see [native app](docs/native-app.md)), offers an optional desktop shortcut and global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). Along the way it also asks whether `localm gui` should open as its own app window or a browser tab (default: browser tab; see [native app](docs/native-app.md)). Nothing is installed globally, and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
+
+### Recommended (Linux/macOS): self-contained setup
+
+The same self-contained install, one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | bash
+```
+
+This clones localm to `~/localm`, creates a private `.venv`, detects your GPU, and provisions the matching backend non-interactively. For the interactive version (`bash setup.sh` from a clone, same prompts as `setup.bat` above), GPU-backend details, and macOS's experimental status, see [docs/linux-setup.md](docs/linux-setup.md).
 
 ### Manual (any OS)
 
@@ -133,6 +143,7 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | Extra | What it adds |
 |---|---|
 | `coder` | The AI coding agent (opt-in marker; deps are already core) |
+| `desktop` | Native OS app window for `localm gui` instead of a browser tab (`pywebview`; see [native app](docs/native-app.md)) |
 | `gpu` | AMD RDNA2 ROCm 7.13 stack: torch, transformers, rocm-sdk (Windows, Python 3.12) |
 | `audio` | Audio multimodal input (`soundfile`) |
 | `rag` | PDF parsing for Knowledge (`pypdf`); other formats are stdlib |

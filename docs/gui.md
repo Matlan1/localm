@@ -2,19 +2,19 @@
 
 `localm gui` starts an inference server and opens a browser interface. No build step, no Node, no network dependency - the frontend is plain HTML/JS served by the same FastAPI process, with vendored libraries for markdown rendering and syntax highlighting.
 
-Only two surfaces are always present: **Chat** (the protected plugin #0) and the **Models** page. Every other tab - the image, music, and video studios, coder, Knowledge (RAG), and so on - is contributed by a plugin and appears only when that plugin is installed and enabled. See [plugins.md](plugins.md) to learn more.
+Only three tabs are always present, outside the plugin system: **Chat** (the protected plugin #0), **Models**, and **Settings** - plus **Plugins** itself, the page that makes everything else appear. Every other tab - the image, music, and video studios, coder, Knowledge (RAG), Jobs, and so on - is contributed by a plugin and appears only when that plugin is installed and enabled. See [plugins.md](plugins.md) to learn more.
 
 ## Getting started
 
 ```bash
 localm gui              # launch with the first registered model
 localm gui mymodel      # launch with a named model
-localm gui --no-browser # start the server; open the URL yourself
+localm gui --no-browser # start the server only, no browser tab or app window
 localm gui -p 8650      # explicit port (must be free, else startup errors)
 localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
 ```
 
-1. **Launch.** Running `localm gui` starts the server and opens your default browser to http://127.0.0.1:8642 (or your configured port).
+1. **Launch.** Running `localm gui` starts the server and opens the GUI at http://127.0.0.1:8642 (or your configured port) - in its own app window if you installed that option, otherwise your default browser. See [native-app.md](native-app.md).
 2. **Pick a model.** If a model is already registered, it loads in the background so the first reply is instant. Otherwise, land on the Models page to download or import one. You can also use `--pull <spec>` to begin downloading a HuggingFace model immediately with progress shown on the Models page.
 3. **Type and reply.** Once a model is loaded, click in the composer and start typing. The model replies with streaming text, markdown rendering, and syntax highlighting on code blocks. Use `/` to see available commands and access slash features like `/web` (search and cite sources) and `/generate-image` (requires the image plugin).
 
@@ -29,7 +29,7 @@ Ask questions and have conversations with the model. The model can access docume
 **Basic features:**
 - Model selector in the sidebar switches between registered models. Switching unloads the old one and loads the new one.
 - Streaming responses with markdown and syntax highlighting. Copy buttons on all messages and code blocks.
-- Parameters drawer (click the settings icon) controls temperature, top-p, max tokens, seed, and system prompt per conversation.
+- Parameters drawer (click the settings icon) controls temperature and system prompt per conversation, plus web access, memory, and knowledge toggles. Top-p, top-k, repeat penalty, max tokens, seed, and a GBNF grammar box sit behind an **Advanced** fold so the drawer leads with what you actually touch; it opens itself if a persona or a restored setting fills one of those fields in.
 - Search box (in the sidebar) filters chats by title and message content; hover to pin-to-top or move-to-folder. `/pin` and `/folder <name>` do the same from the composer.
 - Branching: regenerating a reply keeps the old one as a variant. Editing a message forks the conversation instead of deleting what followed. A control in the message meta shows which branch you are viewing.
 - Session persistence follows your session mode: `privacy` (default, memory only, vanishes on reload), `log` (saved to `sessions/` in the data directory, survives reloads and server restarts), `full` (log plus markdown transcript). The page you were on is restored after reload (except in privacy mode).
@@ -52,6 +52,8 @@ Ask questions and have conversations with the model. The model can access docume
 **Knowledge:** Pick an indexed collection in the parameters drawer and every question is answered against the most relevant excerpts, cited as `[1]` (file + line). Collections are managed on the Knowledge page - see [rag.md](rag.md).
 
 **Web access:** The "Web access" checkbox in the parameters drawer lets the model search and read pages on its own, mid-conversation (bounded rounds; every request and result is shown as a dimmed "Web" message). Off by default; without it, chat is fully offline. Both `/web` and the toggle run through the server's network policy - see [network.md](network.md).
+
+**Remote images in replies:** A reply that links an image (`![alt](https://...)`) cannot load it by default - showing one is off. Turn "Show remote images in replies" on or to "ask" under Settings &rsaquo; Server & network &rsaquo; Outbound access; either way this machine fetches the image server-side, so the remote site never learns your IP or browser. On "ask" (the middle setting), the first image from a given site in a conversation prompts you to allow or refuse it; your answer is remembered for that site in that conversation only, never written to disk.
 
 **Voice:**
 - **Input:** The microphone button records from your device and transcribes locally with Whisper (needs `pip install "localm[voice]"`). The Whisper model is fetched exactly once (installing the voice plugin prefetches it), then everything is offline. That one fetch follows the network policy: under `net_mode=allow` it happens automatically on first use; under `ask` the mic is greyed out with the reason and offers a one-time download (needs the same permission that governs the network policy; nothing is written to settings); under `off` it is blocked entirely. Recordings are processed in memory, never written to disk.
@@ -109,23 +111,41 @@ Pair with an AI agent on code tasks. Point it at a project directory and give it
 
 ## Other pages
 
-Of the pages below, only **Models** and **Plugins** are part of the core shell. The **Images**, **Music**, **Video**, **Knowledge**, and **Jobs** tabs are each contributed by a plugin and appear only when installed and enabled.
+Of the pages below, **Models**, **Plugins**, and **Settings** are part of the core shell. The **Images**, **Music**, **Video**, **Knowledge**, and **Jobs** tabs are each contributed by a plugin and appear only when installed and enabled.
 
-**Models:** Search HuggingFace for GGUF models (empty query shows most downloaded); results show the model's architecture family and an MoE badge when applicable. Expand a repo to see every quantization with its size and a "fits your VRAM" badge (compared against total VRAM, no torch required). Pull any file with one click; pull by spec with live progress, switch the active engine (the "use" button shows "loading…" for the duration), add aliases or rename outright, inspect path/hash/size, and remove models. Your registered models list carries the same architecture/MoE badges and sorts by column (Name, Role, Source, Size, Modified - remembered across reloads). Search is lazy - no network request until you ask.
+**Models:** Search HuggingFace for GGUF or Safetensors/HF models (empty query shows most downloaded; format and type checkboxes narrow it). Results show architecture family, parameter count, and a MoE badge, plus a "fits your VRAM" badge (compared against total VRAM, no torch required) - per quantization for a GGUF repo (expand it to see every file), for the whole repo for an HF one. A **curated shortcuts** dropdown fills in a known-good small model that pulls even with network access off; a **sha256** field verifies a single-file pull; a vision-projector (mmproj) picker offers a matching file alongside a GGUF pull; **register in place / copy into library / move into library** controls how a local folder or file is added.
 
-**Images:** Drive the local ComfyUI FLUX pipeline. Prompt, negative prompt, seed, guidance, img2img with denoise, and an optional LoRA (picked from what is installed in your ComfyUI, with separate strength fields for the model and CLIP). History grid with metadata from sidecar files. If ComfyUI is not running, the job tells you how to start it, or starts it automatically if `comfy_launch_cmd` is set in the config. After generation, ComfyUI releases its models and the chat model reloads for instant replies.
+Registered models are tabbed by type - **All, LLMs, Embedding, Diffusion, Encoders, VAEs, LoRAs, Other** (Other catches vision projectors and anything localm could not classify) - each tab showing its count. "show other types here" merges the Other-tab models into All; "group by type" breaks the list into one section per type instead of one flat table. Switch the active engine (the "use" button shows "loading…" for the duration), add aliases or rename outright, inspect path/hash/size, change a model's recorded type inline, remove a model, or **unload all** loaded models at once. A model whose file went missing shows a "missing" badge and a **relocate** button that points the registry entry at the file's new location, without losing its aliases or hash. Sort by column (Name, Role, Source, Size, Modified - remembered across reloads). Search is lazy - no network request until you ask.
 
-**Music:** Generate tracks with the local ComfyUI ACE-Step workflow - style tags, optional lyrics ([verse]/[chorus] markers), and arbitrary track length in seconds. Seed/steps/CFG for control. History with inline playback, move-to-folder, and delete. `/generate-music <tags>` in chat generates a default-length instrumental inline. Use `localm music "tags" --lyrics song.txt -d 180` from the terminal.
+**Images:** Drive the local ComfyUI FLUX pipeline. Prompt and negative prompt up front; seed, guidance, img2img denoise, and an optional LoRA (picked from what is installed in your ComfyUI, with separate strength fields for the model and CLIP) sit behind an **Advanced** fold. History grid with metadata from sidecar files. If ComfyUI is not running, the job tells you how to start it, or starts it automatically if `comfy_launch_cmd` is set in the config. After generation, ComfyUI releases its models and the chat model reloads for instant replies.
 
-**Video:** Generate short clips with the local ComfyUI Wan 2.2 workflow - prompt, negative, duration (snapped to the model's frame rule; ~5 s is native), fps, resolution, seed/steps/CFG, and optional start image (image-to-video). Same VRAM handover as images. History with inline playback. `/generate-video <prompt>` in chat generates a ~5 s clip inline. Use `localm video "prompt"` from the terminal. Video is the slowest generator - see [docs/video.md](video.md) for model setup and timing expectations.
+**Music:** Generate tracks with the local ComfyUI ACE-Step workflow - style tags and optional lyrics ([verse]/[chorus] markers) up front, track length in seconds, and an **Advanced** fold for seed/steps/CFG. History with inline playback, move-to-folder, and delete. `/generate-music <tags>` in chat generates a default-length instrumental inline. Use `localm music "tags" --lyrics song.txt -d 180` from the terminal.
+
+**Video:** Generate short clips with the local ComfyUI Wan 2.2 workflow - prompt, negative, duration (snapped to the model's frame rule; ~5 s is native) and optional start image (image-to-video) up front, with fps, resolution, and seed/steps/CFG behind an **Advanced** fold. Same VRAM handover as images. History with inline playback. `/generate-video <prompt>` in chat generates a ~5 s clip inline. Use `localm video "prompt"` from the terminal. Video is the slowest generator - see [docs/video.md](video.md) for model setup and timing expectations.
 
 **Knowledge:** Create document collections, index files or folders with live progress, inspect/remove indexed documents, test-search a collection, and delete collections (index only - originals untouched). Collections show `hybrid` when embeddings are available, `BM25` otherwise. Manage collections from chat too - see [rag.md](rag.md).
 
-**Jobs:** Schedule a chat or coder prompt to run on a repeating schedule (every N seconds or a 5-field cron expression). Create, enable/disable, edit, run-now, and delete jobs; each run records a result you can browse. An in-app scheduler runs due jobs while the GUI or server is up. Manage jobs from the terminal with `localm job` - see [jobs.md](jobs.md).
+**Jobs:** Schedule a chat prompt, a coder task, or a knowledge-collection re-sync to run on a schedule - every N hours, a daily or weekly time, or a custom interval in seconds or 5-field cron expression. Jobs list as a table with their schedule and last-run status; **Run now**, **Enable/Disable**, **Results** (browse past runs), and **Delete** per row. A scheduled job cannot run the coder agent with full shell access unless it was created by the owner - that opt-in is not exposed in the form itself. An in-app scheduler runs due jobs while the GUI or server is up. Manage jobs from the terminal with `localm job` - see [jobs.md](jobs.md).
 
 **Plugins:** Browse the bundled store, install a plugin, then enable or disable it - all at runtime, no server restart. Installing copies the plugin into the installed folder; enabling mounts its routes, static assets, and tab onto the live app (disabling removes them). This page makes every plugin-contributed surface appear or disappear. See [plugins.md](plugins.md) for authoring.
 
-**Settings:** Edit the server config (`<data dir>/config.json`) and the GUI's API key. Light/dark theme toggle lives in the sidebar.
+**Settings:** Edit the server config and manage the running server - see [Settings](#settings) below. Light/dark theme toggle lives in the sidebar.
+
+## Settings
+
+Everything here is stored in `config.json` in the data directory; each section saves on its own, and a search box at the top matches a term against every section at once, whichever tab it lives under. Sections are grouped into seven tabs:
+
+- **Model:** engine tuning (context size, GPU layers, timeouts), generation defaults (system prompt, sampling), model-library import depth, and embeddings (with a "warm up now" button). A **Live tuning** card applies without a restart: GPU layers and context window for the model that is currently loaded, which GPU a model loads onto, splitting a model across two or more GPUs (with an optional relative-weight input per checked GPU, so one card can take a larger share than another), a cap on how many models may stay resident at once, and model names pinned against eviction.
+- **Server & network:** bind address, port, TLS (a built-in certificate by default, or your own PEM pair; off serves plain HTTP), CORS origins, and the mDNS name your LAN uses to find this server. Binding past loopback without a strong API key is refused and the server stays on 127.0.0.1 - only the CLI's `--insecure` flag overrides that, with no Settings equivalent. Separate cards restart or shut down the server, list every other `localm gui`/`localm serve` running on this machine and stop one, and show the addresses (plus a pairing QR) to open on a phone - see [phone.md](phone.md). The Outbound access card's "Show remote images in replies" controls whether a model-linked image in a chat reply loads (see Chat above).
+- **Security:** require an API key, mint a scope-limited key for another device or person (shown as a QR to scan, no typing - a `coder` key is read-and-confined-edit only, `coder (full)` and `admin` are owner-only), and roll or set the **owner key**, the one credential with full access (rolling it does not sign this browser out; every other device needs the new key to keep working).
+- **Plugins:** per-plugin settings - coder, Knowledge, voice, text-to-speech, and anything a third-party plugin adds via `host.add_settings()`.
+- **Media:** shared and per-generator settings for Images/Music/Video - localm's own managed ComfyUI install, or one you already run.
+- **Privacy & data:** session persistence mode, memory settings, and a button to delete every stored conversation.
+- **System:** appearance (sidebar logo style), the desktop app window mode (see [native-app.md](native-app.md)), reporting a bug, the changelog, exporting logs, and uploading files into the server's `uploads` folder, plus Updates and Diagnostics below.
+
+**Updates** covers everything that changes what is installed: a new localm build and rolling back to the previous one, rebuilding the native launcher (after a Python upgrade, for instance), and the **inference runtime** - install a llama.cpp backend on a machine that has none yet, switch backends, pin an exact release tag, or roll back to the previous build. You always start it; a build that fails to load here is never kept.
+
+**Diagnostics** runs the same five active self-checks `localm doctor` performs in a terminal - the llama.cpp library, the native ABI, spawning the worker process every model load needs, creating a nested venv, and the HF/transformers backend - in an isolated process so a check cannot crash the running server. About half a minute; nothing is installed or changed. Each check reports its own status pill; the aggregate verdict is scoped to these five checks, not a claim about the whole machine.
 
 ## Math rendering
 
@@ -146,6 +166,7 @@ If the server dies mid-generation, the native abort message at the end of that f
 - The server binds to 127.0.0.1 by default. CORS is locked to `localhost`/`127.0.0.1` origins, so a genuinely remote website you visit gets no CORS access at all and cannot call your API from browser JS. Another program ALSO running on localhost (a dev server, an npm postinstall page) is treated as trusted for CORS purposes, since it is on the same machine - it can use the OpenAI-compatible inference API (`/v1/chat/completions` and friends stay deliberately cross-origin callable for local apps) and unauthenticated reads (`/v1/models`, `/health`) by design, but it cannot drive any state-changing route or read management/metadata endpoints (keys, config, host stats, the filesystem browser) without a real API key - in open mode, the per-process shell token those need is gated on the SAME same-origin/allowlist check as writes, so a token seen in the page's own HTML cannot be replayed from another origin either.
 - If `LOCALM_API_KEY` is set, the GUI prompts for the key once and exchanges it for an HttpOnly session cookie, so the key itself is never kept in browser-readable storage (localStorage or JS).
 - Binding past loopback (e.g. `-H 0.0.0.0`) without an API key is refused: localm exits rather than expose the unauthenticated coder agent to the network. Set `LOCALM_API_KEY` first, or pass `--insecure` to override on a trusted, isolated network. On a network bind, traffic is TLS-encrypted by default (a built-in local-CA certificate). Even so, do not expose the GUI to a network you do not trust: the coder agent can write files and run shell commands on this machine.
+- The same network bind, TLS on/off, and owner-key changes are also reachable from the GUI itself, in Settings, once you already hold the owner key or key-generation privilege - no terminal needed after the first key exists. See [Settings](#settings).
 
 ## How it fits together
 

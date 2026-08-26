@@ -81,7 +81,7 @@ my-plugin/
   static/            # optional client-side assets (served at /plugins/<name>/)
 ```
 
-The bundled `voice` plugin (routes only) and `tts` plugin (client-side assets)
+The bundled `web` plugin (routes only) and `tts` plugin (client-side assets)
 are the two smallest worked examples in `localm/plugins/builtin/`.
 
 ## `plugin.toml` reference
@@ -97,7 +97,7 @@ register = "plug"            # module exposing register(host) (default "plugin")
                              # "module:attr" is also accepted
 requires = ["other-plugin"]  # other plugins that must be installed first
 requires_extras = ["myextra"]# pip extras carrying heavy deps (pip install "localm[myextra]")
-capabilities = ["feature"]   # declared capabilities (shown at install)
+capabilities = ["feature"]   # declared capabilities (parsed and stored; not surfaced anywhere yet)
 data_subdir = "my_data"      # storage under the data dir (<data dir>/my_data); "" = none
 protected = false            # cannot be disabled/uninstalled (chat only)
 default_enabled = false      # active on first run (chat only)
@@ -106,7 +106,9 @@ cli = "module:attr"          # optional legacy Click command entry point
 [surface]                    # optional GUI/SPA contribution
 tab_id = "mytab"             # "" = no tab (settings-only or headless plugin)
 label = "My Plugin"
-icon = "gear"                # emoji or static-asset name
+icon = "book"                # one of a fixed set: chat, code, image, music,
+                             # video, book, clock; anything else falls back to
+                             # a generic icon
 assets_dir = "static"        # client assets dir; served at /plugins/<name>/ when set
 client_entry = "myplugin.js" # ES module under assets_dir the SPA import()s on boot
 settings_group = "My Plugin" # label for this plugin's settings section
@@ -127,7 +129,7 @@ def unregister() -> None:
     """Optional: clean up when the plugin is disabled/unloaded."""
 
 # Optional lifecycle hooks, called if present:
-def on_install() -> None: ...                # called once when installed
+def on_install() -> None: ...                # called on an HTTP/GUI-driven install
 def on_uninstall(delete_data: bool = False) -> None: ...  # called at uninstall
 def on_first_use() -> None: ...              # called once the first time the plugin is loaded/activated; persisted so it never re-fires on a later server start
 ```
@@ -135,6 +137,20 @@ def on_first_use() -> None: ...              # called once the first time the pl
 The engine hands `register` a `PluginHost`; everything the plugin attaches
 through it is tracked and removed again on `unregister`, so enabling/disabling is
 instant and clean.
+
+All four hooks are best-effort: a hook that raises never blocks the
+install/enable/uninstall it was called from. `on_install` and `on_first_use`
+failures are logged at WARNING (so they show up in a bug report's activity log,
+not just a debug file); an `on_uninstall` failure stays silent, since uninstall
+must proceed regardless.
+
+`on_install` fires only from the HTTP/GUI install routes (`PluginManager.install`
+/ `install_external`). The CLI's `localm plugin install <name>` (and `install
+/path/to/plugin`) install headless, without loading the plugin, and never call
+it - nor does it fire retroactively the first time the server loads the plugin.
+A plugin whose `on_install` does real work (the bundled `voice` plugin prefetches
+its Whisper model there) must not assume it ran; use `on_first_use` for anything
+that has to happen regardless of install path.
 
 ### The Host API
 
@@ -147,6 +163,8 @@ instant and clean.
 | `plugin_config(name=None)` | Read this (or another) plugin's config block (`config["plugins"][name]`). |
 | `save_plugin_config(name, cfg)` | Write a plugin's config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). |
 | `engine()` | Handle to the inference engine. |
+| `driving_engine(engine=None)` | Context manager: wrap around a real generation call to pin the engine busy and reset its idle-unload clock for the duration. Never wrap a bare `.loaded`/name check with it. |
+| `on_startup(callback)` | Queue work to run once the server's event loop is up (register() runs before uvicorn creates it on a normal start). |
 | `audit(event, data)` | Log a plugin event. |
 | `browse_dirs(path)` | Server-side folder picker helper. |
 | `register_chat_hook(phase, fn, *, priority=0)` | Register an inlet/stream/outlet transform that runs on every chat turn (see [Chat pipeline hooks](#chat-pipeline-hooks)). |
@@ -417,8 +435,8 @@ the tracked `tts.example.json` only supplies the shipped defaults.
 
 A plugin block that users are meant to EDIT needs a write surface, or those
 settings are hand-edit-only in practice. The two worked examples are the media
-blocks (`GET/POST /v1/media/config`) and the tts block (`GET/POST
-/v1/tts/config`): both validate the update in
+blocks (`GET /v1/media/config`, `POST /v1/media/config/{name}`) and the tts
+block (`GET/POST /v1/tts/config`): both validate the update in
 [settings_schema.py](../localm/settings_schema.py) and merge it into the plugin's
 own block, and both are gated on `config:read` / `config:write` rather than on
 the plugin's own capability, so a key that may merely USE a plugin cannot

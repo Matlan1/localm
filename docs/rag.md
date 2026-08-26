@@ -29,9 +29,23 @@ From the terminal:
 localm rag add manuals D:\docs\printer-manual.pdf
 localm rag add project D:\projects\myapp        # folder, recursive
 localm rag list
+localm rag docs manuals                         # list its documents: path, chunks, status
 localm rag query manuals "how do I replace the toner"
-localm rag rm manuals
+localm rag rm-doc manuals D:\docs\printer-manual.pdf   # drop one document (file kept)
+localm rag rm manuals                           # delete the whole collection (files kept)
 ```
+
+`rag rm-doc` matches PATH against the index's stored key exactly, so copy it
+from `rag docs`'s own output rather than retyping it - a path that is
+otherwise equivalent but spelled differently (forward vs backward slashes, a
+different but equal-looking absolute form) is reported as not in the
+collection.
+
+`rag docs` flags a document `(missing)` when its source file is no longer on
+disk (see [Keeping an index current](#keeping-an-index-current)), and
+`(uploaded)` when it was added via the GUI/API upload path rather than a file
+path - `rag repair`/`rag resync` cannot re-read an uploaded document from disk,
+so only `rag rm-doc` can remove it.
 
 From the coder: two built-in tools let the agent search your Knowledge
 collections mid-task - one lists what is available, the other searches a
@@ -66,6 +80,27 @@ deliberate choice for a local, single-user tool, not an oversight. Picking a
 folder outside the whitelist offers an "add this folder and continue" prompt
 rather than a dead end. The local CLI (`localm rag add`) is unconfined: the
 person running it can already read their own files.
+
+### Per-key folder scoping
+
+A named API key's **indexing** reach can be confined further, to a specific
+set of folders it may index at all - narrower than the global policy above,
+not wider than it. Mint one with:
+
+```bash
+localm key create dashboard --scope rag --rag-root D:\docs\manuals --rag-root D:\docs\public
+```
+
+Any `--rag-root` grant REPLACES the key's indexing reach with exactly those
+folders, instead of falling back to your home dir, working dir, and the
+configured allowed roots. Omit `--rag-root` to leave indexing unrestricted
+(it still obeys the global folder policy above). **This confines indexing
+only.** Querying and listing collections are not scoped by `rag_roots` at
+all: a key with the `rag` scope can query or list any existing collection on
+the server, including one built from folders outside its granted roots.
+Only the owner key may set `rag_roots` on another key (via `key create` or
+`POST /v1/keys`); the owner's own reach is never confined by it. See
+[cli.md](cli.md#api-keys).
 
 ## Supported file types
 
@@ -121,9 +156,14 @@ embedder too rather than quietly returning those vectors.
   needs it first; Settings has a "Warm up now" button that loads it up front
   instead, with a live status line through resolving, downloading if needed,
   freeing VRAM, and loading (already-loaded shows "Already warm"). Changing
-  which model is used (Knowledge page, or `PATCH /v1/config`) requires an
-  owner (admin-scoped) key; a scoped `rag` key can index and query but not
-  switch models.
+  which model is used (Knowledge page, `PATCH /v1/config`, or
+  `localm setup-embeddings --model NAME`) requires an owner (admin-scoped) key;
+  a scoped `rag` key can index and query but not switch models. Every one of
+  those writers reports which existing collections have vectors and what they
+  were built with BEFORE the switch happens (the exact dimension impact is
+  only known once the new model is actually loaded); `setup-embeddings` also
+  asks you to confirm when it would change the model, and `-y`/`--yes` skips
+  that confirmation.
 - Embedding failures **degrade, never break**: indexing falls back to
   lexical-only. Indexing (`add`/`upload`) and embedding setup always run as a
   background job, on `localm gui` and a headless `localm serve` alike:
@@ -138,8 +178,9 @@ embedder too rather than quietly returning those vectors.
   corrupt or dimension-mismatched vector sidecar is also logged at WARNING).
 
 By default CLI indexing is lexical-only (no running engine); pass `--embed` to
-`localm rag add` / `localm rag query` to compute vectors via a running localm
-server, matching the GUI.
+`localm rag add` / `query` / `resync` / `repair` to compute vectors via a
+running localm server (`--url` to point at a specific one), matching the GUI.
+`localm rag reembed` always needs an embedder - there is no lexical form of it.
 
 ## Keeping an index current
 
@@ -209,6 +250,12 @@ policy as an interactive add. Full details in
 - **A query returns nothing.** No chunk matched: broaden or rephrase the query
   (exact words matter in lexical mode), or confirm the collection
   indexed the files (re-index if a source changed).
+- **`rag repair` refuses a collection built entirely from uploads.** An
+  uploaded document has no server-side source file to re-read - the bytes were
+  never retained - so `repair` cannot rebuild it and says so rather than
+  reporting a false "0 re-indexed" success. A mixed collection repairs
+  whatever has a real source and names the uploaded documents it left alone;
+  re-upload those, or remove them with `rag rm-doc`.
 - **Indexing failed.** Indexing is atomic, so a failed index leaves the previous
   snapshot intact. Check the error in the GUI/CLI and `--debug` log; common causes
   are an unreadable/encrypted file or a missing `[rag]` extra for PDF parsing.

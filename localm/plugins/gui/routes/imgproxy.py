@@ -98,8 +98,8 @@ def register(app: FastAPI, ctx) -> None:
         if mode == REMOTE_IMAGE_OFF:
             raise HTTPException(
                 403, "Showing remote images is off. Set 'Show remote images "
-                     "in replies' to 'ask' or 'on' under Settings > Network to "
-                     "enable it.")
+                     "in replies' to 'ask' or 'on' under Settings > Server & "
+                     "network > Outbound access to enable it.")
         if mode == REMOTE_IMAGE_ASK and consent.strip() not in ("1", "true", "yes"):
             # Refused BEFORE any fetch, so a host the reader has not agreed to
             # is never contacted.
@@ -107,7 +107,8 @@ def register(app: FastAPI, ctx) -> None:
                 428, "Showing remote images is set to 'ask', and this site has "
                      "not been allowed in this conversation. Choose to show "
                      "images from it when localm asks, or set 'Show remote "
-                     "images in replies' to 'on' under Settings > Network.")
+                     "images in replies' to 'on' under Settings > Server & "
+                     "network > Outbound access.")
 
         parsed = urllib.parse.urlparse(url or "")
         if parsed.scheme not in ("http", "https"):

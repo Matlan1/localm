@@ -230,8 +230,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   broken: localm refuses to let the page load anything from the internet. Other
   local-AI apps just let your browser fetch it, which tells that site your IP
   address, your browser and which page you were on. There is now a setting,
-  **Settings > Network > "Show remote images in replies"**, which is **off by
-  default**. Turned on, localm fetches the picture itself and hands it to the
+  **Settings > Server & network > Outbound access > "Show remote images in
+  replies"**, which is **off by default**. Turned on, localm fetches the picture itself and hands it to the
   page, so your browser never contacts the remote site at all, and the request
   obeys the same protections as every other one localm makes (no local or
   private addresses, size limit, and your allowed/denied domain lists). Worth

@@ -22,7 +22,9 @@ surface.
 - Action buttons use an icon, including "new/add" ones (the `plus` icon, not a
   literal `+`), so the whole chrome reads as one icon set. A close/remove `x` may
   stay ASCII text on a dense inline affordance (a chip/tag remove): it is crisp
-  and conventional there.
+  and conventional there. (A few older secondary buttons still prefix a literal
+  `+` instead of the icon; treat that as a gap to fix when you touch them, not
+  as a second accepted pattern.)
 
 Color carries meaning in two independent registers, and they must not be mixed:
 
@@ -46,15 +48,23 @@ background, and active adds the inset accent bar:
 
 A `.data-table` active row (`tr:has(.active-tag)`) uses the same inset bar but
 with `background: var(--accent-soft)` instead of `--bg-input`, so an active
-table row reads a shade stronger than an active picker row. Nav buttons and
-settings-nav links (primary navigation, not a data row) go further still,
-pairing that same accent-soft fill and inset bar with `color: var(--accent)`
-and `font-weight: 600`:
+table row reads a shade stronger than an active picker row. Nav buttons
+(primary navigation, not a data row) go further still, pairing that same
+accent-soft fill and inset bar with `color: var(--accent)` and
+`font-weight: 600`:
 
 ```css
 .thing:hover  { background: var(--bg-input); color: var(--text); }
 .thing.active { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); color: var(--accent); font-weight: 600; }
 ```
+
+Settings-nav links use the same shape (fill + inset bar + bold) but swap the
+accent for a per-section category hue instead: `--nav-cat`, set via
+`.settings-nav-link.cat-*`, drives both the background
+(`color-mix(in srgb, var(--nav-cat) 16%, transparent)`) and the inset bar
+(`box-shadow: inset 2px 0 0 var(--nav-cat)`), with `color: var(--text)` rather
+than the hue itself - so each settings section stays scannable by its own
+color instead of all reading as the generic accent.
 
 ## 3. Two button tiers plus danger, one vocabulary
 
@@ -63,8 +73,11 @@ and `font-weight: 600`:
 - `.btn-danger` (red outline that FILLS red on hover) for destructive actions.
 
 Inside a dense `.data-table`, the compact `.data-table button` styling wins;
-there, use `.primary` / `.danger` modifiers (accent / red that fill on hover).
-Never ship a class-less `el("button", "", ...)`.
+there, use `.primary` / `.danger` modifiers (accent rest-state / red on hover
+only for `.primary`; `.danger` stays plain until hover, then fills red).
+A class-less `el("button", "", ...)` is acceptable only for a dense inline
+remove affordance (an attachment/doc chip's `×`), matching the icon rule's
+close/remove exception above - never for a standalone action button.
 
 ## 4. Sections are cards, with a `.card-head`
 
@@ -88,8 +101,16 @@ filter field adds a leading search/type SVG via the `.picker-filter` shell.
 ok / fail / running / active read as a `.job-state`-shaped badge: ~11px, 999px
 radius, `1px` border, a tinted background per state. Not bare `color: green`, and
 not a `(status)` parenthetical. The run-status variants are `.job-state.st-ok` /
-`.st-error` / `.st-skipped` / `.st-running` / `.st-pending` / `.st-paused`, their
-tints `color-mix`ed from the theme tokens so both themes follow the palette.
+`.st-done` / `.st-error` / `.st-failed` / `.st-warn` / `.st-skipped` /
+`.st-unknown` / `.st-interrupted` / `.st-running` / `.st-pending` / `.st-paused`,
+their tints `color-mix`ed from the theme tokens so both themes follow the palette.
+`st-warn` reads a shade off `st-skipped` ("needs attention", not asserting a
+failure nobody measured); `st-unknown` is the same neutral treatment for a fact
+that was never established (a model's type, an install's status) rather than a
+run that did not complete; `st-interrupted` (the server stopped mid-operation,
+outcome unknown) gets the same yellow treatment for the same reason. A job's
+`cancelled` status has no dedicated `.st-cancelled` rule yet and falls back to
+the plain unmodified `.job-state` look - add one when you next touch this file.
 
 ## 7. Empty and unsupported states are designed
 
@@ -100,15 +121,18 @@ next" hint), never a blank scroll area or a lone `.sub` line. Use the
 ## 8. Shared spacing and corner rhythm
 
 8px for controls and rows, 12px for cards, generous section padding. Radii come
-from the token scale (8px controls, 12px cards). No one-off `7px` selects or
-bespoke badge radii.
+from the token scale (8px controls, 12px cards) for new work; a handful of
+older compact controls (the picker type select, a few toolbar buttons) still
+carry a one-off `7px` and are not a pattern to copy, not a second scale to
+match.
 
 ## 9. Help text says what the control does, and what changes if you alter it
 
 Nothing else. Rationale, threat models, upstream issue numbers, history and
-"why it is off by default" belong in a code comment beside the field, or in the
-docs. A control's help is read while deciding; a paragraph is not read at all,
-so a 452-character warning protects nobody.
+"why it is off by default" do not belong in help text - a comment states
+behaviour, never why (AGENTS.md rule 5), so that reasoning goes in a test, in
+`dev-notes/`, or in the docs. A control's help is read while deciding; a
+paragraph is not read at all, so a 452-character warning protects nobody.
 
 - **Target 150 characters. Hard cap 200**, enforced over `CORE_FIELDS`,
   `MEDIA_PLUGIN_FIELDS` and `TTS_FIELDS` by `tests/test_settings_help_budget.py`.
@@ -130,14 +154,20 @@ so a 452-character warning protects nobody.
 - **A shared explanation goes in the panel intro once**, not repeated per field.
   Five load/timeout fields once carried the same paragraph five times.
 
-When you cut, move the removed reasoning into a why-comment at the schema site.
-It is usually the most valuable text in the field; it was just in the wrong
-place.
+When you cut, the removed reasoning does not move into a code comment - a
+comment states what the code does, never why (AGENTS.md rule 5). If it is worth
+keeping, it goes in a test or in `dev-notes/`; otherwise it was help text that
+should not have carried an argument in the first place.
 
 ---
 
 Tokens live in `:root` / `[data-theme="light"]` at the top of `style.css`
 (`--bg`, `--bg-raised`, `--bg-input`, `--border`, `--text`, `--text-dim`,
 `--accent`, `--accent-soft`, `--green`/`--red`/`--yellow`). Use them; never
-hardcode a hex that will not follow the theme (the one exception is the pairing
-QR, which is deliberately pinned dark-on-light so a scanner can read it).
+hardcode a hex that will not follow the theme. The pairing QR is deliberately
+pinned dark-on-light so a scanner can read it - a genuine, intentional
+exception. `.fmt-badge`'s backgrounds are hardcoded `rgba()` rather than
+`color-mix(in srgb, var(--green) 15%, transparent)`-style tokens, so unlike
+every other tinted badge they keep a dark-theme tint in light mode; that one
+is a bug, not a second exception - fix it forward to `color-mix` if you touch
+that rule.
