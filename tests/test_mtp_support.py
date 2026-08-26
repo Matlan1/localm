@@ -3,7 +3,6 @@
 
 import ctypes
 from unittest.mock import MagicMock, patch
-import pytest
 
 from localm.config import DEFAULT_CONFIG
 from localm.settings_schema import CORE_FIELDS
