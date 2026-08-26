@@ -446,8 +446,11 @@ _GGUF_MIN_BYTES = 1024
 
 
 def _has_gguf_magic(path: Path) -> bool:
-    """True when *path* begins with the GGUF magic ``b"GGUF"`` and is at least
-    ``_GGUF_MIN_BYTES`` long.
+    """True when *path* begins with the GGUF magic ``b"GGUF"``, is at least
+    ``_GGUF_MIN_BYTES`` long, and - when its header can be parsed - is not
+    shorter than what that header's own tensor-info section declares it must
+    be (see ``_gguf_declared_min_size`` for exactly what that check does and
+    does not catch).
 
     Auto-registration (sync_models_dir) keys on the ``.gguf`` extension alone, so
     a foreign file renamed ``.gguf``, a 0-byte placeholder, or a partial copy that
@@ -457,8 +460,14 @@ def _has_gguf_magic(path: Path) -> bool:
     with this 4-byte magic; an unreadable file is treated as not-a-GGUF and
     skipped. The size floor additionally rejects a header-only truncated copy or
     placeholder that got just the magic, which would pass the magic check and then
-    fail a later load with an opaque ggml error. (A mid-copy of a *valid* GGUF that
-    already passed the floor stays a best-effort gap.)"""
+    fail a later load with an opaque ggml error.
+
+    Both the magic and the floor live at/near the start of the file, so a
+    truncation that only removes the TAIL survives both
+    (NEW-TRUNCATED-GGUF-DEFEATS-REGISTRATION-GUARDS). The declared-size check
+    below catches that whenever the header itself parses; when it does not
+    (or the truncation lands inside the last tensor's own data), this stays a
+    best-effort gap."""
     floor = _mm._GGUF_MIN_BYTES
     try:
         with open(path, "rb") as fh:
@@ -472,6 +481,14 @@ def _has_gguf_magic(path: Path) -> bool:
             "skipping %s: GGUF magic but only %d bytes (< %d) - truncated or "
             "placeholder, not a usable model",
             path.name, size, floor,
+        )
+        return False
+    declared_min = _gguf_declared_min_size(path)
+    if declared_min is not None and size < declared_min:
+        logger.debug(
+            "skipping %s: GGUF header declares its last tensor starting at "
+            "byte %d but the file is only %d bytes - truncated",
+            path.name, declared_min, size,
         )
         return False
     return True
@@ -1138,6 +1155,68 @@ def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[i
         if size > 0:
             total += size
     return total
+
+
+def _gguf_declared_min_size(path: Path) -> Optional[int]:
+    """The smallest *path* could possibly be and still hold every tensor its
+    own GGUF header declares: the byte offset, from the start of the file, at
+    which the LAST tensor's data begins. Tensor-info offsets are relative to
+    the start of the tensor-data section (right after the KV+tensor-info
+    block, alignment-padded) - the same layout gguf_moe_pinned_expert_bytes
+    above walks, and this mirrors its parsing.
+
+    Deliberately NOT the full expected file size: that needs each tensor's
+    exact byte length, which depends on its ggml quantization type's block
+    size - a per-type table gguf_moe_pinned_expert_bytes avoids for the same
+    reason (get even one type wrong and every caller silently mis-sizes). So
+    a file truncated INSIDE its last tensor's own data - past where that
+    tensor starts but before it ends - still passes this check; only
+    truncation before the last tensor's data even starts is caught. That is
+    still the common real-world shape (a copy or download cut off partway
+    through the weight data) and needs no per-quantization knowledge at all.
+
+    Returns None - never raises - whenever the header cannot be parsed this
+    way (a GGUF v1 file, an implausible tensor/kv count, a truncation inside
+    the KV or tensor-info section itself, a corrupt/hostile KV array whose
+    declared element count seeks past what Python's file API can address, or
+    any other parse failure): the caller must treat that as no signal, never
+    as proof of truncation - the same defensive stance ``_has_gguf_magic``'s
+    other checks already take."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            (version,) = struct.unpack("<I", f.read(4))
+            if version < 2:
+                return None
+            tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
+            if tensor_count > _GGUF_MAX_TENSOR_COUNT:
+                return None
+            for _ in range(kv_count):
+                _gguf_read_string_stream(f)          # key (value unused here)
+                (vtype,) = struct.unpack("<I", f.read(4))
+                _gguf_skip_value_stream(f, vtype)
+            max_offset = 0
+            for _ in range(tensor_count):
+                _gguf_read_string_stream(f)          # name (unused here)
+                (n_dims,) = struct.unpack("<I", f.read(4))
+                if n_dims > _GGUF_MAX_TENSOR_DIMS:
+                    raise struct.error(f"implausible tensor n_dims {n_dims}")
+                f.seek(8 * n_dims, 1)   # dims[] - unneeded for a min-size check
+                f.seek(4, 1)            # ggml_type - unneeded too
+                (offset,) = struct.unpack("<Q", f.read(8))
+                if offset > max_offset:
+                    max_offset = offset
+            data_start = f.tell()
+    # ValueError: an out-of-range seek from a hostile KV array count. See
+    # test_hostile_kv_array_count_does_not_crash_sync.
+    except (OSError, struct.error, IndexError, UnicodeDecodeError, ValueError):
+        return None
+
+    remainder = data_start % _GGUF_DEFAULT_ALIGNMENT
+    if remainder:
+        data_start += _GGUF_DEFAULT_ALIGNMENT - remainder
+    return data_start + max_offset
 
 
 def _gguf_metadata_probe(path: Path) -> dict:

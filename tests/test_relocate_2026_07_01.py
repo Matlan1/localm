@@ -91,6 +91,53 @@ def test_relocate_target_shared_validator(env):
     assert "HuggingFace" in reason
 
 
+def test_relocate_target_truncated_gguf_gets_its_own_reason(env):
+    """A truncated GGUF has real magic bytes - it IS a GGUF file, just an
+    incomplete one. Telling the user "Not a GGUF model file" for it is false
+    and sends them looking for the wrong problem (their file is fine, it is
+    just early). The declared-size gap in _has_gguf_magic must not collapse
+    into the same generic message the wrong-magic case gets."""
+    import struct
+
+    import localm.model_manager as mm
+    from localm.model_manager.gguf import _GGUF_MIN_BYTES
+
+    tmp, _ = env
+
+    def s(text):
+        raw = text.encode("utf-8")
+        return struct.pack("<Q", len(raw)) + raw
+
+    # weight.0 declares 4096 bytes, so weight.1 (never reached) starts at
+    # offset 4096 - the file below has only a handful of bytes after the
+    # header, nowhere near even weight.0's own declared size.
+    header = b"".join([
+        b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 2, 0),
+        s("weight.0"), struct.pack("<I", 1), struct.pack("<Q", 1),
+        struct.pack("<I", 0), struct.pack("<Q", 0),
+        s("weight.1"), struct.pack("<I", 1), struct.pack("<Q", 1),
+        struct.pack("<I", 0), struct.pack("<Q", 4096),
+    ])
+    truncated = tmp / "truncated.gguf"
+    truncated.parent.mkdir(parents=True, exist_ok=True)
+    truncated.write_bytes(header.ljust(_GGUF_MIN_BYTES + 4, b"\0"))
+
+    p, reason = mm.relocate_target(str(truncated))
+
+    assert p is None
+    assert "Not a GGUF" not in reason
+    assert "has not finished copying" in reason
+    assert str(truncated) in reason
+
+    # Regression guard: a genuinely foreign file still gets the original,
+    # generic message - only the truncated-GGUF case gets the new one.
+    bad = tmp / "not-really-2.gguf"
+    bad.write_bytes(b"NOPE not a gguf")
+    p2, reason2 = mm.relocate_target(str(bad))
+    assert p2 is None
+    assert "Not a GGUF" in reason2
+
+
 def test_relocate_cli_command(env, monkeypatch):
     from click.testing import CliRunner
     from localm.cli import models as models_cli
