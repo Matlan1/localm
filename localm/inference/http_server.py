@@ -1778,6 +1778,25 @@ async def _idle_unload_loop() -> None:
             _dbg.warning("idle-unload check failed (continuing)", exc_info=True)
 
 
+async def _mmproj_backfill_once() -> None:
+    """Run ``model_manager.sync_models_dir()`` (its default
+    ``backfill_mmproj=True``) exactly once, off the event loop - a bounded
+    one-shot, not a loop like its lifespan siblings. Any outcome is logged,
+    never printed to a console."""
+    loop = asyncio.get_running_loop()
+    from localm.debuglog import logger as _dbg
+    try:
+        from localm.model_manager import sync_models_dir
+        result = await loop.run_in_executor(None, sync_models_dir)
+        if result.mmproj_backfilled:
+            _dbg.info("vision-projector backfill: %d model(s) backfilled",
+                      result.mmproj_backfilled)
+        if result.note:
+            _dbg.debug("model sync note: %s", result.note)
+    except Exception as e:
+        _dbg.debug("vision-projector backfill failed (continuing): %s", e)
+
+
 async def _gpu_registry_heartbeat_loop(*, interval: float = 20.0) -> None:
     """Keep this instance's cross-install GPU-coordination entry fresh
     (~every 20s), matching the ``_idle_unload_loop`` pattern above. Only
@@ -3498,6 +3517,19 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                           "cross-instance GPU coordination): %s", e)
                 _gpu_coord = None
 
+        # Vision-projector backfill (model_manager.sync_models_dir's
+        # backfill_mmproj part): one-shot, off the loop, started here rather
+        # than during the synchronous CLI startup sequence so a per-candidate
+        # HF lookup never delays accepting connections. Best-effort, logged
+        # only; skipped under pytest like its siblings above.
+        mmproj_task = None
+        if "pytest" not in sys.modules:
+            try:
+                mmproj_task = asyncio.create_task(_mmproj_backfill_once())
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("mmproj backfill task startup failed (continuing): %s", e)
+
         try:
             yield
         finally:
@@ -3528,6 +3560,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 gpu_task.cancel()
                 try:
                     await gpu_task
+                except asyncio.CancelledError:
+                    pass
+            if mmproj_task is not None:
+                mmproj_task.cancel()
+                try:
+                    await mmproj_task
                 except asyncio.CancelledError:
                     pass
             if _gpu_coord is not None:

@@ -515,8 +515,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     from localm.model_manager import (get_model_info, get_model_mmproj,
                                       is_auto_chat_eligible, sync_models_dir)
 
-    # Pick up models added to (or gone missing from) the models folder since last run.
-    _sync = sync_models_dir()
+    # Pick up models added to (or gone missing from) the models folder since
+    # last run. Local reconciliation only; no network I/O.
+    _sync = sync_models_dir(backfill_mmproj=False)
     if _sync.changed:
         _bits = []
         if _sync.added:
@@ -529,8 +530,6 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             _bits.append(f"{_sync.pruned} pruned")
         if _sync.backfilled:
             _bits.append(f"{_sync.backfilled} metadata backfilled")
-        if _sync.mmproj_backfilled:
-            _bits.append(f"{_sync.mmproj_backfilled} vision projector backfilled")
         if _bits:
             console.print(f"[dim]Models folder synced: {', '.join(_bits)}.[/dim]")
     if _sync.note:
