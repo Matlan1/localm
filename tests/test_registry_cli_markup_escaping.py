@@ -396,6 +396,11 @@ class TestRegisterWithDedupMarkupEscaping:
     def test_also_registered_as_shows_bracketed_alias_verbatim(self, fake_registry, capsys):
         store, models_dir = fake_registry
         gguf = _mkfile(models_dir, "shared.gguf")
+        # model_name itself must ALREADY be a registered alias of this file
+        # for the code to reach the "Also registered as" join at all - it
+        # lives inside the `model_name in aliases` branch (the true no-op
+        # case), not the dedup-prompt path a bare fresh model_name reaches.
+        store["primary"] = {"path": str(gguf)}
         store[f"other-{BRACKET_STYLE}"] = {"path": str(gguf)}
         mm._register_with_dedup("primary", gguf, "local")
         out = capsys.readouterr().out
@@ -570,15 +575,25 @@ class TestAddLocalMarkupEscaping:
         # is declined by the (forced non-interactive) dedup prompt - the
         # honest "moved/copied but not registered" outcome, not a claimed
         # success.
+        monkeypatch.setenv("COLUMNS", "1000")   # keep the long final message on one line
         store, models_dir = fake_registry
         external = tmp_path / "external" / f"new-{BRACKET_STYLE}.gguf"
         external.parent.mkdir()
-        external.write_bytes(b"content")
+        external.write_bytes(_GGUF_BYTES)
         dest = models_dir / external.name
         store[f"already-{BRACKET_DROP}"] = {"path": str(dest.resolve())}
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
         ok = mm.add_local(str(external), name="newname", store="copy", no_hash=True)
         assert ok is False
         out = capsys.readouterr().out
-        assert f"new-{BRACKET_STYLE}.gguf" in out, (
-            f"the stored path must survive verbatim: {out!r}")
+        # _store_into_models_dir's own (separately tested, in
+        # TestStoreIntoModelsDirMarkupEscaping) "Copying ..." progress print
+        # ALSO shows this bracketed filename, earlier in `out` - isolate the
+        # assertion to add_local's OWN final message (the distinct escape()
+        # call this test exists to cover), so this test cannot pass on the
+        # strength of a DIFFERENT function's escaping alone.
+        final_line = next(
+            line for line in out.splitlines() if "not registered as" in line)
+        assert f"new-{BRACKET_STYLE}.gguf" in final_line, (
+            f"the stored path must survive verbatim in add_local's own "
+            f"message: {final_line!r}")
