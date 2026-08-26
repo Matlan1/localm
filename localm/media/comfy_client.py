@@ -2263,10 +2263,12 @@ def contain_comfy_artifacts(
     if not delete_outputs:
         return ""   # keep ComfyUI's history + on-disk copy by default
 
-    clear_comfy_history(api_url, prompt_id)
-    root = _comfy_output_root(comfy_output_dir)
-
     warnings: list = []
+    if not clear_comfy_history(api_url, prompt_id):
+        warnings.append(
+            "ComfyUI's /history entry for this generation could not be cleared "
+            "and remains visible in its Queue/History panel")
+    root = _comfy_output_root(comfy_output_dir)
     # Remove the uploaded img2img source from ComfyUI's input/ dir (sibling of
     # output/). Surface a failure (do not silence): it is still a stray copy of
     # the user's input that they asked to contain.
