@@ -498,6 +498,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Starting localm no longer prints an unprompted note about a missing vision
+  projector.** Launch used to include a network check for each vision-capable
+  model's companion projector file, and if network access was off it announced
+  that as a startup warning nobody had asked for. That check now runs quietly
+  in the background once the app is already serving, instead of during
+  startup, and it no longer shows up as a startup message either way.
 - **A remote image a reply links to no longer disappears without explanation.**
   Showing remote images is off by default, and several other things can stop one
   loading: the host is not on your Allowed domains list, it is unreachable, the

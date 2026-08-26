@@ -197,7 +197,8 @@ def load_models() -> list:
         # last refresh. Guarded so an older localm without sync still lists fine.
         try:
             from localm.model_manager import sync_models_dir
-            sync_models_dir()
+            # Local reconciliation only; no network I/O.
+            sync_models_dir(backfill_mmproj=False)
         except Exception:
             pass
         reg = load_registry()

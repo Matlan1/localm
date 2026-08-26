@@ -1526,7 +1526,8 @@ def _backup_registry() -> Optional[Path]:
 
 
 
-def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
+def sync_models_dir(prune: Optional[bool] = None, *,
+                     backfill_mmproj: bool = True) -> ModelSyncResult:
     """Reconcile the registry with the models directory.
 
     Scans ``MODELS_DIR`` for models that aren't registered yet - loose GGUF
@@ -1544,6 +1545,12 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     config setting - and even then only for files under ``MODELS_DIR`` (external
     models are flagged, never deleted). Runs without prompting; safe to call on
     every launch.
+
+    *backfill_mmproj*, default True: also look up (and, if found, fetch) a
+    missing vision-projector file for a few already-registered entries per
+    call - network-touching, bounded by ``_MMPROJ_BACKFILL_CAP``. Pass False
+    to skip that part and its ``note`` entirely, doing only the local,
+    no-network reconciliation above.
     """
     if prune is None:
         prune = bool(load_config().get("autoprune_missing_models", False))
@@ -1719,7 +1726,7 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                 # carries. Cheap candidacy check first (mmproj_backfill_candidate,
                 # no I/O) so the cap is spent only on entries that could
                 # possibly qualify.
-                if mmproj_attempts < _MMPROJ_BACKFILL_CAP:
+                if backfill_mmproj and mmproj_attempts < _MMPROJ_BACKFILL_CAP:
                     from localm.model_manager.pull import (
                         backfill_mmproj_for_entry, mmproj_backfill_candidate)
                     if mmproj_backfill_candidate(entry, path):
