@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, authHeaders, clearImageProxyCache, confirmDanger, el, fileToAvatarDataUri, isAvatarImageDataUri, openModal, promptText, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, clearImageProxyCache, confirmDanger, el, fileToAvatarDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
@@ -1665,9 +1665,10 @@ function buildAvatarPicker(initial) {
 
   function renderPreview() {
     preview.replaceChildren();
-    if (isAvatarImageDataUri(value)) {
+    const safeSrc = safeAvatarImageSrc(value);
+    if (safeSrc) {
       const img = document.createElement("img");
-      img.src = value;
+      img.src = safeSrc;
       preview.appendChild(img);
       glyphInput.value = "";
     } else {

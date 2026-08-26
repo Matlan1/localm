@@ -841,12 +841,18 @@ export function el(tag, className, text) {
   return node;
 }
 
-/** An avatar value that is a raster image, never anything else that merely
- * starts with the literal string "data:" - mirrors settings_schema.py's
- * _AVATAR_DATA_URI_RE exactly. See test_isAvatarImageDataUri_matches_the_server_regex. */
-export const AVATAR_DATA_URI_RE = /^data:image\/(png|jpeg|gif|webp);base64,/i;
-export function isAvatarImageDataUri(value) {
-  return AVATAR_DATA_URI_RE.test(value);
+/** Matches settings_schema.py's _AVATAR_DATA_URI_RE (the mime alternation),
+ * plus a base64-alphabet check on the payload the server does not need
+ * (config.py never renders the value into markup). Returns the value
+ * REBUILT from the captured mime and payload groups, never the original
+ * string, so nothing reaches an <img src> that was not read back out of this
+ * exact character set. Returns null for anything else - a glyph, an empty
+ * value, or a near-miss like "data:text/html,...". See
+ * test_safeAvatarImageSrc_rebuilds_from_validated_groups_or_returns_null. */
+const AVATAR_DATA_URI_RE = /^data:image\/(png|jpeg|gif|webp);base64,([A-Za-z0-9+/]*={0,2})$/i;
+export function safeAvatarImageSrc(value) {
+  const m = typeof value === "string" ? value.match(AVATAR_DATA_URI_RE) : null;
+  return m ? "data:image/" + m[1].toLowerCase() + ";base64," + m[2] : null;
 }
 
 /** Reads an image file client-side and resolves a data:image/png;base64,...
