@@ -122,8 +122,12 @@ class TestRunShell:
         with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
             tool_run_shell(tmp_path, "git status")   # git resolves via PATH
 
-        # Must NOT go through cmd/sh - first token is the executable
-        assert captured_cmd[0] == "git"
+        # Must NOT go through cmd/sh - first token names the executable.
+        # resolve_runner() now absolutises argv[0] for every resolvable
+        # command (not only npm/yarn/npx), so this is the resolved path
+        # rather than the bare name.
+        from pathlib import Path
+        assert Path(captured_cmd[0]).stem.lower() == "git"
         assert "status" in captured_cmd
 
     def test_shell_builtin_routed_through_shell(self, tmp_path):
