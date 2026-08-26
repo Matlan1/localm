@@ -2,18 +2,13 @@
 """
 Settings schema: typed metadata for every configurable value.
 
-The legacy settings page renders the raw config dict with no metadata, which is
-why it is a flat, unfriendly grid. This module attaches per-field metadata
-(widget, label, help, group, allowed values, secret flag, when-it-applies,
-owner) so the redesigned page can render the right control - a dropdown for a
-fixed set of choices, free text for URLs, a folder picker for directories, a
-masked input for secrets - and so each plugin can contribute its own section.
+Attaches per-field metadata (widget, label, help, group, allowed values, secret
+flag, when-it-applies, owner) so the settings page can render the right control
+- a dropdown for a fixed set of choices, free text for URLs, a folder picker for
+directories, a masked input for secrets - and so each plugin can contribute its
+own section.
 
 `owner` records which surface a setting belongs to ("core" or a plugin scope).
-Plugin-owned core keys (comfy_*, net_*, voice_*, coder_*) migrate
-to those plugins in Phase 3 - this field is the migration map.
-
-Phase 0 ships the schema + the core fields. The renderer (GUI) lands in Phase 5.
 """
 
 from __future__ import annotations
@@ -23,25 +18,21 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-# Sanity ceiling for a gpu_split_indices entry: no real machine has anywhere
-# near this many GPU devices, so an index above it is a config error (typo or
-# malicious PATCH), never a legitimate one. Bounds the ctypes tensor_split
-# allocation this value eventually drives in discover.apply_gpu_split - without
-# a cap, [0, 500000] would attempt a 500,001-element allocation before the
-# native loader is ever invoked. discover.resolve_gpu_split re-applies the same
-# ceiling at read time (defense in depth: a hand-edited config.json bypasses
-# this write-time check entirely).
+# Sanity ceiling for a gpu_split_indices entry: an index above it is a config
+# error (typo or malicious PATCH), never a legitimate one. It bounds the ctypes
+# tensor_split allocation this value eventually drives in
+# discover.apply_gpu_split - uncapped, [0, 500000] would attempt a
+# 500,001-element allocation before the native loader is ever invoked.
+# discover.resolve_gpu_split re-applies the same ceiling at read time, since a
+# hand-edited config.json bypasses this write-time check entirely.
 #
-# Also the ceiling for main_gpu_index: the same "no machine has this many GPU
-# devices" reasoning bounds a single device index exactly as much as a list of
-# split indices, and both values ultimately land in the same ctypes.c_int32
-# main_gpu field (llamacpp/_structs.py) before llama_load_model_from_file.
-# discover.resolve_main_gpu_index re-applies this ceiling at read time, same
-# defense-in-depth reasoning as gpu_split_indices above.
+# Also the ceiling for main_gpu_index: both values land in the same
+# ctypes.c_int32 main_gpu field (llamacpp/_structs.py) before
+# llama_load_model_from_file, and discover.resolve_main_gpu_index re-applies
+# this ceiling at read time too.
 MAX_GPU_SPLIT_INDEX = 127
 
-# Sanity ceiling for cors_origins: a browser-origin allowlist has no legitimate
-# reason to carry more than a few hundred entries, so a longer one is a config
+# Sanity ceiling for cors_origins: a longer browser-origin allowlist is a config
 # error (garbage input or a malformed import), not a real deployment. Without
 # a cap the raw list is handed straight to starlette's CORSMiddleware
 # (allow_origins) and to the membership-tested _cors_allowlist in
@@ -74,8 +65,8 @@ _PRIVACY = ["privacy", "log", "full"]
 _PRIVACY_INHERIT = ["", "privacy", "log", "full"]   # "" = inherit the global mode
 # Embedding pooling choices, default first (see config.py embedding_pooling).
 # Spelled out here rather than imported so this module stays free of the
-# inference stack; tests/test_settings_schema.py asserts it against the one
-# source of truth (embedder.POOLING_CHOICES) so the two cannot drift apart.
+# inference stack. Pinned to embedder.POOLING_CHOICES by
+# test_embedding_pooling_options_match_the_embedder.
 _EMBEDDING_POOLING = ["mean", "auto", "cls", "last", "none"]
 # Sidebar wordmark treatments (see config.py logo_style). Shared by the web GUI
 # logo picker and the desktop launcher; kept here so PATCH /v1/config validates.
@@ -91,14 +82,13 @@ class SettingField:
     group: str = "General"
     owner: str = "core"                  # "core" or a plugin scope (see scopes.py)
     options: Optional[list] = None       # for SELECT
-    # A SELECT that USED to be a TOGGLE, as ``(false_option, true_option)``. A
-    # boolean (or its 1/0 and "true"/"false" spellings) is then accepted and
-    # mapped to that pair, so a config.json written before the widget changed,
-    # a `localm config <key> true`, and an API client still sending JSON true
-    # keep working. An exact option always wins first, so "on"/"off" are read as
-    # modes rather than as booleans. Pairs with config.py's own read-side
-    # normalisation - see REMOTE_IMAGE_LEGACY_BOOL, which is the single
-    # definition of the mapping and is pinned to this field by a test.
+    # For a SELECT that also accepts a boolean, as ``(false_option,
+    # true_option)``. A boolean (or its 1/0 and "true"/"false" spellings) is
+    # mapped to that pair, so a config.json holding `true`, a `localm config
+    # <key> true`, and an API client sending JSON true are all accepted. An
+    # exact option always wins first, so "on"/"off" are read as modes rather
+    # than as booleans. Pairs with config.py's own read-side normalisation -
+    # see REMOTE_IMAGE_LEGACY_BOOL, the single definition of the mapping.
     legacy_bool: Optional[tuple] = None
     applies: str = Applies.LIVE
     secret: bool = False
@@ -110,9 +100,8 @@ class SettingField:
     # is INSIDE it and stores what it is given VERBATIM (the container tail of
     # the HIDDEN branch in _validate_one). Its real write surface lives elsewhere
     # and enforces a STRONGER gate, so a non-ADMIN config:write caller must not
-    # reach it through the generic PATCH /v1/config - that would let the generic
-    # route outrank the specific one. WRITE-gated only: unlike admin_only the
-    # value stays readable (see engine_managed_keys for the full rationale).
+    # reach it through the generic PATCH /v1/config. WRITE-gated only: unlike
+    # admin_only the value stays readable (see engine_managed_keys).
     engine_managed: bool = False
     min: Optional[float] = None
     max: Optional[float] = None
@@ -141,22 +130,12 @@ class SettingField:
 # Order = display order. `owner != "core"` flags keys that migrate to a plugin.
 CORE_FIELDS: list = [
     # ---- Engine ----
-    # REC-MEDIA-CMD sweep: this names WHICH NATIVE CODE THE SERVER LOADS INTO
-    # ITSELF, so it is the largest trust boundary in this schema - larger than
-    # rag_* (which folders may be READ), net_allow_private (network reach) or
-    # cors_origins (browser origins), all of which are already admin_only.
-    # _loader.py:88-93 reads this key and the resolved dir is handed to
-    # ctypes.CDLL(); config.py:1256-1257 and _loader.py:88-93 both place it
-    # AHEAD of the bundled localm-llama-runtime wheel, so a planted file WINS.
-    # Unlike comfy_launch_cmd (which spawns a subprocess) this is arbitrary
-    # native code IN-PROCESS, with no subprocess boundary: discover.py:864-866
-    # names compute_devices()/has_max_devices() as in-process reachers and
-    # discover.py:1541 reaches has_max_devices() before any worker spawns.
-    # Ungated it completed a single-scope RCE chain: POST /api/upload is
-    # CONFIG_WRITE (gui/routes/uploads.py:24), applies no extension filter
-    # (gui/web.py:390-392), preserves an exact filename when there is no
-    # collision (gui/web.py:419-425) and RETURNS the absolute uploads dir - so
-    # ONE config:write key plants llama.dll and repoints this key at it.
+    # admin_only: this key names WHICH NATIVE CODE THE SERVER LOADS INTO ITSELF.
+    # _loader.py reads it and hands the resolved dir to ctypes.CDLL(), ahead of
+    # the bundled localm-llama-runtime wheel, so a file placed there WINS. Unlike
+    # comfy_launch_cmd (which spawns a subprocess) this is arbitrary native code
+    # IN-PROCESS, with no subprocess boundary: compute_devices() /
+    # has_max_devices() in discover.py reach it before any worker spawns.
     SettingField("binary_dir", Widget.FOLDER, "llama.cpp binary folder",
                  "Folder holding llama.dll / ggml libraries. Blank uses the "
                  "bundled runtime (auto-detected path shown); set it to point at "
@@ -165,40 +144,32 @@ CORE_FIELDS: list = [
     # HIDDEN: both are written by `localm setup-llama` (--tag / --rollback) and
     # read back by doctor and the bug reporter. There is no settings-form widget
     # for them because setting one WITHOUT re-provisioning leaves the config and
-    # the installed binaries disagreeing, which is the confusion the recorded
-    # build exists to remove - the CLI moves the pin and installs in one step.
+    # the installed binaries disagreeing; the CLI moves the pin and installs in
+    # one step.
     #
-    # admin_only, for the same reason as binary_dir directly above though not to
-    # the same degree: the pin selects WHICH NATIVE BUILD is downloaded and then
+    # admin_only: the pin selects WHICH NATIVE BUILD is downloaded and then
     # loaded in-process. It cannot name an arbitrary path or host (the repo is
-    # fixed, and the asset is checksum-verified), so it is not the planted-file
-    # escalation binary_dir is; what it can do is hold an install on a specific
-    # older upstream build, which is a downgrade a lower-privileged principal
-    # should not get to choose.
+    # fixed, and the asset is checksum-verified), but it can hold an install on
+    # a specific older upstream build.
     SettingField("llama_runtime_pin", Widget.HIDDEN, "Pinned llama.cpp build",
                  "Release tag setup-llama installs (e.g. 'b10355'). Blank uses "
                  "the build localm confirmed; 'latest' tracks upstream's newest, "
                  "untested. Set with `localm setup-llama --tag`, not here.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
-    # NOT engine_managed, despite being written by the engine rather than by a
-    # user: that flag means PLUGIN STATE specifically (`plugins`,
-    # `plugins_enabled` - see test_config_plugin_state_gate.py, which pins the
-    # set), and the two flags are deliberately DISJOINT gates - admin_only also
-    # hides a value from a non-owner, engine_managed only refuses the write, so
-    # carrying both would silently narrow reads. admin_only is the correct one
-    # here and it alone satisfies the owner-gate requirement for a verbatim key.
+    # NOT engine_managed: that flag means PLUGIN STATE specifically (`plugins`,
+    # `plugins_enabled`). The two flags are DISJOINT gates - admin_only also
+    # hides a value from a non-owner, engine_managed only refuses the write - so
+    # carrying both would narrow reads. admin_only is the gate for this key.
     SettingField("llama_runtime_history", Widget.HIDDEN, "Runtime build history",
                  "Builds provisioned on this machine, newest last. Recorded by "
                  "setup-llama so `--rollback` knows what to return to.",
                  group="Engine", admin_only=True),
-    # "up to the maximum below" until 2026-08-13: .settings-fields is a TWO-COLUMN
-    # grid (style.css), so the next field renders to the RIGHT, not below. Every
-    # positional reference in this schema was replaced with the setting's NAME
-    # (gui-design.md rule 9 / decision D3) - a name survives a reflow, a position
-    # does not.
-    # max is a sanity bound, not a capability claim - generous enough for any
-    # real long-context model (1M+ token models exist), just large enough to
-    # keep an absurd value from reaching the native ctypes layer unbounded.
+    # Help text in this schema names another setting rather than placing it
+    # ("below", "above"): .settings-fields is a TWO-COLUMN grid (style.css), so
+    # the next field renders to the RIGHT, not below.
+    # max is a sanity bound, not a capability claim: large enough for any real
+    # long-context model, small enough to keep an absurd value from reaching the
+    # native ctypes layer unbounded.
     SettingField("n_ctx", Widget.NUMBER, "Context window (initial)",
                  "Tokens of history the model starts with; it grows on demand up "
                  "to Context window (max).",
@@ -220,14 +191,11 @@ CORE_FIELDS: list = [
     # Label carries "(next load)" because the Live tuning card in the SAME nav
     # group has its own "GPU layers (running model)" (index.html) - two controls
     # of the same name, one persisted and one immediate, and the settings search
-    # box indexes both under the same words. See finding M4 in dev-notes.
+    # box indexes both under the same words.
     SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers (next load)",
                  "Model layers to run on the GPU. 99 puts the whole model on the "
                  "GPU; lower it if you run out of VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
-    # Trimmed to the 200-char budget (gui-design.md rule 9). Removed: "Has no
-    # effect on a normal (dense) model", which only restated the opening
-    # "Mixture-of-Experts models only".
     SettingField("n_cpu_moe", Widget.NUMBER, "MoE expert layers on CPU",
                  "Mixture-of-Experts models only. Keeps this many layers' expert "
                  "weights in system RAM instead of VRAM, so the model fits in far "
@@ -243,14 +211,9 @@ CORE_FIELDS: list = [
                  "default: it pays on large models and costs a little on small "
                  "ones, so try it and keep it if your model gets faster.",
                  group="Engine", applies=Applies.NEXT_LOAD),
-    # Trimmed to the 200-char budget; the consequence now leads. The removed
-    # explanation, kept here because it is the WHY and a future reader will want
-    # it: this is VRAM reserved beyond model weights for the KV cache's compute
-    # buffers and llama.cpp's graph/scratch allocations, deducted before GPU
-    # layers or context are auto-sized. It is real memory the loader needs, not
-    # a safety margin, which is why lowering it faults rather than just slowing
-    # things down - only lower it once you have confirmed your model/context
-    # needs less.
+    # VRAM reserved beyond model weights for the KV cache's compute buffers and
+    # llama.cpp's graph/scratch allocations, deducted before GPU layers or
+    # context are auto-sized.
     SettingField("vram_overhead_mb", Widget.NUMBER, "Reserved VRAM overhead (MB)",
                  "Lowering this risks a native crash or GPU driver hang, not just "
                  "a slower load: it is VRAM the loader genuinely needs for the KV "
@@ -269,11 +232,9 @@ CORE_FIELDS: list = [
     # GPU selector (populated from GET /api/gpus), not the generic settings
     # form - same reasoning as main_gpu_index above. Still accepted by PATCH
     # /v1/config and `localm config gpu_split_indices 0,1` like any other field.
-    # Trimmed to the budget like every other field even though HIDDEN renders no
-    # control: the cap is enforced over the WHOLE schema (tests/test_settings_help_budget.py)
-    # so a field that later becomes visible cannot smuggle a wall of text in with
-    # it. Removed detail, kept here: each card's share follows its free VRAM at
-    # load time unless GPU split ratios pins exact weights.
+    # The help-length cap is enforced over the WHOLE schema, HIDDEN fields
+    # included. Each card's share follows its free VRAM at load time unless GPU
+    # split ratios pins exact weights.
     SettingField("gpu_split_indices", Widget.HIDDEN, "Split across GPUs",
                  "Device indices to split a model across when it is too large for "
                  "one card (2+ needed to take effect). Blank still spreads a model "
@@ -317,23 +278,18 @@ CORE_FIELDS: list = [
                  "(0 = never; the model stays resident). The next message reloads "
                  "it automatically.",
                  group="Engine", min=0, step=30),
-    # These five repeated one near-identical paragraph five times (~1,220 chars
-    # for one idea). Trimmed to the 200-char budget and, deliberately, to the
-    # SAME sentence shape, so the panel reads as one family and a difference
-    # between two of them is visible instead of buried in boilerplate.
+    # The five timeout fields below share one sentence shape, so the panel reads
+    # as one family and a difference between two of them stays visible.
     SettingField("gguf_load_timeout_s", Widget.NUMBER, "GGUF load timeout (s)",
                  "How long a GGUF model load may run in its isolated worker "
                  "before it is treated as hung and cancelled. Raise it only for a "
                  "huge model on slow storage.",
                  group="Timeouts", min=10, step=60),
-    # Label prefixed "GGUF" 2026-08-13: three of the four load/first-token
-    # timeouts named their format and this one did not, so on screen a bare
-    # "First-token timeout" read as the global one (assessment A7b).
-    #
-    # Removed from the help, kept because it is the WHY the default is so large:
-    # the timer covers reading the whole prompt rather than emitting one token,
-    # so on CPU, with most layers off the GPU, or with a very long prompt, a
-    # legitimate first token can take minutes.
+    # The label names the format, like the other load/first-token timeouts: a
+    # bare "First-token timeout" reads on screen as the global one. The timer
+    # covers reading the whole prompt rather than emitting one token, so on CPU,
+    # with most layers off the GPU, or with a very long prompt, a legitimate
+    # first token can take minutes.
     SettingField("gguf_first_token_timeout_s", Widget.NUMBER,
                  "GGUF first-token timeout (s)",
                  "How long a reply may take to produce its first token before the "
@@ -359,8 +315,8 @@ CORE_FIELDS: list = [
                  "in its isolated worker before it is treated as hung. Raise it if "
                  "you regularly embed large batches.",
                  group="Timeouts", min=10, step=60),
-    # Removed, kept as the WHY the cap is low: a HuggingFace embed runs one text
-    # at a time with no batching, so request cost is linear in the batch size.
+    # The cap is low because a HuggingFace embed runs one text at a time with no
+    # batching, so request cost is linear in the batch size.
     SettingField("hf_embed_max_texts", Widget.NUMBER,
                  "HuggingFace embed batch cap (texts)",
                  "Most texts accepted in one /v1/embeddings request against a "
@@ -423,9 +379,9 @@ CORE_FIELDS: list = [
     # LAN. Note what this key CANNOT do: bind past loopback without a strong API
     # key. The startup guard (plugins/gui/cli.py) ignores a config-driven
     # network bind when no strong key is set and stays on loopback, loudly -
-    # only the CLI's --insecure flag, which deliberately has NO config form,
-    # can override that, so an unauthenticated network bind always requires a
-    # terminal. Applies.RESTART: an in-place restart re-execs the same argv,
+    # only the CLI's --insecure flag, which has NO config form, can override
+    # that, so an unauthenticated network bind always requires a terminal.
+    # Applies.RESTART: an in-place restart re-execs the same argv,
     # and the fresh process re-reads this key (cli._resolve_bind_host) when no
     # explicit -H was typed - that read is what makes the Settings > Restart
     # server flow work for a browser-only user.
@@ -468,8 +424,8 @@ CORE_FIELDS: list = [
                  "Browser origins allowed to call the API. Blank = localhost "
                  'only; comma-separated list; or "*" for any.',
                  group="Server", applies=Applies.RESTART, admin_only=True),
-    # Removed from the help, kept as the WHY a rename needs a restart: the name
-    # is also written into the HTTPS certificate's SANs, so it is not display-only.
+    # A rename needs a restart: the name is also written into the HTTPS
+    # certificate's SANs, so it is not display-only.
     SettingField("mdns_name", Widget.TEXT, "Network name (mDNS)",
                  "The name other devices use to reach this server on your LAN: "
                  "<name>.local, so there is no IP to type. Letters, digits and "
@@ -481,18 +437,15 @@ CORE_FIELDS: list = [
                  "address only. Loopback binds never advertise.",
                  group="Server", applies=Applies.RESTART),
     # ---- Security ----
-    # REC-MEDIA-CMD sweep: defense in depth on a LATENT fail-closed control, NOT
-    # an active bypass - be precise about which, because overclaiming this one
-    # would be wrong. Both readers sit behind an any_key_configured() check
-    # (http_server.py:1982-1988, :2950-2951), so while any key exists the flag is
-    # INERT and clearing it cannot disable auth. The narrow real regression is
-    # deferred: an owner who set it true, whose non-owner key cleared it, and who
-    # later removes every key, silently gets an OPEN server instead of the
-    # fail-closed one they asked for. A non-owner should not be able to disarm a
-    # fail-closed control even latently, and the cost is ~zero: the effective
-    # state stays readable without config:read via GET /api/session
-    # (routes/session.py:136-147, no auth dependency), and the CLI/launcher write
-    # config directly rather than through this route.
+    # admin_only: defense in depth on a LATENT fail-closed control, not an active
+    # bypass. Both readers sit behind an any_key_configured() check in
+    # http_server.py, so while any key exists the flag is INERT and clearing it
+    # cannot disable auth. What the gate stops is deferred: an owner who set it
+    # true, whose non-owner key cleared it, and who later removes every key,
+    # would otherwise get an OPEN server instead of the fail-closed one they
+    # asked for. The effective state stays readable without config:read via GET
+    # /api/session, and the CLI/launcher write config directly rather than
+    # through this route.
     SettingField("require_auth", Widget.TOGGLE, "Require an API key",
                  "Refuse all requests until an API key is set (fail closed). "
                  "Required before exposing localm on a network.",
@@ -500,10 +453,9 @@ CORE_FIELDS: list = [
     # admin_only: turning this ON lets a downloaded model directory run its own
     # bundled Python inside the localm process, which is arbitrary code execution
     # as the server user. Only an owner may make that call, never a config:write
-    # key. See routes/config.py admin_only gate and hf.py's refusal path.
-    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: the
-    # mechanism is the model directory's 'auto_map' custom code; a model
-    # needing it is refused WITH AN EXPLANATION rather than failing opaquely.
+    # key. See routes/config.py admin_only gate and hf.py's refusal path. The
+    # mechanism is the model directory's 'auto_map' custom code; a model needing
+    # it is refused WITH AN EXPLANATION rather than failing opaquely.
     SettingField("hf_trust_remote_code", Widget.TOGGLE,
                  "Allow model-bundled custom code",
                  "Arbitrary code execution on this machine: lets a HuggingFace "
@@ -511,14 +463,12 @@ CORE_FIELDS: list = [
                  "default; a model needing it is refused. Turn on only for a "
                  "source you trust.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
-    # admin_only: matches rag_allowed_roots/rag_denied_roots right above (same
-    # "which host locations may localm touch" trust boundary). On by default -
-    # a mapped network drive already works exactly like a local folder today
-    # (see config.py's DEFAULT_CONFIG comment for allow_network_drives: the
-    # classification gap this closes is that pathsafe.is_unc_or_device_path
-    # never flagged a mapped drive letter, not that anything was unconfined),
-    # so this must not silently break an existing setup. Turning it off is
-    # opt-in extra caution, not a vulnerability fix.
+    # admin_only: matches rag_allowed_roots/rag_denied_roots (same "which host
+    # locations may localm touch" trust boundary). ON by default, so a mapped
+    # network drive keeps working exactly like a local folder; turning it off is
+    # opt-in extra confinement. See config.py's DEFAULT_CONFIG comment for
+    # allow_network_drives: pathsafe.is_unc_or_device_path does not flag a mapped
+    # drive letter.
     SettingField("allow_network_drives", Widget.TOGGLE,
                  "Allow network drives as filesystem locations",
                  "Let the folder picker, RAG indexing, and related routes "
@@ -533,25 +483,16 @@ CORE_FIELDS: list = [
                  "Sidebar wordmark, chosen with the logo picker and shared with "
                  "the desktop launcher.",
                  group="General"),
-    # Right by DEFAULT on purpose, and configurable on purpose. Most tools put a
-    # session list on the left; putting it on the right is a deliberate difference,
-    # and the option exists so someone who is used to the usual arrangement can have
-    # it rather than being told their habit is wrong. The rail carries its own
-    # toggle as well - moving a panel is direct manipulation, and making someone
-    # open Settings to do it is the kind of friction that gets a feature disliked.
-    # Both surfaces write THIS key, so they cannot disagree.
-    # OFF is a legitimate position, not an edge case: a list of the project paths
-    # you have opened is a real record, and some people will not want one kept.
-    # Off means it is NOT WRITTEN, never "written but hidden" - see
-    # plugins/coder/projects.py, whose privacy-mode refusal is NOT covered by this
-    # setting and is not configurable at all.
+    # OFF means the project list is NOT WRITTEN, never "written but hidden" -
+    # see plugins/coder/projects.py, whose privacy-mode refusal is NOT covered
+    # by this setting and is not configurable at all.
     SettingField("coder_remember_projects", Widget.TOGGLE,
                  "Remember projects you have coded in",
                  "Keeps a list of project folders so past sessions are easy to "
                  "reach. Privacy-mode sessions are never listed.",
                  group="Coder"),
-    # Capped because an unbounded list is both a scrolling wall and a slowly
-    # growing disclosure surface.
+    # Capped: an unbounded list is both a scrolling wall and a growing
+    # disclosure surface.
     SettingField("coder_projects_remembered", Widget.NUMBER,
                  "Projects to remember",
                  "How many recent project folders to keep in that list.",
@@ -574,22 +515,18 @@ CORE_FIELDS: list = [
                  "stops the server.",
                  group="Desktop"),
     # ---- Privacy ----
-    # REC-MEDIA-CMD sweep: these three decide WHETHER LOCALM WRITES THE USER'S
-    # CONTENT TO DISK. Turning privacy off starts persisting transcripts and an
-    # audit trail the owner had chosen not to keep, and that is a decision only
-    # the owner may make - a non-owner config:write key silently converting
-    # "nothing is written" into "everything is written" is the privacy contract
-    # inverted. Gating the READ costs the GUI nothing: it reads the injected
-    # cfg["effective_mode"] / cfg["effective_coder_mode"] (chat.js:204), which
-    # routes/config.py:38-39 adds AFTER the admin_only strip, never cfg["mode"].
+    # admin_only, all three: they decide WHETHER LOCALM WRITES THE USER'S
+    # CONTENT TO DISK, so only an owner may turn privacy off and start
+    # persisting transcripts and an audit trail. Gating the READ costs the GUI
+    # nothing: it reads the injected cfg["effective_mode"] /
+    # cfg["effective_coder_mode"], which routes/config.py adds AFTER the
+    # admin_only strip, never cfg["mode"].
     SettingField("mode", Widget.SELECT, "Session persistence",
                  "What localm saves: privacy = nothing written automatically; "
                  "log = a JSONL audit trail; full = log plus a chat transcript.",
                  group="Privacy", options=_PRIVACY, admin_only=True),
-    # "the global mode above" until 2026-08-13, and it was false twice over: the
-    # parent used to sit on a different nav TAB, and after the group-first move
-    # it sits in the same panel but to the LEFT (two-column grid). Both children
-    # now name the parent setting instead of pointing at a position (D3).
+    # Both children name the parent setting rather than pointing at a position:
+    # in the two-column grid the parent sits to the LEFT, not above.
     SettingField("chat_mode", Widget.SELECT, "Chat persistence override",
                  "Overrides Session persistence for chat only. Blank inherits "
                  "whatever Session persistence is set to.",
@@ -605,9 +542,9 @@ CORE_FIELDS: list = [
                  "them to the system prompt each chat turn. Off = keep the facts "
                  "but stop recalling them.",
                  group="Memory", owner="memory"),
-    # Removed, kept as the WHY there is no privacy exception here: consolidation
-    # WRITES, and privacy mode's contract is that nothing is written
-    # automatically - so unlike recall it can never be opted back in.
+    # No privacy exception here: consolidation WRITES, and privacy mode's
+    # contract is that nothing is written automatically, so unlike recall it can
+    # never be opted back in.
     SettingField("memory_auto_consolidate", Widget.TOGGLE, "Grow memory automatically",
                  "After a chat turn, quietly distil durable facts from the "
                  "conversation into memory, so it grows with no manual step. Always "
@@ -619,9 +556,8 @@ CORE_FIELDS: list = [
                  "still READ existing memories in privacy mode; writing new ones "
                  "stays off, so no new trace is created.",
                  group="Memory", owner="memory"),
-    # These two labels began with a literal ellipsis ("...in privacy mode: chat"),
-    # which is meaningless in the settings SEARCH results, where a match renders
-    # outside its section with no parent to complete the sentence (D3).
+    # These two labels must read on their own: a settings SEARCH match renders
+    # outside its section, with no parent label to complete the sentence.
     SettingField("memory_recall_in_privacy_chat", Widget.TOGGLE,
                  "Privacy-mode recall: chat",
                  "With Allow memory recall in privacy mode on, recall chat memory "
@@ -633,10 +569,9 @@ CORE_FIELDS: list = [
                  "past-session lessons during privacy-mode coder sessions "
                  "(read-only).",
                  group="Memory", owner="memory"),
-    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: privacy
-    # mode's contract is that nothing is written automatically, and the
-    # crash/hang diagnostics a bug report needs are part of what that
-    # suppresses - which is why this opt-in exists at all.
+    # Privacy mode's contract is that nothing is written automatically, and the
+    # crash/hang diagnostics a bug report needs are part of what it suppresses.
+    # This toggle is the opt-in that writes them anyway.
     SettingField("keep_diagnostics", Widget.TOGGLE,
                  "Keep diagnostics for bug reports",
                  "Writes crash and hang diagnostics (stack traces, restart "
@@ -645,67 +580,45 @@ CORE_FIELDS: list = [
                  "never chat content.",
                  group="Diagnostics", admin_only=True),
     # ---- Models ----
-    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: it is a
-    # small on-device model loaded separately from the chat model;
-    # nomic-embed-text-v1.5 is the other known key (besides bge-small-en-v1.5).
+    # A small on-device model, loaded separately from the chat model. The known
+    # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
                  "Until this is fetched, memory and RAG fall back to lexical "
                  "search. Run 'localm setup-embeddings' to get one. Accepts a "
                  "known key (bge-small-en-v1.5), a registered name, or a GGUF "
                  "path.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
-                 # (embedder.py:262-264) returns a CALLER-CHOSEN filesystem path with
-                 # no confined_* check, and that path is then handed to llama.cpp's
-                 # native GGUF parser. Same class as the rag_* keys (which host files
-                 # the server may open), plus attacker-chosen bytes reaching a C
+                 # returns a CALLER-CHOSEN filesystem path with no confined_*
+                 # check, and that path is then handed to llama.cpp's native GGUF
                  # parser; on Windows a UNC path also makes the is_file() probe an
-                 # outbound SMB/NTLM authentication. NOT an SSRF or arbitrary-download
-                 # hole: the download branch resolves repo+filename from the fixed
-                 # KNOWN_EMBEDDING_MODELS dict (:277-287) and returns None otherwise,
-                 # so do not restate this as a network finding.
+                 # outbound SMB/NTLM authentication. The download branch resolves
+                 # repo+filename from the fixed KNOWN_EMBEDDING_MODELS dict and
+                 # returns None otherwise.
                  # Gating PATCH does NOT break ordinary embedder selection: the CLI
                  # (setup-embeddings) and the RAG picker (POST /api/rag/embedding,
                  # gated by the rag plugin scope, not config:write) both bypass this
                  # route entirely.
-                 # RESIDUAL, STATED SO NOBODY READS THIS FLAG AS MORE THAN IT IS:
-                 # this flag closes the config:write path. The plugin route
+                 # This flag closes the config:write path ONLY. The plugin route
                  # POST /api/rag/embedding writes the SAME key under the
                  # non-privileged `rag` scope (rag/plug.py, rag_embedding_set, via
-                 # update_config) and is gated separately by an owner check added in
-                 # that file; if that check is ever reverted, this flag ALONE does not
-                 # close the rag path. Verified by execution rather than assumed: on
-                 # master a `rag`-scoped principal passes authorization on that route
-                 # outright. Do not go hunting for the write in the re-embed endpoint,
-                 # which only READS this value to label a job.
-                 # SEVERITY, PRECISELY: nothing was being BYPASSED before this flag
-                 # (neither route gated the key, so there was no gate to get around),
-                 # but "no gate existed" is NOT the same as "no escalation existed".
-                 # A `rag`-scoped key - the documented restricted key, e.g.
-                 # --scope chat --scope rag - could point this process at an arbitrary
-                 # local path for the native parser to open, and the rag scope grants
-                 # no other arbitrary-path read: indexing goes through
-                 # confine_index_path, whose hard floor refuses credential folders
-                 # unconditionally. So this was a real CAPABILITY WIDENING FOR A
-                 # RESTRICTED PRINCIPAL, lower severity than binary_dir, with no
-                 # proven exploit and no demonstrated parser memory-safety bug.
-                 # binary_dir is the only field in this sweep to call an escalation.
-                 # Do not flatten the two to one severity in a write-up.
+                 # update_config) and carries its own owner check; without that
+                 # check, this flag alone does not close the rag path. The re-embed
+                 # endpoint only READS this value to label a job.
                  group="Embeddings", applies=Applies.NEXT_LOAD, admin_only=True),
-    # Consequence first (it is destructive-adjacent: existing collections and
-    # memory vectors stop matching). Removed, kept as the WHY the choice matters:
-    # mean suits bge/nomic and matches everything already indexed, while a
+    # Changing this makes existing collections and memory vectors stop matching.
+    # mean suits bge/nomic and matches everything already indexed; a
     # decoder-based embedder (Qwen3-Embedding, gte-Qwen2) is trained for
-    # last-token pooling and is DEGRADED by mean - choose last for those, or auto
-    # to follow whatever the model declares.
+    # last-token pooling and is DEGRADED by mean - last for those, or auto to
+    # follow whatever the model declares.
     SettingField("embedding_pooling", Widget.SELECT, "Embedding pooling",
                  "Changing this invalidates existing document collections and "
                  "memory vectors: re-index afterwards. mean suits bge/nomic; a "
                  "decoder-based embedder needs last, or auto to follow the model.",
                  group="Embeddings", applies=Applies.NEXT_LOAD,
                  options=_EMBEDDING_POOLING),
-    # Removed, kept as the WHY blank is not simply "use the GPU": a large embedder
-    # sharing one card with a loaded chat model oversubscribes VRAM and slows the
-    # chat model down, so automatic falls back to CPU rather than competing.
+    # Blank is not simply "use the GPU": a large embedder sharing one card with a
+    # loaded chat model oversubscribes VRAM and slows the chat model down, so
+    # automatic falls back to CPU rather than competing.
     SettingField("embedding_gpu_layers", Widget.NUMBER, "Embedder GPU layers",
                  "GPU layers for the embedding model. Empty = automatic: full GPU "
                  "offload when free VRAM holds it, otherwise CPU. 0 forces CPU; 99 "
@@ -728,8 +641,7 @@ CORE_FIELDS: list = [
                  "When a command belongs to a known but inactive plugin, suggest "
                  "installing it instead of reporting an unknown command.",
                  group="Plugins"),
-    # Removed, kept because it is the reassurance the sentence was carrying: only
-    # the LOCAL operator can trigger this - a remote client never causes a
+    # Only the LOCAL operator can trigger this - a remote client never causes a
     # server-side install (the install path is gated on the local principal).
     SettingField("auto_install_plugin_deps", Widget.TOGGLE,
                  "Auto-install plugin dependencies",
@@ -773,12 +685,10 @@ CORE_FIELDS: list = [
     # this machine - the same "widens trust reach" reasoning as update_url/
     # update_token/bugreport_upload_url right above (all admin_only in this same
     # group). A prerelease is signed and anti-rollback-checked exactly like a
-    # stable release (see updater.py's CHK-UPDATER-INTEGRITY), so this is not
-    # about authenticity - it is about a non-admin config:write caller being able
-    # to make the GUI start suggesting release-candidate builds to whoever
-    # actually clicks "Update now", without that person having made the choice
-    # themselves. Default MUST be False: this is an OPT-IN channel, not a
-    # default-on one - see dev-notes/self-updater-design (prerelease channel).
+    # stable release, so this is not about authenticity - it is about a non-admin
+    # config:write caller being able to make the GUI start suggesting
+    # release-candidate builds to whoever actually clicks "Update now". The
+    # default MUST be False: this is an OPT-IN channel.
     SettingField("update_allow_prerelease", Widget.TOGGLE,
                  "Offer prerelease updates",
                  "Also offer release-candidate builds when checking for updates. "
@@ -794,9 +704,8 @@ CORE_FIELDS: list = [
     # it like every other network capability unless an admin opts it out here.
     SettingField("update_ignore_net_policy", Widget.TOGGLE,
                  "Check for updates even when network access is off",
-                 # "the Network access setting above" until 2026-08-13, and after
-                 # the group-first move it is not merely mis-positioned but on a
-                 # different NAV GROUP (Server & network). Name it, never place it.
+                 # Network access sits in a different NAV GROUP (Server &
+                 # network), so the help names it rather than placing it.
                  "The update check normally obeys Network access, so setting that "
                  "to Off also turns off update checks. Turn this on to let the "
                  "update channel through regardless.",
@@ -845,24 +754,20 @@ CORE_FIELDS: list = [
                  "tool-call JSON (lazy GBNF grammar; local grammar-capable "
                  "backends only). Free text and thinking are unaffected.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
-    # Removed, kept as the WHY it is safe to leave on: recall itself is free, and
-    # the write half is skipped in privacy mode and for shared keys. Episodes are
-    # stored under the localm data dir, never inside your project, and are managed
-    # with `localcoder --episodes` / `--forget-episodes`.
+    # Recall is free; the write half is skipped in privacy mode and for shared
+    # keys. Episodes are stored under the localm data dir, never inside the
+    # project, and are managed with `localcoder --episodes` /
+    # `--forget-episodes`.
     SettingField("coder_episodic_memory", Widget.TOGGLE,
                  "Coder episodic memory",
                  "Recall lessons from past sessions on a project and, at session "
                  "close, distil the finished session into a new one. Costs one "
                  "extra model call per session that changed files.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
-    # REC-MEDIA-CMD sweep: this is an INJECTION-HARDENING control. Its own help
-    # says "leave ON unless you have a specific reason", so a non-owner turning
-    # it off re-opens the indirect-prompt-injection boundary for the OWNER's
-    # coder - the delegate weakens a defense it does not bear the consequence of.
-    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: the attack
-    # class is indirect prompt injection; the mechanism is marking results as
-    # DATA rather than instructions and hardening the result boundary; it is
-    # defense in depth and blocks no legitimate use.
+    # admin_only: an INJECTION-HARDENING control, so a non-owner turning it off
+    # would re-open the indirect-prompt-injection boundary for the OWNER's coder.
+    # The mechanism is marking tool results as DATA rather than instructions; it
+    # is defense in depth and blocks no legitimate use.
     SettingField("coder_untrusted_provenance", Widget.TOGGLE,
                  "Tag untrusted external content",
                  "Marks coder tool results from the web, web search and external "
@@ -876,19 +781,17 @@ CORE_FIELDS: list = [
                  "Before the coder declares a task done, a reviewer model reads the "
                  "diff and feeds blocking issues back for one more fix pass. Adds a "
                  "model round-trip per task that changed files. Off by default.",
-                 # DELIBERATELY NOT admin_only, unlike the coder_reviewer* fields
-                 # just below. This is the on/off switch for an extra review pass,
-                 # off by default: it crosses no trust boundary, and gating it would
-                 # stop a delegated user ENABLING more scrutiny, which is backwards.
-                 # coder_reviewer / coder_reviewer_model ARE owner-only because they
-                 # choose WHICH backend or model file reviews (a URL or a path).
+                 # NOT admin_only, unlike the coder_reviewer* fields: this is the
+                 # on/off switch for an extra review pass and crosses no trust
+                 # boundary. coder_reviewer / coder_reviewer_model ARE owner-only,
+                 # because they choose WHICH backend or model file reviews (a URL
+                 # or a path).
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
-    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: 'local' is
-    # heterogeneous and private but adds CPU latency (the model is set via
-    # coder_reviewer_model below); an http(s) URL is a second OpenAI-compatible
-    # endpoint, e.g. a second local server; a network reviewer is skipped in
-    # privacy mode and for shared keys (it would send the diff off-machine) and
-    # those review with the local model instead.
+    # 'local' is heterogeneous and private but adds CPU latency (the model is
+    # set via coder_reviewer_model); an http(s) URL is a second
+    # OpenAI-compatible endpoint, e.g. a second local server. A network reviewer
+    # is skipped in privacy mode and for shared keys, which review with the
+    # local model instead.
     SettingField("coder_reviewer", Widget.TEXT,
                  "Reviewer model target",
                  "Sends your diff off-machine unless left blank or set to "
@@ -896,11 +799,11 @@ CORE_FIELDS: list = [
                  "small CPU model; openai; anthropic; or an http(s) URL.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
                  admin_only=True),
-    # Gated together with coder_reviewer on purpose: gating the SELECTOR while
-    # leaving its ARGUMENT writable is the half-fix this sweep exists to catch.
-    # registry.py:256-276 falls through to Path(name), accepting any existing
-    # GGUF / HF dir, so this is not registry-only - it names a file the coder
-    # process loads into a llama.cpp backend.
+    # Gated together with coder_reviewer: gating the SELECTOR while leaving its
+    # ARGUMENT writable would be a half-fix. registry.py falls through to
+    # Path(name), accepting any existing GGUF / HF dir, so this is not
+    # registry-only - it names a file the coder process loads into a llama.cpp
+    # backend.
     SettingField("coder_reviewer_model", Widget.TEXT,
                  "Reviewer model name",
                  "Model name for a cloud/URL reviewer. Blank uses a sensible provider "
@@ -928,29 +831,27 @@ CORE_FIELDS: list = [
                  "Folders that are never indexed in blacklist mode (everything "
                  "else is allowed). Ignored in whitelist mode.",
                  group="Knowledge", owner="rag", admin_only=True),
-    # Removed, kept as the WHY this is off by default and narrow: format tagging
-    # from the extension and content is already free, so the LLM is asked only
-    # about an unknown extension it cannot tell structurally, and only while a
-    # chat model happens to be loaded.
+    # Narrow by construction: format tagging from the extension and content is
+    # already free, so the LLM is asked only about an unknown extension it cannot
+    # tell structurally, and only while a chat model happens to be loaded.
     SettingField("rag_classify_unknown_files", Widget.TOGGLE, "Classify unknown files with AI",
                  "Let the local LLM guess the format of a file whose extension it "
                  "does not recognise, when a chat model is loaded. Off, those files "
                  "are tagged plain text.",
                  group="Knowledge", owner="rag"),
     # ---- Media (ComfyUI: image / music / video plugins) ----
-    # REC-MEDIA-CMD: these three are the CORE twins of MediaFields that were
-    # already admin_only (see MEDIA_PLUGIN_FIELDS below). The write gate reads
-    # CORE_FIELDS only - admin_only_keys() is built from this list - so gating
-    # the mirror never protected these, and PATCH /v1/config was a back door
-    # around the stronger per-plugin gate at routes/config.py:220-225. Same
-    # shape as the X8 finding (a generic route outranking a specific one).
+    # These three are the CORE twins of the admin_only MediaFields (see
+    # MEDIA_PLUGIN_FIELDS below). The write gate reads CORE_FIELDS only -
+    # admin_only_keys() is built from this list - so they must carry admin_only
+    # here; gating the mirror alone leaves PATCH /v1/config as a back door around
+    # the stronger per-plugin gate in routes/config.py.
     #
     # workdir is not merely a folder: it selects where the launcher is
-    # AUTO-DISCOVERED (comfy_client.py:1125 discover_launch_cmd -> shlex.split ->
-    # Popen) AND what the model scanner walks into registry.json, and
-    # POST /api/comfy/setup (CONFIG_WRITE-only, gui/routes/comfy.py:92-93)
-    # executes <comfy_workdir>/venv/Scripts/python.exe. So a blank launch_cmd
-    # plus an attacker-chosen workdir still reaches execution.
+    # AUTO-DISCOVERED (comfy_client.discover_launch_cmd -> shlex.split -> Popen)
+    # AND what the model scanner walks into registry.json, and POST
+    # /api/comfy/setup (CONFIG_WRITE-only) executes
+    # <comfy_workdir>/venv/Scripts/python.exe. So a blank launch_cmd plus an
+    # attacker-chosen workdir still reaches execution.
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "
                  "auto-detects a launcher inside. The one setting most setups need.",
@@ -971,16 +872,11 @@ CORE_FIELDS: list = [
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
                  "ComfyUI's own output folder. Only needed with 'Remove ComfyUI's "
                  "copy after generating' on; blank derives it.",
-                 # DELIBERATELY NOT admin_only, though it names a folder this
-                 # process DELETES from when comfy_delete_outputs is on
-                 # (comfy_client.py, the unlink() calls under _comfy_output_root).
-                 # That is a delete-ESCAPE concern, and the fix is path confinement
-                 # at the unlink site, not an owner flag here: an owner flag would
-                 # leave the escape reachable by the owner's own misconfiguration
-                 # while hiding an ordinary media setting from a delegated user.
-                 # Confinement is being added in comfy_client.py by the lane that
-                 # owns that file. If that confinement is ever removed, reopen THIS
-                 # decision rather than assuming the flag covers it.
+                 # NOT admin_only, though it names a folder this process DELETES
+                 # from when comfy_delete_outputs is on (comfy_client.py, the
+                 # unlink() calls under _comfy_output_root). That delete-escape is
+                 # held by path confinement at the unlink site, not by an owner
+                 # flag here.
                  group="Media", owner="image"),
     SettingField("comfy_delete_outputs", Widget.TOGGLE,
                  "Remove ComfyUI's copy after generating",
@@ -993,19 +889,17 @@ CORE_FIELDS: list = [
                  "Rewrite a slow float32 Flux GGUF dequant to fp16/bf16 on submit. "
                  "float32 is the usual cause of very slow gen on smaller cards.",
                  group="Media", owner="image"),
-    # Removed, kept as the WHY it can appear to do nothing: the flag is passed by
-    # appending --disable-auto-launch to the launcher, so it needs a launcher that
-    # FORWARDS args to main.py. The stock run_*.bat and a plain `python main.py`
-    # do; a launcher that drops its args simply ignores the setting.
+    # The flag is passed by appending --disable-auto-launch to the launcher, so
+    # it needs a launcher that FORWARDS args to main.py. The stock run_*.bat and
+    # a plain `python main.py` do; a launcher that drops its args ignores the
+    # setting.
     SettingField("comfy_disable_auto_launch", Widget.TOGGLE,
                  "Suppress ComfyUI's web page on launch",
                  "When localm starts ComfyUI for you, keep it headless instead of "
                  "letting it open its own browser tab. Off by default.",
                  group="Media", owner="image"),
-    # Removed, kept because it is the mechanism and the reassurance, and a user
-    # deciding whether to enable a "patch" deserves both on the record: this is a
-    # reactive fix for ComfyUI core regression Comfy-Org/ComfyUI #12116, which
-    # crashes native ACE-Step audio with "'function' object has no attribute
+    # Reactive fix for an upstream ComfyUI core regression that crashes native
+    # ACE-Step audio with "'function' object has no attribute
     # '__func__'". When on, a ComfyUI that localm STARTS gets an in-memory
     # compatibility patch via a PYTHONPATH env var - localm writes NOTHING into
     # your ComfyUI install and never patches a ComfyUI it did not start. The patch
@@ -1016,23 +910,16 @@ CORE_FIELDS: list = [
                  "by default. Patches only a ComfyUI that localm starts, in memory "
                  "- nothing is written into your install.",
                  group="Media", owner="image"),
-    # Removed, kept as the compatibility rule and the honest limit: per-component
-    # placement needs upstream ComfyUI 2026-05-25 or newer - localm's own managed
-    # ComfyUI has it, and an older ComfyUI of your own declines cleanly and says
-    # why. It does NOT split one model across cards (no ComfyUI feature does).
-    # Still UNPROVEN on real multi-GPU hardware, which is why it ships off; with
-    # it off, or on a single-GPU box, media generation is unchanged.
+    # Per-component placement needs a ComfyUI that offers the multigpu
+    # Select*Device nodes - localm's own managed ComfyUI has them, and an older
+    # ComfyUI of your own declines cleanly and says why. It does NOT split one
+    # model across cards (no ComfyUI feature does). Off by default; with it off,
+    # or on a single-GPU box, media generation is unchanged.
     SettingField("comfy_gpu_placement", Widget.TOGGLE,
                  "Split media across GPUs (experimental)",
-                 # "Single-GPU setups are unaffected" is four words and it is
-                 # load-bearing, not padding: this toggle is visible to EVERY user,
-                 # and most have one card. Without it the reader has to infer from
-                 # "with two or more GPUs" that the setting does nothing for them,
-                 # which is exactly the inference a settings description exists to
-                 # save them. tests/test_media_placement.py asserts both halves -
-                 # that placement is not promised everywhere, AND that single-GPU
-                 # users are still told it does not apply - and the second half went
-                 # red when a verbosity trim dropped this clause.
+                 # The help must keep BOTH halves: that placement is not promised
+                 # everywhere, and that single-GPU setups are unaffected. See
+                 # test_placement_help_still_states_the_two_gpu_precondition.
                  "EXPERIMENTAL, off by default. With two or more GPUs, put the text "
                  "encoder and VAE on a second card, freeing room for the diffusion "
                  "model. Single-GPU setups are unaffected. Needs a recent ComfyUI.",
@@ -1047,10 +934,9 @@ CORE_FIELDS: list = [
                  "always = always unload chat; never = keep chat hot.",
                  group="Media", owner="image",
                  options=["auto", "always", "never"]),
-    # Removed, kept as the two reassurances that make either choice safe: 'own' is
-    # INERT until you actually run `localm comfy setup`, so leaving it there costs
-    # nothing; and your own ComfyUI is never modified either way, with neither
-    # install's settings lost by switching back and forth.
+    # 'own' is INERT until `localm comfy setup` has been run. The user's own
+    # ComfyUI is never modified either way, and neither install's settings are
+    # lost by switching back and forth.
     SettingField("comfy_target", Widget.SELECT, "ComfyUI to use",
                  "own = localm's own managed ComfyUI, installed under the localm "
                  "data folder by 'localm comfy setup'. user = always your own "
@@ -1059,11 +945,9 @@ CORE_FIELDS: list = [
                  applies=Applies.RESTART),
     # The GLOBAL fallback behind the per-plugin "Model weight dtype" Media
     # field (MEDIA_PLUGIN_FIELDS "float_type"): the music/video backends read
-    # the plugin block's value, else this key. It existed only as that
-    # documented read until 2026-07-22 - absent from DEFAULT_CONFIG and this
-    # schema, so the validated PATCH/CLI paths REJECTED it and the fallback
-    # was hand-edit-only. Options must stay identical to the per-plugin
-    # field's (pinned by a test). Not rendered anywhere itself: like every
+    # the plugin block's value, else this key. Options must stay identical to
+    # the per-plugin field's (pinned by a test). Not rendered anywhere itself:
+    # like every
     # per-plugin-mapped comfy_* global, the GUI edits the per-plugin values
     # (schema_json's media_per_plugin annotation routes it away from the
     # Media section's shared box).
@@ -1074,11 +958,10 @@ CORE_FIELDS: list = [
                  options=["default", "fp16", "bf16", "fp32", "fp8_e4m3fn",
                           "fp8_e5m2"]),
     # ---- Network (web plugin) ----
-    # Removed, kept because it is the SHARP EDGE of "ask" and a user choosing it
-    # is entitled to know: only a BROWSER-initiated request is prompted. A
-    # non-browser API or MCP client holding the web scope is NOT prompted and its
-    # requests proceed. The private-address SSRF guard and the domain lists apply
-    # in every mode, "off" included.
+    # "ask" prompts only a BROWSER-initiated request. A non-browser API or MCP
+    # client holding the web scope is NOT prompted and its requests proceed. The
+    # private-address SSRF guard and the domain lists apply in every mode, "off"
+    # included.
     SettingField("net_mode", Widget.SELECT, "Network access",
                  "Model-initiated web access: off = every request fails; ask = the "
                  "GUI prompts first; allow = no prompt. The SSRF guard and the "
@@ -1088,17 +971,12 @@ CORE_FIELDS: list = [
                  "Domains the model may reach. Empty = any. e.g. example.com "
                  "(also covers *.example.com).",
                  group="Network", owner="web"),
-    # REC-MEDIA-CMD sweep: net_deny is the SUPPRESSIVE half of the domain policy
-    # and is stored verbatim, so a non-owner can CLEAR it (validate_update
-    # accepts {"net_deny": []}) and silently un-block every host the owner
-    # blocked. That is the same trust-widening class as net_allow_private, which
-    # is already admin_only. Deliberately NOT symmetric with net_allow, which
-    # stays non-admin (pinned by test_net_allow_private_is_admin_only; cited by
-    # NAME, not line, because a line reference in a comment goes stale silently
-    # and this one already did): net_allow only names
-    # PUBLIC hosts and _check_public_address() still constrains it, so it is the
-    # fine-grained knob a scoped key legitimately manages. Removing a denial is
-    # not the same act as adding a permission.
+    # admin_only: net_deny is the SUPPRESSIVE half of the domain policy and is
+    # stored verbatim, so without the gate a non-owner could CLEAR it
+    # (validate_update accepts {"net_deny": []}) and un-block every host the
+    # owner blocked. NOT symmetric with net_allow, which stays non-admin (pinned
+    # by test_net_allow_private_is_admin_only): net_allow only names PUBLIC
+    # hosts and _check_public_address() still constrains it.
     SettingField("net_deny", Widget.LIST, "Denied domains",
                  "Domains always refused, even when listed in Allowed domains "
                  "(deny wins). Empty = none.",
@@ -1113,10 +991,10 @@ CORE_FIELDS: list = [
                  # be able to set it (else it could reach loopback/metadata via any
                  # model-initiated fetch). See routes/config.py admin_only gate.
                  group="Network", owner="web", admin_only=True),
-    # REC-MEDIA-CMD sweep: names WHERE every web search is sent, so a non-owner
-    # can re-point the search channel at a host it controls and receive the
-    # owner's queries - the same "where does data go" boundary that already makes
-    # bugreport_upload_url and update_url admin_only.
+    # admin_only: this names WHERE every web search is sent, so without the gate
+    # a non-owner could re-point the search channel at a host it controls and
+    # receive the owner's queries - the same "where does data go" boundary that
+    # makes bugreport_upload_url and update_url admin_only.
     SettingField("net_search_url", Widget.TEXT, "Search backend URL",
                  "A SearXNG JSON search endpoint for web search. Blank uses "
                  "DuckDuckGo (no key needed).",
@@ -1126,30 +1004,20 @@ CORE_FIELDS: list = [
     # net_search_url is - it decides whether rendering a reply causes an outbound
     # request at all, which is a "where does data go" boundary, and a non-owner
     # config:write key must not be able to switch it on.
-    # THE THREAT MODEL LIVES HERE, NOT IN THE HELP STRING (gui-design rule 9:
-    # rationale and threat models belong in a comment beside the field, because
-    # "a control's help is read while deciding; a paragraph is not read at all").
-    # It was a 488-character warning, which is precisely the shape that rule
-    # names as protecting nobody.
+    # A remote image a model links is an exfiltration channel: the ADDRESS
+    # ITSELF carries the data, and the fetch happens the moment the reply
+    # renders.
     #
-    # The trade, in full: a remote image a model links is an exfiltration
-    # channel. The ADDRESS ITSELF carries the data, and the fetch happens the
-    # moment the reply renders. "on" does NOT close that channel - it only moves
-    # the request from the user's browser to this server, so the remote site
-    # never learns their IP, their browser, or which page they were on, and the
-    # fetch obeys the same SSRF guard and allow/deny domain lists as every other
-    # outbound request localm makes. That is why it ships OFF: the privacy win
-    # is real but partial, and the user should choose it knowingly.
+    # "on" does not close that channel. It moves the request from the user's
+    # browser to this server, so the remote site never learns their IP, their
+    # browser, or which page they were on, and the fetch obeys the same SSRF
+    # guard and allow/deny domain lists as every other outbound request localm
+    # makes. It ships OFF.
     #
-    # "ask" is the state that closes the channel for an ARBITRARY host: the
-    # route refuses with 428 until the request carries the reader's consent for
-    # that ORIGIN, so no fetch happens for a host they have not seen. Per-origin
-    # rather than per-image because the payload is IN the URL, so one decision
-    # per image is one mis-click chance per exfiltration attempt.
-    #
-    # THREE STATES OF ONE SETTING, not a second setting beside it: two
-    # independent toggles over one behaviour is how a user ends up in a
-    # combination neither of them describes.
+    # "ask" closes the channel for an ARBITRARY host: the route refuses with 428
+    # until the request carries the reader's consent for that ORIGIN, so no
+    # fetch happens for a host they have not seen. Consent is per-ORIGIN, not
+    # per-image, since the payload is in the URL.
     SettingField("gui_proxy_remote_images", Widget.SELECT,
                  "Show remote images in replies (fetched by this machine)",
                  "Off by default. 'on' loads them; 'ask' checks with you once "
@@ -1157,10 +1025,10 @@ CORE_FIELDS: list = [
                  "fetches the image, so the site never learns your IP or "
                  "browser.",
                  # Spelled out rather than imported from config: every
-                 # localm.config import in this module is deliberately LAZY
-                 # (inside a function), because importing config runs its
-                 # data-directory detection, and a module-level import here
-                 # would drag that into merely importing the schema.
+                 # localm.config import in this module is LAZY (inside a
+                 # function), because importing config runs its data-directory
+                 # detection, and a module-level import here would drag that into
+                 # merely importing the schema.
                  # test_the_modes_match_config_s_own_constants pins these two
                  # to config.REMOTE_IMAGE_MODES / REMOTE_IMAGE_LEGACY_BOOL so
                  # the copy cannot drift.
@@ -1341,9 +1209,9 @@ def _validate_one(key: str, val, field: "SettingField", default):
             # as a JSON int (GUI) or a CLI string (`localm config main_gpu_index
             # 1`); route it through the shared _to_number helper so config.json
             # stores a real int and this field inherits the SAME coercion guards
-            # as every other number (bool/NaN/inf/overflow rejection). A parallel
-            # hand-rolled int(val) here previously drifted from _to_number and
-            # leaked an uncaught OverflowError on inf (int(float("inf"))).
+            # as every other number (bool/NaN/inf/overflow rejection). A separate
+            # hand-rolled int(val) here would leak an uncaught OverflowError on
+            # inf (int(float("inf"))).
             return _to_number(key, val, want_int=True, lo=field.min, hi=field.max)
         if key == "gpu_split_indices":
             # A HIDDEN list-of-ints field (the checkbox row renders it, not a
@@ -1382,9 +1250,8 @@ def _validate_one(key: str, val, field: "SettingField", default):
             return out
         if key == "max_resident_models":
             # A HIDDEN nullable INT (see its schema comment). Blank clears the
-            # cap back to "no cap" - a cap you could set but never un-set from
-            # the CLI would be a trap - so "" is accepted here rather than
-            # falling into _to_number, where int("") is a hard error.
+            # cap back to "no cap", so "" is accepted here rather than falling
+            # into _to_number, where int("") is a hard error.
             if isinstance(val, str) and not val.strip():
                 return None
             return _to_number(key, val, want_int=True, lo=field.min, hi=field.max)
@@ -1449,8 +1316,8 @@ def _validate_one(key: str, val, field: "SettingField", default):
         # Gate on what actually SANITIZES to a usable label - not str.isalnum(),
         # which is Unicode-aware and would let a non-ASCII name (e.g. Greek/CJK)
         # pass the guard and then silently strip to the "localm" default. A name
-        # that reduces to nothing is a clear error, not a silent fall back to the
-        # default (which would hide the typo).
+        # that reduces to nothing raises here rather than falling back to the
+        # default.
         from localm.netname import normalize_label
         s = "" if val is None else str(val).strip()
         if not s:
@@ -1544,12 +1411,11 @@ def engine_managed_keys() -> set:
                                need not hold.
 
     Without this gate the generic route outranks the specific one: a non-owner
-    config:write key could write the same state and skip both the value check and
-    the stronger scope (X8, dev-notes/review-drain-merges-2026-07-22.md).
+    config:write key could write the same state and skip both the value check
+    and the stronger scope.
 
-    Unlike admin_only_keys these are WRITE-gated only - the values stay readable,
-    because the finding is an escalation on write and nothing reads them off
-    GET /v1/config anyway. Keep this derived from the flag, not a literal set."""
+    Unlike admin_only_keys these are WRITE-gated only - the values stay
+    readable. Keep this derived from the flag, not a literal set."""
     return {f.key for f in CORE_FIELDS if f.engine_managed}
 
 
@@ -1570,12 +1436,11 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
     base = DEFAULT_CONFIG if values is None else values
     # The GUI's Media section skips group="Media" fields in the flat form and
     # shows per-plugin-mapped globals ONLY inside the per-plugin boxes, so it
-    # must be able to tell which those are FROM THE SCHEMA - a client-side
-    # name allowlist is exactly how three Media fields (comfy_launch_timeout,
-    # comfy_disable_auto_launch, comfy_func_shim) ended up rendered nowhere
-    # (2026-07-22 settings-exposure audit). MEDIA_PLUGIN_FIELDS is the single
-    # source of truth; every OTHER Media field renders in the section's
-    # shared box by default, so a future field cannot silently vanish.
+    # must be able to tell which those are FROM THE SCHEMA rather than from a
+    # client-side name allowlist, which renders any field missing from it
+    # nowhere. MEDIA_PLUGIN_FIELDS is the single source of truth; every OTHER
+    # Media field renders in the section's shared box by default, so a future
+    # field cannot silently vanish.
     media_mapped = {m.global_key for m in MEDIA_PLUGIN_FIELDS}
     out = []
     for f in CORE_FIELDS:
@@ -1592,8 +1457,7 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
         # "the user set it to this exact number". Always sourced from
         # DEFAULT_CONFIG regardless of *values*, so the GUI can grey a field that
         # still matches what shipped rather than rendering every value - default
-        # or override alike - as solid, indistinguishable text (NEW-DEFAULT-VALUE-
-        # PLACEHOLDER).
+        # or override alike - as solid, indistinguishable text.
         if not f.secret and f.key in DEFAULT_CONFIG:
             d["shipped_default"] = DEFAULT_CONFIG[f.key]
         if f.key == "binary_dir":
@@ -1637,23 +1501,23 @@ class MediaField:
 
 # Order = display order within each plugin subsection.
 MEDIA_PLUGIN_FIELDS: list = [
-    # REC-MEDIA-CMD: the per-plugin workdir WINS over the global comfy_workdir
-    # (scan.py:51-58 returns the per-plugin value first; image/backend.py:58 and
-    # its music/video twins pass it into ensure_comfy()), so gating only
-    # the CORE field would leave this as the live surface. It reaches execution
-    # the same way: a blank launch_cmd makes the launcher AUTO-DISCOVERED inside
-    # this folder (comfy_client.py:1125) and run via Popen. admin_only here hides
-    # the resolved value; the WRITE gate is set_media_config in
-    # routes/config.py, which now covers workdir alongside launch_cmd/api_url.
+    # The per-plugin workdir WINS over the global comfy_workdir (scan.py returns
+    # the per-plugin value first; image/backend.py and its music/video twins
+    # pass it into ensure_comfy()), so gating only the CORE field would leave
+    # this as the live surface. It reaches execution the same way: a blank
+    # launch_cmd makes the launcher AUTO-DISCOVERED inside this folder
+    # (comfy_client.discover_launch_cmd) and run via Popen. admin_only here
+    # hides the resolved value; the WRITE gate is set_media_config in
+    # routes/config.py, which covers workdir alongside launch_cmd/api_url.
     MediaField("workdir", ("comfy", "workdir"), "comfy_workdir", Widget.FOLDER,
                "ComfyUI folder",
                "This plugin's ComfyUI install folder. Blank uses the shared default.",
                admin_only=True),
-    # REC-MEDIA-CMD: launch_cmd is a shell command and api_url is a render
-    # target, so both widen a trust boundary the same way the tts library/
-    # wasm_paths script-URL fields do - admin_only=True hides their RESOLVED
-    # value from a non-owner config:read caller (see media_schema_json) on top
-    # of the existing write-side owner gate in set_media_config.
+    # launch_cmd is a shell command and api_url is a render target, so both
+    # widen a trust boundary the same way the tts library/wasm_paths script-URL
+    # fields do. admin_only=True hides their RESOLVED value from a non-owner
+    # config:read caller (see media_schema_json), on top of the write-side owner
+    # gate in set_media_config.
     MediaField("launch_cmd", ("comfy", "launch_cmd"), "comfy_launch_cmd", Widget.TEXT,
                "ComfyUI launch command",
                "Launcher that starts ComfyUI for this plugin. Blank auto-detects one "
@@ -1665,8 +1529,8 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
                "Only needed if 'Remove ComfyUI's copy' is on; blank derives it."),
-    # R14: dropdowns before checkboxes - the swap_policy SELECT sits ahead of the
-    # toggle fields so all dropdowns render before all checkboxes in each subsection.
+    # The swap_policy SELECT sits ahead of the toggle fields so all dropdowns
+    # render before all checkboxes in each subsection.
     MediaField("swap_policy", ("model_swap_policy",), "model_swap_policy",
                Widget.SELECT, "Media VRAM swap",
                "auto = keep chat if it fits; always = unload chat; never = keep chat hot.",
@@ -1712,8 +1576,8 @@ def media_fields_for(name: str) -> list:
 def media_admin_only_fields() -> set:
     """Field keys (across all media plugins) flagged owner-only (today:
     launch_cmd, api_url). A non-owner config:write key must not set them
-    (set_media_config's REC-MEDIA-CMD gate) and must not see their resolved
-    value either (media_schema_json). The single source of truth for both."""
+    (set_media_config's owner gate) and must not see their resolved value
+    either (media_schema_json). The single source of truth for both."""
     return {f.key for f in MEDIA_PLUGIN_FIELDS if f.admin_only}
 
 
@@ -1784,11 +1648,10 @@ def _coerce_media_value(f: "MediaField", val):
 def _is_http_url(value: str) -> bool:
     """True if *value* is a well-formed absolute http(s) URL with a host.
 
-    Deliberately shape-only (scheme in http/https + a non-empty host): a
-    scheme-less or hostless value never works as a ComfyUI endpoint anyway
-    (urllib.request.urlopen needs a scheme), so rejecting it loses no working
-    config. SSRF / link-local screening is NOT done here - that stays with
-    sanitize_comfy_url at request time (do not duplicate the SSRF policy)."""
+    Shape-only: scheme in http/https plus a non-empty host. A scheme-less or
+    hostless value never works as a ComfyUI endpoint (urllib.request.urlopen
+    needs a scheme). SSRF / link-local screening is NOT done here - that stays
+    with sanitize_comfy_url at request time."""
     import urllib.parse
     try:
         parsed = urllib.parse.urlparse(value)
@@ -1814,11 +1677,10 @@ def validate_media_block(name: str, updates: dict) -> dict:
         if f is None:
             raise ValueError(f"unknown media field for {name!r}: {key!r}")
         coerced = _coerce_media_value(f, val)
-        # api_url shape check (REC-MEDIA-CMD): reject a malformed URL at SET time
-        # with a clear error, instead of storing it and letting sanitize_comfy_url
-        # silently drop it back to the loopback default at READ time (AGENTS.md
-        # rule 5 - surface a bad input, do not hide it). launch_cmd is intentionally
-        # NOT shape-checked: it is a free-form shell command, so there is no "valid
+        # api_url shape check: a malformed URL is rejected at SET time with a
+        # clear error, rather than stored and dropped back to the loopback
+        # default by sanitize_comfy_url at READ time. launch_cmd is NOT
+        # shape-checked: it is a free-form shell command, so there is no "valid
         # path" invariant to assert without rejecting real commands.
         if f.key == "api_url" and coerced is not None and not _is_http_url(coerced):
             raise ValueError(
@@ -1836,11 +1698,10 @@ def validate_media_block(name: str, updates: dict) -> dict:
 #                                                                              #
 #  Same idea as the media blocks above, one plugin instead of three: the       #
 #  shipped defaults live in the plugin's tracked tts.example.json template and #
-#  the user's overrides win over them (see the plugin's plug.py). Until the    #
-#  2026-07-22 settings-exposure audit these keys had NO write surface at all - #
-#  the GUI voice picker wrote browser localStorage, a different store, so      #
-#  picking a voice never moved the server-side one. GET/POST /v1/tts/config    #
-#  (localm/inference/routes/config.py) is that write surface.                  #
+#  the user's overrides win over them (see the plugin's plug.py). GET/POST     #
+#  /v1/tts/config (localm/inference/routes/config.py) is the write surface for #
+#  these keys; the GUI voice picker's browser localStorage is a separate store #
+#  and does not reach them.                                                    #
 #                                                                              #
 #  The block is FLAT (no nesting), so a validated update is merged key by key. #
 # --------------------------------------------------------------------------- #
@@ -1854,8 +1715,8 @@ TTS_PLUGIN = "tts"
 TTS_ENGINES = ("kokoro",)
 TTS_DEVICES = ("auto", "webgpu", "wasm")
 # Only the dtypes the template documents as tried: fp32 is the clean default,
-# q8/fp16 are smaller/faster but lower quality (q8 produced audible cracks on
-# the WASM path - see the template's _dtype_note and tts-util.js R06).
+# q8/fp16 are smaller/faster but lower quality (q8 produces audible cracks on
+# the WASM path - see the template's _dtype_note).
 TTS_DTYPES = ("auto", "fp32", "fp16", "q8")
 TTS_SPEED_MIN, TTS_SPEED_MAX = 0.5, 2.0
 
@@ -1903,11 +1764,11 @@ TTS_FIELDS: list = [
     TtsField("engine", Widget.SELECT, "Engine",
              "Speech engine the plugin uses.",
              options=list(TTS_ENGINES), gui=False),
-    # SEC: these two become a SCRIPT url and a WASM base url that every browser
+    # These two become a SCRIPT url and a WASM base url that every browser
     # client loads from, so setting them is code injection into every user's
-    # page. Admin-only (mirrors REC-MEDIA-CMD for launch_cmd/api_url), confined
-    # to the plugin's own asset folder by the validator, and not rendered in the
-    # GUI - they are an install-level escape hatch, not a user setting.
+    # page. admin_only, confined to the plugin's own asset folder by the
+    # validator, and not rendered in the GUI - an install-level escape hatch,
+    # not a user setting.
     TtsField("library", Widget.TEXT, "Kokoro library path",
              "Path to the vendored kokoro-js bundle, relative to the tts "
              "plugin's static folder.",
@@ -1995,8 +1856,8 @@ def _tts_relative_asset(key: str, value: str) -> str:
 
     The browser resolves these against /plugins/tts/, so an absolute, remote, or
     traversing value would make every client load code from somewhere else. The
-    existence check is deliberate too: a typo here silently breaks text-to-speech
-    for everyone, and a 400 at set time beats a mystery failure later.
+    target must also EXIST, so a typo raises here instead of silently breaking
+    text-to-speech for every client later.
     """
     if ":" in value:
         raise ValueError(
@@ -2214,25 +2075,22 @@ def validate_plugin_settings_update(fields, updates: dict) -> dict:
 #                                             it exists ONLY inside a process  #
 #                                             that has LOADED that plugin      #
 #                                                                              #
-#  A CLI process has not loaded any plugin, and deliberately never does: the   #
-#  app-free set_enabled_state / set_installed_state / set_installed_from_dir   #
-#  exist precisely so CLI plugin management never runs a plugin's register()   #
-#  (see their docstrings in plugins/engine.py, and every command in            #
-#  cli/plugins.py uses them). Loading one just to read its field list would    #
-#  not be a free probe either: PluginManager._load calls _maybe_fire_first_use,#
-#  which invokes the on_first_use lifecycle hook and writes config for it - so #
-#  a READ would have a side effect. A no-app load also fails outright for any  #
-#  plugin that mounts routes (app is None), so it would work for some plugins  #
-#  and silently not others.                                                    #
+#  A CLI process never loads a plugin: the app-free set_enabled_state /        #
+#  set_installed_state / set_installed_from_dir exist so CLI plugin management #
+#  never runs a plugin's register() (see their docstrings in                   #
+#  plugins/engine.py, and every command in cli/plugins.py uses them). Loading  #
+#  one to read its field list is not a free probe either: PluginManager._load  #
+#  calls _maybe_fire_first_use, which invokes the on_first_use lifecycle hook  #
+#  and writes config for it, so a READ would have a side effect. A no-app load #
+#  also fails outright for any plugin that mounts routes (app is None).        #
 #                                                                              #
-#  So the CLI answers the static two itself, offline, exactly the way          #
-#  `localm config` already answers the core schema - and for a runtime-        #
-#  declared block it asks a RUNNING localm over the existing routes.           #
-#  plugin_config_kind() is the discriminator, and its "runtime" answer is a    #
-#  real answer the caller must report as such: "this plugin has to be running  #
-#  for its settings to be listed" is a different state from "this plugin has   #
-#  no settings", and collapsing the two would report an unasked question as an #
-#  empty result (AGENTS.md rule 5).                                            #
+#  So the CLI answers the static two itself, offline, the way `localm config`  #
+#  answers the core schema - and for a runtime-declared block it asks a        #
+#  RUNNING localm over the existing routes. plugin_config_kind() is the        #
+#  discriminator, and its "runtime" answer is a real answer the caller must    #
+#  report as such: "this plugin has to be running for its settings to be       #
+#  listed" is a different state from "this plugin has no settings", and the    #
+#  two are never collapsed into an empty result.                               #
 # --------------------------------------------------------------------------- #
 
 #: The two per-plugin media keys that are NOT MediaFields. Both live in the same
@@ -2242,10 +2100,9 @@ def validate_plugin_settings_update(fields, updates: dict) -> dict:
 #: listing and DISPATCHED to those owners on write rather than folded into
 #: validate_media_block.
 #:
-#: Deliberately NOT added to MEDIA_PLUGIN_FIELDS: that list is what the GUI's
-#: media settings section renders, and `workflow` already has a richer GUI
-#: affordance of its own (the workflow manager), so adding it there would
-#: duplicate an existing control rather than add a missing one.
+#: NOT in MEDIA_PLUGIN_FIELDS: that list is what the GUI's media settings
+#: section renders, and `workflow` already has its own GUI affordance (the
+#: workflow manager).
 MEDIA_EXTRA_KEYS = ("workflow", "use_config_from")
 
 

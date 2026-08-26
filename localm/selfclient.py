@@ -39,11 +39,10 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None,
       ``"http"``         - some other HTTP status; payload is the code
       ``"unreachable"``  - could not connect; payload is a short reason
 
-    Each non-ok state is distinct, so a caller can say WHICH one happened. An
-    empty list is a real answer and is only ever returned under ``"ok"``.
+    Each non-ok state is distinct. An empty list is a real answer and is only
+    ever returned under ``"ok"``.
 
-    Shared by ``localm status`` and the MCP activity tool, which must answer
-    this question identically.
+    Shared by ``localm status`` and the MCP activity tool.
 
     *instance_token*: a genuinely OPEN (keyless) server's open-mode middleware
     needs the caller to prove it is a local process, and no API key exists to
@@ -92,27 +91,13 @@ def read_model_file_hold(scheme: str, port, model: str,
       ``"http"``         - some other HTTP status; payload is the code
       ``"unreachable"``  - could not connect; payload is a short reason
 
-    THE STATES ARE KEPT APART BECAUSE ONLY ONE OF THEM IS AN ANSWER. A caller
-    about to delete a model file needs "that server says nothing holds it" and
-    "I could not ask that server" to reach it as different facts, because they
-    lead to opposite actions: proceed, or refuse. Folding any non-ok state into
-    ``held: False`` would delete a live model's file on the evidence of never
-    having found out - the same collapse :func:`read_activity` exists to
-    prevent for the activity question, and the consequence here is a destroyed
-    download rather than a wrong status line.
+    Only ``"ok"`` is an answer; no other state is folded into
+    ``held: False``. ``"absent"`` (404) means this instance serves a different
+    data home, so it does not carry THIS file at all.
 
-    ``"absent"`` (404) is deliberately NOT folded into ``"ok"/held: False``
-    either. It means this instance serves a different data home, so it is
-    genuinely not a holder of THIS file - but that is a conclusion about scope,
-    not about residency, and a caller that wants to report accurately why it
-    refused (or did not) has to be able to tell them apart.
-
-    Deliberately mirrors :func:`read_activity`'s signature and state machine
-    rather than inventing a second shape: both are "ask each discovered
-    instance one question over the loopback", and the parameters that make that
-    work (the per-instance attach token for a keyless server, the bound host so
-    an IPv6-bound instance is dialled where it actually listens) are the same
-    in both cases and wrong to re-derive.
+    Takes the same parameters as :func:`read_activity`: the per-instance attach
+    token for a keyless server, and the bound host so an IPv6-bound instance is
+    dialled where it actually listens.
     """
     from urllib.parse import quote
 
@@ -120,9 +105,8 @@ def read_model_file_hold(scheme: str, port, model: str,
     from localm.auth import resolve_bearer_headers
 
     host = url_host(self_connect_host(bind_host))
-    # quote with no safe characters: a registry name reaches here from a tool
-    # argument, and a "/" in it would otherwise re-point the request at a
-    # different route.
+    # Quote with no safe characters: a "/" in a registry name would otherwise
+    # re-point the request at a different route.
     url = (f"{scheme}://{host}:{port}"
            f"/v1/models/{quote(model, safe='')}/hold")
     headers = resolve_bearer_headers(instance_token)
@@ -137,9 +121,8 @@ def read_model_file_hold(scheme: str, port, model: str,
         # Ambiguous by status alone: an older server has no such ROUTE, a
         # current one answers 404 for a model IT does not carry. FastAPI's
         # unmatched-route body is {"detail": "Not Found"}; the route's own is
-        # "Model not registered: <name>". Read the body rather than guessing,
-        # and when it cannot be read, take the CAUTIOUS branch (unsupported,
-        # which refuses) rather than the permissive one.
+        # "Model not registered: <name>". An unreadable body falls to
+        # "unsupported", which refuses.
         try:
             detail = str((r.json() or {}).get("detail", ""))
         except ValueError:
@@ -152,12 +135,11 @@ def read_model_file_hold(scheme: str, port, model: str,
     try:
         body = r.json()
     except ValueError:
-        # A 200 whose body is not JSON is not a "nothing holds it"; it means
-        # something other than localm answered, or answered wrongly.
+        # A 200 whose body is not JSON means something other than localm
+        # answered, or answered wrongly.
         return "http", r.status_code
     if not isinstance(body, dict) or not isinstance(body.get("held"), bool):
-        # Same rule one level in: a well-formed HTTP 200 carrying a shape this
-        # client cannot read is not evidence that the file is free.
+        # A 200 whose JSON carries no boolean "held" is reported as "http".
         return "http", r.status_code
     return "ok", body
 
@@ -168,34 +150,24 @@ def remote_hold_reason(model: str) -> Optional[str]:
     instance POSITIVELY RULES ITSELF OUT; otherwise a ready-to-print reason
     naming which instance could not be ruled out (or could not be asked).
 
-    Exists for a caller that shares no memory with any server that might be
-    running: ``localm rm`` and the MCP ``remove_model`` tool both delete a
-    registry entry's file from a fresh, one-shot process, so neither can
-    consult an in-process engine map the way the HTTP server's own remove
-    route does (``loaded_engine_holding_model_file``). Asking each discovered
-    instance over :func:`read_model_file_hold` is the only way either caller
-    can find out.
+    Used by ``localm rm`` and the MCP ``remove_model`` tool, which delete a
+    registry entry's file from a fresh, one-shot process and so have no
+    in-process engine map to consult. Each discovered instance is asked over
+    :func:`read_model_file_hold`.
 
-    EVERY OUTCOME THAT IS NOT AN ANSWER IS A REFUSAL, and the message says
-    which one it was. "That server reports nothing holds it" and "I could not
-    reach that server" are opposite conclusions, and collapsing them would
-    delete a live model's file on the strength of never having found out. A
-    refused delete costs one command and names the server to go and check; a
-    deleted model file is gone.
+    Every outcome that is not an answer is a refusal, and the message says
+    which one it was.
 
-    No server running at all is a certain all-clear (``instances.snapshot``
-    yields nothing to loop over, so this returns None immediately), never a
-    refusal - a tool that blocked every deletion whenever nothing happened to
-    be running would be useless.
+    With no server running at all, ``instances.snapshot`` yields nothing to
+    loop over and this returns None immediately.
     """
     from localm import instances
     from localm.bindhost import self_connect_host, url_host
     from localm.config import home_dir
 
-    # include_token=True: this ASKS each instance over HTTP (an internal,
-    # non-display use), so it needs the attach token a genuinely open
-    # (keyless) instance's middleware requires. Never for anything a human
-    # reads.
+    # include_token=True: a genuinely open (keyless) instance's middleware
+    # requires the attach token. The token is only sent over HTTP, never
+    # displayed.
     rows = instances.snapshot(home_dir(), include_token=True)
     for e in rows:
         scheme = e.get("scheme", "http")
@@ -203,10 +175,9 @@ def remote_hold_reason(model: str) -> Optional[str]:
                  + url_host(self_connect_host(e.get("host")))
                  + ":" + str(e.get("port")))
         if not e.get("alive"):
-            # A failed /whoami is NOT proof the process is gone: snapshot()
-            # reaps entries whose pid has died before this runs, and a listed
-            # instance that did not answer is therefore a live process of
-            # unknown state, and unknown refuses.
+            # snapshot() has already reaped entries whose pid has died, so a
+            # listed instance that did not answer a /whoami is a live process
+            # of unknown state, and unknown refuses.
             return (f"a localm server at {where} is registered but did not "
                     f"answer an identity check, so whether it has this "
                     f"model loaded could not be established")
@@ -252,8 +223,7 @@ def resolve_self_url(app) -> Optional[str]:
     ``instances.advertise()`` publishes (``instance_scheme`` /
     ``instance_port``, both set before uvicorn accepts connections).
 
-    Returns None rather than "" when it cannot tell, so a caller can report
-    that instead of handing an empty string to self_request().
+    Returns None rather than ``""`` when it cannot tell.
     """
     url = getattr(app.state, "self_url", "") or ""
     if url:
@@ -282,7 +252,7 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     process for state-changing calls like ``/v1/models/unload``/``load``; an
     empty ``Authorization`` header 403s there. The per-instance attach token
     from the 0600 registry file is that proof. Used ONLY when no API key is
-    configured, mirroring ``read_activity``.
+    configured.
 
     Resolves the TLS verify argument via ``localm.tls.requests_verify``, so a
     loopback HTTPS self-call trusts this install's own local CA.
