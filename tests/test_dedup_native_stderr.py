@@ -121,9 +121,19 @@ def test_more_distinct_lines_than_capacity_still_emits_everything():
     with debuglog.dedup_native_stderr():
         for i in range(n):
             os.write(2, f"distinct line {i}\n".encode())
+    # Polled rather than asserted the instant the context exits - the join
+    # does not guarantee the reader has drained the pipe by then (see
+    # test_teardown_survives_a_slow_reader_thread).
+    expected = [f"distinct line {i}" for i in range(n)]
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        joined = "\n".join(debuglog.recent_activity()[before:])
+        if all(line in joined for line in expected):
+            break
+        time.sleep(0.05)
     joined = "\n".join(debuglog.recent_activity()[before:])
-    for i in range(n):
-        assert f"distinct line {i}" in joined
+    for line in expected:
+        assert line in joined, f"missing after poll (saw: {joined!r})"
 
 
 def test_fd_2_is_restored_after_exit(capfd):
