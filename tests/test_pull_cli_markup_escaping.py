@@ -56,6 +56,7 @@ resilience, not markup escaping).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -80,8 +81,18 @@ BRACKET_STYLE = "repo[bold red]xyz-name"
 # value still balances even though the payload smuggled its own tag pair
 # into the middle of the real one.
 _INJECT_STYLE = "on white"
-_INJECT_ANSI = "\x1b[47m"          # the SGR code "on white" actually produces
 _INJECT_MARKER = "PWNED-MARKER"
+# The SGR "47" (white background) code "on white" produces, matched as a
+# REGEX rather than a fixed literal: when the injected style CLOSES the
+# surrounding tag first (_tag_injection_payload), "47" renders alone
+# ("\x1b[47m"); when it merely OPENS without closing
+# (_tag_injection_payload_no_slash), Rich MERGES it with whatever style was
+# already active ("\x1b[33;47m" alongside an open [yellow], etc.) - confirmed
+# empirically both shapes occur in this file's real sites. A fixed-string
+# search for "\x1b[47m" alone misses the merged form and would silently pass
+# on genuine injection - the exact "test that cannot fail" trap this regex
+# exists to avoid.
+_INJECT_ANSI_RE = re.compile(r"\x1b\[[0-9;]*47(;[0-9]+)*m")
 
 
 def _tag_injection_payload(open_tag: str) -> str:
@@ -133,10 +144,11 @@ def _assert_injection_blocked(cap, payload: str):
     assert payload in plain, (
         f"the crafted value must render as literal text verbatim, not be "
         f"parsed as markup: {plain!r}")
-    assert _INJECT_ANSI not in styled, (
+    assert not _INJECT_ANSI_RE.search(styled), (
         f"the injected '[{_INJECT_STYLE}]' span must NEVER actually apply - "
-        f"finding its ANSI code in the styled render means real tag "
-        f"injection occurred: {styled!r}")
+        f"finding its ANSI code (standalone or merged with a surrounding "
+        f"style) in the styled render means real tag injection occurred: "
+        f"{styled!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +430,7 @@ class TestPullHfSnapshotTagInjection:
         assert plain.count(payload) == 2, (
             f"both repo_id and the exception text must survive verbatim: "
             f"{plain!r}")
-        assert _INJECT_ANSI not in styled, (
+        assert not _INJECT_ANSI_RE.search(styled), (
             f"the injected style must never actually apply: {styled!r}")
 
 
