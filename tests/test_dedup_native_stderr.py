@@ -14,6 +14,7 @@ so the call order is asserted directly instead of the hang.
 
 import logging
 import os
+import string
 import time
 
 from localm import debuglog
@@ -113,27 +114,36 @@ def test_cycle_survives_an_interleaved_changing_line():
 
 
 def test_more_distinct_lines_than_capacity_still_emits_everything():
-    """Bounded memory: pushing well past _MAX_PENDING distinct lines must
+    """Bounded memory: pushing well past _MAX_PENDING PENDING SLOTS must
     still emit every one of them (via LRU eviction), never silently drop a
-    line just because the pending set filled up."""
-    before = len(debuglog.recent_activity())
+    line just because the pending set filled up.
+
+    Labels vary by LETTER, not by embedded digit: _LineGrouper._key()
+    normalizes digit runs to a placeholder, so "distinct line 0".."31"
+    would all collapse to ONE shared template/slot and never touch the
+    _MAX_PENDING eviction path at all - this test's original form did
+    exactly that, silently testing _emit_one's variant-count threshold
+    instead of slot eviction, and would pass even with eviction broken.
+
+    Exercises _LineGrouper directly rather than going through the full
+    dedup_native_stderr() pipe/thread pipeline and the shared, capacity-
+    bounded ring buffer: on at least one CI runner, unrelated log activity
+    from other tests in the same xdist worker evicted this test's own
+    earliest entries out of that shared 400-entry buffer before the check
+    could run - a false negative about eviction inside _LineGrouper, which
+    this form cannot reproduce since nothing else can write to a local
+    list."""
+    emitted = []
     n = debuglog._LineGrouper._MAX_PENDING * 4
-    with debuglog.dedup_native_stderr():
-        for i in range(n):
-            os.write(2, f"distinct line {i}\n".encode())
-    # Polled rather than asserted the instant the context exits - the join
-    # does not guarantee the reader has drained the pipe by then (see
-    # test_teardown_survives_a_slow_reader_thread).
-    expected = [f"distinct line {i}" for i in range(n)]
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        joined = "\n".join(debuglog.recent_activity()[before:])
-        if all(line in joined for line in expected):
-            break
-        time.sleep(0.05)
-    joined = "\n".join(debuglog.recent_activity()[before:])
-    for line in expected:
-        assert line in joined, f"missing after poll (saw: {joined!r})"
+    labels = (string.ascii_lowercase + string.ascii_uppercase)[:n]
+    assert len(labels) == n, "need one distinct non-digit label per line"
+    grouper = debuglog._LineGrouper(emitted.append)
+    for label in labels:
+        grouper.feed(f"distinct line {label}")
+    grouper.flush()
+    joined = "\n".join(emitted)
+    for label in labels:
+        assert f"distinct line {label}" in joined, f"missing (saw: {emitted!r})"
 
 
 def test_fd_2_is_restored_after_exit(capfd):
