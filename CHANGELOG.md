@@ -859,6 +859,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   you to set the exact variable you had already set. It now says plainly
   that CPU encoding is being used as requested. A genuine GPU failure
   (the variable unset) still gets the original message.
+- **`localm comfy status` no longer uses "own" for two opposite things.**
+  With nothing configured, "Preferred target : own" and "Target now : your
+  own ComfyUI" read as agreeing while naming opposite targets - the first
+  means localm's managed ComfyUI, the second means a separate install you
+  run yourself. The preferred-target line now spells out the same wording
+  the second line already uses.
 
 ### Security
 - **Two more model families' role markers are now defanged in untrusted text.**
