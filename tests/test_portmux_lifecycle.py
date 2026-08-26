@@ -394,7 +394,13 @@ def test_run_server_plain_falls_back_to_uvicorn_run_on_unexpected_error(monkeypa
     monkeypatch.setattr(uvicorn_mod, "run", lambda app, **kw: fallback_calls.append(kw))
 
     portmux.run_server(_bare_app, "127.0.0.1", 8002)   # must not raise
-    assert fallback_calls == [{"host": "127.0.0.1", "port": 8002, "log_level": "warning"}]
+    assert fallback_calls == [{
+        "host": "127.0.0.1", "port": 8002, "log_level": "warning",
+        # The fallback is a real server bind, so it carries the same bounded
+        # stop as the primary path; without it a Ctrl+C on the degraded path
+        # waits for the longest open response.
+        "timeout_graceful_shutdown": portmux.GRACEFUL_SHUTDOWN_TIMEOUT,
+    }]
     assert calls[-1] == ("disarmed", None)
 
 
@@ -430,6 +436,7 @@ def test_run_server_tls_falls_back_to_uvicorn_run_on_unexpected_error(monkeypatc
                        ssl_certfile="cert.pem", ssl_keyfile="key.pem")   # must not raise
     assert fallback_calls == [{
         "host": "0.0.0.0", "port": 8443, "log_level": "warning",
+        "timeout_graceful_shutdown": portmux.GRACEFUL_SHUTDOWN_TIMEOUT,
         "ssl_certfile": "cert.pem", "ssl_keyfile": "key.pem",
     }]
     assert calls[-1] == ("disarmed", None)

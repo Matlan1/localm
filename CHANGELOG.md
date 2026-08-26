@@ -504,6 +504,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   that as a startup warning nobody had asked for. That check now runs quietly
   in the background once the app is already serving, instead of during
   startup, and it no longer shows up as a startup message either way.
+- **Ctrl+C in the server window now stops the server the same way the GUI's Stop
+  button does.** It used to print a `gguf worker process crashed` report with a
+  KeyboardInterrupt traceback, because the interrupt reaches every process
+  sharing the console and the model worker took it as a crash - an intentional
+  stop that looked like a failure. The stop now unloads the model, releases the
+  embedding model, stops any download or setup still running, and clears the
+  crash marker so the next start does not report a crash that never happened.
+  A stop no longer waits for a chat that is still generating: in-flight replies
+  get a few seconds to finish and are then ended, instead of holding the server
+  open until the longest one completes.
 - **A remote image a reply links to no longer disappears without explanation.**
   Showing remote images is off by default, and several other things can stop one
   loading: the host is not on your Allowed domains list, it is unreachable, the
