@@ -379,6 +379,30 @@ class TestStoreIntoModelsDirMarkupEscaping:
 
 
 # ------------------------------------------------------------------ #
+#  _store_loose_gguf_dir                                               #
+# ------------------------------------------------------------------ #
+
+class TestStoreLooseGgufDirMarkupEscaping:
+    def test_runtime_error_shows_bracketed_path_verbatim(self, fake_registry, tmp_path, capsys):
+        _, models_dir = fake_registry
+        # A name collision forces _store_into_models_dir to raise, whose
+        # message this function re-prints - the same RuntimeError-catch
+        # shape as add_local's and _register_with_dedup's own copy/move
+        # paths (already independently fires-controlled), exercised here
+        # for _store_loose_gguf_dir's own escape() call specifically.
+        conflict = models_dir / f"m-{BRACKET_STYLE}.gguf"
+        conflict.write_bytes(b"different content")
+        external = tmp_path / "ext" / f"m-{BRACKET_STYLE}.gguf"
+        external.parent.mkdir()
+        external.write_bytes(_GGUF_BYTES)
+        result = mm._store_loose_gguf_dir([external], "copy")
+        assert result is None
+        out = capsys.readouterr().out
+        assert f"m-{BRACKET_STYLE}.gguf" in out, (
+            f"the conflicting destination path must survive verbatim: {out!r}")
+
+
+# ------------------------------------------------------------------ #
 #  _register_with_dedup                                               #
 # ------------------------------------------------------------------ #
 
