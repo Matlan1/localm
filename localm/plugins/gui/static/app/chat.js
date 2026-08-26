@@ -916,7 +916,15 @@ export function addMessageRow(container, role, text, opts = {}) {
     // fresh streaming shell - only then does renderMarkdown show its "(no reply
     // text)" note for a body that rendered to nothing, so a live shell that is
     // briefly empty before its first token never flashes it.
-    renderMarkdown(body, text, { final: opts.final });
+    //
+    // imageScope is the ACTIVE conversation, which is the only one the chat view
+    // ever renders - a streaming shell appends to it and renderChat() rebuilds
+    // it. It scopes the reader's "load images from this site" answers, so an
+    // answer given in one conversation is not visible in another. Read here
+    // rather than threaded from the caller so a future caller cannot forget it
+    // and silently share one conversation's answers with the next.
+    renderMarkdown(body, text,
+                   { final: opts.final, imageScope: "chat:" + (chat.activeId || "") });
   }
   for (const url of opts.images || []) {
     const img = document.createElement("img");

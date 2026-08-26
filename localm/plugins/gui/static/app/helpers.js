@@ -257,6 +257,13 @@ export function scrubMarkers(text) {
  *  and going stale the moment the user toggles the setting, and would put a
  *  security decision in the browser where it cannot be enforced.
  *
+ *  THAT HOLDS FOR THE `ask` STATE TOO, which is why the prompt is driven by the
+ *  route's 428 rather than by this function reading the mode. The client never
+ *  learns what the setting says; it attempts, and the answer it gets IS the
+ *  current setting. *scope* identifies the conversation the render belongs to,
+ *  and is what keeps one conversation's answers out of another's - see
+ *  _imgOriginConsent.
+ *
  *  Runs AFTER sanitisation, and only ever REPLACES a src attribute with a
  *  same-origin URL built through encodeURIComponent - it inserts no markup, so
  *  it is not a sanitize-then-modify hazard. data:, blob: and relative/same-origin
@@ -274,7 +281,40 @@ export function scrubMarkers(text) {
 const _imgProxyCache = new Map();
 const _IMG_PROXY_CACHE_MAX = 64;
 
-/** Drop every cached proxied image and release its object URL.
+/** WHAT THE READER HAS AGREED TO, for the `ask` state of the setting.
+ *
+ *  Keyed on (scope, origin); the value is the reader's answer. The scope is the
+ *  conversation the render belongs to (renderMarkdown's `imageScope` option),
+ *  so a decision taken in one conversation is NOT VISIBLE in another - the
+ *  cross-conversation leak is unrepresentable rather than prevented by a reset
+ *  that a future seventh way of switching conversation could miss.
+ *
+ *  THE LIFETIME IS THIS MAP'S OWN: one page session. It is never written to
+ *  localStorage, sessionStorage or the server, so a reload asks again, and a
+ *  consent decision cannot outlive the context it was given in. It is also
+ *  dropped by clearImageProxyCache(), which every settings save calls.
+ *
+ *  ORIGIN, not URL, and that is the decision rather than an optimisation: the
+ *  exfiltration payload is IN the URL, so one prompt per URL would be one
+ *  mis-click chance per exfiltration attempt. An origin is also the thing a
+ *  reader can actually reason about. */
+const _imgOriginConsent = new Map();
+/** scope+origin -> the in-flight ask for it, so ten images from one host raise
+ *  ONE dialog rather than ten. */
+const _imgConsentPending = new Map();
+/** Dialogs are serialised through this: openModal drives a SINGLE #modal
+ *  element, so two overlapping asks would leave the second silently replacing
+ *  the first and the first's promise resolving off the wrong buttons. */
+let _imgConsentQueue = Promise.resolve();
+
+function _consentKey(scope, origin) {
+  // JSON rather than a delimiter: an origin cannot collide with a scope
+  // whatever either of them contains, with no separator to reason about.
+  return JSON.stringify([scope || "", origin]);
+}
+
+/** Drop every cached proxied image, release its object URL, and forget every
+ *  per-origin consent.
  *
  *  MUST be called when the remote-image setting may have changed. Without it the
  *  OFF switch does not take effect for anything already on screen: the route
@@ -282,14 +322,88 @@ const _IMG_PROXY_CACHE_MAX = 64;
  *  SESSION, including in a conversation the user has not opened yet. That is the
  *  same staleness the response's `no-store` was added to fix, and strictly worse
  *  - a session outlasts the five minutes that was judged unacceptable there.
- *  Closing the HTTP cache while leaving this one open fixed half the defect. */
+ *  Closing the HTTP cache while leaving this one open fixed half the defect.
+ *
+ *  Consent goes with it, for the same reason and on the same terms: the setting
+ *  that governs asking may just have moved, so the safe reading of a save is
+ *  that every earlier answer is stale. It costs one re-prompt, and the
+ *  alternative is deciding which key moved, which puts a security decision
+ *  behind a diff. */
 export function clearImageProxyCache() {
   for (const v of _imgProxyCache.values()) {
     if (typeof v === "string") URL.revokeObjectURL(v);
   }
   _imgProxyCache.clear();
+  _imgOriginConsent.clear();
+  _imgConsentPending.clear();
 }
 window.clearImageProxyCache = clearImageProxyCache;
+
+/** Ask the reader whether to load images from ONE origin in ONE conversation.
+ *
+ *  Resolves true/false, never rejects. Built on openModal like confirmDanger and
+ *  promptText rather than window.confirm, which is suppressed outright in some
+ *  mobile / PWA browsers (the NET-1 class): there it returns undefined with no
+ *  error, which is indistinguishable from the reader declining and would make
+ *  the `ask` state silently unusable on a phone.
+ *
+ *  Dismissing through the shared modal chrome (the x, or the backdrop) is a
+ *  DECLINE. Those handlers are not ours, so it is detected by polling for
+ *  display:none - the same pattern promptText and the missing-model modal use. */
+function askOriginConsent(origin) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
+    openModal("Load images from this site?", (body) => {
+      body.appendChild(el("p", "",
+        "A reply wants to show an image from " + origin + ". Loading it tells "
+        + "that site someone is reading this reply, and the address itself can "
+        + "carry information out. This machine makes the request, not your "
+        + "browser."));
+      body.appendChild(el("p", "",
+        "Your answer is remembered for this site in this conversation only."));
+      const row = el("div", "actions");
+      const no = el("button", "btn-secondary", "Do not load");
+      no.onclick = () => finish(false);
+      const yes = el("button", "btn-secondary", "Show images from this site");
+      yes.onclick = () => finish(true);
+      row.appendChild(no);
+      row.appendChild(yes);
+      body.appendChild(row);
+    });
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
+  });
+}
+
+/** askOriginConsent, de-duplicated per scope+origin and serialised so only one
+ *  dialog is ever open. A `true` answer is remembered in _imgOriginConsent. */
+function requestOriginConsent(scope, origin) {
+  const key = _consentKey(scope, origin);
+  if (_imgOriginConsent.has(key)) return Promise.resolve(true);
+  const inFlight = _imgConsentPending.get(key);
+  if (inFlight) return inFlight;
+  const p = _imgConsentQueue
+    .then(() => (_imgOriginConsent.has(key) ? true : askOriginConsent(origin)))
+    .catch(() => false)
+    .then((ok) => {
+      if (ok) _imgOriginConsent.set(key, true);
+      _imgConsentPending.delete(key);
+      return ok;
+    });
+  _imgConsentPending.set(key, p);
+  // The QUEUE swallows the answer: a declined ask must not stop the next one.
+  _imgConsentQueue = p.then(() => undefined, () => undefined);
+  return p;
+}
 
 function _rememberProxiedImage(href, objUrl) {
   if (_imgProxyCache.size >= _IMG_PROXY_CACHE_MAX) {
@@ -312,14 +426,85 @@ class ImageProxyRefused extends Error {
   }
 }
 
+/** The reader answered "do not load" for this origin in this conversation. Not
+ *  a failure of anything - the feature working - so it says so in its own
+ *  words rather than borrowing the route's. */
+class ImageOriginDeclined extends Error {
+  constructor(origin) {
+    super("declined: " + origin);
+    this.origin = origin;
+  }
+}
+
 /** One sentence saying why an image did not load, for the placeholder below. */
 function proxyRefusalText(e) {
+  if (e instanceof ImageOriginDeclined) {
+    return "You chose not to load images from " + e.origin + " in this chat.";
+  }
   if (e instanceof ImageProxyRefused) {
     if (e.detail) return e.detail;
     if (e.status === 403) return "This localm refused to fetch it.";
     return "This localm could not fetch it (HTTP " + e.status + ").";
   }
   return "This localm could not reach it.";
+}
+
+/** One attempt at the proxy route. *consented* adds the reader's per-origin
+ *  answer for the `ask` state; it is ignored by every other state, and it can
+ *  only ever reach what `on` would have reached anyway. */
+function _requestProxiedImage(href, consented) {
+  return fetch("/api/image-proxy?url=" + encodeURIComponent(href)
+               + (consented ? "&consent=1" : ""),
+               { headers: authHeaders() })
+    .then(async (r) => {
+      if (r.ok) return r.blob();
+      // The route answers with a REASON, and each one is different work for
+      // the user: the feature is off (and which setting turns it on), this site
+      // has not been allowed in this conversation, the host is not on their own
+      // net_allow list, the image is over the size cap, the response was not an
+      // image. Read it here, because after this it is gone.
+      let detail = "";
+      try { detail = (await r.json()).detail || ""; } catch (e) { /* no JSON body */ }
+      return Promise.reject(new ImageProxyRefused(r.status, detail));
+    });
+}
+
+/** Fetch one remote image through the proxy, asking the reader about its ORIGIN
+ *  first if the route says the setting requires it.
+ *
+ *  Resolves to a blob: URL, or to `{failed, reason, declined}` - it never
+ *  rejects, because the caller renders the reason either way.
+ *
+ *  428 means the setting is `ask` and this origin has no answer yet, and it is
+ *  raised BEFORE the route fetches anything, so nothing has reached the remote
+ *  host at the point the dialog opens. */
+function _proxyImage(href, origin, scope) {
+  const consented = _imgOriginConsent.get(_consentKey(scope, origin)) === true;
+  return _requestProxiedImage(href, consented)
+    .catch((e) => {
+      if (!(e instanceof ImageProxyRefused) || e.status !== 428) throw e;
+      return requestOriginConsent(scope, origin).then((ok) => {
+        if (!ok) throw new ImageOriginDeclined(origin);
+        return _requestProxiedImage(href, true);
+      });
+    })
+    .then((blob) => {
+      const objUrl = URL.createObjectURL(blob);
+      _rememberProxiedImage(href, objUrl);
+      return objUrl;
+    })
+    .catch((e) => {
+      const declined = e instanceof ImageOriginDeclined;
+      // Forget it so a later render may retry - EXCEPT after a decline, which
+      // is an answer rather than a failure. Retrying that would re-ask on every
+      // streamed chunk, which is the same dialog-per-token defect keying this
+      // on the URL instead of the element exists to avoid. The remembered
+      // answer is dropped by clearImageProxyCache() on any settings save, and
+      // it can never keep an image OUT once the setting is `on`, because `on`
+      // never asks in the first place.
+      if (!declined) _imgProxyCache.delete(href);
+      return { failed: true, declined, reason: proxyRefusalText(e) };
+    });
 }
 
 /** Replace a remote image that did not load with a visible note saying so.
@@ -340,7 +525,7 @@ function showBlockedImage(img, reason) {
   if (img.parentNode) img.parentNode.replaceChild(note, img);
 }
 
-function proxyRemoteImages(root) {
+function proxyRemoteImages(root, scope) {
   // srcset FIRST, and it is not optional tidying. DOMPurify's default allowlist
   // passes `srcset`, `picture` and `source` (verified against the vendored
   // build), and when an <img> carries both, the browser picks a srcset candidate
@@ -368,43 +553,28 @@ function proxyRemoteImages(root) {
     // img-src, that guarantee moves to this line's timing and becomes a race.
     img.removeAttribute("src");
 
+    const settle = (o) => {
+      if (typeof o === "string") img.src = o;
+      else if (o && o.failed) showBlockedImage(img, o.reason);
+    };
+
     const cached = _imgProxyCache.get(u.href);
     if (typeof cached === "string") { img.src = cached; return; }
-    if (cached) { cached.then((o) => { if (o) img.src = o; }); return; }  // in flight
+    // In flight, or a settled refusal held on purpose (a declined origin). The
+    // handler is `settle`, NOT a bare `if (o) img.src = o` - a failure resolves
+    // to an OBJECT, which is truthy, so that shape set src to "[object Object]"
+    // and the element got no note at all. Reached whenever a second render
+    // arrives before the first fetch answers, which streaming does constantly.
+    if (cached) { cached.then(settle); return; }
 
     // MUST be fetch(), not a bare src=. In open mode every GET under /api/ needs
     // the per-process shell token as a BEARER header, and an <img> element cannot
     // send a header - so pointing src straight at the proxy 403s on the default
     // keyless install and the feature silently never works. Measured end to end:
     // 403 without the token, 200 with it, on the same URL.
-    const pending = fetch("/api/image-proxy?url=" + encodeURIComponent(u.href),
-                          { headers: authHeaders() })
-      .then(async (r) => {
-        if (r.ok) return r.blob();
-        // The route answers with a REASON, and each one is different work for
-        // the user: the feature is off (and which setting turns it on), the host
-        // is not on their own net_allow list, the image is over the size cap, the
-        // response was not an image. Read it here, because after this it is gone.
-        let detail = "";
-        try { detail = (await r.json()).detail || ""; } catch (e) { /* no JSON body */ }
-        return Promise.reject(new ImageProxyRefused(r.status, detail));
-      })
-      .then((blob) => {
-        const objUrl = URL.createObjectURL(blob);
-        _rememberProxiedImage(u.href, objUrl);
-        return objUrl;
-      })
-      .catch((e) => {
-        // Forget it so a later render may retry, and carry the reason out so the
-        // caller can say WHY rather than leaving a silent hole in the reply.
-        _imgProxyCache.delete(u.href);
-        return { failed: true, reason: proxyRefusalText(e) };
-      });
+    const pending = _proxyImage(u.href, u.origin, scope);
     _imgProxyCache.set(u.href, pending);
-    pending.then((o) => {
-      if (typeof o === "string") img.src = o;
-      else if (o && o.failed) showBlockedImage(img, o.reason);
-    });
+    pending.then(settle);
   });
 }
 
@@ -420,6 +590,16 @@ function mainHasVisibleContent(main) {
   return main.querySelector("img, svg, canvas, video, audio, iframe, table, hr, input") !== null;
 }
 
+/** Render one model reply into *target*.
+ *
+ *  opts.final          this is a SETTLED render (a reload or a post-stream
+ *                      rebuild), not a live streaming shell.
+ *  opts.imageScope     which conversation this render belongs to. Remote-image
+ *                      consent is remembered per origin WITHIN this string, so
+ *                      a caller that renders separate conversations must pass a
+ *                      different one for each. Omitting it puts the render in
+ *                      one shared unnamed scope - correct only where there is a
+ *                      single stream of content per page session. */
 export function renderMarkdown(target, text, opts = {}) {
   const { think, open, rest: rawRest } = splitThink(scrubMarkers(text));
   const rest = formatToolCalls(rawRest);
@@ -459,7 +639,7 @@ export function renderMarkdown(target, text, opts = {}) {
   // On `target`, not `main`, so the think block's sink is covered by the same
   // call. Idempotent across a streaming re-render: an already-proxied src is
   // same-origin, so the second pass leaves it alone.
-  proxyRemoteImages(target);
+  proxyRemoteImages(target, opts.imageScope);
   // Never leave a blank reply bubble. On a SETTLED render (opts.final - a reload
   // or post-stream renderChat, never a mid-stream shell) a body that rendered to
   // nothing visible gets a plain note instead of an empty box (real case: a 1B

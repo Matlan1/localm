@@ -267,9 +267,12 @@ test("clearImageProxyCache drops cached images so the OFF switch takes effect", 
 // wrote `![](...)`. So a reply could silently lose an image with no way for the
 // reader to know one had been there.
 
+// A STAND-IN for what the route says, not a reading of it: the harness supplies
+// this as the 403 body, so this file cannot notice the route rewording itself.
+// tests/test_image_proxy.py owns the real sentence.
 const OFF_REASON =
-  "Showing remote images is off. Turn on 'Show remote images in replies' " +
-  "under Settings > Network to enable it.";
+  "Showing remote images is off. Set 'Show remote images in replies' " +
+  "to 'ask' or 'on' under Settings > Network to enable it.";
 
 test("a refused image says why, using the reason the route gave", async () => {
   const { win } = loadReal({ ok: false, detail: OFF_REASON });
@@ -320,4 +323,224 @@ test("a refusal with no JSON body still says something rather than nothing", asy
   assert.ok(note, "a body-less failure is still surfaced");
   assert.match(note.textContent, /could not fetch it \(HTTP 502\)/,
     "with the status, so it is diagnosable rather than a bare shrug");
+});
+
+// --------------------------------------------------------------------------- //
+//  The `ask` state: per-origin consent.
+//
+//  `on` decides WHO makes the request. `ask` decides WHETHER it is made, and the
+//  route raises its 428 before fetching anything, so what these pin is the
+//  client half: one dialog per ORIGIN per CONVERSATION, an answer remembered for
+//  exactly that long, and a decline that does not come back on the next chunk.
+// --------------------------------------------------------------------------- //
+
+const ASK_REASON =
+  "Showing remote images is set to 'ask', and this site has not been allowed " +
+  "in this conversation.";
+
+/** loadReal(), but standing in for a server whose setting is `ask`: every
+ *  request without `consent=1` is a 428, and one with it succeeds. */
+function loadAsking() {
+  const calls = [];
+  const { window: win } = loadApp({
+    fetchImpl: async (url, opts) => {
+      const u = String(url);
+      calls.push({ url: u, headers: (opts && opts.headers) || {} });
+      if (u.includes("/api/image-proxy") && !/[?&]consent=1(&|$)/.test(u)) {
+        return {
+          ok: false, status: 428, blob: async () => null,
+          json: async () => ({ detail: ASK_REASON }),
+        };
+      }
+      return { ok: true, status: 200, blob: async () => new win.Blob([1, 2, 3]) };
+    },
+  });
+  for (const f of ["marked.min.js", "purify.min.js"]) {
+    const tag = win.document.createElement("script");
+    tag.textContent = fs.readFileSync(new URL(f, VENDOR), "utf8");
+    win.document.head.appendChild(tag);
+  }
+  win.marked.setOptions({ breaks: true, mangle: false, headerIds: false });
+  if (!win.URL.createObjectURL) {
+    win.URL.createObjectURL = () => "blob:mock/1";
+    win.URL.revokeObjectURL = () => {};
+  }
+  return { win, calls };
+}
+
+function renderScoped(win, md, imageScope) {
+  const t = win.document.createElement("div");
+  win.document.body.appendChild(t);
+  win.renderMarkdown(t, md, { final: true, imageScope });
+  return t;
+}
+
+const modalOpen = (win) => win.document.getElementById("modal").style.display === "flex";
+const modalText = (win) => win.document.getElementById("modal-body").textContent;
+function clickConsent(win, label) {
+  const btn = [...win.document.querySelectorAll("#modal-body button")]
+    .find((b) => b.textContent === label);
+  assert.ok(btn, "no \"" + label + "\" button in the dialog: " + modalText(win));
+  btn.click();
+}
+const consented = (calls) => proxied(calls).filter((c) => /[?&]consent=1(&|$)/.test(c.url));
+
+test("ask: nothing loads until the reader answers, and the dialog names the origin",
+  async () => {
+    const { win, calls } = loadAsking();
+    const t = renderScoped(win, "![x](https://cdn.example.com/a.png)", "chat:1");
+    await settle();
+
+    assert.ok(modalOpen(win), "the reader is asked");
+    assert.match(modalText(win), /https:\/\/cdn\.example\.com/,
+      "and the dialog names the ORIGIN, which is what they are deciding about");
+    assert.doesNotMatch(modalText(win), /a\.png/,
+      "not the model-chosen path, which is the exfiltration payload itself");
+    // The load-bearing assertion: no consented request has been made, so at this
+    // point the remote host has not been contacted for this image at all.
+    assert.equal(consented(calls).length, 0,
+      "a consented fetch went out before the reader answered: " + JSON.stringify(calls));
+    assert.equal(t.querySelector("img").getAttribute("src"), null);
+  });
+
+test("ask: allowing the origin re-requests WITH consent and the image renders",
+  async () => {
+    const { win, calls } = loadAsking();
+    const t = renderScoped(win, "![x](https://cdn.example.com/a.png)", "chat:1");
+    await settle();
+    clickConsent(win, "Show images from this site");
+    await settle();
+
+    assert.equal(consented(calls).length, 1, JSON.stringify(calls));
+    assert.match(t.querySelector("img").getAttribute("src") || "", /^blob:/);
+    assert.equal(modalOpen(win), false, "and the dialog closed");
+  });
+
+test("ask: declining says so by name and does NOT re-ask on the next render",
+  async () => {
+    // The dialog-per-token defect in its second form. renderMarkdown reassigns
+    // innerHTML on every streamed chunk, so a decline that is not remembered
+    // reopens the dialog for the whole length of a reply.
+    const { win, calls } = loadAsking();
+    const t = renderScoped(win, "![x](https://cdn.example.com/a.png)", "chat:1");
+    await settle();
+    clickConsent(win, "Do not load");
+    await settle();
+
+    const note = t.querySelector(".img-blocked");
+    assert.ok(note, "a declined image leaves a visible note, not a hole");
+    assert.match(note.textContent,
+      /You chose not to load images from https:\/\/cdn\.example\.com/);
+    assert.equal(consented(calls).length, 0, "and nothing was fetched");
+
+    const before = calls.length;
+    win.renderMarkdown(t, "![x](https://cdn.example.com/a.png) more text",
+                       { final: true, imageScope: "chat:1" });
+    await settle();
+    assert.equal(modalOpen(win), false, "the next chunk must not re-open the dialog");
+    assert.equal(calls.length, before,
+      "and must not re-ask the server either - the answer is remembered");
+  });
+
+test("ask: one answer covers every image from that ORIGIN, and only that origin",
+  async () => {
+    // Per-origin is the decision, not an optimisation: the payload is in the
+    // URL, so one dialog per URL would be one mis-click chance per attempt.
+    const { win, calls } = loadAsking();
+    const t = renderScoped(win,
+      "![a](https://cdn.example.com/1.png)\n\n![b](https://cdn.example.com/2.png)",
+      "chat:1");
+    await settle();
+    assert.ok(modalOpen(win), "asked once");
+    clickConsent(win, "Show images from this site");
+    await settle();
+
+    assert.equal(modalOpen(win), false, "and not asked again for the same host");
+    assert.equal(consented(calls).length, 2, "both images loaded on one answer");
+    assert.equal(t.querySelectorAll("img[src^=\"blob:\"]").length, 2);
+
+    renderScoped(win, "![c](https://other.example.net/3.png)", "chat:1");
+    await settle();
+    assert.ok(modalOpen(win), "a DIFFERENT origin is a different decision");
+    assert.match(modalText(win), /https:\/\/other\.example\.net/);
+  });
+
+test("ask: an answer given in one conversation is not visible in another", async () => {
+  // "Remembered for the conversation" is the whole lifetime contract. It holds
+  // by KEYING, not by a reset hook, so no future way of switching conversation
+  // can forget to clear it.
+  const { win } = loadAsking();
+  renderScoped(win, "![a](https://cdn.example.com/1.png)", "chat:aaa");
+  await settle();
+  clickConsent(win, "Show images from this site");
+  await settle();
+  assert.equal(modalOpen(win), false);
+
+  renderScoped(win, "![a](https://cdn.example.com/9.png)", "chat:bbb");
+  await settle();
+  assert.ok(modalOpen(win), "a second conversation must ask again for the same host");
+});
+
+test("consent is never written anywhere that outlives the page", async () => {
+  const { win } = loadAsking();
+  renderScoped(win, "![a](https://cdn.example.com/1.png)", "chat:1");
+  await settle();
+  clickConsent(win, "Show images from this site");
+  await settle();
+
+  for (const store of [win.localStorage, win.sessionStorage]) {
+    for (const k of Object.keys(store)) {
+      assert.doesNotMatch(String(store.getItem(k)), /cdn\.example\.com/,
+        "a consent decision reached " + k + ", so it would outlive the page session");
+    }
+  }
+});
+
+test("clearImageProxyCache forgets consent, so a settings save re-asks", async () => {
+  const { win } = loadAsking();
+  renderScoped(win, "![a](https://cdn.example.com/1.png)", "chat:1");
+  await settle();
+  clickConsent(win, "Show images from this site");
+  await settle();
+
+  win.clearImageProxyCache();
+  renderScoped(win, "![a](https://cdn.example.com/1.png)", "chat:1");
+  await settle();
+  assert.ok(modalOpen(win),
+    "the setting that governs asking may have moved, so every answer is stale");
+});
+
+test("dismissing the dialog through the modal chrome counts as declining", async () => {
+  // The x and the backdrop are not our handlers - they just hide the modal. A
+  // dismissal that resolved as "allowed" would load the very image the reader
+  // was getting away from.
+  const { win, calls } = loadAsking();
+  const t = renderScoped(win, "![a](https://cdn.example.com/1.png)", "chat:1");
+  await settle();
+  assert.ok(modalOpen(win));
+  win.document.getElementById("modal-close").click();
+  await new Promise((r) => setTimeout(r, 350));   // the display:none poll is 200ms
+
+  assert.equal(consented(calls).length, 0, "nothing was fetched");
+  assert.ok(t.querySelector(".img-blocked"), "and the reader is told why");
+});
+
+test("two origins in one reply raise their dialogs one at a time", async () => {
+  // openModal drives a SINGLE #modal element, so two overlapping asks would
+  // leave the second silently replacing the first, and the first's promise
+  // resolving off buttons that are no longer on screen.
+  const { win } = loadAsking();
+  renderScoped(win,
+    "![a](https://one.example.com/1.png)\n\n![b](https://two.example.net/2.png)",
+    "chat:1");
+  await settle();
+
+  const first = modalText(win);
+  assert.match(first, /https:\/\/one\.example\.com/);
+  assert.doesNotMatch(first, /two\.example\.net/,
+    "the second ask must not have overwritten the first");
+  clickConsent(win, "Do not load");
+  await settle();
+  assert.ok(modalOpen(win), "and the second one follows");
+  assert.match(modalText(win), /https:\/\/two\.example\.net/);
 });

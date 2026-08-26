@@ -13,10 +13,29 @@ through the same `netpolicy` path every other outbound request uses. The browser
 never contacts the remote origin.
 
 OFF BY DEFAULT (`gui_proxy_remote_images`), and the setting's help text says
-plainly what it does and does not buy: proxying decides WHO makes the request,
+plainly what "on" does and does not buy: proxying decides WHO makes the request,
 not WHETHER it is made. A crafted URL still reaches the attacker's server the
-moment the reply renders. Closing that channel is a separate decision (a per-image
-affordance, or an allowlist) and is deliberately not attempted here.
+moment the reply renders.
+
+THE `ask` STATE IS WHAT CLOSES THAT CHANNEL, and the shape is worth reading
+before changing anything here. It refuses with 428 unless the request carries
+`consent=1`, and the refusal happens BEFORE any outbound fetch, so a host the
+reader has not agreed to is never contacted at all. 428 rather than 403 because
+the two say different things to a client: 403 is "refused, nothing you can do",
+428 is "there is a precondition you can satisfy and then retry", which is
+exactly the case - the client asks the reader and re-requests.
+
+WHERE THE CONSENT ACTUALLY LIVES IS THE BROWSER, NOT HERE, and that is
+deliberate. It is remembered per ORIGIN for the duration of one conversation in
+one page session, so it never reaches disk and never crosses a conversation.
+Keeping it server-side would mean inventing a lifetime for it and sharing one
+reader's answer with every other tab and browser pointed at this instance. So
+`consent=1` is the client stating the reader's answer, not a capability: it can
+only reach a state `on` would have reached anyway, and every real boundary
+(scope, net_mode, net_allow/net_deny, the SSRF guard, the size and type caps)
+is unchanged and still applies. A model cannot smuggle it in through the URL it
+chose - the client builds the query with encodeURIComponent, which escapes `&`
+and `=`. See test_a_url_carrying_its_own_consent_parameter_is_still_refused.
 
 ONE INTERACTION WORTH KNOWING, recorded rather than left silent. The URL here
 comes straight off a query parameter, which makes this the first caller to feed
@@ -90,23 +109,37 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/image-proxy",
              dependencies=[Depends(require_scope(scopes.CHAT))])
-    async def image_proxy(url: str):
+    async def image_proxy(url: str, consent: str = ""):
         """Fetch a remote image server-side and return its bytes.
 
-        Refuses unless `gui_proxy_remote_images` is on. The fetch itself goes
+        Refuses unless `gui_proxy_remote_images` allows it: never when it is
+        `off`, and only with `consent=1` when it is `ask`. The fetch itself goes
         through `netpolicy.safe_fetch_bytes`, so it inherits the per-hop
         `check_url`, the DNS pin against rebind, redirect re-validation and the
         byte cap rather than reimplementing any of them.
         """
-        from localm.config import load_config
+        from localm.config import (REMOTE_IMAGE_ASK, REMOTE_IMAGE_OFF,
+                                   load_config, remote_image_mode)
 
-        if not load_config().get("gui_proxy_remote_images"):
+        mode = remote_image_mode(load_config())
+        if mode == REMOTE_IMAGE_OFF:
             # 403 rather than 404: the endpoint exists and the caller is allowed
             # to ask, the OWNER has simply not turned it on. A 404 here would read
             # as "old server" to a client trying to tell those apart.
             raise HTTPException(
-                403, "Showing remote images is off. Turn on 'Show remote images "
-                     "in replies' under Settings > Network to enable it.")
+                403, "Showing remote images is off. Set 'Show remote images "
+                     "in replies' to 'ask' or 'on' under Settings > Network to "
+                     "enable it.")
+        if mode == REMOTE_IMAGE_ASK and consent.strip() not in ("1", "true", "yes"):
+            # BEFORE any fetch, so a host the reader has not agreed to is never
+            # contacted. The client turns this into its own per-origin prompt;
+            # the sentence matters anyway, because a client that does not (an
+            # older cached shell, a direct API caller) shows it verbatim.
+            raise HTTPException(
+                428, "Showing remote images is set to 'ask', and this site has "
+                     "not been allowed in this conversation. Choose to show "
+                     "images from it when localm asks, or set 'Show remote "
+                     "images in replies' to 'on' under Settings > Network.")
 
         parsed = urllib.parse.urlparse(url or "")
         if parsed.scheme not in ("http", "https"):

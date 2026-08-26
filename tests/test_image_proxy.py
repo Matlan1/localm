@@ -17,18 +17,21 @@ from unittest.mock import MagicMock
 from localm.plugins.gui.routes import imgproxy
 
 
-def _client(monkeypatch, *, enabled, fetch=None):
-    """A GUI app with the proxy route mounted and config forced on/off.
+def _client(monkeypatch, *, mode, fetch=None):
+    """A GUI app with the proxy route mounted and gui_proxy_remote_images forced
+    to *mode* ("off" / "ask" / "on").
 
     load_config is patched where the ROUTE imports it (inside the handler, from
     localm.config), not where it is defined, so the patch is on the path the code
-    under test actually takes.
+    under test actually takes. The value goes in RAW, so passing the pre-3-state
+    True/False here also exercises the legacy coercion the route inherits from
+    config.remote_image_mode.
     """
     from fastapi import FastAPI
     app = FastAPI()
     imgproxy.register(app, MagicMock())
     monkeypatch.setattr("localm.config.load_config",
-                        lambda *a, **k: {"gui_proxy_remote_images": enabled})
+                        lambda *a, **k: {"gui_proxy_remote_images": mode})
     if fetch is not None:
         monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fetch)
     return TestClient(app)
@@ -49,7 +52,7 @@ def test_refused_by_default_and_nothing_is_fetched(monkeypatch):
         called.append(url)
         return (url, "image/png", PNG)
 
-    c = _client(monkeypatch, enabled=False, fetch=_spy)
+    c = _client(monkeypatch, mode="off", fetch=_spy)
     r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
     assert r.status_code == 403, r.text
     # The refusal must come BEFORE any outbound request. Asserting only on the
@@ -59,7 +62,7 @@ def test_refused_by_default_and_nothing_is_fetched(monkeypatch):
 
 
 def test_proxies_the_bytes_when_enabled(monkeypatch):
-    c = _client(monkeypatch, enabled=True, fetch=_ok_fetch)
+    c = _client(monkeypatch, mode="on", fetch=_ok_fetch)
     r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
     assert r.status_code == 200, r.text
     assert r.content == PNG
@@ -79,7 +82,7 @@ def test_the_response_is_never_cached(monkeypatch):
     product. The client keeps its own in-page blob cache, so a streaming
     re-render still does not refetch; the HTTP cache was buying almost nothing.
     """
-    c = _client(monkeypatch, enabled=True, fetch=_ok_fetch)
+    c = _client(monkeypatch, mode="on", fetch=_ok_fetch)
     r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
     assert r.status_code == 200
     cache = r.headers.get("cache-control", "")
@@ -99,7 +102,7 @@ def test_ssrf_refusal_from_netpolicy_is_surfaced_not_swallowed(monkeypatch):
     def _refuse(url, **kw):
         raise NetworkPolicyError("Refusing to fetch a loopback address.")
 
-    c = _client(monkeypatch, enabled=True, fetch=_refuse)
+    c = _client(monkeypatch, mode="on", fetch=_refuse)
     r = c.get("/api/image-proxy", params={"url": "http://127.0.0.1:8080/secret.png"})
     assert r.status_code == 403, r.text
     assert "loopback" in r.text.lower()
@@ -118,7 +121,7 @@ def test_non_http_schemes_never_reach_the_fetch_layer(monkeypatch, scheme_url):
         called.append(url)
         return (url, "image/png", PNG)
 
-    c = _client(monkeypatch, enabled=True, fetch=_spy)
+    c = _client(monkeypatch, mode="on", fetch=_spy)
     r = c.get("/api/image-proxy", params={"url": scheme_url})
     assert r.status_code == 400, r.text
     assert called == [], f"{scheme_url!r} reached the fetch layer"
@@ -133,7 +136,7 @@ def test_non_http_schemes_never_reach_the_fetch_layer(monkeypatch, scheme_url):
 ])
 def test_non_image_content_types_are_refused(monkeypatch, ctype):
     """Otherwise the proxy is a general-purpose fetch-anything endpoint."""
-    c = _client(monkeypatch, enabled=True,
+    c = _client(monkeypatch, mode="on",
                 fetch=lambda url, **kw: (url, ctype, b"whatever"))
     r = c.get("/api/image-proxy", params={"url": "https://example.com/a"})
     assert r.status_code == 415, r.text
@@ -148,7 +151,7 @@ def test_svg_is_refused_even_though_it_is_an_image_type(monkeypatch):
     on localm's origin. If someone ever "fixes" the allowlist by loosening it to
     a prefix match, this is the test that must stop them.
     """
-    c = _client(monkeypatch, enabled=True,
+    c = _client(monkeypatch, mode="on",
                 fetch=lambda url, **kw: (url, "image/svg+xml",
                                          b"<svg xmlns='http://www.w3.org/2000/svg'></svg>"))
     r = c.get("/api/image-proxy", params={"url": "https://example.com/x.svg"})
@@ -158,7 +161,7 @@ def test_svg_is_refused_even_though_it_is_an_image_type(monkeypatch):
 
 def test_content_type_parameters_do_not_defeat_the_allowlist(monkeypatch):
     """`image/png; charset=binary` is still image/png."""
-    c = _client(monkeypatch, enabled=True,
+    c = _client(monkeypatch, mode="on",
                 fetch=lambda url, **kw: (url, "image/PNG; charset=binary", PNG))
     r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
     assert r.status_code == 200, r.text
@@ -177,7 +180,7 @@ def test_the_byte_cap_is_passed_to_the_fetch_layer(monkeypatch):
         seen.update(kw)
         return (url, "image/png", PNG)
 
-    c = _client(monkeypatch, enabled=True, fetch=_capture)
+    c = _client(monkeypatch, mode="on", fetch=_capture)
     c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
     assert seen.get("max_bytes") == imgproxy._MAX_BYTES
     assert imgproxy._MAX_BYTES <= 25_000_000, "a display image should not be unbounded"
@@ -194,7 +197,7 @@ def test_a_truncated_oversize_image_is_REFUSED_not_served_corrupt(monkeypatch):
     small image.
     """
     truncated = b"IMGDATA" * ((imgproxy._MAX_BYTES // 7) + 2)
-    c = _client(monkeypatch, enabled=True,
+    c = _client(monkeypatch, mode="on",
                 fetch=lambda url, **kw: (url, "image/png", truncated[:imgproxy._MAX_BYTES]))
     r = c.get("/api/image-proxy", params={"url": "https://example.com/huge.png"})
     assert r.status_code == 413, (
@@ -205,7 +208,7 @@ def test_a_truncated_oversize_image_is_REFUSED_not_served_corrupt(monkeypatch):
 def test_an_image_just_under_the_cap_is_still_served(monkeypatch):
     """The refusal above must not swallow legitimate large-but-complete images."""
     body = b"z" * (imgproxy._MAX_BYTES - 100)
-    c = _client(monkeypatch, enabled=True,
+    c = _client(monkeypatch, mode="on",
                 fetch=lambda url, **kw: (url, "image/png", body))
     r = c.get("/api/image-proxy", params={"url": "https://example.com/big.png"})
     assert r.status_code == 200, r.text
@@ -217,15 +220,19 @@ def test_a_fetch_failure_is_a_502_not_a_500(monkeypatch):
     def _boom(url, **kw):
         raise OSError("connection refused")
 
-    c = _client(monkeypatch, enabled=True, fetch=_boom)
+    c = _client(monkeypatch, mode="on", fetch=_boom)
     r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
     assert r.status_code == 502, r.text
 
 
 def test_the_setting_defaults_to_off_in_the_shipped_config():
-    """The route's refusal is only a default if the CONFIG default agrees."""
-    from localm.config import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG["gui_proxy_remote_images"] is False
+    """The route's refusal is only a default if the CONFIG default agrees.
+
+    "ask" would ALSO be a closed channel, and is still the wrong default: it
+    would start prompting on every install that never opted in to anything.
+    """
+    from localm.config import DEFAULT_CONFIG, REMOTE_IMAGE_OFF
+    assert DEFAULT_CONFIG["gui_proxy_remote_images"] == REMOTE_IMAGE_OFF
 
 
 def test_the_setting_is_owner_only_and_visible_in_the_schema():
@@ -238,7 +245,19 @@ def test_the_setting_is_owner_only_and_visible_in_the_schema():
         "fetching triggered by rendered model content")
     f = next(f for f in CORE_FIELDS if f.key == "gui_proxy_remote_images")
     assert f.group == "Network"
-    assert f.widget == "toggle", f.widget
+    assert f.widget == "select", f.widget
+
+
+def test_the_modes_match_config_s_own_constants():
+    """settings_schema spells the options out (its localm.config imports are all
+    deliberately lazy), so the copy needs a gate or it drifts. A drift here is
+    silent in both directions: an option config cannot store, or a stored value
+    the form cannot show."""
+    from localm.config import REMOTE_IMAGE_LEGACY_BOOL, REMOTE_IMAGE_MODES
+    from localm.settings_schema import CORE_FIELDS
+    f = next(f for f in CORE_FIELDS if f.key == "gui_proxy_remote_images")
+    assert tuple(f.options) == REMOTE_IMAGE_MODES
+    assert f.legacy_bool == REMOTE_IMAGE_LEGACY_BOOL
 
 
 def test_the_schema_still_shows_the_toggle_in_a_keyless_install():
@@ -343,3 +362,154 @@ def test_the_fetch_budget_stays_above_netpolicy_s_own_worst_case():
         f"safe_fetch_bytes' own legitimate worst case ({worst_case}s: "
         f"{netpolicy._MAX_REDIRECTS + 1} hops x connect+read x "
         f"{netpolicy._DEFAULT_TIMEOUT}s), so a slow but working image would 504")
+
+
+# --------------------------------------------------------------------------- #
+#  The `ask` state: per-origin consent (NEW-GUI-EXFIL-CHANNEL-REMOTE-IMAGES).  #
+#                                                                             #
+#  `on` moves the request from the browser to this machine. It does not stop   #
+#  it, and the URL IS the exfiltration payload. `ask` is the state that stops   #
+#  it for a host the reader has not agreed to, so what these pin is that the    #
+#  refusal happens BEFORE any outbound fetch, and that nothing except the       #
+#  reader's own answer can get past it.                                        #
+# --------------------------------------------------------------------------- #
+
+def test_ask_refuses_with_428_and_nothing_is_fetched(monkeypatch):
+    called = []
+
+    def _spy(url, **kw):
+        called.append(url)
+        return (url, "image/png", PNG)
+
+    c = _client(monkeypatch, mode="ask", fetch=_spy)
+    r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
+    assert r.status_code == 428, r.text
+    # The whole point of the state. A status-code-only assertion would pass on a
+    # version that fetched first and refused after, which is the failure that
+    # would actually matter: by then the address has already reached the host.
+    assert called == [], f"an outbound fetch was made before the reader agreed: {called}"
+    # 428 rather than 403 is load-bearing for the client, which uses the code to
+    # tell "there is nothing you can do" from "ask, then retry".
+    assert r.status_code != 403
+
+
+def test_ask_fetches_once_the_request_carries_the_reader_s_consent(monkeypatch):
+    c = _client(monkeypatch, mode="ask", fetch=_ok_fetch)
+    r = c.get("/api/image-proxy",
+              params={"url": "https://example.com/a.png", "consent": "1"})
+    assert r.status_code == 200, r.text
+    assert r.content == PNG
+    assert r.headers["content-type"].startswith("image/png")
+
+
+def test_consent_cannot_switch_the_feature_on_while_it_is_off(monkeypatch):
+    """consent states the READER's answer for one origin. It is not a capability,
+    and it must never reach past what `on` would have reached."""
+    called = []
+
+    def _spy(url, **kw):
+        called.append(url)
+        return (url, "image/png", PNG)
+
+    c = _client(monkeypatch, mode="off", fetch=_spy)
+    r = c.get("/api/image-proxy",
+              params={"url": "https://example.com/a.png", "consent": "1"})
+    assert r.status_code == 403, r.text
+    assert called == [], f"consent reached past an OFF setting: {called}"
+
+
+def test_a_url_carrying_its_own_consent_parameter_is_still_refused(monkeypatch):
+    """The URL is the one part of this a MODEL chooses, so it is the one part
+    that must not be able to answer for the reader.
+
+    The client builds the query with encodeURIComponent, which escapes `&` and
+    `=`; this asserts the server side of that, i.e. that a `consent=1` sitting
+    inside the url value is read as part of the URL and never as the parameter.
+    """
+    called = []
+
+    def _spy(url, **kw):
+        called.append(url)
+        return (url, "image/png", PNG)
+
+    c = _client(monkeypatch, mode="ask", fetch=_spy)
+    # params= encodes it exactly as the client's encodeURIComponent would.
+    r = c.get("/api/image-proxy",
+              params={"url": "https://evil.example/p.png?x=1&consent=1"})
+    assert r.status_code == 428, r.text
+    assert called == [], f"a model-chosen URL answered for the reader: {called}"
+
+
+def test_a_config_still_holding_the_pre_three_state_boolean_keeps_working(monkeypatch):
+    """There is no config migration step in this project: load_config() is the
+    defaults plus the stored delta, so an install that switched the old boolean
+    on still has `true` on disk. It must keep meaning "on"."""
+    c = _client(monkeypatch, mode=True, fetch=_ok_fetch)
+    assert c.get("/api/image-proxy",
+                 params={"url": "https://example.com/a.png"}).status_code == 200
+
+    c_off = _client(monkeypatch, mode=False, fetch=_ok_fetch)
+    assert c_off.get("/api/image-proxy",
+                     params={"url": "https://example.com/a.png"}).status_code == 403
+
+
+def test_an_unreadable_setting_refuses_rather_than_fetches(monkeypatch):
+    """A hand-edited or newer-version config.json must fail CLOSED here: this key
+    decides whether rendering a reply makes an outbound request at all."""
+    called = []
+
+    def _spy(url, **kw):
+        called.append(url)
+        return (url, "image/png", PNG)
+
+    c = _client(monkeypatch, mode="sometimes", fetch=_spy)
+    r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
+    assert r.status_code == 403, r.text
+    assert called == []
+
+
+def test_load_config_canonicalises_the_legacy_boolean_and_says_when_it_cannot(
+        tmp_path, monkeypatch, capsys):
+    """The read-side half, which is the entire migration: every consumer (the
+    route, the settings schema, the CLI, the bug report) goes through
+    load_config(), so normalising there is what makes a legacy file readable
+    everywhere at once - and save_config() then heals the file."""
+    import json
+    from localm import config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(cfgmod, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(cfgmod, "ensure_dirs", lambda *a, **k: None)
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"gui_proxy_remote_images": True}), encoding="utf-8")
+    assert cfgmod.load_config()["gui_proxy_remote_images"] == "on"
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"gui_proxy_remote_images": "ask"}), encoding="utf-8")
+    assert cfgmod.load_config()["gui_proxy_remote_images"] == "ask"
+
+    # Unreadable: falls back to off AND says so. A silent fallback here would
+    # turn a feature the owner had switched on back off with nothing to read.
+    cfgmod._warned_bad_remote_image_mode.clear()
+    (tmp_path / "config.json").write_text(
+        json.dumps({"gui_proxy_remote_images": "sometimes"}), encoding="utf-8")
+    assert cfgmod.load_config()["gui_proxy_remote_images"] == "off"
+    err = capsys.readouterr().err
+    assert "gui_proxy_remote_images" in err and "sometimes" in err, err
+
+
+def test_patch_config_still_accepts_the_boolean_an_older_client_sends():
+    """The write-side half. `localm config gui_proxy_remote_images true`, a shell
+    script, and any API client written before the third state exists all still
+    send a boolean; rejecting it would break them for no gain."""
+    from localm.settings_schema import validate_update
+    assert validate_update({"gui_proxy_remote_images": True}) == {
+        "gui_proxy_remote_images": "on"}
+    assert validate_update({"gui_proxy_remote_images": False}) == {
+        "gui_proxy_remote_images": "off"}
+    # An exact mode always wins over the boolean reading of the same word.
+    assert validate_update({"gui_proxy_remote_images": "ask"}) == {
+        "gui_proxy_remote_images": "ask"}
+    with pytest.raises(ValueError):
+        validate_update({"gui_proxy_remote_images": "sometimes"})

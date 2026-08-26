@@ -317,8 +317,11 @@ export function startAssistantBlock(s) {
 // channel never clobbers the other.
 function renderLiveBlock(s) {
   const stick = nearBottom(s.feedEl);
+  // imageScope: a coder session is its own conversation, so a "load images
+  // from this site" answer given in one must not carry into another.
   renderMarkdown(s.liveBody,
-    s.liveReasoning ? `<think>\n${s.liveReasoning}\n</think>\n${s.liveText}` : s.liveText);
+    s.liveReasoning ? `<think>\n${s.liveReasoning}\n</think>\n${s.liveText}` : s.liveText,
+    { imageScope: "coder:" + s.info.id });
   if (stick) s.feedEl.scrollTop = s.feedEl.scrollHeight;
 }
 

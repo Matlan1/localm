@@ -91,6 +91,15 @@ class SettingField:
     group: str = "General"
     owner: str = "core"                  # "core" or a plugin scope (see scopes.py)
     options: Optional[list] = None       # for SELECT
+    # A SELECT that USED to be a TOGGLE, as ``(false_option, true_option)``. A
+    # boolean (or its 1/0 and "true"/"false" spellings) is then accepted and
+    # mapped to that pair, so a config.json written before the widget changed,
+    # a `localm config <key> true`, and an API client still sending JSON true
+    # keep working. An exact option always wins first, so "on"/"off" are read as
+    # modes rather than as booleans. Pairs with config.py's own read-side
+    # normalisation - see REMOTE_IMAGE_LEGACY_BOOL, which is the single
+    # definition of the mapping and is pinned to this field by a test.
+    legacy_bool: Optional[tuple] = None
     applies: str = Applies.LIVE
     secret: bool = False
     # Owner-only: a non-ADMIN caller may neither SEE this field in the schema nor
@@ -1125,17 +1134,38 @@ CORE_FIELDS: list = [
     #
     # The trade, in full: a remote image a model links is an exfiltration
     # channel. The ADDRESS ITSELF carries the data, and the fetch happens the
-    # moment the reply renders. Turning this on does NOT close that channel - it
-    # only moves the request from the user's browser to this server, so the
-    # remote site never learns their IP, their browser, or which page they were
-    # on, and the fetch obeys the same SSRF guard and allow/deny domain lists as
-    # every other outbound request localm makes. That is why it ships OFF: the
-    # privacy win is real but partial, and the user should choose it knowingly.
-    SettingField("gui_proxy_remote_images", Widget.TOGGLE,
+    # moment the reply renders. "on" does NOT close that channel - it only moves
+    # the request from the user's browser to this server, so the remote site
+    # never learns their IP, their browser, or which page they were on, and the
+    # fetch obeys the same SSRF guard and allow/deny domain lists as every other
+    # outbound request localm makes. That is why it ships OFF: the privacy win
+    # is real but partial, and the user should choose it knowingly.
+    #
+    # "ask" is the state that closes the channel for an ARBITRARY host: the
+    # route refuses with 428 until the request carries the reader's consent for
+    # that ORIGIN, so no fetch happens for a host they have not seen. Per-origin
+    # rather than per-image because the payload is IN the URL, so one decision
+    # per image is one mis-click chance per exfiltration attempt.
+    #
+    # THREE STATES OF ONE SETTING, not a second setting beside it: two
+    # independent toggles over one behaviour is how a user ends up in a
+    # combination neither of them describes.
+    SettingField("gui_proxy_remote_images", Widget.SELECT,
                  "Show remote images in replies (fetched by this machine)",
-                 "Off by default. When on, this machine fetches the image so "
-                 "the site never learns your IP or browser. It cannot stop a "
-                 "link carrying data out, so leave it off unless you need it.",
+                 "Off by default. 'on' loads them; 'ask' checks with you once "
+                 "per site per conversation first. Either way this machine "
+                 "fetches the image, so the site never learns your IP or "
+                 "browser.",
+                 # Spelled out rather than imported from config: every
+                 # localm.config import in this module is deliberately LAZY
+                 # (inside a function), because importing config runs its
+                 # data-directory detection, and a module-level import here
+                 # would drag that into merely importing the schema.
+                 # test_the_modes_match_config_s_own_constants pins these two
+                 # to config.REMOTE_IMAGE_MODES / REMOTE_IMAGE_LEGACY_BOOL so
+                 # the copy cannot drift.
+                 options=["off", "ask", "on"],
+                 legacy_bool=("off", "on"),
                  # Reachable in the default keyless install regardless: the schema
                  # route treats open mode as owner (is_owner = held is None or
                  # ADMIN in held), so admin_only hides this from a SCOPED key, not
@@ -1265,6 +1295,13 @@ def _validate_one(key: str, val, field: "SettingField", default):
             return None
         if field.options and s in field.options:
             return s
+        if field.legacy_bool:
+            try:
+                b = _to_bool(key, val)
+            except ValueError:
+                pass
+            else:
+                return field.legacy_bool[1] if b else field.legacy_bool[0]
         raise ValueError(f"{key}: {val!r} is not one of {field.options}")
 
     if widget == Widget.LIST:
