@@ -943,6 +943,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unrelated file, which sends you looking for the wrong problem. It now
   says the file looks incomplete and to try again once the copy or download
   has finished.
+- **`setup.sh`'s automatic hardware detection now recognizes Apple Silicon.**
+  It previously had no check for it at all, so every Mac was silently treated
+  as having no GPU: the acceleration prompt never appeared, and the
+  recommended llama.cpp backend was forced to CPU-only even though localm's
+  own hardware policy already knew Metal was the right choice for that
+  hardware. Apple Silicon is now detected correctly, so `setup.sh` offers and
+  defaults to the Metal backend, which can also be picked directly from the
+  interactive backend menu.
 
 ### Security
 - **Two more model families' role markers are now defanged in untrusted text.**

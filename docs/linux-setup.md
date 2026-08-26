@@ -3,11 +3,11 @@
 localm runs natively on Linux. The app code is platform-agnostic; only the
 native llama.cpp library and a few setup scripts differ from Windows.
 
-> **macOS is experimental and unverified.** `setup.sh`'s GPU detection does not
-> recognize Apple Silicon, so it always installs the CPU llama.cpp build during
-> setup. To try Metal instead, run `.venv/bin/localm setup-llama --backend
-> metal` afterward - this path has not been tested, so treat it as best-effort
-> and expect rough edges.
+> **macOS is experimental and unverified.** `setup.sh` auto-detects Apple
+> Silicon and defaults to the Metal llama.cpp build (the interactive picker
+> also offers it as its own numbered choice); Intel Macs default to CPU-only,
+> since no Metal build targets them. Detection itself has not been tested on
+> real hardware - treat it as best-effort and expect rough edges.
 
 ## One-click install (the lazy path)
 
@@ -18,10 +18,9 @@ curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | 
 This clones localm to `~/localm`, installs `uv` if needed, creates a private
 `.venv`, auto-detects your GPU, and runs a non-interactive setup that also
 provisions the matching llama.cpp backend (CUDA for NVIDIA, HIP for AMD when a
-system ROCm/HIP toolkit is present, Vulkan as the universal fallback otherwise,
-CPU with no GPU or on macOS - see [gpu-setup.md](gpu-setup.md) for the full
-policy). On Apple Silicon this installs the CPU backend; switch to Metal
-yourself afterward (see the macOS note above).
+system ROCm/HIP toolkit is present, Metal on Apple Silicon, Vulkan as the
+universal fallback otherwise, CPU with no GPU - see
+[gpu-setup.md](gpu-setup.md) for the full policy).
 Override the location with `LOCALM_DIR=...`.
 
 ## Manual install
