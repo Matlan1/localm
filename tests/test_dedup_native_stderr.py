@@ -14,6 +14,9 @@ so the call order is asserted directly instead of the hang.
 
 import logging
 import os
+import time
+
+import pytest
 
 from localm import debuglog
 
@@ -181,6 +184,47 @@ def test_persisted_write_failure_warns_once_and_keeps_ring_buffer(monkeypatch, c
     assert len(warns) == 1, (
         f"expected exactly one latched warning, got {len(warns)}: "
         f"{[w.getMessage() for w in warns]}")
+
+
+def test_teardown_survives_a_slow_reader_thread(monkeypatch, caplog):
+    """A reader thread too slow to finish within the join timeout must not lose
+    data permanently - it keeps draining in the background (a daemon thread,
+    never killed) and the ring buffer catches up. The timeout expiring must be
+    logged, not silent, since a caller checking recent_activity() right after
+    the context exits would otherwise see an incomplete view with no signal
+    that anything was still in flight."""
+    monkeypatch.setattr(debuglog, "_READER_JOIN_TIMEOUT", 0.05)
+    real_feed = debuglog._LineGrouper.feed
+
+    def slow_feed(self, line):
+        time.sleep(0.03)
+        return real_feed(self, line)
+
+    monkeypatch.setattr(debuglog._LineGrouper, "feed", slow_feed)
+
+    before = len(debuglog.recent_activity())
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        with debuglog.dedup_native_stderr():
+            os.write(2, b"slow-line-one\n")
+            os.write(2, b"slow-line-two\n")
+            os.write(2, b"slow-line-three\n")
+
+    warns = [r for r in caplog.records
+             if r.levelno >= logging.WARNING and "did not finish" in r.getMessage()]
+    assert len(warns) == 1, (
+        f"expected exactly one reader-timeout warning, got {len(warns)}: "
+        f"{[w.getMessage() for w in warns]}")
+
+    deadline = time.monotonic() + 5.0
+    lines = ("slow-line-one", "slow-line-two", "slow-line-three")
+    while time.monotonic() < deadline:
+        tail = "\n".join(debuglog.recent_activity()[before:])
+        if all(line in tail for line in lines):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the abandoned reader thread never delivered every line "
+                     f"(saw: {debuglog.recent_activity()[before:]!r})")
 
 
 # --------------------------------------------------------------------------- #

@@ -698,6 +698,9 @@ class _LineGrouper:
         self._pending.clear()
 
 
+_READER_JOIN_TIMEOUT = 30.0
+
+
 @contextlib.contextmanager
 def dedup_native_stderr():
     """
@@ -805,7 +808,12 @@ def dedup_native_stderr():
         yield
     finally:
         os.dup2(saved_fd, 2)
-        thread.join(timeout=2.0)
+        thread.join(timeout=_READER_JOIN_TIMEOUT)
+        if thread.is_alive():
+            logger.warning("debuglog: native-stderr-dedup reader did not finish "
+                            "within %.0fs of teardown; recent_activity() may be "
+                            "missing the tail of this run's native output",
+                            _READER_JOIN_TIMEOUT)
         os.close(saved_fd)
         if debug_fd is not None:
             with contextlib.suppress(OSError):
