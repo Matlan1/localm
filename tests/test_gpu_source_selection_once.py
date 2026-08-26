@@ -104,13 +104,32 @@ class TestSourceSelectionResolvedOnce:
         assert discover.native_hip_runtime_resident() is True
 
     def test_not_resident_is_not_latched(self, monkeypatch, tmp_path):
-        """False is re-derived: the lib can still load later in the process."""
+        """False is re-derived while the lib is UNLOADED: it can still load later
+        in the process, and that path never reaches the glob anyway."""
         _arm_doomed(monkeypatch, tmp_path, native_loaded=False)
         assert discover.native_hip_runtime_resident() is False
         monkeypatch.setattr(
             "localm.inference.backends.llamacpp._loader.native_lib_loaded",
             lambda: True)
         assert discover.native_hip_runtime_resident() is True
+
+    def test_non_hip_runtime_also_resolves_once(self, monkeypatch, tmp_path):
+        """The answer is latched EITHER WAY once the lib is loaded. A loaded
+        non-HIP runtime answers False through the glob, and that glob - plus the
+        runtime_binary_dir() resolution behind it, which reads the config file -
+        must not re-run on every probe just because the answer was False."""
+        counts = _arm_doomed(monkeypatch, tmp_path, hip_dll=False)
+        for _ in range(10):
+            assert discover.native_hip_runtime_resident() is False
+        assert counts["runtime_dir"] == 1
+
+    def test_unloaded_lib_never_reaches_the_glob(self, monkeypatch, tmp_path):
+        """The un-latched path is the cheap one: it answers on native_lib_loaded()
+        alone, so re-deriving it costs no directory resolution."""
+        counts = _arm_doomed(monkeypatch, tmp_path, native_loaded=False)
+        for _ in range(10):
+            assert discover.native_hip_runtime_resident() is False
+        assert counts["runtime_dir"] == 0
 
 
 class TestSkipAnnouncedOnce:
@@ -212,6 +231,41 @@ class TestGpuUsageNoticesOncePerProcess:
         # Once for device 0, once for device 1: a different device is a
         # different selection and stays visible.
         assert len(said) == 2
+
+    def _arm_single_adl_adapter(self, monkeypatch):
+        """One AMD adapter, one requested GPU, no torch bus id: the state that
+        reaches the adapter-pairing notice."""
+        monkeypatch.setattr(gpu_usage.sys, "platform", "win32", raising=False)
+        monkeypatch.setattr(gpu_usage, "_adl_used_by_bus",
+                            lambda: {45: 2_900_000_000})
+        monkeypatch.setattr(gpu_usage, "_torch_pci_bus", lambda index: None)
+        monkeypatch.setattr(gpu_usage, "raw_reading_is_process_scoped",
+                            lambda: True)
+        monkeypatch.setattr(gpu_usage, "_pdh_adapter_used", lambda: [])
+        return [{"index": 0, "total": 16_000_000_000}]
+
+    def test_the_vram_correction_survives_the_notice_gate(self, monkeypatch):
+        """The pairing notice gates the LOG, never the mapping.
+
+        That notice sits immediately before the return carrying the ADL
+        device-global figure, so a gate accidentally placed around the return
+        would leave the first poll corrected and every later one uncorrected -
+        the free-VRAM meter silently reverting to a process-scoped reading from
+        the second poll on. Repeat the call: the mapping must be identical."""
+        gpus = self._arm_single_adl_adapter(monkeypatch)
+        first = gpu_usage.device_global_used_bytes(gpus)
+        assert first == {0: 2_900_000_000}
+        for _ in range(5):
+            assert gpu_usage.device_global_used_bytes(gpus) == first
+
+    def test_adapter_pairing_notice_fires_once(self, monkeypatch, caplog):
+        gpus = self._arm_single_adl_adapter(monkeypatch)
+        with caplog.at_level("DEBUG", logger="localm"):
+            for _ in range(10):
+                gpu_usage.device_global_used_bytes(gpus)
+        said = [r for r in caplog.records
+                if "pairing the single AMD adapter" in r.getMessage()]
+        assert len(said) == 1
 
     @pytest.mark.parametrize("reason", ["first cause", "second cause"])
     def test_a_different_reason_is_still_announced(self, monkeypatch, tmp_path,

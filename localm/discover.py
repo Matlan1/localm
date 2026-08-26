@@ -781,7 +781,7 @@ def _reset_gpu_probe_cache() -> None:
     # ever held while acquiring it.
     global _native_hip_resident, _rocm_sdk_present, _torch_doomed_announced
     with _source_selection_lock:
-        _native_hip_resident = False
+        _native_hip_resident = None
         _rocm_sdk_present = None
         _torch_doomed_announced = None
     try:
@@ -1033,13 +1033,13 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
 # a LEAF: it is never held across a call out of this block, and no other lock in
 # this module or in gpu_usage is acquired while it is held.
 #
-# _native_hip_resident: True once native_hip_runtime_resident() has answered True,
-# and never set back to False outside _reset_gpu_probe_cache.
+# _native_hip_resident: the native_hip_runtime_resident() answer once the glob has
+# resolved it, or None while the native lib is unloaded and it is still open.
 # _rocm_sdk_present: the find_spec("rocm_sdk") answer, or None before it is taken.
 # _torch_doomed_announced: the last _torch_gpu_probe_known_doomed() answer written
 # to the log, or None before anything has been.
 _source_selection_lock = threading.Lock()
-_native_hip_resident = False
+_native_hip_resident: "bool | None" = None
 _rocm_sdk_present: "bool | None" = None
 _torch_doomed_announced: "bool | None" = None
 
@@ -1066,14 +1066,19 @@ def native_hip_runtime_resident() -> bool:
     Fails closed (False) when the check itself errors: both callers treat
     False as "no special handling", today's behavior.
 
-    A True answer is LATCHED for the life of the process (cleared only by
-    :func:`_reset_gpu_probe_cache`), so the directory glob runs at most once per
+    Once the native lib is loaded, the answer is LATCHED for the life of the
+    process (cleared only by :func:`_reset_gpu_probe_cache`), EITHER WAY: a
+    resolved True and a resolved False are both kept, so the directory glob and
+    the ``runtime_binary_dir()`` resolution behind it run at most once per
     process rather than on every call. The latch relies on this INVARIANT: a
-    native lib that has been loaded is never unloaded, so True never becomes
-    False. False is not latched - the lib can still load later, and the
-    ``native_lib_loaded()`` check that answers it takes no glob.
+    native lib that has been loaded is never unloaded and the DLL set it shipped
+    with does not change, so neither answer can flip once the glob has read it.
 
-    While True is latched the answer no longer re-resolves
+    The answer is NOT latched while the lib is unloaded, because it can still
+    load later. That path returns False on the ``native_lib_loaded()`` check
+    alone and never reaches the glob, so re-deriving it is cheap.
+
+    While the answer is latched it no longer re-resolves
     ``runtime_binary_dir()``, so it can no longer drift from the dir the
     resident lib actually loaded from."""
     global _native_hip_resident
@@ -1081,8 +1086,8 @@ def native_hip_runtime_resident() -> bool:
     if sys.platform != "win32":
         return False
     with _source_selection_lock:
-        if _native_hip_resident:
-            return True
+        if _native_hip_resident is not None:
+            return _native_hip_resident
     try:
         from localm.inference.backends.llamacpp import _loader
         if not _loader.native_lib_loaded():
@@ -1094,9 +1099,8 @@ def native_hip_runtime_resident() -> bool:
         logger.debug("native-HIP-resident check failed (%s); answering False",
                      type(e).__name__)
         return False
-    if resident:
-        with _source_selection_lock:
-            _native_hip_resident = True
+    with _source_selection_lock:
+        _native_hip_resident = resident
     return resident
 
 
