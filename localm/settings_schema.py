@@ -71,6 +71,12 @@ _EMBEDDING_POOLING = ["mean", "auto", "cls", "last", "none"]
 # Sidebar wordmark treatments (see config.py logo_style). Shared by the web GUI
 # logo picker and the desktop launcher; kept here so PATCH /v1/config validates.
 LOGO_STYLE_IDS = ["local-m", "loca-lm", "localm"]
+# Chat avatars (user_avatar / model_avatar_default / model_avatar_overrides, see
+# config.py). A value is "", a short emoji/text glyph, or a raster data URI -
+# never a URL or path. See test_avatar_value_rejects_url_or_path.
+_AVATAR_DATA_URI_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,", re.IGNORECASE)
+_AVATAR_MAX_DATA_URI_LEN = 200_000
+_AVATAR_MAX_GLYPH_LEN = 16
 
 
 @dataclass
@@ -366,6 +372,20 @@ CORE_FIELDS: list = [
                  "force it to be valid tool-call JSON (lazy GBNF grammar; local "
                  "grammar-capable backends only). Free text and thinking are "
                  "unaffected.",
+                 group="Chat", owner="chat", applies=Applies.LIVE),
+    # HIDDEN: the Settings > Chat "Avatars" panel renders these with its own
+    # upload/emoji picker, not a generic text box - see settings.js.
+    SettingField("user_avatar", Widget.HIDDEN, "Your icon",
+                 "An emoji or a small uploaded image shown next to your own "
+                 "messages. Blank shows nothing.",
+                 group="Chat", owner="chat", applies=Applies.LIVE),
+    SettingField("model_avatar_default", Widget.HIDDEN, "Model icon",
+                 "An emoji or a small uploaded image shown next to every "
+                 "model's replies. Blank falls back to a generated monogram.",
+                 group="Chat", owner="chat", applies=Applies.LIVE),
+    SettingField("model_avatar_overrides", Widget.HIDDEN, "Per-model icons",
+                 "Override the model icon for one specific model. Falls back "
+                 "to the default above, then the monogram, when unset.",
                  group="Chat", owner="chat", applies=Applies.LIVE),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
@@ -1141,6 +1161,49 @@ def _validate_key_presets(val):
     return out
 
 
+def _validate_avatar_value(key: str, val) -> str:
+    """Validate one avatar value: "", a short emoji/text glyph, or a raster
+    data URI. See _AVATAR_DATA_URI_RE / test_avatar_value_rejects_url_or_path."""
+    if val is None:
+        return ""
+    s = str(val)
+    if not s:
+        return ""
+    if _AVATAR_DATA_URI_RE.match(s):
+        if len(s) > _AVATAR_MAX_DATA_URI_LEN:
+            raise ValueError(
+                f"{key}: image is too large ({len(s)} bytes encoded, max "
+                f"{_AVATAR_MAX_DATA_URI_LEN})")
+        return s
+    if "://" in s or s.startswith("data:") or "\\" in s or "/" in s:
+        raise ValueError(
+            f"{key}: must be a short glyph or an uploaded png/jpeg/gif/webp "
+            f"image, never a URL or a path, got {s!r}")
+    if len(s) > _AVATAR_MAX_GLYPH_LEN:
+        raise ValueError(
+            f"{key}: glyph is too long ({len(s)} characters, max "
+            f"{_AVATAR_MAX_GLYPH_LEN})")
+    return s
+
+
+def _validate_avatar_overrides(key: str, val) -> dict:
+    """Validate model_avatar_overrides: {model_id: avatar_value}, each value
+    checked with _validate_avatar_value. An empty value clears that entry."""
+    if val is None:
+        return {}
+    if not isinstance(val, dict):
+        raise ValueError(f"{key}: expected an object of {{model_id: icon}}")
+    out: dict = {}
+    for model_id, icon in val.items():
+        mid = str(model_id).strip()
+        if not mid:
+            raise ValueError(f"{key}: a model id is required")
+        checked = _validate_avatar_value(f"{key}[{mid}]", icon)
+        if checked:
+            out[mid] = checked
+    return out
+
+
 def _validate_one(key: str, val, field: "SettingField", default):
     nullable = default is None
     widget = field.widget
@@ -1261,6 +1324,10 @@ def _validate_one(key: str, val, field: "SettingField", default):
             # ("a,b") or a JSON list; empty clears every pin.
             tokens = _to_str_list(key, val)
             return tokens or None
+        if key in ("user_avatar", "model_avatar_default"):
+            return _validate_avatar_value(key, val)
+        if key == "model_avatar_overrides":
+            return _validate_avatar_overrides(key, val)
         # plugins_enabled (list) / plugins (dict): managed by the engine, not the
         # settings form, but accepted with the right container type for the
         # GET->PATCH round-trip the GUI does.

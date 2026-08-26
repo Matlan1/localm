@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { openMemoryModal, runCompletion, speak, setWebAskSession } from "./settings-perf.js";
@@ -26,6 +26,9 @@ export const chat = {
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
   systemDefault: "", // default system prompt from Settings; a blank drawer inherits it
   toolGrammar: true, // chat_tool_grammar from /v1/config - grammar-constrain web-tool calls
+  userAvatar: "",           // user_avatar from /v1/config: "", an emoji/glyph, or a data: URI
+  modelAvatarDefault: "",   // model_avatar_default from /v1/config, same shape
+  modelAvatarOverrides: {}, // model_avatar_overrides from /v1/config: {model_id: icon}
   // Set once a backend REFUSES a web-tool grammar request; never cleared until
   // reload. Kept separate from toolGrammar (the config preference, refreshed
   // by refreshCtxLimit's 30s poll) - a config refresh must not resurrect a
@@ -243,6 +246,9 @@ export async function refreshCtxLimit() {
       // field inherits this (the per-chat drawer overrides it).
       chat.systemDefault = (cfg.chat_system_prompt || "").trim();
       chat.toolGrammar = cfg.chat_tool_grammar !== false;
+      chat.userAvatar = cfg.user_avatar || "";
+      chat.modelAvatarDefault = cfg.model_avatar_default || "";
+      chat.modelAvatarOverrides = cfg.model_avatar_overrides || {};
       // The coder session rail's side. Applied here because this is the one boot
       // round trip that already has the config in hand - a second fetch just for a
       // panel side would be a request per page load for a value that never changes
@@ -898,11 +904,76 @@ export function buildMemoryChip(mem) {
   return chip;
 }
 
+// A stable per-label mark with no external asset and no network fetch: the
+// same label always derives the same letters and the same hue. Two or more
+// hyphen/underscore/space/dot-separated words give one initial each (e.g.
+// "Qwen3-Coder-30B" -> "QC"); a single word gives its own first two
+// characters (e.g. "phi3" -> "PH"). See monogramFor's tests.
+function monogramFor(label) {
+  const s = String(label || "");
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) | 0;
+  const words = s.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  let letters = "";
+  if (words.length >= 2) letters = words.slice(0, 2).map((w) => w[0]).join("");
+  else if (words.length === 1) letters = words[0].slice(0, 2);
+  return { letters: letters.toUpperCase() || "?", hue: Math.abs(hash) % 360 };
+}
+
+// Resolves what to show for one turn's avatar mark: null (nothing), or
+// {kind: "image"|"glyph"|"mono", value, hue}. Never a URL - a configured
+// value is already either a short glyph or a data: URI (see
+// settings_schema.py's _validate_avatar_value).
+function avatarInfoFor(role, mName) {
+  if (role === "user") {
+    const v = (chat.userAvatar || "").trim();
+    if (!v) return null;
+    const safeSrc = safeAvatarImageSrc(v);
+    return safeSrc ? { kind: "image", value: safeSrc } : { kind: "glyph", value: v };
+  }
+  const override = (chat.modelAvatarOverrides || {})[mName];
+  const v = (override || chat.modelAvatarDefault || "").trim();
+  if (v) {
+    const safeSrc = safeAvatarImageSrc(v);
+    return safeSrc ? { kind: "image", value: safeSrc } : { kind: "glyph", value: v };
+  }
+  const mono = monogramFor(mName);
+  return { kind: "mono", letters: mono.letters, hue: mono.hue };
+}
+
+function buildAvatarEl(info) {
+  if (!info) return null;
+  const av = el("div", "msg-avatar");
+  if (info.kind === "image") {
+    const img = document.createElement("img");
+    img.src = info.value;
+    img.alt = "";
+    img.draggable = false;
+    av.appendChild(img);
+  } else if (info.kind === "glyph") {
+    av.textContent = info.value;
+  } else {
+    av.textContent = info.letters;
+    av.style.background = `hsl(${info.hue} 45% 30%)`;
+  }
+  return av;
+}
+
 export function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
   const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || "Model");
-  row.appendChild(el("div", "msg-role",
-    opts.label || (role === "user" ? "You" : mName)));
+  const roleEl = el("div", "msg-role", opts.label || (role === "user" ? "You" : mName));
+  const avatarEl = buildAvatarEl(avatarInfoFor(role, mName));
+  if (avatarEl) {
+    // Wrap only when there is an avatar. See
+    // test_addMessageRow_user_turn_with_no_avatar_has_no_head_wrapper.
+    const head = el("div", "msg-head");
+    head.appendChild(avatarEl);
+    head.appendChild(roleEl);
+    row.appendChild(head);
+  } else {
+    row.appendChild(roleEl);
+  }
   const body = el("div", "msg-body");
   if (role === "user") {
     // CHAT-1: a user's OWN message renders LITERALLY (exactly as typed). Markdown is

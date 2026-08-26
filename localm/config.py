@@ -653,6 +653,11 @@ DEFAULT_CONFIG: dict = {
     # web_search/fetch_url loop, scheduled jobs and the interactive GUI alike):
     # once the model starts a <tool_call>, force it to be valid tool-call JSON.
     "chat_tool_grammar": True,
+    # Chat avatars: an emoji or a small data:image URI, never a URL. See
+    # settings_schema.py's _validate_avatar_value / _AVATAR_DATA_URI_RE.
+    "user_avatar": "",
+    "model_avatar_default": "",
+    "model_avatar_overrides": {},
     # After an image is generated, ask ComfyUI to release VRAM and reload the chat
     # model so the next reply is instant. Off = the chat model reloads lazily on
     # the next message instead (better for many images in a row).

@@ -841,6 +841,51 @@ export function el(tag, className, text) {
   return node;
 }
 
+/** Matches settings_schema.py's _AVATAR_DATA_URI_RE (the mime alternation),
+ * plus a base64-alphabet check on the payload the server does not need
+ * (config.py never renders the value into markup). Returns the value
+ * REBUILT from the captured mime and payload groups, never the original
+ * string, so nothing reaches an <img src> that was not read back out of this
+ * exact character set. Returns null for anything else - a glyph, an empty
+ * value, or a near-miss like "data:text/html,...". See
+ * test_safeAvatarImageSrc_rebuilds_from_validated_groups_or_returns_null. */
+const AVATAR_DATA_URI_RE = /^data:image\/(png|jpeg|gif|webp);base64,([A-Za-z0-9+/]*={0,2})$/i;
+export function safeAvatarImageSrc(value) {
+  const m = typeof value === "string" ? value.match(AVATAR_DATA_URI_RE) : null;
+  return m ? "data:image/" + m[1].toLowerCase() + ";base64," + m[2] : null;
+}
+
+/** Reads an image file client-side and resolves a data:image/png;base64,...
+ * URI downscaled so its longest edge is at most maxSize - kept well under
+ * settings_schema.py's _AVATAR_MAX_DATA_URI_LEN regardless of the source
+ * file's size, and read entirely in-browser (no server round trip). */
+export function fileToAvatarDataUri(file, maxSize = 128) {
+  return new Promise((resolve, reject) => {
+    if (!file.type || !file.type.startsWith("image/")) {
+      reject(new Error("choose an image file"));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("could not read the file"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("could not decode the image"));
+      img.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export function autoGrow(textarea) {
   textarea.style.height = "auto";
   textarea.style.height = Math.min(textarea.scrollHeight, 220) + "px";

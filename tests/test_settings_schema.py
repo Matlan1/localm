@@ -382,3 +382,85 @@ def test_schema_json_hides_admin_only_for_non_owner():
     assert by_key["rag_indexing_mode"].get("admin_only") is True
     # Default (no is_owner arg) behaves as owner, for the CLI and tests.
     assert RAG_OWNER_KEYS <= {f["key"] for f in ss.schema_json()}
+
+
+# --------------------------------------------------------------------------- #
+#  Chat avatars: user_avatar / model_avatar_default / model_avatar_overrides  #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("key", ["user_avatar", "model_avatar_default"])
+def test_avatar_value_accepts_empty(key):
+    """"" clears the field, same contract as chat_system_prompt (also a
+    string-default HIDDEN-adjacent field): None is a validation error, not a
+    synonym for "" - a client sends the empty string to clear it."""
+    assert ss.validate_update({key: ""}) == {key: ""}
+    with pytest.raises(ValueError):
+        ss.validate_update({key: None})
+
+
+@pytest.mark.parametrize("key", ["user_avatar", "model_avatar_default"])
+def test_avatar_value_accepts_a_short_glyph(key):
+    assert ss.validate_update({key: "AB"}) == {key: "AB"}
+    assert ss.validate_update({key: "\U0001F600"}) == {key: "\U0001F600"}
+
+
+@pytest.mark.parametrize("key", ["user_avatar", "model_avatar_default"])
+def test_avatar_value_accepts_a_data_uri(key):
+    uri = "data:image/png;base64,iVBORw0KGgo="
+    assert ss.validate_update({key: uri}) == {key: uri}
+
+
+@pytest.mark.parametrize("key", ["user_avatar", "model_avatar_default"])
+@pytest.mark.parametrize("bad", [
+    # Each of these is <= _AVATAR_MAX_GLYPH_LEN chars, so a case here can only
+    # go red via the URL/path check itself - the length cap cannot mask it.
+    "http://x",
+    "https://x",
+    "//x",
+    "data:img",
+    "/etc/pw",
+    "a\\b",
+])
+def test_avatar_value_rejects_url_or_path_short_form(key, bad):
+    assert len(bad) <= ss._AVATAR_MAX_GLYPH_LEN
+    with pytest.raises(ValueError):
+        ss.validate_update({key: bad})
+
+
+@pytest.mark.parametrize("key", ["user_avatar", "model_avatar_default"])
+@pytest.mark.parametrize("bad", [
+    "http://example.com/a.png",
+    "https://example.com/a.png",
+    "//example.com/a.png",
+    "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+    "/etc/passwd",
+    "C:\\Users\\me\\avatar.png",
+    "a" * 17,
+])
+def test_avatar_value_rejects_url_or_path(key, bad):
+    with pytest.raises(ValueError):
+        ss.validate_update({key: bad})
+
+
+def test_avatar_value_rejects_oversized_data_uri():
+    huge = "data:image/png;base64," + ("A" * ss._AVATAR_MAX_DATA_URI_LEN)
+    with pytest.raises(ValueError):
+        ss.validate_update({"user_avatar": huge})
+
+
+def test_model_avatar_overrides_accepts_a_valid_map():
+    val = {"qwen3-coder-30b": "\U0001F916", "llama-3-8b": ""}
+    # An empty per-model value clears that entry rather than storing "".
+    assert ss.validate_update({"model_avatar_overrides": val}) == {
+        "model_avatar_overrides": {"qwen3-coder-30b": "\U0001F916"}}
+
+
+def test_model_avatar_overrides_rejects_non_dict():
+    with pytest.raises(ValueError):
+        ss.validate_update({"model_avatar_overrides": ["not", "a", "dict"]})
+
+
+def test_model_avatar_overrides_rejects_a_bad_entry():
+    with pytest.raises(ValueError, match="qwen3-coder-30b"):
+        ss.validate_update({
+            "model_avatar_overrides": {"qwen3-coder-30b": "http://evil.example/x.png"}})

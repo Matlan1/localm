@@ -558,16 +558,32 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   padding: 24px 0 12px;
 }
 .msg-row { max-width: var(--thread-max); margin: 0 auto 18px; padding: 0 24px; }
+.msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .msg-role {
   font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.8px;
-  margin-bottom: 6px;
   color: var(--text-dim);
 }
 .msg-row.user .msg-role { color: var(--accent); }
 .msg-row.assistant .msg-role { color: var(--green); }
+.msg-avatar {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--border);
+  overflow: hidden;
+  user-select: none;
+}
+.msg-avatar img { width: 100%; height: 100%; object-fit: cover; }
 
 /* Companion-app layout: the user's turn is a right-aligned chat bubble; the
    assistant's turn stays full width so code, tables and long markdown have room
@@ -1406,6 +1422,29 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   border: 1px solid var(--border); color: var(--text-dim);
 }
 .comfy-pill.ok { color: var(--green); border-color: var(--green); }
+/* Settings "Avatars" section: user_avatar / model_avatar_default fields, plus
+   the per-model override list, same bordered-box language as .media-comfy-box. */
+.avatar-field-row {
+  display: flex; align-items: center; gap: 12px; margin-top: 12px;
+}
+.avatar-field-label { min-width: 140px; color: var(--text-dim); font-size: 13px; }
+.avatar-picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.avatar-picker-preview {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--bg-input);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; overflow: hidden; flex: none;
+}
+.avatar-picker-preview img { width: 100%; height: 100%; object-fit: cover; }
+.avatar-picker-glyph { width: 110px; }
+.avatar-overrides-box {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-top: 12px;
+  background: var(--bg-input);
+}
+.avatar-overrides-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.avatar-override-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.avatar-override-id { width: 200px; }
 /* The Settings "Updates" card: three sub-blocks (app update, runtime update,
    the update-behavior toggles) stacked in one card, same bordered-box language
    as .media-comfy-box so they read as distinct pieces without being separate
