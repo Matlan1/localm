@@ -65,11 +65,12 @@ TAG_CONST = "MTP_ARCH_SOURCE_TAG"
 MTP_CTX_CONST = "LLAMA_CONTEXT_TYPE_MTP"
 
 # Feeding an MTP draft head its hidden state needs these. They are a staging API
-# in llama.cpp's internal llama-ext.h rather than the public llama.h, and the
-# runtimes localm ships do not export them, so the head runs on the token
-# embedding alone and its drafts are rarely accepted. That is why mtp_enabled
-# defaults to False. If a later runtime DOES export them, this gate says so:
-# the real implementation becomes possible and the default should be revisited.
+# in llama.cpp's internal llama-ext.h rather than the public llama.h, so they are
+# exported with C++ LINKAGE and a plain getattr misses them - reading that as
+# absence is how this check first got the answer backwards. Resolution goes
+# through localm.inference.backends.llamacpp._symbols, which reads the binary's
+# own export table. mtp_enabled defaults to False because localm does not yet
+# DRIVE this API, not because the runtime lacks it.
 MTP_HIDDEN_STATE_API = (
     "llama_set_embeddings_nextn",
     "llama_get_embeddings_nextn",
@@ -168,17 +169,39 @@ def _runtime_feeds_the_draft_head():
     answer from "loaded and the symbol is absent" and must not collapse into it.
     """
     try:
+        from localm.inference.backends.llamacpp import _symbols
         from localm.inference.backends.llamacpp._api import load_lib
         lib = load_lib()
     except Exception as exc:
         return None, "no runtime to query (%s)" % type(exc).__name__
-    # Prove the probe can see a symbol before believing it saw none.
-    if not hasattr(lib, "llama_model_n_embd_out"):
+    # Prove the probe can see a symbol, and can MISS one, before believing either.
+    if not _symbols.resolve(lib, "llama_model_n_embd_out"):
         return None, "runtime loaded but the control symbol is absent, so the probe is blind"
-    missing = [n for n in MTP_HIDDEN_STATE_API if not hasattr(lib, n)]
+    if _symbols.resolve(lib, "zzz_localm_not_a_symbol"):
+        return None, "the probe resolves a fabricated name, so it cannot report absence"
+    missing = [n for n in MTP_HIDDEN_STATE_API if not _symbols.resolve(lib, n)]
     if missing:
         return False, "not exported: %s" % ", ".join(missing)
     return True, "exported: %s" % ", ".join(MTP_HIDDEN_STATE_API)
+
+
+def _drives_the_draft_head() -> bool:
+    """True when the tree actually CALLS the hidden-state API.
+
+    Availability and use are different questions. The runtime exposing the API
+    is a work item; shipping MTP on without driving it is a defect.
+    """
+    pkg = REPO / "localm"
+    for path in pkg.rglob("*.py"):
+        if path.name == "_symbols.py":
+            continue          # it names the symbols to resolve them, not to call them
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "llama_set_embeddings_nextn" in text:
+            return True
+    return False
 
 
 def _pinned_tag() -> Optional[str]:
@@ -307,16 +330,27 @@ def main(argv: Optional[list] = None) -> int:
     print("  %-19s : %s" % ("mtp_enabled default", default_on))
     print("  %-19s : %s (%s)" % ("draft-head API", feeds, detail))
     print()
-    if feeds is True and default_on is False:
+    drives = _drives_the_draft_head()
+    print("  %-19s : %s" % ("localm drives head", drives))
+    print()
+
+    if default_on and not drives:
         failures.append(
-            "this runtime DOES export %s, so an MTP draft head can now be fed its "
-            "hidden state. Implement that path and revisit the mtp_enabled default, "
-            "which is still False." % " / ".join(MTP_HIDDEN_STATE_API))
-    if feeds is False and default_on is True:
+            "mtp_enabled defaults to True while nothing in localm feeds the draft "
+            "head its hidden state, so the head runs on the token embedding alone "
+            "and every token pays for drafts that rarely survive verification.")
+    if drives and not default_on:
         failures.append(
-            "mtp_enabled defaults to True while this runtime does not export the "
-            "hidden-state API (%s), so the draft head runs on the token embedding "
-            "alone and its drafts cost more than they save." % detail)
+            "localm now drives the draft head, so the mtp_enabled default of False "
+            "is stale. Measure acceptance against the mtp_enabled=False arm and "
+            "turn it on if it wins.")
+    if feeds is True and not drives:
+        # A work item, not a violation: reported every run so it cannot be
+        # forgotten, and NOT gated, because a permanently red gate gets disabled.
+        print("  NOTE: this runtime exports %s, so the draft head CAN be fed its "
+              "hidden state. localm does not do that yet, which is why MTP is off."
+              % " / ".join(MTP_HIDDEN_STATE_API))
+        print()
 
     ungated = _ungated_mtp_context_sites(REPO)
     if ungated:

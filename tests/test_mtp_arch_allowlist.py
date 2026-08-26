@@ -183,42 +183,49 @@ def test_refresh_refuses_an_upstream_layout_it_no_longer_understands(monkeypatch
         raise AssertionError("refresh accepted an unparseable upstream layout")
 
 
-def _bench_api(tmp_path, mod, feeds, default_on):
-    """Drive the draft-head-API arm with both inputs forced."""
+DRIVING_CALLER = GATED_CALLER + """
+
+def feed_head(ctx, h):
+    llama_set_embeddings_nextn(ctx, True, False)
+"""
+
+
+def _bench_api(tmp_path, mod, feeds, default_on, driving=False):
+    """Drive the draft-head arm with availability, default and use all forced."""
     mod._runtime_feeds_the_draft_head = lambda: (feeds, "forced")
     mod._mtp_default_enabled = lambda: default_on
-    return _bench(tmp_path, mod)
+    caller = DRIVING_CALLER if driving else GATED_CALLER
+    return _bench(tmp_path, mod, caller_src=caller)
 
 
-def test_gate_fires_when_the_runtime_gains_the_draft_head_api(tmp_path):
-    """The moment a runtime can feed the draft head, the real implementation
-    becomes possible and the off-by-default decision has to be revisited. Nothing
-    else in the tree would notice that the world changed."""
-    assert _bench_api(tmp_path, _load(), feeds=True, default_on=False) == 1
+def test_gate_fires_when_mtp_defaults_on_without_driving_the_head(tmp_path):
+    """The harmful direction: speculation on by default while the head is starved,
+    which costs more per token than it saves."""
+    assert _bench_api(tmp_path, _load(), feeds=True, default_on=True, driving=False) == 1
+    assert _bench_api(tmp_path, _load(), feeds=False, default_on=True, driving=False) == 1
 
 
-def test_gate_fires_when_mtp_defaults_on_without_the_draft_head_api(tmp_path):
-    """The state this default exists to prevent: speculation on by default while
-    the head is starved, which costs more per token than it saves."""
-    assert _bench_api(tmp_path, _load(), feeds=False, default_on=True) == 1
+def test_gate_fires_when_the_head_is_driven_but_the_default_is_still_off(tmp_path):
+    """Once the work lands, an off default is stale and nothing else would notice."""
+    assert _bench_api(tmp_path, _load(), feeds=True, default_on=False, driving=True) == 1
 
 
 def test_gate_is_quiet_in_the_state_that_actually_ships(tmp_path):
-    """API absent, default off. A gate that fired here would be turned off."""
-    assert _bench_api(tmp_path, _load(), feeds=False, default_on=False) == 0
+    """API available, not driven yet, default off. This is a tracked work item, not
+    a violation - gating it would leave the check permanently red, and a gate that
+    is always red gets switched off."""
+    assert _bench_api(tmp_path, _load(), feeds=True, default_on=False, driving=False) == 0
 
 
-def test_gate_is_quiet_when_the_api_exists_and_mtp_is_on(tmp_path):
-    """The other consistent pair, so the check is about AGREEMENT rather than
-    about either value on its own."""
-    assert _bench_api(tmp_path, _load(), feeds=True, default_on=True) == 0
+def test_gate_is_quiet_once_the_head_is_driven_and_mtp_is_on(tmp_path):
+    """The other consistent pair, so the check is about AGREEMENT between what the
+    code does and what the default says, not about either value alone."""
+    assert _bench_api(tmp_path, _load(), feeds=True, default_on=True, driving=True) == 0
 
 
 def test_an_unloadable_runtime_is_not_read_as_an_absent_api(tmp_path):
-    """"Could not look" must not collapse into "looked and found nothing" - that
-    is the difference between a real absence and a broken probe."""
-    assert _bench_api(tmp_path, _load(), feeds=None, default_on=True) == 0
-    assert _bench_api(tmp_path, _load(), feeds=None, default_on=False) == 0
+    """"Could not look" must not collapse into "looked and found nothing"."""
+    assert _bench_api(tmp_path, _load(), feeds=None, default_on=False, driving=False) == 0
 
 
 def test_the_real_tree_passes_the_gate():

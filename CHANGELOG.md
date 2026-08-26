@@ -39,12 +39,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   context all fall back to ordinary autoregressive decoding, with the reason
   recorded in the debug log.
 
-  `mtp_enabled` **defaults to off.** Feeding a draft head the hidden state it
-  predicts from needs an API the bundled llama.cpp runtimes do not expose, so
-  the head sees only the token embedding: on a real MTP model fewer than one
-  draft in ten was accepted, which does not repay the extra work each token
-  costs. The setting is there for anyone who wants to measure it on their own
-  model, and the default will change when a runtime can feed the head properly.
+  `mtp_enabled` **defaults to off.** The draft head is not yet fed the hidden
+  state it predicts from, so it sees only the token embedding: on a real MTP
+  model fewer than one draft in ten was accepted, which does not repay the extra
+  work each token costs. The setting is there for anyone who wants to try it on
+  their own model, and the default will change once the head is driven properly.
 - **A collection's individual documents can now be listed and removed from the
   terminal.** `localm rag docs NAME` shows each indexed document with its chunk
   count and whether its source file has since gone missing or was added via an
