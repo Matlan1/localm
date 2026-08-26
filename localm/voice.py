@@ -16,11 +16,12 @@ That one download is gated by the network policy (netpolicy.network_mode), the
 same bypass-ask-respect-off rule the embedder's ``_download_known`` applies:
 under ``net_mode=allow`` the first use fetches automatically; under ``ask`` the
 fetch needs an explicit one-time authorization (``prefetch_stt_model``); under
-``off`` nothing fetches, ever - off is the kill switch and stays absolute. The
-worker enforces this structurally: it is dispatched with ``local_files_only``
-so it CANNOT download unless the policy decision in this (parent) process said
-so - and a cached model always loads with ``local_files_only=True``, so a
-routine load never touches the network at all.
+``off`` nothing fetches, unless ``net_allow_model_downloads`` exempts an
+explicit fetch - off is still the default kill switch. The worker enforces
+this structurally: it is dispatched with ``local_files_only`` so it CANNOT
+download unless the policy decision in this (parent) process said so - and a
+cached model always loads with ``local_files_only=True``, so a routine load
+never touches the network at all.
 
 Text-to-speech needs no backend at all: the GUI uses Kokoro in the browser
 (see the ``tts`` plugin) or the browser's built-in speechSynthesis.

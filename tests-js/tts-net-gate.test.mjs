@@ -227,7 +227,7 @@ test("load(): net_mode=off with net_allow_model_downloads never refuses at the n
   assert.equal(win.$("modal").style.display, "none",
     "an exempted off proceeds like allow - no confirmation needed");
   const gateToast = calls.toasts.find(
-    (t) => t.isError && /Network access is off/.test(t.msg));
+    (t) => t.isError && /Voice model download is off/.test(t.msg));
   assert.equal(gateToast, undefined,
     "must not fail on the net_mode gate when the override is set");
 });

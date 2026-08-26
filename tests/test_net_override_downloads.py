@@ -420,6 +420,16 @@ class TestVoiceRoutes:
         assert body["can_download"] is False
         assert "net_mode=off" in body["reason"]
 
+    def test_status_offers_download_under_off_when_downloads_allowed(
+            self, voice_client, monkeypatch):
+        _fake_faster_whisper_present(monkeypatch)
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "off"))
+        update_config(lambda c: c.__setitem__("net_allow_model_downloads", True))
+        body = voice_client.c.get("/api/voice/status",
+                                  headers=_hdr(OWNER_KEY)).json()
+        assert body["can_download"] is True
+
     def test_download_route_403_without_config_write(self, voice_client):
         r = voice_client.c.post("/api/voice/model/download",
                                 headers=_hdr(voice_client.voice_only))
@@ -433,6 +443,14 @@ class TestVoiceRoutes:
                                 headers=_hdr(OWNER_KEY))
         assert r.status_code == 409
         assert "net_mode=off" in r.text
+
+    def test_download_route_200_under_off_when_downloads_allowed(self, voice_client):
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "off"))
+        update_config(lambda c: c.__setitem__("net_allow_model_downloads", True))
+        r = voice_client.c.post("/api/voice/model/download",
+                                headers=_hdr(OWNER_KEY))
+        assert r.status_code == 200, r.text
 
     def test_download_route_runs_one_authorized_job_persists_nothing(
             self, voice_client):
@@ -510,6 +528,14 @@ class TestEmbeddingRoutes:
                                 headers=_hdr(OWNER_KEY)).json()
         assert body["can_download"] is False
 
+    def test_status_offers_download_under_off_when_downloads_allowed(self, rag_client):
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "off"))
+        update_config(lambda c: c.__setitem__("net_allow_model_downloads", True))
+        body = rag_client.c.get("/api/rag/embedding",
+                                headers=_hdr(OWNER_KEY)).json()
+        assert body["can_download"] is True
+
     def test_download_route_403_without_config_write(self, rag_client):
         r = rag_client.c.post("/api/rag/embedding/download",
                               headers=_hdr(rag_client.rag_only))
@@ -523,6 +549,34 @@ class TestEmbeddingRoutes:
                               headers=_hdr(OWNER_KEY))
         assert r.status_code == 409
         assert "net_mode=off" in r.text
+
+    def test_download_route_200_under_off_when_downloads_allowed(
+            self, rag_client, monkeypatch):
+        """The route's own redundant pre-check (ahead of resolve_embedding_
+        model_path's inner one) honours the override too."""
+        from localm.inference.embedder import (
+            DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, _embeddings_dir)
+        _repo, filename = KNOWN_EMBEDDING_MODELS[DEFAULT_EMBEDDING_MODEL]
+        dest = _embeddings_dir() / filename
+        fetched = []
+
+        def _fake_hf_download(repo, fname, local_dir=None, **kw):
+            fetched.append((repo, fname))
+            target = (dest.parent if local_dir is None else Path(local_dir)) / fname
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"GGUF")
+            return str(target)
+
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hf_download)
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "off"))
+        update_config(lambda c: c.__setitem__("net_allow_model_downloads", True))
+        r = rag_client.c.post("/api/rag/embedding/download",
+                              headers=_hdr(rag_client.rag_writer))
+        assert r.status_code == 200, r.text
+        job = _wait_job(rag_client.app, r.json()["job_id"])
+        assert fetched == [(_repo, filename)]
+        assert job.status == "done"
 
     def test_download_route_409_for_non_internal_model(self, rag_client):
         from localm.config import update_config
