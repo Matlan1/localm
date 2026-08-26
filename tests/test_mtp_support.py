@@ -373,3 +373,16 @@ def test_mtp_sampler_state_never_advances_past_an_emitted_token():
     tokens, _ = _run_generate(rec, max_new_tokens=8)
 
     _assert_chain_matches_output(rec, tokens)
+
+
+def test_mtp_carried_token_is_not_dropped_at_the_token_budget_boundary():
+    """The carry survives the last budgeted token. The in-loop budget check runs
+    before the speculative block, so a speculation only starts with budget left
+    and its replacement token always has an iteration to be emitted in."""
+    rec = _SpecRecorder(head=[200], draft=[201], verify=[202])
+
+    tokens, _ = _run_generate(rec, max_new_tokens=2)
+
+    assert tokens == [200, 202]
+    _assert_chain_matches_output(rec, tokens)
+
