@@ -33,8 +33,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   generate draft tokens via a dedicated MTP draft context and verify them in
   batches on the main model graph, speeding up generation without requiring a
   separate draft model (structured or tool-calling replies generate one token
-  at a time instead). Configurable via `mtp_enabled` (default true) with
-  seamless fallback to standard autoregressive decoding on standard models.
+  at a time instead). Configurable via `mtp_enabled` (default true). It engages
+  only where the runtime can genuinely build an MTP draft head: a model that
+  merely carries next-n metadata, one whose cache cannot roll back a rejected
+  draft, and a conversation that outgrows the draft context all fall back to
+  ordinary autoregressive decoding, with the reason recorded in the debug log.
 - **A collection's individual documents can now be listed and removed from the
   terminal.** `localm rag docs NAME` shows each indexed document with its chunk
   count and whether its source file has since gone missing or was added via an

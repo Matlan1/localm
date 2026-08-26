@@ -2,6 +2,7 @@
 """Tests for Multi-Token Prediction (MTP) model support."""
 
 import ctypes
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from localm.config import DEFAULT_CONFIG
@@ -87,7 +88,8 @@ def test_llama_model_has_mtp_detection():
         with patch.object(api, "llama_model_meta_val_str", side_effect=fake_meta_val):
             assert api.llama_model_has_mtp(mock_model) is True
 
-    # 3. GGUF metadata check (Qwen mtp_head_count)
+    # 3. GGUF metadata check, tolerated mtp_head_count spelling, on an arch
+    #    that does build an MTP graph
     with patch.object(api, "load_lib") as mock_load_lib, \
          patch.object(api, "has_model_meta_api", return_value=True):
         mock_dll = MagicMock(spec=[])
@@ -95,8 +97,8 @@ def test_llama_model_has_mtp_detection():
 
         def fake_meta_val_qwen(model, key):
             if key == "general.architecture":
-                return "qwen2"
-            if key == "qwen2.mtp_head_count":
+                return "qwen35moe"
+            if key == "qwen35moe.mtp_head_count":
                 return "2"
             return None
 
@@ -116,6 +118,68 @@ def test_llama_model_has_mtp_detection():
 
         with patch.object(api, "llama_model_meta_val_str", side_effect=fake_meta_val_none):
             assert api.llama_model_has_mtp(mock_model) is False
+
+
+def _detect(arch, extra):
+    """Run the real detector against a synthetic GGUF metadata table."""
+    def _val(model, key):
+        if key == "general.architecture":
+            return arch
+        return extra.get(key)
+
+    with patch.object(api, "load_lib") as mock_load_lib,          patch.object(api, "has_model_meta_api", return_value=True):
+        mock_load_lib.return_value = MagicMock(spec=[])  # no native llama_model_has_mtp
+        with patch.object(api, "llama_model_meta_val_str", side_effect=_val):
+            return api.llama_model_mtp_support(ctypes.c_void_p(1234))
+
+
+def test_metadata_key_alone_does_not_engage_mtp():
+    """An architecture that ships nextn metadata but builds no MTP graph is refused.
+
+    glm4moe (GLM-4.5 / 4.5-Air / 4.6) is the real case: published GGUFs carry
+    glm4moe.nextn_predict_layers=1 and the NextN tensors, while upstream's
+    build_arch_graph ignores the MTP graph type, so an MTP context there is a
+    second full decoder rather than a draft head.
+    """
+    supported, reason = _detect("glm4moe", {"glm4moe.nextn_predict_layers": "1"})
+    assert supported is False
+    assert reason == "no-mtp-graph:glm4moe"
+
+
+def test_mtp_engages_on_an_architecture_with_a_draft_graph():
+    """The same metadata on an architecture that does build an MTP graph is accepted."""
+    supported, reason = _detect("qwen35", {"qwen35.nextn_predict_layers": "1"})
+    assert supported is True
+    assert reason == "ok:qwen35"
+
+
+def test_mtp_needs_metadata_as_well_as_a_capable_architecture():
+    """A capable architecture with no nextn metadata is refused."""
+    supported, reason = _detect("qwen35", {})
+    assert supported is False
+    assert reason == "no-mtp-metadata"
+
+
+def test_every_allowlisted_architecture_is_accepted_with_metadata():
+    """No allowlist entry is unreachable - a typo would strand one silently."""
+    for arch in sorted(api.MTP_GRAPH_ARCHITECTURES):
+        supported, reason = _detect(arch, {f"{arch}.nextn_predict_layers": "1"})
+        assert supported is True, f"{arch} is allowlisted but was refused ({reason})"
+
+
+def test_zero_or_unparsable_nextn_value_is_not_mtp():
+    """nextn_predict_layers=0 declares no heads; a non-numeric value declares nothing."""
+    assert _detect("qwen35", {"qwen35.nextn_predict_layers": "0"})[1] == "no-mtp-metadata"
+    assert _detect("qwen35", {"qwen35.nextn_predict_layers": "x"})[1] == "no-mtp-metadata"
+
+
+def test_absent_metadata_api_is_reported_as_its_own_reason():
+    """"Could not look" is a distinct answer from "looked and found no MTP"."""
+    with patch.object(api, "load_lib") as mock_load_lib,          patch.object(api, "has_model_meta_api", return_value=False):
+        mock_load_lib.return_value = MagicMock(spec=[])
+        supported, reason = api.llama_model_mtp_support(ctypes.c_void_p(1234))
+    assert supported is False
+    assert reason == "no-metadata-api"
 
 
 def test_gguf_backend_supports_mtp():
@@ -338,6 +402,141 @@ def test_mtp_drafting_is_disabled_while_a_grammar_is_active():
     assert tokens == [400]
     assert "DRAFT" not in rec.shapes(), rec.shapes()
     mock_api.llama_sampler_init_greedy.assert_not_called()
+
+
+def test_a_stuck_draft_cell_disables_mtp_and_keeps_generating():
+    """A rejected draft whose KV cell cannot be removed must not end the turn.
+
+    llama_memory_seq_rm returns false on a memory module that cannot partially
+    rewind. The rejected token then stays at pos + 1, and llama.cpp refuses any
+    later batch whose start position it already holds, so generation dies a
+    couple of tokens in and reports a token budget it never reached. Measured on
+    unsloth/Qwen3.5-0.8B-MTP-GGUF: 28 characters and finish_reason "length"
+    against 941 characters with MTP off.
+
+    The cache here is modelled rather than mocked flat, because the defect's
+    symptom IS the later decodes failing: against a decode that always returns 0
+    the token stream comes out right whether the fix is present or not.
+    """
+    rec = _SpecRecorder(head=[600, 604, _SpecRecorder.EOG],
+                        draft=[601], verify=[602])
+
+    llm = make_bare_llama(
+        _model_ptr=ctypes.c_void_p(1),
+        _ctx_ptr=ctypes.c_void_p(2),
+        _mtp_ctx_ptr=ctypes.c_void_p(3),
+        supports_mtp=True,
+    )
+    llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
+    llm._fit_generation_budget = lambda n_prompt, max_new: max_new
+    llm._can_reuse_kv = lambda needed: False
+    llm._prefill_fresh_context = MagicMock()
+    llm._create_batch = lambda tokens, pos, **kw: SimpleNamespace(
+        tokens=list(tokens), pos=pos)
+
+    # Highest position the main cache holds. The prompt is 2 tokens, and
+    # _prefill_fresh_context is mocked, so start where a real prefill would end.
+    main = {"last": 1}
+
+    def decode(ctx, batch):
+        rec.calls.append(("DECODE", None))
+        if ctx is not llm._ctx_ptr:
+            return 0
+        if batch.pos <= main["last"]:
+            # llama.cpp: "the tokens for sequence 0 in the input batch have a
+            # starting position of Y ... required that the position satisfies X < Y"
+            return -1
+        main["last"] = batch.pos + len(batch.tokens) - 1
+        return 0
+
+    def seq_rm(ctx, seq_id, p0, p1):
+        return False        # this memory module cannot partially rewind
+
+    def clear(mem, data):
+        main["last"] = -1
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api,          patch("localm.inference.backends.llamacpp.llama._build_sampler",
+               return_value=rec.main_sampler):
+        mock_api.llama_sampler_init_greedy.return_value = rec.draft_sampler
+        mock_api.llama_sampler_sample.side_effect = rec.sample
+        mock_api.llama_sampler_accept.side_effect = rec.accept
+        mock_api.llama_decode.side_effect = decode
+        mock_api.llama_kv_cache_seq_rm.side_effect = seq_rm
+        mock_api.llama_memory_clear.side_effect = clear
+        tokens = list(llm._generate(
+            prompt_tokens=[1, 2], max_new_tokens=8, temperature=0.8,
+            top_k=40, top_p=0.95, repeat_penalty=1.1,
+        ))
+
+    # THE PROPERTY: the turn survives the stuck cell. Assert the token stream
+    # before the status flags - a truncated reply is the user-visible loss, and
+    # a status assertion alone reads as a detail worth adjusting.
+    assert tokens == [600, 602, 604], tokens
+    assert llm.last_finish_reason == "stop"
+
+    # MTP is off for this model from here on, and says why.
+    assert llm.supports_mtp is False
+    assert llm.mtp_status == "rewind-unsupported"
+    assert llm._mtp_usable is False
+
+    # No speculation is attempted after the failure.
+    assert rec.shapes().count("DRAFT") == 1, rec.shapes()
+
+
+def _mtp_prefill_llama(capacity):
+    llm = make_bare_llama(
+        _model_ptr=ctypes.c_void_p(1),
+        _ctx_ptr=ctypes.c_void_p(2),
+        _mtp_ctx_ptr=ctypes.c_void_p(3),
+        supports_mtp=True,
+    )
+    llm._mtp_ctx_capacity = capacity
+    llm._create_batch = lambda tokens, pos, **kw: SimpleNamespace(
+        tokens=list(tokens), pos=pos)
+    return llm
+
+
+def test_a_conversation_outgrowing_the_draft_context_stops_drafting():
+    """The draft context is created once and never resized while the main one
+    grows, so past its own n_ctx every draft decode fails. Stop instead of
+    paying a doomed decode per token, and report why."""
+    llm = _mtp_prefill_llama(2048)
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        llm._prefill_mtp(list(range(10)), base_pos=2045)
+
+    mock_api.llama_decode.assert_not_called()
+    assert llm.supports_mtp is False
+    assert llm.mtp_status == "draft-context-full"
+    assert llm._mtp_usable is False
+
+
+def test_a_failed_draft_prefill_decode_stops_drafting():
+    """A draft decode that fails leaves the draft cache out of step with the
+    main one, so every later draft would be conditioned on the wrong prefix.
+    The return value used to be discarded inside a bare except."""
+    llm = _mtp_prefill_llama(2048)
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        mock_api.llama_decode.return_value = -1
+        llm._prefill_mtp([1, 2, 3], base_pos=0)
+
+    assert llm.supports_mtp is False
+    assert llm.mtp_status == "draft-prefill-failed:-1"
+    assert llm._mtp_usable is False
+
+
+def test_a_healthy_draft_prefill_leaves_mtp_alone():
+    """The false-positive direction: a normal prefill must not disable anything."""
+    llm = _mtp_prefill_llama(2048)
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        mock_api.llama_decode.return_value = 0
+        llm._prefill_mtp([1, 2, 3], base_pos=0)
+
+    assert mock_api.llama_decode.called
+    assert llm.supports_mtp is True
+    assert llm._mtp_usable is True
 
 
 def test_mtp_two_consecutive_rejections_each_emit_their_own_token():
