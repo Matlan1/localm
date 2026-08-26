@@ -281,11 +281,19 @@ detect_gpu() {
     echo rocm
   elif command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -Eiq 'intel.*(arc|dg2|xe)'; then
     echo intel
+  elif [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "arm64" ]; then
+    echo metal
   else
     echo cpu
   fi
 }
 GPU="$(detect_gpu)"
+# Independent of $GPU, which the Y/n prompt below can downgrade to "cpu". See
+# test_menu_shows_metal_even_when_gpu_was_downgraded_to_cpu.
+IS_APPLE_SILICON=0
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "arm64" ]; then
+  IS_APPLE_SILICON=1
+fi
 # NOT presented as "Detected acceleration: $GPU" here on purpose: this crude
 # pre-venv guess and the authoritative "Recommended for your hardware: $REC"
 # line further down (sourced from `python -m localm.hwdetect`, once the venv
@@ -492,8 +500,12 @@ uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 # setup-llama fetches the matching upstream build, so a tester never compiles by hand.
 REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}')"
 case "$REC" in
-  vulkan|cuda|hip|cpu|metal|amd-rocm) ;;                      # a known backend from the policy
-  *) case "$GPU" in cpu) REC=cpu ;; *) REC=vulkan ;; esac ;;  # fallback if the probe failed
+  vulkan|cuda|hip|cpu|metal|amd-rocm) ;;   # a known backend from the policy
+  *) case "$GPU" in                        # fallback if the probe failed
+       cpu)   REC=cpu ;;
+       metal) REC=metal ;;   # see test_probe_failed_fallback_metal_gpu_stays_metal
+       *)     REC=vulkan ;;
+     esac ;;
 esac
 # The prompt above promises "n = CPU only", so honour it: hwdetect answers what
 # this HARDWARE could use, which is a different question from what the user just
@@ -504,17 +516,17 @@ esac
 if [ "$GPU" = cpu ]; then REC=cpu; fi
 # [1] is a shortcut for whichever backend the policy recommended, so it is ALWAYS
 # the same choice as one of the numbered entries below (vulkan on most GPUs, cpu
-# with none). Listing it twice with no relation shown reads as two different
-# options that happen to share a name. Mark the twin instead of removing it: the
-# numbering has to stay stable, and [1] has to keep working for a REC with no
-# numbered entry of its own (metal on Apple Silicon).
+# with none, metal on Apple Silicon). Listing it twice with no relation shown
+# reads as two different options that happen to share a name. Mark the twin
+# instead of removing it: the numbering has to stay stable.
 _same="   (same as [1])"
-_m2=""; _m3=""; _m4=""; _m5=""
+_m2=""; _m3=""; _m4=""; _m5=""; _m7=""
 case "$REC" in
   vulkan) _m2="$_same" ;;
   cuda)   _m3="$_same" ;;
   hip)    _m4="$_same" ;;
   cpu)    _m5="$_same" ;;
+  metal)  _m7="$_same" ;;
 esac
 say ""
 say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
@@ -524,11 +536,17 @@ say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)$_m3"
 say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"
 say "    [5] cpu      - no GPU$_m5"
 say "    [6] I will build / provide my own (skip the download)"
+# See test_menu_shows_metal_line_only_on_apple_silicon.
+_pick_range="1-6"
+if [ "$IS_APPLE_SILICON" = 1 ]; then
+  say "    [7] metal    - Apple Silicon, native GPU acceleration$_m7"
+  _pick_range="1-7"
+fi
 say "    (your pick is load-tested; a failure offers Vulkan, never a silent swap)"
-bpick="$(ask "  Pick 1-6 [1]: " 1)"
+bpick="$(ask "  Pick $_pick_range [1]: " 1)"
 case "$bpick" in
   2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=cpu ;;
-  6) BACKEND=own ;;   *) BACKEND="$REC" ;;
+  6) BACKEND=own ;;    7) BACKEND=metal ;; *) BACKEND="$REC" ;;
 esac
 if [ "$LOCALM_BIN_OK" != 1 ]; then
   # .venv/bin/localm never got installed (warned above) - it is what setup-llama

@@ -160,3 +160,212 @@ def test_detect_gpu_guess_not_printed_as_its_own_verdict_line_in_source():
     """Static backstop that holds even without bash on PATH."""
     src = SETUP_SH.read_text(encoding="utf-8")
     assert 'say "  Detected acceleration: $GPU"' not in src
+
+
+# ---------------------------------------------------------------------------
+# Apple Silicon: detect_gpu() must recognize Darwin/arm64 so an Apple Silicon
+# machine is actually offered the metal backend through the normal
+# automatic/interactive path, instead of always falling through to "cpu"
+# (detect_gpu() had no Darwin branch at all - every real Mac silently landed
+# on the CPU-only build, with the correct hwdetect.py "metal" recommendation
+# clobbered by the "$GPU = cpu -> REC=cpu" guard further down in setup.sh).
+# ---------------------------------------------------------------------------
+
+
+def _make_uname_stub(bin_dir: Path, *, os_name: str, arch: str) -> None:
+    stub = bin_dir / "uname"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "-s" ]; then echo {os_name}; fi\n'
+        f'if [ "$1" = "-m" ]; then echo {arch}; fi\n',
+        encoding="utf-8",
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _run_detect_gpu_with_uname(tmp_path: Path, *, os_name: str, arch: str,
+                                stub_names: list[str] | None = None) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in stub_names or []:
+        _make_stub(bin_dir, name)
+    _make_uname_stub(bin_dir, os_name=os_name, arch=arch)
+    script = _function_body("detect_gpu") + "\ndetect_gpu\n"
+    env = dict(os.environ)
+    env["PATH"] = str(bin_dir)   # isolate: no real nvidia-smi/rocminfo/uname must leak in
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, env=env, timeout=15)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_apple_silicon_is_metal(tmp_path):
+    assert _run_detect_gpu_with_uname(tmp_path, os_name="Darwin", arch="arm64") == "metal"
+
+
+def test_intel_mac_is_cpu_not_metal(tmp_path):
+    # Matches hwdetect.py's own policy: Intel Macs get "cpu", not metal - the
+    # official llama.cpp macOS Metal build targets Apple Silicon.
+    assert _run_detect_gpu_with_uname(tmp_path, os_name="Darwin", arch="x86_64") == "cpu"
+
+
+def test_linux_uname_never_mistaken_for_darwin(tmp_path):
+    assert _run_detect_gpu_with_uname(tmp_path, os_name="Linux", arch="x86_64") == "cpu"
+
+
+def test_nvidia_still_wins_over_a_darwin_arm64_uname(tmp_path):
+    # Priority order: a real vendor tool detected earlier in detect_gpu() must
+    # still win even if uname would otherwise match the Darwin/arm64 branch
+    # (not reachable on real hardware - Apple Silicon has no nvidia-smi - but
+    # this pins that the Darwin check is an elif appended AFTER the vendor
+    # checks, not a check that could ever shadow them).
+    assert _run_detect_gpu_with_uname(
+        tmp_path, os_name="Darwin", arch="arm64", stub_names=["nvidia-smi"]
+    ) == "cuda"
+
+
+def test_darwin_branch_checked_after_vendor_tools_in_source():
+    """Static backstop that holds even without bash on PATH."""
+    body = _function_body("detect_gpu")
+    assert body.index("nvidia-smi") < body.index('"Darwin"')
+    assert body.index("rocminfo") < body.index('"Darwin"')
+
+
+# ---------------------------------------------------------------------------
+# The "probe failed" fallback (fires only if `python -m localm.hwdetect`
+# itself produced no known backend token) must not recommend "vulkan" for a
+# GPU value of "metal" - localm has no vulkan build for darwin at all (see
+# setup_llama.py's _BACKEND_ASSETS), so that fallback would recommend a
+# backend nothing can ever provision on Apple Silicon.
+# ---------------------------------------------------------------------------
+
+
+def _rec_fallback_case() -> str:
+    src = SETUP_SH.read_text(encoding="utf-8")
+    marker = 'case "$REC" in\n  vulkan|cuda|hip|cpu|metal|amd-rocm) ;;'
+    start = src.index(marker)
+    end = src.index("esac\n", start) + len("esac\n")
+    return src[start:end]
+
+
+def _run_rec_fallback(tmp_path: Path, *, gpu: str, rec: str = "") -> str:
+    script = f'REC="{rec}"\nGPU="{gpu}"\n' + _rec_fallback_case() + '\nprintf "REC=%s\\n" "$REC"\n'
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_probe_failed_fallback_metal_gpu_stays_metal(tmp_path):
+    assert _run_rec_fallback(tmp_path, gpu="metal") == "REC=metal"
+
+
+def test_probe_failed_fallback_cpu_gpu_stays_cpu(tmp_path):
+    assert _run_rec_fallback(tmp_path, gpu="cpu") == "REC=cpu"
+
+
+def test_probe_failed_fallback_other_gpu_is_vulkan(tmp_path):
+    assert _run_rec_fallback(tmp_path, gpu="cuda") == "REC=vulkan"
+
+
+def test_probe_succeeded_metal_is_trusted_directly(tmp_path):
+    # The probe SUCCEEDED (REC is already a known backend) - the case
+    # statement's first arm must leave it alone rather than falling into the
+    # GPU-based fallback at all.
+    assert _run_rec_fallback(tmp_path, gpu="cpu", rec="metal") == "REC=metal"
+
+
+def test_probe_failed_fallback_metal_case_precedes_generic_vulkan_fallback_in_source():
+    """Static backstop that holds even without bash on PATH."""
+    body = _rec_fallback_case()
+    assert body.index("metal) REC=metal") < body.index("REC=vulkan")
+
+
+# ---------------------------------------------------------------------------
+# The backend-choice menu must offer metal as a real, selectable numbered
+# entry on Apple Silicon (not only reachable via the recommended-default
+# shortcut [1]) - and must never offer it on a platform with no darwin build
+# to provision at all.
+# ---------------------------------------------------------------------------
+
+
+def _backend_menu_block() -> str:
+    src = SETUP_SH.read_text(encoding="utf-8")
+    start = src.index('_same="   (same as [1])"')
+    end = src.index("esac\n", src.index('case "$bpick" in')) + len("esac\n")
+    return src[start:end]
+
+
+def _run_backend_menu(tmp_path: Path, *, rec: str, is_apple_silicon: bool, bpick: str) -> dict:
+    script = (
+        'say() { :; }\n'
+        f'ask() {{ echo "{bpick}"; }}\n'
+        f'REC="{rec}"\n'
+        f'GPU=irrelevant\n'
+        f'IS_APPLE_SILICON={1 if is_apple_silicon else 0}\n'
+        + _backend_menu_block()
+        + '\nprintf "BACKEND=%s\\n" "$BACKEND"\n'
+    )
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
+    return dict(line.split("=", 1) for line in result.stdout.strip().splitlines() if "=" in line)
+
+
+def test_menu_bpick_7_selects_metal_on_apple_silicon(tmp_path):
+    out = _run_backend_menu(tmp_path, rec="cpu", is_apple_silicon=True, bpick="7")
+    assert out["BACKEND"] == "metal"
+
+
+def test_menu_default_pick_on_apple_silicon_with_rec_metal_is_metal(tmp_path):
+    # ask() here returns bpick itself (default "1" simulated directly), so this
+    # covers the recommended-default path staying correct too.
+    out = _run_backend_menu(tmp_path, rec="metal", is_apple_silicon=True, bpick="1")
+    assert out["BACKEND"] == "metal"
+
+
+def test_menu_shows_metal_line_only_on_apple_silicon(tmp_path):
+    script_apple = (
+        'say() { printf "%s\\n" "$*"; }\n'
+        'ask() { echo 1; }\n'
+        'REC="metal"\nGPU=irrelevant\nIS_APPLE_SILICON=1\n'
+        + _backend_menu_block()
+    )
+    script_other = script_apple.replace("IS_APPLE_SILICON=1", "IS_APPLE_SILICON=0")
+    out_apple = subprocess.run([_bash(), "-c", script_apple], capture_output=True,
+                               text=True, cwd=tmp_path, timeout=15)
+    out_other = subprocess.run([_bash(), "-c", script_other], capture_output=True,
+                               text=True, cwd=tmp_path, timeout=15)
+    assert out_apple.returncode == 0, out_apple.stderr
+    assert out_other.returncode == 0, out_other.stderr
+    assert "[7] metal" in out_apple.stdout
+    assert "[7] metal" not in out_other.stdout
+
+
+def test_menu_pick_range_extends_to_7_only_on_apple_silicon(tmp_path):
+    script_apple = (
+        'say() { :; }\n'
+        'ask() { printf "%s" "$1" >&2; echo 1; }\n'
+        'REC="metal"\nGPU=irrelevant\nIS_APPLE_SILICON=1\n'
+        + _backend_menu_block()
+    )
+    result = subprocess.run([_bash(), "-c", script_apple], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert "Pick 1-7" in result.stderr
+
+
+def test_menu_shows_metal_even_when_gpu_was_downgraded_to_cpu(tmp_path):
+    # $GPU can be downgraded to "cpu" by the earlier Y/n prompt (a declined
+    # GPU); IS_APPLE_SILICON is a separate flag computed once from uname, so a
+    # declined GPU must not also remove the [7] metal choice from the menu.
+    script = (
+        'say() { printf "%s\\n" "$*"; }\n'
+        'ask() { echo 1; }\n'
+        'REC="cpu"\nGPU=cpu\nIS_APPLE_SILICON=1\n'
+        + _backend_menu_block()
+    )
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert "[7] metal" in result.stdout
