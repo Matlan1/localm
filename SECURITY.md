@@ -17,9 +17,9 @@ localm is a local-first, single-owner application. API access is gated by a
   and serves them without auth, for frictionless local use. State-changing
   management routes, and reads of management/metadata endpoints specifically
   (named keys, server config, host stats, the filesystem browser), still
-  require the loopback shell token (see *State-changing endpoints* below), so
-  another local program cannot silently drive a keyless install or read those
-  endpoints either.
+  require the loopback shell token (see *State-changing endpoints* below) -
+  that stops a malicious **web page**, not another **local program**, which
+  can obtain the token the same way the GUI shell does (see below).
 - When a key **is** configured (`LOCALM_API_KEY`), every `/v1` and `/api` route
   requires `Authorization: Bearer <key>`, gated by capability scopes: model-read
   routes (`GET /v1/models`, `GET /v1/models/{id}`) need `models:read`, plugin
@@ -66,17 +66,24 @@ per-coordination token. A configured `"cors_origins"` (or `"*"`) opts specific
 origins into cross-origin use for everything else.
 
 When **no key is configured** (open mode), those same state-changing routes also
-require a per-process **shell token** that only the loopback GUI shell carries. So a
-local non-browser client (curl, a script) cannot mint a key, change config, install
-a plugin, load a model, drive the coder agent, or index files in open mode: manage
-through the loopback GUI, or set a key (`localm key generate`). Reads and the
-inference API stay open. A configured `cors_origins` (including `"*"`) is trusted for
-cross-origin *reads* of ordinary API responses, but state changes still need a key or
-the shell token, so a forged `Origin` header cannot be used as a management
-credential. **The one exception is `GET /` itself**: the page that carries the shell
-token is served to same-origin requests only, regardless of `cors_origins` - CORS
-governs whether another origin may read a response, not whether the token was safe to
-put in one, so the token's own delivery is never covered by that trust.
+require a per-process **shell token**, served by `GET /` to whatever passes the
+same-origin-or-loopback-`Host` check above. The loopback GUI shell is the intended
+recipient, but that check cannot tell it apart from any other local program making
+the identical request - so a local non-browser client (curl, a script) needs one
+extra, unauthenticated `GET /` to obtain the token, and from there has the same
+reach as the shell: mint a key, change config, install a plugin, load a model,
+drive the coder agent, index files. This matches open mode's own
+frictionless-local-use design (see above); it is not a credential boundary between
+the owner and other software already running on the machine. Set a key (`localm
+key generate`) if that reach should not be available to other local programs. Reads
+and the inference API stay open. A configured `cors_origins` (including `"*"`) is
+trusted for cross-origin *reads* of ordinary API responses, but state changes still
+need a key or the shell token, so a forged `Origin` header cannot be used as a
+management credential. **The one exception is `GET /` itself**: the page that
+carries the shell token is served to same-origin requests only, regardless of
+`cors_origins` - CORS governs whether another origin may read a response, not
+whether the token was safe to put in one, so the token's own delivery is never
+covered by that trust.
 
 ### Management/metadata reads (open mode)
 

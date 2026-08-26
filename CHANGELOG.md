@@ -802,6 +802,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and localm falls back to Vulkan, the error referenced an internal
   maintainer file that isn't part of the published repository. It now
   states the same condition without the dead reference.
+- **`setup.sh` could quit partway through with a confusing error on a rare,
+  filesystem-specific install hiccup.** Occasionally, mostly on a WSL clone
+  under a Windows-drive mount, `uv pip install` reports success while the
+  `localm` command itself does not get written; setup already retried once
+  and warned loudly when it was still missing, but then went on to run that
+  missing command anyway for the native runtime, which quit setup early with
+  an unrelated-looking "failed" message instead of the real cause. Setup now
+  skips the steps that need the command and finishes normally, and its
+  closing summary says plainly which commands will not work until it is
+  fixed (the graphical launcher is unaffected).
 
 ### Security
 - **Turning network access off no longer left the voice model able to
