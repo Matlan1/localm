@@ -2136,6 +2136,29 @@ class TestSessionExtras:
                 client.delete(f"/api/coder/sessions/{sid}")
         assert switched == ["model-b"]
 
+    def test_set_model_writes_an_audit_marker_for_the_switch(self, coder_app, tmp_path):
+        """set_model must record the switch, or an exported/read-back session
+        misattributes the turns after it to the OLD model."""
+        app, switched = coder_app
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path), "mode": "log"}).json()["id"]
+                r = client.post(f"/api/coder/sessions/{sid}/model",
+                                json={"model": "model-b"})
+                assert r.status_code == 200
+                log_path = app.state.coder_sessions.get(sid).audit_log_path()
+                client.delete(f"/api/coder/sessions/{sid}")
+        assert switched == ["model-b"]
+        assert log_path is not None
+        entries = [json.loads(line) for line in
+                   log_path.read_text(encoding="utf-8").splitlines()]
+        markers = [e for e in entries if e["type"] == "notice"
+                   and e["data"]["kind"] == "model_switch"]
+        assert len(markers) == 1
+        assert "model-a" in markers[0]["data"]["message"]
+        assert "model-b" in markers[0]["data"]["message"]
+
     def test_set_model_rejects_unknown_model_404(self, coder_app, tmp_path):
         app, switched = coder_app
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
