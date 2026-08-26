@@ -241,6 +241,15 @@ class TestPrefillWithReuse:
 
         assert llm._cached_tokens == []
         mock_api.llama_memory_clear.assert_called_once()
+        # The failed suffix decode must trigger a full re-prefill retry from
+        # position 0 before giving up - not an immediate raise. Two decode
+        # calls: the first for the 2-token suffix, the second for the WHOLE
+        # 4-token prompt (n_tokens is llama_batch_init's first positional
+        # arg - see test_only_suffix_decoded_on_shared_prefix above).
+        assert mock_api.llama_decode.call_count == 2
+        batch_calls = mock_api.llama_batch_init.call_args_list
+        assert batch_calls[0][0][0] == 2   # first attempt: the 2-token suffix
+        assert batch_calls[1][0][0] == 4   # retry: the full 4-token prompt
 
     def test_long_suffix_chunked(self):
         llm = _bare_llama()
