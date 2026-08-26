@@ -1,9 +1,11 @@
 # Internet access for the coder and chat
 
 > The network policy (`localm/netpolicy.py`) is CORE and always governs every
-> outbound request, plugin or not. The chat "Web access" surface and the coder
-> web tools, however, are provided by the `web` plugin and appear only when it
-> is active. The off/ask/allow modes and SSRF protection below apply regardless.
+> outbound request, plugin or not. The chat "Web access" surface is provided
+> by the `web` plugin and appears only when it is active. The coder's
+> `fetch_url` and `web_search` tools are built into the coder itself and are
+> always present, independent of the `web` plugin. The off/ask/allow modes
+> and SSRF protection below apply to both.
 
 localm is offline-first: nothing *requires* the internet. But some tasks
 genuinely need it - looking up current documentation, checking a version,
@@ -17,8 +19,19 @@ point** (`localm/netpolicy.py`). The coder's `fetch_url` and `web_search`
 tools, and the chat's web access, all use it. There is no second path.
 
 Things a *user* triggers directly (`localm pull`, the `/web` chat command,
-online coder providers you explicitly configured) are consent by definition -
-but `net_mode off` still kills them.
+the Knowledge page's one-time embedding-model download, the mic button's
+one-time Whisper download) are consent by definition - but `net_mode off`
+still kills them, with no exception. A one-time download like the last two
+is a single-call authorization, never written to config; it lets that one
+fetch through `ask`'s per-request friction, exactly like clicking "download
+now" is itself the consent, and it changes nothing about how the next
+request is handled.
+
+Online coder providers (`--online`, `--anthropic`) are a separate case and
+are not covered by this policy at all: every request to OpenAI/Anthropic
+goes straight out over plain HTTP, with no `net_mode` check anywhere in
+that path. The only gate is the explicit CLI flag itself, plus a warning
+if you try it in privacy mode.
 
 ## Modes
 
@@ -31,12 +44,18 @@ localm config net_mode allow   # no confirmation
 | mode | coder `fetch_url` / `web_search` | chat web access |
 |---|---|---|
 | `off` | tool returns a policy error | `/web` and the toggle return a clear error |
-| `ask` (default) | approval prompt per request (terminal y/N or GUI approval card showing the URL/query) | works - the `/web` command and the per-conversation toggle are themselves the consent |
+| `ask` (default) | approval prompt per request (terminal y/N or GUI approval card showing the URL/query) | `/web` runs immediately (typing the command is the consent); the toggle still shows a per-request approval card for each model-initiated request |
 | `allow` | runs without asking | works |
 
 The `LOCALM_NET_MODE` env var overrides the config (like `LOCALM_MODE` for
 privacy). In the coder, sessions started with auto-approve also auto-approve
 network requests in `ask` mode.
+
+`ask`'s approval prompt is enforced by the front end (the GUI modal, the
+coder's terminal y/N), not the server. A direct API or MCP caller
+authenticated with the `web` scope hits the underlying endpoints directly
+and is treated as already consented - it is not prompted. Domain rules and
+the SSRF guard below still apply in every mode, `off` included.
 
 ## Domain rules
 

@@ -272,7 +272,8 @@ test("clearImageProxyCache drops cached images so the OFF switch takes effect", 
 // tests/test_image_proxy.py owns the real sentence.
 const OFF_REASON =
   "Showing remote images is off. Set 'Show remote images in replies' " +
-  "to 'ask' or 'on' under Settings > Network to enable it.";
+  "to 'ask' or 'on' under Settings > Server & network > Outbound access " +
+  "to enable it.";
 
 test("a refused image says why, using the reason the route gave", async () => {
   const { win } = loadReal({ ok: false, detail: OFF_REASON });

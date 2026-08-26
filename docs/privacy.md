@@ -15,6 +15,11 @@ behaviour covered separately below:
 3. **Update checks** - whether localm phones its update server; not a
    persistence mode, but still something that leaves your machine.
 
+Bug reports (section 3 below) are not a fourth dial - they are the one
+deliberate action that pulls diagnostics and a config snapshot together into
+text meant to leave your machine, so what gets redacted from one is its own
+section.
+
 ---
 
 ## 1. Session persistence modes
@@ -41,6 +46,10 @@ Notes:
 - "Nothing written automatically" is the promise privacy mode makes; anything you
   do explicitly (saving a conversation, filing a bug report, `--debug`) is a
   deliberate action, not an automatic trace.
+- In privacy mode, the interactive `localm run` chat and the coder REPL also
+  suppress Python's own `readline` history, so what you type is not left
+  behind in `~/.python_history` either. This is separate from and in addition
+  to not writing a session transcript.
 
 ---
 
@@ -90,13 +99,66 @@ report needs, even in privacy mode:
 - a debug log (operational lines only).
 
 Set it in **Settings > Privacy** (in-app, persistent), with the **desktop
-launcher** checkbox, or with `--keep-diagnostics` on `localm gui` / `serve` (a
-per-run override via `LOCALM_KEEP_DIAGNOSTICS`). In `log`/`full` mode diagnostics
-are already kept, so this toggle only changes behaviour in privacy mode.
+launcher** checkbox, with `--keep-diagnostics` on `localm gui` (`serve` and
+`run` have no such flag - use the `LOCALM_KEEP_DIAGNOSTICS` environment
+variable for those, a per-run override either way). The hang watchdog trace
+and the crash/restart breadcrumb log are already kept automatically in
+`log`/`full` mode; the debug log is not - it always needs `--debug` or this
+toggle, in any session mode. So in privacy mode the toggle turns on all
+three; in `log`/`full` mode it only adds the debug log.
 
 ---
 
-## 3. Update checks (network policy, not a persistence mode)
+## 3. Bug reports: what's redacted, and what needs your OK
+
+Filing a bug report - Settings > Report a problem in the GUI, `localm
+bug-report` at a terminal, or the standalone `report-issue.bat` /
+`report-issue.sh` (repo root) that works even when localm cannot start at
+all - is one of the deliberate actions above, but it is worth its own
+section because it is the one path that pulls together diagnostics, recent
+logs and your config into text meant to leave your machine. The standalone
+reporter runs `scripts/report_issue.py`, or its no-Python PowerShell
+equivalent (`report_issue.ps1`) when even that cannot run.
+
+**You always see the full report before anything is sent, and sending needs
+your explicit OK.** The GUI shows the assembled text and requires you to
+press Send. The standalone reporter and `localm bug-report` preview the
+same text at a terminal prompt - and when there is no terminal to prompt
+(piped/redirected stdin, or run non-interactively), both the Python and
+PowerShell standalone reporters now treat that exactly like you said no: the
+report is saved locally and nothing is sent. This was a real gap: the
+PowerShell fallback used to fall through to sending on its own when it had
+no way to show the confirmation prompt at all.
+
+**What is redacted from a report:**
+- Your account name and home directory, in every textual form the report
+  might quote it in (a plain path, a `repr()`'d or JSON-encoded one with
+  doubled backslashes, or a path embedded in a native crash traceback's own
+  message) - the backstop regex runs unconditionally, so one unresolvable
+  path lookup can't leave the raw text unscrubbed.
+- URL credentials (`user:pass@...`), credential-named query parameters and
+  HTTP header lines (`api_key=`, `token=`, `X-Api-Key:`, `Auth-Token:`, ...),
+  and bearer / API-key-shaped tokens - so `Authorization: Bearer ...` is
+  caught, but a raw or Basic-auth `Authorization:` value is not, wherever
+  they appear in diagnostic text, recent log tails, or the activity ring.
+- Config values are sent only from a small allowlist of operational keys
+  (port, context size, GPU layer count, mode, ...); the API key itself is
+  never stored in config and never included.
+
+**What a report deliberately keeps**, because it is what makes the report
+useful to debug: your install location, data directory path, native runtime
+library names, dependency versions, the loaded model's name and backend, and
+a tail of the crashed run's own log. Only the account name is stripped from
+these, not the whole path - unlike an HTTP response handed to a
+lower-privileged API caller, which strips the install/data-dir paths too.
+
+None of this is affected by session persistence mode: filing a report is the
+same deliberate action, and gets the same scrubbing, whether you are in
+`privacy`, `log`, or `full` mode.
+
+---
+
+## 4. Update checks (network policy, not a persistence mode)
 
 Separate from both dials above: localm periodically asks its update server whether
 a newer release exists. This is a network behaviour, not something that writes to
@@ -118,7 +180,7 @@ policy](network.md) instead.
   goes through the network policy (`localm/netpolicy.py`) - setting network
   access to `off` blocks it too, and it fails honestly (never a false "you are
   up to date") when blocked. Turn on "Check for updates even when network
-  access is off" in **Settings > Bug reports** to exempt just this one channel;
+  access is off" in **Settings > Updates** to exempt just this one channel;
   it is off by default, so `net_mode=off` is a real kill switch unless you
   opt back in.
 - **Turning the channel off entirely.** Clear the update endpoint

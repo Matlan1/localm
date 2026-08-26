@@ -1,9 +1,62 @@
 # Native app identity (LocaLM.exe)
 
+This page covers two related but independent things: running the GUI in its own
+app window instead of a browser tab, and the server's process identity
+(`LocaLM.exe`, the taskbar/tray icon). Neither requires the other.
+
 By default the localm server runs as `LocaLM.exe` in Task Manager (not
 `python.exe`), launches from a double-click or a desktop shortcut, and carries the
 LocaLM icon on the taskbar, in the tray, and on the file itself. `setup.bat` /
 `setup.sh` build this launcher for you; you can also (re)build it yourself.
+
+## App window, not a browser tab
+
+Install the optional `desktop` extra (`localm[desktop]`, built on
+[pywebview](https://pywebview.flowrl.com/)) and `localm gui` opens the GUI in its
+own OS window instead of a browser tab - no address bar, no other tabs, and it
+closes and reopens like any other app.
+
+- **Setup asks up front.** `setup.sh` / `setup.bat` ask "Open localm's GUI as its
+  own app window, or in your browser?" before installing anything. The default is
+  the browser tab (no extra install); choosing the app window installs
+  `localm[desktop]` alongside the rest.
+- **Change your mind later without reinstalling**, from Settings &rsaquo; System &rsaquo;
+  Desktop app: **Default window mode** (`auto`, the default: the app window when
+  the extra is installed, else a browser tab; `browser`: always a browser tab,
+  even with the extra installed) and **Quit when the app window is closed** (off
+  by default: closing the window hides it and the server keeps running, same as
+  closing a browser tab, use Stop to actually quit; on: closing the window quits
+  the server too). **Default window mode** is read once, at launch, so switching
+  it does not touch a window already open - it takes effect on the next
+  `localm gui`. **Quit when the app window is closed** is read live, from disk,
+  every time the window's close button is clicked - so switching it DOES change
+  the behavior of a window that is already open, with no restart needed.
+- **`localm gui --no-browser` suppresses the app window too**, along with the
+  browser tab - it starts the server only, for a headless launch.
+- **If the window fails to open** (a missing runtime dependency, a broken driver,
+  or it does not finish loading within a few seconds), `localm gui` falls back to
+  opening a browser tab automatically. It never fails to open something.
+- There is no CLI flag to force the app window on for a single run; only the
+  Settings toggle and whether the extra is installed decide.
+
+Platform status:
+
+- **Windows:** pywebview's default backend, hosting Microsoft Edge WebView2.
+- **Linux:** installs entirely via `pip`, no system packages and no `sudo` -
+  `localm[desktop]` pulls in `pywebview[qt]` rather than pywebview's default GTK
+  backend, because GTK's Python bindings are a system package pywebview cannot see
+  from inside localm's isolated virtual environment. A couple of small system
+  libraries the Qt/X11 stack itself needs (e.g. `libxcb-cursor0`) are commonly
+  already present on a desktop install but not on a minimal one; `setup.sh` notes
+  this when you choose the app window.
+- **macOS:** uses pywebview's default backend (WKWebView). Not independently
+  verified on this project's own hardware - the same caveat this project applies
+  to its other macOS-only paths.
+
+This is a separate control surface from the tray/status window described below:
+with the `desktop` extra installed, both can be visible at once - a tray icon or
+status window for Open/Copy address/View logs/Restart/Stop, and the app window
+itself showing the GUI content.
 
 ## Build it
 

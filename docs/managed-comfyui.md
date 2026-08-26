@@ -108,6 +108,12 @@ instead of a bare "Added 0", so a misconfiguration is visible rather than silent
 This is separate from `extra_model_paths.yaml`: sharing lets the managed ComfyUI
 *use* your models, scanning lets *localm* list them.
 
+The scan runs as a background job (same shape as a model pull) and reports live
+progress - "registering model N of M" with the file name - instead of a static
+"Scanning..." message, so a large models folder does not look stuck. The dry-run
+preview step (shown before you confirm the scan) has no per-item total, so it is
+unchanged.
+
 The neighboring **Import from ComfyUI…** action covers a different case: previewing
 and importing from a ComfyUI folder other than your configured `comfy_workdir` -
 a one-off install, or localm's own managed ComfyUI - without changing that setting.
@@ -122,8 +128,10 @@ localm comfy remove -y             # skip the confirmation
 ```
 
 `localm comfy status` reports the `comfy_target` setting, whether an instance is
-installed and where, and which ComfyUI media calls target right now. `localm
-comfy remove` deletes only
+installed and where, and which ComfyUI media calls target right now. By default it
+also pings the targeted ComfyUI (whether it is actually running, and, when a localm
+server is up, whether localm itself launched it); pass `--no-ping` to keep the
+command instant and offline. `localm comfy remove` deletes only
 `<data dir>/comfyui`; your own ComfyUI is never a target. Managed models are kept
 by default (they are expensive to re-download) unless you pass `--models`. The
 whole feature is self-contained under the data folder, so removing it leaves no
@@ -133,6 +141,52 @@ trace elsewhere.
 (`localm can manage its own ComfyUI (isolated, patched, pinned): run 'localm comfy
 setup'`) and confirms the install path once one is set up. The hint never installs
 anything.
+
+## Controlling the ComfyUI process from the CLI
+
+```bash
+localm comfy start                 # start ComfyUI (no generation, just bring it up)
+localm comfy stop                  # abort the in-flight render, clear the queue, free VRAM
+localm comfy restart               # stop then start again
+```
+
+These act on whichever ComfyUI `localm comfy status` reports as the current target
+(managed or your own) and need a running localm server (`localm gui` or `localm
+serve`) to reach it. `start` uses the same launch path a real generation would
+(`comfy_launch_cmd`/`comfy_workdir`, or the managed instance's own), so a cold
+ROCm/ZLUDA start that compiles GPU kernels gets the same generous timeout a real
+generation waits on. If ComfyUI is already running, `start` says so and changes
+nothing.
+
+`stop` and `restart` behave differently depending on who launched ComfyUI: if
+localm started it, its process is ended too; if you started it yourself, localm
+only aborts the render and frees VRAM, leaving the process running (`restart` then
+finds it already up). Either way localm never kills a process it did not start.
+
+You do not need any of this to just generate: `localm image`/`music`/`video`
+already auto-launch ComfyUI when `comfy_launch_cmd` is set (or always, for the
+managed instance), and pressing Ctrl-C during a CLI generation now tells ComfyUI to
+abort the render and free its VRAM instead of leaving it running.
+
+## Managing uploaded workflows from the CLI
+
+`localm comfy workflow` manages each media plugin's uploaded ComfyUI workflows
+(image, music, video) - the same store the GUI's Workflow card writes to. It works
+fully offline; no running server needed.
+
+```bash
+localm comfy workflow list image                    # uploaded workflows + which is active
+localm comfy workflow add image my_flux.json --use   # upload and select it
+localm comfy workflow use image my_flux.json         # select an uploaded workflow
+localm comfy workflow use image --clear              # fall back to the built-in default
+localm comfy workflow rm image my_flux.json          # delete one (refuses on the active one)
+```
+
+`add` validates the file is ComfyUI's API-format JSON (Save > API format in
+ComfyUI) before storing it, so a bad upload fails immediately instead of at the
+next generation. Whatever is selected here governs `localm image`/`music`/`video`
+and the GUI's own picker on the matching page - they all resolve the same active
+workflow.
 
 ## Keeping it current
 
@@ -151,6 +205,15 @@ version with git. It only touches the managed instance. By default it stays with
 that git rollback and does not reinstall ComfyUI's Python requirements (a partial
 dependency upgrade cannot be rolled back exactly); pass `--reinstall-requirements`
 when a new pin changed them.
+
+The same update is available from **Settings -> Media**: the managed-ComfyUI panel
+shows the installed version next to the version localm ships, an **Update**
+button, an "Also reinstall ComfyUI's dependencies" checkbox for
+`--reinstall-requirements`, and an advanced "update to a specific commit" field for
+`--commit` - the same knobs as the CLI, streamed to a log as the job runs. If a
+setup attempt was interrupted (a crash, a closed browser tab mid-install) the panel
+shows a **Repair** action instead, which clears the incomplete install and re-runs
+setup in one step.
 
 ## The patches localm carries
 

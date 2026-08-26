@@ -10,8 +10,13 @@
 | `_structs.py` | ctypes Structure definitions (sizes probed from the DLL) |
 | `_abi.py` | Runtime ABI self-check: verifies the loaded DLL's struct layout before first use |
 | `_api.py` | Low-level C API bindings (one Python function per C function) |
+| `_symbols.py` | Resolves a C++-linkage export (MTP draft-head API) by reading the binary's own export table when a plain `getattr` lookup fails |
 | `llama.py` | `LlamaCpp` public class + helpers |
 | `mtmd.py` | Multimodal (vision) support: binds the bundled `mtmd.dll` for GGUF mmproj |
+| `_runner.py` | Subprocess isolation for the whole GGUF model lifecycle (load, generate, tokenize, grammar-check, unload), so a native abort in the child kills only that child |
+| `_worker.py` | `GgufWorker`: owns the real native model; runs only inside the isolated child process spawned by `_runner.py` |
+| `_sizing.py` | VRAM measurement and load-sizing logic shared by `GgufBackend` (preflight checks before spawning) and `GgufWorker` (mid-generation context-grow checks) |
+| `_vram_probe.py` | Standalone daemon entry point that answers the native ggml backend's VRAM-view query out-of-process, so a native abort inside the query cannot take down the caller |
 | `__init__.py` | Exports `LlamaCpp` |
 
 ## DLL Loading (`_loader.py`)
@@ -158,10 +163,12 @@ fingerprint of the returned defaults:
   higher is never refused.
 
 The context_params LAYOUT DECISION itself (as opposed to the keystone check
-above) scores each candidate layout out of 5: `ctx_type` at the position
-immediately before the run is-not-(-1), plus all FOUR consecutive
+above) scores each candidate layout out of 6: `ctx_type` at the position
+immediately before the run is graded 0/1/2 (2 when it equals its own default
+of 0, 1 when merely not -1, 0 when it is -1 and so falls inside the run
+itself), plus up to 4 more points for however many of the FOUR consecutive
 `rope_scaling_type`/`pooling_type`/`attention_type`/`flash_attn_type` reads
-being exactly -1. Checking only three of the four (an earlier version of this
+are exactly -1. Checking only three of the four (an earlier version of this
 fingerprint) let a struct with exactly `rope_scaling_type` corrupted score
 HIGHER under the wrong layout than the true one under its own - the field sits
 at the position the other layout treats as `ctx_type`, and "not -1" is nearly
@@ -282,14 +289,17 @@ Covered functions (grouped):
 **Lifecycle**: `llama_backend_init`, `llama_backend_free`  
 **Model**: `llama_load_model_from_file`, `llama_free_model`, `llama_model_default_params`  
 **Context**: `llama_init_from_model`, `llama_free`, `llama_context_default_params`  
-**Accessors**: `llama_get_model`, `llama_n_ctx`, `llama_model_n_ctx_train`, `llama_model_n_embd`  
-**Vocabulary**: `llama_model_get_vocab`, `llama_vocab_n_tokens`, `llama_tokenize`, `llama_token_to_piece`, `llama_detokenize`, `llama_token_bos`, `llama_token_eos`, `llama_vocab_is_eog`  
+**Accessors**: `llama_get_model`, `llama_n_ctx`, `llama_n_ctx_seq`, `llama_model_n_ctx_train`, `llama_model_n_embd`, `llama_model_n_layer`  
+**Vocabulary**: `llama_model_get_vocab`, `llama_vocab_n_tokens`, `llama_n_vocab`, `llama_tokenize`, `llama_token_to_piece`, `llama_detokenize`, `llama_token_bos`, `llama_token_eos`, `llama_vocab_is_eog`, `llama_token_is_eog`  
 **Chat template**: `llama_model_chat_template`, `llama_chat_apply_template`  
 **Batch**: `llama_batch_get_one`, `llama_batch_init`, `llama_batch_free`  
 **Inference**: `llama_decode`, `llama_get_logits_ith`, `llama_get_logits`  
-**Embeddings** (export-probed via `has_embeddings_api()`): `llama_get_embeddings_seq`, `llama_get_embeddings_ith` - bound here but unused by `LlamaCpp`/`GgufBackend`; the only caller is the separate dedicated embedding-model loader (`localm.inference.embedder`, see Known Limitations)  
-**Sampler chain**: `llama_sampler_chain_init`, `llama_sampler_chain_add`, `llama_sampler_free`, `llama_sampler_sample`, `llama_sampler_accept`, `llama_sampler_init_greedy`, `llama_sampler_init_dist`, `llama_sampler_init_top_k`, `llama_sampler_init_top_p`, `llama_sampler_init_min_p`, `llama_sampler_init_temp`, `llama_sampler_init_grammar`, `llama_sampler_init_grammar_lazy_patterns` (export-probed via `has_lazy_grammar()`), `llama_sampler_init_penalties` (export-probed via `has_penalties_sampler()`)  
-**Memory (KV cache)**: `llama_get_memory`, `llama_memory_clear`, `llama_memory_seq_rm` (all probed at runtime via `has_memory_api()`)  
+**Embeddings** (export-probed via `has_embeddings_api()`): `llama_get_embeddings_seq`, `llama_get_embeddings_ith` - bound here but unused by `LlamaCpp`/`GgufBackend`; `llama_get_embeddings_seq` is called by the separate dedicated embedding-model loader (`localm.inference.embedder`, see Known Limitations), `llama_get_embeddings_ith` currently has no caller anywhere in the codebase  
+**Model metadata**: `has_model_meta_api()` / `llama_model_meta_val_str`  
+**Model introspection**: `has_kv_head_api()` / `llama_model_n_head` / `llama_model_n_head_kv`, `has_hybrid_api()` / `llama_model_is_recurrent` / `llama_model_is_hybrid`, `llama_model_has_mrope`, `has_max_devices()` / `llama_max_devices`  
+**Sampler chain**: `llama_sampler_chain_default_params`, `llama_sampler_chain_init`, `llama_sampler_chain_add`, `llama_sampler_free`, `llama_sampler_sample`, `llama_sampler_accept`, `llama_sampler_init_greedy`, `llama_sampler_init_dist`, `llama_sampler_init_top_k`, `llama_sampler_init_top_p`, `llama_sampler_init_min_p`, `llama_sampler_init_temp`, `llama_sampler_init_grammar`, `llama_sampler_init_grammar_lazy_patterns` (export-probed via `has_lazy_grammar()`), `llama_sampler_init_penalties` (export-probed via `has_penalties_sampler()`)  
+**Memory (KV cache)**: `llama_get_memory`, `llama_memory_clear`, `llama_memory_seq_rm` (all probed at runtime via `has_memory_api()`), `llama_kv_cache_seq_rm` (a combined wrapper that prefers the memory API and falls back to the legacy call on an older DLL)  
+**Multi-Token Prediction (MTP)**: `llama_model_mtp_support` / `llama_model_has_mtp` (plain export; whether an MTP draft context on this model would run a real draft head), `llama_set_embeddings_nextn`, `llama_get_embeddings_nextn` (declared without `extern "C"` in an internal header, resolved via `_symbols.py` rather than a plain `getattr`, and probed as a group via `mtp_hidden_state_available()`), `llama_get_embeddings_nextn_ith`, `llama_set_nextn_layer_offset` (same C++-linkage resolution, but each probed individually rather than as part of the group check) - see below  
 **Diagnostics**: `llama_print_system_info`
 
 ## LlamaCpp Class (`llama.py`)
@@ -308,8 +318,8 @@ llm = LlamaCpp(
 ```
 
 The constructor:
-1. Calls `llama_backend_init()`
-2. Calls `llama_model_default_params()`, sets `n_gpu_layers`, loads model
+1. Calls `llama_model_default_params()`, sets `n_gpu_layers`, applies GPU-split/main-GPU placement
+2. Calls `llama_backend_init()`, then loads the model
 3. Calls `llama_context_default_params()`, sets `n_ctx`, `n_batch`, `offload_kqv`, creates context
 4. Creates `_Tokenizer(model_ptr, ctx_ptr)`
 5. If `mmproj_path` is given, best-effort loads it via `MtmdContext` (`mtmd.py`)
@@ -323,7 +333,7 @@ The constructor:
 1. Calls `llama_model_chat_template(model_ptr)`: returns the Jinja template embedded in the GGUF
 2. Builds a `LlamaChatMessage` ctypes array from the messages list
 3. Calls `llama_chat_apply_template(tmpl, array, n, add_assistant=True, buf, buflen)`
-4. If the template includes a BOS marker (`<bos>`, `<s>`) at the start, skips `add_special` in tokenize to avoid doubling
+4. If the template includes a BOS marker (`<bos>`, `<s>`, or a leading BOM character) at the start, skips `add_special` in tokenize to avoid doubling
 5. Falls back to hardcoded ChatML if the model has no embedded template
 
 ### Generation loop (`_generate`)
@@ -335,13 +345,16 @@ family):
   the previous call stays in the KV cache; diverging cached tokens are
   removed with `llama_memory_seq_rm` and only the new suffix is prefilled.
   Follow-up chat turns skip re-evaluating the whole history.
-- **Fresh rebuild** (old DLLs, or when the request outgrows the live
-  context): the context is freed and re-created at the next dynamic-window
-  size (`n_ctx_grow` steps up to `n_ctx_max`), then the full prompt is
-  prefilled.
-- Prefill is always chunked to `n_batch` (2048): a single oversized
-  `llama_decode` batch aborts the native process rather than returning an
-  error.
+- **Fresh rebuild** (old DLLs, when the request outgrows the live context,
+  or the model is M-RoPE/vision): the context is freed and re-created at the
+  next dynamic-window size (`n_ctx_grow` steps up to `n_ctx_max`), then the
+  full prompt is prefilled. M-RoPE models always take this path regardless of
+  DLL age or capacity - their multi-dimensional RoPE coordinate grids cannot
+  be partially rewound by sequence removal.
+- Prefill is chunked to a fixed 2048-token constant, not the context's actual
+  `n_batch` (which is `min(n_ctx, 2048)` and can be smaller on a small-context
+  configuration): a single oversized `llama_decode` batch aborts the native
+  process rather than returning an error.
 
 ```
 loop:
@@ -360,6 +373,111 @@ already accepts the token into every stateful sampler in the chain. A second
 accept advances the grammar sampler's parse state twice per token (it throws
 `std::runtime_error` across the C ABI once its stacks empty - WinError
 0xe06d7363) and double-counts the repetition-penalty window.
+
+### Multi-Token Prediction (MTP) speculative decoding
+
+Some models are trained with an extra "next-n" head that predicts more than
+one token ahead (DeepSeek-V3/R1, the Qwen3.5/3.6 MTP family, Nemotron,
+GLM-DSA, among others - see `MTP_GRAPH_ARCHITECTURES` below for the exact
+set this runtime can drive). `LlamaCpp` can use that head to draft a token
+speculatively and verify it in the same pass as the next real token,
+producing two tokens per verification when the draft is accepted, without a
+separate draft model.
+
+**Off by default** - `mtp_enabled=False` (config key `mtp_enabled`, one
+setting shared by `GgufBackend`/`GgufWorker`). A rejected draft still costs a
+two-token verification batch every step, which pays only once decode is
+compute-bound enough that verifying two tokens costs about what verifying one
+does; measured slightly slower on a small model. Turn it on per model and
+keep it if it helps.
+
+**Detection is a capability test, not a metadata test**
+(`llama_model_mtp_support()` in `_api.py`). Both of these must hold:
+
+- the GGUF declares MTP heads (`<arch>.nextn_predict_layers`, or a tolerated
+  alias some third-party conversions use instead);
+- the loaded llama.cpp build's model class for that architecture actually
+  builds an MTP draft graph, per `MTP_GRAPH_ARCHITECTURES` in `_api.py` - a
+  hand-derived allowlist pinned to the shipped runtime's build tag
+  (`MTP_ARCH_SOURCE_TAG`) and kept honest by `scripts/check_mtp_arch_allowlist.py`,
+  which fails when the pin moves without a re-derivation. Carrying the
+  metadata does not imply this: GLM-4.5/4.5-Air/4.6 ship
+  `nextn_predict_layers` and the NextN tensors, but the runtime's
+  `build_arch_graph` ignores the MTP graph type for `glm4moe` and returns an
+  ordinary decoder, so an MTP context there would be a second full decoder
+  with its own VRAM-pinned KV cache rather than a draft head -
+  `llama_model_mtp_support` refuses it instead of allocating one.
+
+When both hold, `LlamaCpp` opens a second, small context (capped at
+`min(n_ctx, 2048)`) as the draft head's own KV cache. Two more things gate
+whether it actually activates:
+
+- **Feeding the hidden state.** The draft head predicts from the target
+  model's hidden state at the previous position, not from the token
+  embedding alone - fed only the embedding, fewer than one draft in ten was
+  accepted, which does not repay the extra work. The API that supplies it
+  (`llama_set_embeddings_nextn` / `llama_get_embeddings_nextn`) is declared
+  in llama.cpp's internal `src/llama-ext.h` without `extern "C"`, so it is
+  exported under a compiler-mangled name rather than a plain one.
+  `_symbols.py` resolves it by reading the binary's own export table (MSVC
+  or Itanium mangling) once a plain-name `getattr` lookup fails, rather than
+  reading that failed lookup as "not exported" - the earlier mistake, which
+  produced a written, incorrect conclusion that the shipped runtimes could
+  not drive MTP at all. Fed correctly, a real MTP model accepts about half
+  its drafts.
+- **Rewinding a rejected draft.** Speculation writes a draft token into the
+  cache and removes it again when the target rejects it. A cache holding
+  recurrent state (the Qwen3.5/3.6 MTP family, Nemotron, DeepSeek V4) cannot
+  be truncated at all unless it was asked to keep per-token snapshots, so
+  the context requests two of them (`n_rs_seq`, on builds whose context
+  params struct has the field) whenever MTP is enabled - enough for a
+  one-token draft with headroom, and a no-op on a model with no recurrent
+  layers. Without this, those models declined MTP outright rather than
+  running it.
+
+**Drafting and verification, per step:** `llama_sampler_init_greedy()`
+proposes one draft token from the draft context; the already-decided token
+and the draft token are then decoded together in one batch on the MAIN
+context, and the REQUEST's own sampler chain - not a bare greedy sampler -
+decides what each position actually emits, so temperature, top-k/top-p and
+the repetition penalty apply identically whether or not a draft is accepted.
+An accepted draft advances the draft context's own cache to match; a
+rejected one is removed from the main context's cache
+(`llama_memory_seq_rm`), and if that removal itself fails, MTP is disabled
+for the rest of the loaded model's life (not just the current generation) -
+speculation needs that rewind, and the flag is an instance attribute that
+persists across every later `_generate()` call until the model is reloaded. **Drafting never runs while a grammar is active** - a
+mis-sequenced `llama_sampler_accept` on a grammar sampler throws across the
+C ABI, so a constrained request always takes the plain, one-token-at-a-time
+path.
+
+**Why it declines**, recorded in `mtp_status` and logged
+(`MTP: active=%s status=%s`) rather than surfaced through an HTTP route yet:
+`disabled` (config off); `native-refused` / `no-metadata-api` /
+`no-mtp-metadata` / `unknown-architecture` / `no-mtp-graph:<arch>` (from
+`llama_model_mtp_support` - the runtime or the GGUF's own declaration refuses
+MTP for this model, distinct from the rewind case below);
+`rewind-unsupported` (the draft KV cache could not be rewound after a
+rejected draft, checked at load and again during generation);
+`no-hidden-state-api` / `no-ctx-type-field` / `hidden-state-refused` /
+`context-refused` (this runtime cannot build or feed a draft context);
+`draft-context-full` (the conversation outgrew the capped draft context -
+ordinary decoding continues, the reply does not stop); `draft-prefill-error:*`
+/ `draft-prefill-failed:*` / `draft-trim-error:*` for a failed draft-side
+prefill or cache trim; and `error:<ExceptionName>` for any other exception
+raised while setting up the draft context. `Engine.supports_mtp` /
+`GgufBackend.supports_mtp` reflect whether MTP is actually active for the
+currently loaded model.
+
+The child reports `mtp_status` and `mtp_active` at the end of EVERY call, not
+just at load - `GgufBackend._record_mtp` takes that per-call state and, if
+`mtp_status` is one of the statuses above that mean speculation has stopped for
+the model's life, latches `supports_mtp` False from the next reply onward.
+Without this, a session whose speculation stopped hours into a conversation
+(draft context exhaustion, a failed rewind) would keep reporting the
+capability it had at load time. `mtp_active` is the narrower, per-call answer:
+False on a turn carrying an image even while `supports_mtp` stays True, since
+the same model speculates normally on its next text turn.
 
 ### Stop-string filter (`_filtered_stream`)
 
@@ -386,8 +504,10 @@ Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `<
   stays unconstrained until the output matches a trigger pattern, then the
   grammar enforces from there (the "text-or-tool" mechanism, so a strict
   grammar never stalls a thinking model). Without triggers, or on an older
-  DLL, a lazy request generates unconstrained rather than silently becoming a
-  strict grammar.
+  DLL, the request is REFUSED with a `GrammarUnsupportedError` (HTTP 400)
+  rather than silently generating unconstrained text - answering with a
+  normal 200 the caller had every reason to believe was grammar-conformant
+  would be worse than a clean refusal.
 - The repetition-penalty stage is added when `repeat_penalty != 1.0` and
   the DLL exports `llama_sampler_init_penalties`.
 - For `temperature <= 0` the stochastic stages are replaced by `greedy`
@@ -397,7 +517,10 @@ Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `<
 
 `_filtered_stream` halts on stop strings (above); `_scrub_stream` then
 removes internal model markers (thinking-channel tags, reserved placeholder
-tokens) unless debug mode is active.
+tokens). Chat output is ALWAYS scrubbed - debug mode does not skip this. In
+debug mode (`LOCALM_DEBUG`) the raw, pre-scrub text is additionally written
+to the debug log, except in privacy mode, where chat content is never
+persisted.
 
 ## Known Limitations
 
@@ -411,4 +534,6 @@ tokens) unless debug mode is active.
   dedicated on-device embedding-model loader (`localm.inference.embedder`),
   loaded independently of whatever chat model is active. HF-format models
   embed fine. (See server-api.md for the `/v1/embeddings` behavior.)
-- **No speculative decoding / draft models**
+- **No two-model (separate draft model) speculative decoding.** Only
+  single-model MTP speculative decoding is supported - a model trained with
+  its own next-n draft head (see above) - and it is off by default.

@@ -108,9 +108,12 @@ localm pull owner/repo:model-Q4_K_M.gguf --redownload
 
 # Download an mmproj vision projector alongside the main model
 localm pull owner/repo:model-Q4_K_M.gguf --mmproj mmproj-model-f16.gguf
+
+# Set the model type explicitly instead of relying on auto-detection
+localm pull owner/repo:model-Q4_K_M.gguf --type llm
 ```
 
-Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / register / skip instead of silently duplicating gigabytes.
+Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / register / skip instead of silently duplicating gigabytes. Two downloads to the same destination (from the CLI, the GUI, or both) are serialised rather than allowed to interleave their bytes into one file; starting a download that is already running is refused up front, and one interrupted by a crash resumes instead of restarting.
 
 ### Search HuggingFace
 
@@ -125,9 +128,13 @@ localm search bartowski/Qwen2.5-7B-GGUF --files  # quants + sizes + VRAM fit
 localm add D:\models\mymodel.gguf
 localm add D:\models\my-hf-model --name mymodel
 localm add D:\ollama\manifests\registry.ollama.ai\library\<model>\<tag>
+localm add D:\models\mymodel.gguf --on-duplicate alias   # ask|alias|copy|move|register|skip
+localm add D:\models\bulk-dir --fast                     # dedup on file size, skip the SHA256 hash
 localm alias mymodel short                   # second name for the same file
 localm rename mymodel newname                # rename it outright (unlike alias, the old name stops working)
 ```
+
+Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry (large files hash off the main thread with a progress bar; `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely). `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`).
 
 By default `add` (and `pull` with a local path) registers the file where it already is - nothing is copied or moved. Pass `--store copy` or `--store move` to bring it into `<data dir>/models` first and register it from there instead, so it's managed exactly like a pulled model:
 
@@ -171,7 +178,7 @@ localm relocate MODEL NEW_PATH  # re-point a registered model after you moved it
 localm unload [MODEL]           # free VRAM on the running server: all models, or just one
 ```
 
-`localm rm` only deletes the file when the last alias pointing at it is removed, and the confirmation prompt states exactly what will happen. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model, and a named model that is not loaded is a no-op.
+`localm rm` only deletes the file when the last alias pointing at it is removed, and the confirmation prompt states exactly what will happen. It also refuses when a running localm server (this directory's or another one's) still has the model's file loaded - checked regardless of `--yes`, before the confirmation prompt, since this one-shot process shares no memory with a server and has to ask over HTTP; a server it cannot reach counts as "cannot rule it out", not as a green light. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model, and a named model that is not loaded is a no-op.
 
 ---
 
@@ -255,23 +262,32 @@ actually uploaded.
 ## Knowledge (RAG)
 
 ```bash
-localm rag add NAME PATH...      # index files/folders into a collection
+localm rag add NAME PATH... [--embed] [--force]   # index files/folders into a collection
 localm rag list                  # collections with doc/chunk counts
 localm rag docs NAME             # list a collection's documents: path, chunks, status
-localm rag query NAME "text"     # show the top matching excerpts
-localm rag resync NAME           # re-walk the indexed folders: pick up new and
+localm rag query NAME "text" [--embed] [-k N]   # show the top matching excerpts
+localm rag resync NAME [--embed] [--prune-missing]  # re-walk the indexed folders: pick up new and
                                  # changed files, flag ones that have vanished
-localm rag repair NAME           # re-index every known document from scratch
+localm rag repair NAME [--embed]  # re-index every known document from scratch
 localm rag reembed NAME          # recompute vectors with the current embedding model, without re-reading source files
 localm rag rm-doc NAME PATH      # remove one document from the index (file kept)
 localm rag rm NAME [--yes]       # delete a collection (index only, files kept)
 ```
+
+CLI indexing is lexical-only (BM25) by default, with no engine involved; pass
+`--embed` to `add`/`query`/`resync`/`repair` to also compute embeddings via a
+running localm server (`--url` to point at a non-default one), matching the
+GUI's hybrid retrieval.
 
 `resync` is the incremental one to run regularly (`--prune-missing` to also drop
 entries whose file is gone; off by default so an unplugged drive cannot delete
 your index). Put it on a schedule with
 `localm job add sync-docs --rag --collection NAME --cron "0 3 * * *"` - see
 [docs/jobs.md](../docs/jobs.md#keeping-an-indexed-folder-current).
+
+A named API key's RAG *indexing* reach can be confined to specific folders
+with `localm key create NAME --scope rag --rag-root DIR` (repeatable) - see
+[API keys](#api-keys) and [docs/rag.md](../docs/rag.md#per-key-folder-scoping).
 
 Enable the rag plugin and install `pip install "localm[rag]"` for PDF parsing. See [docs/rag.md](../docs/rag.md) for retrieval design.
 
@@ -282,16 +298,44 @@ Enable the rag plugin and install `pip install "localm[rag]"` for PDF parsing. S
 ```bash
 localm job add NAME --prompt "..." [--cron "0 9 * * 1-5" | --every SECONDS]
 localm job add NAME --prompt "..." --coder --cwd DIR --scope "tests/**"
+localm job add NAME --memory --every 21600         # synthesise memory facts, no prompt needed
+localm job add NAME --rag --collection COLL --cron "0 3 * * *"   # keep a Knowledge collection current
 localm job list                  # id, name, schedule, state, last status
 localm job show JOB_ID           # full definition: schedule, prompt, cwd/scope, allow_shell
 localm job run JOB_ID            # run once now, record the result
-localm job results JOB_ID        # past run results, newest first
+localm job results JOB_ID [--limit N] [--offset N]  # past run results, newest first
 localm job enable JOB_ID
 localm job disable JOB_ID
 localm job remove JOB_ID         # delete the job and its results
 ```
 
+A job's `--model NAME` picks a specific registered model to run it with (chat
+and coder jobs; otherwise it uses the server's active model), and a coder job
+needs `--allow-shell` to run unrestricted (off by default: read plus confined
+edits, no shell, no network).
+
 The `localm job` CLI, the Jobs GUI tab, and the plugin's `/api/jobs` routes share one on-disk store. The scheduler only ticks while a `localm gui`/`localm serve` (with the jobs plugin active) is up. See [docs/jobs.md](../docs/jobs.md).
+
+---
+
+## Memory
+
+```bash
+localm memory list [--all] [--json]        # what localm has remembered about you
+localm memory show ID                      # one fact in full, with its provenance
+localm memory add "fact" [--kind semantic|episodic] [--importance F]
+localm memory forget ID [-y]               # delete one fact (not recoverable)
+localm memory forgotten                    # facts localm archived on its own
+localm memory restore ID                   # bring an archived fact back
+localm memory corrections [--json]         # proposals consolidation left for review
+localm memory accept ID | reject ID        # resolve one proposal
+localm memory clear [-y]                   # erase everything (not recoverable)
+```
+
+Reads and writes the same store the app and the `memory` plugin's chat recall
+use, and works whether or not that plugin is installed - the plugin only adds
+the automatic recall-on-chat and background consolidation hooks. See
+[docs/memory.md](../docs/memory.md).
 
 ---
 
@@ -408,17 +452,24 @@ still goes ahead and the missed policy is logged rather than silently dropped.
 localm's HTTP surface is protected by a bearer key. Manage the owner key and mint named, scope-limited keys from the CLI:
 
 ```bash
-localm key show                 # show the active owner key (masked) or "open mode"
+localm key show [--reveal]      # show the active owner key (masked, or full with --reveal) or "open mode"
 localm key generate             # generate a random owner key, persist it, print it once
 localm key set KEY              # persist a specific owner key you provide
 localm key clear                # remove the owner key, return to open mode
 localm key create NAME --scope chat --scope rag   # mint a named key limited to those scopes
+localm key create NAME -s rag --fs-access host --rag-root D:\docs --expires-in 86400
 localm key list                 # list named keys (metadata only, never the secret)
 localm key rm KEY_ID            # revoke a named key by ID
 localm key recover              # recover owner access after a lockout (run locally on the server machine)
 ```
 
 The owner key can also be set outside these commands: the `LOCALM_API_KEY` env var, or a `<data dir>/auth.key` file.
+
+`key create` takes three optional confinements beyond `--scope`, each narrowing what the key can do below what the owner can:
+
+- `--fs-access [none|host]` - host filesystem reach for the coder/file tools. Defaults to `none` (device-upload-only); `host` grants the whole server disk, same as the owner.
+- `--rag-root DIR` (repeatable) - confines the key's RAG **indexing** reach to exactly these folders instead of the global folder policy; querying and listing collections are not scoped by this. Omit for no per-key restriction. See [docs/rag.md](../docs/rag.md#per-key-folder-scoping).
+- `--expires-in SECONDS` - the key stops working this many seconds after creation. Omitted means it never expires.
 
 Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for serving over a LAN.
 
@@ -430,7 +481,7 @@ Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `code
 localm completion powershell   # also: bash, zsh, fish
 ```
 
-Model names complete everywhere a model argument is expected.
+In bash/zsh/fish, model names complete everywhere a model argument is expected. In PowerShell, model-name completion only covers `run`, `serve`, `rm`, and `alias`; other commands that take a model argument (`relocate`, `set-type`, `unload`, `rename`, `benchmark`, `gui`) complete only the command name, not the model.
 
 ---
 
@@ -643,7 +694,7 @@ localm stop --all                        # stop every running localm instance
 
 `localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those.
 
-`localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path.
+`localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path. Switching to a different model than the one currently configured reports which existing Knowledge collections have embeddings and asks you to confirm before it happens (`-y`/`--yes` skips the confirmation) - see [docs/rag.md](../docs/rag.md#how-retrieval-works-and-why-its-lexical-first).
 
 See [docs/gpu-setup.md](../docs/gpu-setup.md) for the full GPU setup guide.
 

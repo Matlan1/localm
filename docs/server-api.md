@@ -82,7 +82,7 @@ failure happens, not on which endpoint you called:
 | Failure | Reported as |
 |---|---|
 | The request is refused before generation starts (unsupported input, an undecodable image, a grammar this model cannot apply, a malformed grammar or trigger pattern) | An HTTP error status with the reason in `detail`: `400`, `501` when the server lacks an image decoder, `413` when an embedding batch is too large, `503` when the trigger-pattern validator was too busy to check your pattern |
-| Generation started and then failed (not enough free VRAM for this prompt, a conversation that outgrew the context window, a native decode error) | `200` whose text is `[inference error: <reason>]` and whose `finish_reason` is `"error"` |
+| Generation started and then failed (not enough free VRAM for this prompt, a conversation that outgrew the context window, a native decode error) | `200` whose text is `\n[inference error: <reason>]` (a leading newline, then the bracketed reason) and whose `finish_reason` is `"error"` |
 
 The second row is a `200` on purpose. A streaming response has already sent its
 headers by the time generation can fail, so a status is no longer available to
@@ -185,6 +185,14 @@ reports only this process's own allocations, or an unmeasurable post-unload
 reading). Unloading is implicit-recovery: the next chat request against an
 unloaded model reloads it automatically.
 
+`POST /v1/models/rename?model=<name>&new_name=<name>` renames a registered
+model in place: re-keys the registry entry and, if the model is currently
+loaded, its in-memory engine, so it keeps serving under the new name with no
+reload. Unlike an alias, the old name stops resolving. This is what `localm
+rename` calls; it exists on the always-present `/v1` surface (not only under
+`localm gui`) because a headless `localm serve` has no GUI routes to do it
+from instead.
+
 ## Server control
 
 Scope: `config:write`.
@@ -226,6 +234,22 @@ requires `plugins:admin`). PATCH therefore refuses both to a non-owner
 general route cannot be used to bypass a specific one. Their values stay
 readable.
 
+### `GET /v1/plugins/settings` / `POST /v1/plugins/{name}/settings`
+
+Scope: `config:read` for `GET`, `config:write` for `POST`.
+
+The generic counterpart to `/v1/tts/config` and `/v1/media/config/{name}` for
+a plugin that contributes settings dynamically via `host.add_settings()`
+rather than through a bespoke schema (the Open WebUI Valves interop seam -
+see [plugin-interop.md](plugin-interop.md)). `GET` returns every ACTIVE
+plugin's declared fields with their resolved values; an inactive or unknown
+plugin simply has no entry. `POST` merges a plugin's block key by key (a
+blank field clears that override back to its declared default) and 404s for
+a plugin with no active `add_settings()` fields. A field marked owner-only in
+the plugin's own declaration is hidden from, and refused for, a non-owner
+`config:write` key, the same rule `/v1/config` applies to its own `admin_only`
+keys.
+
 ## Diagnostics, issues, and updates
 
 These routes are part of the base server, registered unconditionally. They are
@@ -239,6 +263,8 @@ present on a headless `localm serve` with no plugins installed, not only under
 | `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. |
 | `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. |
 | `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](../SECURITY.md) for the signing and rollback model. |
+| `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. |
+| `POST /api/update/rollback` | `admin` | Restore the previous build from the last update's local backup and restart into it. No signature check and no network request - it restores files, not a download. Requires `admin` specifically (not merely `config:write`), and restores files only, not a deps-class update's package installs. |
 | `POST /api/bug-report` | `config:write` | Generate a bug report, and optionally file it. |
 
 **A proxy failure is reported in the body, not the status.** `GET /api/issues`
@@ -285,8 +311,9 @@ a trust boundary and are owner-only; see the note under
 ## Plugin management endpoints
 
 These endpoints are present under `localm serve` too, not just `localm gui`.
-They are scope-gated: `GET` requires `PLUGINS_READ`, the mutations require
-`PLUGINS_ADMIN`.
+They are scope-gated: `GET /api/plugins` requires `PLUGINS_READ`, and the
+mutations require `PLUGINS_ADMIN` - except the install-deps event stream
+below, which is a `GET` that also requires `PLUGINS_ADMIN`.
 
 ### `GET /api/plugins`
 
@@ -317,7 +344,9 @@ non-builtin plugin returns 404; any other refresh failure returns 400.
 
 Toggle an installed plugin active or inactive in config. Disabling a
 protected plugin (chat) returns 409; enabling a plugin that is not installed
-returns 409; an unknown plugin returns 404.
+returns 409; an unknown plugin returns 404 from `enable`. `disable` does not
+check whether the name is a real plugin - an unknown name returns 200 the
+same as a real one.
 
 ### `POST /api/plugins/install-external`
 
@@ -355,6 +384,21 @@ holding the file open, for example), or `"browser sessions (some devices may
 still be signed in)"` when the session store could not be written. The labels
 are deliberately path-free.
 
+`POST /api/auth/key/rotate` (scope `admin` - not merely `config:write`, since
+setting a caller-chosen key is privilege-equivalent to minting yourself owner)
+rolls or sets the owner key - the HTTP sibling of `localm key generate` /
+`localm key set <key>`. An empty or omitted body mints a fresh random key;
+`{"key": "<value>"}` persists that exact one (an empty/whitespace `key` still
+GENERATES, so this route can never drop the server to open mode - use
+`/api/auth/key/clear` for that). Returns `{"rotated", "active", "key",
+"warnings"}`: `key` is the new key, shown once; `active` is whether the
+server's next request will actually accept it (false when `LOCALM_API_KEY` in
+the environment overrides the stored key, or on an unexplained write/read-back
+mismatch, either surfaced in `warnings`). Existing browser sessions are NOT
+revoked by a roll (sessions are decoupled from the key's value); the
+compromise-recovery path that does revoke them is `localm key recover`, run
+locally.
+
 `POST /api/session/logout` reports the same way: it always clears the calling
 browser's own cookie, and carries a `warnings` entry when the server-side
 session record could not be dropped.
@@ -367,9 +411,20 @@ design, indexing confinement, and CLI equivalents.
 
 | Route | Purpose |
 |---|---|
+| `GET /api/rag/collections` | List every collection with its stats (chunk/doc counts, `has_vectors`, `dim_mismatch` against whatever embedder is currently loaded). |
+| `POST /api/rag/collections` | Create an empty collection. `{"name": ...}`; 409 if it already exists. |
+| `GET /api/rag/collections/{name}` | One collection's stats plus its document list. 404 for an unknown name. |
+| `DELETE /api/rag/collections/{name}` | Delete a collection and its on-disk index. 404 if it does not exist. |
 | `POST /api/rag/collections/{name}/add` | Index paths into a collection. Always starts a background job and returns `{"job_id": ...}` immediately, on `localm gui` and a headless `localm serve` alike. Follow progress with `GET /api/jobs/{id}/events`. |
 | `POST /api/rag/collections/{name}/upload` | Same, for uploaded files; same `{"job_id": ...}` response. |
-| `POST /api/rag/embedding` | Install or switch the embedding model; also starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key. |
+| `POST /api/rag/collections/{name}/query` | Semantic/lexical search against one collection; returns up to `k` (max 20) hits. Chunk text is defanged of control/frame tokens before it comes back, since it is untrusted content headed for a chat prompt. |
+| `POST /api/rag/collections/{name}/reembed` | Recompute the collection's vectors with the currently-loaded embedding model, from the stored chunk text (no re-read of the source files). Job-backed. |
+| `POST /api/rag/collections/{name}/repair` | Re-index every rebuildable document (mirrors `localm rag repair`). Upload-only documents cannot be rebuilt (the uploaded bytes are never retained) and are reported, not silently dropped. Returns `{"needs_confirm": true, ...}` instead of starting a job when repairing without embeddings would remove existing vectors; re-POST with `confirm: true` to proceed. |
+| `POST /api/rag/collections/{name}/remove-doc` | Remove one indexed document (`{"path": ...}`) from a collection. 404 if it is not indexed there. |
+| `POST /api/rag/extract` | Extract plain text from an uploaded chat attachment, entirely in memory (30 MB cap). Used by the chat attachment flow, not by collection indexing. |
+| `GET /api/rag/embedding` | Current embedding-model config and availability (`installed`, `dim`, `can_download`, any load error). Never loads a model. A non-owner caller gets a withheld/generic answer for a model that is not one of localm's known internal ones or a registered model. |
+| `POST /api/rag/embedding/download` | One-time download of the currently-configured embedding model, when the network policy would otherwise not fetch it automatically (`net_mode: ask`). Needs `config:write` - the same scope that governs `net_mode` itself. Writes nothing to config; `net_mode: off` always refuses it. Job-backed. See [network.md](network.md). |
+| `POST /api/rag/embedding` | Select the embedding model (and install it, if it is one of localm's known internal models and not yet on disk). Two-step by `confirm`: without it, this is a dry run - no job starts, and the response is `{"needs_confirm": true, "model", "collections", "note"}` describing what switching would affect. Re-POST with `confirm: true` to actually switch; that starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key. |
 
 ## Memory endpoints (memory plugin)
 
@@ -418,8 +473,9 @@ for chunk in stream:
   requests queue in order. GPU memory is shared and the KV cache is not
   concurrency-safe, so this is deliberate.
 - **Context**: the window starts at `n_ctx` and grows on demand up to
-  `n_ctx_max` (see the dynamic context section of the README). Conversations
-  that outgrow the ceiling get a clear error instead of an OOM.
+  `n_ctx_max` (see the dynamic context window section of
+  [architecture.md](architecture.md)). Conversations that outgrow the
+  ceiling get a clear error instead of an OOM.
 - **GUI-only routes**: only a handful of `/api/models/*` model-switching
   routes are actually gated behind `localm gui`. Everything else
   plugin-contributed - coder sessions (`/api/coder/*`), the Knowledge routes

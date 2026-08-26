@@ -45,20 +45,31 @@ binaries also ships their license text:
 
 localm declares its Python dependencies in `pyproject.toml`. They are installed
 from PyPI by pip or uv and are NOT redistributed inside this repository, so no
-license text is reproduced here. The declared dependencies are permissive
-(MIT / BSD / Apache-2.0 / HPND / ISC / PSF) apart from two weak-copyleft
-exceptions; there is no strong copyleft (no GPL / AGPL). The weak copyleft
-present is:
+license text is reproduced here. The great majority of declared dependencies are
+permissive (MIT / BSD / Apache-2.0 / HPND / ISC / PSF), with three exceptions:
 
 - **MPL-2.0**, in `certifi` (an unmodified CA-certificate bundle) and `tqdm`
   (dual-licensed MPL-2.0 / MIT).
 - **LGPL-2.1-or-later**, in `zeroconf` (the mDNS / DNS-SD service-discovery
   library behind `localm.local` network naming).
+- **GPL-3.0-only**, in `PyQt6` and `PyQt6-WebEngine`, pulled in transitively by
+  `pywebview[qt]` under the optional `desktop` extra on Linux only (see
+  `pyproject.toml`'s `desktop` extra and `localm/appface.py`'s Linux
+  `gui="qt"` selection). Both are Riverbank Computing packages dual-licensed
+  under GPL-3.0-only or a paid commercial license; a `pip install
+  "localm[desktop]"` on Linux takes the GPL-3.0-only terms by default. This
+  extra is optional, best-effort (localm falls back to a browser tab if it is
+  absent or fails to start), and not installed by either `setup.sh` or
+  `setup.bat` by default.
 
-Each is imported unmodified as a separate library installed from PyPI, at arm's
-length. LGPL-2.1-or-later and MPL-2.0 are both compatible with localm's AGPL-3.0
-license and, used this way, impose no obligation on localm beyond preserving the
-upstream license notices.
+MPL-2.0 and LGPL-2.1-or-later are both weak copyleft: each library above is
+imported unmodified as a separate package installed from PyPI, at arm's length,
+and imposes no obligation on localm beyond preserving the upstream license
+notices. GPL-3.0-only is strong copyleft and works differently: whether it is
+compatible with distributing it alongside localm's own AGPL-3.0-or-later code is
+a legal question this notice does not resolve. Anyone distributing a build that
+includes the `desktop[qt]` extra on Linux should get their own confirmation
+rather than relying on this file.
 
 One dependency's license is not confirmed here: `rocm`, `rocm-sdk-core`, and
 `rocm-sdk-libraries-gfx103x-all` (pulled in by the optional `[gpu]` extra, for the

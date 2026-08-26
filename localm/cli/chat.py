@@ -136,8 +136,10 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         if debug:
             console.print(
                 "[yellow]⚠  privacy mode + --debug:[/yellow] the debug log "
-                "records requests and raw model output - delete it after "
-                "analysis if that matters.")
+                "still records operational lines (requests, timings, errors) "
+                "- never raw model output or chat content, even with this "
+                "flag on. Delete it after analysis if the operational detail "
+                "matters to you.")
     else:
         console.print(f"[dim]session mode: {session_mode.value} "
                       f"(audit trail in <data dir>/sessions/)[/dim]")

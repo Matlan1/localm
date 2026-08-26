@@ -104,12 +104,12 @@ This is a *format*, not a runtime, and it maps to localm almost for free because
 
 | Skill element | localm mapping | Verdict |
 |---|---|---|
-| `name` + `description` (disclosure L1) | inject into the coder system prompt as available skills, or a `use_skill(name)` tool | clean |
-| body instructions (L2) | inject `SKILL.md` body into agent context on activation | clean |
-| bundled scripts/resources (L3) | the agent's existing `read_file` / `run_shell` read and run them on demand | clean, reuses existing tools |
-| `allowed-tools` | map to localm capability scopes | clean |
+| `name` + `description` (disclosure L1) | `list_skills()` tool, read-only, never gated | clean |
+| body instructions (L2) | `use_skill(name)` injects the `SKILL.md` body into agent context | clean |
+| bundled scripts/resources (L3) | `use_skill(name, file=...)` plus the agent's existing `read_file` / `run_shell` | clean, reuses existing tools |
+| `allowed-tools` | a dispatch-time tool-name restriction, hard-enforced for the rest of the turn (not merely advisory) - see `docs/skills.md` | clean, implemented |
 
-**Verdict:** the cleanest and lowest-risk of the three. The coder gains `list_skills` and `use_skill(name)` tools (see `localm/plugins/coder/skills.py`) that let it discover and load skills from `<data dir>/skills/` and `.localcoder/skills/` (project-local). Lower risk than Open WebUI / oobabooga: the agent *chooses* to run a bundled script through its existing confirm/scope/audit, rather than the host `exec`-ing foreign Python. (For plain non-agentic chat its value drops to a structured persona + context.)
+**Verdict:** the cleanest and lowest-risk of the three, and the only one fully implemented. The coder gains `list_skills` and `use_skill(name)` tools (see `localm/plugins/coder/skills.py`) that let it discover and load skills from `<data dir>/skills/` and `.localcoder/skills/` (project-local). Lower risk than Open WebUI / oobabooga: the agent *chooses* to run a bundled script through its existing confirm/scope/audit, and a skill's declared `allowed-tools` is enforced rather than the host `exec`-ing foreign Python unconstrained. (For plain non-agentic chat its value drops to a structured persona + context.)
 
 ## Reachable vs out of reach
 
@@ -123,7 +123,7 @@ This is a *format*, not a runtime, and it maps to localm almost for free because
 
 Leverage-weighted:
 
-1. **Skills importer** - IMPLEMENTED. A coder-surface plugin with two tools (`list_skills`, `use_skill`), zero kernel change. Skills from `<data dir>/skills/` and `.localcoder/skills/` are discovered and loaded on agent start (see `docs/skills.md`).
+1. **Skills importer** - IMPLEMENTED. Built directly into the coder agent (not a registered plugin under `localm/plugins/contract.py`), exposing two tools (`list_skills`, `use_skill`), zero kernel change. Skills from `<data dir>/skills/` and `.localcoder/skills/` are discovered and loaded on agent start (see `docs/skills.md`).
 2. **Chat-pipeline hook (B)** - IMPLEMENTED. The kernel hook runs on every `/v1/chat/completions` call; the Tools and text-pipeline adapters build on top of it (see the per-ecosystem sections above).
 3. **Open WebUI Tools adapter** - ROADMAP. Reuses the existing tool-adapter machinery (see Open WebUI above).
 4. **Open WebUI Pipes** - ROADMAP. A virtual-model backend (bigger, deferred).
@@ -147,7 +147,7 @@ Before building, confirm these facts against real source code, not docs:
 - Claude Desktop MCP config paths (for the localm MCP server):
   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-  - (Claude Desktop has no official Linux build; use third-party clients)
+  - Linux: Claude Desktop has no official Linux build; `localm mcp --print-config` prints `~/.config/Claude/claude_desktop_config.json` for third-party clients that follow the same config layout
 - ComfyUI: runs at default `http://127.0.0.1:8188`; launched with `python main.py`, prints its URL on startup.
 
 ## Sources

@@ -20,6 +20,7 @@ always present; three are conditional (marked below).
 | Tool | What it does | Annotation |
 |---|---|---|
 | `chat` | Generate with a local model. Per-call `model`, `system`, `seed`, `temperature`, `max_tokens` | |
+| `server_activity` | What any running localm server (GUI/HTTP) on this machine is doing right now - downloads, indexing, media generation - so a client can check before starting a long operation of its own | read-only |
 | `list_models` | Your registry with sizes and sources | read-only |
 | `system_stats` | Live CPU/RAM/VRAM/GPU load, for judging model/quant fit | read-only |
 | `search_models` | Search HuggingFace for GGUF repos | read-only |
@@ -100,7 +101,7 @@ Open the config file in your editor and paste the block from Step 2 (if the file
 
 ### Step 4: Restart Claude Desktop
 
-Close and reopen Claude Desktop. The app will launch localm on startup. You should see the localm tools (chat, the model and plugin management tools, and generate_image when ComfyUI is reachable) available in the tool menu. See [Exposed tools](#exposed-tools) for the full list.
+Close and reopen Claude Desktop. The app will launch localm on startup. You should see the localm tools (chat, the model and plugin management tools, and generate_image unless you passed `--no-images`) available in the tool menu. See [Exposed tools](#exposed-tools) for the full list.
 
 ### Step 5: Try a tool
 
@@ -134,6 +135,7 @@ Each `[mcp.servers.NAME]` table declares:
 
 - `command`: the executable to run (must be on PATH or an absolute path)
 - `args`: command-line arguments (optional)
+- `env` (optional): a table of environment variables to set for the server process, merged on top of the coder's own environment - see [Permission errors in MCP tools](#permission-errors-in-mcp-tools) below
 - `trusted` (optional, default false): if true, every tool this server offers runs without confirmation; if false, every one of its tools (whatever it actually does) is treated as destructive and triggers a confirmation prompt - see [Security: trusted vs. untrusted](#security-trusted-vs-untrusted) below
 
 ### How tools appear
@@ -147,13 +149,13 @@ The agent sees the tool description and calls it like a built-in tool (e.g. `mcp
 
 ### Verify tools loaded
 
-Run the coder in verbose mode to see MCP startup:
+Start the coder:
 
 ```bash
-localm coder --verbose
+localm coder
 ```
 
-A server that starts cleanly prints nothing here: its tools appear in the agent's tool list (named `mcp_<server>_<tool>` and listed in the system prompt). Confirm it loaded by checking its tools are offered, for example `mcp_fs_search`.
+MCP startup output does not depend on `--verbose` (that flag only affects how tool call results are printed later). A server that starts cleanly prints nothing here: its tools appear in the agent's tool list (named `mcp_<server>_<tool>` and listed in the system prompt). Confirm it loaded by checking its tools are offered, for example `mcp_fs_search`.
 
 If a server fails to start, the coder prints a warning and continues - MCP problems never break the agent. For example:
 
@@ -177,6 +179,17 @@ a server's tools the same way based on this one setting.
   did not mean to allow cannot be stopped once the server is trusted.
 
 Do not set `trusted = true` for arbitrary code. MCP servers run with your user account and full file access.
+
+**`trusted` only governs confirmation, not how the result is read.** Separately
+from that flag, the *output* of every `mcp_<server>_<tool>` call - trusted
+server or not - is wrapped as untrusted external content before it reaches the
+model: fenced, labeled, and accompanied by an instruction not to treat it as
+commands. This is indirect-prompt-injection defense in depth (the same
+handling `fetch_url` and `web_search` get), because a tool result can carry
+attacker-influenceable text (a document, a search hit, a database row) that a
+model would otherwise read as part of its own context. `trusted` decides
+whether *calling* a tool needs your approval; the output fencing runs
+regardless and is not configurable.
 
 ### Example: add sqlite server
 
@@ -224,6 +237,12 @@ Windows: check `%APPDATA%\Claude\logs\` for error files.
 
 ### Coder: MCP server fails to start
 
+If the server's own process wrote anything to stderr before it died - a
+Python traceback, a missing-dependency message, an auth error - the coder
+captures the last 20 lines and includes them in the warning it prints, so
+read the full warning text before digging further; it often names the real
+cause directly.
+
 **Check the command:**
 
 Make sure the executable exists and is on PATH:
@@ -263,13 +282,13 @@ args = ["my_search_server.py", "--db-path", "app.db"]
 
 **Check the server is alive:**
 
-In verbose mode:
+Start the coder:
 
 ```bash
-localm coder --verbose
+localm coder
 ```
 
-If a server failed to start, a yellow warning line naming it appears at startup (see "MCP server fails to start" above). A clean server is silent (see "Verify tools loaded"), so confirm it with the tool-name check below.
+If a server failed to start, a yellow warning line naming it appears at startup (see "MCP server fails to start" above) - this does not depend on `--verbose`. A clean server is silent (see "Verify tools loaded"), so confirm it with the tool-name check below.
 
 **Check the tool name:**
 
@@ -294,7 +313,7 @@ python main.py
 
 (download from https://github.com/comfyanonymous/ComfyUI). It prints its URL on startup, typically `http://127.0.0.1:8188`.
 
-Then restart Claude Desktop to reload the MCP server. The `generate_image` tool should appear.
+The `generate_image` tool is already in the menu (it is hidden only by `--no-images`, never by ComfyUI's reachability); once ComfyUI is running, retry the call and it should succeed.
 
 **Pass the URL if non-standard:**
 

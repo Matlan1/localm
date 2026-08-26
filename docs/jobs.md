@@ -58,7 +58,7 @@ localm job add sync-manuals --rag --collection manuals --cron "0 3 * * *"
 localm job list                 # id, name, schedule, enabled state, last status
 localm job show <job_id>        # full definition: schedule, prompt, cwd/scope, allow_shell
 localm job run <job_id>         # run once now and record the result
-localm job results <job_id>     # past run results, newest first
+localm job results <job_id> [--limit N] [--offset N]  # past run results, newest first
 localm job disable <job_id>     # keep it but stop it firing
 localm job enable <job_id>
 localm job remove <job_id>      # delete the job and its stored results
@@ -84,14 +84,19 @@ localm job remove <job_id>      # delete the job and its stored results
 
 The **Jobs** tab (visible once the plugin is enabled) lists every job with its
 schedule and last result. From there you can create a job (chat, coder, or a
-knowledge re-sync, interval or cron), enable or disable it, edit it, run it now,
-and browse each job's past run results. See [gui.md](gui.md).
+knowledge re-sync, interval or cron), enable or disable it, run it now, and
+browse each job's past run results. There is no edit action in the GUI; to
+change a job's schedule or prompt, delete it and add it again, or use
+`PUT /api/jobs/{id}` directly. See [gui.md](gui.md).
 
 ## HTTP API
 
 When the plugin is active the server mounts a small REST surface, scoped to the
-`jobs` capability (it requires a valid API key only when auth is configured, the
+`jobs` capability (it requires a valid API key when auth is configured, the
 same as the rest of the management API; see [server-api.md](server-api.md)).
+In open mode (no key configured) these routes still need this instance's
+shell token or attach token, same as `/api/activity` below - a bare `curl`
+with no credentials is refused here too.
 Each job is bound to the key that created it: a `jobs`-scoped key sees and can
 touch only its own jobs (an owner/`admin` key sees every job); a job created
 with no key configured (open mode) is unrestricted. A foreign job id 404s the
@@ -139,19 +144,30 @@ what decides which registry answers.
 `GET /api/activity` is how you find those in-flight operations without already
 holding an id. It answers `{"now": <server clock>, "operations": [...]}`, where
 each entry carries `id`, `kind`, `status`, `created_at`, `finished_at` (null
-while it runs), `cancellable`, a `label` that is only set for model pulls and
-ComfyUI setup (fall back to `kind`), and `pct`/`phase` once the operation has
-something real to report. `pct` is absent, never `0`, before then. Compute an
+while it runs), `cancellable`, a `label` that is set for a model pull, a
+ComfyUI setup or update, a llama.cpp runtime setup or update, and system
+diagnostics (other kinds fall back to `kind`), and `pct`/`phase` once the
+operation has something real to report. `pct` is absent, never `0`, before then. Compute an
 age as `now - created_at`, using the server's `now` rather than your own clock.
 It is deliberately not under `/api/jobs`, so that one prefix does not mean two
 things. `localm status` and the MCP activity tool read this same route; on a
 server with no API key configured they authenticate with that instance's local
 attach token, which is why a bare `curl` with no credentials is refused there.
 
-What it does not promise: the registry is in memory, so it is empty again after
-a restart; a finished operation is dropped about an hour after it finishes, and
-only when some new operation starts, so an idle server may keep showing it
-longer; an operation still marked `running` is never dropped, at any age.
+A model pull, a runtime install, and a ComfyUI setup are also mirrored to disk
+under `<data dir>/activity/`, so a restart or a crash does not lose track of
+what was happening: on the next start, any row still marked `running` is
+reported as **`interrupted`** rather than `failed`, since whether the work
+actually finished is genuinely unknown, and stopping or restarting the server
+also terminates the background child processes it started instead of
+abandoning them. Progress (`pct`/`phase`) is not mirrored and does not survive
+a restart.
+
+What it does not promise beyond that: a finished operation is dropped about an
+hour after it finishes, and only when some new operation starts, so an idle
+server may keep showing it longer; an operation still marked `running` is
+never dropped, at any age.
+
 Cancelling always answers `{"status": "cancelling"}`, whatever state the
 operation was in. It terminates the subprocess behind a model pull, a model
 removal or a ComfyUI setup; for the in-process operations it is only a request
@@ -231,7 +247,8 @@ semantic search.
 
 A schedule is either an **interval** (seconds between runs) or a **cron**
 expression (see the `--every` / `--cron` rows above). The 5-field cron matcher
-supports ranges (`1-5`), lists (`1,3,5`), and `*`.
+supports ranges (`1-5`), lists (`1,3,5`), `*`, and step values (`*/15`,
+`1-30/5`, `5/15`).
 
 The scheduler polls about every 30 seconds, so a job fires at the first tick at
 or after its due time, not to the exact second.
@@ -247,3 +264,10 @@ or after its due time, not to the exact second.
   (see above) - keep `localm serve`/`localm gui` running, or run it on a machine
   that stays up. Confirm the job is enabled and its next-run time is in the future.
 - **Stop a job.** Disable or delete it from the Jobs tab or with `localm job`.
+- **The job store was corrupt.** If `<data dir>/jobs/`'s definitions file fails
+  to parse (a crash mid-write, a damaged filesystem), localm does not lose your
+  jobs silently: the corrupt file is copied aside as
+  `<file>.corrupt-<timestamp>` (owner-key digests redacted, the last 3 copies
+  kept) and a warning is logged, then localm starts with an empty job list. A
+  single unreadable job entry inside an otherwise-valid file is skipped the
+  same way, logged, and does not block the rest of the store from loading.

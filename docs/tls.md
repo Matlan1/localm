@@ -30,10 +30,17 @@ read -rs LOCALM_API_KEY && export LOCALM_API_KEY
 localm serve mymodel -H 0.0.0.0
 ```
 
-localm refuses to bind past loopback without a key (pass `--insecure` to
-override on a trusted, isolated network). Clients send `Authorization: Bearer
-<key>`. Do not put the key on the command line (it lands in shell history); use
-`Read-Host -MaskInput` as above or set it in your environment manager.
+localm refuses to bind past loopback without a key of at least 8 characters
+(pass `--insecure` to override on a trusted, isolated network; a key that
+clears the 8-character floor still is not necessarily hard to guess - prefer
+a generated one, `localm key generate`, over something memorable). Clients
+send `Authorization: Bearer <key>`. Do not put the key on the command line
+(it lands in shell history); use `Read-Host -MaskInput` as above or set it in
+your environment manager.
+
+`-H` also accepts an IPv6 literal (`-H ::` for every interface on both
+IPv4 and IPv6, or a specific address like `-H ::1`); localm brackets it
+correctly in the URLs it prints and adds it as an IP SAN in the certificate.
 
 ## Built-in TLS (the default past loopback)
 
@@ -49,8 +56,14 @@ if 8642 was busy - use the address it prints). Under the hood:
 
 - On first run it creates a small **local certificate authority** under
   `<LOCALM_HOME>/tls/` (`ca.crt` + `ca.key`) and a server certificate signed by
-  it. The certificate covers 127.0.0.1, your LAN IP, any Tailscale IP, and the
-  hostname, so the same cert works however a device reaches you.
+  it. The certificate covers 127.0.0.1/::1, this machine's own hostname and LAN
+  IP, the mDNS name (`localm.local` by default), and the Tailscale MagicDNS
+  name when Tailscale is up - see [phone.md](phone.md) for how to reach localm
+  by name instead of a DHCP-assigned IP. The raw Tailscale IP is not reliably
+  covered (it depends on hostname resolution turning it up, which can miss it,
+  especially on Linux/macOS) - reach localm by its Tailscale name rather than
+  its `100.x.y.z` address to avoid a certificate warning. The same cert works
+  however a device reaches you, within that set.
 - The certificate is reused across restarts, and it is regenerated as it nears
   expiry (about 30 days before) or when its addresses/names change. The CA is
   reused for those regenerations, so a device you trusted once stays trusted
@@ -106,6 +119,33 @@ localm gui -H 0.0.0.0 --tls-cert D:\certs\localm.crt --tls-key D:\certs\localm.k
 `--no-tls` serves plain HTTP and is an escape hatch for a trusted, isolated
 network only. `--tls-cert`/`--tls-key` let you supply your own certificate (for
 example one issued for a real hostname) instead of the built-in local CA.
+
+### From the GUI: Settings > Server
+
+Everything above has a Settings equivalent, so a browser-only user (no
+terminal) can bind past loopback too - Settings > Server:
+
+- **Bind address** (`bind_host`) - blank for loopback-only, `0.0.0.0` for
+  every IPv4 interface, `::` for every interface on both IPv4 and IPv6, or a
+  specific literal address.
+- **Encrypt network traffic (TLS)** (`tls_enabled`) - on by default; turning
+  it off is the Settings equivalent of `--no-tls`.
+- **Custom TLS certificate / private key** (`tls_cert` / `tls_key`) - the
+  Settings equivalent of `--tls-cert`/`--tls-key`; leave both blank for the
+  built-in CA.
+
+All four are owner-only (Settings hides them, and the API refuses them, for a
+non-owner `config:write` key) and apply on the next restart (Settings has a
+**Restart server** button). There is **no Settings equivalent of
+`--insecure`**, by design: a key check that failed on this route would leave a
+browser-only user locked out of a server that refuses to start, with nothing
+that could fix it. So instead of exiting, a Settings-driven bind that fails
+the check - no key, too short a key, TLS setup failing, or the configured
+address simply not being bindable on this machine right now - falls back to
+127.0.0.1 with a loud warning (console, log, and a hint in the Companion app
+card under Settings > Server) rather than leaving the server unreachable. An
+explicit `-H` from a terminal keeps failing hard (exits) exactly as above,
+since a terminal can always add `--insecure` or fix the key itself.
 
 ## Advanced: terminate TLS with a reverse proxy
 
