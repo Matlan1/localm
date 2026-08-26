@@ -40,7 +40,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   recorded in the debug log.
 
   The draft head is fed the hidden state it predicts from, so it now accepts
-  about half its drafts instead of about one in ten.
+  about half its drafts instead of about one in ten, and it works on models
+  whose cache keeps recurrent state (the Qwen3.5 and 3.6 MTP family, Nemotron
+  and DeepSeek V4 among them). Those declined outright before: speculation has
+  to take a rejected draft back out of the cache, and such a cache cannot be
+  rewound unless it was asked to keep per-token snapshots, which nothing did.
 
   `mtp_enabled` **stays off by default.** Good drafts are necessary for
   speculation to pay and not sufficient: a rejected draft still costs a

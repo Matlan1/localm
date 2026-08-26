@@ -1146,6 +1146,15 @@ class LlamaCpp:
         cp.n_batch           = min(n_ctx, 2048)
         cp.n_ubatch          = cp.n_batch   # match micro-batch to batch
         cp.offload_kqv       = True
+        # Speculation writes a draft token into the cache and takes it back out
+        # when the target rejects it. A recurrent cache cannot be truncated at
+        # all UNLESS it is keeping per-token state snapshots, and it keeps none
+        # by default, so a rejected draft leaves the sequence unrewindable and
+        # every later batch is refused. One snapshot covers a one-token draft;
+        # two leaves room. Costs nothing on a model with no recurrent layers.
+        # See test_recurrent_rollback_is_requested_when_mtp_is_enabled.
+        if self._mtp_enabled and hasattr(cp, "n_rs_seq"):
+            cp.n_rs_seq = max(int(getattr(cp, "n_rs_seq", 0) or 0), 2)
         cp.flash_attn_type   = -1  # keep default (unspecified)
         if n_threads is not None:
             cp.n_threads       = n_threads
@@ -2365,6 +2374,10 @@ class LlamaCpp:
         cp.n_batch     = min(cp.n_ctx, 2048)
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = offload_kqv  # False -> KV cache in system RAM (VRAM was tight)
+        # The grown context must keep the rollback snapshots too, or speculation
+        # stops working the moment a conversation outgrows its first context.
+        if self._mtp_enabled and hasattr(cp, "n_rs_seq"):
+            cp.n_rs_seq = max(int(getattr(cp, "n_rs_seq", 0) or 0), 2)
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
         if not self._ctx_ptr:
