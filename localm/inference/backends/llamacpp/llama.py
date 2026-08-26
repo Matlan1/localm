@@ -836,6 +836,12 @@ class LlamaCpp:
     the API used by :class:`~localm.inference.backends.gguf.GgufBackend`.
     """
 
+    # Class-level so it exists on instances built with object.__new__ (the test
+    # helpers) as well as through __init__. Cleared the first time a rejected
+    # draft's KV cell cannot be removed; speculation needs that rewind, so it
+    # stays off for the rest of the model's life.
+    _mtp_rewind_ok = True
+
     def __init__(
         self,
         model_path: str,
@@ -878,6 +884,7 @@ class LlamaCpp:
         self._mtp_ctx_ptr = None   # Multi-Token Prediction draft context
         self.supports_mtp = False  # True when MTP heads and draft context are active
         self.mtp_status   = "not-initialised"  # short token: why MTP is or is not active
+        self._mtp_rewind_ok = True
         self._mmproj_path = mmproj_path
         self._mtmd        = None   # MtmdContext (vision) when an mmproj is loaded
         self._tokenizer   = None   # type: ignore[assignment]
@@ -1509,6 +1516,7 @@ class LlamaCpp:
                 draft_sampler = (
                     api.llama_sampler_init_greedy()
                     if self._mtp_ctx_ptr is not None and grammar is None
+                    and self._mtp_rewind_ok
                     else None
                 )
 
@@ -1609,7 +1617,8 @@ class LlamaCpp:
 
                         # --- Speculative MTP drafting (if draft context is active) ---
                         draft_token = None
-                        if self._mtp_ctx_ptr is not None and draft_sampler is not None:
+                        if (self._mtp_ctx_ptr is not None and draft_sampler is not None
+                                and self._mtp_rewind_ok):
                             with self._gen_lock:
                                 if not (self._stop.is_set() or self._ctx_ptr is None):
                                     try:
@@ -1665,11 +1674,31 @@ class LlamaCpp:
                                             continue
                                         else:
                                             # Draft REJECTED: remove the speculative token slot at pos + 1
-                                            api.llama_kv_cache_seq_rm(self._ctx_ptr, 0, pos + 1, -1)
+                                            removed = api.llama_kv_cache_seq_rm(self._ctx_ptr, 0, pos + 1, -1)
                                             if self._mtp_ctx_ptr is not None:
                                                 api.llama_kv_cache_seq_rm(self._mtp_ctx_ptr, 0, pos + 1, -1)
                                             self._cached_tokens.append(token)
                                             pos += 1
+                                            if not removed:
+                                                # This memory module cannot drop the
+                                                # rejected cell, so it still holds
+                                                # position pos and llama.cpp refuses
+                                                # every later batch as having
+                                                # inconsistent sequence positions.
+                                                # Rebuild from the tokens actually
+                                                # emitted and stop speculating.
+                                                # See test_a_stuck_draft_cell_disables_mtp_and_keeps_generating.
+                                                self._mtp_rewind_ok = False
+                                                self.supports_mtp = False
+                                                self.mtp_status = "rewind-unsupported"
+                                                from localm.debuglog import logger as _dbg_rewind
+                                                _dbg_rewind.warning(
+                                                    "MTP: this model's KV cache cannot drop a rejected "
+                                                    "draft token; speculation disabled for this model")
+                                                if not self._rebuild_kv_after_stuck_draft():
+                                                    self.last_finish_reason = "error"
+                                                    self._cached_tokens = []
+                                                    break
                                             # verified_token is the target's own
                                             # continuation of *token* and is what
                                             # this position emits. Carry it to the
@@ -1687,7 +1716,7 @@ class LlamaCpp:
                                             self._cached_tokens.append(token)
                                             pos += 1
                                         else:
-                                            self.last_finish_reason = "length"
+                                            self.last_finish_reason = "error"
                                             self._cached_tokens = []
                                             break
                                 finally:
@@ -2004,6 +2033,33 @@ class LlamaCpp:
         # M-RoPE models use multi-dimensional RoPE coordinate grids that cannot be
         # partially rewound by sequence removal; always start clean from fresh context.
         if api.llama_model_has_mrope(self._model_ptr):
+            return False
+        return True
+
+    def _rebuild_kv_after_stuck_draft(self) -> bool:
+        """Re-decode the emitted tokens into a cleared main KV cache.
+
+        Called when a rejected draft token could not be removed from the cache,
+        which leaves a cell at the position the next batch wants to write.
+        ``_cached_tokens`` holds exactly the tokens already emitted, so decoding
+        them from position 0 restores the state the caller's ``pos`` describes.
+        Returns False when the rebuild itself fails.
+        """
+        tokens = list(self._cached_tokens)
+        try:
+            api.llama_memory_clear(api.llama_get_memory(self._ctx_ptr), True)
+            for i in range(0, len(tokens), _PREFILL_CHUNK):
+                batch = self._create_batch(tokens[i:i + _PREFILL_CHUNK], i,
+                                           logits_at_last_only=True)
+                try:
+                    if api.llama_decode(self._ctx_ptr, batch) != 0:
+                        return False
+                finally:
+                    api.llama_batch_free(batch)
+        except Exception as exc:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("MTP: KV rebuild after a stuck draft cell failed (%s)",
+                       type(exc).__name__)
             return False
         return True
 

@@ -403,6 +403,62 @@ def test_mtp_drafting_is_disabled_while_a_grammar_is_active():
     mock_api.llama_sampler_init_greedy.assert_not_called()
 
 
+def test_a_stuck_draft_cell_disables_mtp_and_keeps_generating():
+    """A rejected draft whose KV cell cannot be removed must not end the turn.
+
+    llama_memory_seq_rm returns false on a memory module that cannot partially
+    rewind. The rejected token then stays at pos + 1, and llama.cpp refuses every
+    later batch for having inconsistent sequence positions, so generation dies a
+    couple of tokens in and reports a token budget it never reached. Measured on
+    unsloth/Qwen3.5-0.8B-MTP-GGUF: 28 characters and finish_reason "length"
+    against 941 characters with MTP off.
+    """
+    rec = _SpecRecorder(head=[600, 604, _SpecRecorder.EOG],
+                        draft=[601], verify=[602])
+
+    llm = make_bare_llama(
+        _model_ptr=ctypes.c_void_p(1),
+        _ctx_ptr=ctypes.c_void_p(2),
+        _mtp_ctx_ptr=ctypes.c_void_p(3),
+        supports_mtp=True,
+    )
+    llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
+    llm._fit_generation_budget = lambda n_prompt, max_new: max_new
+    llm._can_reuse_kv = lambda needed: False
+    llm._prefill_fresh_context = MagicMock()
+    llm._create_batch = MagicMock(return_value=MagicMock())
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api,          patch("localm.inference.backends.llamacpp.llama._build_sampler",
+               return_value=rec.main_sampler):
+        mock_api.llama_sampler_init_greedy.return_value = rec.draft_sampler
+        mock_api.llama_sampler_sample.side_effect = rec.sample
+        mock_api.llama_sampler_accept.side_effect = rec.accept
+        mock_api.llama_decode.side_effect = rec.decode
+        # The whole point: the main context refuses to drop the rejected cell.
+        mock_api.llama_kv_cache_seq_rm.return_value = False
+        tokens = list(llm._generate(
+            prompt_tokens=[1, 2], max_new_tokens=8, temperature=0.8,
+            top_k=40, top_p=0.95, repeat_penalty=1.1,
+        ))
+
+    # The turn survives: the rejection still emits the target's own token, and
+    # generation carries on afterwards instead of stopping at the stuck cell.
+    assert tokens == [600, 602, 604], tokens
+    assert llm.last_finish_reason == "stop"
+
+    # MTP is off for this model from here on, and says why.
+    assert llm.supports_mtp is False
+    assert llm.mtp_status == "rewind-unsupported"
+    assert llm._mtp_rewind_ok is False
+
+    # The cache was rebuilt rather than left holding the rejected token.
+    assert mock_api.llama_memory_clear.called
+
+    # No speculation is attempted after the failure.
+    shapes = rec.shapes()
+    assert shapes.count("DRAFT") == 1, shapes
+
+
 def test_mtp_two_consecutive_rejections_each_emit_their_own_token():
     """A carried replacement token opens a fresh speculation of its own, so the
     carry cannot be a one-shot that silently drops the second rejection."""
