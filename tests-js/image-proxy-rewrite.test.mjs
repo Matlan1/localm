@@ -594,3 +594,37 @@ test("a REFUSED origin's later images resolve without waiting on another dialog"
     assert.ok(modalOpen(win), "without disturbing the open dialog");
     assert.match(modalText(win), /undecided\.example\.net/);
   });
+
+test("a realistic reply raises ONE dialog per ORIGIN, however many images it has",
+  async () => {
+    // The number that decides whether this feature is usable. Per-origin was
+    // chosen over per-URL so a reply cannot produce a dialog per image, and the
+    // failure mode being designed against is habituation, not leakage: a modal
+    // that appears often enough becomes reflex, and a prompt people are trained
+    // to dismiss is worse than no prompt. So the COUNT is the property, and it
+    // is asserted here rather than left to follow from the mechanism.
+    const { win } = loadAsking();
+    const md = [
+      "![1](https://a.example.com/1.png)", "![2](https://a.example.com/2.png)",
+      "![3](https://a.example.com/3.png)", "![4](https://b.example.net/4.png)",
+      "![5](https://b.example.net/5.png)", "![6](https://c.example.org/6.png)",
+      "![7](https://c.example.org/7.png)", "![8](https://a.example.com/8.png)",
+    ].join("\n\n");
+
+    renderScoped(win, md, "chat:1");
+    let dialogs = 0;
+    // Answer whatever is open until nothing more asks, counting as we go.
+    for (let i = 0; i < 20; i++) {
+      await settle();
+      if (!modalOpen(win)) break;
+      dialogs += 1;
+      clickConsent(win, "Show images from this site");
+    }
+    assert.equal(dialogs, 3,
+      "8 images across 3 origins must ask 3 times, not 8");
+
+    // And a re-render of the same reply, which streaming does per token, adds none.
+    renderScoped(win, md, "chat:1");
+    await settle();
+    assert.equal(modalOpen(win), false, "a re-render asks nothing further");
+  });
