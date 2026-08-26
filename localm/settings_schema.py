@@ -178,8 +178,9 @@ CORE_FIELDS: list = [
                  "still loads instead of being refused. An explicit value is kept.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("mtp_enabled", Widget.TOGGLE, "Multi-Token Prediction (MTP)",
-                 "Enable speculative drafting on models trained with MTP/next-n "
-                 "prediction heads for faster inference.",
+                 "Speculative drafting on models with MTP/next-n heads. Off by "
+                 "default: the draft head is not yet fed the hidden state it "
+                 "predicts from, so drafts rarely land and cost more than they save.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or

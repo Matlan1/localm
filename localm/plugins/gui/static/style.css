@@ -1,7 +1,9 @@
 /* localm GUI - dark, quiet, professional */
 
-/* Inter (self-hosted, SIL OFL) - the UI typeface. Latin subset, ~24KB/weight.
-   Notices: THIRD-PARTY-NOTICES.md + vendor/inter/OFL.txt. */
+/* Inter (self-hosted, SIL OFL) - the UI typeface. A real designed face with true
+   weight steps replaces the thin OS system font (the "pencil font" look) and falls
+   back to the native stack, offline-clean, if a woff2 ever fails to load. Latin
+   subset, ~24KB/weight. Notices: THIRD-PARTY-NOTICES.md + vendor/inter/OFL.txt. */
 @font-face { font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap;
   src: url("vendor/inter/inter-latin-400-normal.woff2") format("woff2"); }
 @font-face { font-family: "Inter"; font-style: normal; font-weight: 500; font-display: swap;
@@ -20,9 +22,10 @@
   --text-dim:  #98a2b4;
   --accent:    #5aa2fb;
   --accent-soft: rgba(90, 162, 251, 0.15);
-  /* Category hues, applied to nav/section icons only; text and surfaces stay
-     neutral. core=blue, build=green, media=violet, docs=amber, jobs=teal,
-     network=cyan, system=slate. */
+  /* Category hues: color as INFORMATION on nav/section icons (which area each is),
+     muted and at a shared lightness so they read as one family, never a rainbow.
+     Applied to ICONS only; text and surfaces stay neutral. core=blue, build=green,
+     media=violet, docs=amber, jobs=teal, network=cyan, system=slate. */
   --cat-blue:   #62a6fb;
   --cat-cyan:   #4bb8d6;
   --cat-green:  #4fc08d;
@@ -30,7 +33,9 @@
   --cat-violet: #a98bfb;
   --cat-amber:  #e0a44f;
   --cat-slate:  #8fa3c2;
-  /* Content-type icon hues, applied to content icons on page rows and grids. */
+  /* Content-type icon hues (muted): color CONTENT by kind (a model reads blue, a folder amber,
+     a doc slate) on page rows/grids - the color lever for content, distinct from the category
+     NAV hues above. Chrome/nav = category; content = type. */
   --ic-folder:  #e0a458;
   --ic-doc:     #8fa3b8;
   --ic-media:   #c98bd0;
@@ -38,7 +43,9 @@
   --ic-video:   #6ba3e0;
   --ic-code:    #d4915d;
   --ic-model:   #7fb0e6;
-  /* Drop shadow for cards and modals. */
+  /* Depth: dark UIs read flat without a shadow. Cards/modals float on this so
+     a surface reads as a surface, not a same-color rectangle (the picker gets
+     this for free from its modal backdrop; the settings cards did not). */
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.34), 0 6px 20px rgba(0, 0, 0, 0.22);
   --green:     #3fb68b;
   --red:       #e25d5d;
@@ -46,8 +53,8 @@
   --code-bg:   #11141a;
   --mono: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
   --sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
-  /* Column width for chat/coder transcript blocks. #view-chat and #view-coder
-     override it to full width. */
+  /* R17: readable column width for chat/coder transcript blocks. The chat and
+     coder views widen this to full-width (see #view-chat / #view-coder). */
   --thread-max: 860px;
 }
 
@@ -90,8 +97,9 @@ html, body {
   color: var(--text);
   font-family: var(--sans);
   font-size: 14.5px;
-  /* Grayscale smoothing plus Inter's stylistic sets: cv02/03/04 give the
-     single-storey a/g/l, cv11 the straight-tail y. */
+  /* Inter renders crisper with grayscale smoothing + its stylistic sets (cv02/03/04
+     give the single-storey a/g/l; cv11 the straight-tail y) - part of shaking the
+     thin, low-contrast "pencil font" feel. Harmless on the system-font fallback. */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
@@ -159,14 +167,15 @@ nav button {
   text-align: left;
 }
 nav button:hover { background: var(--bg-input); color: var(--text); }
-/* Active tab: accent fill, bold, and an inset accent bar. */
+/* Active tab: the picker-row / settings-nav treatment - accent fill, bold, and
+   the inset accent bar so the current view reads at a glance. */
 nav button.active {
   background: var(--accent-soft); color: var(--accent);
   font-weight: 600; box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* Studio group: a parent button with a disclosure chevron, and its child tabs
-   indented beneath it. */
+   indented beneath it (the media plugins when 2+ are active). */
 .nav-group-parent::after {
   content: "\25B8";              /* right-pointing triangle */
   margin-left: auto;
@@ -178,8 +187,8 @@ nav button.active {
 .nav-child { padding-left: 30px; font-size: 13px; }
 
 /* ---------------- icons (app/icons.js) ---------------- */
-/* Inline SVGs (currentColor), sized per context. Base 16px; nav 17px; small
-   inline (button/label) 15px; composer buttons 19px. */
+/* Inline SVGs (currentColor) replace emoji everywhere; sized per context. Base
+   16px; nav 17px; small inline (button/label) 15px; composer buttons 19px. */
 span[data-icon], .ic, .nav-ic, .btn-ic, .lbl-ic { display: inline-flex; align-items: center; }
 [data-icon] svg, .ic svg { display: block; width: 16px; height: 16px; }
 .nav-ic svg { width: 17px; height: 17px; }
@@ -191,8 +200,10 @@ span[data-icon], .ic, .nav-ic, .btn-ic, .lbl-ic { display: inline-flex; align-it
 .composer .attach svg, .composer .send svg { width: 19px; height: 19px; }
 #nav-toggle svg { width: 22px; height: 22px; }
 #mtb-new svg { width: 22px; height: 22px; }
-/* Nav icons take their category hue via data-icon (static markup) or
-   data-icon-name (JS-built). Labels and surfaces stay neutral. */
+/* Category-colored nav icons (color = which area, not decoration). The icon takes
+   its area's hue via data-icon (static markup) or data-icon-name (JS-built), so
+   the sidebar reads as organized zones instead of a grey column. Labels/surfaces
+   stay neutral; the active row still carries the accent. */
 .nav-ic[data-icon="chat"],     .nav-ic[data-icon-name="chat"]     { color: var(--cat-blue); }
 .nav-ic[data-icon="models"],   .nav-ic[data-icon-name="models"]   { color: var(--cat-blue); }
 .nav-ic[data-icon="coder"],    .nav-ic[data-icon-name="coder"]    { color: var(--cat-green); }
@@ -204,12 +215,16 @@ span[data-icon], .ic, .nav-ic, .btn-ic, .lbl-ic { display: inline-flex; align-it
 .nav-ic[data-icon="book"],     .nav-ic[data-icon-name="book"]     { color: var(--cat-amber); }
 .nav-ic[data-icon="clock"],    .nav-ic[data-icon-name="clock"]    { color: var(--cat-teal); }
 .nav-ic[data-icon="settings"], .nav-ic[data-icon-name="settings"] { color: var(--cat-slate); }
-/* The tint stays quiet until the row is hovered or active. */
+/* Keep the tint quiet until the row is hovered/active, so the icons read as a
+   colored family, not a row of glowing dots. */
 nav button .nav-ic { opacity: 0.82; }
 nav button:hover .nav-ic, nav button.active .nav-ic { opacity: 1; }
-/* Every checkbox and radio takes the accent color. */
+/* Every dynamically-built checkbox/radio inherits the accent (matches the picker
+   checkboxes) instead of the browser default. */
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); cursor: pointer; }
-/* One focus treatment for every field: an accent border, no outline. */
+/* One focus treatment for every field (design standard rule 5): the accent border
+   the app already uses on #conv-search / #model-select / .card inputs, applied
+   everywhere so the pull, plugin-install, and params inputs get it too. */
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 
 #conversations {
@@ -230,7 +245,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   align-items: center;
 }
 /* Ghost icon button in a list-section head (new conversation / new coder
-   session), shared by #conversations and #coder-sessions. */
+   session): shared by #conversations and #coder-sessions, both plain <h3>
+   affordances rather than a data row or a form action. */
 .section-head-btn {
   background: none; border: none; color: var(--text-dim);
   cursor: pointer; font-size: 16px; padding: 0 2px;
@@ -311,8 +327,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   align-items: center;
   gap: 6px;
 }
-/* The `display: flex` above outranks the user-agent `[hidden] { display: none }`,
-   so hiding the pill needs this rule. */
+/* Required, not defensive: the `display: flex` above BEATS the user-agent
+   `[hidden] { display: none }`, so setStatus()'s `hidden = state === "ok"`
+   would be a silent no-op without this rule and the pill would never actually
+   disappear. */
 #model-status[hidden] { display: none; }
 #status-text {
   white-space: nowrap;
@@ -325,33 +343,60 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.2px;
-  /* A 2x2 grid:
+  /* A REAL 2x2 GRID, never a truncated line:
 
          CPU 53%     RAM 20.3/31.9 GB
          GPU 12%    VRAM  5.6/16.0 GB
 
-     Load in column 1, memory in column 2; system on row 1, card on row 2.
-     `justify-content: start` plus `auto` tracks keeps the pair tight against
-     the left rather than stretching across the sidebar. */
+     LOAD in column 1, MEMORY in column 2, system on row 1 and the card on
+     row 2, so the two percentages and the two used/total figures each read
+     down a column.
+
+     This was `white-space: nowrap` + `overflow: hidden` + `text-overflow:
+     ellipsis`, which ellipsised at the sidebar's width and cut the VRAM figure
+     - the one value this readout exists for ("VRAM 3.6/1..."). The first fix
+     made it `flex-wrap`, which stopped the truncation but left the layout at
+     the mercy of WHERE the row happened to wrap: the 2x2 held only while the
+     metrics were about equal width and all four were present.
+
+     Grid instead of wrapping, because ABSENCE IS ROUTINE HERE rather than
+     exceptional - no psutil means no CPU/RAM, and an AMD card reports no GPU%.
+     Under `flex-wrap` a missing GPU pulls VRAM up into the GPU slot; with each
+     span pinned to its column below, the cell just stays empty and everything
+     else keeps its place.
+
+     `justify-content: start` + `auto` tracks keep the pair tight against the
+     left rather than stretching across the sidebar. */
   display: grid;
   grid-template-columns: auto auto;
   justify-content: start;
   column-gap: 10px;
   row-gap: 2px;
 }
-/* Pin each metric to its column, so an absent metric leaves its cell empty
-   instead of shifting the later ones. */
+/* Pin each metric to its column. Auto-placement alone would not do it: it fills
+   row-major from whatever spans exist, so one absent metric shifts every later
+   one into the wrong column. */
 .hw-stats > [data-metric="cpu"],
 .hw-stats > [data-metric="gpu"]  { grid-column: 1; }
 .hw-stats > [data-metric="ram"],
 .hw-stats > [data-metric="vram"] { grid-column: 2; }
-/* Each metric is one unbreakable unit; metrics are separated by the grid gap,
-   not by a glyph. */
+/* Each metric is an unbreakable unit, so a wrap can never split "3.6/16.0 GB"
+   across two lines.
+
+   SEPARATION IS THE GAP, NOT A "·" GLYPH, and that is a consequence of wrapping
+   rather than a taste call: an inline separator has to attach to one side, and
+   once the row can wrap, BOTH sides are wrong somewhere. As a text node after a
+   metric it strands at the end of a wrapped line; moved into the next metric's
+   ::before (tried, and visibly wrong in the browser) it leads the wrapped line
+   with an orphan "· VRAM ...". A gap cannot be orphaned because it collapses at
+   a line break. */
 .hw-stats > span { white-space: nowrap; }
 .hw-stats[hidden] { display: none; }
 #sidebar-unload-btn { width: 100%; margin-top: 6px; padding: 5px 8px; font-size: 12px; }
-/* VRAM-fullness tint, applied only on the .vram-usage class renderHwStats sets
-   when a trustworthy used/total is known. */
+/* Subtle VRAM-fullness tint, shown ONLY when a trustworthy used/total is known
+   (renderHwStats sets .vram-usage then; a stale/blind or total-only reading gets
+   no colour). "how full": calm with headroom, warmer as it fills - kept faint to
+   sit quietly in the 11px status row. */
 .hw-stats .vram-usage.vram-ok   { color: var(--green); }
 .hw-stats .vram-usage.vram-busy { color: var(--yellow); }
 .hw-stats .vram-usage.vram-full { color: var(--red); }
@@ -389,8 +434,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .perf-estimate { font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
 .perf-estimate.perf-warn { color: var(--yellow); }
 .perf-backend-row { margin: 0 0 10px; }
-/* :not([hidden]) keeps this `display` from outranking the user-agent
-   `[hidden] { display: none }` rule. */
+/* :not([hidden]) - an unconditional `display` here would outrank the
+   browser's own `[hidden] { display: none }` UA rule (author CSS always
+   beats user-agent CSS, regardless of selector specificity), so setting the
+   hidden PROPERTY in JS would stop actually hiding the element. Measured
+   live: the hint rendered on an AMD box with hidden correctly set to true. */
 .perf-backend-hint:not([hidden]) {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
@@ -402,8 +450,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 }
 .perf-backend-hint .btn-secondary { flex-shrink: 0; padding: 5px 12px; font-size: 12.5px; }
 /* GPU split ratio-weight inputs (settings-perf.js renderGpuSplitRatioRow):
-   one row per checked device, name/index on the left, a small fixed-width
-   weight box on the right. */
+   one row per checked device, name/index on the left, a small weight box on
+   the right - not the full-width text/number styling .card input[type=
+   number] gives every other number field in this card, which would stretch
+   the box to the card's full width and push the label onto its own line. */
 .card label.perf-gpu-ratio-item { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
 #perf-gpu-ratio-list input[type="number"] { width: 90px; flex: 0 0 auto; }
 
@@ -414,14 +464,20 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .view { display: none; flex: 1; flex-direction: column; min-height: 0; }
 .view.active { display: flex; }
 
-/* Chat and coder use the full available width. Transcript blocks keep their own
-   24px side gutters via per-block padding. */
+/* R17: chat and coder use the full available width instead of a narrow centered
+   column (the 860px cap read as cramped). Transcript blocks keep their own 24px
+   side gutters via per-block padding. */
 #view-chat, #view-coder { --thread-max: 100%; }
 
-/* The coder view is a main column plus a right-side open-sessions rail. */
+/* R17: the coder view is a main column plus a right-side open-sessions rail that
+   mirrors the chat conversation list (its own style so the two can diverge). */
 #view-coder.active { flex-direction: row; }
-/* LEFT rail: row-reverse, so the DOM order stays main-then-rail for screen
-   readers and tab order. The border moves to the rail's right edge with it. */
+/* LEFT rail: row-reverse rather than moving the element, so the DOM order stays
+   main-then-rail. That order is what a screen reader and keyboard tab follow, and
+   the session list is secondary to the session itself in both - flipping the DOM
+   to move a panel visually would reorder the reading sequence as a side effect.
+   The border has to move with it: a left rail with a border on its left draws a
+   line against the window edge and none against the content it separates. */
 #view-coder.active[data-rail="left"] { flex-direction: row-reverse; }
 #view-coder[data-rail="left"] #coder-sessions {
   border-left: none;
@@ -456,15 +512,17 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .coder-session-item .badge { font-size: 11px; color: var(--text-dim); }
 .coder-session-empty { color: var(--text-dim); font-size: 12px; padding: 8px 10px; }
 
-/* The rail groups live sessions, past sessions here, and other projects, each
-   under its own heading. */
+/* The rail groups live sessions, past sessions here, and other projects. A
+   heading per group, so "Open" and "Past sessions here" are never read as one
+   list - one of those is running now and the other is not, and a row that
+   hides the difference invites clicking the wrong thing. */
 .coder-rail-head {
   color: var(--text-dim); font-size: 11px; text-transform: uppercase;
   letter-spacing: .04em; padding: 10px 10px 4px; font-weight: 600;
 }
 .coder-rail-head:first-child { padding-top: 2px; }
-/* A dormant row carries a second line, so it is a block rather than a nowrap
-   flex row. */
+/* A dormant row carries a second line, so it cannot be a nowrap flex row like
+   a live one. */
 .coder-session-item.dormant {
   display: block; white-space: normal; line-height: 1.35;
 }
@@ -472,7 +530,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .coder-session-meta { display: block; font-size: 11px; color: var(--text-dim); }
-/* The folder is gone: the session is still listed but cannot be continued. */
+/* The folder is gone: the conversation is still listed (it outlives the
+   directory) but it cannot be continued, and it must LOOK that way rather
+   than failing at the server after a click. */
 .coder-session-item.unavailable { opacity: .55; cursor: default; }
 .coder-session-item.unavailable:hover { background: none; color: var(--text-dim); }
 .coder-rail-project > summary {
@@ -509,9 +569,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .msg-row.user .msg-role { color: var(--accent); }
 .msg-row.assistant .msg-role { color: var(--green); }
 
-/* Companion-app layout: the user's turn is a right-aligned chat bubble, the
-   assistant's turn stays full width. The "You" role label is hidden and the
-   action buttons hug the right edge. */
+/* Companion-app layout: the user's turn is a right-aligned chat bubble; the
+   assistant's turn stays full width so code, tables and long markdown have room
+   (the same split ChatGPT / Claude use). The bubble itself reads as "you", so
+   the "You" role label is dropped and the action buttons hug the right edge. */
 .msg-row.user { display: flex; flex-direction: column; align-items: flex-end; }
 .msg-row.user .msg-role { display: none; }
 .msg-row.user .msg-body {
@@ -522,15 +583,16 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   max-width: 80%;
 }
 .msg-row.user .msg-meta { justify-content: flex-end; }
-/* A user's own message is set via textContent: preserve its line breaks and
-   wrap long unbroken strings. */
+/* CHAT-1: a user's own message is shown verbatim (set via textContent), so preserve
+   its line breaks and wrap long unbroken strings (pasted URLs/code) instead of
+   collapsing whitespace the way rendered markdown would. */
 .msg-body.msg-literal { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* injected web search/fetch results */
+/* injected web search/fetch results - visible but visually secondary */
 .msg-row.web-note { opacity: 0.7; }
 .msg-row.web-note .msg-body { font-size: 13px; max-height: 180px; overflow-y: auto; }
 .msg-row.web-note .msg-role { color: var(--yellow); }
-/* inline marker where the active model changed between turns */
+/* NEW-1: inline marker where the active model changed between turns */
 .model-switch {
   text-align: center;
   font-size: 12px;
@@ -578,8 +640,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 }
 .copy-btn:hover { color: var(--text); border-color: var(--text-dim); }
 
-/* Reveal toggle on the API-key inputs: a show/hide button beside a masked
-   password field. */
+/* Reveal toggle on the API-key inputs (AUTH-2): a "show/hide" button beside a
+   masked password field so the key the user typed can be verified. */
 .input-reveal { display: flex; gap: 6px; align-items: stretch; }
 .input-reveal input { flex: 1 1 auto; min-width: 0; }
 .reveal-btn {
@@ -669,8 +731,14 @@ pre:hover .canvas-btn { opacity: 1; }
   align-items: flex-end;
   padding: 8px 12px;
   gap: 8px;
-  /* position/overflow/transition make this the clipping, animatable host for
-     the absolutely positioned context-gauge overlay. */
+  /* position/overflow/transition: the context-gauge overlay (an absolutely
+     positioned bar) needs a clipping, animatable host. These used to live in
+     a SECOND ".composer" rule declared later in this file (after the Images
+     bulk-actions block), which silently broke the background above - an
+     undefined --bg-card token made that duplicate rule's `background`
+     declaration invalid, and at equal specificity the later rule wins, so
+     the composer rendered fully transparent instead of --bg-input. Merged
+     into one rule so there is only ever one place this can drift again. */
   position: relative;
   overflow: hidden;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -678,7 +746,9 @@ pre:hover .canvas-btn { opacity: 1; }
 .composer:focus-within { border-color: var(--accent); }
 .composer textarea {
   flex: 1;
-  /* min-width:0 lets the textarea shrink inside the flex row. */
+  /* min-width:0 lets the textarea shrink inside the flex row. Without it the
+     flex default (min-width:auto) keeps the textarea at its intrinsic column
+     width on a narrow phone and pushes the send button off-screen. */
   min-width: 0;
   background: none;
   border: none;
@@ -751,9 +821,14 @@ pre:hover .canvas-btn { opacity: 1; }
 }
 #params .full { grid-column: 1 / -1; }
 #params textarea { font-family: var(--mono); font-size: 12.5px; resize: vertical; }
-/* The Advanced fold spans the drawer (it carries .full) and rebuilds the
-   drawer's column rhythm inside itself. auto-fill, not the outer grid's
-   auto-fit, so a lone input does not stretch across the whole fold. */
+/* The Advanced fold spans the drawer (it carries .full) and rebuilds the drawer's
+   own column rhythm inside itself, so the folded numbers line up exactly where
+   they did when they sat in the outer grid.
+   auto-FILL, not the outer grid's auto-FIT, and the difference is deliberate:
+   auto-fit collapses tracks that nothing occupies or spans, which would stretch
+   a lone input across the whole fold. The outer grid is safe from that only
+   because nine .full rows span every one of its tracks; this inner grid has one
+   (the grammar box), so it does not rely on that. */
 #params .adv-fold-body {
   display: grid; gap: 14px;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -762,6 +837,11 @@ pre:hover .canvas-btn { opacity: 1; }
 /* ---------------- coder ---------------- */
 
 #coder-setup {
+  /* Was `max-width: 680px`, which on a wide window left the form as a narrow
+     column in a sea of background while its own flag row had no space to breathe.
+     The cap stays, because a form line stretched across an ultrawide is worse to
+     read than one that is too narrow, but it is now wide enough for the two-column
+     field rows AND the flag grid below to sit at a comfortable width. */
   max-width: 1040px;
   margin: 40px auto;
   background: var(--bg-raised);
@@ -793,8 +873,13 @@ pre:hover .canvas-btn { opacity: 1; }
   font-family: var(--sans);
 }
 #coder-setup textarea { resize: vertical; }
-/* A grid: auto-fit + minmax gives each labelled checkbox a minimum width and
-   drops to fewer columns on a narrow window. */
+/* A GRID, not a single flex row. As a row, six labelled checkboxes shared whatever
+   width was left and each label wrapped to three or four lines - "Still confirm
+   shell commands (with auto-approve)" over four lines beside a checkbox is not a
+   readable control, and the row read as a wall of text rather than six choices.
+   auto-fit + minmax gives each one a floor and lets the row become as many columns
+   as actually fit, so it degrades to fewer columns on a narrow window instead of
+   crushing every label at once. */
 #coder-setup .checks {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
@@ -802,7 +887,9 @@ pre:hover .canvas-btn { opacity: 1; }
   margin-top: 18px;
   font-size: 13.5px;
 }
-/* align-items: start keeps the checkbox beside a wrapped label's first line. */
+/* align-items: start, not center: a label that does wrap (a long one on a narrow
+   window) should keep its checkbox beside the FIRST line rather than floating to
+   the middle of a two-line block. */
 #coder-setup .checks label {
   display: flex; align-items: start; gap: 8px; margin: 0; cursor: pointer;
   line-height: 1.35;
@@ -829,7 +916,7 @@ pre:hover .canvas-btn { opacity: 1; }
   cursor: pointer;
 }
 .btn-secondary:hover { color: var(--text); border-color: var(--text-dim); }
-/* Destructive confirm (e.g. Revert). */
+/* Destructive confirm (e.g. Revert) - red to flag the action can't be undone. */
 .btn-danger { color: var(--red); border-color: var(--red); }
 .btn-danger:hover { color: #fff; background: var(--red); border-color: var(--red); }
 
@@ -909,8 +996,8 @@ pre:hover .canvas-btn { opacity: 1; }
 }
 .confirm-card .title { font-weight: 600; margin-bottom: 8px; }
 .confirm-card .title .name { font-family: var(--mono); color: var(--yellow); }
-/* Which sub-agent is asking (parallel dispatch). Rendered only when a child is
-   the asker. */
+/* Which sub-agent is asking (parallel dispatch). Only rendered when a child is
+   the asker, so an ordinary prompt keeps its original spacing. */
 .confirm-card .asker {
   font-size: 0.88em;
   color: var(--text-dim);
@@ -971,7 +1058,7 @@ pre:hover .canvas-btn { opacity: 1; }
   color: var(--text);
   font-size: 13px;
 }
-/* knowledge collection search modal query box */
+/* knowledge collection search modal query box - a bare ad-hoc input, no card scope */
 .kb-search-input {
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -1039,8 +1126,8 @@ pre:hover .canvas-btn { opacity: 1; }
 }
 .empty-hint .big { font-size: 26px; margin-bottom: 10px; }
 
-/* Empty state (emptyState() in app/icons.js): a centred icon, a line, and an
-   optional hint. */
+/* Designed empty state (emptyState() in app/icons.js): a centred icon + a line +
+   an optional 'do this next' hint, so an empty list never reads as a blank gap. */
 .empty-state {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 6px; padding: 40px 20px; text-align: center;
@@ -1054,7 +1141,7 @@ pre:hover .canvas-btn { opacity: 1; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 ::-webkit-scrollbar-track { background: transparent; }
-/* Firefox equivalent of the ::-webkit-scrollbar rules above. */
+/* Firefox has no ::-webkit-scrollbar; give it the same thin, quiet scrollbar. */
 * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 
 /* ---------------- pages (models / images / plugins / settings) -------- */
@@ -1067,7 +1154,9 @@ pre:hover .canvas-btn { opacity: 1; }
   margin: 0 auto;
   width: 100%;
 }
-/* Settings gets a wider cap than the 1280px .page default. */
+/* Settings is a dense two-column form, not prose: let it stretch to fill a wide
+   screen instead of sitting in a centred 1280px column. The prose pages
+   (Models / Plugins / Knowledge) keep the readable cap above. */
 #view-settings .page { max-width: 1700px; }
 .page h2 { margin: 0 0 6px; }
 .page .sub { color: var(--text-dim); font-size: 13.5px; margin-bottom: 18px; }
@@ -1104,8 +1193,21 @@ pre:hover .canvas-btn { opacity: 1; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
 
 /* ---- the "Advanced" disclosure (one pattern, four surfaces) ---- */
-/* A native <details> that folds away the rarely-touched tuning fields in chat's
-   #params drawer and the three Studio generation forms. */
+/* Chat's #params drawer and the three Studio generation forms each mix fields you
+   touch every time (the prompt, temperature) with tuning knobs you almost never
+   do (seed, cfg, denoise, grammar). This folds the second group away.
+
+   It is a native <details>, which is the app's THIRD use of that primitive
+   (.onboard-help, .think-block) rather than a new component family: the open
+   state, the keyboard affordance and the AT semantics all come from the platform
+   instead of hand-rolled aria-expanded bookkeeping.
+
+   Nothing here is a new visual idea. The chevron glyph, its rotation and the
+   0.12s ease are lifted verbatim from .nav-group-parent::after, the app's only
+   other disclosure control - which is also why it stays a CSS geometric
+   character instead of an APP_ICONS SVG (design-doc rule 1 bans EMOJI; matching
+   the one existing disclosure beats a second, differently-drawn arrow). The dim
+   summary that brightens on hover is .think-block summary's treatment. */
 .adv-fold { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
 .adv-fold > summary {
   cursor: pointer; user-select: none; list-style: none;
@@ -1115,22 +1217,25 @@ pre:hover .canvas-btn { opacity: 1; }
 }
 .adv-fold > summary::-webkit-details-marker { display: none; }   /* Safari's own triangle */
 .adv-fold > summary::before {
-  content: "\25B8";                /* right-pointing triangle */
+  content: "\25B8";                /* right-pointing triangle, as .nav-group-parent */
   font-size: 11px; opacity: 0.7;
   transition: transform 0.12s ease;
 }
 .adv-fold[open] > summary::before { transform: rotate(90deg); }
 .adv-fold > summary:hover { color: var(--text); }
-/* The hint names what is inside the fold. */
+/* The hint names what is inside, so the fold can be judged without opening it. */
 .adv-fold-hint { color: var(--text-dim); opacity: 0.75; font-size: 12px; }
-/* Count of set values on a closed fold: the .job-state pill shape, accent tint. */
+/* A fold the user collapsed by hand can still hold values that change the
+   output. The count says so rather than letting a closed fold read as empty
+   (rule 5: we do not hide problems). It is the .job-state pill shape with an
+   accent tint - same construction as .st-ok's green one, not a new badge. */
 .adv-fold-count { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-.adv-fold[open] .adv-fold-count { display: none; }
+.adv-fold[open] .adv-fold-count { display: none; }   /* open: the values speak for themselves */
 .adv-fold-body { margin-top: 10px; }
 
-/* ---- content-type icons + card headers + motion ---- */
-/* Content icons take the type hue on page rows and grids. Apply alongside the
-   icon span: <span class="ic ic-model">. */
+/* ---- content coherence (direction A): content-type icons + card headers + motion ---- */
+/* Content icons take the TYPE hue on page rows/grids (distinct from the category-hued NAV
+   icons). Apply alongside the icon span: <span class="ic ic-model">. */
 .ic-model  { color: var(--ic-model); }
 .ic-folder { color: var(--ic-folder); }
 .ic-doc    { color: var(--ic-doc); }
@@ -1138,17 +1243,24 @@ pre:hover .canvas-btn { opacity: 1; }
 .ic-audio  { color: var(--ic-audio); }
 .ic-video  { color: var(--ic-video); }
 .ic-code   { color: var(--ic-code); }
-/* A data-table name cell that leads with a colored content icon. The flex row
-   lives on the inner .cell-line, never on the <td>, which stays a table-cell. */
+/* A data-table name cell that leads with a colored content icon.
+   The flex row lives on the INNER .cell-line, never on the <td> itself: a td with
+   display:flex stops being a table-cell, so the browser wraps it in an anonymous
+   cell and the real td no longer stretches to the row height - its border-bottom
+   then draws under its own content instead of at the row's foot, leaving the
+   separator visibly broken partway across every row (measured: 82px above the
+   other cells' border on a tall row). Keeping the td a table-cell and flexing a
+   child gets the same icon/name/badge line with one continuous row rule. */
 .data-table .name-cell .cell-line { display: flex; align-items: center; gap: 9px; }
 .data-table .name-cell .ic { flex: 0 0 auto; }
 .data-table .name-cell .ic svg { width: 16px; height: 16px; }
-/* The name is the only part allowed to wrap; badges keep their own line.
-   break-word, not anywhere, so min-content stays the longest word. */
+/* The name is the only part allowed to wrap; badges keep their own line. break-word
+   (not anywhere) so the flex item's min-content stays the longest word - `anywhere`
+   lets it collapse to one character per line, which it did: a 593px-tall row. */
 .data-table .name-cell .cell-line .name { min-width: 0; overflow-wrap: break-word; }
 .data-table .name-cell .cell-line > :not(.name) { flex: 0 0 auto; }
-/* A section header inside a card: leading icon + title + one-line description.
-   Use .card-head { icon + .card-head-text { h3 + .card-desc } }. */
+/* A real section header inside a card: leading icon + title + one-line description, so no page
+   shows a bare grey h3. Use .card-head { icon + .card-head-text { h3 + .card-desc } }. */
 .card-head { display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
   padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .card-head > .ic, .card-head > .nav-ic { flex: 0 0 auto; }
@@ -1156,8 +1268,8 @@ pre:hover .canvas-btn { opacity: 1; }
 .card-head-text { min-width: 0; }
 .card-head h3, .card-head .card-title { margin: 0; font-size: 15px; font-weight: 600; }
 .card-desc { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
-/* Category-hued icon for a card-head / section header. Pair with an icon:
-   <span class="ic cat-ic cat-slate" data-icon="...">. */
+/* Category-hued icon for a card-head / section header (color = which area, matching the
+   category NAV hues). Pair with an icon: <span class="ic cat-ic cat-slate" data-icon="...">. */
 .cat-ic.cat-blue   { color: var(--cat-blue); }
 .cat-ic.cat-cyan   { color: var(--cat-cyan); }
 .cat-ic.cat-green  { color: var(--cat-green); }
@@ -1165,22 +1277,23 @@ pre:hover .canvas-btn { opacity: 1; }
 .cat-ic.cat-violet { color: var(--cat-violet); }
 .cat-ic.cat-amber  { color: var(--cat-amber); }
 .cat-ic.cat-slate  { color: var(--cat-slate); }
-/* A .settings-section-head inside a .card-head drops its own divider, leaving
-   the card-head's single border. */
+/* A schema-driven settings section head (.settings-section-head) sits INSIDE a .card-head
+   now; drop its own divider so the card-head's single border wins (no double rule). */
 .card-head .settings-section-head { border: 0; padding: 0; margin: 0; }
 /* Plugin rows: content icon takes the plugins category hue (violet). */
 .ic-plugin { color: var(--cat-violet); }
-/* Job rows: content icon takes the jobs category hue (teal). */
+/* Job rows: content icon takes the jobs category hue (teal), same borrow-an-existing
+   -token shape as .ic-plugin above rather than minting another --ic-* pair. */
 .ic-job { color: var(--cat-teal); }
 /* Leading content icon inside a mono .log-entry (e.g. the Knowledge doc list). */
 .log-entry .log-ic { margin-right: 6px; vertical-align: -0.15em; }
-/* Transitions on interactive rows and buttons; disabled under reduced-motion. */
+/* Quiet motion on interactive rows/buttons; reduced-motion fully respected. */
 .list-row, nav button, .settings-nav-link, .btn-primary, .btn-secondary, .btn-danger,
 .data-table tbody tr, .conv-item, .coder-session-item {
   transition: background 90ms ease, color 90ms ease, border-color 90ms ease, box-shadow 90ms ease;
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
-/* Keyboard-focus treatment for buttons, plus the disabled state. */
+/* One visible keyboard-focus treatment for buttons + a real disabled state. */
 .btn-primary:focus-visible, .btn-secondary:focus-visible, .btn-danger:focus-visible {
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
 }
@@ -1188,9 +1301,9 @@ pre:hover .canvas-btn { opacity: 1; }
 
 /* Settings: a left section nav + a content area that shows one section (tab) at
    a time. Each core group and each plugin is its own section with its own Save. */
-/* The search box above the layout filters every group at once. A matched field
-   stays in its section; non-matching siblings get .filter-hidden, which has to
-   beat the .settings-fields grid. */
+/* The search box above the layout: filters every group at once. A matched field
+   stays in its section (so its context is visible) and its non-matching siblings
+   are dropped via .filter-hidden, which must beat the .settings-fields grid. */
 .settings-filter {
   width: 100%; max-width: 420px; margin: 0 0 16px;
   background: var(--bg-input); border: 1px solid var(--border);
@@ -1210,8 +1323,8 @@ pre:hover .canvas-btn { opacity: 1; }
   font: inherit; font-size: 13.5px; width: 100%;
   --nav-cat: var(--text-dim);
 }
-/* Each section owns a hue: the icon carries it, and the active row tints its
-   background and accent bar to match. */
+/* Each section owns a hue; the icon carries it, and the active row tints its bg +
+   accent bar to match, so the six areas are scannable by color (as in the mockup).*/
 .settings-nav-link.cat-blue   { --nav-cat: var(--cat-blue); }
 .settings-nav-link.cat-cyan   { --nav-cat: var(--cat-cyan); }
 .settings-nav-link.cat-green  { --nav-cat: var(--cat-green); }
@@ -1231,12 +1344,13 @@ pre:hover .canvas-btn { opacity: 1; }
 .settings-content { flex: 1 1 auto; min-width: 0; }
 #config-form { display: block; }
 .settings-section { display: none; }
-/* A group shows all its sections stacked; each .card carries its own bottom
-   margin. */
+/* A group shows all its sections stacked; each .card already carries its own
+   bottom margin, so they read as separate cards without extra spacing rules. */
 .settings-section.active { display: block; }
-/* Both gate-hidden mechanisms outrank .active, so a conditionally-shown card
-   (.sec-hidden, or the [hidden] attribute) stays hidden while its group is
-   active and reveals itself as soon as the gate is lifted. */
+/* Both gate-hidden mechanisms win over .active, so a conditionally-shown card
+   (owner-only keys card via .sec-hidden; proxy-gated Updates/Issues via the
+   [hidden] attribute) stays hidden even while its group is active, and self-reveals
+   the instant the gate is lifted - no extra nav rebuild needed. */
 .settings-section.sec-hidden { display: none !important; }
 .settings-section[hidden] { display: none !important; }
 .settings-section-head {
@@ -1247,12 +1361,16 @@ pre:hover .canvas-btn { opacity: 1; }
   display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin-top: 10px;
 }
 .settings-fields .sub { margin: 0 0 10px; font-size: 12px; }
-/* An auto-detected path in a blank field, or a select still on its shipped
-   default: greyed and italic rather than shown as a value the user chose. */
+/* An auto-detected path shown in a blank "Blank = auto-detect" field, OR a
+   SELECT still sitting on its unmodified shipped default (NEW-DEFAULT-VALUE-
+   PLACEHOLDER - a dropdown has no blank state to hide the value behind the
+   way a number/text box does, so it gets this same grey cue instead): greyed
+   so it reads as "this is what would be used", not a value you typed/chose. */
 input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: italic; }
 
 /* Media section: three per-plugin boxes (image/music/video) side by side on a
-   wide screen, stacking on narrow screens. Each keeps its own Save. */
+   wide screen, stacking on narrow/mobile - each keeps its own Save so the three
+   are clearly configured apart. */
 .media-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px; margin-top: 12px;
@@ -1263,14 +1381,17 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   padding: 10px 12px;
 }
 .media-sub-head { margin: 0; font-size: 14px; }
-/* A field inheriting the shared default: label and value box both dimmed. */
+/* A field inheriting the shared default (no per-plugin override yet): the whole
+   row reads dimmer (label AND the value box) so an override clearly stands out
+   from an inherited value, matching the auto-detected-path cue above. */
 .media-inherited label { color: var(--text-dim); }
 .media-inherited input, .media-inherited select {
   color: var(--text-dim); font-style: italic;
 }
 
-/* "localm's own ComfyUI": a compact box at the top of the Media section holding
-   the set-up/remove action and the coexistence fields. */
+/* "localm's own ComfyUI" - a compact box of its own at the top of the Media
+   section (set-up/remove action + the S1 coexistence fields), visually
+   distinct from the three per-plugin boxes below. */
 .media-comfy-box {
   border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px; margin-top: 12px;
@@ -1286,28 +1407,35 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 }
 .comfy-pill.ok { color: var(--green); border-color: var(--green); }
 /* The Settings "Updates" card: three sub-blocks (app update, runtime update,
-   update-behavior toggles) stacked as bordered boxes in one card. */
+   the update-behavior toggles) stacked in one card, same bordered-box language
+   as .media-comfy-box so they read as distinct pieces without being separate
+   cards. */
 .update-subsection {
   border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px; margin-top: 12px;
 }
 .update-sub-head { margin: 0 0 6px; font-size: 14px; }
 /* Settings "Diagnostics" card: one row per active self-check, each a name plus a
-   .job-state pill with the check's own sentence underneath. Reuses .job-head
-   and .job-name. */
+   .job-state pill (docs/gui-design.md rule 6) with the check's own sentence
+   underneath. Reuses .job-head / .job-name so a status row reads the same here
+   as on the Jobs page. */
 .doctor-checks { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
 .doctor-check { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
 .doctor-check .sub { margin-top: 4px; }
 .doctor-check-hint { margin-top: 2px; font-size: 12px; color: var(--text-dim); }
-/* Settings per-media-subsection badge: spacing only, sits inline after the
-   subsection's <h4>. */
+/* Settings page per-media-subsection badge (.job-state pill, docs/gui-design.md
+   rule 6) - spacing only, sits inline after the subsection's <h4>. */
 .comfy-status-badge { margin-left: 12px; }
 .comfy-managed-log {
   margin-top: 8px; max-height: 220px; overflow: auto;
 }
-/* "Still working" indicator for a long-running Set-up/Update/Repair job: an
-   inline spinner beside the button or pill label, plus a live elapsed readout
-   above the log. Reuses the .reconnect-spinner keyframe. */
+/* "Still working" indicator for a long-running Set-up/Update/Repair job (or a
+   reattached one after a reload): a spinner next to the button/pill label
+   plus a live readout above the log, so a quiet stretch (a large git clone,
+   pip install, or a multi-GB download with no per-line progress) never
+   reads as an indistinguishable-from-hung silence. Same rotating-ring
+   technique as .reconnect-spinner (reuses its keyframe), sized to sit
+   inline with text instead of as a full-page overlay. */
 .comfy-managed-spinner {
   display: inline-block; width: 11px; height: 11px; margin-left: 8px;
   vertical-align: -1px;
@@ -1339,21 +1467,31 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .comfy-model-label { flex: 0 0 auto; min-width: 110px; color: var(--text-dim); }
 .comfy-model-select { flex: 1; min-width: 0; }
 .comfy-model-missing { color: var(--red); }
-/* The two picker rows that carry no <select>: the per-role registered summary
-   shown while ComfyUI is unreachable, and the not-offered note. Both drop
-   `.page .sub`'s bottom margin so they stay on the label's baseline. */
+/* The two picker rows that carry no <select>: the per-role "what you have
+   registered" summary shown while ComfyUI is unreachable, and the "this is
+   registered here but ComfyUI is not offering it" note. Both would otherwise
+   take `.page .sub`'s 18px bottom margin, which inside a flex row pushes the
+   value off the label's baseline (measured in the browser: the fallback list
+   rendered visibly staggered) and between rows opens a gap that reads as a
+   section break. */
 .comfy-model-known { flex: 1; min-width: 0; color: var(--text-dim); margin: 0; }
 .comfy-model-registry-hint { margin: 2px 0 6px; font-size: 12px; }
-/* The missing-model state renders as a .job-state st-error pill. It does not
-   grow to fill the row; min-width: 0 lets a long filename shrink instead of
-   overflowing. */
+/* docs/gui-design.md rule 6: state renders as a .job-state pill (job-state
+   st-error supplies the color, no longer the undefined --danger token which
+   always fell back to a hardcoded hex regardless of theme). A pill that grows
+   to fill the row (flex: 1, matching the sibling .comfy-model-select it
+   replaces) renders as a wide color bar instead of a badge, so it does not
+   grow here - min-width: 0 is kept only so a very long filename can still
+   shrink instead of overflowing the row. */
 .comfy-model-missing-value { min-width: 0; }
 
-/* Camera button: shown only on a coarse-pointer (touch) device. */
+/* Camera button: only useful on a device with a camera + touch (a phone). The
+   attach button already offers camera+gallery on mobile via the OS picker, so
+   hide the dedicated one on a mouse-pointer (desktop) device to avoid clutter. */
 .chat-camera { display: none; }
 @media (pointer: coarse) { .chat-camera { display: inline-flex; } }
 
-/* "download" button on a coder changed-file row. */
+/* "download" button on a coder changed-file row (pull output onto a phone). */
 .file-dl { margin-left: 8px; }
 
 /* download progress bar (model pull) */
@@ -1381,13 +1519,13 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   margin-top: 5px; font-family: var(--mono);
   font-size: 11.5px; color: var(--text-dim);
 }
-/* per-file line above the bar for a multi-file (split GGUF) download. */
+/* R06: per-file line above the bar for a multi-file (split GGUF) download. */
 .dl-file {
   margin-bottom: 5px; font-family: var(--mono);
   font-size: 11.5px; color: var(--text); overflow-wrap: anywhere;
 }
 
-/* uploaded-files list under the Settings "Upload files" section. */
+/* R37: uploaded-files list under the Settings "Upload files" section. */
 .upload-list { list-style: none; margin: 12px 0 0; padding: 0;
   display: flex; flex-direction: column; gap: 6px; }
 .upload-list li { display: flex; align-items: center; justify-content: space-between;
@@ -1396,9 +1534,11 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .upload-list .upload-name { font-family: var(--mono); font-size: 12px;
   overflow-wrap: anywhere; }
 
-/* Card rules for the two surfaces that stack a head + meta + log vertically:
-   the activity panel (app/models-sidebar.js) and the jobs plugin's results
-   panel. */
+/* The jobs LIST is a .data-table now; these card rules serve the two surfaces that
+   still stack a head + meta + log vertically: the activity panel
+   (app/models-sidebar.js) and the jobs plugin's own results panel. Without them the
+   name/state and schedule/last-run spans collapse together ("look up the
+   weatherenabled"). */
 .job-row {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1414,8 +1554,8 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   color: var(--text-dim);
 }
 .job-state.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-/* Run-status pills (a job's last_status, or a result row's status). Backgrounds
-   are color-mixed from the theme tokens. */
+/* Run-status pills (a job's last_status, or a result row's status). Backgrounds are
+   color-mixed from the theme tokens so both themes follow the palette (no raw hex). */
 .job-state.st-ok, .job-state.st-done {
   color: var(--green); border-color: var(--green);
   background: color-mix(in srgb, var(--green) 15%, transparent);
@@ -1424,22 +1564,28 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   color: var(--red); border-color: var(--red);
   background: color-mix(in srgb, var(--red) 15%, transparent);
 }
-/* st-warn and st-skipped share the yellow treatment. A check that did not run
-   takes the plain .job-state pill above. */
+/* st-warn joins the yellow group rather than reusing st-skipped: a diagnostics
+   check that WARNED and one that did not run need different pills, and the
+   plain (unmodified) .job-state above is the neutral one a not-run check gets.
+   Rendering "not installed, and that is fine" in yellow would put a warning on
+   every ordinary box, which is how a warning stops meaning anything. */
 .job-state.st-warn,
 .job-state.st-skipped {
   color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent);
 }
-/* A model whose type could not be determined ('unknown'). */
+/* A model whose type could not be determined ('unknown'): highlighted so it reads
+   as needing a type set via the per-row control. */
 .job-state.st-unknown {
   color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent);
 }
-/* Model-type tag pills: Registered-models "Role" column, the model-detail modal,
-   and HF-discovery result rows. One --cat-* hue per
-   localm.model_manager.registry MODEL_TYPES entry; 'unknown' takes the yellow
-   treatment above. */
+/* Model-type tag pills - Registered-models "Role" column, the model-detail modal,
+   and HF-discovery result rows. One hue per localm.model_manager.registry
+   MODEL_TYPES entry, drawn from the existing --cat-* category palette so a type
+   reads as the same color everywhere it appears. 'unknown' keeps the yellow
+   "needs attention" treatment above rather than a category hue, since it signals
+   an action needed, not a category. */
 .type-badge {
   font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
   border: 1px solid var(--border); white-space: nowrap; letter-spacing: 0.01em;
@@ -1460,23 +1606,32 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   background: color-mix(in srgb, var(--cat-cyan) 15%, transparent); }
 .type-badge.type-unknown { color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent); }
-/* Not a MODEL_TYPES entry: a registry entry that carries no type at all, as
-   distinct from the recorded type 'unknown'. Unfilled and neutral. */
+/* NOT a MODEL_TYPES entry: a registry entry that carries no type at all, which
+   is a different fact from the recorded type 'unknown' ("we looked, it is none
+   of these") and must not borrow its colour. Deliberately quiet and unfilled -
+   it is an absence, not a classification, and dressing it as a category would
+   be the same claim the flag exists to avoid making. */
 .type-badge.type-unset {
   color: var(--text-dim); border-color: var(--border);
   background: transparent; font-style: italic;
 }
-/* The per-row model type <select> is the Role column's type pill: it shows the
-   type and changes it, taking its colour from the .type-<name> classes above.
-   `.card select` outranks a lone class, so the width reset sits on
-   `.data-table select` and the compact box is pinned here. */
+/* The per-row model type <select>, which sits in the Role column and IS that
+   column's type pill - one control that both shows the type and changes it, rather
+   than a read-only badge plus a separate select elsewhere in the row. It takes its
+   colour from the .type-<name> classes above, so the column still scans by colour.
+   .card select sets width:100% and a 13.5px/8px-10px form-input box, and beats a
+   lone class on specificity - which is why the compact styling written here never
+   applied and the control rendered 36px tall and full-cell wide. Both are pinned
+   below; the width reset is on `.data-table select` so the next row control to
+   appear does not walk into the same trap. */
 .data-table select { width: auto; }
 .data-table select.model-type-select {
   appearance: none; -webkit-appearance: none;
   font-family: var(--mono); font-size: 11px; line-height: 1.5;
   padding: 2px 20px 2px 8px; height: auto; margin: 0;
   border-radius: 999px; cursor: pointer;
-  /* Two 4px triangles form the caret, drawn in currentColor. */
+  /* Two 4px triangles form the caret; no background-image asset, and it inherits
+     currentColor so it matches whichever type colour the pill is wearing. */
   background-image:
     linear-gradient(45deg, transparent 50%, currentColor 50%),
     linear-gradient(135deg, currentColor 50%, transparent 50%);
@@ -1484,18 +1639,19 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   background-size: 4px 4px, 4px 4px;
   background-repeat: no-repeat;
 }
-/* The OS-drawn popup list gets its own colors instead of inheriting the pill's
-   type colour. */
+/* The popup list is drawn by the OS, not by the pill: without this it inherits the
+   pill's type colour on its own text and is unreadable on several platforms. */
 .data-table select.model-type-select option { color: var(--text); background: var(--bg-input); }
 .job-state.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-/* interrupted: the server stopped while the operation was in flight, so the
-   outcome is unknown (localm/plugins/gui/jobs.py _JOB_STATUSES). Yellow, as for
-   st-skipped and st-unknown. */
+/* interrupted: the server stopped while the operation was in flight, so its
+   outcome is UNKNOWN (localm/plugins/gui/jobs.py _JOB_STATUSES). Yellow
+   "needs attention", the same treatment st-skipped/st-unknown get - not the red
+   of st-failed, which would assert the work failed when nobody measured that. */
 .job-state.st-interrupted {
   color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent);
 }
-/* pending / paused: the neutral base pill look. */
+/* pending / paused: quiet neutral (base pill look), named so the vocabulary is complete. */
 .job-state.st-pending, .job-state.st-paused { color: var(--text-dim); }
 .job-meta {
   display: flex;
@@ -1527,7 +1683,8 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   letter-spacing: 0.8px; color: var(--text-dim); font-weight: 600;
   padding: 6px 10px; border-bottom: 1px solid var(--border);
 }
-/* Sortable column headers, on any .data-table. */
+/* Sortable column headers (currently the Models page) - generic on .data-table
+   so any future sortable table picks up the same look for free. */
 .data-table th.sortable { cursor: pointer; user-select: none; }
 .data-table th.sortable:hover { color: var(--text); }
 .data-table th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -1536,23 +1693,31 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border);
   vertical-align: middle; }
 .data-table tr:last-child td { border-bottom: none; }
-/* One record is one row: the actions cell never wraps its controls onto a second
-   line, and .shrink-cell columns shrink to their content so the name column
-   keeps the slack. */
+/* One record is one row. The actions cell never wraps its controls onto a second
+   line (they used to stack one per line, turning a single model into a 163px-tall
+   block), and the columns that hold reference text rather than identity shrink to
+   their content so the name column keeps the slack. */
 .data-table .actions-cell { white-space: nowrap; text-align: right; }
 .data-table .shrink-cell { white-space: nowrap; width: 1%; }
-/* Clips a long hf: source or path to one line with an ellipsis; the full value
-   sits on the element's title. Not applied to the name column. */
+/* A long hf: source or path is reference text, not the row's identity - clipping it
+   with an ellipsis (full value on the element's title) keeps the row one line high.
+   Deliberately NOT applied to the name column: a model name's tail carries the quant
+   level, which is exactly what a reader compares between two rows. */
 .data-table .clip-cell {
   max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* Below the table's floor width, the table scrolls inside its own card instead
-   of pushing the page sideways. */
+/* Keeping every record on one line gives the table a floor width. In a window too
+   narrow for it (but still above the mobile card breakpoint) the table scrolls
+   inside its own card rather than pushing the whole page sideways - the row stays
+   intact and the card keeps its edges. */
 div:has(> .data-table) { overflow-x: auto; }
-/* The column that absorbs the slack, with a floor so it does not collapse to one
-   word wide; past that point the table scrolls instead. */
+/* The one column that should absorb the slack rather than shrink to its content.
+   The floor stops it collapsing into a column one word wide when the row's other
+   columns are all at their natural width - past that point the table scrolls (rule
+   above) instead, which reads far better than a paragraph broken one word per line. */
 .data-table .grow-cell { width: 100%; min-width: 240px; }
-/* Row hover, plus the active model's row highlighted with an inset accent bar. */
+/* Row hover + the active model's row highlighted with the inset accent bar, like
+   the picker rows - so the table reads as interactive, not a static grid. */
 .data-table tbody tr:hover { background: var(--bg-input); }
 .data-table tbody tr:has(.active-tag) {
   background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent);
@@ -1560,9 +1725,13 @@ div:has(> .data-table) { overflow-x: auto; }
 .data-table .mono { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
 .data-table .name { font-weight: 600; }
 .data-table .active-tag, .data-table .loaded-tag, .data-table .missing-tag { margin-left: 8px; }
-/* Knowledge page inline flags: .retrieval-badge for a collection stuck on BM25,
-   .corrupt-badge for chunk or metadata damage. Both are .job-state pills; this
-   rule is spacing only. */
+/* Knowledge page: a collection stuck on BM25 while the embedding model is
+   ready is actionable (reindex fixes it), so it gets a visible inline flag
+   instead of only a tooltip - same shape as .active-tag, warning color.
+   Chunk-level or metadata damage (.corrupt-badge) is distinct from
+   .retrieval-badge's "not embedded yet" - it means data may be lost or
+   unreadable, not just un-optimized, so it gets the stronger red. Both reuse
+   the .job-state pill (docs/gui-design.md rule 6); this rule is spacing-only. */
 .retrieval-badge, .corrupt-badge { margin-left: 8px; }
 .data-table button {
   background: none; border: 1px solid var(--border); color: var(--text-dim);
@@ -1570,27 +1739,37 @@ div:has(> .data-table) { overflow-x: auto; }
   margin-left: 6px;
 }
 .data-table button:hover { color: var(--text); border-color: var(--text-dim); }
-/* Default row action (info / alias / rename / unload / search / add docs). */
+/* Default row action (info / alias / rename / unload / search / add docs):
+   identical to the base button above, named explicitly so every button in a
+   dense table states its tier instead of relying on an implicit classless
+   fallback (gui-design.md rule 3). */
 .data-table button.secondary { color: var(--text-dim); border-color: var(--border); }
 .data-table button.danger:hover { color: #fff; background: var(--red); border-color: var(--red); }
-/* Primary row action (use / install / enable): accent outline, filled on hover. */
+/* Primary row action (use / install / enable): accent outline that fills on
+   hover, staying compact - the two-tier button vocabulary inside a dense table. */
 .data-table button.primary { color: var(--accent); border-color: var(--accent); }
 .data-table button.primary:hover { color: #fff; background: var(--accent); border-color: var(--accent); }
 /* The reindex button when it is the fix for a .retrieval-badge row. */
 .data-table button.warn { color: var(--yellow); border-color: var(--yellow); }
 .data-table button.warn:hover { color: #fff; background: var(--yellow); border-color: var(--yellow); }
 /* A non-fatal problem stated inside a modal: a project-memory file over the
-   injection budget, or a warning a background job recorded. */
+   injection budget, or a warning a background job recorded. There was no
+   general-purpose in-modal notice class, and rendering these as .sub (the muted
+   style every other modal line uses) would understate a real loss - which is
+   the shape AGENTS.md rule 5 exists to stop. Yellow, matching .data-table
+   button.warn's severity vocabulary rather than inventing a second one. */
 .modal-warn { color: var(--yellow); font-size: .85rem; margin: .4rem 0; }
 
-/* The repair button on a .corrupt-badge row. */
+/* The repair button when it is the fix for a .corrupt-badge row - red to
+   match that badge's stronger severity, same shape as .warn for .retrieval-badge. */
 .data-table button.corrupt-fix { color: var(--red); border-color: var(--red); }
 .data-table button.corrupt-fix:hover { color: #fff; background: var(--red); border-color: var(--red); }
 
 /* media generation galleries (image / music / video)
 
-   .img-grid is an alias of .media-grid. The three Studio pages emit
-   .media-grid. */
+   .img-grid is kept as an alias of .media-grid so anything still targeting the
+   original class - other stylesheets, a user script, an old cached shell -
+   keeps rendering. The three Studio pages all emit .media-grid. */
 
 .media-grid, .img-grid {
   display: grid;
@@ -1611,8 +1790,9 @@ div:has(> .data-table) { overflow-x: auto; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* The square preview area. Image and video fill it edge to edge; audio gets a
-   text-forward card instead. */
+/* The square preview area. Image and video fill it edge to edge; audio has no
+   frame to show, so its face is a text-forward card instead (see
+   media-gallery.js for why a waveform is deliberately not rendered). */
 .thumb-face { position: relative; display: block; }
 .thumb-face img, .thumb-face video {
   width: 100%; display: block; aspect-ratio: 1; object-fit: cover;
@@ -1631,7 +1811,8 @@ div:has(> .data-table) { overflow-x: auto; }
   -webkit-box-orient: vertical; overflow: hidden;
 }
 
-/* play control on an audio card */
+/* play control on an audio card: audio has no frame, so this is the only way to
+   tell two tracks apart without opening the detail view */
 .audio-play {
   background: var(--bg-input); color: var(--text);
   border: 1px solid var(--border); border-radius: 999px;
@@ -1643,7 +1824,7 @@ div:has(> .data-table) { overflow-x: auto; }
 .audio-play[disabled] { opacity: 0.5; cursor: default; }
 .thumb-audio .audio-inline { width: 100%; height: 30px; margin-top: 2px; }
 
-/* a preview that could not be shown */
+/* a preview that could not be shown - says so instead of sitting blank */
 .thumb-failed {
   aspect-ratio: 1;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -1748,7 +1929,7 @@ div:has(> .data-table) { overflow-x: auto; }
 /* message images */
 .msg-body .msg-img { max-width: 280px; border-radius: 8px; border: 1px solid var(--border); display: block; margin: 6px 0; }
 
-/* Full-view image lightbox: click a chat image to view / save / copy. */
+/* Full-view image lightbox (VIS-2): click a chat image to view / save / copy. */
 .img-lightbox {
   position: fixed; inset: 0; z-index: 1000;
   background: rgba(0, 0, 0, 0.78);
@@ -1765,8 +1946,8 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .img-lightbox-bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 
-/* Server-unreachable "reconnecting" overlay, shown in place of the key gate
-   while the server is down. */
+/* Server-unreachable "reconnecting" overlay (AUTH-1b): shown when the server is
+   DOWN, instead of the key gate, so a dead server is not mistaken for a bad key. */
 .reconnect-overlay {
   position: fixed; inset: 0; z-index: 1100;
   background: var(--bg);
@@ -1783,7 +1964,8 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 @keyframes reconnect-spin { to { transform: rotate(360deg); } }
 .reconnect-msg { font-size: 14px; line-height: 1.5; }
-/* Manual recovery button on the reconnect overlay. */
+/* Escape hatch: always-available manual recovery on the reconnect overlay. Muted
+   so it does not compete with the auto-retry, but always reachable. */
 .reconnect-reset {
   margin-top: 4px; padding: 7px 14px; font-size: 13px; cursor: pointer;
   color: var(--text-dim); background: transparent;
@@ -1798,15 +1980,16 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .msg-meta button.action:hover { color: var(--accent); border-color: var(--accent); }
 
-/* "used N memories" chip on an assistant turn (chat.js buildMemoryChip). */
+/* F11: "used N memories" chip on an assistant turn (chat.js buildMemoryChip). */
 .msg-meta button.mem-chip {
   background: none; border: 1px solid var(--border); color: var(--text-dim);
   border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.mem-chip:hover { color: var(--accent); border-color: var(--accent); }
 
-/* file/folder picker modal (app/picker.js). The .dir-picker-row/-btn rules
-   below are a separate thing: the settings FOLDER/PATH field row. */
+/* file/folder picker modal (app/picker.js) - replaces the old .dir-picker-*
+   modal list. The .dir-picker-row/-btn rules below are a separate thing (the
+   settings FOLDER/PATH field row) and stay. */
 
 .modal.picker-modal { width: min(880px, 95vw); height: min(620px, 86vh); }
 .picker-modal .modal-body { padding: 0; overflow: hidden; display: flex; min-height: 0; }
@@ -1970,7 +2153,7 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .picker-foot .btn-primary:disabled { opacity: 0.5; cursor: default; }
 
-/* narrow screens: drop the places rail, leaving breadcrumbs + path bar */
+/* narrow screens: drop the places rail, lean on breadcrumbs + path bar */
 @media (max-width: 640px) {
   .modal.picker-modal { height: min(620px, 90vh); }
   .picker-places { display: none; }
@@ -1985,7 +2168,7 @@ div:has(> .data-table) { overflow-x: auto; }
 .pathlist-add { margin-top: 6px; align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; }
 /* "in use" tag on the folder list the current RAG indexing mode enforces. */
 .rag-inuse { color: var(--accent, #4a9eff); font-weight: 600; font-size: 0.85em; }
-/* "Warm up now" action under the embedding_model settings field. */
+/* "Warm up now" action under the embedding_model settings field (ADR-0004). */
 .embedding-warmup-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .embedding-warmup-status { color: var(--text-muted, #888); }
 /* Plugin catalog: "requires X (missing)" warning under a plugin's description. */
@@ -2028,14 +2211,30 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .modal-head button:hover { color: var(--red); }
 .modal-body { padding: 14px 16px; overflow-y: auto; font-size: 13px; }
-/* promptText()'s text input (helpers.js), styled like .card's fields. */
+/* A remote image the proxy refused (helpers.js showBlockedImage). Reads as a
+   deliberate note, not a broken image. */
+.img-blocked {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  margin: 4px 0;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  max-width: 100%;
+}
+.img-blocked-label { font-size: .9em; opacity: .85; }
+.img-blocked-why { font-size: .8em; opacity: .65; overflow-wrap: anywhere; }
+
+/* promptText()'s text input (helpers.js) - same chrome as .card's fields. */
 .modal-body input[type="text"] {
   width: 100%; box-sizing: border-box; background: var(--bg-input);
   border: 1px solid var(--border); border-radius: 8px; color: var(--text);
   padding: 8px 10px; font-size: 13.5px; font-family: var(--sans); margin-bottom: 10px;
 }
 
-/* Companion onboarding / key gate */
+/* Companion onboarding / key gate (NET-1) */
 .modal.onboarding { width: min(440px, 94vw); }
 .onboard-step {
   border: 1px solid var(--border); border-radius: 10px;
@@ -2091,12 +2290,19 @@ div:has(> .data-table) { overflow-x: auto; }
 .key-qr-img { width: 200px; max-width: 100%; }
 .key-qr-img svg { width: 100%; height: auto; display: block; background: #fff;
   padding: 8px; border-radius: 8px; }
-/* A QR renders dark-on-light in both themes: one <path> holds every module,
-   one <rect> the quiet zone. These fills are fixed, never theme variables. */
+/* A QR must render dark-on-light or it will not scan. The server already pins
+   the modules to fill="#000000" over a fill="#ffffff" background rect (see
+   routes/pairing.py::_pairing_qr_svg), and we pin the same colors here so the
+   QR stays scannable even if a global `svg { fill: ... }` rule (e.g. an icon
+   rule using currentColor) is ever added: a CSS fill overrides the SVG's
+   presentation-attribute fills and, in the dark theme, would wash the modules
+   or background out. One <path> = every module, one <rect> = the quiet zone;
+   do NOT turn these into theme variables. */
 .pairing-qr svg path, .key-qr-img svg path { fill: #000; }
 .pairing-qr svg rect, .key-qr-img svg rect { fill: #fff; }
 .key-secret { margin-top: 10px; }
-/* A rotation that reached disk without becoming the live credential. */
+/* A rotation that reached disk without becoming the LIVE credential. Yellow, not
+   red: nothing broke, but the caller must not read it as a completed rotation. */
 .key-warn { color: var(--yellow); margin: 4px 0; }
 .key-secret-value {
   font-family: var(--mono); font-size: 12px; margin: 4px 0; width: 100%;
@@ -2126,7 +2332,7 @@ div:has(> .data-table) { overflow-x: auto; }
 .disc-repo .head > .ic { flex: 0 0 auto; }
 .disc-repo .name { font-family: var(--mono); font-size: 13px; flex: 1; }
 .disc-repo .meta { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
-/* download + like counts as small inline icons */
+/* download + like counts as small inline icons instead of emoji glyphs */
 .disc-stats { display: inline-flex; align-items: center; gap: 5px; }
 .disc-stats .meta-ic { flex: 0 0 auto; }
 .disc-stats .meta-ic svg { width: 13px; height: 13px; }
@@ -2146,9 +2352,11 @@ div:has(> .data-table) { overflow-x: auto; }
 .disc-file .fit.fits { background: rgba(63, 182, 139, 0.18); color: var(--green); }
 .disc-file .fit.tight { background: rgba(222, 179, 73, 0.18); color: var(--yellow); }
 .disc-file .fit.too-big { background: rgba(226, 93, 93, 0.18); color: var(--red); }
-/* search filters: model-type and format (GGUF / Safetensors) toggle chips,
-   always visible and independent of the Registered-models tabs. An active type
-   chip wears its type's hue, matching the result .type-badge pills. */
+/* search filters: explicit model-TYPE + FORMAT (GGUF / Safetensors) toggle
+   chips. Always visible, independent of the Registered-models tabs, so what the
+   search covers is never inferred silently from the active tab. Each type chip,
+   when active, wears its type's hue - the SAME palette as the result .type-badge
+   pills - so the filter and the results read as one color language. */
 .disc-filter-bar {
   display: flex; flex-direction: column; gap: 8px;
   margin: 10px 0 4px; padding: 10px 12px;
@@ -2159,10 +2367,13 @@ div:has(> .data-table) { overflow-x: auto; }
   min-width: 58px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-dim);
 }
-/* A chip: the native checkbox stays in the DOM but is visually hidden, and the
-   <span> is the pill. The active state comes from an `.on` class that models.js
-   keeps in sync with each checkbox (_syncChip), not from a CSS :checked
-   selector. */
+/* A chip: the native checkbox is kept in the DOM (so the label click toggles it
+   and it stays keyboard-focusable) but visually hidden; the <span> IS the pill.
+   The active state is driven by an `.on` class that models.js keeps in sync with
+   each checkbox (_syncChip), NOT by a CSS :checked/:has selector - some engines
+   we ship to do not recalc a :checked-combinator style on a programmatic toggle,
+   which would leave a chip stuck in its coloured state. The JS class is
+   engine-independent. */
 .disc-chip { display: inline-flex; align-items: center; cursor: pointer; user-select: none; }
 .disc-chip input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
 .disc-chip span {
@@ -2177,7 +2388,7 @@ div:has(> .data-table) { overflow-x: auto; }
   color: var(--accent); border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 15%, transparent);
 }
-/* Per-type checked hue, mirroring .type-badge.type-<type>. */
+/* Per-type checked hue - mirrors .type-badge.type-<type> exactly. */
 .disc-chip[data-type="llm"].on span { color: var(--cat-blue); border-color: var(--cat-blue);
   background: color-mix(in srgb, var(--cat-blue) 15%, transparent); }
 .disc-chip[data-type="embedding"].on span { color: var(--cat-teal); border-color: var(--cat-teal);
@@ -2197,7 +2408,7 @@ div:has(> .data-table) { overflow-x: auto; }
   background: color-mix(in srgb, var(--green) 15%, transparent); }
 .disc-chip[data-fmt="hf"].on span { color: var(--accent); border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 15%, transparent); }
-/* alias: .disc-fmt-toggle drives the same toggles. */
+/* legacy alias: older markup used .disc-fmt-toggle for the same toggles. */
 .disc-fmt-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; cursor: pointer; }
 .disc-fmt-toggle input { cursor: pointer; }
 /* per-result format badge */
@@ -2205,14 +2416,16 @@ div:has(> .data-table) { overflow-x: auto; }
   letter-spacing: 0.02em; white-space: nowrap; flex: 0 0 auto; }
 .fmt-badge.fmt-gguf { background: rgba(63, 182, 139, 0.18); color: var(--green); }
 .fmt-badge.fmt-hf { background: rgba(96, 150, 236, 0.18); color: var(--accent); }
-/* HF result inline size + VRAM fit badge; GGUF fit lives in .disc-file rows. */
+/* HF result inline size + VRAM fit badge (GGUF fit lives in .disc-file rows) */
 .disc-hf-size { font-family: var(--mono); font-size: 12px; color: var(--text-dim); white-space: nowrap; }
 .disc-repo .head .fit { font-size: 11px; padding: 1px 8px; border-radius: 9px; white-space: nowrap; }
 .disc-repo .head .fit.fits { background: rgba(63, 182, 139, 0.18); color: var(--green); }
 .disc-repo .head .fit.tight { background: rgba(222, 179, 73, 0.18); color: var(--yellow); }
 .disc-repo .head .fit.too-big { background: rgba(226, 93, 93, 0.18); color: var(--red); }
-/* What the model is: architecture family, MoE-ness, param count. Monochrome and
-   outlined, outside the .type-badge palette. */
+/* what the model IS: architecture family + MoE-ness + param count.
+   Deliberately monochrome/outlined, not colored into the .type-badge palette -
+   every --cat-* hue is already spoken for by MODEL_TYPES, and reusing one here
+   would misread as "this is the model's type" the moment both badges show. */
 .arch-badge {
   font-family: var(--mono); font-size: 11px; color: var(--text-dim);
   padding: 1px 7px; border: 1px solid var(--border); border-radius: 9px;
@@ -2222,13 +2435,19 @@ div:has(> .data-table) { overflow-x: auto; }
   font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 9px;
   letter-spacing: 0.02em; white-space: nowrap; flex: 0 0 auto; color: var(--text-dim);
 }
-/* confirmed: the model's own architecture header says MoE. Solid border. */
+/* confirmed: the model's own architecture header says MoE - a solid border. */
 .moe-badge.moe-confirmed { border: 1px solid var(--text-dim); }
-/* likely: a name-pattern guess only. Dashed border, with a "?" in the label and
-   a title tooltip. */
+/* likely: a name-pattern guess only ("8x7B"/"A3B" in the repo id) - dashed
+   border + a "?" in the label + a title tooltip, so it never reads as equally
+   certain as a confirmed badge (see discover.py's _moe_signal). */
 .moe-badge.moe-likely { border: 1px dashed var(--border); }
-/* Model capability pills: what a model can do, on their own --accent palette.
-   Rendered only for a confirmed capability; there is no negative variant. */
+/* Model CAPABILITY pills - what a model can DO. Its OWN palette (--accent),
+   deliberately not the .fit.fits/.tight/.too-big green/yellow/red scale, which
+   is a SIZE-against-VRAM verdict and would read as one here; and not a --cat-*
+   hue either, since all seven are spoken for by .type-badge's MODEL_TYPES.
+   Only ever rendered for a CONFIRMED capability - there is no "no vision"
+   variant, because an absent pill has to cover both "checked, text-only" and
+   "could not check" (see models.js visionBadge). */
 .cap-badge {
   font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 9px;
   letter-spacing: 0.02em; white-space: nowrap; flex: 0 0 auto;
@@ -2296,15 +2515,21 @@ div:has(> .data-table) { overflow-x: auto; }
   color: var(--text-dim);
 }
 
-/* Shown in place of a reply body that rendered to nothing visible. */
+/* Shown in place of a reply body that rendered to nothing visible (e.g. a tiny
+ * model emitting only an empty ```code fence) - a plain note instead of a blank
+ * bubble, so the reply never just looks broken. */
 .md-empty {
   color: var(--text-dim);
   font-style: italic;
   font-size: 13px;
 }
 
-/* A checkbox with its label, standing alone in a card. Distinct from
-   .inline-check, which has a margin-left and sits beside a button row. */
+/* A checkbox with its label, standing alone in a card (Report a bug's two
+   attach toggles, Appearance's .mmproj toggle). `.check` was already the name
+   used in index.html and had NO rule at all, so those rows fell back to the
+   block `.card label` and the Appearance one carried three inline style
+   declarations instead. One rule, four call sites, no inline layout. It is
+   NOT .inline-check: that one has margin-left and sits beside a button row. */
 .check {
   display: flex;
   align-items: center;
@@ -2335,14 +2560,15 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 
 /* ---------------- responsive: phone / narrow screens ---------------- */
-/* Desktop keeps the always-visible sidebar, with the top bar and drawer backdrop
-   inert. On a narrow screen the sidebar becomes an off-canvas drawer opened from
-   a hamburger in the top bar. */
+/* Desktop keeps the always-visible sidebar; the top bar + drawer backdrop are
+   inert. On a narrow screen the 230px fixed sidebar would eat most of the width
+   and squeeze the content to one word per line, so it becomes an off-canvas
+   drawer opened from a hamburger in a top bar. */
 #mobile-topbar { display: none; }
 #sidebar-backdrop { display: none; }
 
-/* Fill the visible viewport with dvh, falling back to the 100vh rule above
-   where dvh is unsupported. */
+/* Fill the real visible viewport (dvh excludes the mobile browser chrome that
+   100vh leaves an empty gap under); falls back to 100vh where dvh is absent. */
 @supports (height: 100dvh) {
   #app { height: 100dvh; }
 }
@@ -2370,7 +2596,7 @@ div:has(> .data-table) { overflow-x: auto; }
     display: inline-flex; align-items: center; justify-content: center;
   }
   #nav-toggle:hover { background: var(--bg-input); }
-  /* Title fills the bar, pushing the new-chat button to the far right. */
+  /* Title fills the bar so the new-chat button sits at the far right. */
   .mtb-title { flex: 1; font-size: 17px; font-weight: 600; letter-spacing: 0.4px; }
   .mtb-title span { color: var(--accent); }
   #mtb-new {
@@ -2406,27 +2632,29 @@ div:has(> .data-table) { overflow-x: auto; }
   }
   #app.nav-open #sidebar-backdrop { opacity: 1; pointer-events: auto; }
 
-  /* Main takes the full width; the fixed sidebar is out of flow. Horizontal
-     overflow is clipped so a wide child cannot pan the page sideways. */
+  /* Main takes the full width (the sidebar is out of flow when fixed). A hard
+     cap on horizontal overflow keeps a stray wide child (long code line, table)
+     from making the whole page pan sideways. */
   #main { width: 100%; overflow-x: hidden; }
 
-  /* Tighter gutters. */
+  /* Tighter gutters so content is not squeezed. */
   .page { padding: 18px 14px 48px; }
   .msg-row { padding: 0 14px; margin-bottom: 14px; }
-  /* Phone bubbles get more width than the desktop 80%. */
+  /* Phone bubbles can use a touch more width than the desktop 80%. */
   .msg-row.user .msg-body { max-width: 88%; }
 
-  /* Composer: pad the bottom under the home-bar inset, roomier input pill. */
+  /* Composer: pad the bottom under the home-bar inset, and give the input a
+     roomier pill so it reads like a native chat bar. */
   .composer-wrap {
     padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
   }
   .composer { padding: 6px 6px 6px 10px; border-radius: 22px; gap: 4px; }
   .composer textarea { font-size: 16px; padding: 8px 4px; }  /* 16px: no iOS zoom-on-focus */
-  /* 40px touch targets for the icon + send buttons. */
+  /* Comfortable 40px touch targets for the icon + send buttons. */
   .composer .attach { width: 40px; height: 40px; font-size: 19px; }
   .composer .send { width: 40px; height: 40px; font-size: 17px; }
 
-  /* The meta toolbar under the composer wraps. */
+  /* The meta toolbar under the composer wraps instead of colliding. */
   .composer-row { flex-wrap: wrap; gap: 6px 10px; }
   #chat-usage, #coder-usage { width: 100%; }
 
@@ -2441,19 +2669,21 @@ div:has(> .data-table) { overflow-x: auto; }
   }
   .settings-nav-link { width: auto; }
 
-  /* Row inputs and their buttons wrap instead of overflowing the card. */
+  /* Let row inputs + their buttons wrap instead of overflowing the card. */
   .card .row { flex-wrap: wrap; }
 
   /* Toolbars wrap rather than overflow. */
   #coder-bar { flex-wrap: wrap; }
 
-  /* The open-sessions rail is dropped, leaving the #session-select dropdown in
-     the coder bar, and the coder column stacks. */
+  /* R17: no room for the open-sessions rail on a phone - fall back to the
+     #session-select dropdown in the coder bar, and stack the coder column. */
   #view-coder.active { flex-direction: column; }
   #coder-sessions { display: none; }
 
-  /* The drawer's other children keep their intrinsic height so #conversations
-     gets a usable, scrollable share of it, with finger-sized rows. */
+  /* U-7: the conversation list collapsed to a ~5px sliver because its siblings
+     (nav, model box) kept their intrinsic height while only #conversations could
+     flex, so it got starved. Pin the siblings' height and guarantee the list a
+     usable, scrollable share of the drawer, with finger-sized rows. */
   #sidebar nav, #model-box, #logo { flex-shrink: 0; }
   #conversations { flex: 1 1 auto; min-height: 45vh; }
   .conv-item { min-height: 44px; padding: 10px 12px; font-size: 14px; }
@@ -2461,8 +2691,9 @@ div:has(> .data-table) { overflow-x: auto; }
   /* Same 16px rule for the settings search box, and full width on a phone. */
   .settings-filter { max-width: none; padding: 9px 11px; font-size: 16px; }
 
-  /* Each data-table row stacks as a card, so the description wraps and the
-     action buttons drop below it. */
+  /* U7-PLUGIN-TABLE-MOBILE: a 4-column data table (plugin catalog, key list)
+     overflows the narrow viewport. Stack each row as a card so the description
+     wraps and the action buttons drop below instead of forcing horizontal pan. */
   .data-table, .data-table tbody, .data-table tr, .data-table td { display: block; width: 100%; }
   .data-table thead { display: none; }
   .data-table tr {

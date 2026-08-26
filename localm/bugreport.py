@@ -15,7 +15,9 @@ Channels, in the order that actually works for a tester:
   * **do it yourself** - the report is always saved to a file, so the user can
     drop it on Discord, paste it, or attach it however they like.
 
-There is NO "open a GitHub issue in your browser" channel. Anyone who wants to
+There is deliberately NO "open a GitHub issue in your browser" channel: that
+would ask a tester to sign in to (and have access to) a private repo, exactly
+the friction the hosted channel exists to remove. Anyone who genuinely wants to
 file it on github.com themselves still can, by hand, outside the app.
 
 The maintainer's contact email is intentionally published here for bug reports
@@ -42,12 +44,12 @@ edits the report before sending, regardless.
 
 Chat content DOES land in the on-disk debug log at DEBUG level when --debug (or
 keep_diagnostics) is on and the session is not privacy mode - that is what makes
-local debugging with --debug possible at all. That content must never reach a
-REPORT: the digest builder (localm/_log_digest.py) drops every record from a
-known debug_content_enabled()-gated write site (the raw model reply, a
-memory-embed content snippet, a web-tool query) before it is ever collapsed or
-classified, so none of them can appear in ``_recent_log_tail`` regardless of
-what the content itself says.
+local debugging with --debug possible at all. What must never happen is that
+content reaching a REPORT: the digest builder (localm/_log_digest.py) drops every
+record from a known debug_content_enabled()-gated write site (the raw model
+reply, a memory-embed content snippet, a web-tool query, the assembled chat
+prompt) before it is ever collapsed or classified, so none of them can appear
+in ``_recent_log_tail`` regardless of what the content itself says (#961).
 """
 
 from __future__ import annotations
@@ -173,11 +175,17 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
         det = hwdetect.detect()
         diag["gpu_vendors"] = det.vendors or []
         # recommended_install_backend, NOT det.recommended. The latter is the
-        # blanket "vulkan whenever any GPU is present" value, which contradicts
-        # the installer's actual policy (cuda for an NVIDIA-on-Windows box).
-        # updater._installed_backend() and release_verify._default_backend() call
-        # recommended_install_backend() too; det.recommended has no
-        # known-correct caller left, only its own construction/contract tests.
+        # blanket "vulkan whenever any GPU is present" value, so a report from an
+        # NVIDIA-on-Windows box said "Recommended backend: vulkan" while the
+        # installer's actual policy for it is cuda (#765) and the box was in fact
+        # running the CUDA runtime. A diagnostics field that contradicts what the
+        # installer would provision sends triage after the wrong thing; it did
+        # exactly that on #833. CORRECTED: updater._installed_backend() and
+        # release_verify._default_backend() were NOT a legitimate narrower meaning
+        # for det.recommended, as this comment used to claim - they were the same
+        # #833-class bug, unfixed at the time this was written. Both now call
+        # recommended_install_backend() too; det.recommended has no known-correct
+        # caller left, only its own construction/contract tests.
         diag["recommended_backend"] = hwdetect.recommended_install_backend(det)
         diag["detect_source"] = det.source
     except Exception:
@@ -214,8 +222,10 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
 
     # WHICH llama.cpp build is installed, and whether the user has pinned one.
     # Separately guarded from the library listing above so one failing does not
-    # cost the other. Recorded at provision time by setup_llama, so it is a
-    # lookup, not a probe.
+    # cost the other. This is the field triage previously had to INFER from
+    # versioned library filenames (libllama.so.0.0.NNNNN) when an upstream build
+    # broke a machine - a guess, and an ambiguous one between adjacent builds.
+    # Recorded at provision time by setup_llama, so it is a lookup, not a probe.
     try:
         from localm import setup_llama
         build = setup_llama.installed_build()
@@ -255,14 +265,15 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
 
 # The home/username policy itself lives in localm.pathscrub, so the report
 # scrubber and the API-response scrubber (embedder status, /debug/stacks) cannot
-# drift apart. It replaces Path.home() with "~" in both separator forms
-# (case-insensitively on Windows), and ALWAYS applies the known-home-root
-# username strip as a backstop so a path that is not exactly Path.home() - a
-# different account - is caught too.
+# drift apart - a copy of a privacy rule is a copy that gets fixed once. The
+# behaviour here is unchanged: replace Path.home() with "~" in both separator
+# forms (case-insensitively on Windows, AUD-SCRUBHOME), and ALWAYS apply the
+# known-home-root username strip as a backstop so a path that is not exactly
+# Path.home() - a different account - is caught too.
 #
-# A report KEEPS the INSTALL dir (pathscrub.scrub_paths would drop it): the
-# maintainer reading the report needs to know where the app is installed.
-# Responses to a lower-privileged caller use scrub_paths instead.
+# A report deliberately keeps the INSTALL dir (pathscrub.scrub_paths would drop
+# it): the maintainer reading the report needs to know where the app is
+# installed. Responses to a lower-privileged caller use scrub_paths instead.
 _scrub_home = pathscrub.scrub_user_paths
 
 
@@ -279,33 +290,35 @@ def _scrub_url_creds(text: str) -> str:
 # ordinary way ComfyUI/SearXNG/a generic reviewer endpoint carry a key. Redact
 # by PARAMETER NAME, never by guessing the value's format: an opaque token has
 # no reliable shape, but a parameter literally called api_key/token/secret/...
-# is a name that can be trusted regardless of what it holds. The parameter NAME
-# is kept so the report still shows THAT the endpoint was credentialed and which
-# endpoint it is; only the value goes. Do not widen this by adding more
-# value-shape regexes (sk-..., 24-char-opaque, ...): the name is the durable
-# signal.
+# is a name we can trust regardless of what it holds. Keep the parameter NAME
+# so the report still shows THAT the endpoint was credentialed and which
+# endpoint it is - only the value must go. Do not widen this by adding more
+# value-shape regexes (sk-..., 24-char-opaque, ...): that chases formats
+# forever and still misses the next one; the name is the durable signal.
 #
 # The name may sit ANYWHERE a ``name=value`` pair can appear, not only right
-# after a ``?`` or ``&``: a pasted .env fragment or shell line writes
-# ``api_key=...`` at the start of a line, and a prefixed name
+# after a ``?`` or ``&``: a user pasting a .env fragment or a shell line into a
+# report writes ``api_key=...`` at the start of a line, and a prefixed name
 # (``OPENAI_API_KEY=``, ``pull_token=``) never touches a query delimiter at all.
 # Hence three branches, all feeding ONE capture group so the substitution keeps
 # the name and drops only the value:
 #
-#   1. after a literal ?/& - the base set, so a bare ``?key=`` or ``?sig=`` in
-#      a URL redacts;
+#   1. after a literal ?/& - the historic set, unchanged, so a bare ``?key=``
+#      or ``?sig=`` in a URL still redacts exactly as it always has;
 #   2. anywhere else, UNPREFIXED - only the names that mean a credential and
 #      nothing else (api_key, token, secret, password, passwd, pwd, ...);
 #   3. anywhere else, PREFIXED (matched from the separator) - the same names
 #      PLUS the short generic ones (key, auth, sig), admitted only behind a
 #      prefix.
 #
-# The short generic names belong in branch 3 only. In branch 2 they would eat
-# an ordinary ``key=value`` line out of a pasted config dump and an
-# ``auth=none`` out of a log; absent from branch 3 they would leave
-# ``SECRET_KEY=``, ``PRIVATE_KEY=``, ``APP_KEY=``, ``x-auth=`` and ``req_sig=``
-# in the clear. With them in branch 3, ``SECRET_KEY=`` redacts while ``key=``
-# and ``monkey=`` do not.
+# Where the short generic names go is the deliberate decision here, and it is a
+# decision because BOTH failure directions are real. Admitting ``key``/``auth``/
+# ``sig`` UNPREFIXED (branch 2) would eat an ordinary ``key=value`` line out of a
+# pasted config dump and an ``auth=none`` out of a log; dropping them from branch
+# 3 as well would leave ``SECRET_KEY=``, ``PRIVATE_KEY=``, ``APP_KEY=``,
+# ``x-auth=`` and ``req_sig=`` in the clear, and those are among the commonest
+# credential names a .env carries. Putting them in branch 3 only keeps both:
+# ``SECRET_KEY=`` redacts, ``key=`` and ``monkey=`` do not.
 _QUERY_SECRET_RE = re.compile(
     r"(?i)((?:"
     # 1. Immediately after a query delimiter: the historic set, unchanged.
@@ -321,30 +334,38 @@ _QUERY_SECRET_RE = re.compile(
     #    survives outside the match, which leaves the result identical:
     #    ``SECRET_KEY=x`` matches ``_KEY=x`` and reads back as
     #    ``SECRET_KEY=<redacted>``. This is also the branch that admits the
-    #    short generic names, as described above.
+    #    short generic names, per the reasoning above.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
     r")=)"
     # A value that CANNOT be a secret is left alone. This is the INVERSE of
-    # the value-shape rule forbidden above: it only declines to redact a short
-    # list of literals no credential is ever equal to. Without it the name-based
-    # match eats ``LOCALM_REQUIRE_AUTH=1``, ``require_auth=true``,
-    # ``digital_signature=True`` and ``has_token=false`` out of a report, hiding
-    # whether auth was ON.
+    # the value-shape rule forbidden above, not an exception to it: that one
+    # would try to RECOGNISE a secret by its shape and would always miss the
+    # next format, whereas this only declines to redact a short list of
+    # literals no credential is ever equal to. Without it the name-based match
+    # eats ``LOCALM_REQUIRE_AUTH=1``, ``require_auth=true``,
+    # ``digital_signature=True`` and ``has_token=false`` out of a report - and
+    # hiding whether auth was ON is exactly the diagnostic a reader needs when
+    # the bug IS about auth.
     #
     # The literal has to be the WHOLE value, so ``api_key=truesecret123`` and
     # ``api_key=10`` still redact. Closing markup may follow it, because a
     # report carries prose: ``(require_auth=1)`` and ``` `require_auth=1` ```
-    # are the same flag. Something else after that markup is NOT a flag, so
-    # ``api_key=1)SECRET`` stays redacted.
+    # are the same flag. But something else after that markup is NOT a flag,
+    # so ``api_key=1)SECRET`` stays redacted - measured identical to the
+    # no-suppressor behaviour on every credential shape, which is the bar this
+    # has to clear: a false-positive fix must not open a true-negative.
     r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[`\"'\)\]\}]{0,4}(?:[\s&#]|$))"
     # The value may be QUOTED, which is how a .env writes it far more often
-    # than not, so the match runs past the opening quote to the closing one. An
-    # unterminated quote redacts to the NEXT quote on the line, or to the end of
-    # the line when there is none, and never across a newline. Both land on
-    # over-redaction, the safe direction for a line that opened with a
-    # credential, but they are different spans.
+    # than not. Stopping at the opening quote used to leave the secret sitting
+    # in the report right next to a <redacted> marker claiming it had gone -
+    # a privacy step reporting a success it did not achieve, which is the one
+    # thing rule 5 forbids outright. An unterminated quote redacts to the NEXT
+    # quote on the line, or to the end of the line when there is none, and never
+    # across a newline. Both land on over-redaction, which is the safe direction
+    # for a line that opened with a credential - but they are different spans, so
+    # do not reason about the boundary from the end-of-line case alone.
     r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&\s#\"'\)\]\}]*)"
 )
 
@@ -374,7 +395,7 @@ def _scrub_query_and_header_secrets(text: str) -> str:
 # sk-..., or a localm key) can appear in a pasted console error, a fetch log
 # line, or a mistyped config value. A bug report is share-intended, so strip
 # them defensively even though no current code path is known to log a token
-# (defence in depth).
+# (AUD-CLIENTSCRUB, defence in depth).
 _BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
@@ -502,10 +523,10 @@ def _safe_config_subset() -> dict:
 def _config_unreadable() -> bool:
     """True only when config.json (or its .bak) EXISTS and could not be parsed,
     in which case _safe_config_subset() is showing built-in defaults rather than
-    the user's real settings - see config.load_config_checked. Independent of
-    _safe_config_subset, which stays on load_config() and discards the signal
-    this needs: a corrupt config must not render identically to no config at
-    all. Never raises."""
+    the user's real settings - see config.load_config_checked. Deliberately
+    independent of _safe_config_subset (which stays on load_config(), the signal
+    this needs is discarded there): a corrupt config must not render identically
+    to no config at all. Never raises."""
     try:
         from localm.config import load_config_checked
         return not load_config_checked()[1]
@@ -541,7 +562,8 @@ def _format_error(error: Optional[BaseException]) -> str:
     # user-configured credentialed URL (a comfy_api_url / net_search_url / remote
     # server base with user:pass@) or a pasted token, and this traceback ships in the
     # uploaded "Error detail" body. _scrub_secrets adds the url-creds + bearer/apikey
-    # strips the sibling log-tail already applies.
+    # strips the sibling log-tail already applies (HON-15; do not report a scrub the
+    # module docstring promises but did not perform).
     tb = _scrub_secrets(tb)
     # Keep the tail - the last frames are the useful ones, and a shorter report
     # is more likely to be read and sent.
@@ -583,11 +605,14 @@ def _find_run_log(home=None, pid=None):
     return next((p for p in logs if not p.name.endswith(cur)), None)
 
 
-# Why the log digest came back empty, when it did. An empty digest can mean
-# THREE unrelated things - no log file matched this run's pid, the file was
-# found but could not be read, or the run genuinely logged nothing notable. The
-# first two are FAILURES to collect and the third is a clean result, so these
-# are the reasons a caller can attach and the report SAYS which happened.
+# Why the log digest came back empty, when it did. An empty digest used to mean
+# THREE unrelated things at once - no log file matched this run's pid, the file
+# was found but could not be read, or the run genuinely logged nothing notable -
+# and all three rendered as the same thing in the report: no log section at all.
+# The first two are FAILURES to collect and the third is a clean result, so a
+# report was silently missing the one artifact the maintainer needs while looking
+# complete (AGENTS.md rule 5: a step that failed must not report success). These
+# are the reasons a caller can attach so the report SAYS which happened.
 _LOG_UNAVAILABLE_NO_FILE = "no log file was found for that run"
 
 
@@ -595,8 +620,10 @@ def _log_failure_reason(exc: BaseException) -> str:
     """A one-line, PATH-FREE description of why reading the log failed, safe to
     put in a share-intended report.
 
-    The obvious formattings leak the user's home directory, and therefore
-    their username:
+    MEASURED, and it is the whole reason this helper exists rather than an
+    inline f-string: the obvious formattings leak the user's home directory and
+    therefore their username, which AGENTS.md rules 1 and 2 forbid in anything
+    this module emits.
 
         str(exc)      "[Errno 13] Permission denied: " + the FULL absolute path
                       of the log file, which is under the user's home dir and so
@@ -607,12 +634,12 @@ def _log_failure_reason(exc: BaseException) -> str:
                       while a ValueError("boom " + path) reprs with the path
                       intact.
 
-    So the text is built from the exception CLASS NAME plus ``strerror`` - the
+    So the reason is built from the exception CLASS NAME plus ``strerror`` - the
     OS's own errno text ("Permission denied"), which carries no path and is
-    absent on non-OSError, where the class name alone is all that is said. A
-    detail containing a path separator is dropped outright rather than trusted,
-    which makes a leak UNREPRESENTABLE. _scrub_secrets is a further backstop for
-    the home-path form.
+    absent on non-OSError, where the class name alone is all we say. A detail
+    containing a path separator is dropped outright rather than trusted: that
+    makes a leak UNREPRESENTABLE instead of relying on strerror happening never
+    to contain one. _scrub_secrets is a further backstop for the home-path form.
     """
     name = type(exc).__name__
     detail = getattr(exc, "strerror", None)
@@ -643,14 +670,15 @@ def _recent_log_tail_result(home=None, pid=None, max_chars: int = 6000) -> tuple
             raw = raw[-_LOG_TAIL_READ_BYTES:]
         from localm._log_digest import build_digest
         # start_tainted=truncated: a truncated tail can start mid-way through
-        # a debug_content_enabled() write with no header of its own, so
-        # build_digest must not trust whatever it finds first.
+        # a debug_content_enabled() write with no header of its own (#961
+        # follow-up) - build_digest must not trust whatever it finds first.
         return _scrub_secrets(
             build_digest(raw, max_chars=max_chars, start_tainted=truncated)), ""
     except Exception as e:
-        # Swallowed - collecting a log is best effort and must never break the
-        # report it is attached to - but the caller is TOLD, so an unreadable
-        # log is not indistinguishable from a clean one.
+        # Still swallowed - collecting a log is best effort and must never break
+        # the report it is attached to. What changed is that the caller is now
+        # TOLD, instead of an unreadable log being indistinguishable from a
+        # clean one.
         return "", f"the log file could not be read ({_log_failure_reason(e)})"
 
 
@@ -659,11 +687,12 @@ def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
     log filename (localm_<date>_<time>_<pid>.log): EVERY warning/error (with its
     full traceback) from the whole run, with runs of near-duplicate benign lines
     (e.g. routine ``GET /api/stats`` polling) collapsed to one line + a repeat
-    count - see localm/_log_digest.py. Unlike a last-N-lines tail it keeps the
-    failure however much routine activity followed it. Chat content (a raw model
-    reply, a memory-embed snippet, a web-tool query) is dropped by build_digest
-    upstream of this, whatever the content itself says. Home paths are
-    scrubbed. Never raises.
+    count - see localm/_log_digest.py. A blind last-N-lines tail used to miss the
+    actual failure whenever enough routine activity followed it before the report
+    was filed (#617); this survives that regardless of how long the session ran
+    afterward. Chat content (a raw model reply, a memory-embed snippet, a web-tool
+    query) is dropped by build_digest before this ever sees it, whatever the
+    content itself says (#961). Home paths are scrubbed. Never raises.
 
     Returns only the digest. A caller that renders a REPORT wants
     _recent_log_tail_result instead, so it can say why an empty digest is
@@ -672,8 +701,8 @@ def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
 
 
 # A hang trace older than this cannot plausibly belong to the run being reported,
-# whatever pid it carries (pids are reused). Generous: the pid match below is
-# the precise filter, and this only backstops a pid collision.
+# whatever pid it carries (pids are reused - see REG-586). Generous on purpose: the
+# pid match below is the precise filter, and this only backstops a pid collision.
 _HANG_TRACE_MAX_AGE_S = 24 * 3600
 
 
@@ -695,14 +724,14 @@ def _recent_hang_traces(home=None, max_chars: int = 8000, *, pid=None) -> str:
         gave a wrong answer") attached whatever freeze happened to be newest -
         rendered under "## Server hang trace" asserting "the server froze",
         i.e. a stale, unrelated trace presented as the diagnosis of the current
-        problem.
+        problem, sending triage down a false path (REG-542).
       * A pid alone is not an identity (pids get reused), so an ancient trace
         carrying this run's pid would still slip through; the age bound stops it.
       * Age alone is not enough either: a recent freeze in a DIFFERENT localm
         instance is not this report's problem; the pid match stops that.
 
-    A caller that cannot name the run (no pid) gets nothing rather than a
-    guess."""
+    A caller that cannot name the run (no pid) gets nothing rather than a guess:
+    attaching a trace we cannot tie to the report is the whole defect."""
     try:
         import time as _time
         from pathlib import Path as _P
@@ -733,7 +762,7 @@ def _recent_hang_traces(home=None, max_chars: int = 8000, *, pid=None) -> str:
 
 def live_server_hang_trace(home=None) -> str:
     """The event-loop hang trace captured by a LIVE server of this install, for a
-    user-initiated ``localm bug-report`` filed from a SEPARATE process.
+    user-initiated ``localm bug-report`` filed from a SEPARATE process (REG-736).
 
     The two in-process collectors each feed _recent_hang_traces a pid they already
     know: ``save_user_report`` (GUI) matches its own ``getpid()`` because the GUI IS
@@ -814,17 +843,22 @@ def build_report(summary: str, reason: str = "",
     # The user-typed summary/reason are the only report fields not otherwise
     # scrubbed; a home path (username) or pasted credential in them would ship in
     # the uploaded body - and, via the derived title, into a PUBLIC issue. Scrub at
-    # this choke point so every caller (report_failure, save_user_report) is
-    # covered. _scrub_secrets is idempotent and no-ops on empty text.
+    # this choke point so every caller (report_failure, save_user_report) is covered
+    # (HON-03/HON-15; AGENTS.md rule 5: a privacy step must not report a scrub it
+    # did not do). _scrub_secrets is idempotent and no-ops on empty text.
     summary = _scrub_secrets(summary)
     reason = _scrub_secrets(reason)
     ctx = context or {}
     # A user-composed report (save_user_report/the GUI form) can supply these
     # three DISTINCT fields via context, the same threading pattern already
     # used for native_trace/recent_log_tail/hang_traces/client below. Absent
-    # for every automatic (crash/LocalmError) report, which keeps their "What
-    # happened" == summary+reason rendering. Scrubbed here, at the same choke
-    # point as summary/reason above.
+    # for every automatic (crash/LocalmError) report, which keeps their
+    # existing "What happened" == summary+reason rendering unchanged (#958:
+    # before this, save_user_report always left what_i_did/what_i_expected
+    # empty and duplicated ONE string into the title AND the whole "What
+    # happened" body, so a report never distinguished what the user expected
+    # from what actually happened). Scrubbed here, at the same choke point as
+    # summary/reason above (HON-03/HON-15).
     what_i_did = _scrub_secrets((ctx.get("what_i_did") or "").strip())
     what_i_expected = _scrub_secrets((ctx.get("what_i_expected") or "").strip())
     what_happened = _scrub_secrets((ctx.get("what_happened") or "").strip())
@@ -868,17 +902,18 @@ def build_report(summary: str, reason: str = "",
         happened_body = what_happened
     elif what_i_did:
         # A user-composed report (what_i_did present) that answered "what I
-        # was doing" but skipped "what happened". summary is DERIVED from
-        # what_happened-or-description upstream (save_user_report), so falling
-        # back to it here would repeat what_i_did's own first line as a second
-        # section. Say plainly that this section was left blank instead of
-        # manufacturing a duplicate.
+        # was doing" but skipped "what happened" (#958). summary is DERIVED
+        # from what_happened-or-description upstream (save_user_report), so
+        # falling back to it here would just repeat what_i_did's own first
+        # line as a second section - the exact "same sentence twice, no new
+        # information" artifact #958 is made of. Say plainly that this
+        # section was left blank instead of manufacturing a duplicate.
         happened_body = "(not stated)"
     else:
         # No user-composed fields at all: an automatic crash/LocalmError
         # report, where there was never a separate "what happened" prompt to
         # begin with - summary/reason ARE the description of what happened,
-        # and this is the report's ONLY account of it.
+        # and this is the report's ONLY account of it. Unchanged from before.
         happened_body = summary + ((f"\n\nReason: {reason}") if reason else "")
     parts += [
         "## What happened",
@@ -898,7 +933,8 @@ def build_report(summary: str, reason: str = "",
             # Say the file could not be READ rather than silently showing
             # defaults. Without this line a corrupt config.json renders a
             # section byte-identical to a user with no config at all, hiding
-            # the single most likely cause of "my settings do nothing".
+            # the single most likely cause of "my settings do nothing"
+            # (AGENTS.md rule 5).
             section.append("(config.json exists but could not be read; the "
                             "values below are DEFAULTS, not the user's settings)")
         section.append("\n".join(_kv_lines(config_subset)))
@@ -909,11 +945,11 @@ def build_report(summary: str, reason: str = "",
 
     if err:
         parts += ["", "## Error detail", "```", err, "```"]
-    # Crash diagnostics passed via context (e.g. recovered-crash reports, which
-    # have no Python error object), without which the report is contentless: a
-    # faulthandler native trace when one was captured, and the crashed run's own
-    # log tail (the actionable bit when a window-close/OS-kill left no trace).
-    # Both are already home-scrubbed at their source.
+    # Crash diagnostics passed via context (e.g. recovered-crash reports, which have
+    # no Python error object). Without these the report is contentless (BUG-1): a
+    # faulthandler native trace when one was captured, and the crashed run's own log
+    # tail (the actionable bit when a window-close/OS-kill left no trace). Both are
+    # already home-scrubbed at their source.
     ctx = context or {}
     native = ctx.get("native_trace")
     if native:
@@ -924,9 +960,10 @@ def build_report(summary: str, reason: str = "",
     elif ctx.get("log_unavailable"):
         # Say the log could not be COLLECTED rather than rendering nothing. An
         # omitted section is indistinguishable from a clean run, so triage reads
-        # a failed collection as "the log had nothing in it" and stops looking.
-        # The reason is built path-free at its source - see _log_failure_reason -
-        # and scrubbed again here like every other context-supplied string.
+        # a failed collection as "the log had nothing in it" and stops looking
+        # (AGENTS.md rule 5). The reason is built path-free at its source - see
+        # _log_failure_reason - and scrubbed again here like every other
+        # context-supplied string.
         parts += ["", "## Recent log (tail)",
                   f"(not collected: {_scrub_secrets(str(ctx['log_unavailable']))[:200]})"]
     hang = ctx.get("hang_traces")
@@ -1007,8 +1044,8 @@ def _ring_activity() -> list:
                 except OSError as e:
                     # Privacy cleanup: the plaintext pre-restart log is deleted
                     # after being folded into the report. If the delete fails the
-                    # file PERSISTS on disk, so the failure is surfaced rather
-                    # than swallowed and the leftover stays discoverable.
+                    # file PERSISTS on disk - surface it (do not swallow silently)
+                    # so the leftover is discoverable (AGENTS.md rule 5).
                     from localm.debuglog import logger
                     logger.warning(
                         "bugreport: could not delete %s after reading it (%s); "
@@ -1064,10 +1101,10 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         except OSError:
             # Best-effort hardening. chmod is a no-op on Windows and only fails on
             # POSIX filesystems that do not support per-file perms (e.g. a FAT or
-            # network mount), where the data dir's own perms still apply. The
-            # report carries NO secrets (no API key, env, config secrets, or chat
-            # content - see module docstring), so a world-readable report leaks
-            # nothing sensitive.
+            # network mount), where the data dir's own perms still apply. Proven
+            # low-risk regardless: the report deliberately carries NO secrets (no
+            # API key, env, config secrets, or chat content - see module docstring),
+            # so a world-readable report leaks nothing sensitive.
             pass
         return path
     except Exception:
@@ -1082,8 +1119,10 @@ def report_title(summary: str, what_happened: str, description: str) -> str:
 
     A standalone function (not inlined in save_user_report) so the ``localm
     bug-report`` CLI can compute the EXACT SAME title after the report is
-    built, to hand to upload_report/offer_to_send, rather than re-deriving it
-    with logic that could disagree with what the report itself says."""
+    built, to hand to upload_report/offer_to_send, rather than re-deriving
+    it with logic that could silently disagree with what the report itself
+    says (#958: two producers with different logic is how one of them stays
+    wrong)."""
     if not summary:
         title_source = what_happened or description
         summary = title_source.splitlines()[0] if title_source else ""
@@ -1091,16 +1130,20 @@ def report_title(summary: str, what_happened: str, description: str) -> str:
 
 
 # The GUI route offloads save_user_report() to a real worker thread (it does
-# blocking file I/O and must not stall the event loop), so two reports filed
-# close together can run this function on two DIFFERENT threads at the same
-# instant. Two hazards follow: _ring_activity() reads then deletes the shared
-# pre_restart.log (a second reader can race the first's unlink), and
-# save_report() can open the SAME same-second-timestamped filename for writing
-# from two threads at once, interleaving their content into one corrupted file
-# instead of cleanly losing one report. This lock serialises both. Scoped to
-# this function, not a module-wide lock shared with report_failure's own
-# build_report()/save_report() calls: report_failure is the CLI/crash path, a
-# separate process per invocation.
+# blocking file I/O and must not stall the event loop - diff-review-
+# discipline.md item 15), so two reports filed close together can now run
+# this function on two DIFFERENT threads at the same instant, not merely
+# interleaved on one event loop the way a synchronous handler used to
+# guarantee for free. Two hazards that were previously impossible:
+# _ring_activity() reads then deletes the shared pre_restart.log (a second
+# reader can race the first's unlink), and save_report() can open the SAME
+# same-second-timestamped filename for writing from two threads at once,
+# interleaving their content into one corrupted file instead of cleanly
+# losing one report. This lock restores the atomicity the old code had only
+# by accident of its execution model. Scoped to this function (not a
+# module-wide lock shared with report_failure's own build_report()/
+# save_report() calls): report_failure is the CLI/crash path, a separate
+# process per invocation with no new in-process concurrency from this change.
 _SAVE_REPORT_LOCK = threading.Lock()
 
 
@@ -1109,12 +1152,15 @@ def save_user_report(description: str = "", *, summary: str = "",
                      include_log: bool = False,
                      client: Optional[dict] = None,
                      extra_hang_trace: str = "") -> Optional[Path]:
-    """Build and save a USER-initiated bug report and return its path.
+    """Build and save a USER-initiated bug report and return its path (R47).
 
     The shared backend for the GUI "Report a bug" control and the
     ``localm bug-report`` CLI: *description* fills the "What I was doing"
     section, *what_i_expected* and *what_happened* fill their own sections -
-    three DISTINCT fields, not one string echoed three times. *summary* overrides the
+    three DISTINCT fields, not one string echoed three times (#958: a report
+    used to derive its title AND its whole "What happened" body from the same
+    truncated first line of *description*, so a reader could never tell what
+    the user expected from what actually happened). *summary* overrides the
     title; when omitted it is derived from *what_happened* (falling back to
     *description* when that too is empty), since "what happened" makes a more
     useful issue title than "what I was doing". The safe environment snapshot
@@ -1123,12 +1169,12 @@ def save_user_report(description: str = "", *, summary: str = "",
     recent-activity log), and with *include_log* the current run's on-disk
     debug log tail is attached (home-scrubbed at source, and with every
     chat-content record dropped by build_digest regardless of what it says -
-    never the API key, config secrets, or chat content). *client* is an
+    never the API key, config secrets, or chat content, #961). *client* is an
     optional GUI-supplied browser context (user agent, page, viewport, recent
     JS console errors). *extra_hang_trace* lets the CLI supply a freeze trace
-    it found in a DIFFERENT process (see live_server_hang_trace) - the self-pid
-    check below only ever catches the caller's own freeze, which is never the
-    CLI's own case. Returns None on a write failure (the caller
+    it found in a DIFFERENT process (REG-736; see live_server_hang_trace) -
+    the self-pid check below only ever catches the caller's own freeze, which
+    is never the CLI's own case. Returns None on a write failure (the caller
     surfaces that rather than reporting a false success). Serialized on
     ``_SAVE_REPORT_LOCK`` (see the comment above that lock) so two GUI-triggered
     calls running on different worker threads at once cannot race the shared
@@ -1158,12 +1204,13 @@ def save_user_report(description: str = "", *, summary: str = "",
         # Always attach a hang trace captured by THIS run (independent of
         # include_log): it only exists if the server actually froze, and it is the
         # single most useful thing for diagnosing a "the app hung" report. Scoped to
-        # our own pid like the log tail above: an old freeze from a previous run
-        # is not this report's problem.
+        # our own pid like the log tail above: an old freeze from a previous run is
+        # not this report's problem, and presenting one as the diagnosis is worse
+        # than attaching nothing (REG-542).
         import os as _os
         hang = _recent_hang_traces(pid=_os.getpid())
-        # extra_hang_trace covers the ``localm bug-report`` CLI's own case: it
-        # is a separate, short-lived process whose OWN pid never froze, while the
+        # extra_hang_trace covers the ``localm bug-report`` CLI's own case (REG-736):
+        # it is a separate, short-lived process whose OWN pid never froze, while the
         # server that DID freeze is a different, still-running process - a pid-of-
         # self match finds nothing there, so the CLI looks the live server up itself
         # (live_server_hang_trace) and passes what it found in here instead.
@@ -1301,15 +1348,15 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     Only the report text (plus an optional shared secret) is sent; the GitHub
     token lives at the proxy. Raises :class:`LocalmError` on any failure - no
     endpoint, a network error, or a non-2xx response - so a failed send is NEVER
-    reported as success. *opener* is injectable for
+    reported as success (we do not hide problems). *opener* is injectable for
     tests (defaults to urllib)."""
     import json as _json
 
     # Scrub the title at the upload boundary: it becomes a PUBLIC GitHub issue
     # title, and callers pass the user's raw summary / description first line
     # (report_failure, inference/routes/admin.py). This is the single choke point
-    # every uploaded title flows through, so scrubbing here covers all callers.
-    # Idempotent; no-ops on empty text.
+    # every uploaded title flows through, so scrubbing here covers all callers - a
+    # future one cannot forget (HON-03/HON-15). Idempotent; no-ops on empty text.
     title = _scrub_secrets(title)
 
     # Same reasoning, for the body's trailing edit-disclaimer: every caller here
@@ -1318,7 +1365,7 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     # which legitimately carry "you can edit anything above before sending" -
     # true right up until this exact call sends it. Strip it here, the one
     # choke point every uploaded body flows through, so it can never reach a
-    # PUBLIC GitHub issue regardless of which caller forgot.
+    # PUBLIC GitHub issue (LM-DA-PUBTEXT) regardless of which caller forgot.
     body = _strip_report_footer(body or "")
 
     # Fill each of url/token from config independently when not explicitly passed,
@@ -1454,7 +1501,8 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
     producer - report_failure (automatic crash/LocalmError reports, built via
     build_report) and the ``localm bug-report`` CLI (user-composed reports,
     built via save_user_report) - rather than two copies that can drift on
-    retry/rate-limit/failure handling. *text* is the in-memory report
+    retry/rate-limit/failure handling (#958: two producers with different
+    behavior is how one of them stays broken). *text* is the in-memory report
     body (used when *path* is None because the save itself failed); when a
     file exists, the actually-sent body is RE-READ from it so a user's edits
     made before picking a channel are what gets sent, not the stale
@@ -1536,7 +1584,7 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
 
     # When the file save failed (path is None) the channels still work off the
     # in-memory text, but messages must not claim a file exists - say where the
-    # report actually is.
+    # report actually is, honestly ("we do not hide problems").
     where = (str(path) if path is not None
              else "the text above (it could not be saved to a file)")
 
@@ -1564,8 +1612,8 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
                         break
                     continue
                 except LocalmError as e:
-                    # A failed send must never look like success - say WHERE it
-                    # failed, keep the file, and offer to retry creating the issue.
+                    # A failed send must never look like success - say WHERE it failed
+                    # (rule 5), keep the file, and offer to retry creating the issue.
                     console.print(f"[yellow]Could not send it.[/yellow] {e.hint or e.reason}")
                     console.print(f"[dim]The report is saved at {where}.[/dim]")
                     if attempt >= 3:
@@ -1593,10 +1641,10 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
 # --------------------------------------------------------------------------- #
 #  Process-wide net: catch a bug ANYWHERE, not just in a CLI command           #
 #                                                                              #
-#  Bugs are not confined to setup. These hooks route every Python-level       #
-#  failure - a crash in a background thread (model preload, the jobs runner,   #
-#  the coder loop), or an uncaught main-thread exception - through the same    #
-#  "sorry X for Y" + report path.                                              #
+#  Bugs are not confined to setup. A crash in a background thread (model       #
+#  preload, the jobs runner, the coder loop) used to die silently; an uncaught #
+#  main-thread exception used to dump a raw traceback. These hooks make every  #
+#  Python-level failure route through the same "sorry X for Y" + report path.  #
 #                                                                              #
 #  Honest limit: this catches PYTHON exceptions. A native crash inside         #
 #  llama.dll (segfault), an OS OOM-kill, or os._exit cannot be caught in-       #
@@ -1625,9 +1673,9 @@ def _handle_main_exception(exc_type, exc, tb) -> None:
 
 
 def _handle_thread_exception(args) -> None:
-    """threading.excepthook: a crash in a background thread would otherwise
-    vanish. Log it and save a report (never prompt - a worker thread has no user
-    attention), so a failure is visible without taking the whole app down."""
+    """threading.excepthook: a crash in a background thread used to vanish. Log it
+    and save a report (never prompt - a worker thread has no user attention), so a
+    failure is visible without taking the whole app down."""
     exc = getattr(args, "exc_value", None)
     if exc is None or isinstance(exc, SystemExit):
         return
@@ -1664,7 +1712,7 @@ def install_global_handlers(force: bool = False) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-#  asyncio + native-crash net: "fire the bug reporter no matter what"         #
+#  asyncio + native-crash net (SRV-3): "fire the bug reporter no matter what"  #
 #                                                                              #
 #  The excepthooks above cover the main thread and background threads, but two #
 #  failure modes still escaped: (1) an uncaught exception inside an asyncio    #
@@ -1721,14 +1769,17 @@ def _crash_dir(home=None):
 # Running more than one localm server against the SAME LOCALM_HOME is a
 # first-class, supported scenario (`localm ps` lists "running localm servers
 # (per-directory instances)"; `serve --project/--new/--isolated`; the coder
-# plugin self-starting its own backing server). The marker, and its companion
-# native-fault-trace file, is therefore scoped per instance_id - the same
-# per-process identity instances.py's own registry uses
-# (``run/<instance_id>.json``) - so each running instance only ever arms,
-# reports, and disarms its OWN file. One unscoped file per home would let a
-# second instance read the FIRST instance's still-armed marker as "the previous
-# run died hard", and its own later clean-shutdown disarm would then delete
-# whatever marker existed by that point.
+# plugin self-starting its own backing server). The marker used to be one
+# unscoped file per home, so a second instance starting up would find the
+# FIRST instance's still-armed marker, misread it as "the previous run died
+# hard", and file a spurious crash report about a server that was never down -
+# and its own later clean-shutdown disarm would then delete whatever marker
+# existed at that point, which could by then belong to a THIRD, still-live
+# instance, silencing a real crash of that instance forever. Scoping the
+# marker (and its companion native-fault-trace file) per instance_id - the
+# same per-process identity instances.py's own registry already uses for
+# exactly this reason (``run/<instance_id>.json``) - means each running
+# instance only ever arms, reports, and disarms its OWN file.
 
 
 def _crash_marker_path(d, instance_id: Optional[str]):
@@ -1773,8 +1824,8 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
     """Mark that a server run is in progress and enable faulthandler so a native
     fault leaves a trace. If the process dies hard the marker survives;
     check_and_report_prior_crash() reports it on the next start. *instance_id*
-    (``app.state.instance_id``, set by instances.advertise() ahead of this
-    call) scopes the marker to THIS running instance so a sibling instance
+    (``app.state.instance_id``, set by instances.advertise() before this is
+    called) scopes the marker to THIS running instance so a sibling instance
     sharing the same LOCALM_HOME is never mistaken for a crash - see the module
     note above. Returns True if armed. Fully guarded - never raises into the
     caller."""
@@ -1793,17 +1844,21 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
                 # enable() can return without raising yet still not actually be
                 # armed on some platforms/file-object shapes - is_enabled() is
                 # the one call that tells the truth, not "no exception was
-                # raised". A failure to arm is surfaced rather than silent, so
-                # an empty native-trace file is diagnosable.
+                # raised". Surfacing this (rule 5) is the whole point of
+                # NEW-CRASH-NOTICE-USELESS's (A): every native-trace file on the
+                # maintainer's box was 0 bytes across 4 instances, and this was
+                # previously silent either way.
                 logger.warning(
                     "bugreport: faulthandler.enable() returned without raising "
                     "but is_enabled() is False - a native crash will produce no "
                     "trace this run")
         except Exception as e:
-            # Arming must not fail over this: the crash marker below is still
-            # written, so a hard death is still reported next start - just
-            # without the native traceback. Logged rather than swallowed, so an
-            # empty trace file is diagnosable.
+            # Arming must not fail over this: we still write the crash marker
+            # below, so a hard death is still reported next start - just
+            # without the native traceback. But a silent `except: pass` here
+            # is exactly why every trace file on record is 0 bytes with no clue
+            # why - log it so a future empty trace is diagnosable instead of a
+            # repeat mystery.
             logger.warning(
                 "bugreport: faulthandler could not attach (%s: %s) - a native "
                 "crash this run will produce no trace", type(e).__name__, e)
@@ -1844,13 +1899,14 @@ def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
 
 # A native/ggml status line printed via raw fprintf (no "TIMESTAMP LEVEL NAME:"
 # prefix - see debuglog.py's dedup_native_stderr) - the vocabulary a hard native
-# crash mid-load/mid-generate is seen stopping inside, e.g. a log stopping dead
-# at "llama_co" during "llama_context: constructing llama_context".
+# crash mid-load/mid-generate is actually seen stopping inside, e.g. the
+# 2026-07-26 incident's log stopping dead at "llama_co" during
+# "llama_context: constructing llama_context".
 _NATIVE_OP_LINE_RE = re.compile(
     r'^(llama_|ggml_|graph_reserve|sched_reserve|load_tensors|load_all_data|create_tensor)')
 
-# How much of the raw log tail to read for the truncation check below - small,
-# because this only needs the last line, not a digest.
+# How much of the raw log tail to read for the truncation check below - small
+# on purpose, this only needs the last line, not a digest.
 _TRUNCATION_CHECK_READ_BYTES = 4000
 
 
@@ -1884,14 +1940,16 @@ def _raw_tail_truncation_signal(home=None, pid=None) -> "tuple[bool, str]":
 def _classify_prior_death(*, native_trace: str, hang_trace: str,
                           raw_tail_truncated: bool,
                           raw_tail_last_line: str) -> "tuple[str, str]":
-    """(summary, reason) for report_failure(), classified from the evidence
-    actually collected. Pure function (no I/O) so the classification logic is
-    directly unit-testable without real marker/log/trace files.
+    """(summary, reason) for report_failure(), classified from evidence
+    actually collected - never the old blind 3-way guess when something more
+    specific is available. Pure function (no I/O) so the classification logic
+    is directly unit-testable without real marker/log/trace files.
 
     Ordered by how direct the evidence is: a captured native trace beats an
     inferred mid-operation cutoff beats a captured hang, and only when NONE of
-    those fired does it fall back to naming the remaining ambiguity (an OS kill
-    or force-closed window leaves no trace at all)."""
+    those fired do we fall back to naming the genuine remaining ambiguity
+    (an OS kill / force-closed window legitimately leaves no trace at all -
+    NEW-CRASH-NOTICE-USELESS (A)'s own note)."""
     if native_trace.strip():
         first_line = next(
             (ln.strip() for ln in native_trace.strip().splitlines() if ln.strip()), "")
@@ -1948,7 +2006,7 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
         try:
             if pid_alive(int(pid)):
                 # The recorded pid is still running: this is a SIBLING instance
-                # that is simply still up, not a crash. Leave
+                # that is simply still up, not a crash (SRV-3 follow-up). Leave
                 # its marker alone - its own eventual disarm (clean exit) or a
                 # future check here (real crash) will handle it correctly. PID
                 # reuse is an accepted residual risk here, same as elsewhere in
@@ -1979,9 +2037,10 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
         # Delete the trace WITH its marker, now that its content (if any) has
         # been folded into ctx below - otherwise it survives forever: nothing
         # else ever removes a server-crash-trace.<instance_id>.txt, so run/
-        # would accumulate one per instance that has EVER armed, permanently.
-        # Best-effort, same as the marker unlink above - a failure here must not
-        # block or duplicate the report.
+        # accumulates one per instance that has EVER armed, permanently
+        # (NEW-CRASH-NOTICE-USELESS D; 4 already present on the maintainer's
+        # box, all 0 bytes). Best-effort, same as the marker unlink above -
+        # a failure here must not block or duplicate the report.
         try:
             tp.unlink(missing_ok=True)
         except Exception:
@@ -1995,9 +2054,9 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
         if tail:
             ctx["recent_log_tail"] = tail
         elif log_unavailable:
-            # A crash report with no native trace and no log is contentless;
-            # saying WHY the log is missing is the difference between an
-            # actionable report and a dead end.
+            # A crash report with no native trace and no log is the contentless
+            # case BUG-1 was about; saying WHY the log is missing is the
+            # difference between an actionable report and a dead end.
             ctx["log_unavailable"] = log_unavailable
         # If the watchdog captured a freeze before the run was force-killed, attach
         # its stacks too: a hang the user force-quit is exactly this recovery path.
@@ -2006,9 +2065,10 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
         hang = _recent_hang_traces(home, pid=info.get("pid"))
         if hang:
             ctx["hang_traces"] = hang
-        # Classify the death from the evidence actually collected, rather than
-        # naming all three possibilities ("a native crash, an OS kill, or a
-        # force-closed window") without saying which.
+        # NEW-CRASH-NOTICE-USELESS (A): classify the death from the evidence
+        # actually collected instead of a blind 3-way guess ("a native crash,
+        # an OS kill, or a force-closed window") that never said which and
+        # never named what was in flight.
         raw_truncated, raw_last_line = _raw_tail_truncation_signal(
             home, pid=info.get("pid"))
         summary, reason = _classify_prior_death(

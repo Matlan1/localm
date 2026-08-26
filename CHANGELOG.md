@@ -33,8 +33,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   generate draft tokens via a dedicated MTP draft context and verify them in
   batches on the main model graph, speeding up generation without requiring a
   separate draft model (structured or tool-calling replies generate one token
-  at a time instead). Configurable via `mtp_enabled` (default true) with
-  seamless fallback to standard autoregressive decoding on standard models.
+  at a time instead). It engages only where the runtime can genuinely build an
+  MTP draft head: a model that merely carries next-n metadata, one whose cache
+  cannot roll back a rejected draft, and a conversation that outgrows the draft
+  context all fall back to ordinary autoregressive decoding, with the reason
+  recorded in the debug log.
+
+  `mtp_enabled` **defaults to off.** The draft head is not yet fed the hidden
+  state it predicts from, so it sees only the token embedding: on a real MTP
+  model fewer than one draft in ten was accepted, which does not repay the extra
+  work each token costs. The setting is there for anyone who wants to try it on
+  their own model, and the default will change once the head is driven properly.
 - **A collection's individual documents can now be listed and removed from the
   terminal.** `localm rag docs NAME` shows each indexed document with its chunk
   count and whether its source file has since gone missing or was added via an
@@ -469,6 +478,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **A remote image a reply links to no longer disappears without explanation.**
+  Showing remote images is off by default, and several other things can stop one
+  loading: the host is not on your Allowed domains list, it is unreachable, the
+  file is too big, or it is not an image. All of those used to look identical -
+  the picture simply was not there, and when the model wrote no caption there was
+  nothing on screen at all to say one had been meant. A short note now takes its
+  place and says which of those happened, so a setting you can change is not
+  mistaken for a broken link. The Allowed domains list is also now mentioned in
+  the remote-images setting itself.
 - **Your sampling settings now apply to every token on a multi-token-prediction
   model.** These models predict a token ahead and check the guess against the
   main model. That check ignored the temperature, top-k, top-p and repetition

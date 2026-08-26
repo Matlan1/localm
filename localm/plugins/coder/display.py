@@ -14,8 +14,26 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.text import Text
 
 console = Console(highlight=False)
+
+_ESC = "\x1b"
+
+
+def _strip_esc(s: str) -> str:
+    """Remove raw ANSI escape bytes so externally-controlled text (model
+    output, tool args/results, an exception message) can never carry a
+    terminal control sequence (e.g. a screen clear) to the user."""
+    return s.replace(_ESC, "") if _ESC in s else s
+
+
+def _sanitized_text(s: str, *, style: str | None = None) -> Text:
+    """Externally-controlled text wrapped so Rich can never parse it as
+    markup (an unmatched tag - a leaked ``[/INST]`` control token, ``[/b]``,
+    a markdown link's ``[label]`` - raises MarkupError from a plain
+    console.print) and so a raw ANSI escape cannot reach the terminal."""
+    return Text(_strip_esc(s), style=style)
 
 
 # ---------------------------------------------------------------------------
@@ -51,36 +69,58 @@ def print_banner(
 # ---------------------------------------------------------------------------
 
 def print_tool_call(tool_name: str, args: dict, index: int = 0) -> None:
-    args_text = ", ".join(
-        f"[cyan]{k}[/cyan]=[dim]{repr(str(v)[:60])}[/dim]"
-        for k, v in args.items()
-        if k not in ("content",)   # don't show full file contents inline
-    )
-    # Show content length instead of dumping it
+    # A tool's name and its argument values/keys can all carry text a model
+    # generated (an MCP tool's own name, a hostile path/command argument) -
+    # composed via Text so none of it is ever parsed as Rich markup.
+    line = Text("  ")
+    line.append("● ", style="bold yellow")
+    line.append(_strip_esc(tool_name), style="bold")
+    line.append("(")
+    first = True
+    for k, v in args.items():
+        if k == "content":   # don't show full file contents inline
+            continue
+        if not first:
+            line.append(", ")
+        first = False
+        line.append(_strip_esc(k), style="cyan")
+        line.append("=")
+        line.append(_strip_esc(repr(str(v)[:60])), style="dim")
     if "content" in args:
+        # Show content length instead of dumping it
         n = len(args["content"].splitlines())
-        args_text += f", [cyan]content[/cyan]=[dim]<{n} lines>[/dim]"
-
-    console.print(f"  [bold yellow]●[/bold yellow] [bold]{tool_name}[/bold]({args_text})")
+        if not first:
+            line.append(", ")
+        line.append("content", style="cyan")
+        line.append(f"=<{n} lines>", style="dim")
+    line.append(")")
+    console.print(line)
 
 
 def print_tool_result(tool_name: str, result, verbose: bool = False) -> None:
     """Print the one-line summary, optionally expanding the full output."""
-    icon  = "[green]✓[/green]" if result.ok else "[red]✗[/red]"
-    trunc = " [dim](truncated)[/dim]" if result.truncated else ""
-    console.print(f"    {icon} [dim]{result.summary}{trunc}[/dim]")
+    icon, icon_style = ("✓", "green") if result.ok else ("✗", "red")
+    trunc = " (truncated)" if result.truncated else ""
+    line = Text("    ")
+    line.append(icon + " ", style=icon_style)
+    line.append(_strip_esc(result.summary + trunc), style="dim")
+    console.print(line)
 
     if verbose and result.ok and result.output:
         # Collapse tool result behind a divider for readability
-        console.print(f"    [dim]{'─' * 60}[/dim]")
-        for line in result.output.splitlines()[:40]:
-            console.print(f"    [dim]{line}[/dim]")
+        console.print(_sanitized_text("    " + "─" * 60, style="dim"))
+        for out_line in result.output.splitlines()[:40]:
+            console.print(_sanitized_text("    " + out_line, style="dim"))
         if len(result.output.splitlines()) > 40:
-            console.print("    [dim]... (use /verbose to see full output)[/dim]")
+            console.print(_sanitized_text(
+                "    ... (use /verbose to see full output)", style="dim"))
 
 
 def print_tool_error(tool_name: str, message: str) -> None:
-    console.print(f"    [red]✗[/red] [dim]{tool_name}: {message}[/dim]")
+    line = Text("    ")
+    line.append("✗ ", style="red")
+    line.append(_strip_esc(f"{tool_name}: {message}"), style="dim")
+    console.print(line)
 
 
 # ---------------------------------------------------------------------------
@@ -106,21 +146,26 @@ def print_assistant_response(text: str, name: str = "Agent") -> None:
             return
         except Exception:
             pass
-    console.print(text)
+    console.print(_sanitized_text(text))
 
 
 def print_streaming_token(token: str) -> None:
-    # Append-only streaming with end="" - styling escapes only, never cursor
-    # repositioning / alt-screen / a Live region. The terminal owns scrolling, so
-    # scrolling up mid-stream pauses auto-follow natively; the viewport is never
-    # re-pinned.
-    console.print(token, end="", highlight=False)
+    # R31 (CLI half): append-only streaming with end="" - styling escapes only, never
+    # cursor repositioning / alt-screen / a Live region. The terminal owns scrolling,
+    # so scrolling up mid-stream pauses auto-follow natively (the CLI analogue of the
+    # GUI's chat.stick latch; no latch needed because we never re-pin the viewport).
+    # Guarded by tests/test_cli_stream_scroll.py.
+    #
+    # Model-generated text; an unmatched closing tag raises MarkupError from a
+    # plain console.print. See test_streaming_token_survives_a_leaked_control_token.
+    console.print(_sanitized_text(token), end="", highlight=False)
 
 
 def print_reasoning_token(token: str) -> None:
     """Stream a thinking model's reasoning dimmed, so it reads as an aside next
-    to the visible answer. Mirrors the chat REPL's ``_ThinkPrinter`` styling."""
-    console.print(token, end="", style="dim", highlight=False)
+    to the visible answer rather than being indistinguishable from it (H4,
+    AUD-HIGH-17-3) - mirrors the chat REPL's ``_ThinkPrinter`` styling."""
+    console.print(_sanitized_text(token, style="dim"), end="", highlight=False)
 
 
 def print_streaming_done() -> None:
@@ -151,19 +196,23 @@ def print_turn_divider(turn: int, total_tokens: int = 0, turn_tokens: int = 0,
 # ---------------------------------------------------------------------------
 
 def print_info(msg: str) -> None:
-    console.print(f"[dim]{msg}[/dim]")
+    console.print(_sanitized_text(msg, style="dim"))
 
 
 def print_warning(msg: str) -> None:
-    console.print(f"[yellow]{msg}[/yellow]")
+    console.print(_sanitized_text(msg, style="yellow"))
 
 
 def print_error(msg: str) -> None:
-    console.print(f"[red]{msg}[/red]")
+    # msg often embeds an exception's own text (repl.py's "Agent error: {e}"),
+    # which can itself carry the very content that raised - printed unsafely,
+    # this handler would raise on its own message. See
+    # test_print_error_survives_a_message_that_would_itself_crash_markup.
+    console.print(_sanitized_text(msg, style="red"))
 
 
 def print_success(msg: str) -> None:
-    console.print(f"[green]{msg}[/green]")
+    console.print(_sanitized_text(msg, style="green"))
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +231,7 @@ def print_server_timeout(stderr_tail: str = "") -> None:
     msg = "Server did not start in time. Is localm installed?"
     if stderr_tail:
         msg += f"\n{stderr_tail}"
-    console.print(f"[red]{msg}[/red]")
+    console.print(_sanitized_text(msg, style="red"))
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +283,12 @@ def print_diff_preview(
 def confirm_diff(path_label: str) -> bool:
     """Prompt 'Apply changes to <path>? [y/N]' and return True on yes."""
     try:
-        prompt = f"Apply changes to [bold]{path_label}[/bold]? [y/N] "
-        answer = console.input(f"[yellow]{prompt}[/yellow]").strip().lower()
+        # path_label names a file the model chose to write to, so it is
+        # composed via Text rather than embedded in a markup string.
+        prompt = Text("Apply changes to ", style="yellow")
+        prompt.append(_strip_esc(path_label), style="bold yellow")
+        prompt.append("? [y/N] ", style="yellow")
+        answer = console.input(prompt).strip().lower()
         return answer in ("y", "yes")
     except (KeyboardInterrupt, EOFError):
         return False
@@ -247,7 +300,8 @@ def confirm_diff(path_label: str) -> bool:
 
 def confirm(prompt: str) -> bool:
     try:
-        answer = console.input(f"[yellow]{prompt} [y/N][/yellow] ").strip().lower()
+        line = _sanitized_text(f"{prompt} [y/N] ", style="yellow")
+        answer = console.input(line).strip().lower()
         return answer in ("y", "yes")
     except (KeyboardInterrupt, EOFError):
         return False

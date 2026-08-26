@@ -90,6 +90,10 @@ _CONTENT_MARKER_RES = (
     # "jobs web tool: %s %s" (tool name plus the model-derived args dict); the
     # privacy-mode sibling logs the tool name alone. Matched structurally.
     re.compile(r"\bjobs web tool: \S+ \{"),
+    # http_server.py's _log_assembled_prompt(): "assembled chat prompt (%d
+    # message(s)):\n%s" - the count is on the header line, the messages ride
+    # in as continuation lines below it.
+    re.compile(r"assembled chat prompt \(\d+ message\(s\)\):\s*$"),
 )
 
 
