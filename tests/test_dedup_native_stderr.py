@@ -174,63 +174,35 @@ def test_persisted_write_failure_warns_once_and_keeps_ring_buffer(monkeypatch, c
             real_os_write(2, b"native-line-alpha\n")
             real_os_write(2, b"native-line-beta\n")   # second failure must NOT re-warn
 
-    # both distinct lines survived to the ring buffer despite the write failures
-    tail = "\n".join(debuglog.recent_activity()[before:])
-    assert "native-line-alpha" in tail
-    assert "native-line-beta" in tail
-    # exactly ONE latched warning about the persisted-log write failure
-    warns = [r for r in caplog.records
-             if r.levelno >= logging.WARNING and "persisted debug log" in r.getMessage()]
+    # Both distinct lines survive to the ring buffer despite the write
+    # failures, but only once the reader has actually drained the pipe - the
+    # join above does not guarantee that finished before this line runs (see
+    # test_teardown_survives_a_slow_reader_thread), so poll for it instead of
+    # asserting the instant the context exits.
+    deadline = time.monotonic() + 15.0
+    lines = ("native-line-alpha", "native-line-beta")
+    while time.monotonic() < deadline:
+        tail = "\n".join(debuglog.recent_activity()[before:])
+        if all(line in tail for line in lines):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"lines never reached the ring buffer "
+                     f"(saw: {debuglog.recent_activity()[before:]!r})")
+
+    # exactly ONE latched warning about the persisted-log write failure -
+    # also polled: the reader logs it as part of the same drain being waited
+    # for above, not necessarily before the loop above observed completion.
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        warns = [r for r in caplog.records
+                 if r.levelno >= logging.WARNING and "persisted debug log" in r.getMessage()]
+        if warns:
+            break
+        time.sleep(0.05)
     assert len(warns) == 1, (
         f"expected exactly one latched warning, got {len(warns)}: "
         f"{[w.getMessage() for w in warns]}")
-
-
-def test_diagnose_ci_reader_thread_starvation(monkeypatch):
-    """TEMPORARY diagnostic, not a permanent regression test - packs a full
-    timeline into its own failure message so it is visible directly in CI's
-    short-test-summary output without needing to grep captured stdout.
-    Always fails. Remove once the CI-only starvation mechanism is
-    understood and the real fix is decided."""
-    import threading
-
-    feed_calls = []
-    real_feed = debuglog._LineGrouper.feed
-
-    def logging_feed(self, line):
-        feed_calls.append((time.monotonic(), line))
-        return real_feed(self, line)
-
-    monkeypatch.setattr(debuglog._LineGrouper, "feed", logging_feed)
-    monkeypatch.setattr(debuglog, "_READER_JOIN_TIMEOUT", 1.0)
-
-    t0 = time.monotonic()
-    with debuglog.dedup_native_stderr():
-        os.write(2, b"diag-line\n")
-    t_exit = time.monotonic()
-
-    reader_threads_at_exit = [t for t in threading.enumerate() if t.name == "native-stderr-dedup"]
-    alive_at_exit = [t.is_alive() for t in reader_threads_at_exit]
-
-    deadline = time.monotonic() + 45.0
-    while time.monotonic() < deadline and not feed_calls:
-        time.sleep(1.0)
-    total_wait = time.monotonic() - t_exit
-
-    final_reader_threads = [t for t in threading.enumerate() if t.name == "native-stderr-dedup"]
-    final_alive = [t.is_alive() for t in final_reader_threads]
-    timeline = [(round(t - t_exit, 2), line) for t, line in feed_calls]
-
-    pytest.fail(
-        f"DIAGNOSTIC (not a real regression, remove after triage): "
-        f"context-enter-to-exit={t_exit - t0:.3f}s (join timeout was 1.0s); "
-        f"reader threads registered at exit={len(reader_threads_at_exit)}, "
-        f"alive at exit={alive_at_exit}; "
-        f"total wait for first feed() call after exit={total_wait:.2f}s "
-        f"(capped at 45s); feed() call timeline (seconds after exit, line)="
-        f"{timeline}; reader threads at end={len(final_reader_threads)}, "
-        f"still alive at end={final_alive}"
-    )
 
 
 def test_teardown_survives_a_slow_reader_thread(monkeypatch, caplog):
@@ -240,11 +212,16 @@ def test_teardown_survives_a_slow_reader_thread(monkeypatch, caplog):
     logged, not silent, since a caller checking recent_activity() right after
     the context exits would otherwise see an incomplete view with no signal
     that anything was still in flight."""
-    monkeypatch.setattr(debuglog, "_READER_JOIN_TIMEOUT", 0.05)
+    # 0.4s timeout against a reader doing >=0.9s of deliberately slowed work
+    # (0.3s/line x3): a wide margin over any real CI scheduling jitter, so
+    # this reliably exercises "still mid-drain when the join times out"
+    # without depending on sub-100ms thread-scheduling latency from a
+    # shared CI runner.
+    monkeypatch.setattr(debuglog, "_READER_JOIN_TIMEOUT", 0.4)
     real_feed = debuglog._LineGrouper.feed
 
     def slow_feed(self, line):
-        time.sleep(0.03)
+        time.sleep(0.3)
         return real_feed(self, line)
 
     monkeypatch.setattr(debuglog._LineGrouper, "feed", slow_feed)
@@ -262,7 +239,7 @@ def test_teardown_survives_a_slow_reader_thread(monkeypatch, caplog):
         f"expected exactly one reader-timeout warning, got {len(warns)}: "
         f"{[w.getMessage() for w in warns]}")
 
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + 15.0
     lines = ("slow-line-one", "slow-line-two", "slow-line-three")
     while time.monotonic() < deadline:
         tail = "\n".join(debuglog.recent_activity()[before:])
