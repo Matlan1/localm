@@ -237,7 +237,7 @@ def test_split_load_uses_both_native_devices(vulkan_split_model_path, monkeypatc
             f"configured gpu_split_ratios={ratios} asked for ~90% of layers "
             f"on device {indices[0]}, but it actually got {dev0_count}/"
             f"{len(layer_devices)} ({dev0_share:.0%}) - the configured ratio "
-            f"was not honored. This is GPU-SPLIT-VKINDEX (issues/issues.txt): "
+            f"was not honored. This is GPU-SPLIT-VKINDEX: "
             f"apply_gpu_split() silently dropped the configured split because "
             f"list_gpus() (CUDA/HIP/nvidia-smi only) does not recognize the "
             f"native Vulkan device index, and llama.cpp's own unrelated "
