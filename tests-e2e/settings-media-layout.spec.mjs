@@ -11,6 +11,26 @@ function rectsOverlap(a, b) {
     && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
+// The container's OWN boundingBox() does not grow to cover an overflowing
+// child (overflow: visible content is drawn outside the box but does not
+// enlarge it), so a container-only check misses overflow-based overlap. This
+// takes the envelope of every descendant instead, matching what a user
+// actually sees on screen.
+async function visualFootprint(locator) {
+  return await locator.evaluate((el) => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of [el, ...el.querySelectorAll("*")]) {
+      const r = n.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      minX = Math.min(minX, r.left);
+      minY = Math.min(minY, r.top);
+      maxX = Math.max(maxX, r.right);
+      maxY = Math.max(maxY, r.bottom);
+    }
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  });
+}
+
 test("Media settings subsections do not overlap", async ({ page }) => {
   const pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(String(e.message || e)));
@@ -25,7 +45,7 @@ test("Media settings subsections do not overlap", async ({ page }) => {
 
   const boxes = [];
   for (const sub of await subs.all()) {
-    const box = await sub.boundingBox();
+    const box = await visualFootprint(sub);
     expect(box, "each media subsection must have a real layout box").not.toBeNull();
     boxes.push(box);
   }
