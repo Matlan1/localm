@@ -92,6 +92,24 @@ class GgufWorker(VramSizingMixin):
         Read by the runner's dispatch loop for the "done" envelope."""
         return self._llm.chat_template_fallback_reason if self._llm is not None else None
 
+    @property
+    def mtp_status(self) -> Optional[str]:
+        """Why speculation is or is not running, as a short token.
+
+        Live rather than sticky: the child can turn speculation off after the
+        load that reported it (a conversation outgrowing the draft context, a
+        failed draft decode), so the load response alone goes stale. Read by the
+        runner's dispatch loop for the "done" envelope."""
+        return getattr(self._llm, "mtp_status", None) if self._llm is not None else None
+
+    @property
+    def mtp_active_this_call(self) -> bool:
+        """Whether the call that just finished actually speculated.
+
+        A model can speculate on its text turns and never on a turn carrying an
+        image, so this is per-call where mtp_status is per-model."""
+        return bool(getattr(self._llm, "mtp_active_this_call", False)) if self._llm is not None else False
+
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",

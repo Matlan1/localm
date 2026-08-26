@@ -826,6 +826,7 @@ class LlamaCpp:
     _mtp_usable = True
     _mtp_ctx_capacity = 0        # the draft context's own n_ctx, 0 until created
     _mtp_wants_h = False         # True once both contexts expose the next-n state
+    mtp_active_this_call = False # whether THIS generation actually speculated
     _pending_h = None            # the hidden state the next draft will read
     _h_buf = None                # reusable copy target for it
     _n_embd = 0
@@ -1518,6 +1519,7 @@ class LlamaCpp:
                     else None
                 )
 
+                self.mtp_active_this_call = draft_sampler is not None
                 pos = n_prompt
                 # Why generation ended, read by callers as self.last_finish_reason.
                 # Default "stop" - it must cover every early exit (EOG token, a
@@ -1856,6 +1858,11 @@ class LlamaCpp:
                 raise RuntimeError("vision is not available on this model")
 
             from localm.debuglog import logger
+            # An image turn never speculates: this loop has no draft context, and
+            # upstream's own driver skips vision batches for the same reason - the
+            # draft head reads its hidden state from a batch's embd slot and image
+            # embeddings arrive in that same slot.
+            self.mtp_active_this_call = False
             logger.info("gguf generate (vision): prefill starting")
             _t0 = time.monotonic()
             tokens_generated = 0
