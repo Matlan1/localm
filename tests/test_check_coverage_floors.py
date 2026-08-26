@@ -45,7 +45,7 @@ class TestCheckFloors:
         assert ccf.check_floors(report, floors) == []
 
     def test_fails_when_a_module_is_below_its_floor(self):
-        """NEGATIVE: this is the fires-control case - a real drop must be caught."""
+        """NEGATIVE: a real drop must be caught."""
         floors = {"localm/a.py": 90}
         report = {"files": {"localm/a.py": _entry(85.5)}}
         problems = ccf.check_floors(report, floors)
@@ -71,13 +71,13 @@ class TestCheckFloors:
         assert "not present" in problems[0]
 
     def test_windows_backslash_keys_are_matched_not_reported_missing(self):
-        """REGRESSION (found live, 2026-07-29): coverage.json's file keys are the
-        file_reporter's relative_filename(), which uses the HOST's native path
-        separator. A real Windows --cov run produces keys like
-        'localm\\\\pathsafe.py' (backslash), not the forward slash
-        _MODULE_FLOORS uses. Before this was fixed, every floored module read as
-        "not present" on the one platform this check actually runs on - a gate
-        that LOOKS like it is checking coverage while actually checking nothing."""
+        """coverage.json's file keys come from the file_reporter's
+        relative_filename(), which uses the HOST's native path separator. A real
+        Windows --cov run produces backslash-separated keys, not the forward
+        slash _MODULE_FLOORS uses, so an unnormalised comparison reads every
+        floored module as "not present" on the one platform this check actually
+        runs on - a gate that LOOKS like it is checking coverage while checking
+        nothing."""
         floors = {"localm/pathsafe.py": 90}
         report = {"files": {"localm\\pathsafe.py": _entry(95.0)}}
         assert ccf.check_floors(report, floors) == []
@@ -90,15 +90,12 @@ class TestCheckFloors:
 
     def test_real_module_floors_pass_against_their_own_measured_baseline(self):
         """Each shipped floor is one point below the ACTUAL value from a real
-        --cov run on merged master (1fa3af2c, 2026-07-29, Windows, FROM A
-        WORKTREE) - see the module docstring for why a rounded display integer
-        is not safe to floor against directly (netpolicy and portmux both would
-        have failed on day one against their rounded figures), and why the
-        measurement must come from a worktree rather than the main checkout
-        (config.py branches on the gitignored `home/`, and reads ~2.5 points
-        lower where it exists). Feeding that exact real baseline back in must
-        pass - proves the shipped dict is internally consistent with its own
-        rationale, not just with a rounded approximation of it."""
+        --cov run on merged master, taken from a worktree: a rounded display
+        integer is not safe to floor against directly, and config.py branches on
+        the gitignored `home/` and reads lower wherever it exists. Feeding that
+        exact baseline back in must pass, which proves the shipped dict is
+        internally consistent with its own convention rather than with a rounded
+        approximation of it."""
         baseline = {
             "localm/bindhost.py": 100.0,
             "localm/scopes.py": 100.0,
@@ -114,10 +111,10 @@ class TestCheckFloors:
 
     def test_every_shipped_floor_is_one_point_below_its_measured_baseline(self):
         """The CONVENTION itself, asserted as arithmetic rather than trusted to
-        stay true by hand. Without this, someone can bump a floor to a rounded
-        display integer (the mistake that would have failed CI on day one) or
-        leave one far below its module's real value (the portmux stranding),
-        and every other test here still passes.
+        stay true by hand: every floor is one point below its measured
+        baseline. Without this, a floor can be bumped to a rounded display
+        integer, or left far below its module's real value, and every other
+        test here still passes.
 
         bindhost/scopes are the documented exception: pinned AT 100 because
         coverage.py only ever displays 100 for exactly 100.0."""
@@ -170,8 +167,8 @@ class TestMain:
         assert str(len(ccf._MODULE_FLOORS)) in out
 
     def test_failing_report_exits_one_and_names_module_floor_and_actual(self, tmp_path, capsys):
-        """The failure message contract this script promises (AGENTS.md rule 5:
-        a gate must name what failed, not just that something did)."""
+        """The failure message contract this script promises: a gate must name
+        what failed, not just that something did."""
         report = {"files": {m: _entry(0.0) for m in ccf._MODULE_FLOORS}}
         p = tmp_path / "coverage.json"
         p.write_text(json.dumps(report), encoding="utf-8")
@@ -229,10 +226,9 @@ class TestReportFlag:
         assert "measured" in out and "headroom" in out
 
     def test_report_does_not_suppress_a_real_failure(self, tmp_path, capsys):
-        """THE POINT OF THE FLAG'S DESIGN. --report is additive: it prints and
-        then enforces. A reporting flag that also skipped the check would be an
-        always-green gate one CI edit away, and the green would look identical
-        to a real pass."""
+        """--report is additive: it prints and then enforces. A reporting flag
+        that also skipped the check would be an always-green gate one CI edit
+        away, and the green would look identical to a real pass."""
         p = self._write(tmp_path, {m: 0.0 for m in ccf._MODULE_FLOORS})
         rc = ccf.main(["--report", str(p)])
         captured = capsys.readouterr()
@@ -258,11 +254,10 @@ class TestReportFlag:
         assert "-> 97" in out                      # int(98.0) - 1, the bump to make
 
     def test_a_floor_at_its_intended_one_point_gap_is_not_called_stale(self, tmp_path, capsys):
-        """FIRES-CONTROL for the staleness notice: the shipped convention is
-        floor = int(measured) - 1, so an ordinary well-maintained floor sits
-        just under two points below and must NOT be flagged. Without this, a
-        notice that fired on every module would read exactly like one that
-        fired on none."""
+        """The shipped convention is floor = int(measured) - 1, so an ordinary
+        well-maintained floor sits just under two points below its module's
+        value and must NOT be flagged as stale. A notice that fired on every
+        module would read exactly like one that fired on none."""
         p = self._write(tmp_path, {m: float(f) + 1.5 for m, f in ccf._MODULE_FLOORS.items()})
         rc = ccf.main(["--report", str(p)])
         out = capsys.readouterr().out
@@ -306,11 +301,11 @@ class TestHomeDirConfounderNote:
         assert "Re-measure from a worktree" in err
 
     def test_no_note_without_a_home_dir(self, tmp_path, capsys, monkeypatch):
-        """FIRES-CONTROL: in a worktree or CI clone there is no `home/`, so a
-        config.py failure there is a REAL regression and must not be softened
-        by a hint that points at the wrong cause."""
+        """In a worktree or CI clone there is no `home/`, so a config.py failure
+        there is a REAL regression and must not be softened by a hint that
+        points at the wrong cause."""
         repo = tmp_path / "repo"
-        repo.mkdir(parents=True)            # deliberately no home/
+        repo.mkdir(parents=True)            # no home/ in this tree
         monkeypatch.setattr(ccf, "REPO", repo)
         monkeypatch.setattr(ccf, "_MODULE_FLOORS", {"localm/config.py": 83})
         p = self._cov(tmp_path, {"localm/config.py": 82.42})

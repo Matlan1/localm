@@ -1,10 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R11/R13: a client-side "Copy from <other plugin>" control prefills one media
-// subsection's shared fields from another's CURRENT in-DOM values. Prefill only
-// (no server call); the user still presses Save. It is a one-shot snapshot copy
-// with no live binding, so A->B then B->A cannot loop (R13), and a subsection
-// never offers to copy from itself.
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -45,8 +39,8 @@ function makeFetch(posts) {
 }
 
 async function render(win) {
-  // Let init.js's one-shot /api/capabilities fetch settle, then pin host access
-  // so the host-path fields (workdir etc.) render for these tests.
+  // let init.js's one-shot /api/capabilities fetch settle, then pin host access
+  // so the host-path fields render
   await new Promise((r) => setTimeout(r, 0));
   runScript(win, `caps.fsAccess = "host"; refreshSettingsPage();`);
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
@@ -68,7 +62,7 @@ test("R11: Copy-from prefills the shared fields without any server call", async 
   await render(win);
   const doc = win.document;
 
-  // Copy Image's values into Music.
+  // copy Image's values into Music
   const btn = [...sub(doc, "music").querySelectorAll(".media-copy-from")]
     .find((b) => b.dataset.from === "image");
   btn.click();
@@ -78,7 +72,7 @@ test("R11: Copy-from prefills the shared fields without any server call", async 
   assert.equal(sub(doc, "music").querySelector('input[data-key="api_url"]').value, "http://img",
     "the API URL was prefilled from Image");
   assert.equal(posts.length, 0, "prefill makes no server call - the user still Saves");
-  // image-only fields (fast_dequant) are not shared, so they are not copied in.
+  // image-only fields (fast_dequant) are not shared and are not copied in
   assert.equal(sub(doc, "music").querySelector('[data-key="fast_dequant"]'), null);
 });
 
@@ -87,17 +81,17 @@ test("R13: copy A->B then B->A does not loop or corrupt values (snapshot copy)",
   await render(win);
   const doc = win.document;
 
-  // Music starts blank. Copy Image -> Music, then Music -> Video, then Video -> Music.
+  // Music starts blank. Copy Image -> Music, then Music -> Video.
   const copy = (into, from) => [...sub(doc, into).querySelectorAll(".media-copy-from")]
     .find((b) => b.dataset.from === from).click();
   copy("music", "image");           // music.workdir = "/img"
   copy("video", "music");           // video.workdir = "/img"
-  // Change image, then copy image->music again: music tracks the new snapshot only.
+  // change image, then copy image -> music again
   sub(doc, "image").querySelector('input[data-key="workdir"]').value = "/img2";
   copy("music", "image");
   assert.equal(sub(doc, "music").querySelector('input[data-key="workdir"]').value, "/img2",
     "each copy is an independent snapshot of the source at click time");
-  // Video still holds the earlier snapshot (no live binding pulled it along).
+  // video still holds the earlier snapshot
   assert.equal(sub(doc, "video").querySelector('input[data-key="workdir"]').value, "/img",
     "no live binding - an earlier copy is unaffected by later source edits");
 });

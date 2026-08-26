@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// F5 grader follow-up: compaction archives summarised-away alternative branches
-// into conv.droppedBranches. The commit claimed this is "recoverable via
-// export", but exportConversation never read droppedBranches - a facade. This
-// verifies the export now actually emits the archived branch content, so the
-// recovery claim is backed by a real read path.
+// Compaction archives summarised-away alternative branches into
+// conv.droppedBranches; exportConversation emits their content.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
 function setActiveConv(window, conv) {
-  // `chat` is a module-scoped object, not a window property; assign into it
-  // from inside the realm (same pattern as compact.test.mjs).
+  // `chat` is module-scoped, not a window property: assign into it from inside
+  // the realm.
   runScript(window,
     `chat.conversations = [${JSON.stringify(conv)}]; chat.activeId = ${JSON.stringify(conv.id)};`);
 }

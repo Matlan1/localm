@@ -10,7 +10,7 @@ only when they actually change. The file-swap primitives live in
 ``localm/_apply_update.py``; ``apply()`` below backs up first and rolls back on a
 failed swap or post-step. The server-initiated restart (the ONLY unattended
 transition - the CLI always tells the user to relaunch by hand) is followed by a
-DETACHED post-relaunch health watchdog (LM-DA-011, ``spawn_health_watchdog()``
+DETACHED post-relaunch health watchdog (``spawn_health_watchdog()``
 below) that polls the restarted instance's own ``/whoami`` for the applied
 VERSION and automatically invokes the standalone ``scripts/rollback_update.py``
 if it never comes up healthy within its timeout. Manual recovery is still always
@@ -34,33 +34,16 @@ from localm import _version
 _ORDER = ("reboot", "deps", "runtime", "setup")
 
 # ---------------------------------------------------------------------------
-#  CHK-UPDATER-INTEGRITY (signature half): pinned release-signing key(s)
+#  Pinned release-signing public key(s)
 # ---------------------------------------------------------------------------
-# Applying an update EXTRACTS and EXECUTES the downloaded build, so authenticity
-# matters. Two layers protect it, and BOTH are on by default:
-#   - the download is HTTPS-pinned (see download(); no http downgrade) and the release
-#     channel is a PRIVATE repo behind a server-side token; AND
-#   - each release build.zip is SIGNED with the Ed25519 private key whose PUBLIC half
-#     is pinned below. apply() verifies the signature against these pinned key(s)
-#     BEFORE anything is extracted, so a build served by a COMPROMISED release channel
-#     (a leaked proxy/GitHub token, a tampered release, a same-channel checksum) is
-#     rejected: the attacker controls the build but not the pinned key.
+# Each release build.zip is signed with an Ed25519 private key whose public half
+# is pinned here. apply() verifies the signature against these keys BEFORE
+# anything is extracted. The list allows a key to be rotated in before an old one
+# is retired.
 #
-# The PRIVATE key is held by the release signer and used only to sign releases; it is
-# never in the repo, the proxy, or CI. (A compromise of the signing machine itself is
-# out of scope - at that point the whole toolchain is owned regardless.) The PUBLIC key
-# ships in source: public data an attacker cannot forge, pinned so it cannot be swapped.
-# It is a LIST so a key can be rotated in before an old one is retired.
-#
-# BEHAVIOUR (mirrors localm's auth model): with a key pinned the updater ENFORCES - a
-# missing, unsigned, malformed, or non-matching signature is refused before any swap.
-# If this tuple were ever EMPTY the updater fails OPEN (applies on transport trust) so
-# an accidentally keyless build is not bricked, but the shipped default pins a key and
-# test_updater_signature guards that it stays non-empty.
-#
-# Release flow: scripts/make_release.py -> build_release.py assembles the build.zip,
-# sign_release.py signs it with the private key, and the update proxy serves the base64
-# signature in its /update JSON (check() reads it -> apply() verifies it here).
+# With a key pinned the updater enforces: a missing, unsigned, malformed or
+# non-matching signature is refused before any swap. An EMPTY tuple fails open
+# (transport trust only).
 _UPDATE_PUBKEYS: tuple = (
     "3501b23eb1ab6ec245b5e9d9c6a70b522ca89d6250d13060a9642ce1c8868ecf",
 )
@@ -69,11 +52,8 @@ _UPDATE_PUBKEYS: tuple = (
 def _load_update_pubkeys() -> list:
     """The pinned Ed25519 public keys as verifier objects; [] when none/invalid.
 
-    A malformed pinned key is skipped (so a second, valid key still works) rather
-    than crashing the check - but if NO valid key results, verify_signature below
-    fails closed, so a bad pin can never weaken verification into a silent pass.
-    The skip is WARNED, never silent: a typo'd pin would otherwise surface as the
-    misleading "not set up" refusal (missing != corrupt, AGENTS.md rule 5)."""
+    A malformed pinned key is WARNED about and skipped, so a second, valid key
+    still works. When NO valid key results, verify_signature below fails closed."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from localm.debuglog import logger
     keys = []
@@ -92,15 +72,13 @@ def verify_signature(data: bytes, signature_b64) -> None:
     """Verify *signature_b64* (base64 Ed25519 signature) over *data* against the
     pinned public key(s), IF signing is configured.
 
-    Signature verification is OPTIONAL hardening (see _UPDATE_PUBKEYS); this mirrors
-    localm's auth model - fail-OPEN when unconfigured, enforce when configured:
+    Signature verification is OPTIONAL hardening (see _UPDATE_PUBKEYS): fail-OPEN
+    when unconfigured, enforce when configured.
 
-    - No key pinned (the default): signing is not set up, so this ALLOWS the update
-      (returns). Authenticity rests on the HTTPS-pinned transport + private release
-      channel; the self-updater must work out of the box with zero setup.
-    - A key pinned but every pin UNPARSEABLE: configured-but-broken, NOT unconfigured
-      -> FAIL CLOSED (missing != corrupt); a typo must never silently degrade into
-      "no verification".
+    - No key pinned (the default): this ALLOWS the update (returns). Authenticity
+      rests on the HTTPS-pinned transport plus the private release channel.
+    - A key pinned but every pin UNPARSEABLE: configured-but-broken, NOT
+      unconfigured -> FAIL CLOSED.
     - A key pinned and valid: REQUIRE a matching signature; a missing / malformed /
       non-matching signature refuses before any swap (a downgrade is checked
       separately, in _refuse_downgrade).
@@ -113,16 +91,12 @@ def verify_signature(data: bytes, signature_b64) -> None:
     keys = _load_update_pubkeys()
     if not keys:
         if _UPDATE_PUBKEYS:
-            # Pins ARE configured but none parses -> fail closed (missing != corrupt):
-            # a typo'd pin must not weaken verification into a silent pass.
+            # Pins ARE configured but none parses -> fail closed.
             raise LocalmError(
                 "refusing to apply an update: no pinned signing key is usable",
                 reason=f"{len(_UPDATE_PUBKEYS)} key(s) are pinned in _UPDATE_PUBKEYS "
                        "but none parses as an Ed25519 public key hex")
-        # UNCONFIGURED (no key pinned): signing is optional hardening that is not
-        # turned on, so allow the update - like auth.py with no key set. The default,
-        # documented fail-open posture (transport-trusted, not signature-verified);
-        # not a silenced failure.
+        # No key pinned: allow the update on transport trust alone.
         return
     if not signature_b64:
         raise LocalmError(
@@ -146,10 +120,8 @@ def verify_signature(data: bytes, signature_b64) -> None:
 def _refuse_downgrade(new_version: str) -> None:
     """Raise unless *new_version* is strictly newer than the running version.
 
-    Anti-rollback: a build.zip for an OLD release is still validly SIGNED, so a
-    MITM / compromised proxy could replay it to force a downgrade to a known-
-    vulnerable version. The signature proves authenticity, not freshness; this adds
-    freshness."""
+    The anti-rollback check: the signature proves authenticity, not freshness, and
+    an OLD release's build.zip is still validly signed. This adds freshness."""
     from localm.bugreport import LocalmError
     current = _version.read_version()
     if not new_version:
@@ -187,10 +159,7 @@ def repo_root() -> Path:
 def _prerelease_channel_enabled() -> bool:
     """Whether this install opted into the prerelease update channel
     (settings_schema.py's ``update_allow_prerelease``, admin_only, default
-    False - an rc build is signed and anti-rollback checked exactly like a
-    stable one, but this is still an explicit opt-in, never a default-on
-    channel). Best-effort: an unreadable config falls back to stable-only,
-    the safe direction, never to silently offering prereleases."""
+    False). Best-effort: an unreadable config falls back to stable-only."""
     try:
         from localm.config import load_config
         return bool(load_config().get("update_allow_prerelease", False))
@@ -204,17 +173,10 @@ def _net_policy_allows_update_check() -> bool:
     channel (settings_schema.py's ``update_ignore_net_policy``, admin_only,
     default False).
 
-    Same bar as model_manager/pull.py's own ``network_mode() == "off"`` gate for
-    an explicit-but-still-policy-governed network action (see netpolicy.py's
-    module docstring: explicit user actions "still respect net_mode = off so
-    one switch really does kill everything") - "ask"/"allow" need no per-call
-    confirmation here, only the literal kill switch stops it.
+    Only the literal ``net_mode = off`` kill switch stops the check; "ask" and
+    "allow" need no per-call confirmation here.
 
-    Best-effort like _prerelease_channel_enabled(): an unreadable config
-    resolves to the safe direction (blocked), matching network_mode()'s own
-    fail-closed behavior on a config-read failure (HON-2) rather than silently
-    letting a network call through that a broken config cannot actually confirm
-    was requested."""
+    Best-effort: an unreadable config resolves to blocked."""
     from localm.netpolicy import network_mode
     if network_mode() != "off":
         return True
@@ -236,15 +198,12 @@ def check(*, opener=None) -> dict:
 
     Network policy: gated on :func:`_net_policy_allows_update_check` BEFORE any
     request is built or attempted, so a blocked check never resolves DNS or
-    opens a socket - and, because it raises rather than returning a dict, it can
-    never collapse into a false "up to date" the way a swallowed exception
-    would (AGENTS.md rule 5).
+    opens a socket, and it RAISES rather than returning a dict.
 
     When the prerelease channel is opted into, appends ``?channel=prerelease`` to
     the request; the PROXY (not this client) decides which single candidate
-    release to return for that channel (see tools/bugreport-proxy/worker.js's
-    latestRelease) - is_newer() below just orders whatever ONE candidate comes
-    back against the running version, unchanged either way."""
+    release to return for that channel, and is_newer() below orders that one
+    candidate against the running version."""
     from localm import _proxy
     from localm.bugreport import LocalmError
     base, token = endpoint()
@@ -261,11 +220,8 @@ def check(*, opener=None) -> dict:
     current = _version.read_version()
     latest = data.get("version") if isinstance(data, dict) else None
     newer = bool(latest) and _version.is_newer(latest, current)
-    # Whether "not newer" above actually means anything: is_newer() silently
-    # returns False both for a genuine tie/older release AND for a tag it could
-    # not parse as a version at all (see _version.comparable's docstring). No
-    # candidate at all (latest falsy - "no releases published") is not this
-    # function's problem to flag; the caller already branches on that first.
+    # Whether "not newer" means anything: is_newer() returns False both for a
+    # genuine tie or older release and for a tag it could not parse as a version.
     comparable = (not latest) or _version.comparable(latest, current)
     return {
         "current": current,
@@ -324,11 +280,8 @@ def read_manifest(staged_dir) -> dict:
         if p.is_file():
             return _json.loads(p.read_text(encoding="utf-8")) or {}
     except Exception:
-        # Absent is handled by the is_file() guard; this path is the corrupt or
-        # unreadable manifest. Fall back to {} so classify() relies on its own
-        # tree auto-detection (the conservative default). A bad manifest can only
-        # LOSE a `needs` escalation hint, never weaken the update - the heavier
-        # action is the escalation, so the fallback is the safe direction.
+        # A corrupt or unreadable manifest; {} makes classify() rely on its own
+        # tree auto-detection.
         pass
     return {}
 
@@ -394,22 +347,17 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     import urllib.error
     import urllib.parse
     import urllib.request
-    # CHK-UPDATER-INTEGRITY (transport half): a code-update download must stay on
-    # HTTPS end to end. Refuse a non-HTTPS endpoint, and refuse a redirect that
-    # downgrades to http, so a MITM / redirect cannot serve the update in cleartext
-    # (or pivot it). Redirects that STAY https are still followed (the proxy may
-    # hand off to a release CDN). The signature half is separate and ENFORCED in
-    # apply(): verify_signature() checks the build against the pinned Ed25519 key
-    # (fail-closed) BEFORE it is extracted or run.
+    # A code-update download stays on HTTPS end to end: a non-HTTPS endpoint is
+    # refused, and so is a redirect that downgrades to http. Redirects that stay
+    # https are followed. The signature is verified separately in apply(), before
+    # the build is extracted.
     if urllib.parse.urlparse(url).scheme != "https":
         raise LocalmError("refusing a non-HTTPS update download",
                           reason="the update endpoint must be https")
 
-    # verified_urlopen (see localm/http_ssl.py): the download follows a 302 to the
-    # GitHub release CDN and verifies both hops, native cert store first, certifi
-    # as fallback. The https-only-redirect guard that used to be defined here is
-    # now http_ssl.HttpsOnlyRedirect, installed by DEFAULT for every outbound
-    # caller - this download was one of only two sites that had one.
+    # verified_urlopen follows the 302 to the GitHub release CDN and verifies both
+    # hops, native cert store first, certifi as fallback. The https-only-redirect
+    # guard is http_ssl.HttpsOnlyRedirect, installed by default.
     from localm.http_ssl import RedirectDowngradeRefused, verified_urlopen
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
@@ -426,9 +374,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     except urllib.error.HTTPError as e:
         raise LocalmError("the update download failed", reason=f"HTTP {e.code}")
     except RedirectDowngradeRefused as e:
-        # Ahead of the URLError clause below (it is a URLError subclass): a
-        # refused downgrade is a rejected attempt to serve the update in
-        # cleartext, not a network problem, and must not be reported as one.
+        # Must stay ahead of the URLError clause below, which it subclasses.
         raise LocalmError("the update download tried to downgrade to http",
                           reason=str(getattr(e, "reason", e)))
     except (urllib.error.URLError, OSError) as e:
@@ -443,8 +389,7 @@ def _updates_dir(*, create: bool = True) -> Path:
 
     ``create=False`` is for READ-ONLY probes (:func:`rollback_info`): a status poll
     must not bring an ``updates/`` tree into existence on an install that has never
-    updated. One derivation either way, so a probe and the action it describes can
-    never end up looking at different paths."""
+    updated."""
     from localm.config import home_dir
     d = home_dir() / "updates"
     if create:
@@ -452,14 +397,8 @@ def _updates_dir(*, create: bool = True) -> Path:
     return d
 
 
-# SEC-UPDATE-RACE: fallback-only threshold, used ONLY when a lock's holder PID
-# could not be determined at all (an older-format lock, or a crash in the
-# narrow window between mkdir and writing the pid file - see
-# _apply_lock_is_stale). Generous on purpose, for the same reason it always
-# was: a "runtime"-class apply re-provisions the native llama.cpp binaries
-# (post_swap_command -> setup-llama), which can legitimately take several
-# minutes on a slow connection. It is NOT the primary staleness signal - see
-# _apply_lock_is_stale for why elapsed time alone cannot be trusted for that.
+# Fallback-only threshold, used ONLY when a lock's holder PID could not be
+# determined at all. Not the primary staleness signal - see _apply_lock_is_stale.
 _APPLY_LOCK_STALE_S = 1800.0
 
 
@@ -478,25 +417,13 @@ def _apply_lock_is_stale(lock_dir: Path) -> bool:
     """Whether *lock_dir* is an ORPHAN (its holder is gone) rather than a
     legitimately long-running apply.
 
-    An apply can hold this lock for a long time on a perfectly healthy run: it
-    covers the DOWNLOAD (download() has no cap on TOTAL duration, only a
-    per-socket-operation timeout, so a large build over a slow connection can
-    legitimately take many minutes to fully arrive), and a "runtime"-class
-    post-swap step is another real download on top of that. So elapsed time
-    SINCE ACQUISITION cannot tell "still running, slowly" apart from "crashed
-    without releasing the lock" - only whether the holder process is still
-    alive can.
-
     Primary signal: the PID _apply_lock recorded at acquisition. If
     instances.pid_alive() confirms it is dead, the lock is stale regardless of
-    age - reclaimed immediately rather than waiting out a timer. If the PID is
-    alive, or pid_alive cannot tell (its own conservative default - see its
-    docstring), the lock is NOT stale no matter how long it has been held:
-    never falsely steal from a process that may still be genuinely working.
+    age. If the PID is alive, or pid_alive cannot tell (its own conservative
+    default), the lock is NOT stale no matter how long it has been held.
 
     Fallback ONLY when no PID was recorded at all: age against
-    _APPLY_LOCK_STALE_S is the last resort, since there is no liveness signal
-    to check in that case."""
+    _APPLY_LOCK_STALE_S."""
     from localm.instances import pid_alive
     pid = _lock_holder_pid(lock_dir)
     if pid is not None:
@@ -511,35 +438,23 @@ def _apply_lock_is_stale(lock_dir: Path) -> bool:
 @contextlib.contextmanager
 def _apply_lock(what: str = "update"):
     """Cross-process, cross-thread single-flight guard for :func:`apply` and
-    :func:`rollback_last`, which mutate the SAME install tree (SEC-
-    UPDATE-RACE, checkup 2026-08-11 item 7 - the only data-destroying finding in
-    that run). ``mkdir`` is atomic, the same idiom this repo's own test-slot lock
-    uses, so two concurrent callers - two browser tabs' ``POST /api/update/apply``
-    (both landing in the SAME process via ``asyncio.to_thread``), or the CLI
-    racing a live server in a SEPARATE process - cannot both proceed past this
-    point.
+    :func:`rollback_last`, which mutate the SAME install tree. ``mkdir`` is
+    atomic, so two concurrent callers - two browser tabs' ``POST
+    /api/update/apply`` (both landing in the SAME process via
+    ``asyncio.to_thread``), or the CLI racing a live server in a SEPARATE
+    process - cannot both proceed past this point.
 
-    Without a lock, a second call's OWN backup step can run AFTER the first
-    call's swap has already replaced the install, so the "pre-update" backup it
-    writes actually contains the FIRST call's NEW build, not the true original.
-    If that second call then needs to roll back, it restores the wrong state and
-    the true pre-update install is gone for good.
-
-    The SECOND caller fails FAST with a clear refusal rather than blocking: an
-    apply can legitimately run for minutes, and a caller blocked that long is
-    indistinguishable from a hang. A lock whose holder is confirmed gone (see
-    :func:`_apply_lock_is_stale`) is reclaimed rather than stranding every
-    future update forever after a crash."""
+    The SECOND caller fails FAST with a refusal rather than blocking. A lock
+    whose holder is confirmed gone (see :func:`_apply_lock_is_stale`) is
+    reclaimed."""
     import os
     lock_dir = _updates_dir() / "apply.lock"
     try:
         lock_dir.mkdir()
     except FileExistsError:
         if _apply_lock_is_stale(lock_dir):
-            # Reclaim an orphaned lock. If we lose a race to reclaim it (someone
-            # else's mkdir wins first), our own mkdir below raises FileExistsError
-            # again, and we report that exactly like a live lock - safe either way,
-            # since that means a genuinely concurrent, non-stale caller now holds it.
+            # Reclaim an orphaned lock. Losing the race to reclaim it makes our own
+            # mkdir below raise FileExistsError again, reported like a live lock.
             with contextlib.suppress(OSError):
                 shutil.rmtree(lock_dir)
         try:
@@ -549,10 +464,8 @@ def _apply_lock(what: str = "update"):
             raise LocalmError(
                 f"another {what} is already being applied",
                 reason="wait for it to finish, then try again")
-    # Record who holds it, so a future caller's staleness check can ask
-    # instances.pid_alive() instead of guessing from elapsed time. Best-effort:
-    # a failed write just means the next check falls back to age (see
-    # _apply_lock_is_stale) - never the reason this apply itself fails.
+    # Record who holds it, for a future caller's staleness check. Best-effort: a
+    # failed write means the next check falls back to age.
     try:
         (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
     except OSError:
@@ -565,12 +478,9 @@ def _apply_lock(what: str = "update"):
 
 
 def _new_run_dir() -> Path:
-    """A fresh, unique-per-call scratch directory for ONE apply() run (SEC-UPDATE-
-    RACE, defense in depth alongside :func:`_apply_lock`): the download, staging
-    extraction, and swap-time backup for this run never share a path with any
-    other run's, so even if the lock were ever bypassed, two runs cannot corrupt
-    each other's files on disk. uuid4 needs no coordination and will not collide
-    in practice."""
+    """A fresh, unique-per-call scratch directory for ONE apply() run: the
+    download, staging extraction, and swap-time backup for this run never share a
+    path with any other run's."""
     d = _updates_dir() / "runs" / uuid.uuid4().hex
     d.mkdir(parents=True)
     return d
@@ -581,16 +491,12 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
     *backup_dir* location :func:`rollback_last` reads, replacing whatever was
     there.
 
-    Called ONLY after ``swap_with_backup`` has already succeeded, i.e.
+    Must be called ONLY after ``swap_with_backup`` has already succeeded, so
     *run_backup_dir* is a complete, self-contained COPY of the pre-update install
-    (``_apply_update.backup`` copies, never moves, the live tree) - relocating an
-    already-independent copy cannot lose or corrupt it; this is not the "a backup
-    you moved data out of is not a backup" hazard, because the live install was
-    never the thing being moved.
+    (``_apply_update.backup`` copies, never moves, the live tree).
 
-    Best-effort: a failure here does not undo the update (the new build is
-    already live and correct) but IS surfaced, never silently swallowed, since it
-    degrades a later ``update --rollback`` (AGENTS.md rule 5)."""
+    Best-effort: a failure does not undo the update but IS surfaced as a warning,
+    since it degrades a later ``update --rollback``."""
     try:
         if backup_dir.exists():
             shutil.rmtree(backup_dir)
@@ -616,12 +522,8 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     Single-flight (:func:`_apply_lock`): a second concurrent call is refused
     immediately rather than racing the first. Each call also downloads, extracts,
     and takes its swap-time backup in its OWN unique scratch directory
-    (:func:`_new_run_dir`) - defense in depth alongside the lock - and, once its
-    swap has succeeded, moves that backup to the stable location
-    :func:`rollback_last` reads (:func:`_promote_backup`). Without both, a second
-    caller's "pre-update" backup could end up holding the FIRST caller's
-    already-swapped NEW build instead of the true original, making the real
-    pre-update install unrecoverable.
+    (:func:`_new_run_dir`) and, once its swap has succeeded, moves that backup to
+    the stable location :func:`rollback_last` reads (:func:`_promote_backup`).
 
     Rolls back on a swap or post-step failure (never a half-applied tree). Does NOT
     restart - the caller does (the CLI tells the user; the server re-execs). The file
@@ -643,8 +545,8 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
 
         try:
             download(asset_id, zip_path, opener=download_opener)
-            # SIGNATURE GATE - authenticity, before verify_zip/extract/swap, i.e. before
-            # any of the downloaded build's code can be extracted or executed. Fails closed.
+            # SIGNATURE GATE - runs before verify_zip/extract/swap, i.e. before any
+            # of the downloaded build's code can be extracted or executed.
             verify_signature(zip_path.read_bytes(), signature)
             au.verify_zip(zip_path)
             root = au.extract(zip_path, staging)
@@ -654,20 +556,15 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             _refuse_downgrade(new_version)
             klass = classify(root, target, read_manifest(root))
         except Exception:
-            # Nothing precious was written yet (no backup exists for this run) -
-            # safe to clean up unconditionally.
+            # No backup exists for this run yet, so the scratch dir can go.
             shutil.rmtree(run_dir, ignore_errors=True)
             raise
 
-        # A STALE applied_names.json from a PREVIOUS update would mis-describe THIS one: the
-        # updates dir persists across updates and this file is only ever overwritten below,
-        # so a failed write would leave the prior update's names and a later rollback would
-        # then remove/restore the WRONG top-level set (stranding a file THIS build dropped -
-        # silent install data loss reported as rolled_back:True). Remove it BEFORE the swap
-        # so that, once backup/ is replaced, a stale manifest can never coexist with a fresh
-        # backup: a failed write (or a crash) then degrades to the backup-dir listing
-        # (correct for pre-existing names), never to stale data. Placed AFTER download/verify/
-        # extract so an early abort there leaves the previous update's manifest intact.
+        # Remove any stale applied_names.json from a previous update before the
+        # swap, so a failed write below degrades to the backup-dir listing rather
+        # than leaving the prior update's names. Placed after
+        # download/verify/extract so an early abort leaves the previous manifest
+        # intact.
         manifest_path = updir / "applied_names.json"
         try:
             manifest_path.unlink()
@@ -678,31 +575,22 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
                         "the new one below also fails, a later rollback may use stale names",
                         manifest_path, e)
 
-        # swap_with_backup backs up to run_backup_dir FIRST, then swaps - if the swap
-        # itself fails it rolls back using run_backup_dir and re-raises. On failure we
-        # deliberately do NOT touch run_dir: its error message may point a human at
-        # run_backup_dir for manual recovery (if the rollback ALSO failed), and deleting
-        # it here would destroy the one thing that message tells them to restore from.
+        # swap_with_backup backs up to run_backup_dir first, then swaps, rolling
+        # back from it and re-raising on failure. run_dir is left in place on
+        # failure, so run_backup_dir survives for a manual recovery.
         names = au.swap_with_backup(root, target, run_backup_dir)
-        # This run's swap succeeded: promote its backup to the stable path BEFORE
-        # anything downstream (the manifest write, the post-swap command's own
-        # rollback) touches `backup_dir`, so both keep using the exact same fixed
-        # path rollback_last() expects - unchanged from before this function grew
-        # per-run scratch directories.
+        # Promote this run's backup to the stable path before the manifest write or
+        # the post-swap command's own rollback touches `backup_dir`, so both use the
+        # fixed path rollback_last() expects.
         _promote_backup(run_backup_dir, backup_dir)
         shutil.rmtree(run_dir, ignore_errors=True)   # zip/staging no longer needed
 
-        # Record the FULL swap set (including brand-new top-level entries, which the backup
-        # dir does NOT contain because they had nothing to back up) so a later manual
-        # `update --rollback` removes them too, matching the pre-apply state. Without this,
-        # rollback_last() sees only backed-up (pre-existing) names and would strand new files.
+        # Record the full swap set, including brand-new top-level entries the backup
+        # dir does not contain, so a later `update --rollback` removes them too.
         try:
             import json
             manifest_path.write_text(json.dumps(sorted(names)), encoding="utf-8")
         except OSError as e:
-            # Best-effort, but a failed write is now VISIBLE: the manifest was unlinked above,
-            # so a later rollback falls back to the backup-dir listing (correct for pre-existing
-            # names) and cannot remove brand-new top-level entries this update added. Say so.
             _apply_warn("could not record the update manifest %s: %s; a later "
                         "`update --rollback` will fall back to the backup listing and cannot "
                         "remove brand-new top-level entries this update added", manifest_path, e)
@@ -712,8 +600,8 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             run = runner or (lambda c: subprocess.run(c, cwd=str(target)).returncode)
 
             def _rollback_or_raise(why):
-                # If recovery ITSELF fails, say so loudly - never report a clean rollback
-                # over a broken install (we do not hide problems).
+                # A failure of the recovery ITSELF raises rather than reporting a
+                # clean rollback over a broken install.
                 try:
                     au.rollback(backup_dir, target, names)
                 except Exception as rb:
@@ -739,28 +627,11 @@ def _installed_backend() -> str:
     this box, read from setup_llama's on-disk marker - never re-derived from
     the current hardware-recommendation policy. Falls back to
     recommended_install_backend() only when nothing is provisioned yet (no
-    marker at all: a fresh install, or one predating the marker) - there is
-    nothing to preserve in that case, so recommending is a first-time pick,
-    not an override.
+    marker at all: a fresh install, or one predating the marker).
 
-    THIS FUNCTION USED TO CALL recommended_install_backend() UNCONDITIONALLY.
-    That was itself the fix for an earlier bug (#833: this function originally
-    read the legacy Detection.recommended field, which can only ever be
-    "vulkan" or "cpu" - see hwdetect.py). It was correct only as long as the
-    recommendation policy never changed for hardware someone was already
-    running, and it stopped being correct the moment it did: b8878c2b changed
-    the NVIDIA-on-Linux recommendation from vulkan to cuda, which meant an
-    NVIDIA-Linux user running vulkan - working fine - would have been silently
-    re-provisioned onto cuda by their next "runtime"-class `localm update`,
-    despite never asking for the switch.
-
-    The maintainer's ruling: never override what a user is running, whether
-    the choice was deliberate or just what an older default happened to
-    install - detect and display it in Settings instead (the GUI /api/backend
-    route), and at most offer a dismissable hint. So this now preserves
-    unconditionally rather than trying to tell "deliberate" apart from
-    "inherited default": the two need the same answer, which is to never
-    change it out from under the user."""
+    An already-installed backend is preserved unconditionally, whether the user
+    chose it deliberately or inherited it from an older default; an update never
+    switches it."""
     try:
         from localm import setup_llama
         installed = setup_llama.installed_backend()
@@ -777,14 +648,9 @@ def _installed_backend() -> str:
 
 # ------------------------- post-restart health watchdog -------------------
 
-# LM-DA-011: defaults for the detached post-restart health watchdog. TIMEOUT
-# budgets the WHOLE restarted process coming back up and answering /whoami (which
-# does NOT wait on model load) - importing localm's full chain plus unloading a
-# previously-loaded engine plus rebinding the port can run into the tens of
-# seconds on a cold disk / first import. 90s leaves comfortable margin without
-# leaving a genuinely broken build undetected for long; this runs unattended in
-# the background after the update button has already returned 200, so nothing
-# user-facing is blocked waiting on it.
+# Defaults for the detached post-restart health watchdog. TIMEOUT budgets the
+# whole restarted process coming back up and answering /whoami, which does not
+# wait on model load. Runs unattended after the update button has returned 200.
 WATCHDOG_TIMEOUT_S = 90.0
 WATCHDOG_POLL_INTERVAL_S = 2.0
 WATCHDOG_REQUEST_TIMEOUT_S = 3.0
@@ -801,11 +667,10 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
                           popen=None) -> bool:
     """Spawn ``scripts/update_watchdog.py`` DETACHED to verify the build
     ``_do_restart`` is about to re-exec into actually comes back up, auto-rolling
-    back if it does not (LM-DA-011). Returns True iff the spawn was attempted and
-    succeeded - NEVER raises: a watchdog that fails to spawn must not block or fail
-    the restart itself (today there is no watchdog at all, so a failed spawn is a
-    no-op, not a new regression). *popen* is injectable for tests, matching
-    apply()'s download_opener/runner convention."""
+    back if it does not. Returns True iff the spawn was attempted and succeeded -
+    NEVER raises: a watchdog that fails to spawn must not block or fail the
+    restart itself. *popen* is injectable, matching apply()'s
+    download_opener/runner convention."""
     try:
         import os
         import subprocess
@@ -826,19 +691,16 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
                "--request-timeout", str(request_timeout),
                "--log-file", str(log_file)]
         env = os.environ.copy()
-        # So the watchdog's rollback call (on failure) re-derives the SAME data
-        # home this server was actually using, via rollback_update.py's own
-        # _detect_home() LOCALM_HOME-env precedence - no home-dir logic duplicated
-        # here or in the watchdog itself.
+        # So the watchdog's rollback call re-derives the same data home this server
+        # was using, via rollback_update.py's own _detect_home() precedence.
         env["LOCALM_HOME"] = str(home)
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL, env=env, close_fds=True)
         if sys.platform == "win32":
             # DETACHED_PROCESS (no console) + CREATE_NEW_PROCESS_GROUP so the
             # watchdog is not tied to this process's console/process group and
-            # survives past the execv this call precedes. Literal fallback
-            # constants let a test exercise this branch on any platform via a
-            # monkeypatched sys.platform.
+            # survives past the execv this call precedes. The literal fallbacks
+            # keep this branch runnable on any platform.
             kwargs["creationflags"] = (
                 getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
@@ -862,9 +724,8 @@ def _watchdog_warn(msg, *args) -> None:
 
 
 def _apply_warn(msg, *args) -> None:
-    """Best-effort WARNING for apply()/rollback bookkeeping (the manifest write/prune).
-    A failure to LOG must never itself break or mask an update; when the logger is
-    importable the real problem is surfaced through it."""
+    """Best-effort WARNING for apply()/rollback bookkeeping (the manifest
+    write/prune). Never raises, even when the logger cannot be imported."""
     try:
         from localm.debuglog import logger
         logger.warning(msg, *args)
@@ -874,19 +735,16 @@ def _apply_warn(msg, *args) -> None:
 
 def _backup_dir(*, create: bool = False) -> Path:
     """The ONE stable path :func:`apply` promotes each run's backup to and
-    :func:`rollback_last` restores from. Derived in a single place so a read-only
-    probe and the action it describes can never disagree about where to look."""
+    :func:`rollback_last` restores from."""
     return _updates_dir(create=create) / "backup"
 
 
 def _backup_is_restorable(backup_dir: Path) -> bool:
     """True when *backup_dir* holds something :func:`rollback_last` could restore.
 
-    ONE predicate, shared by the probe and the action, so a surface can never offer
-    a rollback the action then refuses, nor hide one it would have accepted. An
-    unreadable directory answers False: "we cannot look" and "there is nothing here"
-    lead to the same safe refusal HERE (both mean do not offer a rollback), and the
-    action re-checks and reports the real reason if it is actually attempted."""
+    ONE predicate, shared by the probe and the action. An unreadable directory
+    answers False, and the action re-checks and reports the real reason if it is
+    actually attempted."""
     try:
         return backup_dir.is_dir() and any(backup_dir.iterdir())
     except OSError:
@@ -900,10 +758,9 @@ def rollback_info() -> dict:
     build's VERSION, or None when the backup predates that file or it is unreadable
     (reported as unknown, never guessed from the running version).
 
-    STRICTLY READ-ONLY, and that is the point: an existence check must not be done by
-    calling the action and catching its refusal, because :func:`rollback_last` MOVES
-    THE INSTALL. It also does not create ``updates/`` (see :func:`_updates_dir`), so
-    a GUI status poll leaves an install that has never updated exactly as it was."""
+    STRICTLY READ-ONLY: it restores nothing (:func:`rollback_last` MOVES THE
+    INSTALL) and does not create ``updates/`` (see :func:`_updates_dir`), so a GUI
+    status poll leaves an install that has never updated exactly as it was."""
     backup_dir = _backup_dir()
     available = _backup_is_restorable(backup_dir)
     version = None
@@ -922,11 +779,10 @@ def rollback_last(*, installed=None) -> dict:
     """Restore the install from the most recent update backup. Returns
     ``{rolled_back, backup}``. Raises LocalmError when there is no backup.
 
-    NOT signature- or freshness-checked, and neither check is applicable rather than
-    merely omitted - see the CHK-UPDATE-ROLLBACK note above :func:`rollback_info`'s
-    HTTP callers in ``inference/routes/admin.py`` for why, and for the owner gate that
-    is the real control on this operation. Use :func:`rollback_info` to ask whether a
-    rollback is possible; calling this one to find out performs it."""
+    NOT signature- or freshness-checked; the owner gate on its HTTP callers
+    (``inference/routes/admin.py``) is the control on this operation. Use
+    :func:`rollback_info` to ask whether a rollback is possible; calling this one
+    to find out performs it."""
     from localm import _apply_update as au
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
@@ -934,14 +790,9 @@ def rollback_last(*, installed=None) -> dict:
     backup_dir = _backup_dir(create=True)
     if not _backup_is_restorable(backup_dir):
         raise LocalmError("no update backup to roll back to", reason=str(backup_dir))
-    # SAME single-flight lock apply() takes, because both mutate the SAME install
-    # tree. This was previously unserialised and safe only by accident of having
-    # exactly ONE caller (the CLI); the GUI route makes an apply and a rollback two
-    # buttons in one Settings card, so "nobody would run both at once" stopped being
-    # true. A rollback interleaved with a swap removes names the swap is restoring,
-    # and the lock's own docstring already describes how that loses the true
-    # pre-update install for good. Cross-PROCESS on purpose: the contender can be the
-    # CLI in a terminal, which no in-process lock could see.
+    # The SAME single-flight lock apply() takes, because both mutate the SAME
+    # install tree. Cross-PROCESS: the contender can be the CLI in a terminal,
+    # which no in-process lock could see.
     with _apply_lock("update or rollback"):
         # Prefer the recorded full swap set (includes brand-new top-level entries the update
         # added, which are NOT in the backup dir) so those are removed too; fall back to the
@@ -960,10 +811,9 @@ def rollback_last(*, installed=None) -> dict:
                 names = None
             if names is None:
                 # The manifest EXISTS but is unreadable or malformed (NOT the benign
-                # never-written case): we can still roll back from the backup dir, but that
-                # listing lacks the brand-new top-level entries the update ADDED, so those
-                # will not be removed. Surface the degraded rollback rather than silently
-                # doing a partial one (we do not hide problems).
+                # never-written case): the rollback still runs from the backup dir,
+                # but that listing lacks the brand-new top-level entries the update
+                # ADDED, so those will not be removed.
                 _apply_warn("applied_names.json at %s exists but is unreadable; new files "
                             "added by the update will not be removed by this rollback", manifest)
         if names is None:

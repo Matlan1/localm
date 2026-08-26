@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The mtmd_input_text ABI drift (llama.cpp #25548) and its two consequences.
+"""The mtmd_input_text ABI drift and its two consequences.
 
-llama.cpp commit 4114ba18b (2026-07-12) inserted ``size_t text_len`` as the SECOND
-field of ``mtmd_input_text``. Passing the older 16-byte layout to a build that has
-it makes the callee read ``text_len`` out of the two flag bytes plus padding: with
-both flags true that is 257, so EVERY image prompt was silently truncated to 257
-bytes, dropping the media marker and failing with "number of media markers in text
-(0) does not match number of bitmaps (1)".
-
-Measured against the real bundled runtime, both directions, on
-Qwen3-VL-8B-Instruct: pre-fix struct rc=2 / post-fix struct rc=0, with the cliff
-exactly at marker offset 257. See
-dev-notes/mtmd-input-text-abi-drift-2026-08-06.md.
+llama.cpp commit 4114ba18b inserted ``size_t text_len`` as the SECOND field of
+``mtmd_input_text``. Passing the older 16-byte layout to a build that has it
+makes the callee read ``text_len`` out of the two flag bytes plus padding: with
+both flags true that is 257, so EVERY image prompt is silently truncated to 257
+bytes, dropping the media marker and failing with "number of media markers in
+text (0) does not match number of bitmaps (1)". The cliff sits exactly at marker
+offset 257.
 """
 
 import ctypes
@@ -31,9 +27,9 @@ from localm.inference.backends.llamacpp import mtmd as lmtmd
 # --------------------------------------------------------------------------- #
 
 def test_v1_flag_bytes_are_read_as_text_len_257_by_a_v2_build():
-    """Pins the exact mechanism, so a future 'simplification' back to one struct
-    is caught with its consequence spelled out rather than as an opaque size
-    assertion."""
+    """Pins the exact mechanism: the V1 flag bytes plus padding are read as a
+    text_len of 257 by a V2 build, so the consequence is stated rather than
+    left as an opaque size assertion."""
     v1 = lmtmd._MtmdInputTextV1(b"x" * 1000, True, True)
     raw = ctypes.string_at(ctypes.byref(v1), ctypes.sizeof(v1))
     assert ctypes.sizeof(v1) == 16
@@ -257,8 +253,7 @@ def test_retry_on_cpu_reopens_once_and_refuses_to_loop():
     assert c.retry_on_cpu() is True
     assert c.on_gpu is False
     assert rec.seen[-1]["use_gpu"] == 0
-    # Already on the CPU: a second call must decline, or a failing encode would
-    # rebuild forever instead of reporting.
+    # Already on the CPU: a second call declines.
     assert c.retry_on_cpu() is False
 
 
@@ -314,12 +309,12 @@ def test_a_gpu_encode_failure_is_retryable_but_a_cpu_one_is_not():
 def test_runner_dispatch_survives_an_unprocessable_image(monkeypatch):
     """THE crash regression, sited on the dispatch loop where the defect lives.
 
-    _runner_main's chat_stream branch caught only InvalidGrammarError and let
-    everything else escape on purpose, killing the worker process. A test of
-    eval_into alone cannot see that: the collapse is in the ARRANGEMENT of except
-    clauses here, not in the raising code. So drive the real dispatch loop and
-    assert BOTH halves - it reports an error envelope, and it is still alive to
-    serve the next command."""
+    _runner_main's chat_stream branch catching only InvalidGrammarError lets
+    everything else escape and kill the worker process. A test of eval_into
+    alone cannot see that: the collapse is in the ARRANGEMENT of except clauses
+    here, not in the raising code. So drive the real dispatch loop and assert
+    BOTH halves - it reports an error envelope, and it is still alive to serve
+    the next command."""
     import queue
     import threading
 
@@ -373,8 +368,7 @@ def test_runner_dispatch_survives_an_unprocessable_image(monkeypatch):
         f"untagged errors become RuntimeError, which makes GgufBackend unload the "
         f"model; got tag {envelope[2:]!r}")
 
-    # The worker must still be serving. This is the regression: pre-fix the
-    # exception escaped _runner_main entirely and the process exited 1.
+    # The worker must still be serving.
     req_q.put(("count_tokens", "still alive?"))
     assert resp_q.get(timeout=5) == ("ok", 42)
     assert not died, f"the dispatch loop died instead of reporting: {died!r}"

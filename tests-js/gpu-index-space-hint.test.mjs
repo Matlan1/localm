@@ -1,17 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// jsdom tests for the native index-space hint on the Settings GPU selectors
-// (settings-perf.js): when GET /api/gpus says index_space "native" (the
-// vulkan build serving ggml's own device registry - GPU-SPLIT-VKINDEX), the
-// numbering shown is the native backend's load-time order and the page must
-// say so - once - and must say nothing otherwise.
-//
-// CONTRACT CHANGED 2026-08-13 (finding M1 of the settings conformance sweep).
-// It used to be appended PER ROW, so a multi-GPU Vulkan box rendered the
-// identical sentence twice about 130px apart. It is now ONE element that both
-// refreshers drive, so these tests assert on its VISIBILITY rather than on how
-// many copies exist, and additionally assert that a second copy never appears.
-// The property being guarded is unchanged: the note is present exactly when the
-// device list is native-sourced and a GPU row is actually on screen.
+// The native index-space hint on the Settings GPU selectors (settings-perf.js):
+// one shared element, driven by both refreshers, visible exactly when GET
+// /api/gpus reports index_space "native" and a GPU row is on screen.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -72,14 +62,12 @@ test("index_space native: the native-numbering hint is shown ONCE for both rows"
   assert.ok(await waitFor(() => splitRow.hidden === false), "split row visible");
   assert.ok(await waitFor(() => hintVisible(doc)), "the shared hint is visible");
 
-  // M1 is exactly this assertion: BOTH rows are on screen, and the sentence
-  // still appears once. Before the fix this was 2.
   const all = doc.querySelectorAll(".perf-index-space-hint");
   assert.equal(all.length, 1,
                `the note must exist once, found ${all.length} copies`);
   assert.match(hint(doc).textContent, /Vulkan backend/);
 
-  // ...and it is NOT nested inside either row, which is what made it duplicate.
+  // The note is not nested inside either row.
   assert.equal(selRow.querySelectorAll(".perf-index-space-hint").length, 0,
                "the note must not live inside the Main GPU row");
   assert.equal(splitRow.querySelectorAll(".perf-index-space-hint").length, 0,
@@ -102,8 +90,6 @@ test("no index_space: no native-numbering hint is shown", async () => {
 });
 
 test("a single-GPU box hides the rows, so the shared hint stays hidden too", async () => {
-  // The note is shared, so it must not be left stranded under two hidden rows.
-  // A single-GPU box is the common case and the one that would show it.
   const calls = [];
   const one = [{ index: 0, name: "AMD Radeon RX 6900 XT", total: 16 * GIB, free: 15 * GIB }];
   const { window } = loadApp({
@@ -118,8 +104,7 @@ test("a single-GPU box hides the rows, so the shared hint stays hidden too", asy
 });
 
 test("a refresh after switching away from native removes the stale hint", async () => {
-  // First load: native. Then the fetch double flips to a plain list (as after
-  // a runtime re-provision) and a manual refresh must not leave a stale hint.
+  // First load is native; the stub then flips to a plain list.
   const calls = [];
   const state = { gpus: TWO_NATIVE, indexSpace: "native" };
   const fetchImpl = async (url, opts = {}) => {
@@ -136,8 +121,7 @@ test("a refresh after switching away from native removes the stale hint", async 
   const doc = window.document;
   assert.ok(await waitFor(() => hintVisible(doc)), "hint present after the native load");
   state.indexSpace = null;
-  // Classic-script injection lands the top-level functions on the window
-  // (see harness.mjs) - call the refreshers directly for the second pass.
+  // Classic-script injection puts the top-level functions on the window.
   await window.refreshMainGpuSelector();
   await window.refreshGpuSplitCheckboxes();
   await settle(30);

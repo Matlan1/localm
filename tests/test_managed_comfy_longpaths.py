@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression pin for #621: a managed-ComfyUI git clone must not fail with
-Windows' legacy 260-char MAX_PATH limit.
+"""A managed-ComfyUI git clone must not fail with Windows' legacy 260-char
+MAX_PATH limit.
 
-Reproduced live: cloning a custom node under a sufficiently-nested
-LOCALM_HOME failed with "fatal: cannot write keep file '...pack-<sha>.keep':
-Filename too long" / "fatal: fetch-pack: invalid index-pack output" - the
-destination path plus a 40-char pack object name pushed it past 260
-characters. ``-c core.longpaths=true`` (a per-invocation override, not a
-global git config change) makes git use the long-path-safe Win32 API
-internally regardless of the OS-level LongPathsEnabled policy.
+Cloning a custom node under a sufficiently-nested LOCALM_HOME fails with
+"fatal: cannot write keep file '...pack-<sha>.keep': Filename too long" /
+"fatal: fetch-pack: invalid index-pack output" - the destination path plus a
+40-char pack object name pushes it past 260 characters.
+``-c core.longpaths=true`` (a per-invocation override, not a global git config
+change) makes git use the long-path-safe Win32 API internally regardless of the
+OS-level LongPathsEnabled policy.
 """
 
 from __future__ import annotations

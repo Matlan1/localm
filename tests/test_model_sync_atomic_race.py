@@ -1,23 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Follow-up to #584/#586: model_manager/registry.py's sync_models_dir() had
-the same bare load/mutate/save shape the update_config()/update_registry()
-atomic helpers exist to close, just with the registry instead of the config.
-sync_models_dir() loaded the registry once, reconciled missing/restored/pruned
-entries against it with real per-entry filesystem stat calls (not
-instantaneous), then did a blind save_registry(reg) at the end - a concurrent
-update_registry() write (a `pull`/`rm`/`alias` in another thread or process)
-landing during that scan was silently discarded by the final overwrite.
+"""model_manager/registry.py's sync_models_dir() runs its whole reconcile loop
+inside a single update_registry() call, so it is atomic and cross-process
+lock-protected like every other write path in that file.
 
-Fix: the whole reconcile loop now runs inside a single update_registry()
-call, so it is atomic and (cross-process) lock-protected like every other
-write path in this file.
+A bare load/mutate/save shape would load the registry once, reconcile
+missing/restored/pruned entries with real per-entry filesystem stat calls, then
+blind-save at the end, silently discarding a concurrent update_registry() write
+(a `pull`/`rm`/`alias` in another thread or process) that landed during the scan.
 
-This test proves the fix with a REAL in-process threading race (not a mock):
-_entry_path (the per-entry accessor the reconcile loop calls to get an
-entry's stat-checkable path) is wrapped with a delay, widening the window a
-concurrent update_registry() writer can land in - exactly the technique
-test_app_lifecycle_1_atomic_config.py's _install_slow_merge uses for the
-config side, adapted to registry.py (which has no merge step of its own)."""
+This test drives a REAL in-process threading race, not a mock: _entry_path (the
+per-entry accessor the reconcile loop calls) is wrapped with a delay, widening
+the window a concurrent update_registry() writer can land in - the same
+technique test_app_lifecycle_1_atomic_config.py's _install_slow_merge uses for
+the config side."""
 
 import json
 import threading

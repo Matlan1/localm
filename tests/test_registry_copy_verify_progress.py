@@ -1,22 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0009 P17: the store-by-copy path hashes a model TWICE, silently.
+"""Both hashes of the store-by-copy path must report progress.
 
 `_store_into_models_dir(path, "copy")` hashes the source, copies, then hashes the
-destination, so a multi-GB model is read three times end to end. It printed one
-"Copying ..." line and then nothing moved for minutes, twice, with the copy in
-between. It is the longest silence measured anywhere in the pull path.
+destination, so a multi-GB model is read three times end to end.
 
-WHY THE FIX NEEDED A RELOCATION, since the diff looks larger than the feature:
-`_verify_digest` and `_emit_progress` lived in `pull.py`, and `pull` imports FROM
-`registry`, so a registry-side caller could not reach them without an import
-cycle. Both now live in `_shared.py`, which imports nothing from the package.
-That module choice is load-bearing, not cosmetic, and this file pins it.
+`_verify_digest` and `_emit_progress` live in `_shared.py`, which imports nothing
+from the package: `pull` imports FROM `registry`, so a registry-side caller
+cannot reach them from `pull.py` without an import cycle. This file pins that
+placement.
 
-WHAT THE FIXTURE HAS TO BE ABLE TO EXPRESS (item 19): a single hash cannot show
-that BOTH hashes report, and reporting only the second would leave the longer
-first wait silent - which is the half a reader would most likely assume was
-already covered. The fixture therefore drives a real copy and asserts two
-distinct verify runs.
+WHAT THE FIXTURE HAS TO EXPRESS: a single hash cannot show that BOTH hashes
+report, and reporting only the second would leave the longer first wait silent.
+The fixture drives a real copy and asserts two distinct verify runs.
 """
 
 import json
@@ -41,9 +36,9 @@ def gui(monkeypatch):
 
 class TestTheRelocationThatMakesThisPossible:
     def test_the_emitters_live_where_registry_can_import_them(self):
-        """`registry` cannot import from `pull` (pull imports registry), so if
-        these ever move back the copy path silently loses its reporting or the
-        package stops importing. Pinning the module is the point."""
+        """`registry` cannot import from `pull` (pull imports registry), so
+        moving these back makes the copy path lose its reporting or breaks the
+        package import. This pins the module they live in."""
         assert _shared._verify_digest.__module__ == "localm.model_manager._shared"
         assert _shared._emit_progress.__module__ == "localm.model_manager._shared"
 

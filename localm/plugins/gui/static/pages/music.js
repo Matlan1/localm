@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm GUI - Music page. The library (grid, selection, bulk actions, detail
-   modal, rename/move/delete) is the shared engine in app/media-gallery.js; only
-   the medium-specific bits live here.
-
-   Audio has no frame, so the card is text-forward: the tags are what identify a
-   track, and they are text. See media-gallery.js for why a waveform thumbnail
-   is deliberately not rendered. */
+   modal, rename/move/delete) comes from app/media-gallery.js; this file adds
+   the medium-specific bits. Cards are text-forward, with no thumbnail. */
 
 "use strict";
 
@@ -45,10 +41,8 @@ const musicGallery = createGallery({
     $("music-seed").value = m.seed ?? "";
     $("music-steps").value = m.steps ?? "";
     $("music-cfg").value = m.cfg ?? "";
-    // Most of these fields live behind this page's Advanced fold. Restoring
-    // into a CLOSED fold means the toast claims the settings came back while
-    // they sit invisible behind a shut triangle - the same trap the Images
-    // page documents, and the seed is the whole reason anyone reuses settings.
+    // Most of these fields live behind this page's Advanced fold; open it when
+    // they are filled.
     revealFilledAdvanced($("view-music"));
   },
 });

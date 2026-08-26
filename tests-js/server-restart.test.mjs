@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R18 (restart half): a Settings "Restart server" button that confirms, then POSTs
-// /v1/server/restart. The backend unloads the model and re-execs the same process,
-// so it comes back on the same port; the reconnect overlay auto-reconnects.
+// The Settings "Restart server" button confirms, then POSTs /v1/server/restart
+// and shows the reconnect overlay.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

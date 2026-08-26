@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-CUDADLL: the CUDA build matcher must not pick the cudart runtime zip.
+"""The CUDA build matcher does not pick the cudart runtime zip.
 
 The build and the CUDA runtime share the "...bin-win-cuda-12.x..." name fragment
 (the runtime is cudart-llama-bin-win-cuda-12.4-x64.zip) and the runtime is often
-listed FIRST by the GitHub API. A plain substring match therefore resolved the
-BUILD to the runtime-only zip (CUDA DLLs, no llama.dll), so provisioning aborted
-with "the archive did not contain llama.dll" on every cuda pick. Both build-
-resolution paths (_resolve_backend_url and _resolve_cuda_pair) must exclude
-cudart from the build match.
+listed FIRST by the GitHub API, so a plain substring match resolves the BUILD to
+the runtime-only zip (CUDA DLLs, no llama.dll). Both build-resolution paths
+(_resolve_backend_url and _resolve_cuda_pair) exclude cudart from the build
+match.
 """
 
 import io
@@ -72,5 +71,5 @@ def test_pick_asset_exclude_filters_cudart():
     # Unit: the exclude param drops the runtime even when it sorts first.
     build = sl._pick_asset(ASSETS, "bin-win-cuda-12", exclude=("cudart",))
     assert build is not None and build["name"].startswith("llama-")
-    # Without exclude, the first match IS the cudart zip (the bug we fixed).
+    # Without exclude, the first match IS the cudart zip.
     assert sl._pick_asset(ASSETS, "bin-win-cuda-12")["name"].startswith("cudart-")

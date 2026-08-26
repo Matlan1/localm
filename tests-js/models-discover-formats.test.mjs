@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Models page HuggingFace search: the GGUF / HF-transformers format toggles.
-// The search must send the toggled formats, badge each result by format, offer
-// the right pull affordance (GGUF -> per-quant file list; HF -> whole-repo add
-// prefilling a BARE owner/repo), and show a NON-BLOCKING hint when HF is searched
-// but no transformers runtime is installed (the download still works).
+// The search sends the toggled formats, badges each result by format, offers
+// the matching pull affordance (GGUF gives a per-quant file list, HF a
+// whole-repo add prefilling a bare owner/repo), and shows a non-blocking hint
+// when HF is searched with no transformers runtime installed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -82,7 +82,7 @@ test("discover: shows the non-blocking HF-runtime hint when HF is on but no back
   const hint = window.document.getElementById("disc-hf-hint");
   assert.notEqual(hint.style.display, "none", "the hint is shown");
   assert.match(hint.textContent, /transformers|gpu/i, "the hint names the missing runtime");
-  // Non-blocking: the HF row is still fully pullable.
+  // The HF row is still pullable.
   const hf = rowFor(window, "org/hf-only");
   assert.ok(buttonByText(hf, "add full repo"), "the HF model is still addable despite no runtime");
 });

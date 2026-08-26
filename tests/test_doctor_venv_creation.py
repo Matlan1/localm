@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#621 follow-up: `localm doctor` must actually verify that a nested venv can be
-created (the exact mechanism the managed-ComfyUI installer depends on), not just
-that the isolated worker process can spawn. The reporter's own repro showed
-ComfyUI setup silently failing with "[WinError 2]" - a doctor run at the time
-would have shown everything green, since nothing probed venv creation at all.
+"""`localm doctor` must verify that a nested venv can actually be created (the
+mechanism the managed-ComfyUI installer depends on), not only that the isolated
+worker process can spawn. Without that probe, ComfyUI setup failing with
+"[WinError 2]" leaves every doctor check green.
 """
 
 from __future__ import annotations
@@ -37,9 +36,8 @@ def test_venv_creation_check_passes_for_a_real_venv(monkeypatch):
 
 
 def test_venv_creation_check_reports_failure_when_venv_creation_is_broken(monkeypatch):
-    """Simulates the #621 failure mode (the resolved interpreter cannot actually
-    create a venv) and confirms doctor surfaces it as a FAILED check, rather than
-    silently passing like a doctor run did before this check existed."""
+    """The resolved interpreter cannot actually create a venv; doctor must surface
+    that as a FAILED check, never a silent pass."""
     import subprocess
 
     class _BrokenResult:
@@ -57,14 +55,12 @@ def test_venv_creation_check_reports_failure_when_venv_creation_is_broken(monkey
 
 
 def test_venv_creation_check_reports_failure_when_pip_did_not_land(monkeypatch):
-    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: `-m venv` can report success (return
-    code 0, the interpreter file present) while its own mandatory ensurepip
-    bootstrap silently failed - the managed-ComfyUI installer immediately
-    pip-installs into a venv it just created, so a pip-less venv used to read as
-    doctor-green right up until provisioning failed deep inside with an opaque
-    "No module named pip". Runs a REAL `-m venv` (unmocked) and fakes only the
-    follow-up `-m pip --version` probe failing, so this proves the check reads
-    that SECOND subprocess call rather than merely reacting to any failure."""
+    """`-m venv` can report success (return code 0, the interpreter file present)
+    while its own mandatory ensurepip bootstrap failed. The managed-ComfyUI
+    installer pip-installs into a venv it just created, so a pip-less venv must
+    not read as doctor-green. Runs a REAL `-m venv` (unmocked) and fakes only the
+    follow-up `-m pip --version` probe failing, so the check has to read that
+    SECOND subprocess call rather than react to any failure."""
     import subprocess
 
     real_run = subprocess.run

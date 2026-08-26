@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - Models page (split from pages.js). Classic script: it
-   shares the one global lexical environment with app.js and the other
-   page scripts, so the helpers it uses ($, el, authHeaders, toast, ...)
-   resolve by bare name exactly as before. */
+/* localm GUI - Models page. */
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+// --- ES module imports ---
 import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast } from "../app/helpers.js";
 import { onServerUnreachable } from "../app/init.js";
@@ -19,11 +16,10 @@ import { refreshPerfEstimate } from "../app/settings-perf.js";
 
 export function fmtSize(bytes) {
   if (bytes == null) return "";
-  return (bytes / GIB).toFixed(2) + " GB";   // binary GiB, labelled GB (see app.js)
+  return (bytes / GIB).toFixed(2) + " GB";   // binary GiB, labelled GB
 }
 
-// Same shape as picker.js's local fmtDate: an ISO calendar date, compact enough
-// for a dense table cell. mtime is a null-able epoch-seconds float from /api/models.
+// An ISO calendar date. mtime is a nullable epoch-seconds float from /api/models.
 export function fmtModelDate(mtime) {
   if (mtime == null) return "";
   try { return new Date(mtime * 1000).toISOString().slice(0, 10); }
@@ -31,22 +27,17 @@ export function fmtModelDate(mtime) {
 }
 
 // The Registered-models table tab (All/LLMs/Embedding/...). Scopes only the
-// installed-models TABLE below - the HuggingFace SEARCH has its own explicit,
-// always-visible Type checkboxes (discTypes()), so what the search covers is
-// never inferred silently from this tab.
+// installed-models TABLE below; the HuggingFace SEARCH has its own Type
+// checkboxes (discTypes()).
 let currentTypeFilter = "all";
 
-// The Other tab's data-type is NOT a MODEL_TYPES value. It used to be "unknown",
-// which made the tab mean one particular type rather than what it is named for:
-// everything the strip has no tab for. "unknown" is still one of the types it
-// collects, alongside mmproj (which had no tab at all and was reachable from All
-// alone) and whatever the registry gains next.
+// The Other tab's data-type, not a MODEL_TYPES value. It collects every type
+// the strip has no tab for: "unknown", mmproj, and whatever the registry gains
+// next.
 export const OTHER_TAB = "other";
 
-// Two browser-only display preferences for this list. Same mechanism as the
-// mmproj "show in search results" toggle (discoverFiles below): a localStorage
-// flag read at RENDER time rather than cached in a module variable, so the next
-// refresh picks up a change with nothing to keep in sync.
+// Two browser-only display preferences for this list, read from localStorage at
+// RENDER time rather than cached in a module variable.
 export const SHOW_OTHER_KEY = "localm.showOtherModelsInAll";
 export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
 
@@ -56,35 +47,24 @@ export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
 const MODEL_TYPE_OPTIONS =
   ["llm", "embedding", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
 
-// A registry entry with NO model_type at all is a third thing, distinct from
-// both a recorded type and from the recorded type "unknown": nobody has
-// classified it YET. The route still reports `model_type: "llm"` for it, because
-// that default is load-bearing elsewhere (the chat picker asks this same route
-// for ?type=llm, and a legacy entry must stay selectable for chat) - so it sends
-// `model_type_recorded: false` alongside to say the type is a guess rather than
-// a fact. Absent flag means recorded, which is what every normal model and every
-// older server sends.
-//
-// It reads as a type here rather than as a separate flag on purpose: ONE helper
-// then carries the distinction into the Other filter, the All merge-out, the tab
-// counts and the group headings, instead of four call sites each remembering to
-// check a second field. The sentinel is deliberately not identifier-shaped, so
-// it can never collide with a MODEL_TYPES member and is never used as a
-// selector (typeLabel's own regex rejects it and returns it as the heading).
+// The type reported for a registry entry with no recorded model_type. The route
+// still sends `model_type: "llm"` for such an entry, plus
+// `model_type_recorded: false`; an absent flag means recorded. Not
+// identifier-shaped, so it can never collide with a MODEL_TYPES member and is
+// never used as a selector (typeLabel's regex rejects it and returns it as the
+// heading).
 export const UNTAGGED_TYPE = "(not set)";
 
-// The route's own default: an entry with a recorded model_type reads as that,
-// and anything the route could not read reads as "llm". Every filter, count and
-// grouping decision goes through this one helper so they cannot disagree about
-// what an untyped registry entry is.
+// The type a model reads as: UNTAGGED_TYPE when the route reports none is
+// recorded, the recorded model_type otherwise, falling back to "llm". Every
+// filter, count and grouping decision goes through this one helper.
 export function modelTypeOf(m) {
   if (m && m.model_type_recorded === false) return UNTAGGED_TYPE;
   return (m && m.model_type) || "llm";
 }
 
-// Which types have a tab of their own, read from the strip ITSELF rather than
-// from a second list here. Add a tab to index.html and Other stops claiming that
-// type, with no matching edit in this file - the two cannot drift apart.
+// Which types have a tab of their own, read from the tab strip itself rather
+// than from a second list here.
 export function typesWithOwnTab() {
   const out = new Set();
   const nav = $("models-tab-nav");
@@ -96,9 +76,8 @@ export function typesWithOwnTab() {
   return out;
 }
 
-// A group heading borrows the tab strip's own label so the sections and the tabs
-// speak one vocabulary. A type with no tab has no label to borrow and shows its
-// raw registry value, which is exactly what its Role pill already reads.
+// A group heading borrows the tab strip's own label. A type with no tab has no
+// label to borrow and shows its raw registry value.
 export function typeLabel(type) {
   const nav = $("models-tab-nav");
   if (nav && /^[a-z0-9-]+$/i.test(type)) {
@@ -113,9 +92,9 @@ export function typeLabel(type) {
   return type;
 }
 
-// Heading order: the tab strip's order first (so grouped All reads down the same
-// sequence as the tabs across), then any remaining known type, then anything the
-// registry grew that neither list names. Only types actually PRESENT are ordered.
+// Heading order: the tab strip's order first, then any remaining known type,
+// then anything the registry grew that neither list names. Only types actually
+// PRESENT are ordered.
 function _groupOrder(present) {
   const have = new Set(present);
   const seen = new Set();
@@ -129,16 +108,13 @@ function _groupOrder(present) {
   for (const t of [...present].sort()) {
     if (t !== UNTAGGED_TYPE) push(t);
   }
-  // Last, explicitly rather than by where "(" happens to sort: every recorded
-  // type first, then the residual bucket of models nobody has classified.
+  // Last: the untagged bucket, after every recorded type.
   push(UNTAGGED_TYPE);
   return order;
 }
 
 // Turn an already-sorted model list into a flat render list of heading markers
-// and models. Flat (rather than one table per type) on purpose: a single table
-// keeps every group's columns aligned to the same widths, and keeps the
-// "exactly one table.data-table in #models-table" overlap guard below meaningful.
+// and models, all for one table.
 export function groupModelsByType(models) {
   const byType = new Map();
   for (const m of models) {
@@ -155,18 +131,15 @@ export function groupModelsByType(models) {
   return out;
 }
 
-// Grouping applies only to a view that can hold more than one type. On a
-// single-type tab every row lands in one section, which is the flat list with
-// extra furniture, so the control hides itself there (see _syncViewOptControls).
+// Grouping applies only to a view that can hold more than one type: All and
+// Other. The control hides itself on a single-type tab (_syncViewOptControls).
 function _groupingActive() {
   if (localStorage.getItem(GROUP_BY_TYPE_KEY) !== "true") return false;
   return currentTypeFilter === "all" || currentTypeFilter === OTHER_TAB;
 }
 
-// AGENTS.md rule 5: the All tab leaving rows out must never be silent. Names how
-// many and where they are, so a registered model is always findable - and it is
-// what stands in for the empty state when EVERY model is one of the hidden ones
-// ("No models yet. Pull your first one" would be false in that case).
+// The note naming how many rows the All tab left out and where to find them.
+// Also stands in for the empty state when every model is one of the hidden ones.
 export function otherHiddenNote(n) {
   const one = n === 1;
   return el("div", "sub models-other-note",
@@ -175,8 +148,7 @@ export function otherHiddenNote(n) {
     `or tick "show other types here".`);
 }
 
-// Each display toggle applies to some views and not others; showing a control
-// that silently does nothing is its own small dishonesty.
+// Show each display toggle only in the views it applies to.
 function _syncViewOptControls() {
   const showOther = $("models-show-other-wrap");
   const group = $("models-group-wrap");
@@ -184,17 +156,15 @@ function _syncViewOptControls() {
   if (group) group.hidden = !(currentTypeFilter === "all" || currentTypeFilter === OTHER_TAB);
 }
 // Set when a discovery result is chosen, cleared on a successful add or a spec
-// edit. {spec, type} - the Add handler only attaches model_type when spec still
-// matches exactly what was prefilled, so a hand-edited spec silently falls back
-// to auto-detect (never sends a stale/wrong type hint).
+// edit. {spec, type} - the Add handler attaches model_type only while spec
+// still matches exactly what was prefilled.
 let pendingPullTypeHint = null;
 
-// Registered-models table columns: label + how to read/compare a row + whether
-// it is sortable at all (the actions column never is). "kind" picks the
-// comparator - "number" (size_bytes/mtime, both nullable: an unreadable file, a
-// UNC timeout, a missing path) vs "string" (case-insensitive). Kept as a single
-// descriptor table so the header row, the click/keydown handlers and the
-// comparator all read the same column list instead of drifting apart.
+// Registered-models table columns: label, how to read/compare a row, and
+// whether it is sortable (the actions column is not). "kind" picks the
+// comparator - "number" (size_bytes/mtime, both nullable) vs "string"
+// (case-insensitive). The header row, the click/keydown handlers and the
+// comparator all read this one list.
 const MODEL_COLUMNS = [
   { key: "name", label: "Name", sortable: true, kind: "string", get: (m) => m.name || "" },
   { key: "model_type", label: "Role", sortable: true, kind: "string", get: (m) => m.model_type || "llm" },
@@ -205,19 +175,15 @@ const MODEL_COLUMNS = [
 ];
 const _SORTABLE_KEYS = MODEL_COLUMNS.filter((c) => c.sortable).map((c) => c.key);
 
-// Persisted sort choice (mirrors the _bindDiscToggle read-on-init pattern this
-// file already uses for search filters). Falls back to alphabetical-by-name -
-// today's only ordering (the server's sorted(registry.items())) - whenever
-// nothing is stored yet, or a stored value no longer names a real column.
+// Persisted sort choice. Falls back to alphabetical-by-name whenever nothing is
+// stored yet, or a stored value no longer names a real column.
 let currentSortKey = _SORTABLE_KEYS.includes(localStorage.getItem("localm.modelsSortKey"))
   ? localStorage.getItem("localm.modelsSortKey") : "name";
 let currentSortDir = ["asc", "desc"].includes(localStorage.getItem("localm.modelsSortDir"))
   ? localStorage.getItem("localm.modelsSortDir") : "asc";
 
 // Compare two model rows on one column. Numbers (size_bytes, mtime) can be
-// null - an unreadable file, a UNC stat timeout, a missing path - and a null
-// ALWAYS sorts last, in both directions: coercing it to 0 would rank a broken
-// row as the smallest/oldest file rather than as genuinely unknown.
+// null, and a null ALWAYS sorts last, in both directions.
 function _compareModelRows(a, b, col, dir) {
   const av = col.get(a);
   const bv = col.get(b);
@@ -237,78 +203,49 @@ function _compareModelRows(a, b, col, dir) {
 }
 
 // Sort a copy of `models` by `sortKey`/`sortDir` ("asc"/"desc"). An unknown or
-// non-sortable sortKey returns an unsorted copy rather than throwing, so a
-// stale localStorage value degrades to "no sort" instead of breaking the page.
+// non-sortable sortKey returns an unsorted copy rather than throwing.
 export function sortModels(models, sortKey, sortDir) {
   const col = MODEL_COLUMNS.find((c) => c.key === sortKey && c.sortable);
   if (!col) return models.slice();
   return models.slice().sort((a, b) => _compareModelRows(a, b, col, sortDir));
 }
 
-// Guards refreshModelsPage() against overlapping calls (a rapid double-click
-// on a sortable header, a set-type change or use/alias/rename/remove action
-// firing while a prior refresh's fetch is still in flight, ...):
-// two calls racing past their own awaited fetch would each render their own
-// table (reproduced live: a rapid double-click on the Name header left two
-// <table class="data-table"> in #models-table). Every call captures this counter
-// BEFORE it awaits anything, then re-checks it immediately before its single
-// write into the shared `box`: a call superseded by a newer one discards its own
-// render instead of writing stale content over the newer call's.
-//
-// Each render path now writes with ONE replaceChildren() rather than clearing up
-// front and appending afterwards. That is what stops the scroll jump (see
-// refreshModelsPage), and it also makes the duplicate impossible by construction
-// rather than only by the counter: a replace cannot leave two tables behind.
+// Guards refreshModelsPage() against overlapping calls. Every call captures this
+// counter BEFORE it awaits anything, then re-checks it immediately before its
+// single write into the shared `box`: a call superseded by a newer one discards
+// its own render. Each render path writes with ONE replaceChildren().
 let _modelsRenderGen = 0;
 let _pullShortcutsLoaded = false;   // guards _loadPullShortcuts() below, fetched once
 
 export async function refreshModelsPage() {
   const myGen = ++_modelsRenderGen;
-  // Fire-and-forget, and only once per page lifetime: the picker's own onchange
-  // handler is wired at module load (no fetch involved), but the DATA fetch must
-  // wait until here - onViewShown (dispatch.js) only calls refreshModelsPage()
-  // once the boot auth probe has confirmed this client is authed. Fetching it
-  // eagerly at module-eval time instead would run this authenticated read before
-  // that confirmation, on every boot path, keyed or not (see keygate.test.mjs's
-  // "still fires ONLY the auth probe" contract).
+  // Fire-and-forget, once per page lifetime. This authenticated read must run
+  // only after the boot auth probe has confirmed the client is authed, which is
+  // what onViewShown (dispatch.js) gates refreshModelsPage() on.
   if (!_pullShortcutsLoaded) { _pullShortcutsLoaded = true; _loadPullShortcuts(); }
   await refreshModels();
 
   const box = $("models-table");
   if (myGen !== _modelsRenderGen) return;
-  // NOT cleared here. This used to be `box.replaceChildren()`, which emptied the
-  // table and THEN awaited the fetch below - so the scroll container sat empty
-  // across a whole network round-trip. An empty container has nothing to scroll,
-  // so the browser clamps scrollTop to 0, and the rebuilt rows arrive too late to
-  // put it back: the page visibly jumped to the top on every sort, tab change and
-  // row action. MEASURED before the fix: scrollHeight 1232 -> 945 (== clientHeight)
-  // -> 1429 with scrollTop 287 -> 0, and zero scroll calls from our own code.
-  // Every write below therefore REPLACES the old content in one call instead of
-  // appending to an emptied box, so what is on screen is swapped atomically and
-  // no layout ever sees it empty.
+  // `box` is NOT cleared here: every write below REPLACES its content in one
+  // call, so the scroll container never sits empty across the fetch.
 
-  // Fetched unfiltered and narrowed to the active tab below. The tabs carry a
-  // per-type count, and a count of a type you are NOT looking at cannot come
-  // from a ?type= response. Same cost as the default All tab, which already
-  // asks for the whole registry; what each tab SHOWS is unchanged, because the
-  // filter below is the same comparison the route makes.
+  // Fetched unfiltered and narrowed to the active tab below, so the per-type tab
+  // counts can cover the whole registry.
   let models = [];
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });
     if (r.status === 401) {
-      // Expired/absent session (e.g. a network bind whose loopback key was never
-      // seeded): the JSON error body parses fine, so the models=[] fallback below
-      // would masquerade as "No models yet". Show the in-page key gate instead,
-      // mirroring the sidebar's refreshModels() (models-sidebar.js). Not
-      // gated on myGen: an expired session is a real, current fact regardless
-      // of which overlapping call happens to observe it first.
+      // Expired or absent session. Show the in-page key gate rather than falling
+      // through to the models=[] path, which would read as "No models yet". Not
+      // gated on myGen.
       showKeyGate("This LocaLM server requires an API key.");
       return;
     }
     if (!r.ok) {
-      // A non-401 error (403 = key lacks models.read, 500, 503, ...) also returns
-      // a body with no `models` array; the empty-list fallback would hide the real
-      // failure behind "No models yet". Surface the status instead.
+      // A non-401 error (403 = key lacks models.read, 500, 503, ...) also
+      // returns a body with no `models` array. Surface the status instead of
+      // falling through to the empty-list path.
       if (myGen !== _modelsRenderGen) return;
       box.replaceChildren(el("div", "sub", `Could not load models (HTTP ${r.status})`));
       return;
@@ -323,30 +260,23 @@ export async function refreshModelsPage() {
 
   if (myGen !== _modelsRenderGen) return;
   // Counts come from the WHOLE registry, so a tab keeps showing how many it
-  // holds while you are looking at a different one.
+  // holds while a different one is active.
   syncTabCounts(models);
   _syncViewOptControls();
 
-  // Narrow to the active tab. A named type is still the SAME comparison the
-  // /api/models route makes (its own "llm" default for an entry with no
-  // recorded type, and an exact match otherwise). The two multi-type views are
-  // where this now differs from the route, deliberately:
-  //   Other - every model whose type has no tab of its own, so a type the strip
-  //           does not name has a home rather than existing only inside All.
+  // Narrow to the active tab. A named type is the same comparison the
+  // /api/models route makes. The two multi-type views differ from it:
+  //   Other - every model whose type has no tab of its own.
   //   All   - those same models are left OUT by default and merged back in on
-  //           demand, exactly as the mmproj toggle merges projector files into a
-  //           repo's file list. Nothing disappears quietly: whatever All leaves
-  //           out is counted on the Other tab and said out loud below.
+  //           demand; whatever it leaves out is counted on Other and named below.
   const tabbed = typesWithOwnTab();
   const mergeOther = localStorage.getItem(SHOW_OTHER_KEY) === "true";
   let hiddenOther = 0;
   if (currentTypeFilter !== "all" && currentTypeFilter !== OTHER_TAB) {
     models = models.filter((m) => modelTypeOf(m) === currentTypeFilter);
   } else if (tabbed.size === 0) {
-    // No strip to read, so "has a tab of its own" has no answer. Both branches
-    // below would then call EVERY type an Other and All would render empty -
-    // a missing element turning into "you have no models", which is the worst
-    // reading of an unanswerable question. Leave the list whole instead.
+    // No strip to read, so "has a tab of its own" has no answer: leave the list
+    // whole rather than treating every type as an Other.
   } else if (currentTypeFilter === OTHER_TAB) {
     models = models.filter((m) => !tabbed.has(modelTypeOf(m)));
   } else if (!mergeOther) {
@@ -356,8 +286,8 @@ export async function refreshModelsPage() {
   }
 
   if (!models.length) {
-    // "No models yet - pull your first one" is FALSE when the registry is not
-    // empty and All is merely hiding all of it, so say the true thing instead.
+    // The hidden-rows note when the registry is not empty and All is merely
+    // hiding all of it; the empty state otherwise.
     box.replaceChildren(hiddenOther
       ? otherHiddenNote(hiddenOther)
       : emptyState("models", "No models yet",
@@ -366,8 +296,8 @@ export async function refreshModelsPage() {
   }
 
   models = sortModels(models, currentSortKey, currentSortDir);
-  // Sorted FIRST, then partitioned, so each section stays in the order the
-  // active column sort asked for instead of quietly reverting to registry order.
+  // Sorted FIRST, then partitioned, so each section keeps the active column
+  // sort's order.
   const renderList = _groupingActive()
     ? groupModelsByType(models)
     : models.map((m) => ({ model: m }));
@@ -407,9 +337,6 @@ export async function refreshModelsPage() {
   thead.appendChild(hr);
   table.appendChild(thead);
   const tbody = el("tbody");
-  // MODEL_TYPE_OPTIONS is module-scope now (the group-by-type ordering needs it
-  // too); this loop's use of it - the per-row one-click set-type control - is
-  // unchanged.
   for (const entry of renderList) {
     if (entry.head) {
       // A group heading spans the whole row rather than sitting in a column, so
@@ -428,21 +355,16 @@ export async function refreshModelsPage() {
     const tr = el("tr");
     const nameTd = el("td", "name-cell");
     // The icon/name/badge flex line lives on this inner span, never on the td: a
-    // display:flex td stops being a table-cell, so its border-bottom draws under its
-    // own content rather than at the row's foot, which left the separator visibly
-    // broken partway across every row (measured 82px out on a tall one).
+    // display:flex td stops being a table-cell, so its border-bottom draws under
+    // its own content rather than at the row's foot.
     const nameLine = el("span", "cell-line");
     nameTd.appendChild(nameLine);
     nameLine.appendChild(iconEl("models", "ic ic-model"));
     nameLine.appendChild(el("span", "name", m.name));
-    // F8-PERSIST-ARCH-AND-EXPERT-COUNT: the same real, from-the-file-header
-    // architecture/MoE badges the HuggingFace search page shows (discRepoRow
-    // below), now available for an already-registered model too - hard
-    // metadata read once at registration/pull time, not a name guess.
-    // Falsy-checked (m.architecture, m.expert_count > 0), never a fallback
-    // default: a model registered before this existed, or whose header could
-    // not be read, has these as null/undefined and correctly shows NEITHER
-    // badge - never a false "not MoE" claim about a model nobody has checked.
+    // Architecture/MoE badges from the model's own file header, read at
+    // registration/pull time. Falsy-checked (m.architecture,
+    // m.expert_count > 0), never defaulted: a model whose header carries
+    // neither shows neither badge.
     if (m.architecture) {
       nameLine.appendChild(el("span", "arch-badge", m.architecture));
     }
@@ -453,37 +375,25 @@ export async function refreshModelsPage() {
     if (visBadge) nameLine.appendChild(visBadge);
     if (m.active) nameLine.appendChild(el("span", "active-tag job-state st-ok", "active"));
     // Independent of "active": a model can sit resident in VRAM without being
-    // the one currently serving requests - surfaced so a background-loaded
-    // model is never invisible/indistinguishable from one that was never
-    // loaded at all. Deliberately NOT the active-tag class here (it used to be,
-    // which made "loaded" render identically to "active" - .loaded-tag had no
-    // CSS of its own - and incorrectly triggered the tr:has(.active-tag) row
-    // highlight for a merely-resident model); job-state's "on" variant gives it
-    // its own distinct look instead.
+    // the one currently serving requests. Wears job-state's "on" variant rather
+    // than active-tag, so it looks distinct and does not trigger the
+    // tr:has(.active-tag) row highlight.
     else if (m.loaded) nameLine.appendChild(el("span", "loaded-tag job-state on", "loaded"));
-    // The file behind this entry is gone (moved or deleted) - the CLI's own red
-    // "missing" row (registry.py), now visible here too. The relocate action
-    // below in the actions cell is the fix; this badge is what tells you it
-    // is needed.
+    // The file behind this entry is gone (moved or deleted). The relocate
+    // action in the actions cell below is the fix.
     if (m.missing) nameLine.appendChild(el("span", "missing-tag job-state st-error", "missing"));
     tr.appendChild(nameTd);
     
-    // Role column. The set-type control IS this column - one pill that both shows
-    // the type and changes it, wearing the same .type-<name> colour the read-only
-    // badge used to, so the column still scans by colour. It was previously a badge
-    // here plus a separate <select> over in the actions cell: the same fact twice,
-    // and the select was the widest thing in the row.
+    // Role column. The set-type control IS this column - one pill that both
+    // shows the type and changes it, wearing the .type-<name> colour.
     const roleTd = el("td", "mono shrink-cell");
-    // An entry with nothing recorded must not wear an "llm" badge here: the row
-    // is on the Other tab precisely because nobody has classified it, and a page
-    // that files a model under Other while labelling it llm contradicts itself.
+    // An entry with nothing recorded wears "unset", never an "llm" badge.
     const untagged = modelTypeOf(m) === UNTAGGED_TYPE;
     const roleType = untagged ? "unset" : (m.model_type || "llm");
 
-    // On every row (outside the LLM-only gate below): an 'unknown'/media model
-    // otherwise has no controls, and this is how a mis-detected model is
-    // reclassified without the CLI. Changing it POSTs the chosen type, then
-    // re-renders (so an unknown->llm switch reveals use/alias).
+    // On every row, outside the LLM-only gate below. Changing it POSTs the
+    // chosen type, then re-renders (so an unknown->llm switch reveals
+    // use/alias).
     const typeSel = el("select", "model-type-select type-badge type-" + roleType);
     typeSel.title = untagged
       ? "No type is recorded for this model - pick one"
@@ -491,9 +401,8 @@ export async function refreshModelsPage() {
     typeSel.setAttribute("aria-label", `Model type for ${m.name}`);
     if (untagged) {
       // A placeholder, not a value: "not set" is not a MODEL_TYPES member and
-      // the set-type route would reject it, so it is disabled and cannot be
-      // chosen or posted. It exists so the control shows the truth until
-      // somebody picks a real type, at which point it stops being rendered.
+      // the set-type route rejects it, so it is disabled and can never be
+      // chosen or posted. Rendered only while no type is recorded.
       const none = el("option", "", "not set");
       none.value = "";
       none.disabled = true;
@@ -523,8 +432,7 @@ export async function refreshModelsPage() {
     roleTd.appendChild(typeSel);
     tr.appendChild(roleTd);
 
-    // The source is reference text, not the row's identity, so it clips to an
-    // ellipsis with the full value on hover rather than wrapping the row.
+    // The source clips to an ellipsis, with the full value on hover.
     const sourceTd = el("td", "mono clip-cell", m.source || "");
     if (m.source) sourceTd.title = m.source;
     tr.appendChild(sourceTd);
@@ -536,10 +444,8 @@ export async function refreshModelsPage() {
     detail.onclick = () => showModelDetail(m.name);
     actions.appendChild(detail);
 
-    // Not gated on isLlm below: any model type (embedding, diffusion-unet, a
-    // LoRA, ...) can be an externally-referenced file that gets moved, same as
-    // an LLM. Only rendered when actually missing - a relocate control on every
-    // healthy row would have no use and would just clutter the row.
+    // Not gated on isLlm below: any model type can be an externally-referenced
+    // file that gets moved. Rendered only when the file is missing.
     if (m.missing) {
       const relocateBtn = el("button", "secondary", "relocate");
       relocateBtn.title = "Point this entry at the file's new location";
@@ -559,22 +465,14 @@ export async function refreshModelsPage() {
       actions.appendChild(relocateBtn);
     }
 
-    // Only LLMs support use/alias/remove in Phase 1
+    // Only LLMs support use/alias/remove
     const isLlm = !m.model_type || m.model_type === "llm";
     if (isLlm) {
       if (!m.active) {
         const use = el("button", "primary", "use");
         use.onclick = async () => {
-          // switchModel() already drives the sidebar's #status-text pill
-          // for the real load duration (a genuine blocking VRAM-check/evict/
-          // load, not fire-and-forget) - but that status line lives inside the
-          // off-canvas #sidebar, invisible on mobile until the drawer opens, and
-          // easy to miss even on desktop since it is not on this button. Give
-          // the button its OWN inline cue too, mirroring settings.js's
-          // comfyAction prev-label/busy-label swap (the established pattern for
-          // an async button in this codebase) rather than the bigger
-          // .reconnect-spinner, which is sized for a full-panel state, not an
-          // inline table button.
+          // An inline busy label on the button itself, alongside the sidebar
+          // #status-text pill switchModel() drives.
           const prevLabel = use.textContent;
           use.disabled = true;
           use.textContent = "loading…";
@@ -583,8 +481,8 @@ export async function refreshModelsPage() {
             if (!res || res.status !== "superseded") {
               toastLoadResult(res, m.name);
               refreshModelsPage();
-              // Keep the Settings "Live tuning" VRAM estimate (which defaults to
-              // the active model) in sync with a switch made from this page too.
+              // Keep the Settings "Live tuning" VRAM estimate, which defaults
+              // to the active model, in sync.
               refreshPerfEstimate();
             }
           } catch (e) {
@@ -603,8 +501,7 @@ export async function refreshModelsPage() {
         });
         const data = await r.json().catch(() => ({}));
         // Report the alias the SERVER stored, not the raw text: aliases are
-        // sanitized server-side ("daily driver" -> "daily-driver"), so echoing the
-        // input would name a key that does not exist in the registry (REG-562).
+        // sanitized server-side ("daily driver" -> "daily-driver").
         if (r.ok) { toast(`Aliased as '${data.alias || name.trim()}'`); refreshModelsPage(); }
         else toast(data.detail || "Alias failed", true);
       };
@@ -620,15 +517,13 @@ export async function refreshModelsPage() {
           body: JSON.stringify({ model: m.name, new_name: name.trim() }),
         });
         const data = await r.json().catch(() => ({}));
-        // Same discipline as alias above: the server sanitizes the name, so
-        // report what it actually stored, not the raw text typed in.
+        // Same as alias above: the server sanitizes the name, so report what it
+        // actually stored, not the raw text typed in.
         if (r.ok) {
           let msg = `Renamed to '${data.new_name || name.trim()}'`;
           // The server's migration notes - what it updated, and what it could
-          // NOT reach (e.g. a per-project .localcoder/config.toml) - must
-          // reach the user here, not sit only in the server log (AGENTS.md
-          // rule 5: a partial outcome reported and then discarded is the same
-          // as hiding it).
+          // NOT reach (e.g. a per-project .localcoder/config.toml) - are shown
+          // to the user, not left in the server log alone.
           if (Array.isArray(data.notes) && data.notes.length) {
             msg += ". " + data.notes.join(" ");
           }
@@ -650,13 +545,9 @@ export async function refreshModelsPage() {
             });
             const data = await r.json().catch(() => ({}));
             if (!r.ok) { toast(data.detail || "Unload failed", true); return; }
-            // unload_one_model() (http_server.py) answers HTTP 200 for an in-use
-            // engine too - a legitimate "not done yet, not an error" outcome (a
-            // request is mid-generation against it right now), not the same
-            // thing as a real unload. Reporting "Unloaded" here regardless of
-            // `status` would claim a VRAM release that did not happen (AGENTS.md
-            // rule 5). Mirrors the sidebar quick-unload handler's fix
-            // (models-sidebar.js sidebarUnloadBtn.onclick).
+            // unload_one_model() (http_server.py) answers HTTP 200 for an
+            // in-use engine too - a request is mid-generation against it, so
+            // nothing was released. Report that rather than "Unloaded".
             if (data.status === "in_use") {
               toast(`'${m.name}' is still generating - try again once it finishes`, true);
               refreshModelsPage();
@@ -683,9 +574,9 @@ export async function refreshModelsPage() {
               if (!r.ok) { toast(data.detail || "Remove failed", true); return; }
               const end = await streamJob(data.job_id, null);
               // "disconnected" (streamJob gave up reconnecting, or the job was
-              // already gone) is NOT the same fact as the remove having
-              // failed - do not claim it did. refreshModelsPage() below shows
-              // the real current state regardless.
+              // already gone) is not the same outcome as the remove having
+              // failed. refreshModelsPage() below shows the current state either
+              // way.
               if (end.status === "done") {
                 toast(`Removed '${m.name}'`);
               } else if (end.status === "disconnected") {
@@ -704,7 +595,7 @@ export async function refreshModelsPage() {
   }
   table.appendChild(tbody);
   if (myGen !== _modelsRenderGen) return;
-  // ONE call, so the old table is still on screen until the new one is ready.
+  // One call, so the old table stays on screen until the new one is ready.
   box.replaceChildren(...(hiddenOther ? [otherHiddenNote(hiddenOther), table] : [table]));
 }
 
@@ -715,9 +606,7 @@ export async function showModelDetail(name) {
   if (!r.ok) { toast(data.detail || "Lookup failed", true); return; }
   openModal("Model - " + name, (body) => {
     // Same three-state read as the list: `model_type` alone would render the
-    // route's "llm" DEFAULT as though somebody had chosen it, and this modal
-    // opens from a row that may be sitting on the Other tab for exactly the
-    // opposite reason.
+    // route's "llm" default as though it had been chosen.
     const modelUntagged = data.model_type_recorded === false;
     const modelType = modelUntagged ? "unset" : (data.model_type || "llm");
     const rows = [
@@ -735,10 +624,8 @@ export async function showModelDetail(name) {
       if (k === "Type") {
         row.appendChild(el("span", "type-badge type-" + modelType,
                             modelUntagged ? "not set" : modelType));
-        // Beside the type, not as a row of its own: a "Capabilities" row would
-        // have to render SOMETHING when there is no confirmed capability, and
-        // the only honest something for an unknown is nothing at all. An
-        // absent pill says nothing either way, which is the whole contract.
+        // Rendered beside the type, not as a row of its own, so an unconfirmed
+        // capability renders nothing at all.
         const visBadge = visionBadge(data.vision);
         if (visBadge) row.appendChild(visBadge);
       } else row.appendChild(document.createTextNode(String(v)));
@@ -757,8 +644,7 @@ export function fmtCount(n) {
 }
 
 // Parameter COUNT (e.g. gguf.total / safetensors.total from discover.py), not a
-// byte size - fmtSize is for bytes. A separate formatter so the two are never
-// mixed up at a call site.
+// byte size - fmtSize is the formatter for bytes.
 export function fmtParamCount(n) {
   if (!n) return "";
   if (n >= 1e9) return (n / 1e9).toFixed(1) + "B params";
@@ -769,33 +655,24 @@ export function fmtParamCount(n) {
 export const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
                    "too-big": "needs partial CPU offload" };
 
-// moe: "confirmed" (the model's own architecture header says MoE - reliable)
-// or "likely" (a name-pattern guess only, e.g. "8x7B"/"A3B" in the repo id -
-// see discover.py's _moe_signal). The label and tooltip make that distinction
-// visible; never presented as equally certain.
+// moe: "confirmed" (the model's own architecture header says MoE) or "likely"
+// (a name-pattern guess, e.g. "8x7B"/"A3B" in the repo id - see discover.py's
+// _moe_signal). The label and tooltip keep the two distinct.
 const MOE_LABEL = { confirmed: "MoE", likely: "MoE?" };
 
-// Model CAPABILITY pills - what a model can DO, deliberately separate from the
-// .fit.fits/.tight/.too-big scale, which grades file SIZE against VRAM and
-// means something entirely different. Vision is the only capability with a
-// real detector today (registry.model_vision_capability, the same lookup the
-// load path uses); tool-use and reasoning are a separate, larger design item
-// and are NOT inferred here from a filename.
+// Model CAPABILITY pills - what a model can DO, separate from the
+// .fit.fits/.tight/.too-big scale, which grades file SIZE against VRAM. Vision
+// is the only capability with a detector (registry.model_vision_capability, the
+// same lookup the load path uses).
 const CAP_LABEL = { vision: "vision" };
 const CAP_TITLE = { vision: "Accepts image input on this install - a vision projector (mmproj) or HF vision metadata was found beside the model" };
 
 /** The vision pill for a `vision` field, or null when there must be no pill.
  *
- *  ONE function for the list row AND the detail modal on purpose: two separate
- *  reads of a tri-state is two chances to write `if (v)` and collapse "checked,
- *  text-only" together with "COULD NOT CHECK".
- *
- *  STRICT `=== true`, never truthiness: the server sends true / false / NO KEY
- *  AT ALL, and the absent case means the model's files could not be inspected
- *  (an unmounted drive, a dead UNC share), NOT that it is text-only. false and
- *  absent both render nothing, and nothing is all they may render - a "no
- *  vision" label on a model nobody could check is exactly the false claim the
- *  F8 architecture/MoE badges are written to avoid. */
+ *  Shared by the list row and the detail modal. Tests `=== true`, never
+ *  truthiness: the server sends true, false, or no key at all, and the absent
+ *  case means the model's files could not be inspected. false and absent both
+ *  render nothing. */
 function visionBadge(v) {
   if (v !== true) return null;
   const badge = el("span", "cap-badge cap-vision", CAP_LABEL.vision);
@@ -806,10 +683,9 @@ const MOE_TITLE = { likely: "Inferred from the repo name - not confirmed by the 
 
 export const FMT_LABEL = { gguf: "GGUF", hf: "HF" };
 
-/** Fetch the GPU list AND the configured split once per search/files-load (not
- *  once per row) - used for the split-fit hint and the VRAM-basis caption below.
- *  Empty on any failure (server unreachable, no scope) so both simply degrade,
- *  never a broken search. */
+/** Fetch the GPU list AND the configured split once per search/files-load, for
+ *  the split-fit hint and the VRAM-basis caption below. Empty on any failure
+ *  (server unreachable, no scope). */
 async function _gpuInfo() {
   try {
     const r = await fetch("/api/gpus", { headers: authHeaders() });
@@ -822,21 +698,19 @@ async function _gpuInfo() {
   } catch (e) { return { gpus: [], gpu_split_indices: [] }; }
 }
 
-/** The GPU array alone (for the split hint / row rendering). */
+/** The GPU array alone, for the split hint and row rendering. */
 async function _splitGpus() { return (await _gpuInfo()).gpus; }
 
-/** Caption naming what the fit-badge VRAM number actually is, so it never
- *  mislabels a single main-GPU ceiling as the machine "total" (a 2x16 GB box
- *  with no split has a 16 GB main-GPU ceiling, not 32) and always agrees with
- *  the split hint. Mirrors discover.vram_capacity: the number is COMBINED only
- *  when 2+ configured split indices map to detected devices; otherwise it is the
- *  single main GPU's. `gpuInfo` is {gpus, gpu_split_indices} from _gpuInfo(). */
+/** Caption naming what the fit-badge VRAM number is. Mirrors
+ *  discover.vram_capacity: the number is COMBINED only when 2+ configured split
+ *  indices map to detected devices; otherwise it is the single main GPU's.
+ *  `gpuInfo` is {gpus, gpu_split_indices} from _gpuInfo(). */
 export function vramBasisCaption(totalBytes, gpuInfo) {
   const gib = (totalBytes / GIB).toFixed(0);
   const gpus = Array.isArray(gpuInfo?.gpus) ? gpuInfo.gpus : [];
   const rawSplit = Array.isArray(gpuInfo?.gpu_split_indices) ? gpuInfo.gpu_split_indices : [];
   // Dedup and keep only indices that map to a detected device - the same
-  // resolve_gpu_split validation vram_capacity() applies before it combines.
+  // resolve_gpu_split validation vram_capacity() applies.
   const split = [...new Set(rawSplit.filter((i) => gpus.some((g) => g.index === i)))];
   const tail = " (weights + ~1.5 GB overhead).";
   let basis;
@@ -853,14 +727,11 @@ export function vramBasisCaption(totalBytes, gpuInfo) {
 /** Non-blocking "might not fit on one GPU, but may fit split across them" hint,
  *  or "" when not applicable: unknown size, fewer than 2 GPUs detected, it
  *  already fits the single largest device, or it would not fit even split
- *  across every device. A ROUGH client-side suggestion only - the server's own
- *  fit badges (`m.fit`/`f.fit`) remain the authoritative numbers, and the real
- *  split load still applies a per-device VRAM check (gpu_split_shortfall) that
- *  can refuse it, which is why this is hedged ("may fit") not a promise. It uses
- *  the same need-math as the fit badge (weights * 1.10 + ~1.5 GB overhead) rather
- *  than a raw byte sum so it does not over-promise. Never auto-enables anything
- *  (the "never silently override a user's explicit choice" rule) - it only points
- *  at the "Split across GPUs" control that actually enables a split. */
+ *  across every device. A rough client-side suggestion; the server's own fit
+ *  badges (`m.fit`/`f.fit`) are the authoritative numbers, and a real split load
+ *  applies its own per-device VRAM check (gpu_split_shortfall). Uses the same
+ *  need-math as the fit badge (weights * 1.10 + ~1.5 GB overhead). Enables
+ *  nothing - it only points at the "Split across GPUs" control. */
 export function splitFitHint(sizeBytes, gpus) {
   if (!sizeBytes || !Array.isArray(gpus) || gpus.length < 2) return "";
   const frees = gpus.map((g) => (typeof g.free === "number" ? g.free : g.total));
@@ -876,8 +747,8 @@ export function splitFitHint(sizeBytes, gpus) {
 export function discFormats() {
   // The search-page FORMAT toggles -> the formats list. "hf" is the non-gguf /
   // safetensors world (labelled "Safetensors" in the UI). Defaults to gguf when
-  // the checkboxes are absent (older DOM) so search never silently returns
-  // nothing. Empty (both unchecked) is a real state the caller handles.
+  // the checkboxes are absent. Empty (both unchecked) is a real state the
+  // caller handles.
   const g = $("disc-fmt-gguf"), h = $("disc-fmt-hf");
   if (!g && !h) return ["gguf"];
   const out = [];
@@ -890,21 +761,19 @@ const ALL_SEARCH_TYPES =
   ["llm", "embedding", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
 
 export function discTypes() {
-  // The search-page TYPE checkboxes -> the model_types list. Explicit and
-  // always visible, independent of the Registered-models tab. Defaults to all
-  // types when the checkboxes are absent (older DOM). Empty (none ticked) is a
-  // real state the caller surfaces, same as no format.
+  // The search-page TYPE checkboxes -> the model_types list, independent of the
+  // Registered-models tab. Defaults to all types when the checkboxes are
+  // absent. Empty (none ticked) is a real state the caller surfaces, same as no
+  // format.
   const boxes = [...document.querySelectorAll(".disc-type")];
   if (!boxes.length) return ALL_SEARCH_TYPES.slice();
   return boxes.filter((b) => b.checked).map((b) => b.value);
 }
 
-// The model_type hint carried into a pull for a chosen discovery result. What
-// you SEE badged is what it registers as (detected_type), so the two never
-// disagree. When HF gave no confident type ("unknown" - the common case for a
-// standalone VAE / text-encoder, whose repos carry no type metadata) but the
-// user narrowed the search to exactly ONE type, that single explicit choice is
-// the hint. Otherwise let the pull auto-detect (never force "unknown").
+// The model_type hint carried into a pull for a chosen discovery result: the
+// badged detected_type, or - when HF gave no confident type ("unknown") and the
+// search is narrowed to exactly ONE type - that single type. Null otherwise, so
+// the pull auto-detects.
 function resolveTypeHint(detectedType) {
   if (detectedType && detectedType !== "unknown") return detectedType;
   const types = discTypes();
@@ -914,8 +783,8 @@ function resolveTypeHint(detectedType) {
 function showHfHint() {
   const hint = $("disc-hf-hint");
   if (!hint) return;
-  // Non-blocking: HF (transformers) models still DOWNLOAD, they just cannot RUN
-  // until torch + transformers are installed. State that, do not block the pull.
+  // Non-blocking: HF (transformers) models still download, they just cannot run
+  // until torch + transformers are installed.
   hint.textContent = "No transformers runtime detected. HF models will download, "
     + "but need the [gpu] extra (torch + transformers) installed to run.";
   hint.style.display = "block";
@@ -926,8 +795,8 @@ function hideHfHint() {
 }
 
 // A bare owner/repo (no :file.gguf) tells `localm pull` to fetch the WHOLE
-// transformers repo -> the HF backend. Prefill the Add box and let the user
-// confirm (they can still just download the files, backend or not).
+// transformers repo -> the HF backend. Prefills the Add box for the user to
+// confirm.
 function prefillHfPull(repo, detectedType) {
   $("pull-spec").value = repo;
   $("pull-name").value = repo.split("/").pop();
@@ -937,7 +806,7 @@ function prefillHfPull(repo, detectedType) {
   if (mmprojSelect) { mmprojSelect.replaceChildren(); mmprojSelect.style.display = "none"; }
   const nameInput = $("pull-name");
   // scrollIntoView is absent in some environments (e.g. jsdom); guard so the
-  // prefill never throws where it is unimplemented. Browsers have it.
+  // prefill never throws where it is unimplemented.
   if (typeof nameInput.scrollIntoView === "function") {
     nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
   }
@@ -950,23 +819,20 @@ function prefillHfPull(repo, detectedType) {
 // pull affordance (GGUF -> a per-quant file list; HF -> a whole-repo add). A
 // repo tagged with both formats gets both. Each pull affordance resolves its
 // model_type hint at click time from the result's detected type and the current
-// Type checkboxes (resolveTypeHint), so a vae/text-encoder whose HF metadata
-// gave no type still registers under the type the user searched for.
+// Type checkboxes (resolveTypeHint).
 function discRepoRow(m, gpus) {
   const row = el("div", "disc-repo");
   const head = el("div", "head");
   head.appendChild(iconEl("models", "ic ic-model"));
   head.appendChild(el("span", "name", m.id));
   // Best-effort HF classification, DISPLAY ONLY - never gates whether a result
-  // is shown (HF has no reliable type signal for standalone vae/text-encoder).
+  // is shown.
   if (m.detected_type) {
     head.appendChild(el("span", "type-badge type-" + m.detected_type, m.detected_type));
   }
-  // What the model actually IS: architecture family, MoE-ness, param
-  // count - all DISPLAY ONLY, from discover.py's classified-row fields, never
-  // gating which results show. Not colored into the type-badge palette (all 7
-  // --cat-* hues are already spoken for by MODEL_TYPES) - a shared hue here
-  // would misread as "this is the model's type".
+  // Architecture family, MoE-ness and param count from discover.py's
+  // classified-row fields - display only, never gating which results show, and
+  // outside the type-badge colour palette.
   if (m.architecture) {
     head.appendChild(el("span", "arch-badge", m.architecture));
   }
@@ -981,18 +847,14 @@ function discRepoRow(m, gpus) {
   const fmts = Array.isArray(m.formats) ? m.formats : ["gguf"];
   for (const f of fmts) head.appendChild(el("span", "fmt-badge fmt-" + f, FMT_LABEL[f] || f));
   // HF repos pull whole, so show total size + a VRAM fit badge inline (from the
-  // server's safetensors param estimate). When the estimate is unknown (no
-  // safetensors metadata) say so - never guess a fit. GGUF results are sized
-  // per-quant in the files expander instead.
+  // server's safetensors param estimate), or "size unknown" when there is no
+  // estimate. GGUF results are sized per-quant in the files expander instead.
   if (fmts.includes("hf")) {
     if (m.size_bytes) {
       head.appendChild(el("span", "disc-hf-size", fmtSize(m.size_bytes)));
       if (m.fit) head.appendChild(el("span", "fit " + m.fit, FIT_TEXT[m.fit]));
-      // "fits"/"tight" are already combined-aware (server sums capacity
-      // across a configured split - see discover.vram_capacity), so a "may
-      // not fit on one GPU, go configure a split" suggestion would be
-      // stale/contradictory right next to a badge that already accounts for
-      // the split.
+      // "fits"/"tight" already account for a configured split (the server sums
+      // capacity across it - see discover.vram_capacity), so no split hint.
       const hint = (m.fit === "fits" || m.fit === "tight")
         ? "" : splitFitHint(m.size_bytes, gpus);
       if (hint) head.appendChild(el("span", "sub split-hint", hint));
@@ -1000,7 +862,7 @@ function discRepoRow(m, gpus) {
       head.appendChild(el("span", "disc-hf-size sub", "size unknown"));
     }
   }
-  // Downloads + likes as inline SVGs (no emoji glyphs on the shipping surface).
+  // Downloads + likes as inline SVGs.
   const meta = el("span", "meta disc-stats");
   meta.appendChild(iconEl("download", "meta-ic"));
   meta.appendChild(el("span", "", fmtCount(m.downloads)));
@@ -1063,10 +925,8 @@ export async function discoverSearch() {
       box.appendChild(el("div", "sub", "(no matching repos found)"));
       return;
     }
-    // A dashed "MoE?" pill's meaning must not depend on a hover-only tooltip
-    // (touch devices have no hover at all) - shown once, persistently, only
-    // when a result on screen actually carries that inferred-not-confirmed
-    // signal, so it never clutters a search with no MoE-named results.
+    // A persistent legend for the dashed "MoE?" pill, shown once and only when
+    // a result on screen carries that inferred-not-confirmed signal.
     if (data.results.some((m) => m.moe === "likely")) {
       box.appendChild(el("div", "sub moe-legend",
         "MoE? = inferred from the model's name, not confirmed by its own header"));
@@ -1086,7 +946,7 @@ export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
   }
   btn.disabled = true;
   filesBox.replaceChildren(el("div", "sub", "loading file list…"));
-  if (!Array.isArray(gpus)) gpus = await _splitGpus();   // direct call, e.g. from a test
+  if (!Array.isArray(gpus)) gpus = await _splitGpus();   // not supplied by the caller
   try {
     const r = await fetch("/api/discover/files?repo=" + encodeURIComponent(repo),
                           { headers: authHeaders() });
@@ -1107,31 +967,23 @@ export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
         (f.n_parts > 1 ? ` (${f.n_parts} parts)` : "");
       row.appendChild(el("span", "mono", desc));
       if (f.fit) row.appendChild(el("span", "fit " + f.fit, FIT_TEXT[f.fit]));
-      // See the discRepoRow comment above: "fits"/"tight" already account
-      // for a configured split, so skip the redundant split-suggestion hint.
+      // "fits"/"tight" already account for a configured split, so no split hint.
       const splitHint = (f.fit === "fits" || f.fit === "tight")
         ? "" : splitFitHint(f.size_bytes, gpus);
       if (splitHint) row.appendChild(el("span", "sub split-hint", splitHint));
       row.appendChild(el("span", "fname", f.file));
       const pull = el("button", "btn-secondary", "pull");
       pull.onclick = () => {
-        // Prefill the pull form - the user confirms (and can set an alias)
-        // before anything downloads. The suggested alias mirrors the
-        // server's default name (file name without .gguf).
+        // Prefill the pull form; the user confirms (and can set an alias)
+        // before anything downloads. The suggested alias mirrors the server's
+        // default name (file name without .gguf).
         $("pull-spec").value = `${repo}:${f.file}`;
         $("pull-name").value = f.file.replace(/\.gguf$/i, "");
-        // A vision-projector companion file is never the searched-for type
-        // (the search Type checkboxes above have no mmproj entry) - only hint a
-        // REGULAR file's own pull, not one drawn from data.mmprojs (same object
-        // reference, "show mmproj files" merge above). The hint resolves at
-        // click time from the repo's detected type and the current Type
-        // checkboxes.
-        //
-        // This says CHECKBOX deliberately. It used to read "no mmproj
-        // tab/checkbox", which stopped being unambiguous once the
-        // Registered-models Other tab began collecting every type with no tab
-        // of its own - mmproj included. That strip is a different control from
-        // these search filters, and only the filters decide this hint.
+        // Only a REGULAR file's pull carries a type hint, never one drawn from
+        // data.mmprojs (the same object reference, merged in by the "show mmproj
+        // files" toggle above): the search Type checkboxes have no mmproj entry.
+        // The hint resolves at click time from the repo's detected type and
+        // those checkboxes.
         const isMmproj = Array.isArray(data.mmprojs) && data.mmprojs.includes(f);
         const typeHint = isMmproj ? null : resolveTypeHint(detectedType);
         pendingPullTypeHint = typeHint
@@ -1176,7 +1028,7 @@ export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
 
         const nameInput = $("pull-name");
         // scrollIntoView is absent in some environments (e.g. jsdom); guard so
-        // this per-file pull button matches prefillHfPull's existing guard above.
+        // this never throws where it is unimplemented.
         if (typeof nameInput.scrollIntoView === "function") {
           nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
         }
@@ -1200,16 +1052,14 @@ $("disc-query").addEventListener("keydown", (e) => {
 });
 
 // Mirror a filter checkbox's state onto its chip label as an `.on` class, which
-// is what style.css colours (a CSS :checked-combinator does not repaint on a
-// programmatic toggle in every engine - see the .disc-chip comment there).
+// is what style.css colours.
 function _syncChip(box) {
   const chip = box.closest(".disc-chip");
   if (chip) chip.classList.toggle("on", box.checked);
 }
 
-// Restore + persist a search filter checkbox (all default on). Keep its chip in
-// sync, and re-run the search on change when results are already showing so a
-// toggle reflects live.
+// Restore + persist a search filter checkbox (all default on). Keeps its chip in
+// sync, and re-runs the search on change when results are already showing.
 function _bindDiscToggle(box, key) {
   if (!box) return;
   const saved = localStorage.getItem(key);
@@ -1224,27 +1074,21 @@ function _bindDiscToggle(box, key) {
 }
 _bindDiscToggle($("disc-fmt-gguf"), "localm.discFmtGguf");
 _bindDiscToggle($("disc-fmt-hf"), "localm.discFmtHf");
-// The explicit model-TYPE checkboxes, persisted per type so a chosen scope
-// sticks across reloads (keyed by value, e.g. localm.discType.vae).
+// The explicit model-TYPE checkboxes, persisted per type (keyed by value, e.g.
+// localm.discType.vae).
 for (const box of document.querySelectorAll(".disc-type")) {
   _bindDiscToggle(box, "localm.discType." + box.value);
 }
 
-// S6: curated model shortcuts (`localm pull <alias>`, see MODEL_SHORTCUTS in
-// model_manager/registry.py). Using a shortcut already worked from this box - the
-// pull endpoint resolves an alias same as the CLI - but the alias keyspace was
-// unlisted, so a GUI-only user had no way to discover it. It is also the only
-// model-discovery path that still works with net_mode=off, since it is a fixed
-// local list rather than a HuggingFace search. Picking one prefills the Add box
-// exactly like a discover result row does (the resolved repo:file, not the bare
-// alias), so what lands in pull-spec is what a user clicking "files" on a search
-// result would also see.
+// Curated model shortcuts (`localm pull <alias>`, see MODEL_SHORTCUTS in
+// model_manager/registry.py) - a fixed local list, so it works with
+// net_mode=off. Picking one prefills the Add box with the resolved repo:file,
+// not the bare alias.
 //
-// Fetched from refreshModelsPage() (above), not eagerly here at module load: this
-// is an authenticated read (MODELS_READ), and the boot deep-link/restore path
-// must fire ONLY the auth probe until it confirms this client is authed - see
-// keygate.test.mjs. onchange needs no such gating (it fires no request itself),
-// so it is wired here unconditionally.
+// Fetched from refreshModelsPage() above, not eagerly at module load: this is an
+// authenticated read (MODELS_READ) and must not run before the boot path
+// confirms this client is authed. onchange fires no request of its own and is
+// wired here unconditionally.
 async function _loadPullShortcuts() {
   const sel = $("pull-shortcut");
   if (!sel) return;
@@ -1270,14 +1114,12 @@ if ($("pull-shortcut")) {
     if (!opt || !opt.value) return;
     $("pull-spec").value = opt.value;
     $("pull-name").value = opt.dataset.alias || "";
-    e.target.selectedIndex = 0;   // reverts to the placeholder - this is an action, not a state
+    e.target.selectedIndex = 0;   // revert to the placeholder
   };
 }
 
-// add-models-disk: make adding a model already on disk discoverable - pick a
-// folder on this machine and drop its path into the spec field (the /api/models/
-// pull endpoint already accepts a local folder/file path). The user no longer has
-// to guess that pasting a path works.
+// Pick a folder on this machine and drop its path into the spec field; the
+// /api/models/pull endpoint accepts a local folder/file path.
 document.addEventListener("click", async (e) => {
   if (e.target && e.target.id === "pull-browse") {
     const spec = $("pull-spec");
@@ -1288,9 +1130,8 @@ document.addEventListener("click", async (e) => {
   }
 });
 
-// R18: restart the server in place from Settings - the backend unloads the model,
-// then re-execs the same process, so it comes back on the same port. The reconnect
-// overlay polls and auto-reconnects once the fresh process is up.
+// Restart the server in place from Settings: the backend unloads the model, then
+// re-execs the same process, so it comes back on the same port.
 if ($("server-restart")) {
   $("server-restart").onclick = () => {
     confirmDanger("Restart the server?",
@@ -1302,16 +1143,15 @@ if ($("server-restart")) {
                                 { method: "POST", headers: authHeaders() });
           if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
           toast("Server restarting…");
-          // The server briefly goes away and comes back; the reconnect overlay
-          // polls and reconnects automatically once the new process is up.
+          // The reconnect overlay polls until the new process is up.
           if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
         } catch (e) { toast("Could not restart: " + e.message, true); }
       });
   };
 }
 
-// R18: shut the server down cleanly from Settings (the backend unloads the model
-// before exit) instead of force-closing the window. Start it again from the launcher.
+// Shut the server down cleanly from Settings; the backend unloads the model
+// before exit.
 if ($("server-shutdown")) {
   $("server-shutdown").onclick = () => {
     confirmDanger("Shut down the server?",
@@ -1323,24 +1163,20 @@ if ($("server-shutdown")) {
                                 { method: "POST", headers: authHeaders() });
           if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
           toast("Server shutting down…");
-          // The server is going away; show the reconnect overlay rather than a dead app.
+          // Show the reconnect overlay while the server goes away.
           if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
         } catch (e) { toast("Could not shut down: " + e.message, true); }
       });
   };
 }
 
-// PARITY-AUDIT-CLI-GUI-2026-08-19.md CLI-only gap #7: the GUI form of `localm
-// ps` / `localm stop <id>`. /api/instances returns every registered instance
-// (this one included, flagged `self`) so it stays a faithful `ps` equivalent
-// for any other caller; the card below filters `self` out client-side, since
-// that row is already covered by the Server controls card right above it.
+// The GUI form of `localm ps` / `localm stop <id>`. /api/instances returns every
+// registered instance, this one included and flagged `self`; the card below
+// filters `self` out client-side.
 //
-// Guarded by a generation counter and written with one replaceChildren(),
-// same discipline as refreshModelsPage above: a stale in-flight fetch must
-// never overwrite a newer render, and the box must never sit empty across an
-// await (that is the exact shape of the scroll-jump bug already fixed
-// elsewhere on this page).
+// Guarded by a generation counter and written with one replaceChildren(), same
+// as refreshModelsPage above: a stale in-flight fetch never overwrites a newer
+// render, and the box never sits empty across an await.
 let _instancesRenderGen = 0;
 
 export async function refreshInstancesCard() {
@@ -1351,7 +1187,7 @@ export async function refreshInstancesCard() {
   try {
     const r = await fetch("/api/instances", { headers: authHeaders() });
     if (myGen !== _instancesRenderGen) return;
-    if (!r.ok) { box.replaceChildren(); return; }   // e.g. a read-only key: hide, like uploads
+    if (!r.ok) { box.replaceChildren(); return; }   // e.g. a read-only key: hide
     const data = await r.json().catch(() => ({ instances: [] }));
     rows = (data.instances || []).filter((i) => !i.self);
   } catch (e) {
@@ -1412,14 +1248,12 @@ export async function refreshInstancesCard() {
 }
 window.refreshInstancesCard = refreshInstancesCard;
 
-// R47: file a bug report from Settings. "Save report" writes an editable markdown
+// File a bug report from Settings. "Save report" writes an editable markdown
 // report to the data folder (safe snapshot, optional log tail - never secrets or
-// chat). "Send to maintainer" (shown only when an upload endpoint is configured,
-// via capabilities.bugreport_upload) ALSO files it as a GitHub issue through the
-// proxy, so a tester needs no GitHub account. A failed upload is reported honestly
-// (the file is still saved), never as success.
-// The most recent saved report's markdown + filename, so "Download report" can
-// hand the tester the file to send manually when an upload fails.
+// chat). "Send to maintainer", shown only when capabilities.bugreport_upload
+// names an upload endpoint, ALSO files it as a GitHub issue through the proxy. A
+// failed upload is reported as a failure; the file is still saved.
+// The most recent saved report's markdown + filename, for "Download report".
 let _lastBugReport = null;
 
 function _showBugActions({ retry, download }) {
@@ -1428,8 +1262,7 @@ function _showBugActions({ retry, download }) {
   if (d) d.hidden = !download;
 }
 
-// Download the last saved report as a .md so the tester can email/Discord it -
-// works from a phone or another LAN device where a server-side path is useless.
+// Download the last saved report as a .md.
 function downloadBugReport() {
   if (!_lastBugReport || !_lastBugReport.markdown) return;
   const blob = new Blob([_lastBugReport.markdown], { type: "text/markdown" });
@@ -1447,18 +1280,16 @@ export async function submitBugReport(upload, isRetry = false) {
   const desc = ($("bug-desc").value || "").trim();
   const expected = (($("bug-expected") && $("bug-expected").value) || "").trim();
   const happened = (($("bug-happened") && $("bug-happened").value) || "").trim();
-  // "What were you doing" and "what happened" are the two fields most likely
-  // to carry the actual report; either alone is enough to send (mirrors the
-  // server's own "description or what_happened" check).
+  // Either "what were you doing" or "what happened" alone is enough to send,
+  // mirroring the server's own "description or what_happened" check.
   if (!desc && !happened) { toast("Describe the problem first", true); return; }
   const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
   const saveBtn = $("bug-send"), upBtn = $("bug-upload");
   if (saveBtn) saveBtn.disabled = true;
   if (upBtn) upBtn.disabled = true;
   _showBugActions({ retry: false, download: false });   // fresh attempt: reset
-  // Browser context so the report carries what actually broke in the page (env
-  // snapshot + server state are added server-side). Sanitized + capped on the
-  // server; rendered as plain text, never executed.
+  // Browser context; the env snapshot and server state are added server-side.
+  // Sanitized + capped on the server; rendered as plain text, never executed.
   const client = {
     userAgent: navigator.userAgent,
     page: location.hash || location.pathname,
@@ -1476,8 +1307,9 @@ export async function submitBugReport(upload, isRetry = false) {
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    // Rate limited: if auto-retry is on (default), keep the user's text, count down,
-    // and retry the send ONCE; if the toggle is off, fall through to a plain notice.
+    // Rate limited: with auto-retry on (the default), keep the user's text,
+    // count down, and retry the send ONCE; with it off, fall through to a plain
+    // notice.
     const autoRetry = !$("bug-autoretry") || $("bug-autoretry").checked;
     if (upload && data.rate_limited && !isRetry && autoRetry) {
       const secs = Math.max(1, parseInt(data.retry_after, 10) || 30);
@@ -1487,13 +1319,12 @@ export async function submitBugReport(upload, isRetry = false) {
     const where = data.path || data.filename || "report";
     const sent = upload && data.uploaded;
     const uploadFailed = upload && data.upload_error && !data.rate_limited;
-    // Stash the saved report so "Download report" can hand it to the tester for
-    // manual sending (a server-side path is useless from a phone / another device).
+    // Stash the saved report so "Download report" can hand it to the tester.
     _lastBugReport = data.report_markdown
       ? { markdown: data.report_markdown, filename: data.filename || "bug-report.md" }
       : null;
-    // On a failed send, offer Retry (re-file the issue) and Download (send it
-    // yourself); on success, keep them hidden.
+    // On a failed send, offer Retry (re-file the issue) and Download; on
+    // success, keep them hidden.
     _showBugActions({ retry: uploadFailed, download: !sent && !!_lastBugReport });
     if (out) {
       out.hidden = false;
@@ -1504,8 +1335,8 @@ export async function submitBugReport(upload, isRetry = false) {
         out.textContent = "Saved: " + where +
           "  -  rate limited; wait a bit and click Send again.";
       } else if (uploadFailed) {
-        // Tell the user WHERE it failed (the diagnosed message), and that the
-        // report is kept - they can retry, download it, or email it.
+        // Name where it failed (the diagnosed message) and that the report is
+        // kept, so it can be retried, downloaded or emailed.
         out.textContent = "Could not send: " +
           (data.upload_message || data.upload_error) +
           "  The report is saved" + (where ? " (" + where + ")" : "") +
@@ -1515,8 +1346,8 @@ export async function submitBugReport(upload, isRetry = false) {
           (data.maintainer ? "  -  send it to " + data.maintainer : "");
       }
     }
-    // Keep the description on ANY failed send so Retry re-uses it; clear it once the
-    // report is genuinely done with (sent, or a plain save with no upload attempt).
+    // Keep the description on ANY failed send so Retry re-uses it; clear it once
+    // the report is done with (sent, or a plain save with no upload attempt).
     if (sent || (!upload && data.saved)) {
       $("bug-desc").value = "";
       if ($("bug-expected")) $("bug-expected").value = "";
@@ -1534,9 +1365,9 @@ export async function submitBugReport(upload, isRetry = false) {
   }
 }
 
-// Show a live countdown in the bug-report result line, then auto-retry the send once
-// (isRetry=true, so it never loops). The caller's buttons stay disabled throughout,
-// so this cannot be double-fired.
+// Show a live countdown in the bug-report result line, then auto-retry the send
+// once (isRetry=true, so it never loops). The caller's buttons stay disabled
+// throughout.
 async function countdownRetryBugReport(secs, out) {
   for (let s = secs; s > 0; s--) {
     if (out) {
@@ -1554,10 +1385,9 @@ if ($("bug-upload")) $("bug-upload").onclick = () => submitBugReport(true);
 if ($("bug-retry")) $("bug-retry").onclick = () => submitBugReport(true);
 if ($("bug-download")) $("bug-download").onclick = () => downloadBugReport();
 
-// Updates: check-only auto-surface (a throttled startup check in app.js calls
-// __localmUpdateCheck) + an explicit "Update now". localm never self-updates; the
-// apply runs only on this click and the server rolls back + reports honestly on
-// failure.
+// Updates: a check-only auto-surface (a throttled startup check in app.js calls
+// __localmUpdateCheck) plus an explicit "Update now". The apply runs only on
+// that click; the server rolls back and reports on failure.
 export async function updateCheck() {
   const out = $("update-status"), applyBtn = $("update-apply");
   try {
@@ -1575,20 +1405,11 @@ export async function updateCheck() {
       if (out) out.textContent = "Update " + d.latest + " is available but has no build attached.";
       if (applyBtn) applyBtn.hidden = true;
     } else if (d.comparable === false) {
-      // is_newer() returns False BOTH for a genuine tie/older release AND for a
-      // tag it could not parse as a version at all (nightly, stable, release-5
-      // all measured False). Without this branch the GUI printed "up to date"
-      // for the second case - a false reassurance, and pushed UNPROMPTED, since
-      // app/settings-perf.js calls this on a throttled startup check as well as
-      // on the button. Keyed like cli/maintenance.py's .get("comparable", True):
-      // strict === false, so an absent key (an older server) still means
-      // comparable and the pre-existing wording is unchanged.
-      // Wording deliberately carries NO "up to date" substring, unlike the CLI's
-      // otherwise-identical sentence ("...before assuming you are up to date").
-      // The CLI ships that inside a bold yellow warning; this is plain text in
-      // one status line, where a skimmed tail would read as the very
-      // reassurance the branch exists to withhold. It also lets the regression
-      // test assert the phrase is ABSENT outright rather than absent-except-here.
+      // is_newer() returns False both for a genuine tie or older release and for
+      // a tag it could not parse as a version at all (nightly, stable,
+      // release-5). Keyed like cli/maintenance.py's .get("comparable", True):
+      // strict === false, so an absent key means comparable. The wording carries
+      // no "up to date" substring.
       if (out) out.textContent = "Could not tell whether " + d.latest +
         " is newer than your version " + d.current +
         " (unrecognized version format) - check the release notes yourself" +
@@ -1626,12 +1447,10 @@ export async function updateApply() {
 if ($("update-check")) $("update-check").onclick = updateCheck;
 if ($("update-apply")) $("update-apply").onclick = updateApply;
 
-// Roll back: the GUI form of `localm update --rollback`, for the one case the other
-// rollback paths do not cover - an update that applied cleanly, runs, and is worse.
-// (The post-apply watchdog handles "did not come back"; rollback.bat/.sh handle "too
-// broken to start".) PROBE first: GET is read-only and never performs the rollback,
-// so the control appears only when a backup really exists. The server owner-gates the
-// POST and restarts itself afterwards - see CHK-UPDATE-ROLLBACK in routes/admin.py.
+// Roll back: the GUI form of `localm update --rollback`. Probes first - the GET
+// is read-only and never performs the rollback - so the control appears only
+// when a backup exists. The server owner-gates the POST and restarts itself
+// afterwards (routes/admin.py).
 export async function updateRollbackCheck() {
   const block = $("app-rollback-block"), out = $("update-rollback-status");
   if (!block) return;
@@ -1646,9 +1465,8 @@ export async function updateRollbackCheck() {
         (d.current ? " (you are running " + d.current + ")" : "") + ".";
     }
   } catch (e) {
-    // An optional affordance we could not confirm: stay hidden rather than offer a
-    // rollback that may not exist, but say so in the console instead of vanishing
-    // silently - the block is not a failure the user needs a banner about.
+    // Unconfirmed: stay hidden rather than offer a rollback that may not exist,
+    // and log it to the console instead of raising a banner.
     block.hidden = true;
     console.warn("could not check for a rollback backup:", e);
   }
@@ -1670,8 +1488,8 @@ export async function updateRollback() {
         if (!r.ok) throw new Error(d.detail || r.statusText);
         if (out) out.textContent = "Rolled back to " + (d.version || "the previous build") +
           ". Restarting...";
-        // Deliberately NOT re-enabled: the server is re-execing, and the reconnect
-        // overlay takes over from here.
+        // Not re-enabled: the server is re-execing and the reconnect overlay
+        // takes over from here.
         if (btn) btn.hidden = true;
         if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
       } catch (e) {
@@ -1682,14 +1500,10 @@ export async function updateRollback() {
 }
 if ($("update-rollback")) $("update-rollback").onclick = updateRollback;
 
-// The GUI form of `localm make-launcher --force`: the CLI's only real use case
-// (refreshing the copied interpreter after a Python upgrade) is precisely when a
-// GUI-only user has no terminal to run it from. Always passes force=true - unlike
-// the CLI's own bare default, a user who clicks "Rebuild" wants a rebuild, not the
-// idempotent no-op a launcher already on disk would otherwise return. A single
-// blocking POST, same shape as updateApply above: make_launcher() runs in seconds
-// and reports a structured result rather than streaming progress, so this needs no
-// job.
+// The GUI form of `localm make-launcher --force`. Always passes force=true, so a
+// launcher already on disk is rebuilt rather than returning an idempotent no-op.
+// A single blocking POST: make_launcher() runs in seconds and reports a
+// structured result rather than streaming progress, so there is no job.
 export async function rebuildLauncher() {
   const out = $("rebuild-launcher-status"), btn = $("rebuild-launcher");
   if (btn) btn.disabled = true;
@@ -1699,9 +1513,8 @@ export async function rebuildLauncher() {
                           { method: "POST", headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
-    // notes carries the human-readable surface even on a success (e.g. "could not
-    // stamp the exe icon") - show it either way rather than only on failure, or a
-    // partial success reads as a silent full one (AGENTS.md rule 5).
+    // notes carries a human-readable surface even on a success (e.g. "could not
+    // stamp the exe icon"), so it is shown either way.
     const notes = (d.notes || []).join(" ");
     if (out) {
       out.textContent = d.ok
@@ -1717,29 +1530,21 @@ export async function rebuildLauncher() {
 if ($("rebuild-launcher")) $("rebuild-launcher").onclick = rebuildLauncher;
 
 // The inference runtime: the native llama.cpp binaries `localm setup-llama`
-// provisions, separate from the "Updates" card above (the Python source
-// tree). Check is read-only (GET /api/runtime/check); provisioning streams a
-// job (POST /api/runtime/update), since a real download + native load-test can
-// take a while - same shape as the managed-ComfyUI update panel's job log,
-// unlike the plain source-tree update above which is a single blocking call.
-//
-// This block is the GUI's whole form of `localm setup-llama`. It used to offer
-// exactly one action (re-provision the backend already installed), so a user
-// who never opens a terminal could not install a runtime, switch backend, or
-// choose a build - while `localm doctor` and this very page told them to run
-// the command they could not reach.
+// provisions, separate from the "Updates" card above (the Python source tree).
+// Check is read-only (GET /api/runtime/check); provisioning streams a job (POST
+// /api/runtime/update). This block is the GUI's whole form of
+// `localm setup-llama`: install a runtime, switch backend, or choose a build.
 
 // The last SUCCESSFUL /api/runtime/check payload, or null when none has
-// succeeded yet. Kept so the button can be re-labelled the instant the
-// selection changes, with no round trip - and so "switch" can be told apart
-// from "install", which is the difference that decides whether to confirm.
+// succeeded yet. Lets the button be re-labelled the instant the selection
+// changes with no round trip, and tells "switch" apart from "install".
 let runtimeCheckState = null;
 
-/** What pressing the button will actually do, given the current selection and
- *  the last check. Pure, so the wording is testable without a DOM.
+/** What pressing the button will do, given the current selection and the last
+ *  check. Pure, so the wording is testable without a DOM.
  *
- *  A null *state* means no check has succeeded, so "switch" versus "install"
- *  is NOT knowable - say the neutral thing rather than assert either. */
+ *  A null *state* means no check has succeeded, so "switch" versus "install" is
+ *  not knowable and the label stays neutral. */
 export function runtimeApplyLabel(wanted, tag, state) {
   const installed = state && state.installed ? state.backend : null;
   if (wanted === "auto") return installed ? "Re-detect and reinstall" : "Detect and install";
@@ -1759,11 +1564,8 @@ export function syncRuntimeApply() {
   const wanted = sel ? sel.value.trim() : "";
   const tag = tagEl ? tagEl.value.trim() : "";
   btn.textContent = runtimeApplyLabel(wanted, tag, runtimeCheckState);
-  // An EXPLICIT choice is actionable whatever the check said, including when
-  // the check failed outright. That case is not hypothetical: a box whose
-  // runtime is broken or absent is exactly the one whose check cannot answer,
-  // and it is the one that most needs this button. A failed read must never
-  // remove the only route to a repair.
+  // An explicit choice is actionable whatever the check said, including when
+  // the check failed outright.
   if (wanted || tag) { btn.hidden = false; return; }
   if (!runtimeCheckState) { btn.hidden = true; return; }
   if (!runtimeCheckState.installed) { btn.hidden = false; return; }
@@ -1780,8 +1582,6 @@ export async function runtimeUpdateCheck() {
     runtimeCheckState = d;
     if (out) {
       if (!d.installed) {
-        // An INVITATION, not a dead end. This used to read "run setup first",
-        // which was only accurate while the route refused to provision.
         out.textContent = "No llama.cpp runtime is installed yet - choose a backend below and install one.";
       } else {
         const current = d.current || "an unrecorded build";
@@ -1800,9 +1600,7 @@ export async function runtimeUpdateCheck() {
   syncRuntimeRollback();
 }
 
-/** Show or hide the Roll back button, from the last check's "previous" field -
- *  the same shape as syncRuntimeApply, but with nothing for the user to pick:
- *  a build is either on record to go back to, or it is not. */
+/** Show or hide the Roll back button, from the last check's "previous" field. */
 export function syncRuntimeRollback() {
   const btn = $("runtime-rollback"), out = $("runtime-rollback-status");
   const prev = runtimeCheckState && runtimeCheckState.installed
@@ -1814,10 +1612,10 @@ export function syncRuntimeRollback() {
   }
 }
 
-/** POST the provision and stream its job. *backend* and *tag* are sent only
- *  when non-empty, so an untouched card means exactly what it meant before
- *  these controls existed: re-provision whatever is installed. *rollback*
- *  sends {rollback: true} instead of a tag, for the Roll back button. */
+/** POST the provision and stream its job. *backend* and *tag* are sent only when
+ *  non-empty, so an untouched card re-provisions whatever is installed.
+ *  *rollback* sends {rollback: true} instead of a tag, for the Roll back
+ *  button. */
 export async function runtimeProvision(backend, tag, rollback) {
   const out = $("runtime-update-status"), btn = $("runtime-update-apply");
   const rbBtn = $("runtime-rollback");
@@ -1851,9 +1649,8 @@ export async function runtimeProvision(backend, tag, rollback) {
   const tail = [];
   const end = await streamJob(jobId, (line) => {
     if (log) { log.textContent += line + "\n"; log.scrollTop = log.scrollHeight; }
-    // A short tail, not just the last line: setup-llama's failure messages
-    // wrap across several printed lines, so the final line alone is often a
-    // fragment with the actual reason lost.
+    // A short tail, not just the last line: setup-llama's failure messages wrap
+    // across several printed lines.
     if (line && line.trim()) { tail.push(line.trim()); if (tail.length > 6) tail.shift(); }
   });
   const ok = !!(end && end.status === "done");
@@ -1864,9 +1661,7 @@ export async function runtimeProvision(backend, tag, rollback) {
   if (btn) btn.disabled = false;
   if (rbBtn) rbBtn.disabled = false;
   if (ok) {
-    // The request has been carried out, so clear it. Leaving "cuda" sitting in
-    // the select would go on offering an action that has already happened, and
-    // would keep the button lit for it forever.
+    // The request has been carried out, so clear the selection.
     if ($("runtime-backend")) $("runtime-backend").value = "";
     if ($("runtime-tag")) $("runtime-tag").value = "";
     runtimeUpdateCheck();   // re-checks; settles both the update and rollback buttons
@@ -1882,12 +1677,10 @@ export function runtimeUpdateApply() {
   const tag = tagEl ? tagEl.value.trim() : "";
   const installed = runtimeCheckState && runtimeCheckState.installed
     ? runtimeCheckState.backend : null;
-  // Replacing a WORKING runtime with a different backend is the one variant
-  // that can leave this machine worse off than it started, so it is the one
-  // that confirms first. A first install has nothing to lose, and a
-  // same-backend re-provision is what this button has always done. "auto"
-  // counts as different: it resolves from hardware detection, so it CAN land
-  // on another backend, and nothing here can know that it will not.
+  // Only replacing a working runtime with a DIFFERENT backend confirms first; a
+  // first install and a same-backend re-provision go straight through. "auto"
+  // counts as different: it resolves from hardware detection and can land on
+  // another backend.
   if (installed && wanted && wanted !== installed) {
     confirmDanger(
       "Switch the inference runtime",
@@ -1902,9 +1695,7 @@ export function runtimeUpdateApply() {
   runtimeProvision(wanted, tag);
 }
 /** Roll back the INSTALLED backend to its previous recorded build. Always
- *  confirms: unlike a forward update, this is a deliberate downgrade of a
- *  runtime that is currently working, mirroring the "switch backend" confirm
- *  above rather than the plain "Update runtime" button, which does not. */
+ *  confirms first. */
 export function runtimeRollbackApply() {
   const state = runtimeCheckState;
   if (!state || !state.installed || !state.previous) return;
@@ -1917,17 +1708,15 @@ export function runtimeRollbackApply() {
 if ($("runtime-update-check")) $("runtime-update-check").onclick = runtimeUpdateCheck;
 if ($("runtime-update-apply")) $("runtime-update-apply").onclick = runtimeUpdateApply;
 if ($("runtime-rollback")) $("runtime-rollback").onclick = runtimeRollbackApply;
-// Re-label the moment the selection changes, so the button never promises the
-// action that was current one keystroke ago.
+// Re-label the moment the selection changes.
 if ($("runtime-backend")) $("runtime-backend").onchange = syncRuntimeApply;
 if ($("runtime-tag")) $("runtime-tag").oninput = syncRuntimeApply;
 
-// Changelog: show the RELEASED history (newest first) in the shared modal. The
-// endpoint strips the in-progress [Unreleased] section before serving, so this
-// never shows changes that are not in the running build.
-// Fetched from /api/changelog and rendered via renderMarkdown - the same
-// DOMPurify(marked) path chat uses, so it is XSS-safe. Always available (it ships
-// in every build); a missing/failed fetch is shown in the modal, never left blank.
+// Changelog: the RELEASED history, newest first, in the shared modal. The
+// endpoint strips the in-progress [Unreleased] section before serving. Fetched
+// from /api/changelog and rendered via renderMarkdown - the same
+// DOMPurify(marked) path chat uses. A missing or failed fetch is shown in the
+// modal, never left blank.
 export async function showChangelog() {
   openModal("Changelog", (body) => {
     const md = el("div", "changelog-md");
@@ -1957,10 +1746,8 @@ export async function issuesRefresh() {
     if (!out) return;
     if (d.error) { out.textContent = "Could not load: " + d.error; return; }
     const list = d.issues || [];
-    // gui-design.md rule 7: a designed empty state, not a lone .sub line. Note
-    // this is reached only on a SUCCESSFUL fetch of an empty list - the error
-    // paths above and below keep saying "could not load", because "nothing is
-    // open" and "I could not ask" are different answers.
+    // Reached only on a SUCCESSFUL fetch of an empty list; the error paths above
+    // and below say "could not load" instead.
     if (!list.length) {
       out.replaceChildren(emptyState("book", "No open issues",
         "Reported bugs that are still open show up here."));
@@ -1982,8 +1769,8 @@ export async function issuesRefresh() {
 }
 if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
 
-// R30: export all logs of this instance to a folder the user picks (reuses the
-// shared directory-picker modal), then POSTs the chosen path to /api/logs/export.
+// Export all logs of this instance to a folder the user picks with the shared
+// directory-picker modal, then POST the chosen path to /api/logs/export.
 if ($("logs-export")) {
   $("logs-export").onclick = async () => {
     const dest = await pickDirectory("Choose a folder for the exported logs");
@@ -2004,7 +1791,7 @@ if ($("logs-export")) {
         out.textContent = data.copied
           ? `Exported ${data.copied} log file(s) to: ${data.dest}`
           : (data.message || "No logs found to export.");
-        // A partial export reports which files failed - surface it, do not hide it.
+        // A partial export names which files failed.
         if (data.warning) out.textContent += `  (${data.warning})`;
       }
       toast(data.copied ? `Exported ${data.copied} log file(s)` : "No logs to export",
@@ -2017,12 +1804,11 @@ if ($("logs-export")) {
   };
 }
 
-// R37: upload files from this device or a phone into <home>/uploads/ so models and
-// tools can read them (beyond transient chat attachments). The POST is multipart;
-// we strip the JSON Content-Type so the browser sets multipart/form-data with its
-// own boundary, but keep the auth + CSRF headers. CONFIG_WRITE-gated server-side.
-// The list is built with safe DOM nodes (textContent), never innerHTML, so a
-// crafted file name cannot inject markup.
+// Upload files from this device or a phone into <home>/uploads/, where models
+// and tools can read them. The POST is multipart: the JSON Content-Type is
+// stripped so the browser sets multipart/form-data with its own boundary, while
+// the auth + CSRF headers stay. CONFIG_WRITE-gated server-side. The list is
+// built with textContent, never innerHTML.
 export async function refreshUploadsList() {
   const list = $("upload-list");
   if (!list) return;
@@ -2031,10 +1817,8 @@ export async function refreshUploadsList() {
     if (!r.ok) { list.replaceChildren(); return; }   // e.g. a read-only key: hide
     const data = await r.json().catch(() => ({ items: [] }));
     list.replaceChildren();
-    // gui-design.md rule 7: an empty <ul> is the blank scroll area the rule
-    // names. Distinct from the read-only-key early return above, which leaves
-    // the list genuinely blank on purpose - "you may not see this" is not the
-    // same statement as "there is nothing here".
+    // The empty state for a readable but empty list, distinct from the
+    // read-only-key early return above, which leaves the list blank.
     if (!(data.items || []).length) {
       list.appendChild(emptyState("attach", "No uploaded files",
         "Files you send here are readable by models and tools."));
@@ -2145,24 +1929,22 @@ $("pull-start").onclick = async () => {
   const prog = $("pull-progress");
   const bar = $("pull-bar");
   const pct = $("pull-pct");
-  // Show a live (indeterminate) bar from the start so a job that fails before
-  // emitting any progress is visibly running rather than a blank panel.
+  // A live (indeterminate) bar from the start, so a job that fails before
+  // emitting any progress still shows as running.
   prog.style.display = "block";
   bar.classList.remove("failed");
   bar.classList.add("indeterminate");
   bar.style.width = "35%";
   pct.textContent = "starting…";
   if ($("pull-file")) { $("pull-file").hidden = true; $("pull-file").textContent = ""; }
-  const samples = [];   // rolling {t, downloaded} window for speed/ETA (U4)
+  const samples = [];   // rolling {t, downloaded} window for speed/ETA
   try {
     const payload = { spec, name: name || null };
     if (mmproj) payload.mmproj = mmproj;
     if (sha256) payload.sha256 = sha256;
     if (store) payload.store = store;
-    // Only attach the type hint if the spec still matches exactly what it was
-    // prefilled for - a hand-edited spec after picking a discovery result
-    // silently falls back to today's auto-detect rather than sending a hint
-    // for a now-different model.
+    // Attach the type hint only while the spec still matches exactly what it was
+    // prefilled for; a hand-edited spec falls back to auto-detect.
     if (pendingPullTypeHint && pendingPullTypeHint.spec === spec) {
       payload.model_type = pendingPullTypeHint.type;
     }
@@ -2177,7 +1959,7 @@ $("pull-start").onclick = async () => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
     }, (ev) => {
-      // R06: for a multi-file (split GGUF) download, show which file is in flight.
+      // For a multi-file (split GGUF) download, show which file is in flight.
       const fileLine = $("pull-file");
       if (fileLine) {
         if (ev.count > 1) {
@@ -2192,7 +1974,7 @@ $("pull-start").onclick = async () => {
       if (ev.pct != null && ev.total) {
         bar.classList.remove("indeterminate");
         bar.style.width = ev.pct + "%";
-        // Smoothed speed + ETA from a rolling ~10-sample window (U4).
+        // Smoothed speed + ETA from a rolling ~10-sample window.
         samples.push({ t: Date.now(), downloaded: ev.downloaded });
         if (samples.length > 10) samples.shift();
         const { bytesPerSec, etaSec } = downloadRate(samples, ev.total);
@@ -2220,18 +2002,15 @@ $("pull-start").onclick = async () => {
       pendingPullTypeHint = null;
       refreshModelsPage();
     } else if (end.status === "disconnected") {
-      // streamJob gave up reconnecting (or the job was already gone) - this is
-      // NOT a job failure, just a lost transport: the pull may well still be
-      // running or have already finished server-side (verified live: a
-      // dropped SSE connection does not stop the job). Never claim "failed"
-      // for a fact we do not have; keep the bar as-is rather than painting it
-      // red, so it does not look like a completed-and-wrong outcome either.
+      // streamJob gave up reconnecting, or the job was already gone. Not a job
+      // failure: a dropped SSE connection does not stop the pull, so the bar is
+      // left as-is rather than painted red or completed.
       pct.textContent = "connection lost - it may still be running";
       toast("Lost connection to the pull - it may still be running in the "
             + "background. Check the Models list in a moment.", true);
     } else {
-      // Surface the failure: red bar, exit code, and keep the inputs so the
-      // user can see what they typed and retry.
+      // Surface the failure: red bar, exit code, and the inputs kept for a
+      // retry.
       bar.classList.remove("indeterminate");
       bar.classList.add("failed");
       const code = end.returncode != null ? `, exit ${end.returncode}` : "";
@@ -2250,16 +2029,13 @@ $("pull-start").onclick = async () => {
 
 
 // Per-tab counts. The tab's own label is left alone and the number rides in a
-// trailing span, so the text a click handler or a test reads by dataset.type is
-// untouched. A type with nothing registered shows no number rather than a "0",
-// which would add noise to six tabs on a fresh install; "All" carries the total.
+// trailing span, so the text read by dataset.type is untouched. A type with
+// nothing registered shows no number rather than a "0"; "All" carries the total.
 //
 // Other counts every model whose type has no tab of its own, and All counts what
-// All actually SHOWS - not the registry total. A tab labelled "All" reporting a
-// number larger than the list under it would be the same quiet dishonesty the
-// merge toggle exists to avoid. So with the toggle off the numbers partition the
-// registry exactly (every model is on All or on Other); with it on, Other is a
-// subset of All, which is the relation every other tab already has to it.
+// All actually SHOWS, not the registry total. With the merge toggle off the
+// numbers partition the registry exactly (every model is on All or on Other);
+// with it on, Other is a subset of All.
 export function syncTabCounts(models) {
   const nav = $("models-tab-nav");
   if (!nav) return;
@@ -2304,9 +2080,8 @@ if (tabNav) {
 }
 
 // Both display toggles: reflect the stored value on load, write it back on
-// change, re-render. The RENDER reads localStorage directly (never this
-// element's .checked), so a value seeded before the page script ran still
-// applies - the same read-at-use-site shape as the mmproj toggle.
+// change, re-render. The render reads localStorage directly, never this
+// element's .checked.
 function _bindModelsViewToggle(id, key) {
   const box = $(id);
   if (!box) return;
@@ -2320,10 +2095,9 @@ _bindModelsViewToggle("models-show-other", SHOW_OTHER_KEY);
 _bindModelsViewToggle("models-group-by-type", GROUP_BY_TYPE_KEY);
 
 // Turn a ComfyUI ScanResult (added / skipped / method) into a human toast. The
-// scanner's `method` field carries WHY an empty scan found nothing ("none
-// (comfy_workdir not configured)", "none (models folder not found under
-// {path})"); surfacing that reason instead of a bare "Added 0" keeps a
-// misconfigured scan from failing silently (AGENTS.md rule 5). The internal
+// scanner's `method` field carries the reason an empty scan found nothing
+// ("none (comfy_workdir not configured)", "none (models folder not found under
+// {path})"), which is decoded here instead of a bare "Added 0". The internal
 // "folder-walk" / "hybrid" method jargon stays out of the visible text.
 export function scanResultMessage(data) {
   const added = data.added || 0;
@@ -2339,12 +2113,12 @@ export function scanResultMessage(data) {
       const path = method.slice(i + under.length).replace(/\)\s*$/, "");
       return `ComfyUI models folder not found at ${path}.`;
     }
-    // Any other "none (...)" reason: still say something specific, never hide it.
+    // Any other "none (...)" reason.
     return "Scan found no ComfyUI models. Check the ComfyUI setup in Settings.";
   }
   if (added === 0 && skipped === 0) {
     // A real scan (folder-walk / hybrid) that turned up nothing: the folders
-    // exist but held no models. Not a misconfig, but clearer than "Added 0".
+    // exist but held no models.
     return "Scan complete. No new ComfyUI models found.";
   }
   return `Scan complete. Added ${added} models, skipped ${skipped} existing.`;
@@ -2358,10 +2132,9 @@ if (scanBtn) {
     const prog = $("scan-progress");
     const bar = $("scan-bar");
     const pct = $("scan-pct");
-    // Live (indeterminate) bar from the start, same shape as the pull flow's
-    // #pull-progress - registering ComfyUI's own found_files.items() has no
-    // total until the directory walk finishes, so the FIRST real feedback is
-    // this busy bar, then it flips to a real "N of M" once registration starts.
+    // Live (indeterminate) bar from the start: registering ComfyUI's
+    // found_files.items() has no total until the directory walk finishes, then
+    // it flips to a real "N of M" once registration starts.
     if (prog) {
       prog.style.display = "block";
       bar.classList.remove("failed");
@@ -2401,9 +2174,8 @@ if (scanBtn) {
         toast(finalResult ? scanResultMessage(finalResult) : "Scan complete.");
         refreshModelsPage();
       } else if (end.status === "disconnected") {
-        // Same distinction streamJob's doc makes for the pull flow: a lost
-        // SSE connection is not a job failure, so the bar is left as-is
-        // rather than painted red for a fact we do not have.
+        // A lost SSE connection is not a job failure, so the bar is left as-is
+        // rather than painted red.
         if (pct) pct.textContent = "connection lost - it may still be running";
         toast("Lost connection to the scan - it may still be running in the "
               + "background. Check the Models list in a moment.", true);
@@ -2422,13 +2194,13 @@ if (scanBtn) {
   };
 }
 
-// import-comfy: the guided "Import from ComfyUI..." flow (Add-a-model card).
-// Unlike the Scan button above (which always scans whatever comfy_workdir is
-// configured in Settings), this lets the user point at ANY ComfyUI folder for
-// a one-off import - previewing counts per category before anything registers -
-// without touching the persistent comfy_workdir setting. Friendly labels for the
-// dry-run preview breakdown; mirrors localm.model_manager.registry.MODEL_TYPES
-// (keep in sync), minus "llm"/"mmproj" which a ComfyUI scan never produces.
+// The guided "Import from ComfyUI..." flow (Add-a-model card). Unlike the Scan
+// button above, which always scans whatever comfy_workdir Settings holds, this
+// imports from ANY ComfyUI folder as a one-off - previewing counts per category
+// before anything registers - without touching the comfy_workdir setting.
+// Friendly labels for the dry-run preview breakdown; mirrors
+// localm.model_manager.registry.MODEL_TYPES (keep in sync), minus "llm"/"mmproj"
+// which a ComfyUI scan never produces.
 export const IMPORT_TYPE_LABELS = {
   "diffusion-unet": "Diffusion / checkpoints",
   "text-encoder": "Text encoders",
@@ -2437,10 +2209,9 @@ export const IMPORT_TYPE_LABELS = {
   unknown: "Other",
 };
 
-// Best-effort: localm's own managed ComfyUI install path, or null if there
-// isn't one (not installed, or this key lacks config:read). Never blocks the
-// primary Browse flow - a failed/403 fetch just means the quick-fill option
-// doesn't appear.
+// localm's own managed ComfyUI install path, or null if there isn't one (not
+// installed, or this key lacks config:read). A failed or 403 fetch just means
+// the quick-fill option does not appear; the Browse flow is unaffected.
 async function fetchManagedComfyPath() {
   try {
     const r = await fetch("/api/comfy/managed-status", { headers: authHeaders() });
@@ -2452,10 +2223,10 @@ async function fetchManagedComfyPath() {
   }
 }
 
-// A dry-run preview response with a "none (...)" method (no folder configured /
-// found) reuses the same humanized reasons scanResultMessage already decodes for
-// the real-scan case, so the wording is never duplicated. Returns null when the
-// preview is a normal (possibly empty) result the caller should render counts for.
+// A dry-run preview response with a "none (...)" method (no folder configured or
+// found) reuses the humanized reasons scanResultMessage decodes for the
+// real-scan case. Returns null when the preview is a normal (possibly empty)
+// result the caller should render counts for.
 export function importComfyPreviewMessage(data) {
   const method = String((data && data.method) || "");
   if (method.startsWith("none")) {
@@ -2476,13 +2247,9 @@ export function openImportComfyModal(initialPath = "") {
     const browseBtn = el("button", "btn-secondary", "Browse…");
     browseBtn.type = "button";
     // pickDirectory() opens its OWN modal, and this app has a single shared
-    // #modal/#modal-body (openModal() replaces its content, it does not
-    // stack) - so calling it from inside this already-open modal destroys
-    // THIS modal's own DOM (pathInput included) the moment the folder picker
-    // renders. Writing the result into `pathInput.value` afterward would land
-    // on an already-detached node - no visible effect, the picker just closes
-    // with nothing appearing to happen. Re-open this same modal fresh with
-    // the picked path instead of trying to keep the old DOM alive across it.
+    // #modal/#modal-body (openModal() replaces its content, it does not stack),
+    // so the picker destroys this modal's DOM, pathInput included. Re-open this
+    // modal fresh with the picked path rather than writing into a detached node.
     browseBtn.onclick = async () => {
       const dir = await pickDirectory("Pick a ComfyUI folder", pathInput.value.trim());
       if (dir) openImportComfyModal(dir);
@@ -2490,8 +2257,8 @@ export function openImportComfyModal(initialPath = "") {
     pathRow.append(pathInput, browseBtn);
     wrap.appendChild(pathRow);
 
-    // Best-effort quick-fill for localm's OWN managed ComfyUI - hidden until the
-    // async status check resolves (or stays hidden forever if there is none).
+    // Quick-fill for localm's own managed ComfyUI - hidden until the async
+    // status check resolves, and stays hidden if there is none.
     const managedRow = el("div", "row");
     managedRow.style.display = "none";
     const managedBtn = el("button", "btn-secondary", "Use localm's own ComfyUI");
@@ -2507,8 +2274,8 @@ export function openImportComfyModal(initialPath = "") {
     const previewBox = el("div", "sub import-comfy-preview");
     wrap.appendChild(previewBox);
 
-    // Live "registering model N of M" text while Import's background job runs
-    // (see importBtn.onclick below) - hidden the rest of the time.
+    // Live "registering model N of M" text while Import's background job runs -
+    // hidden the rest of the time.
     const progressBox = el("div", "sub import-comfy-progress");
     progressBox.style.display = "none";
     wrap.appendChild(progressBox);
@@ -2523,9 +2290,8 @@ export function openImportComfyModal(initialPath = "") {
     wrap.appendChild(actions);
     body.appendChild(wrap);
 
-    // The folder the last successful, non-empty preview covered - Import reuses
-    // it rather than re-reading the (possibly since-edited) input, so what gets
-    // imported always matches what was previewed.
+    // The folder the last successful, non-empty preview covered. Import reuses
+    // it rather than re-reading the possibly since-edited input.
     let previewedWorkdir = null;
 
     previewBtn.onclick = async () => {
@@ -2598,9 +2364,8 @@ export function openImportComfyModal(initialPath = "") {
           return;
         }
         const end = await streamJob(data.job_id, (line) => { lastLine = line; }, (ev) => {
-          // The final progress event (phase "done") carries the same
-          // added/skipped/method fields the old synchronous response body
-          // used to - scanResultMessage() renders it identically either way.
+          // The final progress event (phase "done") carries the added / skipped
+          // / method fields scanResultMessage() renders.
           if (ev.phase === "done") {
             finalResult = { added: ev.added || 0, skipped: ev.skipped || 0, method: ev.method || "" };
             return;
@@ -2615,8 +2380,7 @@ export function openImportComfyModal(initialPath = "") {
           $("modal").style.display = "none";
           refreshModelsPage();
         } else if (end.status === "disconnected") {
-          // Same "lost the stream, not necessarily the job" distinction the
-          // pull flow makes (streamJob never reports this as a failure).
+          // A lost stream is not necessarily a lost job.
           progressBox.textContent = "Connection lost - it may still be running";
           toast("Lost connection to the import - it may still be running in "
                 + "the background. Check the Models list in a moment.", true);
@@ -2637,10 +2401,8 @@ export function openImportComfyModal(initialPath = "") {
 
 if ($("models-import-comfy-btn")) {
   // Not a bare `= openImportComfyModal` assignment: a DOM onclick handler is
-  // called with the click's MouseEvent as its first argument, which would
-  // otherwise land in openImportComfyModal's initialPath parameter instead of
-  // its "" default (a real bug this introduced once - the button's own click
-  // event stringified into the path field on first open).
+  // called with the click's MouseEvent as its first argument, which would land
+  // in openImportComfyModal's initialPath parameter instead of its "" default.
   $("models-import-comfy-btn").onclick = () => openImportComfyModal();
 }
 
@@ -2655,16 +2417,13 @@ if (unloadAllBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { toast(data.detail || "Unload failed", true); return; }
-      // unloaded_models only lists chat engines; the shared embedding model
-      // (a separate lifecycle - see localm.inference.embedder) is reported
-      // via embedder_unloaded, so count it too or a resident embedder alone
-      // reports "Nothing was loaded" despite actually freeing VRAM.
+      // unloaded_models lists only chat engines; the shared embedding model has
+      // its own lifecycle (localm.inference.embedder) and is reported via
+      // embedder_unloaded, so it is counted too.
       const n = (data.unloaded_models || []).length + (data.embedder_unloaded ? 1 : 0);
       // unload_all_models() (http_server.py) reports any pinned (mid-generation)
-      // engine in skipped_in_use rather than unloading it - it was loaded, just
-      // not released. Folding that into the same "Nothing was loaded" (nothing
-      // WAS loaded) or a bare "Unloaded n model(s)" (silently drops the skip)
-      // would misstate what happened either way (AGENTS.md rule 5), so name it.
+      // engine in skipped_in_use rather than unloading it - loaded, but not
+      // released - so the message names it separately.
       const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
       let msg;
       if (n && skipped.length) {

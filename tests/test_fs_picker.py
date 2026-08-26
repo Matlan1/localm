@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the GUI file/folder picker backend and its host-access gate.
 
-- GET /api/fs/dirs / /api/fs/places now require HOST filesystem access
+- GET /api/fs/dirs / /api/fs/places require HOST filesystem access
   (effective_fs_access == "host"): owner / open mode / a key minted with
-  fs_access=host. A merely config:read key can no longer enumerate the disk.
+  fs_access=host. A merely config:read key cannot enumerate the disk.
 - The listing itself: meta=true entries[] with size/mtime, include_files gating,
-  hidden-file/dir exclusion by default plus the include_hidden opt-in (#1220),
+  hidden-file/dir exclusion by default plus the include_hidden opt-in,
   404, the large-listing cap (`truncated`), and no symlink-follow for metadata.
 - /api/fs/places: home + only the standard subfolders that exist, plus a drive.
 - The fs_access attribute round-trips on a key and surfaces via /api/capabilities.
@@ -122,12 +122,12 @@ class TestListing:
             assert entries["sub"]["size"] is None             # dirs carry no faked size
 
     def test_include_hidden_reveals_dotdirs_and_dotfiles(self, fs_app, tmp_path):
-        """Issue #1220: dot-directories (and dot-files) are invisible by
-        default, matching plain `ls`. The GUI picker always requests
-        include_hidden=true and shows its own toggle client-side, so the
-        server has to actually have the entries to give it when asked -
-        this covers a hidden DIRECTORY, which the `tree` fixture above never
-        exercised (it only had a hidden file)."""
+        """Dot-directories (and dot-files) are invisible by default, matching
+        plain `ls`. The GUI picker always requests include_hidden=true and
+        shows its own toggle client-side, so the server has to actually have
+        the entries to give it when asked - this covers a hidden DIRECTORY,
+        which the `tree` fixture above never exercised (it only had a hidden
+        file)."""
         d = tmp_path / "withdots"
         d.mkdir()
         (d / "visible_dir").mkdir()
@@ -220,7 +220,7 @@ class TestListing:
 
 def test_places_lists_home_and_existing_subfolders_only(fs_app, tmp_path):
     (tmp_path / "Documents").mkdir()      # exists -> should appear
-    # Desktop / Downloads deliberately absent -> must NOT be guessed.
+    # Desktop / Downloads absent, so they must not be guessed.
     with TestClient(fs_app) as c:
         r = c.get("/api/fs/places", headers=_hdr(_host_key()))
         assert r.status_code == 200, r.text

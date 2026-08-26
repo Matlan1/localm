@@ -4,16 +4,13 @@
 ``asyncio.start_server(host=...)`` cannot serve localm's IPv6 story on its own.
 ``BaseEventLoop.create_server`` sets ``IPV6_V6ONLY`` to True unconditionally for
 every AF_INET6 socket it builds, so ``-H ::`` would listen for IPv6 only and an
-IPv4 client on the same LAN could not reach it - measured on this platform, both
-arms, with a client probe whose IPv4-to-IPv4 control arm returns OK so it is able
-to report either outcome.
+IPv4 client on the same LAN could not reach it.
 
-That is the wrong answer for a user who typed the IPv6 wildcard. ``::`` means
-"every interface"; splitting it into "every interface, but only half the
-internet" would make the printed URLs lie and would break every self-call the
-server makes to its own loopback API. So localm builds the socket itself, clears
-``IPV6_V6ONLY`` for the wildcard, and hands the ready socket to asyncio (and to
-uvicorn on the fallback path, which accepts ``sockets=[...]`` for exactly this).
+``::`` means "every interface"; splitting it into "every interface, but only
+half the internet" would make the printed URLs lie and would break every
+self-call the server makes to its own loopback API. So localm builds the socket
+itself, clears ``IPV6_V6ONLY`` for the wildcard, and hands the ready socket to
+asyncio (and to uvicorn on the fallback path, which accepts ``sockets=[...]``).
 
 A SPECIFIC literal is never upgraded: ``::1`` or ``2001:db8::5`` names one
 address in one family, and a dual-stack flag on it would change nothing.
@@ -42,9 +39,9 @@ def dual_stack_expected(host: Optional[str]) -> bool:
     ``IPV6_V6ONLY``.
 
     Callers use this to print the truth BEFORE the socket exists (the CLI prints
-    its reachable URLs before the server binds). ``socket.has_dualstack_ipv6()``
-    is the stdlib's own probe for the same capability, so this is a measurement
-    rather than a platform assumption."""
+    its reachable URLs before the server binds). The capability comes from
+    ``socket.has_dualstack_ipv6()``, the stdlib's own probe, rather than from a
+    platform assumption."""
     if (host or "").strip() != "::":
         return False
     try:
@@ -58,9 +55,7 @@ def create_listen_socket(host: str, port: int) -> socket.socket:
 
     Bound only, because both consumers call ``listen()`` themselves:
     ``asyncio.create_server(sock=...)`` does it in ``_start_serving`` and
-    uvicorn's own ``Config.bind_socket`` likewise binds without listening. Doing
-    it here as well would be harmless but would hide which layer owns the
-    backlog.
+    uvicorn's own ``Config.bind_socket`` likewise binds without listening.
 
     Raises ``OSError`` when the address cannot be resolved or bound, which is the
     same failure the caller already handles for an IPv4 bind - a stale interface
@@ -70,17 +65,12 @@ def create_listen_socket(host: str, port: int) -> socket.socket:
         host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)[0]
     sock = socket.socket(family, socktype, proto)
     try:
-        # Match what asyncio's create_server would have done: SO_REUSEADDR on
-        # POSIX only. On Windows it does not mean "reuse a TIME_WAIT port", it
-        # means another process may steal a port we are already serving, so
-        # asyncio deliberately omits it there and so do we.
+        # SO_REUSEADDR on POSIX only, matching asyncio's create_server.
         if os_name_is_posix():
             try:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             except OSError:
-                # Best-effort convenience only; a bind that then hits TIME_WAIT
-                # surfaces as an ordinary OSError from the bind below, which the
-                # caller already reports. Nothing is silenced.
+                # Best-effort; a TIME_WAIT bind failure surfaces from the bind below.
                 pass
         if family == socket.AF_INET6 and (host or "").strip() == "::":
             _try_dual_stack(sock)
@@ -102,12 +92,11 @@ def _try_dual_stack(sock: socket.socket) -> None:
     """Clear ``IPV6_V6ONLY`` on *sock* so the ``::`` wildcard also answers IPv4
     clients, then READ THE FLAG BACK and log the outcome.
 
-    The read-back matters: ``setsockopt`` succeeding is not the same fact as the
-    option having taken (a platform may accept and ignore it), and the whole
-    reason to bind this way is a promise about which clients can connect. A
-    degradation to IPv6-only is a real reduction in reach, so it is reported at
-    WARNING rather than swallowed - the server still starts and still serves
-    IPv6, which is why this is a note and not a hard failure.
+    ``setsockopt`` succeeding is not the same fact as the option having taken (a
+    platform may accept and ignore it). A degradation to IPv6-only is a real
+    reduction in reach, so it is reported at WARNING rather than swallowed; the
+    server still starts and still serves IPv6, so this is a note and not a hard
+    failure.
     """
     from localm.debuglog import logger
     if not hasattr(socket, "IPPROTO_IPV6") or not hasattr(socket, "IPV6_V6ONLY"):

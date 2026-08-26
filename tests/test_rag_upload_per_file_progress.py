@@ -1,28 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0009 P7-b: the upload bar has to MOVE, not just have a denominator.
+"""The upload bar has to MOVE, not just have a denominator: `_add_uploads_locked`
+owns the loop and ticks per file.
 
-#1112 landed P7's t=0 half - one event at `done=0, total=N` before indexing
-starts - and stopped there, on this stated reason:
-
-    add_uploads itself has no per-file progress signal to hook
-
-Accurate about what EXISTED, false about what was POSSIBLE: `_add_uploads_locked`
-owns the loop. So what shipped reported a real denominator with a frozen
-numerator, and the bar read "0 of 12 files" for the entire run. Honest, so no
-ADR-0008 breach, and exactly the frozen-or-working experience ADR-0009 exists to
-remove.
-
-WHAT THE FIXTURES MUST BE ABLE TO EXPRESS (item 19), because #1112's own test
-class could not have caught this: it had two tests, both about the t=0 report,
-with no per-item advancement to assert BECAUSE NONE WAS EMITTED. A capability
-wrongly believed absent produces a test file that reads as complete.
+WHAT THE FIXTURES HAVE TO EXPRESS:
 
 * The loop body has three exits, two of which `continue`. A fixture of only
   indexable files can never reach either, so the mix below is deliberate.
 * Asserting the FINAL event cannot distinguish "advanced through the skips" from
-  "jumped at the end". Measured: an earlier version of this test stayed green
-  under the fires-control that stopped the skip path ticking. Every count
-  assertion here is on the SEQUENCE.
+  "jumped at the end", so every count assertion here is on the SEQUENCE.
 * Most callers pass no `on_progress` at all, so the no-op path is the live one
   and gets its own test - the structured keywords would raise TypeError against
   a one-positional lambda.
@@ -157,10 +142,8 @@ class TestEveryExitFromTheLoopTicks:
 
 class TestBothChannelsTravelTogether:
     def test_the_line_and_the_numbers_arrive_on_one_call(self, coll):
-        """#1112's design, which this reuses rather than replaces: the prose and
-        the structured numbers ride the SAME call, so they cannot drift. A
-        separate channel would need a test asserting they agree; this needs only
-        that neither is dropped."""
+        """The prose and the structured numbers ride the SAME call, so they
+        cannot drift; this asserts neither is dropped."""
         rec = _Recorder()
         coll.add_uploads(_files(2), embed_fn=_embed, on_progress=rec)
 

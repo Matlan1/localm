@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B5: a per-request seed must reach the GGUF sampler.
+"""A per-request seed must reach the GGUF sampler.
 
-The native llama.cpp wrapper dropped the request `seed` into **_ignored and
-always built the sampler with the instance default (LLAMA_DEFAULT_SEED), so
-generation at temperature>0 was non-deterministic and a user seed was silently
-ignored. These tests pin that the seed threads create_chat_completion ->
-_generate -> _build_sampler (llama_sampler_init_dist). The DLL is never loaded.
+A request `seed` that lands in **_ignored leaves the sampler built with the
+instance default (LLAMA_DEFAULT_SEED), so generation at temperature>0 is
+non-deterministic and the user's seed is silently ignored. These tests pin that
+the seed threads create_chat_completion -> _generate -> _build_sampler
+(llama_sampler_init_dist). The DLL is never loaded.
 """
 
 from unittest.mock import patch
@@ -48,7 +48,7 @@ def _seed_passed_to_sampler(llm, **gen_kwargs):
 
 
 def test_generate_threads_request_seed():
-    # NEGATIVE: pre-fix _generate has no seed kwarg -> TypeError (not _StopAfterSampler).
+    # The request seed reaches the sampler.
     llm = _bare_llama()
     assert _seed_passed_to_sampler(llm, seed=42) == 42
 
@@ -59,13 +59,13 @@ def test_generate_seed_masked_to_uint32():
 
 
 def test_generate_defaults_to_instance_seed():
-    # Regression: no request seed -> the instance default is still used.
+    # No request seed: the instance default is used.
     llm = _bare_llama()
     assert _seed_passed_to_sampler(llm) == 1234
 
 
 def test_create_chat_completion_forwards_seed():
-    # NEGATIVE: pre-fix seed lands in **_ignored and is never forwarded.
+    # The seed is forwarded to _generate, not absorbed into **_ignored.
     llm = _bare_llama()
     with patch("localm.inference.backends.llamacpp.llama._apply_model_template",
                return_value=("hi", None)), \

@@ -2,35 +2,27 @@
 """The shared outbound-HTTPS opener (localm/http_ssl.py) and a regression guard
 that every outbound client actually goes through it.
 
-Background: setup-llama, `localm update` (proxy check + release-CDN download), the
-issues list, and the bug-report upload all did raw urllib HTTPS with no explicit SSL
-context, so they verified against whatever the machine's OS cert store happened to
-have cached. Python's OpenSSL on Windows does not keep that store current, so a
-fresh box failed every call with CERTIFICATE_VERIFY_FAILED (#765). The fix then
-hardcoded a certifi-only context - which verifies fine on a fresh box, but a
-corporate/security-product TLS-intercepting proxy's re-signed certificate is not in
-certifi's public root list either, so that DIDN'T help a managed machine behind one
-(#825 - confirmed live: uv's own equivalent bundled-root default fails identically
-on such a network with "invalid peer certificate: UnknownIssuer").
+setup-llama, `localm update` (proxy check + release-CDN download), the issues list,
+and the bug-report upload all reach HTTPS through verified_urlopen(). It tries the
+platform's NATIVE certificate store first (the same trust a browser, or an
+IT-provisioned proxy root, already has) and falls back to certifi ONLY on a
+certificate-verification failure specifically. A raw urllib call with no explicit
+SSL context verifies against whatever the machine's OS cert store happens to have
+cached, and Python's OpenSSL on Windows does not keep that store current; a
+certifi-only context has the opposite gap, since a corporate TLS-intercepting
+proxy's re-signed certificate is not in certifi's public root list.
 
-verified_urlopen() tries the platform's NATIVE certificate store first (the same
-trust a browser, or an IT-provisioned proxy root, already has - so a managed
-machine behind a proxy like that verifies on the very first attempt, nothing ever
-shown) and falls back to certifi ONLY on a certificate-verification failure
-specifically (rescuing the original #765 fresh-Windows case). These tests lock in
-that ordering, that a non-certificate failure never triggers the fallback, and that
-a certificate failure surviving both attempts is never silently swallowed.
-(setup-llama's own two call sites are guarded in tests/test_setup_llama_backends.py.)
+These tests lock in that ordering, that a non-certificate failure never triggers
+the fallback, and that a certificate failure surviving both attempts is never
+swallowed.
 
-They also lock the WIRING of the redirect guard - that HttpsOnlyRedirect is
-installed even when the caller passes no handlers, and that a caller's own
-redirect policy replaces it rather than joining it. What the guard DOES is
-proven over real sockets in tests/test_https_downgrade_redirect.py; asserting it
-here would only re-test the class, not the fact that anything installs it.
+They also lock the WIRING of the redirect guard: HttpsOnlyRedirect is installed
+even when the caller passes no handlers, and a caller's own redirect policy
+REPLACES it instead of joining it.
 
-NOTE THE SEAM: verified_urlopen no longer calls urllib.request.urlopen (it has to
-build an opener to install a handler), so patching urlopen no longer intercepts
-anything and lets the real network through. Use patch_https_transport.
+NOTE THE SEAM: verified_urlopen does not call urllib.request.urlopen (it builds an
+opener to install a handler), so patching urlopen intercepts nothing and lets the
+real network through. Use patch_https_transport.
 """
 from __future__ import annotations
 
@@ -74,9 +66,8 @@ def _cert_error(host="example.com"):
 
 
 def test_verified_urlopen_succeeds_on_native_store_first_try(monkeypatch):
-    # The common case (a plain machine, or one behind a proxy whose root IT
-    # already provisioned into the OS store): ONE call, no fallback, no error
-    # ever surfaced - "do it right from the start", not "fail then recover".
+    # The common case (a machine whose OS store already carries the chain):
+    # ONE call, no fallback, no error surfaced.
     calls = []
 
     def fake_urlopen(req, timeout=None, context=None):
@@ -94,9 +85,8 @@ def test_verified_urlopen_succeeds_on_native_store_first_try(monkeypatch):
 
 
 def test_verified_urlopen_falls_back_to_certifi_on_cert_failure(monkeypatch):
-    # Rescues the original #765 case: a freshly-imaged Windows box whose ROOT
-    # store has not cached a legitimate CA chain yet. First (native) attempt
-    # fails verification; second (certifi) attempt succeeds.
+    # A box whose ROOT store has not cached a legitimate CA chain: the native
+    # attempt fails verification and the certifi attempt succeeds.
     contexts = []
 
     def fake_urlopen(req, timeout=None, context=None):
@@ -113,17 +103,15 @@ def test_verified_urlopen_falls_back_to_certifi_on_cert_failure(monkeypatch):
     assert contexts[0].verify_mode == ssl.CERT_REQUIRED
     assert contexts[1].verify_mode == ssl.CERT_REQUIRED
     assert contexts[1].get_ca_certs(), "the fallback must actually be certifi-backed"
-    # seen["handlers"] is the SECOND build_opener call, so this says the redirect
-    # guard is on the RETRY opener too. Worth asserting separately: this is the
-    # path a fresh Windows box actually takes, and installing the guard per
-    # attempt rather than once is a refactor that would leave exactly it bare.
+    # The SECOND build_opener call, so the redirect guard is on the RETRY
+    # opener too.
     assert http_ssl.HttpsOnlyRedirect in seen["handlers"]
 
 
 def test_verified_urlopen_never_downgrades_to_unverified_when_certifi_missing(monkeypatch):
-    # If certifi is unavailable at the moment the fallback would run, the ORIGINAL
-    # certificate failure must propagate - never a silent downgrade to an
-    # unverified handshake (a security step that fails must not report success).
+    # If certifi is unavailable at the moment the fallback would run, the
+    # ORIGINAL certificate failure propagates; there is no downgrade to an
+    # unverified handshake.
     def fake_urlopen(req, timeout=None, context=None):
         raise _cert_error()
 
@@ -138,8 +126,7 @@ def test_verified_urlopen_never_downgrades_to_unverified_when_certifi_missing(mo
 
 
 def test_verified_urlopen_certifi_also_fails_propagates_original_cert_error(monkeypatch):
-    # A certificate failure that survives BOTH attempts (native and certifi) is a
-    # real, non-recoverable failure - it must reach the caller, not vanish.
+    # A certificate failure that survives BOTH attempts reaches the caller.
     calls = {"n": 0}
 
     def fake_urlopen(req, timeout=None, context=None):
@@ -155,9 +142,8 @@ def test_verified_urlopen_certifi_also_fails_propagates_original_cert_error(monk
 
 
 def test_verified_urlopen_non_certificate_failure_never_retries(monkeypatch):
-    # A non-certificate failure (DNS, connection refused, timeout, ...) is not
-    # fixable by switching CA bundles - retrying would just waste time and could
-    # mask what actually went wrong. Must propagate immediately, unmodified.
+    # A non-certificate failure (DNS, connection refused, timeout, ...)
+    # propagates immediately, unmodified.
     calls = {"n": 0}
 
     def fake_urlopen(req, timeout=None, context=None):
@@ -174,8 +160,7 @@ def test_verified_urlopen_non_certificate_failure_never_retries(monkeypatch):
 
 def test_verified_urlopen_http_error_passes_through_unmodified(monkeypatch):
     # HTTPError is a URLError subclass but represents a real server response
-    # (e.g. 404/500), not a transport/certificate problem - must not be
-    # misidentified as a certificate failure or retried.
+    # (404/500), so it is neither treated as a certificate failure nor retried.
     def fake_urlopen(req, timeout=None, context=None):
         raise urllib.error.HTTPError("https://example.com/", 404, "Not Found", {}, None)
 
@@ -187,9 +172,8 @@ def test_verified_urlopen_http_error_passes_through_unmodified(monkeypatch):
 
 
 def test_verified_urlopen_threads_extra_handlers_through(monkeypatch):
-    # A caller's own handler must actually be installed alongside the HTTPS
-    # handler, and plain urlopen (which would silently ignore it) must NOT be
-    # used instead.
+    # A caller's own handler is installed alongside the HTTPS handler, and
+    # plain urlopen is not used instead.
     class _MarkerHandler(urllib.request.BaseHandler):
         pass
 
@@ -206,10 +190,8 @@ def test_verified_urlopen_threads_extra_handlers_through(monkeypatch):
 
 
 def test_verified_urlopen_installs_the_downgrade_guard_by_default(monkeypatch):
-    # The wiring half of the fix, asserted from OUTSIDE: a caller that passes no
-    # handlers at all (six of the eight call sites) still gets HttpsOnlyRedirect,
-    # so it can never reach urllib's permissive default. The behaviour half is
-    # proven end to end over real sockets in tests/test_https_downgrade_redirect.py.
+    # A caller that passes no handlers at all still gets HttpsOnlyRedirect, not
+    # urllib's permissive default.
     seen = patch_https_transport(
         monkeypatch, lambda req, timeout=None, context=None: _Resp(200, b"ok"))
     req = urllib.request.Request("https://example.com/")
@@ -219,10 +201,8 @@ def test_verified_urlopen_installs_the_downgrade_guard_by_default(monkeypatch):
 
 
 def test_a_caller_supplied_redirect_policy_replaces_the_default(monkeypatch):
-    # comfy_client refuses EVERY hop, not just a downgrade (its ComfyUI may
-    # legitimately be plain http, and its API has no reason to redirect at all).
-    # Its handler must win outright: two redirect handlers on one opener would
-    # make which policy applies depend on registration order.
+    # comfy_client refuses EVERY hop, not just a downgrade, and its handler is
+    # the only redirect handler on the opener.
     class _RefuseEverything(urllib.request.HTTPRedirectHandler):
         pass
 
@@ -265,8 +245,8 @@ def test_bugreport_opener_passes_verifying_context(monkeypatch):
 
 
 def test_updater_download_uses_verifying_https_context(monkeypatch, tmp_path):
-    # The update download follows a 302 to the release CDN; the HTTPSHandler it
-    # builds MUST carry a verifying context, or a fresh box fails the CDN hop.
+    # The update download follows a 302 to the release CDN, so the HTTPSHandler
+    # it builds carries a verifying context.
     from localm import updater
     monkeypatch.setattr(updater, "endpoint", lambda: ("https://updates.example", None))
     seen = patch_https_transport(
@@ -276,7 +256,6 @@ def test_updater_download_uses_verifying_https_context(monkeypatch, tmp_path):
     assert dest.read_bytes() == b"payload"
     assert isinstance(seen["context"], ssl.SSLContext)
     assert seen["context"].verify_mode == ssl.CERT_REQUIRED
-    # CHK-UPDATER-INTEGRITY: updater.py deleted its own _HttpsOnlyRedirect when
-    # the guard became the default. Assert it is still THERE, or the delete
-    # silently removed the protection instead of relocating it.
+    # updater.py has no _HttpsOnlyRedirect of its own; the shared guard is on
+    # the opener it builds.
     assert http_ssl.HttpsOnlyRedirect in seen["handlers"]

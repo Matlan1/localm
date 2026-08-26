@@ -3,10 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
-// Media generation (image / music / video) is a long background job. A Stop
-// button must reveal while it runs and POST /api/jobs/<id>/cancel, so the
-// server interrupts ComfyUI mid-render and frees the GPU instead of running to
-// completion. showStop / hideStop (pages.js) + cancelJob (app.js) implement it.
+// Media generation (image / music / video) runs as a background job. The Stop
+// button reveals while it runs and POSTs /api/jobs/<id>/cancel. showStop /
+// hideStop (pages.js) + cancelJob (app.js) implement it.
 
 function setup() {
   const calls = [];
@@ -28,9 +27,9 @@ test("showStop reveals the Stop button and wires it to cancel that job", async (
   assert.equal(btn.disabled, false);
 
   btn.onclick();                                   // user presses Stop
-  // cancelJob calls fetch() synchronously (before its first await), so the call
-  // is recorded immediately; flush microtasks (not macrotasks, which would run
-  // the rAF-deferred page init) just in case.
+  // cancelJob calls fetch() before its first await, so the call is already
+  // recorded. Flush microtasks only: a macrotask would run the rAF-deferred
+  // page init.
   await Promise.resolve();
 
   const cancels = calls.filter((c) => c.url.includes("/api/jobs/job-abc/cancel"));

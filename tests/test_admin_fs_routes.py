@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Admin filesystem routes: UNC/device rejection, allowlist-before-syscall, and
-the cross-origin refusal for the host browser (CodeQL 3 and 10).
+the cross-origin refusal for the host browser.
 
-WHY THE ASSERTIONS LOOK LIKE THIS. The defect is not the HTTP response, it is the
+WHAT THE ASSERTIONS TARGET. The defect is not the HTTP response, it is the
 SYSCALL that happens on the way to it. ``Path.resolve`` on Windows calls
 ``_getfinalpathname`` (CreateFileW) plus a stat, so a UNC path aimed at an
 attacker's SMB server makes an outbound connection that Windows AUTO-AUTHENTICATES,
-surrendering the host's net-NTLMv2 credential - and that completes before any
-allowlist check downstream can return its 403. Both branches returning the same
-403 is exactly why an earlier reading called this harmless; the exfiltration
-channel is the connection, not the response body.
+surrendering the host's net-NTLMv2 credential, and that completes before any
+allowlist check downstream can return its 403. Both branches return the same 403,
+so the response body cannot distinguish them; the exfiltration channel is the
+connection.
 
-It also blocks: measured on a Windows box, a UNC path to a non-routable RFC5737
-address stalled 271.33 SECONDS before WinError 64, and an unresolvable UNC
-hostname 9.88s - inside an ``async def``, i.e. the whole event loop, per request.
+It also blocks: a UNC path to a non-routable RFC5737 address stalls for minutes
+before WinError 64 - inside an ``async def``, i.e. the whole event loop, per
+request.
 
 So the tests assert on the CODE PATH (no filesystem call is ever made on an
 unsanitized UNC string), not on wall clock alone. Wall clock is Windows-specific
-and a Linux CI run cannot reproduce the stall, so a timing-only test would
-silently prove nothing there.
+and a Linux run cannot reproduce the stall, so a timing-only test would prove
+nothing there.
 """
 
 from __future__ import annotations
@@ -34,39 +34,24 @@ from fastapi.testclient import TestClient
 from localm import scopes as S
 from localm.plugins.gui.web import attach_gui
 
-# A UNC path at a non-routable RFC5737 documentation address (TEST-NET-1). It is
-# guaranteed never to route anywhere, so even a total failure of the fix cannot
-# reach a real host from a developer's machine or from CI.
+# A UNC path at a non-routable RFC5737 documentation address, so it never
+# reaches a real host.
 UNC = r"\\192.0.2.1\share"
 UNC_FWD = "//192.0.2.1/share"
 DEVICE = r"\\.\PhysicalDrive0"
 
-# Upper bound for "the request returned without dialling the UNC host". A
-# BACKSTOP for the _unc_calls(fs_spy) assertions, not a duplicate of them: the
-# spy only sees calls through the surfaces it patches, so a dial down some
-# unpatched path would show up here as elapsed time and nowhere else.
+# Upper bound in wall-clock seconds for "the request returned without dialling
+# the UNC host". A backstop for the _unc_calls(fs_spy) assertions: the spy only
+# sees calls through the surfaces it patches, so a dial down some unpatched path
+# shows up here as elapsed time and nowhere else.
 #
-# The value has to sit between two other numbers, and both matter:
-#   ABOVE runner and shared-box jitter. 192.0.2.1 is TEST-NET-1, guaranteed
-#   unroutable, so a passing run does no network work at all and the measured
-#   time is pure scheduling noise. This was 1.0 and went red on master at 1.04s
-#   (CI run for cb8bc936) with both security assertions already passed - the
-#   tightest wall-clock bound in the repo, where every other one is 2.0s+.
-#   FAR BELOW a real SMB connect timeout, which on Windows is tens of seconds.
-# 5.0 keeps the full detection power (a genuine dial cannot finish under it)
-# while leaving room for a noisy hosted runner.
-#
-# MUST STAY WALL-CLOCK. Do NOT "fix" flakiness here by switching to
-# time.process_time() the way tests/test_redos_bounds.py correctly does: those
-# tests detect a CPU-bound scan, this one detects a BLOCKING NETWORK WAIT, which
-# burns no CPU at all. Measured: a 1.2s block registers 0.000s of process_time.
-# The conversion would leave a green test that can never fire again.
+# Must stay wall-clock, never time.process_time(): a blocking network wait burns
+# no CPU at all.
 _NO_DIAL_SECONDS = 5.0
 
 
-# Every Path method here reaches the filesystem, and on Windows each one dials
-# SMB for a UNC path. resolve() is the one CodeQL flagged, but it is NOT the only
-# door: is_dir() alone reproduces the full stall.
+# Every Path method here reaches the filesystem; on Windows each one dials SMB
+# for a UNC path, and is_dir() alone reproduces the full stall.
 _FS_METHODS = ("resolve", "is_dir", "is_file", "exists", "stat", "iterdir")
 
 
@@ -85,11 +70,10 @@ def fs_spy(monkeypatch):
     call when the path is UNC/device syntax.
 
     Guarding ALL of _FS_METHODS rather than just resolve() is what makes this
-    test suite safe to run. MEASURED: with the fix reverted and only resolve()
-    guarded, this file ran past a 10-MINUTE timeout - because the unguarded
-    is_dir() went on to make the real SMB dial to the RFC5737 address, exactly
-    the 271-second stall the unit is about. A regression must fail in
-    milliseconds with a clear message, never hang CI.
+    test suite safe to run: with only resolve() guarded, an unguarded is_dir()
+    goes on to make the real SMB dial to the RFC5737 address and the file runs
+    for minutes. A regression must fail in milliseconds with a clear message,
+    never hang.
 
     Recording AND raising is deliberate: the handlers wrap their bodies in
     ``except Exception -> HTTPException(500)``, so a raise alone could be
@@ -124,8 +108,8 @@ def _unc_calls(seen) -> list:
 
 @pytest.fixture
 def fs_app(tmp_path, monkeypatch):
-    """GUI stack on a throwaway home. Mirrors tests/test_fs_picker.py so the two
-    files exercise the same wiring."""
+    """GUI stack on a throwaway home, wired the same way the fs-picker suite
+    wires it."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -154,15 +138,15 @@ def _host_key():
 
 
 def _cfgwrite_key():
-    """config:write is a PRIVILEGED scope, so minting it needs the owner-equivalent
-    allow_privileged flag (same convention as tests/test_auth.py)."""
+    """config:write is a PRIVILEGED scope, so minting it needs the
+    owner-equivalent allow_privileged flag."""
     from localm import auth
     return auth.create_key("w", [S.CONFIG_WRITE], allow_privileged=True,
                            fs_access="host")["key"]
 
 
 # --------------------------------------------------------------------------- #
-#  GET /api/fs/dirs - the host folder picker (CodeQL 10)                       #
+#  GET /api/fs/dirs - the host folder picker                                   #
 # --------------------------------------------------------------------------- #
 
 class TestFsDirsRejectsUncBeforeAnySyscall:
@@ -186,7 +170,7 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
         """``//host/share`` is an equivalent UNC spelling on Windows. On POSIX a
         leading ``//`` is a legal path prefix equivalent to ``/``, so it is NOT
         rejected there and the picker keeps working - the assertion is
-        platform-split on purpose, not skipped."""
+        platform-split, not skipped."""
         with TestClient(fs_app) as c:
             r = c.get("/api/fs/dirs", params={"path": UNC_FWD},
                       headers=_hdr(_host_key()))
@@ -216,12 +200,10 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
 
         The POSIX branch is pointed at a DISPOSABLE fixture root, never the
         machine's real "/". Listing "/" stats every child (/opt, /etc, /usr),
-        which is a real system-path touch and is exactly what the guard in
-        tests/conftest.py fails a test for. An earlier revision of this test did
-        exactly that: it passed on Windows, where the roots are drive letters,
-        and reddened master on the ubuntu CI leg - a platform blind spot rather
-        than a logic error, and the reason single-platform local green is a
-        weaker gate than it looks."""
+        which is a real system-path touch and is what the guard in
+        tests/conftest.py fails a test for. On Windows the roots are drive
+        letters, so a test that lists the real root passes there and fails only
+        on POSIX."""
         from localm.plugins.gui.routes import admin as admin_routes
         fake_root = tmp_path / "fakeroot"
         (fake_root / "alpha").mkdir(parents=True)
@@ -235,13 +217,12 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
         dirs = r.json()["dirs"]
         assert dirs, "empty path returned no roots"
         if os.name != "nt":
-            # POSIX went through the injected root, so we know exactly what to
-            # expect - and nothing outside tmp_path was read.
+            # POSIX went through the injected root; nothing outside tmp_path was read.
             assert sorted(dirs) == ["alpha", "beta"]
 
 
 # --------------------------------------------------------------------------- #
-#  POST /api/comfyui/create-launcher (CodeQL 3)                                #
+#  POST /api/comfyui/create-launcher                                           #
 # --------------------------------------------------------------------------- #
 
 class TestCreateLauncherAllowlistsBeforeResolving:
@@ -269,10 +250,8 @@ class TestCreateLauncherAllowlistsBeforeResolving:
         assert _unc_calls(fs_spy) == [], (
             "the UNC string reached a filesystem call BEFORE the allowlist - which "
             "is the whole finding: the 403 is returned after the SMB dial")
-        # Nothing was written anywhere on the way to the refusal. Ordered BEFORE
-        # the timing backstop deliberately: pytest stops at the first failure, so
-        # with the timing assert above it, a slow runner would mask this one and
-        # a real stray write would be reported as a timing flake.
+        # Nothing was written anywhere on the way to the refusal. Ordered before
+        # the timing backstop, since pytest stops at the first failure.
         assert not list(wd.iterdir())
         assert elapsed < _NO_DIAL_SECONDS, f"took {elapsed:.2f}s"
 
@@ -321,19 +300,15 @@ class TestCreateLauncherAllowlistsBeforeResolving:
         the gate rather than end-to-end - there is no SMB server here, so the
         check is that the request gets PAST the allowlist (it then fails on the
         directory not existing, not on a refusal)."""
-        # Inject the config directly rather than through save_config: the point
-        # of this test is the ALLOWLIST's verdict, so it must not depend on
-        # whatever validation the config writer may or may not apply to a UNC
-        # string. admin.py imports load_config inside the handler, so patching
-        # the module attribute is what the handler will see.
+        # Inject the config directly rather than through save_config. admin.py
+        # imports load_config inside the handler, so patching the module
+        # attribute is what the handler sees.
         import localm.config as _cfg
         monkeypatch.setattr(_cfg, "load_config", lambda: {"comfy_workdir": UNC})
 
-        # Neutralise BOTH syscalls the handler would make on the UNC path. Only
-        # patching resolve() is not enough: is_dir() dials SMB too, and on
-        # Windows that is the 271-second stall this whole unit is about - the
-        # test itself would hang. Narrow patches (UNC only) so the rest of the
-        # request keeps using the real filesystem.
+        # Neutralise both syscalls the handler makes on the UNC path: resolve()
+        # and is_dir(). Narrow patches (UNC only), so the rest of the request
+        # keeps using the real filesystem.
         real_resolve, real_is_dir = Path.resolve, Path.is_dir
 
         def no_dial_resolve(self, *a, **kw):
@@ -352,8 +327,7 @@ class TestCreateLauncherAllowlistsBeforeResolving:
         assert r.status_code != 403, (
             "a user-configured UNC workdir was refused by the allowlist - the "
             "fix broke a legitimate network-share setup")
-        # It got past the gate and failed on the (stubbed-absent) directory,
-        # which is the correct downstream behavior, not a refusal.
+        # Past the gate, failing on the stubbed-absent directory rather than refused.
         assert r.status_code == 400 and "not a valid directory" in r.text
 
     def test_configured_workdir_still_writes_the_launcher(self, fs_app, tmp_path):
@@ -511,18 +485,13 @@ class TestFsMkdir:
     def test_permission_denied_is_reported_not_swallowed(
             self, fs_app, browse_dir, monkeypatch):
         # Mint the key BEFORE sabotaging Path.mkdir: creating a key
-        # side-effect-creates LOCALM_HOME via the same Path.mkdir the patch
-        # below hijacks, so minting it afterwards would fail key creation
-        # itself rather than exercise the route's own PermissionError handling.
+        # side-effect-creates LOCALM_HOME through the same Path.mkdir the patch
+        # below hijacks.
         key = _cfgwrite_key()
 
-        # Scoped to the ACTUAL TARGET FOLDER, not every Path.mkdir call: the
-        # route now also reads config (allow_network_drives), which itself
-        # mkdir(exist_ok=True)s the already-existing LOCALM_HOME on every call
-        # (config.py's ensure_dirs(), unconditional regardless of exist_ok) -
-        # a blanket sabotage would fail THAT call first and never reach the
-        # route's own mkdir, testing an unrelated code path instead of this
-        # one's PermissionError handling.
+        # Scoped to the actual target folder rather than every Path.mkdir call:
+        # the route also reads config, whose ensure_dirs() mkdirs LOCALM_HOME on
+        # every call.
         real_mkdir = Path.mkdir
         target = (browse_dir / "x").resolve()
 
@@ -651,15 +620,13 @@ class TestFsRename:
     def test_never_overwrites_even_if_the_os_rename_call_would_silently_succeed(
             self, fs_app, tmp_path, monkeypatch):
         """POSIX rename(2) SILENTLY REPLACES an existing FILE target instead of
-        raising - that is documented rename(2) behavior, unlike Windows, which
-        refuses on its own. The two test_never_overwrites_* tests above pass on
-        THIS platform (Windows) regardless of whether fs_rename's explicit
-        `new_path.exists()` pre-check is present, because Path.rename() itself
-        already refuses here - so they cannot tell the pre-check apart from
-        incidental OS behavior (measured: removing the pre-check left them
-        green). This test makes Path.rename behave like POSIX's rename(2) on
-        EVERY platform, so only the explicit pre-check - never the OS call - can
-        be what refuses the overwrite."""
+        raising, unlike Windows, which refuses on its own. The two
+        test_never_overwrites_* tests above therefore pass on Windows whether or
+        not fs_rename's explicit `new_path.exists()` pre-check is present, so
+        they cannot tell the pre-check apart from incidental OS behavior. This
+        test makes Path.rename behave like POSIX's rename(2) on EVERY platform,
+        so only the explicit pre-check - never the OS call - can be what refuses
+        the overwrite."""
         src = tmp_path / "source.txt"
         src.write_text("SOURCE", encoding="utf-8")
         dst = tmp_path / "target.txt"
@@ -699,8 +666,7 @@ class TestFsRename:
             self, fs_app, tmp_path, monkeypatch):
         f = tmp_path / "old.txt"
         f.write_text("x", encoding="utf-8")
-        # Mint the key BEFORE sabotaging Path.rename - see the identical note
-        # in TestFsMkdir.test_permission_denied_is_reported_not_swallowed.
+        # Mint the key BEFORE sabotaging Path.rename.
         key = _cfgwrite_key()
 
         def flaky_rename(self, target):
@@ -764,9 +730,8 @@ class TestFsBrowserRefusedCrossOrigin:
             from localm.auth import set_api_key
             set_api_key("k" * 32)
         # create_app installs the _origin_guard middleware; attach_gui mounts the
-        # real /api/fs/* routes onto it. Both are needed: the guard runs before
-        # routing, so testing it against an unmounted path would pass even if the
-        # picker lived somewhere else entirely.
+        # real /api/fs/* routes onto it. The guard runs before routing, so both
+        # are needed.
         from localm.inference.http_server import create_app
         from localm.plugins.engine import attach_engine
         app = create_app(None)
@@ -811,9 +776,9 @@ class TestFsBrowserRefusedCrossOrigin:
 
 
 # --------------------------------------------------------------------------- #
-#  allow_network_drives (S9): the fs picker/mkdir/rename/export routes must   #
-#  refuse a mapped network drive when the config setting is off, and leave    #
-#  an ordinary local path completely unaffected either way.                   #
+#  allow_network_drives: the fs picker/mkdir/rename/export routes refuse a     #
+#  mapped network drive when the config setting is off, and leave an ordinary  #
+#  local path unaffected either way.                                           #
 # --------------------------------------------------------------------------- #
 
 def _set_allow_network_drives(value: bool) -> None:
@@ -852,8 +817,7 @@ class TestNetworkDriveToggle:
         with TestClient(fs_app) as c:
             r = c.get("/api/fs/dirs", params={"path": r"Z:\shared"},
                       headers=_hdr(_host_key()))
-        # Not 400 (not the network-drive gate) - a genuinely absent drive on
-        # this box 404s instead, which is the correct, unrelated failure.
+        # Not 400: an absent drive 404s instead of reaching the network-drive gate.
         assert r.status_code != 400, r.text
 
     def test_root_listing_hides_a_disallowed_network_drive(

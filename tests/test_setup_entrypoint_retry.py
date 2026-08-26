@@ -2,25 +2,20 @@
 """setup.sh's localm-entry-point install/retry block, and localm.sh's own
 diagnosis of the same failure mode.
 
-Regression for a filed residual: setup.sh:342-360 retries the `uv pip install`
-once if `.venv/bin/localm` did not land (a real, reproduced WSL2/DrvFs quirk
-where uv reports success but drops exactly one file), then warns loudly and
-CONTINUES if it is still missing afterwards - by design, since the rest of
-setup does not depend on this entry point. But the retry call itself was a
-bare command under `set -euo pipefail`, the one unguarded command in that
-block: a retry that ERRORS (not just "ran but didn't create the file") kills
-setup right there, so the loud "STILL missing" warning a few lines below never
-prints - contradicting the block's own comment.
+setup.sh retries the `uv pip install` once if `.venv/bin/localm` did not land
+(a WSL2/DrvFs quirk where uv reports success but drops exactly one file), then
+warns loudly and CONTINUES if it is still missing afterwards, since the rest of
+setup does not depend on this entry point. The retry call must be GUARDED: as a
+bare command under `set -euo pipefail`, a retry that ERRORS (not just "ran but
+did not create the file") kills setup right there, so the loud "STILL missing"
+warning a few lines below never prints.
 
-No test covered any of the three already-verified-live branches (present /
-recovered-by-retry / still-missing-after-retry), let alone the retry-errors
-case this file adds coverage for. Extracts and runs ONLY the install/retry
-block (not the whole script) against a stub `uv`, in the extract-a-source-
-slice style of tests/test_setup_gpu_detect.py.
+Four branches are covered: present, recovered-by-retry, still-missing-after-
+retry, and retry-errors. Extracts and runs ONLY the install/retry block (not the
+whole script) against a stub `uv`.
 
-Also covers localm.sh's own misdiagnosis of this exact failure mode: it used
-to report "No .venv found" even when the venv was fine and only the console
-script was missing.
+Also covers localm.sh's own diagnosis of this failure mode: it must not report
+"No .venv found" when the venv is fine and only the console script is missing.
 """
 
 from __future__ import annotations
@@ -66,8 +61,7 @@ def _heartbeat_functions() -> str:
     # The install block calls heartbeat_start/heartbeat_stop, defined earlier
     # in the real script (near ask()/offer_report()). Extract them the same
     # way _install_block() extracts its own slice, so the synthetic script
-    # below actually has them - and stays in sync if the implementation
-    # changes - instead of failing on "heartbeat_start: command not found".
+    # below has them.
     src = SETUP_SH.read_text(encoding="utf-8")
     start = src.index("HB_SEQ=0")
     stop_def = src.index("heartbeat_stop() {", start)
@@ -78,9 +72,7 @@ def _heartbeat_functions() -> str:
 def _make_uv_stub(bin_dir: Path) -> None:
     # Records its own call count in a file RELATIVE to cwd (the test sets cwd
     # to tmp_path for the whole run, so both this stub and the extracted
-    # setup.sh block agree on where ".venv/bin/localm" and the counter live -
-    # no absolute path needs to survive translation into the bash script
-    # text, which is what makes this portable across a Windows tmp_path).
+    # setup.sh block agree on where ".venv/bin/localm" and the counter live).
     # Call N's exit code / whether it creates .venv/bin/localm are read from
     # STUB_RC_<N> / STUB_CREATE_<N> env vars, set per-test.
     _make_executable(
@@ -110,7 +102,7 @@ def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]
         "set -euo pipefail\n"
         'say() { printf "%s\\n" "$*"; }\n'
         # The real script sets EXTRAS earlier (the browser/app-window prompt,
-        # before this block), which the extracted block references via
+        # further up the file), which the extracted block references via
         # "${EXTRAS}" without setting it itself - under `set -u` above that is
         # otherwise an unbound-variable error before uv is even reached.
         'EXTRAS="coder,voice,monitor"\n'
@@ -159,18 +151,16 @@ def test_still_missing_after_retry_warns_and_continues(tmp_path):
     assert "retrying once" in result.stdout
     assert "STILL missing" in result.stdout
     assert not (tmp_path / ".venv" / "bin" / "localm").exists()
-    # THE FIX under test: LOCALM_BIN_OK must reflect the real, still-missing
-    # state, because setup-llama/make-launcher/plugin-setup downstream branch
-    # on it instead of blindly invoking a binary that was just diagnosed absent.
+    # LOCALM_BIN_OK must reflect the real, still-missing state: setup-llama,
+    # make-launcher and plugin-setup downstream branch on it instead of blindly
+    # invoking a binary that was just diagnosed absent.
     assert "LOCALM_BIN_OK=0" in result.stdout
 
 
 def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path):
-    # THE FIX under test. Before it, setup.sh:344's retry call was a bare
-    # command under `set -euo pipefail`: a non-zero exit here killed the
-    # extracted block right at this line, "COMPLETED" and the STILL-missing
-    # warning never printed, and the process exit code was the retry's own
-    # (7 here) instead of 0. Revert the `|| true` guard to see this go red.
+    # The retry call is guarded with `|| true`, so a non-zero exit does not
+    # kill the extracted block under `set -euo pipefail`: "COMPLETED" and the
+    # still-missing warning both print, and the process exit code is 0.
     result = _run_install_block(tmp_path, call_specs={1: (0, False), 2: (7, False)})
     assert result.returncode == 0, result.stderr
     assert "COMPLETED" in result.stdout
@@ -200,16 +190,13 @@ def test_retry_install_is_guarded_in_source():
 # setup.sh: the backend-provision (setup-llama) block must not attempt to run
 # a .venv/bin/localm that was already diagnosed missing above.
 #
-# Regression for a second-order break the entry-point fix left in place: once
-# .venv/bin/localm is confirmed STILL missing, the script used to continue
-# straight into `.venv/bin/localm setup-llama --backend ...` anyway (BACKEND
+# Without that skip, the script runs `.venv/bin/localm setup-llama
+# --backend ...` even after confirming that binary is missing (BACKEND
 # is anything but "own" by default, since REC auto-picks a real backend).
 # Bash fails that call with "No such file or directory", the surrounding
 # `|| { ...; exit 1; }` catches it, and setup.sh exits 1 on a MISLEADING
 # "setup-llama failed" message - contradicting the retry block's own comment
-# that "the rest of this script does not depend on the entry point". Proven
-# live: bash -c './missing-binary setup-llama --backend x || { exit 1; };
-# echo unreachable' never prints "unreachable".
+# that "the rest of this script does not depend on the entry point".
 # ---------------------------------------------------------------------------
 
 
@@ -262,15 +249,15 @@ def test_provision_skips_without_invoking_localm_when_bin_missing(tmp_path):
     assert "COMPLETED" in result.stdout
     assert "Skipped - .venv/bin/localm is missing" in result.stdout
     assert "setup-llama failed" not in result.stdout
-    # The decisive assertion: the stub must NEVER have been invoked. Before
-    # the fix this branch didn't exist and the call below fell straight
-    # through to `.venv/bin/localm setup-llama --backend vulkan`.
+    # The decisive assertion: the stub must NEVER have been invoked. Without
+    # the skip branch the call falls straight through to
+    # `.venv/bin/localm setup-llama --backend vulkan`.
     assert not (tmp_path / ".stub-localm-calls").exists()
 
 
 def test_provision_skips_without_invoking_localm_when_bin_missing_own_backend(tmp_path):
-    # BACKEND=own used to be asked its own buildpath question first; confirm
-    # the missing-binary skip pre-empts that path too, not just the `else`.
+    # Confirm the missing-binary skip pre-empts the BACKEND=own path too, not
+    # just the `else` branch.
     result = _run_provision_block(tmp_path, localm_bin_ok=False, backend="own")
     assert result.returncode == 0, result.stderr
     assert "COMPLETED" in result.stdout
@@ -279,7 +266,7 @@ def test_provision_skips_without_invoking_localm_when_bin_missing_own_backend(tm
 
 
 def test_provision_runs_normally_when_bin_present(tmp_path):
-    # Regression protection: the pre-existing, working case must be unchanged.
+    # The normal case: the binary is present, so provisioning runs.
     result = _run_provision_block(tmp_path, localm_bin_ok=True, backend="vulkan", stub_rc=0)
     assert result.returncode == 0, result.stderr
     assert "COMPLETED" in result.stdout
@@ -291,7 +278,7 @@ def test_provision_runs_normally_when_bin_present(tmp_path):
 def test_provision_still_hard_fails_on_a_real_setup_llama_failure(tmp_path):
     # A genuine setup-llama failure (binary present, provisioning itself
     # fails) must still abort setup loudly - only the missing-BINARY case is
-    # now soft. Distinguishes "skip" from "the pre-existing hard-fail path".
+    # soft. Distinguishes "skip" from the hard-fail path.
     result = _run_provision_block(tmp_path, localm_bin_ok=True, backend="vulkan", stub_rc=3)
     assert result.returncode == 1
     assert "setup-llama failed" in result.stdout
@@ -326,8 +313,8 @@ def test_localm_sh_reports_no_venv_when_venv_truly_absent(tmp_path):
 
 
 def test_localm_sh_distinguishes_missing_entrypoint_from_missing_venv(tmp_path):
-    # THE FIX under test: the venv is fine (python present), only the console
-    # script is missing - must NOT be misreported as "No .venv found".
+    # The venv is fine (python present), only the console script is missing -
+    # it must NOT be reported as "No .venv found".
     result = _run_localm_sh(tmp_path, venv_python=True, venv_localm=False)
     assert result.returncode == 1
     assert "No .venv found" not in result.stderr

@@ -1,27 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-591: the episodic pass must be BOUNDED per run and must not re-summarise a
+"""The episodic pass must be BOUNDED per run and must not re-summarise a
 still-growing session.
 
-HIGH: on the FIRST pass (no watermark sidecar -> watermark 0.0) `new_files` is
-EVERY session file, and the loop ran one real model generation per file, serially,
-with no per-run cap. A user with a large accumulated history (e.g. 200 sessions)
-upgrades and the first auto-consolidation monopolises the single inference engine
-for one generation per file, minutes-to-hours, starving chat. Pre-#591 the episodic
-pass made exactly ONE model call total. Fix: cap the number of generations per run
-and drain the backlog over several runs, advancing the watermark only past the
-files actually processed.
+On the FIRST pass (no watermark sidecar -> watermark 0.0) `new_files` is EVERY
+session file. Without a per-run cap that is one real model generation per file,
+serially, so a user with a large accumulated history (e.g. 200 sessions)
+monopolises the single inference engine for minutes to hours and starves chat. The
+number of generations per run is therefore capped, the backlog drains over several
+runs, and the watermark advances only past the files actually processed.
 
-MEDIUM: an active/growing session file's mtime keeps advancing past the watermark,
-so it was re-summarised (from partial content) on every later run, accumulating
-overlapping partial episodes. Fix: only summarise a SETTLED session (untouched for
-a quiet window) and do not advance the watermark past an unsettled one, so a
-growing session is summarised exactly ONCE, after it goes quiet.
+An active/growing session file's mtime keeps advancing past the watermark, so
+without a settle check it is re-summarised from partial content on every later run,
+accumulating overlapping partial episodes. Only a SETTLED session (untouched for a
+quiet window) is summarised, and the watermark does not advance past an unsettled
+one, so a growing session is summarised exactly ONCE, after it goes quiet.
 
-These tests drive the SAME public signature the pre-fix code has (so stashing the
-fix yields a clean behavioural failure, not an import error): they assert on the
-GENERATION COUNT (pre-fix == one per file; post-fix bounded) and never reference
-the fix's tuning constants, and they set mtimes relative to the real clock (settled
-= far past; active = seconds ago), so the settle window's exact value is irrelevant.
+These tests assert on the GENERATION COUNT and never reference the tuning
+constants, and they set mtimes relative to the real clock (settled = far past;
+active = seconds ago), so the settle window's exact value is irrelevant.
 """
 
 from __future__ import annotations
@@ -111,10 +107,10 @@ def test_backlog_drains_over_runs_without_skipping(memhome):
 def test_tied_mtimes_at_cap_boundary_not_skipped(memhome):
     """Tie-safety: a bulk LOCALM_HOME restore, or a coarse-granularity volume
     (FAT/exFAT/SMB, 1-2s mtime resolution), gives MANY session files one IDENTICAL
-    mtime - exactly the large first-pass history REG-591 targets. The per-run cap
-    must not permanently skip the tied files left unprocessed when it breaks
-    mid-group (a strict `>` watermark filter would exclude them forever). Every
-    tied session must still drain, exactly once, over successive runs."""
+    mtime. The per-run cap must not permanently skip the tied files left
+    unprocessed when it breaks mid-group (a strict `>` watermark filter would
+    exclude them forever). Every tied session must still drain, exactly once, over
+    successive runs."""
     n_files = plug.EPISODIC_MAX_PER_RUN * 3
     for i in range(n_files):
         _write_session(memhome, f"s{i:03d}", _SETTLED)   # all identical mtime
@@ -168,15 +164,15 @@ def test_settled_session_summarised_exactly_once(memhome):
     assert calls2["n"] == 1, "a settled session was not summarised"
 
     # Run 3: already past the watermark, so it is NOT re-summarised even though a
-    # real session's mtime keeps advancing (the pre-fix duplicate-episode bug).
+    # real session's mtime keeps advancing.
     complete3, calls3 = _counting_complete()
     plug._store_episodes(store, complete3, embed_fn=None)
     assert calls3["n"] == 0, "a processed session was re-summarised (duplicate episode)"
 
 
 def test_existing_short_history_unaffected(memhome):
-    """A handful of settled sessions (under the cap) still all summarise in one run,
-    exactly as before - the bound must not change small-history behaviour."""
+    """A handful of settled sessions (under the cap) all summarise in one run: the
+    bound must not change small-history behaviour."""
     for i in range(3):
         _write_session(memhome, f"old{i}", 1000.0 + i)  # long-settled
     complete, calls = _counting_complete()
@@ -185,16 +181,14 @@ def test_existing_short_history_unaffected(memhome):
 
 
 # --------------------------------------------------------------------------- #
-#  RESIDUAL of the MEDIUM: a RESUMED session must SUPERSEDE its own episode    #
+#  A RESUMED session SUPERSEDES its own episode                               #
 # --------------------------------------------------------------------------- #
-# The settle gate (above) only closed the "summarised WHILE INCOMPLETE" half. The
-# entry's other half - "re-summarised on every later run ... accumulating partial/
-# duplicate episodes" - survived: a session summarised at mtime M, then RESUMED (a
-# user continues the conversation the next day) has its mtime advance to M2 > M, so
-# it re-crosses the watermark and is summarised AGAIN. The pass already tags each
-# episode with meta={"session": stem} but never read it back, so the second summary
-# was stored as a SECOND record for the SAME conversation whenever it differed enough
-# to clear the 0.85 dedup - which a grown conversation does by construction.
+# A session summarised at mtime M, then RESUMED (a user continues the
+# conversation the next day), has its mtime advance to M2 > M, so it re-crosses
+# the watermark and is summarised again. Each episode is tagged with
+# meta={"session": stem}, and that tag is read back so the second summary
+# replaces the first instead of becoming a second record for the same
+# conversation.
 
 def _summaries(*texts):
     """A stub returning a scripted, genuinely different summary per call."""
@@ -254,9 +248,9 @@ def test_resumed_session_with_same_story_does_not_duplicate(memhome):
 
 
 def test_preexisting_duplicates_for_one_stem_are_collapsed(memhome):
-    """A store written BEFORE this fix can already hold several overlapping partials
-    for one session (the pass then re-summarised a grown session every run). When that
-    session is next processed, they collapse to the single fullest record."""
+    """A store can already hold several overlapping partials for one session. When
+    that session is next processed, they collapse to the single fullest
+    record."""
     from localm.memory import MemoryRecord
     store = plug._chat_store()
     for i, txt in enumerate(["Partial one about rust ownership",
@@ -265,7 +259,7 @@ def test_preexisting_duplicates_for_one_stem_are_collapsed(memhome):
         store.add(MemoryRecord(text=txt, kind="episodic", source="synth",
                                importance=0.4,
                                meta={"session": "dupe", "session_mtime": 1000.0 + i}))
-    assert len(_episodes(plug._chat_store())) == 3       # the pre-fix mess
+    assert len(_episodes(plug._chat_store())) == 3       # three overlapping partials
 
     _write_session(memhome, "dupe", _SETTLED, content="rust, cargo, clippy, the lot")
     c, _ = _summaries("Covered the whole Rust toolchain: ownership, cargo and clippy")
@@ -297,8 +291,8 @@ def test_collapse_only_touches_the_processed_stem(memhome):
 
 
 def test_distinct_sessions_still_get_their_own_episodes(memhome):
-    """The per-stem supersede must NOT collapse genuinely different sessions into one
-    (that would resurrect the pre-#591 'N sessions -> <=1 blob' bug, audit [14])."""
+    """The per-stem supersede must NOT collapse genuinely different sessions into
+    one blob episode."""
     store = plug._chat_store()
     _write_session(memhome, "s_rust", _SETTLED, content="rust ownership please")
     _write_session(memhome, "s_hike", _SETTLED + 1, content="plan a hiking trip")

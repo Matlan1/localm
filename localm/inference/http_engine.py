@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """An Engine-compatible client that talks to a running localm server's ``/v1`` API.
 
-This is the H3 / H6 "thin-client" piece: ``localm run`` ATTACHES to the per-directory
-server (chat flows through its OpenAI-compatible ``/v1/chat/completions``) instead of
-loading a SECOND copy of the model in-process - the same attach-or-spawn model the GUI
-already uses. It is duck-typed to :class:`localm.inference.engine.Engine`, implementing
+The thin-client piece: ``localm run`` ATTACHES to the per-directory server (chat
+flows through its OpenAI-compatible ``/v1/chat/completions``) instead of loading
+a SECOND copy of the model in-process - the same attach-or-spawn model the GUI
+uses. It is duck-typed to :class:`localm.inference.engine.Engine`, implementing
 ONLY the surface the chat REPL touches:
 
     chat_stream(messages, **gen_opts) -> Iterator[str]
@@ -14,8 +14,8 @@ ONLY the surface the chat REPL touches:
     __enter__ / __exit__         (so ``with engine:`` works)
     loaded                       (always True for an attached server)
 
-The CLI must NOT manage the remote server's model or VRAM (other clients share it), so
-load/unload are deliberately no-ops.
+The CLI must NOT manage the remote server's model or VRAM (other clients share
+it), so load/unload are no-ops.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ class HttpEngine:
         # Cache ONLY a successful resolution (matching the docstring). A
         # transient / early failure - the model not loaded yet, a non-200, a
         # network blip - must not permanently latch None; a later call retries
-        # once /v1/config can answer (AUDIT-LOW).
+        # once /v1/config can answer.
         if cap is not None:
             self._ctx_capacity = cap
             self._ctx_capacity_cached = True
@@ -169,10 +169,10 @@ class HttpEngine:
             choices = chunk.get("choices") or [{}]
             delta = (choices[0] or {}).get("delta") or {}
             # The server already splits <think> reasoning out of `content` into its
-            # own `reasoning_content` field (H4, /v1 streaming). Re-wrap it in the
-            # same inline <think>...</think> markers the in-process Engine's raw
-            # stream carries, so cli/chat.py's ThinkSplitter/_ThinkPrinter dims it
-            # identically in attach mode instead of silently dropping it.
+            # own `reasoning_content` field. Re-wrap it in the same inline
+            # <think>...</think> markers the in-process Engine's raw stream carries,
+            # so cli/chat.py's ThinkSplitter/_ThinkPrinter dims it identically in
+            # attach mode instead of silently dropping it.
             # No escaping needed: the server derives reasoning_content by
             # scanning for the FIRST "</think>" (ThinkSplitter in textnorm.py),
             # so a reasoning_content value can never itself contain an intact
@@ -208,11 +208,10 @@ def remote_model_status(base_url: str, token: Optional[str] = None,
             return "unknown", None
         data = (r.json() or {}).get("data") or []
         # /v1/models lists EVERY registered model (sorted), each with a `loaded`
-        # flag and, since the active marker was added, an `active` flag. Pick the
-        # active model (else the first loaded one) - NOT data[0], which is just
-        # the alphabetically-first REGISTERED model and is almost never the loaded
-        # one (AUDIT-HIGH-4: reading data[0] made `localm run` attach to, and
-        # force-load, the wrong model).
+        # flag and an `active` flag. Pick the active model (else the first loaded
+        # one) - NOT data[0], which is the alphabetically-first REGISTERED model
+        # and is almost never the loaded one, so reading it makes `localm run`
+        # attach to, and force-load, the wrong model.
         dicts = [m for m in data if isinstance(m, dict) and m.get("id")]
         chosen = next((m for m in dicts if m.get("active")), None) \
             or next((m for m in dicts if m.get("loaded")), None)

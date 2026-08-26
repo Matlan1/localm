@@ -1,20 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tool implementations for the coding agent.
 
-This package replaces the former single-file ``localm/plugins/coder/tools.py``.
-It is split by concern (base primitives, file ops, shell, git, env, web,
-sub-agents, media, and the registry) but keeps the exact public surface the rest
-of the coder and the test suite import from ``localm.plugins.coder.tools``:
+Split by concern (base primitives, file ops, shell, git, env, web, sub-agents,
+media, and the registry), and re-exporting the public surface the rest of the
+coder and the test suite import from ``localm.plugins.coder.tools``:
 ``ToolResult``, ``ToolDef``, ``TOOL_REGISTRY``, ``SAFE_RESTRICTED_TOOLS``, the
-shared helpers, and every ``tool_*`` function. ``TOOL_REGISTRY`` is re-exported by
-name (the same dict mcp/plugin/skill registration mutates in place)."""
+shared helpers, and every ``tool_*`` function. ``TOOL_REGISTRY`` is re-exported
+by name - the same dict mcp/plugin/skill registration mutates in place."""
 
-# Preserve the monkeypatch surface tests rely on: the single-file tools.py exposed
-# ``subprocess`` and ``os`` as module attributes, so tests patch
-# ``localm.plugins.coder.tools.subprocess.run`` and
-# ``localm.plugins.coder.tools.os.environ``. The submodules (shell/git/env/media)
-# import the SAME global modules, so re-exposing them on the package keeps those
-# patches effective. (F401: deliberately re-exported, not used in this file.)
+# ``subprocess`` and ``os`` are module attributes of this package, so a caller
+# can patch ``localm.plugins.coder.tools.subprocess.run`` and
+# ``localm.plugins.coder.tools.os.environ``. The submodules
+# (shell/git/env/media) import the SAME global modules, so those patches reach
+# them. (F401: re-exported, not used in this file.)
 import os  # noqa: F401
 import subprocess  # noqa: F401
 

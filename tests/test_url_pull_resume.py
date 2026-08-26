@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for resumable direct-URL model downloads (_pull_url).
-
-Only the fresh path was exercised before; the Range/206 resume logic and the
-server-ignores-Range fallback (which must NOT append to a stale .part file) had
-no coverage despite being a correctness- and data-integrity-sensitive path.
+"""Tests for resumable direct-URL model downloads (_pull_url): the Range/206
+resume logic and the server-ignores-Range fallback, which must NOT append to a
+stale .part file.
 """
 
 from unittest.mock import MagicMock
@@ -49,8 +47,8 @@ def url_env(tmp_path, monkeypatch):
 
 
 def _wire_http(monkeypatch, head_total: int, response):
-    """Double netpolicy.pinned_request (the SSRF-REBIND transport seam the pull
-    path now uses); return a dict that captures the GET headers."""
+    """Double netpolicy.pinned_request (the pinned transport seam the pull path
+    uses); return a dict that captures the GET headers."""
     captured = {}
 
     def fake_pinned_request(method, url, **kwargs):
@@ -78,9 +76,9 @@ class TestUrlPull:
         reg_spy.assert_called_once()
 
     def test_gui_mode_streams_json_progress(self, url_env, monkeypatch, capsys):
-        # In GUI mode (LOCALM_PROGRESS_JSON=1) a direct-URL pull must stream the
-        # same PROGRESS_SENTINEL JSON lines the GUI parses, not just a Rich bar it
-        # cannot render - else a URL download looks frozen until it finishes (G1).
+        # In GUI mode (LOCALM_PROGRESS_JSON=1) a direct-URL pull streams the same
+        # PROGRESS_SENTINEL JSON lines the GUI parses, not just a Rich bar it
+        # cannot render.
         import json
         _, _ = url_env
         monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
@@ -160,10 +158,9 @@ class TestUrlPullResult:
         assert "download failed" in capsys.readouterr().out.lower()
 
     def test_size_head_policy_refusal_fails_closed(self, url_env, monkeypatch, capsys):
-        """A NetworkPolicyError at the size-HEAD stage must SURFACE and fail closed,
-        not be silently collapsed into total=0 (AGENTS.md rule 5: distinguish the
-        benign connect error from a policy refusal). Surfaced by the 2026-07-01
-        checkup's honesty-audit."""
+        """A NetworkPolicyError at the size-HEAD stage must SURFACE and fail
+        closed, not be collapsed into total=0: a policy refusal is a different
+        thing from a benign connect error."""
         from localm.netpolicy import NetworkPolicyError
         calls = {"head": 0}
 

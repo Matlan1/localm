@@ -156,10 +156,10 @@ class TestSearchReplace:
 
     def test_dry_run_reports_the_same_changes_shape_a_real_apply_would(self, project):
         """dry_run's preview and a real apply share ONE matching pass (see
-        ToolResult.changes) - this is what lets patch mode compute an
-        accurate diff via dry_run without a second, possibly-diverging
-        implementation. old must be the file's REAL current bytes (nothing
-        was written) and new must be what a real apply would write.
+        ToolResult.changes), so patch mode can compute an accurate diff via
+        dry_run without a second, possibly-diverging implementation. old must
+        be the file's REAL current bytes (nothing was written) and new must be
+        what a real apply would write.
 
         Compared against the file's OWN bytes rather than a hardcoded
         literal: Path.write_text() (the `project` fixture) translates \\n to
@@ -168,11 +168,10 @@ class TestSearchReplace:
         does not - old_bytes must match whichever this platform produced.
         `name` is compared via as_posix() for the same portability reason:
         ToolResult.changes' path uses this tool's existing native-separator
-        convention (matching the report text search_replace has always
-        produced), Windows-native here - the downstream consumer
+        convention (matching the report text search_replace produces),
+        Windows-native here, and the downstream consumer
         (_record_changed_file) re-derives and normalises it to posix
-        regardless, which is what the footer test elsewhere in this PR
-        checks; this test is about the raw field's CONTENT, not that
+        regardless. This test is about the raw field's CONTENT, not that
         normalisation."""
         r = tool_search_replace(
             project, pattern="def main", replacement="def entrypoint",
@@ -244,11 +243,10 @@ class TestSearchReplace:
 # ---------------------------------------------------------------------------
 #  glob traversal confinement (security boundary)
 #
-#  _confine() guards the `path` argument, but the `glob` argument fed to
-#  Path.glob() is a separate escape vector: Path.glob("../*") traverses
-#  upward. grep (read) and search_replace (write) must filter their glob
-#  results back to cwd, the same way tool_search_files already does, or the
-#  coder agent can read/rewrite files outside the project root entirely.
+#  _confine() guards the `path` argument; the `glob` argument fed to
+#  Path.glob() is a separate escape vector (Path.glob("../*") traverses
+#  upward). grep (read) and search_replace (write) filter their glob results
+#  back to cwd, the same way tool_search_files does.
 # ---------------------------------------------------------------------------
 
 class TestGlobTraversalConfinement:

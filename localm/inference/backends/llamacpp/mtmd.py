@@ -4,38 +4,30 @@
 
 Loads an mmproj (vision projector) alongside the text model and evaluates an
 image+text prompt straight into the llama KV cache, so the GGUF backend can answer
-about images instead of refusing them (issue C1).
+about images instead of refusing them.
 
 ABI strategy (the bundled runtime ships NO headers and the mtmd C ABI has drifted
 across llama.cpp versions, so this binding avoids version-specific struct layouts):
 
 * ``mtmd_context_params`` is treated as an OVER-ALLOCATED opaque buffer. We call the
   exported ``mtmd_context_params_default()`` and pass it through UNMODIFIED except
-  two leading fields whose offsets were MEASURED against the shipped runtime
-  (``use_gpu`` at byte 0, ``n_threads`` at byte 4 - the default params read
-  ``01 01 00 00 04 00 00 00``). On Win64 a struct that large is passed by hidden
-  pointer, so an over-sized buffer is safe regardless of the real field layout.
-* THE PROJECTOR RUNS ON THE GPU. It used to be forced onto the CPU unconditionally,
-  on this reasoning: "CPU clip is the universally-safe path: gfx1030 / RDNA2 hipBLAS
-  fails a BF16 GEMM (CUBLAS_STATUS_INTERNAL_ERROR) on a BF16 mmproj." That failure is
-  real, but it is specific to a BF16 projector, and the override was applied to every
-  user, every GPU and every mmproj - a safety net promoted into the design. Measured
-  cost of that on a 1600x928 screenshot (920 image tokens, Qwen3-VL-8B + an f16
-  mmproj): the encode ran for TEN MINUTES on 4 of 12 cores and very nearly hit the
-  900s first-token timeout, with the GPU idle throughout.
-  So: GPU first, and fall back to CPU only when the GPU path ACTUALLY fails, saying
-  so plainly in the log (AGENTS.md rule 5). ``n_threads`` is also set now - mtmd
-  defaults it to 4 regardless of the machine, which is what made the CPU path so
-  much worse than it had to be.
+  two leading fields: ``use_gpu`` at byte 0 and ``n_threads`` at byte 4. On Win64 a
+  struct that large is passed by hidden pointer, so an over-sized buffer is safe
+  regardless of the real field layout.
+* THE PROJECTOR RUNS ON THE GPU, falling back to CPU only when the GPU path
+  ACTUALLY fails, which is logged plainly. A GPU failure is specific to
+  the projector in use - gfx1030 / RDNA2 hipBLAS fails a BF16 GEMM
+  (CUBLAS_STATUS_INTERNAL_ERROR) on a BF16 mmproj - so the fallback is per
+  context, not a blanket override: it reopens this context on the CPU and stays
+  there until the model is reloaded. ``n_threads`` is set explicitly: mtmd defaults it to 4
+  regardless of the machine, which makes the CPU path far slower than it needs to
+  be.
 * the image is decoded to raw RGB by the caller and passed to the clean-signature
   ``mtmd_bitmap_init(w, h, rgb)`` - NOT ``mtmd_helper_bitmap_init_from_buf``, whose
   return type drifted to a by-value wrapper in newer builds.
 * ``mtmd_input_text`` DID drift and cannot be avoided (it is the one struct this
   module must pass by value), so both layouts are bound and the live one is
-  MEASURED at load time - see :func:`_detect_input_text_class`.
-
-Verified end-to-end on gfx1030 with gemma-4 + mmproj-BF16: a test image was
-described correctly. See dev-notes for the standalone probe this was lifted from.
+  detected at load time - see :func:`_detect_input_text_class`.
 """
 
 from __future__ import annotations
@@ -55,9 +47,9 @@ class _MtmdParams(ctypes.Structure):
 
 
 class _MtmdInputTextV1(ctypes.Structure):
-    """``mtmd_input_text`` BEFORE llama.cpp 4114ba18b (#25548, 2026-07-12).
+    """``mtmd_input_text`` BEFORE llama.cpp 4114ba18b.
 
-    The text is NUL-terminated: the tokenizer did ``input_text = text->text``."""
+    The text is NUL-terminated: the tokenizer does ``input_text = text->text``."""
 
     _fields_ = [("text", ctypes.c_char_p),
                 ("add_special", ctypes.c_bool),
@@ -65,18 +57,17 @@ class _MtmdInputTextV1(ctypes.Structure):
 
 
 class _MtmdInputTextV2(ctypes.Structure):
-    """``mtmd_input_text`` FROM #25548 onward: an explicit ``text_len``.
+    """``mtmd_input_text`` FROM llama.cpp 4114ba18b onward: an explicit ``text_len``.
 
-    That commit ("mtmd: fix silent prompt truncation on embedded NUL") inserted
-    ``size_t text_len`` as the SECOND field and switched the tokenizer to
-    ``input_text.assign(text->text, text->text_len)``. Passing the V1 layout to a
-    V2 build is silently catastrophic rather than merely wrong: the callee reads
-    ``text_len`` out of V1's ``add_special``/``parse_special`` bytes plus padding,
-    so with both flags true it reads 257 and TRUNCATES EVERY PROMPT TO 257 BYTES -
-    which drops the image marker for any prompt with a system preamble, yielding
-    "number of media markers in text (0) does not match number of bitmaps (1)".
-    It also reads the two flags from offsets 16/17, past the end of V1's 16 bytes.
-    See dev-notes/mtmd-input-text-abi-drift-2026-08-06.md."""
+    That commit inserted ``size_t text_len`` as the SECOND field and switched the
+    tokenizer to ``input_text.assign(text->text, text->text_len)``. Passing the V1
+    layout to a V2 build is silently catastrophic rather than merely wrong: the
+    callee reads ``text_len`` out of V1's ``add_special``/``parse_special`` bytes
+    plus padding, so with both flags true it reads 257 and TRUNCATES EVERY PROMPT
+    TO 257 BYTES - which drops the image marker for any prompt with a system
+    preamble, yielding "number of media markers in text (0) does not match number
+    of bitmaps (1)". It also reads the two flags from offsets 16/17, past the end
+    of V1's 16 bytes."""
 
     _fields_ = [("text", ctypes.c_char_p),
                 ("text_len", ctypes.c_size_t),
@@ -127,26 +118,23 @@ def _resolve_backend_device_name(gpu_index: int) -> Optional[str]:
     UNAMBIGUOUSLY - in which case the caller leaves ``MTMD_BACKEND_DEVICE`` unset
     and clip keeps today's behaviour (the first GPU-type device).
 
-    WHY THIS EXISTS: ``mtmd_context_params`` has no device field, so the only
-    selector is the process environment variable ``MTMD_BACKEND_DEVICE``, read in
-    clip_ctx's constructor (upstream ``tools/mtmd/clip.cpp:184-195`` at b10361).
-    Unset, clip takes ``ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)``
-    unconditionally, with zero awareness of tensor_split or main_gpu - which is how
-    a field capture showed ``CLIP using Vulkan0 backend`` while the configured split
-    ran the text model on devices 1 and 2, parking ~857 MiB of projector weights and
-    a 248 MiB compute buffer on the one card the user had excluded.
+    ``mtmd_context_params`` has no device field, so the only selector is the
+    process environment variable ``MTMD_BACKEND_DEVICE``, read in clip_ctx's
+    constructor (upstream ``tools/mtmd/clip.cpp:184-195`` at b10361). Unset, clip
+    takes ``ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)``
+    unconditionally, with zero awareness of tensor_split or main_gpu, so the
+    projector weights and its compute buffer land on device 0 even when the
+    configured split excludes that card.
 
-    THE INDEX SPACE, AND WHY THE TYPE CHECK BELOW IS THE WHOLE GUARD. *gpu_index*
+    THE INDEX SPACE, WHICH THE TYPE CHECK BELOW IS THE WHOLE GUARD FOR. *gpu_index*
     is ``mp.main_gpu``, which indexes llama.cpp's OWN ``model->devices``, whereas
     ``compute_devices()`` reports ggml's FULL registry. Those two sequences are NOT
     interchangeable: ``llama_prepare_model_devices`` (upstream ``src/llama.cpp``
     :149-296) hoists RPC devices to the front, deduplicates GPUs by device_id,
     SKIPS ACCEL entirely, and admits iGPUs only when no discrete GPU was found
     (and then at most one). A META device is not skipped but ``GGML_ABORT``s the
-    load outright, so it can never reach that list either - stated precisely
-    because "skipped" and "aborts" are the same OUTCOME here and very different
-    MECHANISMS, and this docstring is the justification for the guard below.
-    Read against the shipped runtime, two of those cannot arise here and one can:
+    load outright, so it can never reach that list either. Against the shipped
+    runtime, two of those cannot arise here and one can:
 
     * RPC devices need an explicit ``ggml_backend_rpc_add_server(endpoint)``
       (``ggml-rpc.cpp:1949-1951``); localm never calls it, so merely shipping
@@ -161,13 +149,11 @@ def _resolve_backend_device_name(gpu_index: int) -> Optional[str]:
       device llama.cpp's list does not - and every index past it is wrong.
 
     So: refuse unless EVERY non-CPU device is a plain ``GPU``. Under that condition
-    the two sequences are provably identical and ``non_cpu[gpu_index]`` is exact,
-    not assumed. Refusing costs today's behaviour; guessing would move ~1 GB onto a
-    card chosen by arithmetic nobody could check.
+    the two sequences are identical and ``non_cpu[gpu_index]`` is exact. Refusing
+    leaves the projector on clip's own default.
 
-    Index 0 returns None deliberately rather than resolving to the same device:
-    clip's own default already picks it, so there is nothing to correct and no
-    reason to spend the risk. That keeps every default install byte-identical."""
+    Index 0 returns None rather than resolving to the same device: clip's own
+    default already picks it, so there is nothing to correct."""
     if gpu_index <= 0:
         return None      # already clip's default; nothing to change
     from localm.debuglog import logger
@@ -197,10 +183,9 @@ def _resolve_backend_device_name(gpu_index: int) -> Optional[str]:
     elif not non_cpu[gpu_index][0]:
         reason = f"device index {gpu_index} reported an empty name"
     if reason is not None:
-        # Rule 5, surface the decision: the user asked for a non-default device
-        # and the projector is NOT going there. INFO so the always-on ring buffer
-        # carries it into a bug report (matching implicit_split_capacity's
-        # decision-logging contract), rather than a WARNING the user cannot act on.
+        # Surface the decision: the user asked for a non-default device and the
+        # projector is NOT going there. INFO so the always-on ring buffer carries
+        # it into a bug report, rather than a WARNING the user cannot act on.
         logger.info(
             "mtmd: leaving the vision projector on the default GPU device "
             "(device 0) rather than the configured device %d - %s",
@@ -243,14 +228,13 @@ def _load_lib() -> ctypes.CDLL:
     m.mtmd_input_chunks_init.restype = ctypes.c_void_p
     m.mtmd_input_chunks_free.argtypes = [ctypes.c_void_p]
     m.mtmd_tokenize.restype = ctypes.c_int32
-    # The mtmd_input_text pointer is bound as an untyped void* on purpose: which
-    # of the two layouts is live is only known after _detect_input_text_class
-    # runs, and re-pointing argtypes per call would mutate shared state on this
-    # CDLL's function object. Callers pass ctypes.addressof(struct).
+    # The mtmd_input_text pointer is bound as an untyped void*: which of the two
+    # layouts is live is only known after _detect_input_text_class runs, and
+    # re-pointing argtypes per call would mutate shared state on this CDLL's
+    # function object. Callers pass ctypes.addressof(struct).
     m.mtmd_tokenize.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
                                 ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t]
-    # Exported by both ABI eras (checked against the 2026-06-04 and 2026-08-04
-    # builds); used by the layout probe below.
+    # Exported by both ABI eras; used by the layout probe below.
     m.mtmd_helper_get_n_tokens.restype = ctypes.c_size_t
     m.mtmd_helper_get_n_tokens.argtypes = [ctypes.c_void_p]
     m.mtmd_helper_eval_chunks.restype = ctypes.c_int32
@@ -309,8 +293,8 @@ def _detect_input_text_class(m: ctypes.CDLL, ctx: int) -> Optional[type]:
     probe could not decide.
 
     Measures the exact property depended on - does this build read ``text_len``
-    or ``strlen`` - rather than correlating with a symbol. #25548 added no new
-    export, so any symbol probe (the approach ``_abi.py`` can use for
+    or ``strlen`` - rather than correlating with a symbol. The upstream change
+    added no new export, so a symbol probe (the approach ``_abi.py`` can use for
     ``llama_model_params``, where the marker symbols landed in the SAME commit as
     the reorder) would have a window of builds where it is simply wrong.
 
@@ -344,7 +328,7 @@ class MtmdContext:
     # Always overwritten by __init__ with the PROBED layout (and __init__ refuses
     # to construct at all when the probe is inconclusive, so this default is
     # unreachable in production). It exists so an instance built by other means -
-    # tests bypass the native-loading __init__ deliberately - marshals with the
+    # a test that bypasses the native-loading __init__ - marshals with the
     # current upstream layout instead of raising AttributeError.
     _input_text_class: type = _MtmdInputTextV2
 
@@ -373,9 +357,8 @@ class MtmdContext:
             # Unreachable from the one production caller (llama.py passes an int
             # derived from mp.main_gpu), so this is a programming error, not a
             # runtime condition. Degrade to 0 (= leave clip's own choice alone)
-            # rather than costing the user vision over a placement hint - but say
-            # so, because a silently-swallowed bad input is exactly what AGENTS.md
-            # rule 5 forbids.
+            # rather than costing the user vision over a placement hint, and warn
+            # rather than swallowing the bad input.
             from localm.debuglog import logger
             logger.warning(
                 "mtmd: ignoring an unusable projector device index %r; the vision "
@@ -385,12 +368,11 @@ class MtmdContext:
         _cpu_requested = bool(os.environ.get("LOCALM_MTMD_CPU"))
         self._ctx = self._open(use_gpu=True)
         if not self._ctx:
-            # A GPU-side refusal at INIT (the backend cannot take this projector at
-            # all) is exactly the case the old blanket CPU override existed for, so
-            # degrade here rather than losing vision - but say so, and only after
-            # the real path was actually tried. _open() itself returns None
-            # without trying anything when LOCALM_MTMD_CPU is set, which is a
-            # deliberate skip, not a failure, and gets a different message.
+            # A GPU-side refusal at INIT (the backend cannot take this projector
+            # at all) degrades to CPU rather than losing vision, and is logged,
+            # only after the GPU path was actually tried. _open() returns None
+            # without trying anything when LOCALM_MTMD_CPU is set: a requested
+            # skip, not a failure, so it gets a different message.
             from localm.debuglog import logger
             if _cpu_requested:
                 logger.info(
@@ -430,30 +412,28 @@ class MtmdContext:
     def _open(self, *, use_gpu: bool) -> Optional[int]:
         """Create the native mtmd context, on GPU or CPU.
 
-        Only two fields of the opaque params buffer are touched, both at offsets
-        measured against the shipped runtime (see the module docstring):
-        ``use_gpu`` at byte 0 and ``n_threads`` at byte 4.
+        Only two fields of the opaque params buffer are touched (see the module
+        docstring): ``use_gpu`` at byte 0 and ``n_threads`` at byte 4.
 
-        ``n_threads`` matters even on the GPU path (parts of preprocessing stay on
-        the host) and matters enormously on the CPU one: mtmd's own default is a
-        flat 4 regardless of the machine, so a 12-thread box was using a third of
-        itself. ``LOCALM_MTMD_CPU=1`` is an escape hatch for a build/GPU where the
-        GPU encode is broken in a way that only shows up mid-encode.
+        ``n_threads`` applies on the GPU path too (parts of preprocessing stay on
+        the host) and dominates the CPU one: mtmd's own default is a flat 4
+        regardless of the machine. ``LOCALM_MTMD_CPU=1`` is an escape hatch for a
+        build/GPU where the GPU encode is broken in a way that only shows up
+        mid-encode.
 
         DEVICE PLACEMENT is not a params field at all - clip reads the process
         environment variable ``MTMD_BACKEND_DEVICE`` instead - so it is set around
-        THIS CALL ONLY and restored in a ``finally``. Scoped that tightly for three
-        reasons: it is process-global state that would otherwise leak into every
-        later library call; clip gates the read on ``use_gpu``, so the CPU attempt
-        and :meth:`retry_on_cpu` would never consult it anyway; and an already-set
-        value belongs to the USER and is never overwritten (see below).
+        THIS CALL ONLY and restored in a ``finally``: it is process-global state
+        that would otherwise leak into every later library call, clip gates the
+        read on ``use_gpu`` so the CPU attempt and :meth:`retry_on_cpu` never
+        consult it, and an already-set value belongs to the USER and is never
+        overwritten (see below).
 
-        That set/restore is NOT serialised, and does not need to be only because
-        the projector is loaded once, inline, during a model load in a worker that
-        is doing nothing else at the time. Two concurrent ``_open`` calls in ONE
-        process would race on the variable (the second's restore could drop the
-        first's value); if a caller is ever added that loads two mmprojs at once,
-        this needs a lock."""
+        That set/restore is NOT serialised. It holds because the projector is
+        loaded once, inline, during a model load in a worker that is doing nothing
+        else at the time. Two concurrent ``_open`` calls in ONE process would race
+        on the variable (the second's restore could drop the first's value), so a
+        caller that loads two mmprojs at once needs a lock."""
         if use_gpu and os.environ.get("LOCALM_MTMD_CPU"):
             return None
         params = self._m.mtmd_context_params_default()
@@ -463,9 +443,9 @@ class MtmdContext:
                     ctypes.POINTER(ctypes.c_int32))[0] = _encode_threads()
 
         # An explicitly exported MTMD_BACKEND_DEVICE is the user's own choice and
-        # outranks anything derived from config: defer to it, never silently
-        # correct it (never-override-user-selection). Only resolve at all on the
-        # GPU attempt, the one path clip reads the variable on.
+        # outranks anything derived from config: it is never overwritten. Only
+        # resolved at all on the GPU attempt, the one path clip reads the
+        # variable on.
         #
         # PRESENCE, not truthiness: an exported-but-EMPTY value is still the user's
         # variable, and it is not equivalent to unset for clip either (it takes the
@@ -477,8 +457,7 @@ class MtmdContext:
             device_name = _resolve_backend_device_name(self._gpu_index)
         if device_name is not None:
             from localm.debuglog import logger
-            # Rule 5, surface the decision: WHICH device the projector landed on is
-            # exactly what the field capture could not answer. INFO reaches the
+            # Surface which device the projector landed on. INFO reaches the
             # always-on ring buffer, so a bug report carries it without --debug.
             logger.info(
                 "mtmd: pinning the vision projector to ggml device %r (the text "
@@ -498,10 +477,10 @@ class MtmdContext:
     def retry_on_cpu(self) -> bool:
         """Rebuild this context on the CPU after a GPU encode failed at RUNTIME.
 
-        The gfx1030 / RDNA2 hipBLAS BF16 GEMM failure the old blanket override was
-        written for does NOT show up at init - it surfaces mid-encode - so an
-        init-time fallback alone would not cover it. Returns False when already on
-        the CPU (so the caller reports the real error instead of looping)."""
+        The gfx1030 / RDNA2 hipBLAS BF16 GEMM failure does NOT show up at init -
+        it surfaces mid-encode - so an init-time fallback alone does not cover it.
+        Returns False when already on the CPU (so the caller reports the real
+        error instead of looping)."""
         if not self.on_gpu:
             return False
         from localm.debuglog import logger
@@ -527,13 +506,11 @@ class MtmdContext:
         position 0. Returns the new n_past (with logits at the last position, ready
         for sampling). Raises RuntimeError on a tokenize/eval failure.
 
-        RAG-VISION-1: *n_batch* defaults to the LIVE context's own configured
-        batch size (via ``llama_n_ctx``, capped the same way llama.py's own
-        context construction caps it) rather than a fixed 512 - the caller's
-        real context can be configured larger (up to 2048), and asking mtmd to
-        micro-batch smaller than what the context was built for is a latent
-        mismatch, not just a performance nit. An explicit *n_batch* still wins,
-        for a caller that knows its own real batch size precisely."""
+        *n_batch* defaults to the LIVE context's own configured batch size (via
+        ``llama_n_ctx``, capped the same way llama.py's own context construction
+        caps it) rather than a fixed 512, so mtmd never micro-batches smaller than
+        what the context was built for. An explicit *n_batch* wins, for a caller
+        that knows its own real batch size precisely."""
         m = self._m
         ctx_n_ctx = api.llama_n_ctx(llama_ctx)
         if n_batch is None:
@@ -565,24 +542,19 @@ class MtmdContext:
                     self._ctx, llama_ctx, chunks, 0, 0, n_batch, True,
                     ctypes.byref(new_n_past))
                 if rc2 != 0:
-                    # On the GPU path this is the shape the documented gfx1030 /
-                    # RDNA2 hipBLAS BF16 failure takes, so tell the caller a CPU
-                    # retry is worth one attempt rather than failing the request.
+                    # On the GPU path this is the shape the gfx1030 / RDNA2
+                    # hipBLAS BF16 failure takes, so tell the caller a CPU retry
+                    # is worth one attempt rather than failing the request.
                     exc = MtmdGpuEncodeFailed if self.on_gpu else VisionInputError
                     raise exc(
                         f"the vision projector could not evaluate this image "
                         f"(mtmd_helper_eval_chunks rc={rc2})")
                 pos = int(new_n_past.value)
-                # RAG-VISION-1: the generation loop trusts this position as the
-                # base for every subsequent single-token decode with zero prior
-                # sanity check - if a native call under/over-reports how many KV
-                # positions the image actually consumed (a real risk: idefics3
-                # and llava-family projectors emit very different image-token
-                # counts, and this binding's ABI note above already flags mtmd's
-                # struct layout as unverified across llama.cpp versions),
-                # generation would silently continue from a corrupted position
-                # instead of failing loudly. A garbage pos manifests exactly like
-                # the degenerate/repeated-token output this check exists to catch.
+                # The generation loop trusts this position as the base for every
+                # subsequent single-token decode with no further sanity check, so
+                # a native call that under/over-reports how many KV positions the
+                # image consumed would let generation continue from a corrupted
+                # position instead of failing loudly.
                 if pos <= 0 or (ctx_n_ctx and pos > ctx_n_ctx):
                     raise VisionInputError(
                         f"mtmd image eval returned an implausible position "

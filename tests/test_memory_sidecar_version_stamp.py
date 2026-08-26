@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LM-DA-025 regression: the F12b correction sidecars (`.corrections.jsonl`,
-`.forgotten.jsonl`, `.corrections-dismissed.json`) carry the same
-`"v": FORMAT_VERSION` stamp the main record store gained for LM-DA-002, and load
-tolerates its absence exactly like the main store tolerates a pre-stamp file.
+"""The correction sidecars (`.corrections.jsonl`, `.forgotten.jsonl`,
+`.corrections-dismissed.json`) carry the same `"v": FORMAT_VERSION` stamp the
+main record store does, and load tolerates its absence exactly like the main
+store tolerates a pre-stamp file.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def test_unstamped_forgotten_line_still_loads(tmp_path):
 
 def test_unstamped_dismissed_bare_array_still_loads(tmp_path):
     s = MemoryStore("owner", "chat", root=tmp_path)
-    # Pre-LM-DA-025 shape: a bare JSON array, not the {"v":.., "keys":[...]} wrapper.
+    # Legacy shape: a bare JSON array, not the {"v":.., "keys":[...]} wrapper.
     s._dismissed_file().parent.mkdir(parents=True, exist_ok=True)
     s._dismissed_file().write_text(json.dumps([["t1", "update", "x"]]),
                                    encoding="utf-8")

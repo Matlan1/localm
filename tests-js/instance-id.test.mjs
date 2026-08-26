@@ -1,20 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// AUD-INSTANCEID: browser localStorage is scoped by ORIGIN (protocol+host+port)
-// only, never by which backend DATA DIRECTORY is actually running behind it.
-// localm's server binds to a fixed default port that only changes when it is
-// already busy, so a fresh install opened after a prior instance closed
-// typically reuses the SAME origin - and therefore the same localStorage
-// bucket - as a totally unrelated data directory. Confirmed root cause: a
-// fresh install showed a PRIOR instance's private conversation history, and in
-// non-privacy mode would even PERMANENTLY UPLOAD it into the new install's own
-// data directory (initServerConversations' "!remote" branch).
-//
-// The fix: /v1/config now reports a stable per-data-directory instance_id; the
-// GUI compares it against the id it last confirmed for this origin
-// (localStorage["localm.instanceId"]) and discards every instance-scoped
-// cached key on any mismatch - or when no id has ever been confirmed yet
-// (a brand-new pairing, exactly this scenario) - before rendering, merging, or
-// uploading any of it.
+// /v1/config reports a stable per-data-directory instance_id. The GUI compares
+// it against the id last confirmed for this origin
+// (localStorage["localm.instanceId"]) and discards every instance-scoped cached
+// key on a mismatch, or when no id has ever been confirmed, before rendering,
+// merging, or uploading any of it.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -31,8 +20,7 @@ async function waitFor(fn, timeout = 800) {
   return false;
 }
 
-// A conversation that must never leak across instances: real title + message
-// content, exactly the payload the bug report described.
+// A cached conversation with a real title and message content.
 const FOREIGN_CONV = {
   id: "foreign-1", title: "Someone else's private chat", updated_at: 999,
   pinned: false, folder: null, branches: [],
@@ -40,14 +28,9 @@ const FOREIGN_CONV = {
              { role: "assistant", content: "here is the reply" }],
 };
 
-// configStatus / configThrows exist because this fixture used to HARDCODE
-// /v1/config to {ok:true, status:200}: the value space had no room for a FAILED
-// round trip at all, so the "or a failed round trip" case named in chat.js's own
-// comments was untestable by construction and the fail-open guard below went
-// unmeasured. The two failures are kept separate deliberately - a non-ok answer
-// and a rejected fetch reach refreshCtxLimit through different paths (the
-// `if (r.ok)` branch versus the `catch`), so one of them passing proves nothing
-// about the other.
+// configStatus and configThrows select the /v1/config outcome. They are kept
+// separate: a non-ok answer reaches refreshCtxLimit through the `if (r.ok)`
+// branch, a rejected fetch through the `catch`.
 function makeFetch({ instanceId, putCalls, indexConversations = [],
                     configStatus = 200, configThrows = false } = {}) {
   return async (url, opts) => {
@@ -80,9 +63,8 @@ test("AUD-INSTANCEID: a brand-new pairing (no cached instance id) never renders 
   const putCalls = [];
   const { window } = loadApp({
     fetchImpl: makeFetch({ instanceId: "backend-new", putCalls }),
-    // Simulate a PRIOR, unrelated backend having populated this browser origin's
-    // cache before this fixed client code ever ran here - no localm.instanceId
-    // cached yet, the exact reported scenario.
+    // A prior backend populated this origin's cache; no localm.instanceId is
+    // cached yet.
     seedLocalStorage: { "localm.conversations": JSON.stringify([FOREIGN_CONV]) },
   });
   runScript(window, "window.chatState = chat;");
@@ -95,9 +77,8 @@ test("AUD-INSTANCEID: a brand-new pairing (no cached instance id) never renders 
     "the foreign conversation title must never be painted to the sidebar");
   assert.equal(putCalls.length, 0,
     "the foreign conversation must never be uploaded to the new backend's store");
-  // The wipe removes the key outright; a later saveConversations() (from the
-  // now-corrected, empty chat.conversations) may re-write it as "[]" - either
-  // way the foreign content must be gone from disk.
+  // The wipe removes the key outright; a later saveConversations() from the
+  // now-empty chat.conversations may re-write it as "[]".
   const persisted = JSON.parse(window.localStorage.getItem("localm.conversations") || "[]");
   assert.deepEqual(persisted, [],
     "the stale cache is wiped on disk too, not merely ignored in memory");
@@ -192,10 +173,7 @@ test("AUD-INSTANCEID: privacy mode clears the in-memory list and repaints, " +
 test("AUD-INSTANCEID: a mismatch also clears the Coder tab's stale " +
      "\"Project directory\" input, not just localStorage", async () => {
   // init.js seeds $("setup-cwd").value from localm.coderCwd synchronously at
-  // boot (before any network round trip can resolve) whenever ANY instance id
-  // was previously cached - so this input is a second place a foreign
-  // install's data (here, a host filesystem path) can linger even after
-  // reconcileInstanceId wipes the underlying localStorage key.
+  // boot whenever any instance id was previously cached.
   const { window } = loadApp({
     fetchImpl: makeFetch({ instanceId: "backend-b" }),
     seedLocalStorage: {
@@ -235,10 +213,9 @@ test("GUI-LIVE-WIPE: a SECOND refreshCtxLimit() call in privacy mode (the 30s " 
   assert.equal(window.chatState.conversations.length, 0,
     "sanity check: the first call still wipes stale content as before");
 
-  // Simulate the user's OWN live conversation - the first message just landed
-  // (or is still streaming) in this same tab, no reload, no other instance
-  // involved. Rendered explicitly here since real message-send flows through
-  // runCompletion()'s own renderChat()/renderConvList(), not refreshCtxLimit().
+  // A live conversation in this same tab. renderConvList() is called here
+  // because the real send path renders from runCompletion(), not
+  // refreshCtxLimit().
   runScript(window, `
     chat.conversations.push({
       id: "live-1", title: "Say the word BANANA", updated_at: 1000,
@@ -251,8 +228,8 @@ test("GUI-LIVE-WIPE: a SECOND refreshCtxLimit() call in privacy mode (the 30s " 
   `);
   assert.equal(window.chatState.conversations.length, 1);
 
-  // The 30s poll (init.js: setInterval(refreshCtxLimit, 30000)) fires again -
-  // still privacy mode, nothing about the backend changed.
+  // The 30s poll (init.js: setInterval(refreshCtxLimit, 30000)) fires again,
+  // still in privacy mode.
   runScript(window, "refreshCtxLimit();");
   await drain();
 
@@ -273,7 +250,7 @@ test("GUI-LIVE-WIPE: leaving privacy mode re-arms the wipe latch, so a LATER " +
     fetchImpl: makeFetch({ instanceId: "backend-x" }),
   });
 
-  // 1) First privacy-mode confirmation: wipes (as usual) and arms the latch.
+  // 1) First privacy-mode confirmation: wipes and arms the latch.
   runScript(window, `
     window.__mode = "privacy";
     window.fetch = async (url) => {
@@ -293,8 +270,8 @@ test("GUI-LIVE-WIPE: leaving privacy mode re-arms the wipe latch, so a LATER " +
   assert.equal(window.chatState.privacy, true);
   assert.equal(window.chatState.conversations.length, 0);
 
-  // 2) The server restarts OUT of privacy mode (log/full); the tab goes on to
-  // accumulate a new conversation exactly as a real non-privacy session would.
+  // 2) The server restarts out of privacy mode (log/full) and the tab
+  // accumulates a new conversation.
   runScript(window, `window.__mode = "log"; refreshCtxLimit();`);
   await drain();
   assert.equal(window.chatState.privacy, false,
@@ -311,11 +288,7 @@ test("GUI-LIVE-WIPE: leaving privacy mode re-arms the wipe latch, so a LATER " +
   `);
   assert.equal(window.chatState.conversations.length, 1);
 
-  // 3) The server restarts back INTO privacy mode - the exact AUD-PRIV-2
-  // scenario the wipe exists to prevent. Without re-arming privacyWiped on the
-  // way out of privacy mode (step 2), this second confirmation is silently
-  // suppressed and the non-privacy leftover stays painted in the sidebar for
-  // the rest of the tab's life.
+  // 3) The server restarts back into privacy mode.
   runScript(window, `window.__mode = "privacy"; refreshCtxLimit();`);
   await drain();
 
@@ -372,19 +345,16 @@ test("instanceCacheTrusted: false with no cached id, true once one is cached", (
 test("AUD-INSTANCEID: the startup overlay stays up until refreshCtxLimit's " +
      "instance-id check resolves, even when refreshModels resolves FIRST " +
      "(closes the flash-of-stale-content race, not just the no-cache case)", async () => {
-  // This origin already confirmed pairing with a DIFFERENT prior backend
-  // ("backend-a"), so instanceCacheTrusted() is true at boot and the raw
-  // cached (foreign) conversation list is painted into the DOM synchronously,
-  // exactly like a real fresh install reusing a previously-paired browser
-  // origin/port. The only thing standing between that paint and the user's
-  // eyes is the opaque startup overlay - it must not come down before
-  // refreshCtxLimit has had a chance to detect the mismatch and correct the DOM.
+  // This origin already confirmed pairing with a different backend
+  // ("backend-a"), so instanceCacheTrusted() is true at boot and the cached
+  // conversation list is painted into the DOM synchronously behind the opaque
+  // startup overlay.
   let resolveConfig;
   const configGate = new Promise((r) => (resolveConfig = r));
   const fetchImpl = async (url) => {
     const u = String(url);
     if (u === "/v1/config") {
-      await configGate;   // deliberately held back to win the race against models
+      await configGate;   // held back so refreshModels settles first
       return { ok: true, status: 200, text: async () => "", json: async () => (
         { effective_mode: "log", n_ctx_max: 16384, instance_id: "backend-new" }) };
     }
@@ -392,8 +362,8 @@ test("AUD-INSTANCEID: the startup overlay stays up until refreshCtxLimit's " +
       return { ok: true, status: 200, text: async () => "", json: async () => (
         { enabled: true, total: 0, conversations: [] }) };
     }
-    // /api/models, /api/session, and everything else resolve immediately -
-    // this is what makes refreshModels() the FIRST of the two chains to settle.
+    // /api/models, /api/session and everything else resolve immediately, so
+    // refreshModels() is the first of the two chains to settle.
     return { ok: true, status: 200, text: async () => "", json: async () => (
       { models: [], active: "", conversations: [], plugins: [] }) };
   };
@@ -406,8 +376,8 @@ test("AUD-INSTANCEID: the startup overlay stays up until refreshCtxLimit's " +
   });
 
   const ov = window.document.getElementById("startup-overlay");
-  // Let bootAuthProbe, refreshCsrf, and refreshModels (all held-open-free) run
-  // to completion while /v1/config is still gated.
+  // Let bootAuthProbe, refreshCsrf and refreshModels run to completion while
+  // /v1/config is still gated.
   await waitFor(() => window.document.getElementById("conv-list").textContent
     .includes("Someone else's private chat"));
   assert.equal(ov.style.display, "flex",
@@ -423,19 +393,15 @@ test("AUD-INSTANCEID: the startup overlay stays up until refreshCtxLimit's " +
 });
 
 // --------------------------------------------------------------------------- //
-//  Residual 1 (COORDINATOR-DISPATCH-2026-08-11): a confirmed mismatch never   //
-//  re-asserted the landing PAGE, only the conversation cache + cwd input.     //
+//  A confirmed mismatch re-asserts the landing PAGE, not only the             //
+//  conversation cache and the cwd input.                                      //
 // --------------------------------------------------------------------------- //
 
 test("AUD-INSTANCEID residual 1: a confirmed mismatch corrects the landing PAGE " +
      "too, not just the cache - a savedView from a DIFFERENT prior backend was " +
      "already restored optimistically before the round trip could catch it", async () => {
-  // Same held-back-/v1/config technique as the startup-overlay race test above:
-  // in the REAL browser the synchronous setTimeout(0) savedView restore always
-  // wins the race against a genuine network round trip, so the test must force
-  // that same ordering rather than let the stub fetch resolve instantly (which
-  // would let the mismatch-driven correction win first via pure microtasks and
-  // never actually exercise the residual).
+  // /v1/config is held back so init.js's setTimeout(0) savedView restore runs
+  // first, the ordering a real network round trip produces.
   let resolveConfig;
   const configGate = new Promise((r) => (resolveConfig = r));
   const fetchImpl = async (url) => {
@@ -475,9 +441,8 @@ test("AUD-INSTANCEID residual 1: a confirmed mismatch corrects the landing PAGE 
 });
 
 // --------------------------------------------------------------------------- //
-//  Residual 2 (COORDINATOR-DISPATCH-2026-08-11): "unknown" and "confirmed"    //
-//  used to collapse into the same boolean, so a failed/old-server round trip  //
-//  could authorise an upload meant only for a real confirmed match.           //
+//  Only a CONFIRMED match authorises an upload. "unknown" - an old server or  //
+//  a failed round trip - does not.                                            //
 // --------------------------------------------------------------------------- //
 
 test("AUD-INSTANCEID residual 2: an UNKNOWN instance state (old server, no " +
@@ -485,14 +450,12 @@ test("AUD-INSTANCEID residual 2: an UNKNOWN instance state (old server, no " +
      "but must NEVER upload it - only a CONFIRMED match may write to the backend", async () => {
   const putCalls = [];
   const { window } = loadApp({
-    // instanceId left undefined: cfg.instance_id comes back missing/falsy,
-    // exactly what an older server (or a failed round trip) looks like.
+    // instanceId left undefined: cfg.instance_id comes back missing, as from
+    // an older server.
     fetchImpl: makeFetch({ instanceId: undefined, putCalls, indexConversations: [] }),
     seedLocalStorage: {
-      // A previously-confirmed pairing with SOME backend, so the synchronous
-      // boot-time fast path in init.js does not wipe the cache outright - the
-      // server THIS load talks to just happens not to report instance_id at
-      // all, so reconcileInstanceId can neither confirm nor refute the match.
+      // A previously-confirmed pairing, so init.js's synchronous boot-time fast
+      // path does not wipe the cache outright.
       "localm.instanceId": "backend-old",
       "localm.conversations": JSON.stringify([{
         id: "local-only-2", title: "Not yet synced (old server)", updated_at: 1,
@@ -516,16 +479,12 @@ test("AUD-INSTANCEID residual 2: an UNKNOWN instance state (old server, no " +
 });
 
 // --------------------------------------------------------------------------- //
-//  Residual 2, the FAILED-ROUND-TRIP half: the test above proves an old server //
-//  (answers, no instance_id) cannot authorise an upload. A /v1/config that     //
-//  never answers at all took a different path - it skipped the reconciliation  //
-//  entirely and left BOTH flags at their permissive boot defaults, so the      //
-//  guard read "confirmed" for a backend it had never heard from.               //
+//  The FAILED-ROUND-TRIP half: a /v1/config that never answers skips the       //
+//  reconciliation entirely, and must still leave the instance UNCONFIRMED      //
+//  rather than at the permissive boot defaults.                                //
 // --------------------------------------------------------------------------- //
 
-// A conversation cached under a PREVIOUSLY confirmed pairing. Whether the
-// backend now behind this origin is that same one is exactly what the failed
-// round trip leaves unanswered.
+// A conversation cached under a previously confirmed pairing.
 const CACHED_LOCAL_ONLY = {
   id: "local-only-3", title: "Cached under an unverified pairing", updated_at: 1,
   pinned: false, folder: null, branches: [], messages: [{ role: "user", content: "hi" }],
@@ -545,13 +504,9 @@ test("AUD-INSTANCEID residual 2: a NON-OK /v1/config (HTTP 500) leaves the " +
   });
   runScript(window, "window.chatState = chat;");
   await drain();
-  // Ride out pushConversation's 600ms debounce BEFORE reading putCalls: without
-  // this the assertion is vacuously true even on the unfixed code, because the
-  // upload has not been attempted yet.
+  // Ride out pushConversation's 600ms debounce before reading putCalls.
   await new Promise((r) => setTimeout(r, 900));
 
-  // The loss first, the mechanism second (a status flag is a proxy; the write
-  // into another install's data directory is the property).
   assert.equal(putCalls.length, 0,
     "a failed /v1/config round trip cannot authorise writing a cached " +
     "conversation into the store of a backend whose identity was never confirmed");
@@ -560,7 +515,6 @@ test("AUD-INSTANCEID residual 2: a NON-OK /v1/config (HTTP 500) leaves the " +
   assert.equal(window.chatState.instanceMatch, false,
     "instanceMatch is the upload gate and must be false without a real match");
 
-  // ...and the other direction: this must not become a data-losing fail-CLOSED.
   assert.equal(window.chatState.conversations.length, 1,
     "nothing is wiped on a failed round trip - it is not a confirmed mismatch");
   assert.ok(window.document.getElementById("conv-list").textContent
@@ -595,10 +549,8 @@ test("AUD-INSTANCEID residual 2: a THROWN /v1/config fetch (server down, the " +
 
 test("AUD-INSTANCEID residual 2: the unconfirmed WARNING is one per breakage, " +
      "but the unconfirmed STATE is re-asserted on every failed poll", async () => {
-  // refreshCtxLimit is polled every 30s for the tab's whole lifetime (init.js),
-  // so the warning has to be deduped or an outage floods the console for hours.
-  // The hazard in deduping it is doing so one line too early and skipping the
-  // flags as well, which would silently restore the fail-open this unit closes.
+  // refreshCtxLimit is polled every 30s (init.js): the warning line is deduped,
+  // the flags are re-asserted on every failed poll.
   const { window } = loadApp({ fetchImpl: makeFetch({ instanceId: "backend-a" }) });
   runScript(window, `
     window.chatState = chat;
@@ -617,8 +569,7 @@ test("AUD-INSTANCEID residual 2: the unconfirmed WARNING is one per breakage, " 
   assert.equal(window.__warns.length, 1, "the first failed poll says so once");
   assert.equal(window.chatState.instanceMatch, false);
 
-  // Simulate the flag having drifted back to permissive between polls: the
-  // second failed poll must still put it back, warning or no warning.
+  // Force the flags back to permissive between polls.
   runScript(window, `chat.instanceMatch = true; chat.instanceState = "confirmed";`);
   runScript(window, "refreshCtxLimit();");
   await drain();

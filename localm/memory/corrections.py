@@ -4,18 +4,11 @@ A PENDING CORRECTION: a proposed supersession of a TRUSTED (user/import) memory
 that the user has not yet reviewed.
 
 A synth candidate distilled from chat may NEVER silently overwrite or delete a
-user-typed fact (it could be a hallucination), but the OLD unconditional NO_OP
-downgrade meant a stale user fact was uncorrectable by the system - the user's own
-later words ("actually I moved to Munich") could not supersede an earlier typed
-fact ("I live in Berlin"); the new info was silently dropped (memory-audit
-2026-07-02 cluster [9]).
-
-The fix keeps the "synth never rewrites a trusted fact unchecked" guarantee but
-stops the silent drop: when a synth candidate contradicts a trusted record with
-HIGH confidence, consolidation records one of these instead of a NO_OP, and the
-memory modal surfaces it for the user to ACCEPT (apply the update/delete, old text
-archived and recoverable) or REJECT (keep the fact, reset its staleness). Nothing
-is silently lost and the user decides.
+user-typed fact. When such a candidate contradicts a trusted record with HIGH
+confidence, consolidation records one of these instead of a NO_OP, and the
+memory modal surfaces it for the user to ACCEPT (apply the update/delete, with
+the old text archived and recoverable) or REJECT (keep the fact, reset its
+staleness). Nothing is dropped silently and the user decides.
 
 Stored one-per-line in a ``<ns>.corrections.jsonl`` sidecar next to the record
 store, kept out of the record list so recall/prune never touch it.

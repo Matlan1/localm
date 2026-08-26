@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A mid-stream client disconnect must not orphan the producer thread.
 
-Regression guard: `_stream_sse` / `_stream_sse_completion` run
-`engine.chat_stream(...)` on a daemon thread. llama.py's `_generate` holds the
-per-model `_inference_lock` across its whole generator body. Before the fix, a
-disconnect released the request SEMAPHORE but left the producer thread running to
-end-of-generation, so it kept holding `_inference_lock` and the NEXT request to
-the same model blocked on it.
+`_stream_sse` / `_stream_sse_completion` run `engine.chat_stream(...)` on a
+daemon thread, and llama.py's `_generate` holds the per-model `_inference_lock`
+across its whole generator body. Releasing only the request SEMAPHORE on
+disconnect would leave the producer thread running to end-of-generation, still
+holding `_inference_lock`, blocking the NEXT request to the same model.
 
 These tests drive the REAL streaming coroutines. The engine stand-in's
 `chat_stream` holds a REAL `threading.Lock` for the whole generator body and
-releases it on exhaustion OR on close() - exactly the lock discipline of
+releases it on exhaustion OR on close() - the same lock discipline as
 `_generate`'s `with self._inference_lock:`. The only faked piece is native token
-production, which is not what the fix changed: the fix is the cancel path in the
-HTTP layer plus the generator-close cascade, and both run for real here.
+production; the cancel path in the HTTP layer and the generator-close cascade
+both run for real.
 """
 
 from __future__ import annotations
@@ -214,12 +213,13 @@ def test_close_cascades_through_scrub_stream_releases_lock():
 # NON-streaming disconnect (the _complete / _generate_full twin of the above).
 #
 # A non-streaming handler is a plain coroutine, so Starlette does NOT aclose it on
-# a client disconnect the way it acloses a StreamingResponse's generator. The fix
-# instead polls request.is_disconnected() and, on disconnect, signals the executor
-# worker to stop and gen.close() the chain - releasing _inference_lock now rather
-# than at end-of-generation. These tests drive the REAL _generate_full / _complete
-# coroutines; the only faked pieces are token production (the lock-holding engine,
-# same discipline as _generate) and the disconnect signal (a controllable request).
+# a client disconnect the way it acloses a StreamingResponse's generator. The
+# handler instead polls request.is_disconnected() and, on disconnect, signals the
+# executor worker to stop and gen.close() the chain - releasing _inference_lock
+# now rather than at end-of-generation. These tests drive the REAL
+# _generate_full / _complete coroutines; the only faked pieces are token
+# production (the lock-holding engine) and the disconnect signal (a controllable
+# request).
 # --------------------------------------------------------------------------- #
 
 
@@ -364,11 +364,10 @@ def test_complete_happy_path_returns_response_and_releases_lock():
 
 # --------------------------------------------------------------------------- #
 # REAL native inference: the unit tests above stub token production with a
-# lock-holding generator. This one proves the ACTUAL llama.py _generate releases
-# the ACTUAL _inference_lock when the real backend generator chain
-# (scrub_stream -> gguf -> create_chat_completion -> _stream_chunks ->
-# _decode_stream -> _generate) is closed mid-stream - closing the gap that would
-# otherwise let the fix pass on a mock of exactly the thing that was broken.
+# lock-holding generator. This one drives the ACTUAL llama.py _generate and
+# asserts it releases the ACTUAL _inference_lock when the real backend generator
+# chain (scrub_stream -> gguf -> create_chat_completion -> _stream_chunks ->
+# _decode_stream -> _generate) is closed mid-stream.
 # @integration + @real_gguf: needs the native runtime + a small real model.
 # --------------------------------------------------------------------------- #
 
@@ -410,14 +409,12 @@ def test_real_gguf_midstream_close_releases_inference_lock(gguf_backend):
     start and produce output promptly. This is the production mechanism the
     disconnect fix relies on.
 
-    Cannot inspect the real `_inference_lock` object directly anymore - the
-    real LlamaCpp instance (and its lock) now live inside an isolated worker
-    PROCESS (see llamacpp/_runner.py), not in this one, so no Python object in
-    THIS process can observe its state. The property this test actually cares
-    about - "closing mid-stream doesn't leave the model unusable for the next
-    request" - is proven instead by timing: a bounded wall-clock assertion
-    that the next generation starts promptly rather than hanging behind a
-    still-held lock in the child."""
+    The real `_inference_lock` object cannot be inspected directly: the real
+    LlamaCpp instance (and its lock) live inside an isolated worker PROCESS
+    (see llamacpp/_runner.py), so no Python object in THIS process can observe
+    its state. The property is asserted by timing instead: a bounded wall-clock
+    assertion that the next generation starts promptly rather than hanging
+    behind a still-held lock in the child."""
     import time
 
     be = gguf_backend
@@ -453,9 +450,7 @@ def test_real_gguf_midstream_close_releases_inference_lock(gguf_backend):
 
 
 # --------------------------------------------------------------------------- #
-# REAL uvicorn server: the unit tests above prove the cancel MECHANISM with a
-# fake request whose is_disconnected() we flip by hand. This one closes the gap
-# they cannot: that a REAL client abort of a REAL non-streaming request over a
+# REAL uvicorn server: a REAL client abort of a REAL non-streaming request over a
 # REAL uvicorn server makes request.is_disconnected() fire, so the lock is freed.
 # No model or network needed - a lock-holding fake engine stands in for the
 # native backend, exactly as in the unit tests, so this runs in the default gate.
@@ -560,13 +555,12 @@ def test_real_uvicorn_nonstream_disconnect_releases_inference_lock():
 #
 # Engine.chat_stream is NOT a generator: it eagerly runs the auto-reload
 # (self._backend.load()) and load_config() BEFORE returning the token generator,
-# so it can RAISE at call time (a reload that OOMs, a since-removed GGUF). The
-# producer body used to call it OUTSIDE its try/finally, so such a raise killed
-# the thread before the sentinel was enqueued and the consumer blocked forever at
-# `await token_queue.get()` inside `async with sem` - a permanent per-model
-# deadlock (every later request to that model hangs). These tests drive the REAL
-# _stream_sse / _stream_sse_completion coroutines and require the failure to be
-# surfaced and the semaphore released.
+# so it can RAISE at call time (a reload that OOMs, a since-removed GGUF). If the
+# producer raises before the sentinel is enqueued, the consumer blocks forever at
+# `await token_queue.get()` inside `async with sem`, deadlocking every later
+# request to that model. These tests drive the REAL _stream_sse /
+# _stream_sse_completion coroutines and require the failure to be surfaced and
+# the semaphore released.
 # --------------------------------------------------------------------------- #
 
 

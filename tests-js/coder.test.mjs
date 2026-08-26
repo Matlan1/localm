@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// jsdom tests for the coder GUI region of app.js:
-//  - CODER-3: renderSessionSelect lists live sessions (the host must see the
-//    selector populated, like mobile does).
-//  - CODER-2: the dynamically-created "Continue last session" button appears when
-//    the chosen directory has a resumable checkpoint, and a resumed session's
-//    "history" recap events render as message rows.
-
+// jsdom tests for the coder GUI region of app.js.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
@@ -33,7 +27,7 @@ function okFetch(state = {}) {
 test("CODER-3: renderSessionSelect lists each live session as an option", () => {
   const { window } = loadApp({ fetchImpl: okFetch() });
   assert.equal(typeof window.renderSessionSelect, "function");
-  // Seed the top-level `coder` state (a const, not on window) from the realm.
+  // seed the top-level `coder` state (a const, not on window) from the realm
   runScript(window, `
     coder.activeId = null;
     coder.sessions.set("sid1", { info: { id: "sid1", cwd: "Z:/proj", model: "m",
@@ -98,10 +92,6 @@ test("CODER-2: a resumed session's history events render as message rows", () =>
   assert.match(feedEl.textContent, /here is the plan/);
 });
 
-// AUD-HIGH-17-3: the coder's HTTP backend now surfaces a thinking model's H4
-// reasoning as its own "reasoning" event (never mixed into "token"), routed
-// through the SAME <think>/renderMarkdown machinery the regular chat GUI uses
-// (see tests-js/reasoning.test.mjs) so it renders as a collapsible block.
 test("AUD-HIGH-17-3: reasoning events render a collapsible think-block separate from the answer", () => {
   const { window } = loadApp({ fetchImpl: okFetch() });
   const feedEl = window.document.createElement("div");
@@ -118,7 +108,7 @@ test("AUD-HIGH-17-3: reasoning events render a collapsible think-block separate 
   assert.match(det.querySelector("div").textContent, /because reasons/);
   const main = feedEl.querySelector(".md-main");
   assert.match(main.textContent, /The answer\./);
-  // NEGATIVE: the visible answer body never contains the reasoning text.
+  // the visible answer body never contains the reasoning text
   assert.doesNotMatch(main.textContent, /because reasons/);
 });
 
@@ -138,7 +128,7 @@ test("CODER-EMPTY-MODEL: a tool-only assistant turn leaves no empty Model row", 
   const { window } = loadApp({ fetchImpl: okFetch() });
   const feedEl = window.document.createElement("div");
   const s = { info: { id: "x" }, feedEl, liveBody: null, liveText: "", pendingCards: [] };
-  // The model streams only whitespace (its visible text scrubs to nothing), then a tool call.
+  // the model streams only whitespace, then a tool call
   window.handleCoderEvent(s, { type: "token", text: "   " });
   assert.ok(feedEl.querySelector(".msg-row.assistant"), "the token started a Model row");
   window.handleCoderEvent(s, { type: "tool_call", tool: "grep", args: { pattern: "x" } });
@@ -157,10 +147,6 @@ test("CODER-EMPTY-MODEL: an assistant turn WITH text keeps its Model row", () =>
   assert.match(feedEl.textContent, /Here is my analysis/, "a real text turn is preserved");
 });
 
-// D2: episodic recall used to be invisible in the GUI - the coder silently
-// prepended past lessons and nothing said which ones, so a lesson that steered a
-// run badly could not be spotted or removed. The run now reports what it recalled,
-// with the id `localcoder --forget-episode <id>` takes.
 test("CODER-EPISODES: recalled lessons render with the id needed to forget them", () => {
   const { window } = loadApp({ fetchImpl: okFetch() });
   const feedEl = window.document.createElement("div");

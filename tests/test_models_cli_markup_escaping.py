@@ -4,10 +4,8 @@ exception/HTTP-error string shown by the `models`-family CLI commands
 (localm/cli/models.py) must survive verbatim - Rich's ``Console.print()``
 parses ``[...]`` in ANY interpolated string as markup, not just inside a
 command's own literal ``[style]`` tags, and the same parsing applies to
-``Table`` titles and cell values added via ``.add_row()``. Reproduced
-directly against this venv's rich (see dev-notes/RAG-CLI-MARKUP-ESCAPING-
-2026-08-20.md and tests/test_rag_cli_markup_escaping.py, which fixed the
-identical pattern in rag.py/errors.py first):
+``Table`` titles and cell values added via ``.add_row()``. Rich renders
+these as:
 
     Console().print('report[draft].txt')       -> prints "report.txt"
     Console().print('notes[bold red].md')       -> prints "notes.md"
@@ -22,10 +20,7 @@ test can produce for real. Each test therefore drives the REAL CLI command
 via ``CliRunner`` and forces the exact code path by monkeypatching the one
 external boundary that path depends on (``requests.post``, ``server_call``,
 ``discover.list_gpus``, an instance registry lookup, ...) with realistic,
-deliberately bracketed data - the same approach
-test_rag_cli_markup_escaping.py's ``TestLockMessageEscaping`` uses to force a
-real ``CollectionLockedError``, and test_cli_ps_status.py/test_cli_search.py
-already use throughout for this same file's other commands.
+bracketed data.
 
 Two bracket shapes are used throughout, matching the reference file's own
 constants and the two distinct Rich failure modes:

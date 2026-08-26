@@ -1,39 +1,34 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Active self-checks, as a callable core no surface owns.
 
-``localm doctor`` grew five ACTIVE probes - checks that go and try the thing
-rather than read a version string - and every one of them lived inside a
-function that printed rich markup to a terminal. That made them reachable from
-exactly one surface. This module holds the probes; ``localm/cli/doctor.py``
-renders them for a terminal and ``localm/plugins/gui/routes/doctor.py`` renders
-them for a browser, so neither surface can drift from the other and neither has
-to parse the other's output. ADR-0001 named this refactor as a follow-up and
-named the alternative too: "parsing doctor's console output would be a facade".
+Five ACTIVE probes - checks that go and try the thing rather than read a version
+string. This module holds the probes; ``localm/cli/doctor.py`` renders them for
+a terminal and ``localm/plugins/gui/routes/doctor.py`` renders them for a
+browser, so neither surface has to parse the other's output.
 
-The five, and why each is here rather than in the read-only status routes:
+The five:
 
   llama_lib      a provisioned llama library that EXISTS but is 0 bytes or
                  truncated, plus rocBLAS/hipBLASLt kernel data missing next to
                  a library that loads fine (the silent one - chat works and the
                  crash arrives on the first GEMM)
   native_abi     the struct-layout self-check against the actual DLL
-  worker_spawn   a real multiprocessing "spawn" round trip (#617: a plain
-                 subprocess probe passes when this is broken)
-  venv           a real ``-m venv`` plus a pip-landed check (#621)
-  hf_backend     transformers' lazy classes really resolve (0.1.2: `import
-                 transformers` succeeded while every model load died)
+  worker_spawn   a real multiprocessing "spawn" round trip (a plain subprocess
+                 probe passes when this is broken)
+  venv           a real ``-m venv`` plus a pip-landed check
+  hf_backend     transformers' lazy classes really resolve (`import
+                 transformers` can succeed while every model load dies)
 
-The narrower reads a surface already had - VRAM, the GPU list, the installed
-backend, plugin pip extras, the Python version, package versions - are
-deliberately NOT here. They have GUI equivalents already, and duplicating them
-would create the second source of truth this module exists to remove.
+The narrower reads a surface already has - VRAM, the GPU list, the installed
+backend, plugin pip extras, the Python version, package versions - are NOT here.
+They have GUI equivalents already, and duplicating them would create a second
+source of truth.
 
 NOTHING IN THIS MODULE PRINTS, and nothing here imports click or rich: a caller
 renders findings, and a caller that cannot render markup (a JSON route) must not
 have to strip it. Findings carry plain text plus the two decorations the
-terminal renderer needs (an inline ``note``, indented ``hints``), so the CLI can
-reproduce its old output character for character while the GUI shows the same
-sentences without markup.
+terminal renderer needs (an inline ``note``, indented ``hints``), so the CLI
+renders markup and the GUI shows the same sentences without it.
 
 RUNNING THIS IN A SERVER PROCESS IS NOT THE SAME AS RUNNING IT IN A FRESH ONE.
 ``check_hf_backend`` imports torch and transformers, which on this project's
@@ -59,23 +54,19 @@ WARN = "warn"
 FAIL = "fail"
 SKIPPED = "skipped"
 # Only ever the aggregate: the run itself could not be completed, which is a
-# different fact from every check passing and must never be collapsed into one
-# (AGENTS.md rule 5).
+# different fact from every check passing.
 ERROR = "error"
 
-# Worst-first, so the aggregate is a max over this. SKIPPED is BELOW OK on
-# purpose: a check that did not run must not drag a clean report down to a
-# warning, and must not lift a failing one up either.
+# Worst-first, so the aggregate is a max over this. SKIPPED sits below OK: a
+# check that did not run neither drags a clean report down nor lifts a failing
+# one up.
 _SEVERITY = {SKIPPED: 0, OK: 1, WARN: 2, FAIL: 3, ERROR: 4}
 
-# The prefix ``run_report_isolated`` scans the child's stdout for. Same idiom as
-# the ABI/GPU probes: one parseable line, so anything else the child or its own
-# grandchildren print cannot be mistaken for the result.
+# The prefix ``run_report_isolated`` scans the child's stdout for: one parseable
+# line, so nothing else the child prints is mistaken for the result.
 JSON_PREFIX = "LOCALM_DIAGNOSTICS:"
-# One line per check as the child starts it, so a surface watching a two-minute
-# run can say which check is in flight instead of showing a spinner. A separate
-# prefix from the result, not a field on it: the result arrives once, at the end,
-# and conflating the two would mean a partial result had to be parseable.
+# One line per check as the child starts it, so a surface can say which check is
+# in flight. A separate prefix from the result, which arrives once at the end.
 PROGRESS_PREFIX = "LOCALM_DIAGNOSTICS_PROGRESS:"
 
 
@@ -115,11 +106,8 @@ class Finding:
 class CheckResult:
     """One check's verdict plus every line it produced.
 
-    ``findings`` may be EMPTY, and that is meaningful rather than a bug: a check
-    that did not run has nothing to say to a terminal, which is exactly what
-    ``localm doctor`` has always done for an absent optional backend. ``summary``
-    still carries the reason, because a compact surface has room for one line and
-    rendering nothing at all would be the least honest option.
+    ``findings`` may be EMPTY: a check that did not run produces no finding
+    lines. ``summary`` still says why.
     """
 
     key: str
@@ -130,10 +118,9 @@ class CheckResult:
 
     @property
     def healthy(self) -> bool:
-        """True only for a clean pass. A warning is not a pass: every caller of
-        the old ``_check_llama_lib`` return value used it to decide whether it
-        was safe to load-test the runtime, and a truncated library is precisely
-        the case that must answer no."""
+        """True only for a clean pass. A warning is not a pass: callers use this
+        to decide whether it is safe to load-test the runtime, and a truncated
+        library must answer no."""
         return self.status == OK
 
     def as_dict(self) -> dict:
@@ -157,8 +144,7 @@ class DiagnosticsReport:
     checks: tuple = field(default_factory=tuple)
     verdict: str = OK
     # Set only when verdict is ERROR: the run could not be completed, and this
-    # says why. A report that could not be produced must never be renderable as
-    # a clean one, so this is the only field that can contradict the checks.
+    # says why. The only field that can contradict the checks.
     error: str = ""
 
     def as_dict(self) -> dict:
@@ -205,20 +191,16 @@ def _result(key: str, label: str, findings, *, summary: str = "",
                        findings=findings)
 
 
-# Every bound a single isolated run can spend, named rather than left as literals
-# at their call sites, because the OUTER deadline has to fit around their sum and
-# a relation between two numbers cannot be reviewed one number at a time
-# (diff-review-discipline item 1). test_diagnostics_core asserts the arithmetic,
-# not the literals, so retuning any one of these fails loudly instead of silently
-# making the outer deadline the first thing to fire.
+# Every bound a single isolated run can spend. The outer deadline has to fit
+# around their sum; test_diagnostics_core asserts that arithmetic rather than the
+# literals.
 PROBE_TIMEOUT_S = 120.0        # the ABI probe's own subprocess
 VENV_TIMEOUT_S = 60.0          # `-m venv`
 VENV_PIP_TIMEOUT_S = 30.0      # the follow-up `-m pip --version`
 SPAWN_REPLY_TIMEOUT_S = 20.0   # waiting for the spawned child's one message
 SPAWN_JOIN_TIMEOUT_S = 5.0     # joining it, twice (once after terminate)
 # Headroom for everything with no timeout of its own: interpreter startup, the
-# localm import, and `import torch` + `import transformers` on a cold filesystem,
-# which is by far the largest of them and the one that grows with the wheel.
+# localm import, and `import torch` + `import transformers` on a cold filesystem.
 UNBOUNDED_HEADROOM_S = 120.0
 
 
@@ -269,9 +251,9 @@ def _blas_findings(binary_dir) -> list:
     hard-crash the native process (uncatchable from Python) the first time a
     workload dispatches through Tensile - the embedder's batch encode.
 
-    That state is reachable two ways, and this catches both: the original defect
-    where the provision copied the library and dropped its data, and a provision
-    interrupted part-way (a locked file on a machine with the runtime open).
+    That state is reachable two ways, and this catches both: a provision that
+    copied the library and dropped its data, and a provision interrupted
+    part-way (a locked file on a machine with the runtime open).
 
     FAIL rather than WARN, because the failure it predicts is a hard process
     crash, and because the remedy is one command."""
@@ -351,19 +333,15 @@ def check_native_abi() -> CheckResult:
     """Native ABI self-check (struct layout vs the actual DLL). Runs in a
     SUBPROCESS (like setup-llama's load test) so a broken/incompatible DLL can
     never crash the caller, and so the GPU runtime is loaded out-of-process."""
-    # Kept separately from the `or {}` fallback below: None means the PROBE never
-    # ran (subprocess timed out, crashed, or printed no matching line - see
-    # run_probe_subprocess), which is a different fact from the probe running
-    # and reporting that it could not check. The reason line below has to tell
-    # those apart; the rest of this function does not care.
+    # Kept separately from the `or {}` fallback below: None means the probe never
+    # ran, which is a different fact from the probe running and reporting that it
+    # could not check.
     abi_raw = run_probe_subprocess(_ABI_PROBE_CODE, "ABI_RESULT:")
     abi = abi_raw or {}
     status = abi.get("status", "unchecked")
-    # WHICH of the two llama_model_params layouts was selected is worth showing:
-    # upstream reordered that struct in place at an unchanged size, so this is
-    # the only externally visible sign of which generation of runtime is
-    # installed, and it is the first thing anyone diagnosing a wrong-GPU or
-    # unexpected-memory-behaviour report needs. See llamacpp/_structs.py.
+    # Which of the two llama_model_params layouts was selected: upstream
+    # reordered that struct in place at an unchanged size, so this is the only
+    # externally visible sign of which runtime generation is installed.
     layout = abi.get("layout") or ""
     context_layout = abi.get("context_layout") or ""
     layout_bits = ", ".join(
@@ -383,13 +361,9 @@ def check_native_abi() -> CheckResult:
     if status == "skipped":
         return _result("native_abi", _ABI_LABEL, [Finding(
             WARN, "native ABI check skipped (LOCALM_SKIP_ABI_CHECK set)")])
-    # The verdict ("not verified") was always honest; the REASON was not.
-    # abi_report() populates detail on every path it can return from
-    # ("runtime not loadable: ...", "loader import failed: ..."), so a
-    # hardcoded 'runtime not loadable' default could ONLY ever be reached when
-    # the probe did not run at all - precisely the case where that reason is
-    # least likely to be true, and it sent the user to 'setup-llama --force'
-    # for a subprocess timeout it cannot fix.
+    # abi_report() populates detail on every path it can return from, so a
+    # hardcoded default reason is reachable only when the probe did not run at
+    # all.
     if abi_raw is None:
         detail = ("the ABI probe did not run - it timed out, crashed, or "
                   "printed no result")
@@ -421,16 +395,15 @@ def _worker_spawn_probe(conn) -> None:
 def check_worker_spawn() -> CheckResult:
     """Verify localm can actually spawn its isolated worker process - the SAME
     ``multiprocessing.get_context("spawn")`` mechanism every GGUF model load and
-    the voice/STT engine depend on (see localm/_mp_spawn.py, #617).
+    the voice/STT engine depend on (see localm/_mp_spawn.py).
 
     The native-ABI and GPU-probe checks isolate via a PLAIN subprocess
-    (``run_probe_subprocess``), a different code path - that proves the native
+    (``run_probe_subprocess``), a different code path: that proves the native
     library loads and computes correctly, but it does NOT exercise
     multiprocessing's own spawn machinery, which on Windows redirects the
     child's executable under conditions a renamed launcher (LocaLM.exe) can
-    break. That gap is exactly why #617 (every GGUF load failing with
-    "[WinError 2] The system cannot find the file specified") passed a doctor
-    run showing everything green. This check would have caught it."""
+    break, so every GGUF load fails with "[WinError 2] The system cannot find
+    the file specified" while every other check stays green."""
     label = _SPAWN_LABEL
     try:
         from localm._mp_spawn import ensure_spawn_uses_venv_python
@@ -455,10 +428,8 @@ def check_worker_spawn() -> CheckResult:
             proc.terminate()
             proc.join(SPAWN_JOIN_TIMEOUT_S)
     except Exception as e:
-        # This IS the #617 failure mode: proc.start() raises directly
-        # (FileNotFoundError: [WinError 2] ...) rather than the child ever
-        # running - treated the same as "no reply", not a separate error line,
-        # so every way this can fail reads as one consistent, actionable verdict.
+        # proc.start() can raise directly rather than the child ever running.
+        # Treated the same as "no reply" so every failure reads as one verdict.
         error_detail = str(e)
 
     if reply == "ok":
@@ -482,23 +453,22 @@ _VENV_LABEL = "Nested venv creation"
 def check_venv_creation() -> CheckResult:
     """Verify localm can actually create a nested venv via ``-m venv`` using
     ``real_base_python()`` - the SAME mechanism the managed-ComfyUI installer
-    depends on (managed_comfy_fresh.py, #621). Creates and immediately discards a
-    throwaway venv under a temp dir; never touches LOCALM_HOME or any real install.
+    depends on (managed_comfy_fresh.py). Creates and immediately discards a
+    throwaway venv under a temp dir; never touches LOCALM_HOME or any real
+    install.
 
     A DIFFERENT code path from the worker-spawn check above (that exercises
-    multiprocessing's spawn machinery; this exercises stdlib venv's own basename-
-    matching + mandatory ensurepip bootstrap): #621 (managed ComfyUI setup
-    silently failing with "[WinError 2]") passed a doctor run showing everything
-    green precisely because nothing probed this. This check would have caught it.
+    multiprocessing's spawn machinery; this exercises stdlib venv's own
+    basename-matching plus its mandatory ensurepip bootstrap), so a managed
+    ComfyUI setup failing with "[WinError 2]" is invisible without it.
 
-    Also probes that pip actually landed inside the new venv (NEW-MANAGED-COMFY-
-    VENV-MISSING-PIP): ``-m venv`` can report success - return code 0, the
-    interpreter file present - while its own mandatory ensurepip bootstrap
-    silently failed (a base Python with ensurepip stripped, or a broken
-    install). The managed-ComfyUI installer pip-installs into a venv it just
-    created with no ``--without-pip`` fallback, so a pip-less venv here would
-    read as doctor-green right up until provisioning fails deep inside with an
-    opaque "No module named pip"."""
+    Also probes that pip actually landed inside the new venv: ``-m venv`` can
+    report success - return code 0, the interpreter file present - while its own
+    mandatory ensurepip bootstrap silently failed (a base Python with ensurepip
+    stripped, or a broken install). The managed-ComfyUI installer pip-installs
+    into a venv it just created with no ``--without-pip`` fallback, so a
+    pip-less venv reads as doctor-green right up until provisioning fails deep
+    inside with an opaque "No module named pip"."""
     import tempfile
     from pathlib import Path
 
@@ -613,12 +583,12 @@ def check_hf_backend(torch_mod: Any = None, transformers_mod: Any = None, *,
     ``import transformers`` can succeed - and a package-version line reports a
     clean version - while every one of those classes is dead.
 
-    This exact gap shipped in 0.1.2: transformers 5.14 hard-imports fsdp on the
-    tokenizer path, which needs ``torch._C._distributed_c10d`` - absent from the
-    pinned ROCm/Windows torch build - so EVERY HF model load died at "loading
-    processor..." while ``localm doctor`` printed both packages OK (found during
-    the 0.1.2 release verification; see tests/test_gpu_extra_pins.py for the
-    version-pin guard this backs up with a functional one).
+    Concretely: transformers 5.14 hard-imports fsdp on the tokenizer path, which
+    needs ``torch._C._distributed_c10d`` - absent from the pinned ROCm/Windows
+    torch build - so EVERY HF model load dies at "loading processor..." while a
+    package-version check reports both packages OK (see
+    tests/test_gpu_extra_pins.py for the version-pin guard this backs up with a
+    functional one).
 
     *resolved* says the caller already resolved the two modules and a None means
     absent, so this must not go importing them itself. ``doctor`` passes the
@@ -642,12 +612,8 @@ def check_hf_backend(torch_mod: Any = None, transformers_mod: Any = None, *,
             getattr(transformers_mod, name)
     except Exception as e:
         # transformers' lazy loader re-raises a failed submodule import as a
-        # generic ModuleNotFoundError("Could not import module 'X'") chained
-        # (`raise ... from e`) onto the real cause - and since resolving one
-        # lazy attribute can walk through OTHER lazy submodules, that can
-        # repeat several layers deep before reaching the actual error. Reporting
-        # only the top frame reproduces exactly the unhelpful message that hid
-        # this regression; walk the chain to the true root instead.
+        # generic ModuleNotFoundError chained onto the real cause, and that can
+        # repeat several layers deep. Walk the chain to the true root.
         root = e
         seen = {id(root)}
         while True:
@@ -668,11 +634,9 @@ def check_hf_backend(torch_mod: Any = None, transformers_mod: Any = None, *,
 #  The set                                                             #
 # ------------------------------------------------------------------ #
 
-# In the order a report reads best: the library first (everything native depends
-# on it), then what it can be asked, then the two process-level probes, then the
-# optional backend. The CLI prints them in this order too, so a finding that says
-# "the runtime above checks out" still refers to something above it, and a
-# surface that reorders these rows breaks that phrase.
+# In the order a report reads best: the library first, then what it can be asked,
+# then the two process-level probes, then the optional backend. The CLI prints
+# them in this order.
 CHECK_LABELS = {
     "llama_lib":    _LIB_LABEL,
     "native_abi":   _ABI_LABEL,
@@ -708,10 +672,9 @@ def run_checks(on_check_start: Optional[Callable] = None) -> list:
     ``(key, label, done, total)`` immediately BEFORE each check, where ``done``
     is how many have actually finished. Reported before rather than after so a
     watching surface can name the check that is currently taking the time, and
-    so ``done`` is never a number nothing has earned yet (ADR-0008 R1: an
-    operation with no established denominator is at an unknown percentage, not
-    at 0%). A callback that raises must not cost the caller its report, so it is
-    guarded - but the failure is logged rather than swallowed.
+    so ``done`` is never a number nothing has earned yet. A callback that raises
+    must not cost the caller its report, so it is guarded - but the failure is
+    logged rather than swallowed.
 
     See the module docstring before calling this from a long-lived process: it
     imports torch and transformers.
@@ -750,9 +713,9 @@ def run_checks(on_check_start: Optional[Callable] = None) -> list:
 def verdict(checks) -> str:
     """The aggregate for a surface that leads with one word.
 
-    Deliberately NOT a claim about the machine as a whole: it aggregates these
-    five checks and nothing else, so a caller must say WHICH checks it ran
-    rather than render it as "everything is fine"."""
+    NOT a claim about the machine as a whole: it aggregates these five checks
+    and nothing else, so a caller must say WHICH checks it ran rather than
+    render it as "everything is fine"."""
     return _worst(c.status for c in checks) or OK
 
 
@@ -766,13 +729,10 @@ def run_report(on_check_start: Optional[Callable] = None) -> DiagnosticsReport:
     return build_report(run_checks(on_check_start))
 
 
-# The child command. ``-c`` rather than ``-m localm.diagnostics`` on purpose:
-# multiprocessing's "spawn" re-imports the parent's __main__ in the child, and
-# with ``-m`` that means re-running this module under runpy for every spawn the
-# worker-spawn check performs. A ``-c`` main has no spec and no __file__, so
-# multiprocessing skips that entirely and the spawn probe measures the spawn
-# rather than an import of itself. ``__main__`` below still works for a human
-# debugging the child by hand.
+# The child command. ``-c`` rather than ``-m localm.diagnostics``: multiprocessing's
+# "spawn" re-imports the parent's __main__ in the child, and with ``-m`` that would
+# re-run this module for every spawn the worker-spawn check performs. A ``-c`` main
+# has no spec and no __file__, so multiprocessing skips that.
 _CHILD_CODE = "import localm.diagnostics as d; d.main_json()"
 
 
@@ -781,8 +741,7 @@ def run_report_isolated(*, timeout: Optional[float] = None,
                         ) -> DiagnosticsReport:
     """Run the checks in a FRESH child interpreter and parse its one JSON line.
 
-    This is what a server surface must use. Three reasons, and the first alone
-    settles it:
+    This is what a server surface must use, for three reasons:
 
       * ``check_hf_backend`` imports torch and transformers. In a process that
         has already loaded llama.cpp's native runtime that is the known-doomed
@@ -807,21 +766,16 @@ def run_report_isolated(*, timeout: Optional[float] = None,
     its stdout closes. NOTE what the kill does NOT reach: the child's own
     grandchildren (the ABI probe, the venv probe). Each of those carries its own
     shorter timeout (120s, 60s, 30s), so they self-terminate rather than leak
-    indefinitely - stated rather than glossed, because "the parent was killed"
-    and "everything it started is gone" are not the same claim on any platform.
+    indefinitely.
     """
     import threading
 
     if timeout is None:
         timeout = worst_case_run_seconds()
     try:
-        # stderr MERGED into stdout, not given its own pipe. Reading one pipe to
-        # EOF while the other fills its (64 KiB) buffer is the classic subprocess
-        # deadlock, and this child has every reason to write to stderr - localm
-        # warns there, and so does anything it imports. Merging removes the
-        # second pipe entirely. Nothing is lost: the result is picked out by
-        # prefix, and the non-prefixed lines are kept as the tail that explains a
-        # child which produced no result at all.
+        # stderr is merged into stdout rather than given its own pipe: reading one
+        # pipe to EOF while the other fills its buffer deadlocks. The result is
+        # picked out by prefix, and non-prefixed lines are kept as the tail.
         proc = subprocess.Popen(
             [sys.executable, "-c", _CHILD_CODE],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -860,9 +814,8 @@ def run_report_isolated(*, timeout: Optional[float] = None,
                     on_progress(ev.get("key", ""), ev.get("label", ""),
                                 int(ev.get("done", 0)), int(ev.get("total", 0)))
                 except Exception:
-                    # A malformed or unhandleable progress line costs a progress
-                    # update, never the report. Deliberately not escalated: the
-                    # result line is what this function exists to return.
+                    # A malformed progress line costs a progress update, never the
+                    # report.
                     pass
             elif line.strip():
                 tail.append(line.strip())
@@ -880,9 +833,8 @@ def run_report_isolated(*, timeout: Optional[float] = None,
             checks=(), verdict=ERROR,
             error=f"the diagnostics run did not finish within {int(timeout)}s")
     if not result_line:
-        # Surface what the child actually said. A run that produced no result is
-        # already the worst case for a diagnostic; dropping what it printed would
-        # make it undiagnosable as well.
+        # Surface what the child actually said, so a run that produced no result
+        # is still diagnosable.
         why = tail[-1] if tail else "it printed no result"
         return DiagnosticsReport(
             checks=(), verdict=ERROR,

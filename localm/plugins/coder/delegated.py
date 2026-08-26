@@ -7,61 +7,56 @@ child-dispatch features (worktree-parallel dispatch and background sub-agent
 jobs) tell the user that such work exists, so the presentation is identical
 whichever feature produced it.
 
-WHY DELEGATED WORK IS NEVER FOLDED INTO session_diff()
--------------------------------------------------------
+DELEGATED WORK IS NEVER FOLDED INTO session_diff()
+--------------------------------------------------
 ``session_diff()`` is not merely displayed. It is an INPUT to two model-facing
-loops, so contaminating it corrupts behaviour, not just a view:
+loops:
 
-- agent/loop.py:381 passes it to ``reviewer.review_feedback(...)``, whose reply is
+- agent/loop.py passes it to ``reviewer.review_feedback(...)``, whose reply is
   injected back into the agent as a user message. Foreign hunks would make the
   self-reviewer critique changes that are not in the tree and instruct the agent
   to fix things it cannot see.
-- agent/session.py:190 passes it to reflect_and_store, so it becomes EPISODIC
+- agent/session.py passes it to reflect_and_store, so it becomes EPISODIC
   MEMORY. A lesson would be stored against a diff that does not match the repo.
 
 There is a mechanical hazard too: ``_track_write`` keys each entry relative to the
-writing agent's OWN cwd (persistence.py:86-90) while ``session_diff`` re-resolves
-those keys against ``self.cwd`` (persistence.py:67) and ``changed_files`` does the
-same (persistence.py:38). A foreign key therefore names a DIFFERENT file in the
-parent, so merging one either fabricates a diff that was never made or silently
-reports nothing at all.
+writing agent's OWN cwd while ``session_diff`` re-resolves those keys against
+``self.cwd``, and ``changed_files`` does the same. A foreign key therefore names a
+DIFFERENT file in the parent, so merging one either fabricates a diff that was
+never made or silently reports nothing at all.
 
 So the invariant is absolute: ``session_diff()`` and ``changed_files()`` describe
 the PARENT's tree and nothing else, ever.
 
-WHERE THE APPEND IS AND IS NOT WIRED (site-selective, deliberately)
---------------------------------------------------------------------
-Holding "session_diff() is unmodified" is NOT a sufficient invariant, because the
-contamination can happen at the CALL SITE instead. The invariant that actually
-protects us is: THE SELF-REVIEWER AND THE EPISODE NEVER RECEIVE FOREIGN-TREE HUNKS.
+WHERE THE APPEND IS AND IS NOT WIRED (site-selective)
+------------------------------------------------------
+"session_diff() is unmodified" is NOT a sufficient invariant, because the
+contamination can happen at the CALL SITE instead. The binding invariant is: THE
+SELF-REVIEWER AND THE EPISODE NEVER RECEIVE FOREIGN-TREE HUNKS.
 
 - APPENDED (human-facing): the ``/diff`` and ``/changes`` REPL commands.
-- NOT APPENDED (model-facing): agent/loop.py:381 and agent/session.py:190. The
-  episode still learns THAT delegation happened, via structured fields, but is
-  never fed hunks it cannot reconcile against the repo.
+- NOT APPENDED (model-facing): agent/loop.py and agent/session.py. The episode
+  still learns THAT delegation happened, via structured fields, but is never fed
+  hunks it cannot reconcile against the repo.
 
-There is a test that pins this by inspecting the source of those two modules, so a
-future well-meaning edit cannot quietly wire the footer into a model-facing path.
+A test pins this by inspecting the source of those two modules.
 
 NEVER UNDER A PATH FILTER
 -------------------------
 ``/diff <path>`` asks about ONE file. A delegated section rendered there would
 answer a question the user did not ask, and in the HTTP equivalent
-(builtin/coder/plug.py:353) a non-empty result for an unchanged path silently
-defeats its ``404``. So the section renders only on the unfiltered view.
+(builtin/coder/plug.py) a non-empty result for an unchanged path defeats its
+``404``. So the section renders only on the unfiltered view.
 
 RENDERED SEPARATELY, NEVER INSIDE THE DIFF DOCUMENT
 ----------------------------------------------------
-``/diff`` renders the parent's diff through ``Syntax(diff, "diff", ...)``
-(cli/repl.py:272), i.e. as ONE applicable patch. The delegated section is printed
-as its OWN console block after it, never concatenated into that string, so the
-foreign hunks cannot read as part of a patch the user might try to apply. The
-heading and the per-child branch line say plainly that the work is not in this
-tree. The branch is quoted because it is the durable artifact: the worktree is
-transient and may already have been removed.
-
-Joint design decision by the parallel-dispatch and background-spawn work,
-2026-07-22, delegated to those two by the maintainer.
+``/diff`` renders the parent's diff through ``Syntax(diff, "diff", ...)``, i.e. as
+ONE applicable patch. The delegated section is printed as its OWN console block
+after it, never concatenated into that string, so the foreign hunks cannot read as
+part of a patch the user might try to apply. The heading and the per-child branch
+line say plainly that the work is not in this tree. The branch is quoted because
+it is the durable artifact: the worktree is transient and may already have been
+removed.
 """
 
 from __future__ import annotations
@@ -99,10 +94,10 @@ class DelegatedChangeSet:
 def render_footer(items: list[DelegatedChangeSet]) -> str:
     """The shared delegated-work section. Empty string when there is none.
 
-    Returning "" for the empty case is deliberate: it lets each display site
-    render this unconditionally, so wiring it in changes nothing at all for a
-    session that never delegated. Callers must print it as its OWN block, never
-    concatenated into a diff document (see the module docstring).
+    The "" for the empty case lets each display site render this
+    unconditionally, so wiring it in changes nothing for a session that never
+    delegated. Callers must print it as its OWN block, never concatenated into a
+    diff document (see the module docstring).
     """
     live = [i for i in items if i.branch]
     if not live:

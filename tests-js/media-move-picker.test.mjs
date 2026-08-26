@@ -3,16 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// rec#210: the music/video history "move..." button used window.prompt(), which
-// mobile/PWA browsers suppress - so the button was dead there. It now uses the
-// in-page pickDirectory() modal, exactly like the image page already does.
-//
-// The BUTTON moved (music/video history is a selectable card grid now, and
-// per-item actions live in the detail modal), but the PROPERTY did not: move
-// must never reach window.prompt(). So this drives the new path rather than
-// dropping the guard - the mobile/PWA regression it exists to catch is
-// unchanged, and deleting it because the selector moved would have retired a
-// live guard for a cosmetic reason.
+// The music/video history "move..." button uses the in-page pickDirectory()
+// modal and never window.prompt(). Music/video history is a selectable card
+// grid, so per-item actions live in the detail modal.
 
 function setup() {
   const calls = [];
@@ -36,8 +29,7 @@ function setup() {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-/** Open the first card's detail modal and return its "move to folder..."
- *  button - the per-item move affordance in the current UI. */
+/** Opens the first card's detail modal and returns its "move to folder..." button. */
 function moveButton(win, boxId) {
   const box = win.document.getElementById(boxId);
   const card = box.querySelector(".thumb");
@@ -58,8 +50,7 @@ const KINDS = [
 for (const kind of KINDS) {
   test(`${kind.name} move uses pickDirectory (not prompt) and POSTs the chosen dir`, async () => {
     const { window: win, calls } = setup();
-    // prompt() must never be reached (it is suppressed on mobile/PWA); the
-    // picker is stubbed so no real modal/fetchDirs machinery is needed.
+    // Records any prompt() call and stubs pickDirectory to a fixed answer.
     runScript(win, `
       globalThis.__promptCalled = false;
       window.prompt = () => { globalThis.__promptCalled = true; return "/from/prompt"; };

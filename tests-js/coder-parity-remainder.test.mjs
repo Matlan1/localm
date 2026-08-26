@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// O5b, GUI half: the parity remainder the O5 brief undercounted.
+// GUI controls for the coder CLI flags:
 //
 //   --seed                  a setup-form field
 //   --interactive-confirm   a setup-form checkbox
@@ -8,11 +8,6 @@
 //   --restore-episode       a per-lesson restore button on the dropped tab
 //   --forget-episodes       an "erase all" button behind confirmDanger
 //   --consolidate-episodes  a "consolidate" button that reports what it did
-//
-// The properties worth pinning here are the ones that fail QUIETLY: a blank seed
-// must not become seed 0, an erase must not be reachable without a confirmation,
-// and a report the server bothered to send (a skipped group, an un-restorable
-// forget) must not be dropped on the floor by the client.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

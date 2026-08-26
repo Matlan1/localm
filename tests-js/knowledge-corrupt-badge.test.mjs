@@ -3,23 +3,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// The server has served stats().corrupt (set for a corrupt meta.json, a
-// malformed chunks.jsonl line, or an unreconstructable roots map - see
-// store.py's three self.corrupt = True sites) since before this change, and
-// the CLI already renders it ("(corrupt index - run 'localm rag repair')" in
-// cli/rag.py). The GUI never referenced .corrupt at all, so a user only saw
-// the unrelated "re-embed needed" badge, which says nothing about on-disk
-// damage. This adds a distinct badge in the collections table and a warning
-// line in the per-collection info modal.
-//
-// NEW-RAG-INDEX-WARN-SPAM: the badge/warning used to just point at a CLI
-// command ("run 'localm rag repair'") - a GUI user had no button, only a
-// terminal pointer. There is now a real Repair button (class corrupt-fix) in
-// both places, and when the server can name the specific fault
-// (stats().chunks_bad_lines, set only for the chunks.jsonl case - see
-// store.py's stats()) the badge/warning name the count instead of a generic
-// "index damaged" sentence.
-
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 const NOT_INSTALLED = { status: "not_installed", model: "bge-small-en-v1.5", dim: null, internal: [], error: null };
@@ -46,8 +29,7 @@ test("corrupt collection gets a distinct 'index damaged' badge and a Repair butt
   const table = window.document.getElementById("kb-table");
   const badge = table.querySelector(".corrupt-badge");
   assert.ok(badge, "a .corrupt-badge is rendered inline in the row");
-  // No chunks_bad_lines count (a meta.json/roots fault, not chunks.jsonl) ->
-  // generic wording, never a fabricated "0 malformed line(s)".
+  // no chunks_bad_lines count -> generic wording
   assert.equal(badge.textContent, "index damaged");
   assert.match(badge.title, /corrupt or malformed/);
   const repairBtn = table.querySelector("button.corrupt-fix");
@@ -86,8 +68,7 @@ test("corrupt and re-embed badges can both show at once, distinctly", async () =
   await tick(); await tick(); await tick();
 
   const table = window.document.getElementById("kb-table");
-  // embedding not installed -> no re-embed badge here, only the corrupt one;
-  // the point of this case is that the two badges are independent flags.
+  // embedding not installed -> no re-embed badge here, only the corrupt one
   assert.ok(table.querySelector(".corrupt-badge"));
   assert.equal(table.querySelector(".retrieval-badge"), null);
 });

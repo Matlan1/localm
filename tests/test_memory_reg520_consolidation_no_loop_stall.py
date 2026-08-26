@@ -1,23 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-520: background consolidation must NOT hold the per-namespace RLock across
-its slow per-candidate LLM calls, or every chat recall freezes the event loop.
+"""Background consolidation must NOT hold the per-namespace RLock across its slow
+per-candidate LLM calls, or every chat recall freezes the event loop.
 
-PR #520 added a namespace RLock to recall(reinforce=True) (the chat inlet, which
-runs ON the asyncio event-loop thread) AND made run_consolidation hold that SAME
-lock across the whole read-decide-write, including one blocking `_decide()` LLM
-call per candidate (seconds-to-minutes on a local model). So while a background
-auto-consolidation runs, the next chat turn's inlet - which CONSTRUCTS a fresh
-MemoryStore (MemoryStore.__init__ locks, store.py:255) and then recall()s (locks
-again, store.py:738) - blocks on the held lock for the ENTIRE consolidation,
-freezing every concurrent request, SSE stream, and heartbeat.
+recall(reinforce=True) is the chat inlet and runs ON the asyncio event-loop
+thread, taking the namespace RLock; MemoryStore.__init__ takes it too. If
+run_consolidation held that SAME lock across its whole read-decide-write,
+including one blocking `_decide()` LLM call per candidate (seconds to minutes on
+a local model), the next chat turn would block for the entire consolidation.
 
-Fix: consolidation runs the slow decide loop OFF the lock (against a snapshot),
-then takes the lock only briefly to reload fresh and MERGE its decided deltas by
-id - preserving the CHK-MEM-LOCK no-data-loss guarantee (a concurrent write during
-the decide window survives) while keeping the lock free for recall.
-
-Negative case: pre-fix the concurrent recall below blocks for the whole (stalled)
-decide and never completes within the window.
+So consolidation runs the slow decide loop OFF the lock, against a snapshot, then
+takes the lock only briefly to reload fresh and MERGE its decided deltas by id,
+so a concurrent write during the decide window survives.
 """
 
 from __future__ import annotations
@@ -34,7 +27,7 @@ from localm.memory import MemoryRecord, MemoryStore, run_consolidation
 def _writes_on(monkeypatch):
     # run_consolidation is gated on writes_allowed(): without log/full mode it
     # returns "skipped" (privacy) and never calls the model, so _decide() would
-    # never fire. Match test_memory_concurrent_lock.py's consolidation test.
+    # never fire.
     monkeypatch.setenv("LOCALM_MODE", "log")
 
 
@@ -69,16 +62,16 @@ def _run_slow_consolidation(store):
 def test_recall_not_blocked_while_consolidation_decides(tmp_path):
     store = MemoryStore("owner", "chat", root=tmp_path)
     # Seed a record whose text difflib-near-matches the extracted candidate, so
-    # _nearest() routes it to the SLOW _decide() LLM step (not a deterministic
-    # ADD/NO_OP shortcut) - the same trick the CHK-MEM-LOCK data-loss test uses.
+    # _nearest() routes it to the SLOW _decide() LLM step rather than a
+    # deterministic ADD/NO_OP shortcut.
     store.add(MemoryRecord(text="User prefers dark mode in the editor", source="synth"))
 
     t, decide_started, release, errors = _run_slow_consolidation(store)
     assert decide_started.wait(5), "consolidation's _decide() never started"
 
-    # Consolidation is now mid-_decide(). A chat recall (construct a fresh store +
-    # recall(reinforce=True), exactly what the inlet does on the loop thread) must
-    # NOT block for the decide duration.
+    # Consolidation is now mid-_decide(). A chat recall - a fresh store plus
+    # recall(reinforce=True), what the inlet does on the loop thread - must not
+    # block for the decide duration.
     done = threading.Event()
     out: dict = {}
 
@@ -94,7 +87,7 @@ def test_recall_not_blocked_while_consolidation_decides(tmp_path):
     rt = threading.Thread(target=recall_worker)
     rt.start()
 
-    completed = done.wait(6)          # pre-fix: blocked on the held lock -> times out
+    completed = done.wait(6)          # a recall blocked on the held lock times out
     release.set()
     t.join(timeout=10)
     rt.join(timeout=10)
@@ -107,8 +100,8 @@ def test_recall_not_blocked_while_consolidation_decides(tmp_path):
 
 
 def test_consolidation_still_consolidates_after_decide_offloaded(tmp_path):
-    """No facade: moving _decide() off the lock must not stop consolidation from
-    applying its result. The ADD decision still lands."""
+    """With _decide() off the lock, consolidation still applies its result: the
+    ADD decision lands."""
     store = MemoryStore("owner", "chat", root=tmp_path)
     store.add(MemoryRecord(text="User prefers dark mode in the editor", source="synth"))
 
@@ -124,9 +117,9 @@ def test_consolidation_still_consolidates_after_decide_offloaded(tmp_path):
 
 
 def test_concurrent_add_during_offloaded_decide_survives(tmp_path):
-    """CHK-MEM-LOCK must still hold with the decide loop OFF the lock: a record a
-    concurrent writer commits DURING the (now lock-free) decide window must survive
-    consolidation's final apply, not be clobbered by a stale-snapshot overwrite."""
+    """A record a concurrent writer commits DURING the lock-free decide window
+    survives consolidation's final apply rather than being clobbered by a
+    stale-snapshot overwrite."""
     store = MemoryStore("owner", "chat", root=tmp_path)
     store.add(MemoryRecord(text="User prefers dark mode in the editor", source="synth"))
 

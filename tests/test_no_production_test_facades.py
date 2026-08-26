@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Production code must not detect tests / mocks and fabricate behavior
-(Antigravity-audit, AGENTS.md rule 5 / no-facade).
+"""Production code must not detect tests or mocks and fabricate behavior.
 
 Two facades in http_server accommodated test mocks in shipped code:
 
@@ -84,7 +83,7 @@ def test_complete_surfaces_a_method_less_engine_instead_of_faking_ok(monkeypatch
 
         def count_tokens(self, text):
             return 3
-        # deliberately NO chat_stream
+        # no chat_stream
 
     sem = asyncio.Semaphore(1)
     with pytest.raises(AttributeError):

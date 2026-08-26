@@ -7,32 +7,18 @@ real isolated worker via that runner's real spawn path, prints the worker PID on
 its first stdout line, then blocks forever. The test then HARD-kills this process
 (the worker's parent) and asserts the worker dies on its own.
 
-The ``if __name__ == "__main__"`` guard is load-bearing: multiprocessing's spawn
-re-imports this module in the worker child, and without the guard the child would
-re-run the spawn at import and crash on ``_check_not_importing_main`` (which looks
-exactly like a reaped worker and would fake a passing test)."""
+The ``if __name__ == "__main__"`` guard is required: multiprocessing's spawn
+re-imports this module in the worker child, and without the guard the child
+re-runs the spawn at import and crashes on ``_check_not_importing_main``."""
 
 from __future__ import annotations
 
 import sys
 import time
 
-# Keep every spawned runner alive for the life of this process. LOAD-BEARING ON POSIX,
-# and a no-op on Windows - which is exactly why it was missed.
-#
-# The runner owns the ctx.Queue()s it handed to the child. Drop the last reference (as
-# `r = ModelRunner(); ...; return r._proc.pid` did - r died at the return) and the queues
-# are garbage-collected, and their finalizers unlink the POSIX named semaphores. The child
-# is still unpickling those queues at that moment, so its sem_open() loses the race and
-# dies with `FileNotFoundError: [Errno 2]` out of SemLock._rebuild - before the test can
-# kill the parent, leaving a zombie and "worker was not alive before the kill".
-#
-# Windows never showed it: there the semaphore HANDLES are duplicated into the child at
-# spawn time (popen_spawn_win32's duplicate_for_child), so the parent dropping its
-# reference cannot starve the child. `voice` never showed it either, on either platform:
-# it stores its handle at module level (localm.voice._proc), so nothing collected it.
-# gguf + embedder were the only two that dropped the reference, and they were the exact
-# two that failed on ubuntu CI. Reproduced and fixed under WSL Ubuntu 24.04 / py3.12.
+# Keep every spawned runner alive for the life of this process. The runner owns the
+# ctx.Queue()s it handed to the child; dropping the last reference collects them and
+# unlinks the POSIX named semaphores the child is still opening.
 _keepalive: list = []
 
 
@@ -59,10 +45,10 @@ def _spawn(kind: str) -> int:
 def main() -> None:
     kind = sys.argv[1]
     pid = _spawn(kind)
-    # First stdout line = the worker PID the test will watch. Flush so the test
-    # reads it immediately, not when the pipe buffer happens to fill.
+    # First stdout line = the worker PID the test will watch; flushed so the test
+    # reads it immediately.
     print(pid, flush=True)
-    time.sleep(600)   # block; the test hard-kills us well before this elapses
+    time.sleep(600)   # block; the test hard-kills us long before it returns
 
 
 if __name__ == "__main__":

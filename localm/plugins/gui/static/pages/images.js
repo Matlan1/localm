@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm GUI - Images page. The library (grid, selection, bulk actions, detail
-   modal, rename/move/delete) is the shared engine in app/media-gallery.js; only
-   the image-specific bits live here - the LoRA picker, and the three detail
-   actions that only make sense for a still image (use as img2img input, send to
-   chat, copy to clipboard). */
+   modal, rename/move/delete) comes from app/media-gallery.js; this file adds
+   the LoRA picker and the image-only detail actions (use as img2img input,
+   send to chat, copy to clipboard). */
 
 "use strict";
 
@@ -52,17 +51,12 @@ const imageGallery = createGallery({
     $("img-lora").value = m.lora_name || "";
     $("img-lora-strength-model").value = m.lora_strength_model ?? "";
     $("img-lora-strength-clip").value = m.lora_strength_clip ?? "";
-    // Most of those ids live behind this page's Advanced fold. Without this the
-    // toast claims the settings were restored while the seed, guidance, denoise,
-    // cfg and both LoRA strengths sit invisible behind a closed triangle - and
-    // the seed is the whole reason anyone reuses settings.
+    // Most of those ids live behind this page's Advanced fold; open it when
+    // they are filled.
     revealFilledAdvanced($("view-images"));
   },
 
-  // Still-image-only actions. Music and video get neither "use as input" (there
-  // is no music2music / the video page takes a START IMAGE, not a clip) nor
-  // "send to chat" (the composer has no audio/video attachment path) - offering
-  // either would be a button that cannot work.
+  // Still-image-only actions.
   extraActions: (item, ctx) => {
     const useInput = el("button", "btn-secondary", "use as input");
     useInput.title = "Use this image as the img2img input";
@@ -119,19 +113,13 @@ const imageGallery = createGallery({
 
 export const refreshImageHistory = imageGallery.refresh;
 
-/* Kept as a named export: it is this page's detail-view entry point and other
-   code (and the Advanced-disclosure tests) drive the reuse flow through it.
-   The shared engine owns the implementation now; this is the stable name. */
+/* This page's detail-view entry point. */
 export const showImageDetail = (item) => imageGallery.showDetail(item);
 
 bindReloadToggle("image", "img-reload-llm");
 
-/* LoRA picker - populated from ComfyUI's live-installed LoRA files (the same
-   /api/imagine/comfy-models call the Workflow panel's model picker uses, see
-   comfyModelPicker in workflow.js; loras is enumerated independently there
-   since a LoraLoader node is not normally in the active workflow graph).
-   Keeps the current selection across a refresh rather than resetting it back
-   to "None" every time the panel reloads. */
+/* LoRA picker - populated from ComfyUI's live-installed LoRA files via
+   /api/imagine/comfy-models. Keeps the current selection across a refresh. */
 export async function refreshLoraPicker() {
   const sel = $("img-lora");
   if (!sel) return;

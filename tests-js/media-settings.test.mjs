@@ -3,13 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// The schema still carries the comfy_* media keys (group "Media"), but the
-// settings form must SKIP the per-plugin-mapped ones (media_per_plugin, the
-// server-side MEDIA_PLUGIN_FIELDS annotation) - they are edited in the Media
-// section instead, per-plugin, via /v1/media/config. An UN-annotated Media
-// field renders in the Media section's Shared box instead (fail-open; see
-// media-shared-settings.test.mjs), so this fixture mirrors the real
-// schema_json contract: mapped keys carry media_per_plugin: true.
+// The schema carries the comfy_* media keys in group "Media". The settings form
+// skips the ones annotated media_per_plugin; those are edited per-plugin in the
+// Media section via /v1/media/config.
 const SCHEMA = {
   fields: [
     { key: "n_ctx", widget: "number", label: "Context window", help: "",
@@ -22,8 +18,8 @@ const SCHEMA = {
   ],
 };
 
-// Resolved per-plugin media config: image has fast_dequant (Flux-only), the
-// others do not; everything inherits the shared default here (is_override false).
+// Resolved per-plugin media config: only image has fast_dequant, and every field
+// inherits the shared default (is_override false).
 const MEDIA = {
   plugins: [
     { plugin: "image", label: "Image", fields: [
@@ -70,17 +66,15 @@ function makeFetch(posts) {
 }
 
 async function render(win) {
-  // Let init.js's one-shot /api/capabilities fetch settle, then pin host access
-  // so the host-path fields (workdir etc.) render for these tests.
+  // Lets the one-shot /api/capabilities fetch settle, then pins host access so
+  // the host-path fields render.
   await new Promise((r) => setTimeout(r, 0));
   runScript(win, `caps.fsAccess = "host"; refreshSettingsPage();`);
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
-// The subsection <h4> head holds the plugin label as its first text node and, for
-// image/music/video, ALSO carries a trailing ComfyUI status badge <span>. Read just
-// the label (the first child node), not the whole textContent (which would include
-// "ComfyUI: checking...").
+// The subsection <h4> holds the plugin label as its first text node, followed by
+// a ComfyUI status badge <span>, so only the first child node is read.
 const headLabel = (s) => {
   const h = s.querySelector(".media-sub-head");
   return (h && h.firstChild ? h.firstChild.textContent : "").trim();
@@ -91,7 +85,7 @@ test("media config renders one independent subsection per plugin", async () => {
   await render(win);
   const doc = win.document;
 
-  // The group=Media schema keys are NOT rendered in the core form.
+  // The group=Media schema keys are not rendered in the core form.
   assert.equal(doc.querySelector('[data-key="comfy_workdir"]'), null,
     "comfy_* media keys are skipped from the schema form");
 
@@ -102,7 +96,7 @@ test("media config renders one independent subsection per plugin", async () => {
   const heads = [...subs].map(headLabel);
   assert.deepEqual(heads, ["Image", "Music", "Video"], "in order, labelled");
 
-  // fast_dequant (Flux-only) only on the image subsection.
+  // fast_dequant appears only on the image subsection.
   const imageSub = [...subs].find((s) => headLabel(s) === "Image");
   const musicSub = [...subs].find((s) => headLabel(s) === "Music");
   assert.ok(imageSub.querySelector('[data-key="fast_dequant"]'),
@@ -118,7 +112,7 @@ test("media config renders one independent subsection per plugin", async () => {
     .map((l) => l.textContent);
   assert.ok(navLabels.includes("Media"), "the Media group appears in the settings nav");
 
-  // The three subsections are laid out in the responsive grid, not stacked loose.
+  // The three subsections sit in the responsive grid.
   const grid = media.querySelector(".media-grid");
   assert.ok(grid, "the three subsections sit inside a .media-grid container");
   assert.equal(grid.querySelectorAll(".media-subsection").length, 3,
@@ -144,14 +138,14 @@ test("saving a media plugin POSTs only the changed fields", async () => {
 
   assert.equal(posts.length, 1, "one POST to the image media config");
   assert.equal(posts[0].name, "image");
-  // Compare by value (jsdom realm): only the changed fields are sent.
+  // Compared by value: the parsed body carries the jsdom realm's prototype.
   assert.equal(JSON.stringify(posts[0].body),
     JSON.stringify({ workdir: "/img/own", delete_outputs: true }),
     "only the changed fields are sent (inherited untouched fields are not pinned)");
 });
 
 test("R12: saving one media subsection preserves unsaved edits in the others", async () => {
-  // Each plugin's POST echoes ITS OWN fields back (so the R12 re-render is correct).
+  // Each plugin's POST echoes its own fields back.
   const posts = [];
   const fetchImpl = async (url, opts = {}) => {
     const method = opts.method || "GET";
@@ -177,7 +171,7 @@ test("R12: saving one media subsection preserves unsaved edits in the others", a
   const sub = (name) => [...doc.querySelectorAll(".media-subsection")]
     .find((s) => s.dataset.plugin === name);
 
-  // Edit the MUSIC subsection (unsaved), then SAVE the IMAGE subsection.
+  // Edit the music subsection without saving, then save the image subsection.
   sub("music").querySelector('input[data-key="workdir"]').value = "/music/edited";
   sub("image").querySelector('input[data-key="workdir"]').value = "/image/own";
   sub("image").querySelector(".media-save").click();
@@ -185,16 +179,14 @@ test("R12: saving one media subsection preserves unsaved edits in the others", a
 
   assert.equal(posts.length, 1, "only the image subsection was saved");
   assert.equal(posts[0].name, "image");
-  // The music subsection's unsaved edit is still in the DOM (not wiped by a refresh).
+  // The music subsection's unsaved edit is still in the DOM.
   assert.equal(sub("music").querySelector('input[data-key="workdir"]').value,
     "/music/edited", "the other subsection's unsaved edit survives the save");
 });
 
 test("EXPERIMENTAL comfy_gpu_placement toggle renders in Media and saves via /v1/config", async () => {
-  // Schema carrying the experimental placement toggle (a core group=Media TOGGLE,
-  // like comfy_func_shim but GIVEN a GUI home here). It must render in the Media
-  // section (unconditionally, not gated on a managed install) and save through the
-  // generic PATCH /v1/config path, exactly like comfy_target.
+  // A schema carrying the experimental placement toggle: a core group=Media
+  // toggle that renders in the Media section and saves through PATCH /v1/config.
   const SCHEMA_P = { fields: [
     ...SCHEMA.fields,
     { key: "comfy_gpu_placement", widget: "toggle",
@@ -220,13 +212,13 @@ test("EXPERIMENTAL comfy_gpu_placement toggle renders in Media and saves via /v1
   await render(win);
   const doc = win.document;
 
-  // The toggle renders inside the Media section (not the flat core form).
+  // The toggle renders inside the Media section, not the flat core form.
   const media = doc.querySelector("#settings-sec-media");
   const toggle = media.querySelector('input[data-key="comfy_gpu_placement"]');
   assert.ok(toggle, "the experimental placement toggle renders in the Media section");
   assert.equal(toggle.type, "checkbox", "it is a checkbox (a TOGGLE widget)");
   assert.equal(toggle.checked, false, "default off");
-  // It is NOT in the per-plugin subsections (it is a single global control).
+  // It is a single global control, not part of a per-plugin subsection.
   const box = toggle.closest(".media-comfy-box");
   assert.ok(box, "the toggle sits in a media-comfy box, not a per-plugin subsection");
   assert.ok(/experimental/i.test(box.textContent),
@@ -244,7 +236,7 @@ test("EXPERIMENTAL comfy_gpu_placement toggle renders in Media and saves via /v1
 });
 
 test("R14: in each media subsection the dropdown renders before the checkboxes", async () => {
-  // Mirror the post-R14 server field order (folders/text, then SELECT, then toggles).
+  // The server field order: folders and text, then selects, then toggles.
   const ORDERED = { plugins: [{ plugin: "image", label: "Image", fields: [
     { key: "workdir", widget: "folder", label: "Folder", help: "", value: "", is_override: false },
     { key: "swap_policy", widget: "select", label: "Swap", help: "", value: "auto",

@@ -1,24 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """STAGE S2 (COPY path) for the localm-managed ComfyUI feature.
 
-S2 provisions localm's OWN ComfyUI by REPLICATING a user's existing stack
-(design decisions 2 + 3): when the user HAS a working ComfyUI (comfy_workdir set
-and a venv discoverable under it), read its repo commit + a pip-freeze of their
-venv, clone that same commit into <LOCALM_HOME>/comfyui, create a FRESH localm
-venv, and pip-install the SAME package versions into it (NOT a byte-copy of the
-user's venv). Custom nodes are copied only when asked. Models are shared via S1's
-extra_model_paths.yaml. When NO usable user ComfyUI is present, setup runs the fresh
-hardware-matched install instead (stage S3, tests/test_managed_comfy_s3.py).
+S2 provisions localm's OWN ComfyUI by REPLICATING a user's existing stack: when
+the user HAS a working ComfyUI (comfy_workdir set and a venv discoverable under
+it), read its repo commit + a pip-freeze of their venv, clone that same commit
+into <LOCALM_HOME>/comfyui, create a FRESH localm venv, and pip-install the SAME
+package versions into it (NOT a byte-copy of the user's venv). Custom nodes are
+copied only when asked. Models are shared via S1's extra_model_paths.yaml. When
+NO usable user ComfyUI is present, setup runs the fresh hardware-matched install
+instead (stage S3).
 
-The heavy end-to-end test exercises the copy path FOR REAL against a MINIMAL fake:
-a real throwaway git repo (stub main.py committed, so rev-parse works) with a real
-minimal venv holding ONE tiny hand-built wheel (no torch - the copy logic is
-version-agnostic, so a tiny freeze exercises it fully and fast). The wheel is
-installed via a ``name @ file://`` reference so pip freeze round-trips OFFLINE and
-the copy path can replay it with PIP_NO_INDEX. The multi-GB torch replication is a
-documented manual/integration check; this proves the mechanism end to end.
-
-Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
+The heavy end-to-end test exercises the copy path FOR REAL against a MINIMAL
+fake: a real throwaway git repo (stub main.py committed, so rev-parse works) with
+a real minimal venv holding ONE tiny hand-built wheel (no torch - the copy logic
+is version-agnostic, so a tiny freeze exercises it fully and fast). The wheel is
+installed via a ``name @ file://`` reference so pip freeze round-trips OFFLINE
+and the copy path can replay it with PIP_NO_INDEX. Multi-GB torch replication is
+a manual check; this proves the mechanism end to end.
 """
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ from localm.media import managed_comfy as mc
 
 # --------------------------------------------------------------------------- #
 #  Isolation: a throwaway LOCALM_HOME wired through BOTH the lazy home_dir()   #
-#  and the import-frozen config attrs, exactly like the S1 test's `home`.      #
+#  and the import-frozen config attrs.                                         #
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def home(tmp_path, monkeypatch):
@@ -197,12 +195,11 @@ def test_discover_finds_git_stack(home, fake_user_comfy):
 
 
 def test_discover_finds_stack_via_plugin_only_workdir(home, fake_user_comfy):
-    """NEW-MANAGED-COMFY-IGNORES-PLUGIN-WORKDIR: a folder set ONLY via a
-    plugin's own comfy.workdir field (no global comfy_workdir) - the shape the
-    modern Settings UI actually produces - must still be discovered, so
-    `localm comfy setup` copies the user's existing ComfyUI (S2) instead of
-    silently running a redundant multi-GB fresh install (S3) because the
-    global-only check found nothing."""
+    """A folder set ONLY via a plugin's own comfy.workdir field (no global
+    comfy_workdir) - the shape the modern Settings UI actually produces - must
+    still be discovered, so `localm comfy setup` copies the user's existing
+    ComfyUI (S2) instead of silently running a redundant multi-GB fresh install
+    (S3) because a global-only check found nothing."""
     from localm.media import managed_comfy_provision as prov
     cfg.save_config({**cfg.load_config(), "plugins": {
         "video": {"comfy": {"workdir": str(fake_user_comfy.workdir)}}}})
@@ -332,12 +329,12 @@ def test_isolated_env_strips_pythonpath(monkeypatch):
 
 
 def test_isolated_env_pins_the_pip_cache_into_the_data_dir(home, monkeypatch):
-    """Provisioning's pip subprocesses must cache INSIDE the data dir (rule 4).
+    """Provisioning's pip subprocesses must cache INSIDE the data dir.
 
-    Unset, pip caches to a per-user location outside the data dir; measured live, this
-    module alone had put ~11 GB there, never asking and never telling. An ambient
-    PIP_CACHE_DIR must NOT win: containment any stray environment variable can silently
-    switch off is not a guarantee. LOCALM_HOME is the knob (see config.cache_dir())."""
+    Unset, pip caches to a per-user location outside the data dir, without asking
+    and without telling. An ambient PIP_CACHE_DIR must NOT win: containment any
+    stray environment variable can silently switch off is not a guarantee.
+    LOCALM_HOME is the knob (see config.cache_dir())."""
     from localm.media import managed_comfy_provision as prov
     monkeypatch.setenv("PIP_CACHE_DIR", str(home.parent / "ambient-cache"))
 
@@ -368,18 +365,18 @@ def test_pip_subprocess_really_honours_the_contained_cache_dir(home, fake_user_c
 
 
 def test_read_user_freeze_ignores_leaked_pythonpath(home, fake_user_comfy, monkeypatch):
-    """A PYTHONPATH set on the CALLING localm process must not contaminate pip freeze
-    of the user's venv. Reproduced live: with a dev PYTHONPATH pointing at localm's own
-    venv, `pip freeze` on a 1-package venv reported 91 packages - one of which needed a
-    source build this feature never intended to trigger, which surfaced downstream as a
-    confusing "offline pip cache is missing a build backend" failure with no hint that
-    the actual cause was environment leakage (see managed_comfy_provision._isolated_env()
-    and its module import of ``os``).
+    """A PYTHONPATH set on the CALLING localm process must not contaminate pip
+    freeze of the user's venv. With a dev PYTHONPATH pointing at localm's own
+    venv, `pip freeze` on a 1-package venv reports the whole leaked environment -
+    one of which needs a source build this feature never intended to trigger,
+    surfacing downstream as a confusing "offline pip cache is missing a build
+    backend" failure with no hint that the cause was environment leakage (see
+    managed_comfy_provision._isolated_env()).
 
     ``pip freeze`` enumerates installed DISTRIBUTIONS via their ``.dist-info``
-    metadata (not just importable modules), so the "leaked" directory here must be
-    dist-info-shaped - a bare importable package would not be picked up either way
-    and this test would pass even on the unfixed code, proving nothing."""
+    metadata (not just importable modules), so the "leaked" directory here must
+    be dist-info-shaped - a bare importable package would not be picked up either
+    way and this test would pass even on the unfixed code."""
     from localm.media import managed_comfy_provision as prov
     leaked = home.parent / "leaked-site-packages"
     dist_info = leaked / "unrelatedpkg-1.0.0.dist-info"
@@ -415,8 +412,8 @@ def test_provision_copy_leaves_out_custom_nodes_when_declined(home, fake_user_co
     assert not (paths.root / "custom_nodes" / "NodeBeta").exists()
 
     # Reversibility on a REAL git-cloned managed dir: git marks its object store
-    # read-only, so plain rmtree fails on Windows - rmtree_robust must still remove it
-    # (or `localm comfy remove` and rollback break after S2).
+    # read-only, so plain rmtree fails on Windows - rmtree_robust must still
+    # remove it.
     mc.rmtree_robust(paths.root)
     assert not paths.root.exists()
     assert mc.is_managed_comfy_installed() is False
@@ -424,10 +421,10 @@ def test_provision_copy_leaves_out_custom_nodes_when_declined(home, fake_user_co
 
 def test_provision_fails_and_rolls_back_when_freeze_unreadable(home, fake_user_comfy,
                                                                monkeypatch):
-    """A FAILED provision must leave NOTHING that reads as installed. Simulate a pip
-    freeze failure AFTER the clone + venv exist (when is_managed_comfy_installed()
-    would otherwise be true) and assert it rolls back: ok=False, not installed, and
-    the partial dir removed - never a broken-but-reads-as-ready facade (rule 5)."""
+    """A FAILED provision must leave NOTHING that reads as installed. Simulates a
+    pip freeze failure AFTER the clone + venv exist (when
+    is_managed_comfy_installed() would otherwise be true) and asserts it rolls
+    back: ok=False, not installed, and the partial dir removed."""
     from localm.media import managed_comfy_provision as prov
     cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
     # None == pip freeze FAILED (distinct from an empty venv).
@@ -443,9 +440,8 @@ def test_provision_fails_and_rolls_back_when_freeze_unreadable(home, fake_user_c
 
 def test_unresolvable_packages_parses_pip_no_match_lines():
     """_unresolvable_packages parses pip's own 'No matching distribution found
-    for <req>' wording (verified live against a real pip: `pip install --no-index
-    vendor-only-package==9.9.9` prints exactly this line), stripping the version
-    pin so the message names the bare package, deduped and in first-seen order."""
+    for <req>' wording, stripping the version pin so the message names the bare
+    package, deduped and in first-seen order."""
     from localm.media import managed_comfy_provision as prov
     out = (
         "Collecting foo==1.0\n"
@@ -460,28 +456,25 @@ def test_unresolvable_packages_parses_pip_no_match_lines():
 
 def test_provision_copy_names_the_unresolvable_package_not_just_a_pip_tail(
         home, fake_user_comfy, monkeypatch):
-    """NEW-COMFY-S2-COPY-FAILS-ON-SIDELOADED-PACKAGE: when the user's freeze names
-    a package pip can find NO version for at all (the shape produced by a
-    vendor-bundled driver package installed from a non-public index or a local
-    wheel on the ORIGINAL machine - reproduced live against a real StableMatrix
-    ComfyUI), the failure must name the package and say why, not just echo a
-    generic pip-transcript tail.
+    """When the user's freeze names a package pip can find NO version for at all
+    (the shape produced by a vendor-bundled driver package installed from a
+    non-public index or a local wheel on the ORIGINAL machine), the failure must
+    name the package and say why, not just echo a generic pip-transcript tail.
 
     Injects one synthetic unresolvable line alongside the REAL freeze (so the
     real, tiny replicable package still installs and only the synthetic one
     fails) and runs the real pip subprocess under PIP_NO_INDEX=1, same as
     test_provision_copy_end_to_end - no mock of pip itself.
 
-    Deliberately asserts wording that is NOT a substring of pip's own raw
-    output ("pip found no matching version", "non-public index", "local
-    wheel") rather than merely checking the package name appears somewhere -
-    the package name alone would ALSO appear in the status-quo generic
-    tail-of-pip-output message and prove nothing about this fix.
+    Asserts wording that is NOT a substring of pip's own raw output ("pip found
+    no matching version", "non-public index", "local wheel") rather than merely
+    checking the package name appears somewhere: the package name alone would
+    also appear in a generic tail-of-pip-output message.
 
-    Also pins the recovery hint (NEW-COMFY-S2-COPY-FAILS-ON-SIDELOADED-PACKAGE
-    option (c)): the message must point at the actual next step (clear the
-    ComfyUI folder setting, re-run setup for the fresh hardware-matched path)
-    rather than leaving the user stuck on a dead-end copy path."""
+    Also pins the recovery hint: the message must point at the actual next step
+    (clear the ComfyUI folder setting, re-run setup for the fresh
+    hardware-matched path) rather than leaving the user stuck on a dead-end copy
+    path."""
     from localm.media import managed_comfy_provision as prov
 
     monkeypatch.setenv("PIP_NO_INDEX", "1")
@@ -514,13 +507,13 @@ def test_provision_copy_names_the_unresolvable_package_not_just_a_pip_tail(
 
 def test_provision_copy_fails_loudly_when_venv_has_no_pip(home, fake_user_comfy,
                                                            monkeypatch):
-    """NEW-MANAGED-COMFY-VENV-MISSING-PIP, S2 copy path: the same probe as S3, so a
-    pip-less managed venv is diagnosed immediately after creation rather than
-    surfacing as an opaque failure two steps later inside the replicated-package
-    install. Mocks only `_run` (git clone/checkout are trivially satisfied, no real
-    network needed for this probe-only check) - if the probe were missing, the
-    fake `_run` below would receive the subsequent `pip install` replay call and
-    raise, which is what makes this a real fires-control."""
+    """S2 copy path: the same pip probe as S3, so a pip-less managed venv is
+    diagnosed immediately after creation rather than surfacing as an opaque
+    failure two steps later inside the replicated-package install. Mocks only
+    `_run` (git clone/checkout are trivially satisfied, no real network needed for
+    this probe-only check) - without the probe, the fake `_run` below would
+    receive the subsequent `pip install` replay call and raise, which is what
+    makes this a real fires-control."""
     from localm.media import managed_comfy_provision as prov
 
     cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
@@ -559,9 +552,9 @@ def test_provision_copy_fails_loudly_when_venv_has_no_pip(home, fake_user_comfy,
 
 
 def test_copy_custom_nodes_returns_warnings_not_silent(tmp_path, monkeypatch):
-    """A node that fails to copy is RETURNED as a warning (so the caller can route it
-    into the run log), not only streamed and forgotten (rule 5, the #622 vanished-log
-    class). Both the dir-copy and the .py-file-copy failure paths are covered."""
+    """A node that fails to copy is RETURNED as a warning (so the caller can route
+    it into the run log), not only streamed and forgotten. Both the dir-copy and
+    the .py-file-copy failure paths are covered."""
     from localm.media import managed_comfy_provision as prov
     user = tmp_path / "user"
     (user / "custom_nodes" / "NodeDir").mkdir(parents=True)
@@ -584,8 +577,8 @@ def test_copy_custom_nodes_returns_warnings_not_silent(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  ADR-0009 P12: ProgressCb carries a structured ProgressEvent, not just text. #
-#  P13: _copy_custom_nodes threads on_progress through with a per-item emit.   #
+#  ProgressCb carries a structured ProgressEvent, not just text, and           #
+#  _copy_custom_nodes threads on_progress through with a per-item emit.        #
 # --------------------------------------------------------------------------- #
 
 def test_progress_event_is_a_string_and_carries_structure():
@@ -620,8 +613,8 @@ def test_emit_wraps_a_plain_string_into_a_bare_progress_event():
 
 
 def test_emit_raising_sink_is_swallowed_not_raised():
-    """The module contract (:50): a raising progress sink is best-effort and must
-    never propagate out of _emit."""
+    """A raising progress sink is best-effort and must never propagate out of
+    _emit."""
     from localm.media import managed_comfy_provision as prov
 
     def _boom(event):
@@ -631,7 +624,7 @@ def test_emit_raising_sink_is_swallowed_not_raised():
 
 
 def test_copy_custom_nodes_reports_structured_progress_per_node(tmp_path):
-    """P13: each node gets its own progress event with phase/done/total/unit set
+    """Each node gets its own progress event with phase/done/total/unit set
     directly - a listener never has to parse "Copying custom node X (i/n) ..." to
     learn i, n or the unit."""
     from localm.media import managed_comfy_provision as prov
@@ -655,7 +648,7 @@ def test_copy_custom_nodes_reports_structured_progress_per_node(tmp_path):
 
 
 def test_copy_custom_nodes_raising_sink_does_not_abort_the_copy(tmp_path):
-    """DONE bar: a raising sink must not abort the copy it is merely reporting on."""
+    """A raising sink must not abort the copy it is merely reporting on."""
     from localm.media import managed_comfy_provision as prov
     user = tmp_path / "user"
     (user / "custom_nodes" / "NodeA").mkdir(parents=True)
@@ -672,10 +665,9 @@ def test_copy_custom_nodes_raising_sink_does_not_abort_the_copy(tmp_path):
 
 
 def test_provision_survives_a_raising_progress_sink(home, fake_user_comfy, monkeypatch):
-    """End to end (DONE bar, "test that explicitly"): a raising on_progress sink must
-    not abort a real provision that would otherwise succeed - covers both the
-    per-step narration (_say) and the per-node emit (_copy_custom_nodes) a real copy
-    exercises."""
+    """End to end: a raising on_progress sink must not abort a real provision that
+    would otherwise succeed - covers both the per-step narration (_say) and the
+    per-node emit (_copy_custom_nodes) a real copy exercises."""
     from localm.media import managed_comfy_provision as prov
     monkeypatch.setenv("PIP_NO_INDEX", "1")
     cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
@@ -691,10 +683,10 @@ def test_provision_survives_a_raising_progress_sink(home, fake_user_comfy, monke
 
 
 def test_provision_copy_node_failures_land_in_result(home, fake_user_comfy, monkeypatch):
-    """End to end: a non-fatal custom-node copy failure must SURVIVE into the result,
-    not only the live progress stream. It lands in ProvisionResult.log and its count is
-    folded into the success message (rule 5). Provisioning still succeeds - a failed
-    node only breaks the workflow needing it, not the whole install."""
+    """End to end: a non-fatal custom-node copy failure must SURVIVE into the
+    result, not only the live progress stream. It lands in ProvisionResult.log and
+    its count is folded into the success message. Provisioning still succeeds - a
+    failed node only breaks the workflow needing it, not the whole install."""
     from localm.media import managed_comfy_provision as prov
 
     # Skip the real pip replicate (empty freeze) to keep this fast; the fresh venv is
@@ -793,8 +785,8 @@ def test_resolve_copy_custom_nodes_helper(monkeypatch):
 
 
 def test_resolve_copy_custom_nodes_interactive_confirm():
-    """The interactive ASK (spec point 3): with no flag and nodes present, the user's
-    confirm() answer is honored both ways."""
+    """The interactive ASK: with no flag and nodes present, the user's confirm()
+    answer is honored both ways."""
     from localm.media import managed_comfy_provision as prov
     assert prov.resolve_copy_custom_nodes(
         None, n_nodes=2, interactive=True, confirm=lambda: True) is True

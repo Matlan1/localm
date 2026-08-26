@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression test for the coder GUI's tool-call display leak.
+"""The coder GUI's tool-call display leak.
 
 context.py's live-streaming hider (_stream_hiding_tool_calls) only recognises
 the UNCONDITIONAL <tool_call>/<|tool_call> wrapper dialects, because those are
@@ -12,18 +12,16 @@ text (the live hider has no idea it will turn out to be a real call) and is
 THEN executed for real once parse_tool_calls runs - so the chat bubble is left
 showing the executed call's own raw JSON, indistinguishable from prose.
 
-_LEAKED_RESPONSE below is the real shape captured live (qwen2.5-coder-7b-
-instruct-q4_k_m, GUI coder session): narration, a ```json fence for run_tests,
-then a block of pytest-looking text the model wrote as its own prose. That
-trailing block is NOT itself tool-call-shaped and must survive uncorrected -
-this is a stripping fix for EXECUTED spans, not a content filter over
-anything that merely resembles tool output.
+_LEAKED_RESPONSE below is a real captured shape: narration, a ```json fence for
+run_tests, then a block of pytest-looking text the model wrote as its own prose.
+That trailing block is NOT itself tool-call-shaped and must survive uncorrected:
+only EXECUTED spans are stripped, never anything that merely resembles tool
+output.
 
-loop.py's fix: once parse_tool_calls/split_response know which spans of the
-response were REAL calls, an "assistant_text" event carries the authoritative
-leftover text so the event-sink (GUI) can fix up whatever it already
-streamed, for every shape parser.py recognises - not just the ones the live
-hider happens to know about.
+Once parse_tool_calls/split_response know which spans of the response were REAL
+calls, loop.py emits an "assistant_text" event carrying the authoritative
+leftover text, so the event-sink (GUI) can fix up whatever it already streamed
+for every shape parser.py recognises.
 """
 
 from pathlib import Path
@@ -58,7 +56,6 @@ def _stub_run_tests(result=None):
                       {"run_tests": tool_def})
 
 
-# The real leaked shape, captured live from the GUI.
 _NARRATION = ("Now I'll run the tests using `pytest` to ensure everything is "
              "working correctly.")
 _FENCE_CALL = '```json\n{"name": "run_tests", "args": {}}\n```'
@@ -78,22 +75,20 @@ class TestAssistantTextCorrection:
              _stub_run_tests():
             agent.run_task("add whisper() and test it")
 
-        # The call was genuinely EXECUTED (the badge the user saw).
+        # The call was executed.
         tool_calls = [e for e in agent._events if e["type"] == "tool_call"]
         assert [c["tool"] for c in tool_calls] == ["run_tests"]
 
-        # The correction fired for this turn...
+        # Exactly one correction event for this turn.
         corrections = [e for e in agent._events if e["type"] == "assistant_text"]
         assert len(corrections) == 1
         corrected = corrections[0]["text"]
 
-        # ...and the executed call's own raw JSON/fence markers are GONE from it.
+        # The executed call's raw JSON and fence markers are gone from it.
         assert '"name": "run_tests"' not in corrected
         assert "```" not in corrected
 
-        # But nothing else was touched: the narration and the model's own
-        # (hallucinated, non-call) prose survive verbatim - this is a
-        # stripping fix, not a content filter.
+        # The narration and the hallucinated prose survive verbatim.
         assert _NARRATION in corrected
         assert _HALLUCINATED_OUTPUT in corrected
 

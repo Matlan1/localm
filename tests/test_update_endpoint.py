@@ -85,9 +85,8 @@ def test_update_check_unconfigured(monkeypatch):
 
 
 def test_update_check_blocked_by_net_policy_is_not_up_to_date(monkeypatch):
-    """The route already has a generic error path (test_issues_endpoint_error_surfaced
-    is the same shape) - a net-policy refusal must go through it, never through
-    the success shape with newer=False (which the GUI reads as "up to date")."""
+    """A net-policy refusal goes through the route's error path, not through the
+    success shape with newer=False (which the GUI reads as "up to date")."""
     _open_mode(monkeypatch)
     from localm.bugreport import LocalmError
     monkeypatch.setattr(updater, "available", lambda: True)
@@ -164,7 +163,7 @@ def test_update_apply_setup_class_does_not_restart(monkeypatch):
     assert restarted == [], "a setup-class update must NOT auto-restart"
 
 
-# ------------------- LM-DA-011: post-update health watchdog -----------------
+# ----------------------- post-update health watchdog -----------------------
 
 def _monkeypatch_apply_ok(monkeypatch, version="0.2.0"):
     monkeypatch.setattr(updater, "available", lambda: True)
@@ -207,8 +206,8 @@ def test_update_apply_uses_concrete_bind_host_directly(monkeypatch):
 
 
 def test_update_apply_no_watchdog_when_port_missing(monkeypatch):
-    """A bare create_app() that never advertised (instance_port unset) must still
-    restart normally - just without a watchdog, exactly like before this feature."""
+    """A bare create_app() that never advertised (instance_port unset) still
+    restarts normally, with no watchdog."""
     _open_mode(monkeypatch)
     import localm.inference.http_server as hs
     calls = []
@@ -223,9 +222,10 @@ def test_update_apply_no_watchdog_when_port_missing(monkeypatch):
 # ------------------------------- auth -----------------------------------
 
 def test_update_apply_requires_management_auth(monkeypatch):
-    """The mutating apply must be behind the management gate (shell-token /
-    same-origin), so a no-token cross-origin caller cannot drive a self-update. The
-    read-only check/issues follow the server's existing open-on-loopback read posture."""
+    """The mutating apply sits behind the management gate (shell-token /
+    same-origin), so a no-token cross-origin caller cannot drive a self-update.
+    The read-only check/issues follow the server's open-on-loopback read
+    posture."""
     _open_mode(monkeypatch)
     with TestClient(create_app(_engine())) as c:
         assert c.post("/api/update/apply").status_code in (401, 403)

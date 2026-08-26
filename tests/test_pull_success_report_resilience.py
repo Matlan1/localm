@@ -1,29 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Item #25: a genuinely successful pull was reported as FAILED, because the
-final status print - a bare console.print of a green checkmark - crashed AFTER
-the download, checksum verification and registry write were already done. Two
-independent, unrelated exceptions have hit this exact line in practice (a
-ModuleNotFoundError from rich's cell-width lookup, a UnicodeEncodeError from a
-legacy Windows console write path) - see
-dev-notes/ROOTCAUSE-pull-success-reported-as-failed-2026-08-05.md.
+"""A genuinely successful pull must not be reported as FAILED when the final
+status print - a bare console.print of a green checkmark - crashes AFTER the
+download, checksum verification and registry write are already done. Two
+independent, unrelated exceptions hit that exact line in practice: a
+ModuleNotFoundError from rich's cell-width lookup, and a UnicodeEncodeError from
+a legacy Windows console write path.
 
 The GUI runs `localm pull` as a subprocess (localm/plugins/gui/jobs.py) and
 reduces the whole operation to `status = "done" if returncode == 0 else
 "failed"`. So the return value of pull_model()/_pull_url()/_pull_hf_snapshot()
-alone is one link short of the real bug: what actually decides the user-visible
-outcome is the CLI PROCESS'S EXIT CODE, which is why the last test below drives
-the real `pull` click command through CliRunner rather than stopping at the
-Python-level return value.
+alone is one link short: what decides the user-visible outcome is the CLI
+PROCESS'S EXIT CODE, so the last test below drives the real `pull` click command
+through CliRunner rather than stopping at the Python-level return value.
 
-The classes near the bottom of this file cover the SAME shape at three more
-call sites (S4): the mid-function "SHA256 verified" checkmark in
-pull_model()'s local-path branch, in _pull_gguf_file(), and in _pull_url() -
-each one printed BEFORE the function's own trailing _report_success()-guarded
-message, but still AFTER the real work (hashing, and in two of the three
-cases the registry write) is done. Unlike the trailing checkmark, these sit
-in the MIDDLE of their function, so the regression is not just "does the
-return value survive" but "does execution reach the registration code that
-follows the print at all".
+The classes near the bottom of this file cover the SAME shape at three more call
+sites: the mid-function "SHA256 verified" checkmark in pull_model()'s local-path
+branch, in _pull_gguf_file(), and in _pull_url() - each printed BEFORE the
+function's own trailing _report_success()-guarded message, but still AFTER the
+real work (hashing, and in two of the three cases the registry write) is done.
+Unlike the trailing checkmark, these sit in the MIDDLE of their function, so the
+property is not just "does the return value survive" but "does execution reach
+the registration code that follows the print at all".
 """
 
 from __future__ import annotations
@@ -49,7 +46,7 @@ class TestReportSuccessNeverRaises:
 
         def _fake_print(msg):
             calls.append(msg)
-            if "✓" in msg:      # the checkmark glyph, exactly what crashes
+            if "✓" in msg:      # the checkmark glyph
                 raise ModuleNotFoundError(
                     "No module named 'rich._unicode_data.unicode17-0-0'")
 
@@ -133,8 +130,7 @@ def _raise_on_checkmark(msg):
     # console.print() also carries non-string renderables (rich.control.Control
     # instances from Progress/Live's cursor-management calls) - only the final
     # status line is ever a plain string containing the glyph, so anything else
-    # must pass through untouched or this mock crashes on input the real bug
-    # never touches.
+    # must pass through untouched.
     if isinstance(msg, str) and "✓" in msg:
         raise ModuleNotFoundError(
             "No module named 'rich._unicode_data.unicode17-0-0'")
@@ -171,8 +167,7 @@ class TestCliPullExitCode:
         from localm.cli.models import pull
 
         body = b"0123456789"
-        # Matches the real incident exactly: the GUI spawns `localm pull` with
-        # LOCALM_PROGRESS_JSON=1 (jobs.py:296/618-619).
+        # The GUI spawns `localm pull` with LOCALM_PROGRESS_JSON=1.
         monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
         _wire_http(monkeypatch, len(body), _resp(200, body))
         monkeypatch.setattr(pull_mod.console, "print", _raise_on_checkmark)
@@ -187,14 +182,13 @@ class TestCliPullExitCode:
         )
 
 
-# ------------------------------------------------------- S4: the mid-function
+# ------------------------------------------------------- the mid-function
 # ------------------------------------------------ "SHA256 verified" checkmarks
 #
-# Three more raw console.print(f"[green]checkmark[/green] SHA256 verified...")
-# calls share the identical shape but sit BEFORE the rest of their function's
-# work, not after it - so the regression these guard against is not merely
-# "the return value survives a crash", it is "execution reaches the
-# registration code that the print used to sit in front of".
+# Three raw console.print(f"[green]checkmark[/green] SHA256 verified...") calls
+# share the identical shape but sit BEFORE the rest of their function's work,
+# so these tests assert that execution reaches the registration code that
+# follows the print.
 
 class TestLocalPathSurvivesACrashingVerifiedPrint:
     """pull_model()'s local-path branch (pull.py, is_local_path with
@@ -227,9 +221,9 @@ class TestLocalPathSurvivesACrashingVerifiedPrint:
 
 
 class TestPullGgufFileSurvivesACrashingVerifiedPrint:
-    """_pull_gguf_file()'s FAC-5 --sha256 branch: the checkmark sits between
-    the real digest check on the freshly-downloaded bytes and the metadata
-    probe + _register() call that follows it."""
+    """_pull_gguf_file()'s --sha256 branch: the checkmark sits between the real
+    digest check on the freshly-downloaded bytes and the metadata probe +
+    _register() call that follows it."""
 
     def test_pull_gguf_file_still_registers_when_the_verified_print_raises(
             self, tmp_path, monkeypatch):
@@ -239,10 +233,10 @@ class TestPullGgufFileSurvivesACrashingVerifiedPrint:
         monkeypatch.setattr(mm, "ensure_dirs", lambda: None)
         monkeypatch.setattr(mm, "find_by_sha256", lambda *a, **k: [])
         monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: True)
-        # None (not a real digest): the FAC-5 pre-download reconciliation at
-        # pull.py's "want and expected and want != expected" only fires when
-        # HF metadata is known: keep it unknown so the caller's --sha256 is
-        # the one actually verified against the downloaded bytes below.
+        # None (not a real digest): the pre-download reconciliation at pull.py's
+        # "want and expected and want != expected" only fires when HF metadata
+        # is known: keep it unknown so the caller's --sha256 is the one actually
+        # verified against the downloaded bytes below.
         monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, fn: None)
 
         register_calls = []

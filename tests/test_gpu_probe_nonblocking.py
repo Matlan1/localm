@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression guard for the diagnosed idle-hang root cause: a GUI request that
-reads GPU state must NOT run the (blocking) GPU driver probe on the event loop.
+"""A GUI request that reads GPU state must NOT run the (blocking) GPU driver probe
+on the event loop.
 
-The probe is safe-by-construction (test_discover.py::TestListGpusSafety proves it
-can never block its caller past its deadline), AND the GUI handlers offload it to
-the plugin executor. This test proves the second half end to end: while the probe
-is blocked in a worker thread, the event loop keeps running coroutines - i.e. the
-whole WebUI stays responsive. If a future edit reintroduces an inline probe on the
-loop, the loop would be frozen for the probe's duration and this test fails."""
+The probe is bounded by its own deadline, and the GUI handlers offload it to the
+plugin executor. This test covers the offload end to end: while the probe is
+blocked in a worker thread, the event loop keeps running coroutines."""
 
 import asyncio
 import threading
@@ -51,7 +48,7 @@ async def test_gpus_endpoint_probe_does_not_block_event_loop(gui_app, monkeypatc
 
     def _blocking_probe():
         # Simulate a slow/wedged GPU driver call. If this ran on the event loop,
-        # the whole server would freeze here until release (regression signal).
+        # the whole server would freeze here until release.
         probe_entered.set()
         release.wait(3)
         return [{"index": 0, "name": "X", "total": 8, "free": 8}]

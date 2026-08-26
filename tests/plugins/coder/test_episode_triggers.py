@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Coder episode TRIGGERS + reflection evidence (audit clusters 11 and 13).
+"""Coder episode TRIGGERS + reflection evidence.
 
 These drive the REAL Agent dispatch / close path (not mocks of the unit under
 test): the tool-failure trace is captured through the real _execute_tool, git
@@ -79,12 +79,12 @@ def _git(cwd, *args):
 
 
 # --------------------------------------------------------------------------- #
-#  Cluster 13: the tool-failure trace is captured and reaches the reflection  #
+#  The tool-failure trace is captured and reaches the reflection              #
 # --------------------------------------------------------------------------- #
 
 def test_tool_failure_is_recorded_in_error_trace(home, tmp_path):
-    # Drive the REAL dispatch path: a read_file on a missing path fails, and the
-    # failure must land in the bounded error trace that feeds the reflection.
+    # A read_file on a missing path fails through the real dispatch path and
+    # lands in the bounded error trace that feeds the reflection.
     agent = _agent(tmp_path, mode=SessionMode.LOG)
     call = ToolCall(name="read_file", args={"path": "does_not_exist.py"},
                     raw="", start=0, end=0)
@@ -104,8 +104,8 @@ def test_error_trace_is_bounded(home, tmp_path):
 
 
 def test_failed_no_change_session_stores_thin_failure_episode(home, tmp_path):
-    # Cluster 11: an investigation-only session that FAILED (no file change) must
-    # still record a failure lesson, even when the model reflects nothing usable.
+    # An investigation-only session that failed (no file change) still records a
+    # failure lesson when the model reflects nothing usable.
     agent = _agent(tmp_path, backend=_ChatBackend("no idea, sorry"),
                    mode=SessionMode.LOG)
     agent._episode_task = "find why the importer crashes"
@@ -120,16 +120,14 @@ def test_failed_no_change_session_stores_thin_failure_episode(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  REG-594: the CLI's synchronous close-time reflection must not hang exit -   #
-#  every OTHER test in this file drives close() with an INSTANT canned         #
-#  backend, so none of them can observe the wall-clock cost this bounds.       #
+#  The CLI's synchronous close-time reflection is bounded                     #
 # --------------------------------------------------------------------------- #
 
 def test_cli_close_reflection_is_bounded_not_unbounded(home, tmp_path, monkeypatch):
     """A no-file-change FAILED session (max_turns / a circuit breaker / a failed
-    verify oracle - REG-594's exact trigger) must not block CLI exit for the
-    full duration of a slow or wedged model call. Patches the deadline down so
-    the test itself stays fast while still proving the bound is real."""
+    verify oracle) must not block CLI exit for the full duration of a slow or
+    wedged model call. Patches the deadline down so the test itself stays fast
+    while still proving the bound is real."""
     import threading
     import time
 
@@ -158,9 +156,8 @@ def test_cli_close_reflection_is_bounded_not_unbounded(home, tmp_path, monkeypat
     release.set()                     # free the leaked daemon thread
     assert elapsed < 2.0, (
         f"close() took {elapsed:.2f}s - the reflection deadline did not bound it")
-    # A timeout must not lose the evidence that led here: episodes.py's
-    # thin-failure fallback still fires from the real error trace, so the
-    # session's lesson survives even though the model's prose did not.
+    # On timeout, episodes.py's thin-failure fallback still fires from the real
+    # error trace, so the session's lesson is recorded.
     eps = agent._episode_store.all()
     assert len(eps) == 1
     assert eps[0].outcome == "incomplete"
@@ -170,9 +167,9 @@ def test_cli_close_reflection_is_bounded_not_unbounded(home, tmp_path, monkeypat
 def test_cli_close_reflection_stores_the_full_episode_within_deadline(
         home, tmp_path, monkeypatch):
     """Negative for the bound: a normal-speed reflection must not be truncated
-    or downgraded to the thin fallback just because it is now wrapped in a
-    deadline - REG-594's fix must not change what gets stored in the common
-    case, only cap the worst case."""
+    or downgraded to the thin fallback just because it is wrapped in a deadline.
+    The bound must change only the worst case, not what gets stored in the
+    common one."""
     import localm.plugins.coder.agent.session as _session_mod
     monkeypatch.setattr(_session_mod, "_CLI_REFLECTION_DEADLINE_S", 5.0)
 
@@ -191,7 +188,7 @@ def test_cli_close_reflection_stores_the_full_episode_within_deadline(
 
 def test_cli_close_prints_a_reflecting_notice_before_the_synchronous_call(
         home, tmp_path, monkeypatch):
-    """The synchronous wait must be visible, not a silent hang (REG-594)."""
+    """The synchronous wait must be visible, not a silent hang."""
     import localm.plugins.coder.agent.session as _session_mod
     printed: list = []
     monkeypatch.setattr(_session_mod, "print_info", printed.append)
@@ -231,15 +228,14 @@ def test_gui_session_reflection_stays_unbounded_and_gets_no_notice(
         time.sleep(0.02)
     eps = agent._episode_store.all()
     assert len(eps) == 1
-    # Reached the FULL reflection, not the thin fallback, even though the CLI
-    # deadline was patched to something absurdly short - proving it never
-    # applied on this path.
+    # The full reflection landed, not the thin fallback: the CLI deadline does
+    # not apply on this path.
     assert eps[0].summary == "ran the generator"
     assert printed == [], "the GUI path must not print the CLI-only notice"
 
 
 def test_clean_no_change_session_stores_nothing(home, tmp_path):
-    # The benign case must stay silent (no bloat): no changes, no failures.
+    # The benign case stays silent: no changes, no failures.
     agent = _agent(tmp_path, backend=_ChatBackend(), mode=SessionMode.LOG)
     agent._episode_task = "what does this function do"
     assert agent._last_run_ok is True
@@ -248,7 +244,7 @@ def test_clean_no_change_session_stores_nothing(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  Cluster 11: run_shell writes recovered via git; delegated work folded       #
+#  run_shell writes recovered via git; delegated work folded                   #
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not available")

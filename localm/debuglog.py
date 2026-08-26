@@ -70,8 +70,7 @@ def debug_content_enabled() -> bool:
         # produces the content (llamacpp/llama.py) is surface-agnostic and serves
         # coder sessions through the same generation path as chat/server, so a
         # coder-only privacy override (coder_mode / .localcoder/config.toml) must
-        # suppress it too, even when chat/server are not privacy. Err toward not
-        # writing - over-suppression only costs a debug convenience, never privacy.
+        # suppress it too, even when chat/server are not privacy.
         for surface in ("server", "chat", "coder"):
             if effective_mode(surface) == SessionMode.PRIVACY:
                 return False
@@ -88,11 +87,9 @@ def debug_content_enabled() -> bool:
 def honor_env_debug() -> None:
     """Open the debug log file when debug was requested via the LOCALM_DEBUG env
     var (e.g. ``LOCALM_DEBUG=1 localm run ...``), not only via the ``--debug``
-    flag. Previously the env var flipped debug SEMANTICS on (debug_enabled() ->
-    True, verbose uvicorn) but nothing ever called enable_debug(), so no log file
-    was written - a silent half-on state (REC-DEBUGENV). A truthy-but-non-path
-    value ("1"/"true"/"yes") is the user's request; a real path means we inherited
-    an already-open log from a parent process, so leave enable_debug() to no-op."""
+    flag. A truthy-but-non-path value ("1"/"true"/"yes") is the user's request;
+    a real path means we inherited an already-open log from a parent process, so
+    leave enable_debug() to no-op."""
     if debug_enabled() and log_file_path() is None:
         enable_debug()
 
@@ -108,11 +105,10 @@ def defer_log(level: int, msg: str, *args) -> None:
     (which calls install_ring_buffer) and before any ``enable_debug()``, so at
     that moment the localm logger has no handler and still inherits the root's
     WARNING threshold. A plain ``logger.debug()`` there is therefore dropped AT
-    THE CALL and no later handler can recover it - a log line that looks like a
-    fix but is dead code (the failure mode that shipped in the first
-    _wire_plugin_cli_entries fix). Queued records are replayed by enable_debug(),
-    so they reach the debug log whichever way debug is turned on (LOCALM_DEBUG
-    via honor_env_debug, or a per-command --debug flag later in the run).
+    THE CALL and no later handler can recover it. Queued records are replayed by
+    enable_debug(), so they reach the debug log whichever way debug is turned on
+    (LOCALM_DEBUG via honor_env_debug, or a per-command --debug flag later in the
+    run).
 
     Bounded: a runaway producer can never grow this without limit."""
     if len(_deferred_records) < 100:
@@ -130,20 +126,18 @@ def _flush_deferred() -> None:
 
 def uvicorn_log_level() -> str:
     """The uvicorn log level for a server launch: verbose ``info`` in debug mode
-    so the console window shows requests / connections / errors live (SRV-5),
-    otherwise the quiet ``warning`` default."""
+    so the console window shows requests / connections / errors live, otherwise
+    the quiet ``warning`` default."""
     return "info" if debug_enabled() else "warning"
 
 
 # --------------------------------------------------------------------------- #
 #  Always-on in-memory recent-activity buffer                                  #
 #                                                                              #
-#  A bug report is only useful if it carries what the app was DOING before it  #
-#  broke. The on-disk debug log only exists under --debug, which a tester will #
-#  not have enabled, so a normal report had no activity trail at all. This     #
-#  bounded, in-memory ring buffer captures recent INFO+ log records ALWAYS, so #
-#  the bug reporter can show the last breadcrumbs (model loads, backend pick,  #
-#  swaps, warnings, errors) regardless of debug mode.                          #
+#  A bounded, in-memory ring buffer that captures recent INFO+ log records     #
+#  ALWAYS, so the bug reporter can show the last breadcrumbs (model loads,     #
+#  backend pick, swaps, warnings, errors) regardless of debug mode - the       #
+#  on-disk debug log only exists under --debug.                                #
 #                                                                              #
 #  Privacy: INFO and above ONLY. The raw, pre-scrub model output (chat content)#
 #  is logged at DEBUG (inference/backends/llamacpp/llama.py), so it never lands #
@@ -163,11 +157,8 @@ def uvicorn_log_level() -> str:
 #  does so for code that executes in the process that called install_ring_     #
 #  buffer(). A child-side breadcrumb needs an explicit relay over its own IPC   #
 #  (an extra envelope back to the parent, which then logs it itself) to land    #
-#  here - verified empirically 2026-08-12, see dev-notes/generation-path-       #
-#  logging-instrumentation-2026-08-12.md for the measurement and the design     #
-#  this constraint forced (llamacpp/_runner.py's ModelRunner.chat_stream logs   #
-#  its own parent-side markers rather than assuming the child's INFO calls      #
-#  would surface here).                                                        #
+#  here: llamacpp/_runner.py's ModelRunner.chat_stream logs its own             #
+#  parent-side markers rather than relying on the child's INFO calls.           #
 # --------------------------------------------------------------------------- #
 
 _RING_CAPACITY = 400
@@ -198,9 +189,9 @@ def flush_log_handlers() -> None:
     """Flush all file handlers on the localm logger.
 
     Call immediately before os.execv() so no buffered log lines are lost
-    when the process image is replaced (Task 1: save-bug / log durability).
-    The file handlers use buffering=1 (line-buffered) so this is a belt-and-
-    suspenders guard against any remaining buffer; it never raises."""
+    when the process image is replaced. The file handlers use buffering=1
+    (line-buffered), so this is a guard against any remaining buffer; it
+    never raises."""
     for h in list(logger.handlers):
         try:
             h.flush()
@@ -277,7 +268,7 @@ def _stable_console_stream():
     The mirror writes through stderr. Without this isolation it writes through
     fd 2 *while that fd is being juggled*, which on Windows raises
     "OSError: [WinError 6] The handle is invalid" on nearly every log line during
-    those windows (LOG-1) - flooding the console and burying real errors.
+    those windows - flooding the console and burying real errors.
     Duplicating the fd once keeps the mirror pointed at the original console no
     matter what later happens to fd 2.
 
@@ -312,16 +303,15 @@ def _stable_console_stream():
 
 def _add_console_handler() -> None:
     """Mirror debug logs to the server console (stderr), so a --debug run shows
-    activity live in the window instead of only in the log file (SRV-5).
+    activity live in the window instead of only in the log file.
     Idempotent: a real (non-file) StreamHandler is added at most once. A
     FileHandler is a StreamHandler subclass, so it is explicitly excluded.
 
     The stream is a private duplicate of stderr (see ``_stable_console_stream``)
     so the mirror is NOT disrupted by the fd-2 redirection that silences native
-    llama.cpp output - the cause of the LOG-1 "[WinError 6] The handle is
-    invalid" log flood. The mirror never swallows a record either way: the file
+    llama.cpp output. The mirror never swallows a record either way: the file
     handler always carries every line, so nothing is hidden if a console write
-    ever does fail (logging then reports that failure loudly, as before)."""
+    ever does fail (logging then reports that failure loudly)."""
     for h in logger.handlers:
         if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
             return
@@ -341,31 +331,23 @@ def suppress_console_mirror():
     """Temporarily detach the debug-mode console-mirroring handler (see
     ``_add_console_handler`` above) so a log record emitted during this block
     reaches only the FILE handler (when debug mode is on), never the shared
-    terminal - nothing is silently lost, only the LIVE view is paused, same
+    terminal - nothing is lost, only the LIVE view is paused, same
     "never drop a record" contract as ``dedup_native_stderr``.
 
-    WHY THIS NEEDS TO EXIST SEPARATELY FROM THE fd-2 REDIRECTS
-    (``_quiet_stderr``/``_capture_stderr``/``dedup_native_stderr`` in
-    ``inference/backends/llamacpp/llama.py``): the console mirror's stream is
-    ``_stable_console_stream()``, and THAT function's own docstring states
-    its entire purpose is staying "immune to the OS-level fd-2 redirection...
-    Without this isolation it writes through fd 2 *while that fd is being
-    juggled*" - i.e. the mirror is DESIGNED to survive those redirects, on
-    purpose (SRV-5: debug activity stays visible during a load). That is a
-    real, wanted property in general. It also means a caller cannot silence
-    the mirror by widening an fd-2 redirect scope - the mirror does not go
-    through fd 2 at all, so no fd-2 trick reaches it.
+    The console mirror's stream is ``_stable_console_stream()``, a private
+    duplicate of stderr, so it does not write through fd 2 at all: an fd-2
+    redirect (``_quiet_stderr``/``_capture_stderr``/``dedup_native_stderr`` in
+    ``inference/backends/llamacpp/llama.py``) does not reach it, and this
+    context manager is what pauses it.
 
-    Concrete case this closes: an isolated child process (the GGUF chat
-    backend's model-load worker) calling ``logger.info(...)`` in debug mode
-    writes straight to the shared terminal from a DIFFERENT process than the
-    one rendering a parent-owned Rich ``Progress``/``Live`` display - the
-    parent has zero visibility into that write, so its cursor-position
-    bookkeeping desyncs and a stale frame is stranded on screen (see
+    The case this covers: an isolated child process (the GGUF chat backend's
+    model-load worker) calling ``logger.info(...)`` in debug mode writes
+    straight to the shared terminal from a DIFFERENT process than the one
+    rendering a parent-owned Rich ``Progress``/``Live`` display - the parent
+    has zero visibility into that write, so its cursor-position bookkeeping
+    desyncs and a stale frame is stranded on screen (see
     ``llamacpp/llama.py``'s ``LlamaCpp.__init__``, which pairs this with its
-    merged native-call redirect scope for exactly this reason - closing the
-    fd-2 gap alone does NOT stop the mirror, by design, per the paragraph
-    above).
+    merged native-call redirect scope).
 
     A no-op when no console mirror is currently attached (debug mode off, or
     never enabled) - nothing to suppress, nothing to restore."""
@@ -431,8 +413,7 @@ def hang_watchdog_verbose() -> bool:
 def hang_watchdog_threshold() -> float:
     """Seconds the event loop may go without a heartbeat before it is declared
     stalled and stacks are dumped. Floored at 2s so a normal slow callback does
-    not trip it; default 10s (conservative, since it runs by default - a real
-    hang is indefinite, so a higher bar only skips brief transient stalls)."""
+    not trip it; default 10s."""
     try:
         return max(2.0, float(os.environ.get(_HANG_SECS_ENV, "10")))
     except ValueError:
@@ -463,12 +444,10 @@ def child_crash_trace_path(tag: str) -> Path:
     what died.
 
     CALLED BY THE PARENT, ONCE, and the resulting path is passed to the child
-    explicitly rather than recomputed there. That is deliberate: `logs_dir()`
-    reads `config.HOME_DIR`, which is frozen at IMPORT time, so a spawned child
-    that inherited a different LOCALM_HOME would resolve a DIFFERENT directory
-    and the two sides would silently disagree about where the trace went (the
-    test suite does exactly this - conftest re-points LOCALM_HOME per test). One
-    derivation, handed over, cannot diverge."""
+    explicitly rather than recomputed there: `logs_dir()` reads
+    `config.HOME_DIR`, which is frozen at IMPORT time, so a spawned child that
+    inherited a different LOCALM_HOME would resolve a DIFFERENT directory and
+    the two sides would disagree about where the trace went."""
     d = logs_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d / f"crash_{tag}_{os.getpid()}_{next(_crash_trace_counter)}.txt"
@@ -489,7 +468,7 @@ def enable_debug() -> Path:
     os.environ[_ENV_VAR] = str(path)
 
     # buffering=1 = line-buffered: each log record is flushed to disk immediately
-    # so no lines are lost if the process is killed or os.execv'd (Task 1: save-bug).
+    # so no lines are lost if the process is killed or os.execv'd.
     # delay=True prevents FileHandler from opening the file internally; we then
     # set stream to a manually opened line-buffered handle so baseFilename is
     # preserved (used by attach_child_logging to deduplicate) while the fd is
@@ -501,7 +480,7 @@ def enable_debug() -> Path:
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
-    _add_console_handler()   # SRV-5: also show debug activity in the console
+    _add_console_handler()   # also show debug activity in the console
     install_ring_buffer()    # keep the in-memory breadcrumb buffer for reports
 
     _install_thread_hook()
@@ -561,7 +540,7 @@ def attach_child_logging() -> None:
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
-    _add_console_handler()   # SRV-5: a managed/child server is verbose too
+    _add_console_handler()   # a managed/child server is verbose too
     install_ring_buffer()    # buffer breadcrumbs for a bug report in this child too
     _install_thread_hook()
 
@@ -588,13 +567,12 @@ def record_native_line(text: str) -> None:
     recent-activity ring buffer, so the GUI status window's live log tail
     shows it too - see appface.py, which polls recent_activity() on a timer.
 
-    Deliberately bypasses the logging.Handler chain (does not call
-    logger.info()): a debug-mode run already has its own console
-    StreamHandler mirroring *structured* localm log calls to the terminal
-    (_add_console_handler), and routing native text through the same logger
-    would print it a second time there. dedup_native_stderr() below writes
-    the terminal copy itself directly, so this function's only job is the
-    ring buffer / GUI side.
+    Bypasses the logging.Handler chain (does not call logger.info()): a
+    debug-mode run already has its own console StreamHandler mirroring
+    *structured* localm log calls to the terminal (_add_console_handler), and
+    routing native text through the same logger would print it a second time
+    there. dedup_native_stderr() below writes the terminal copy itself
+    directly, so this function's only job is the ring buffer / GUI side.
     """
     if _ring_handler is None:
         return
@@ -610,36 +588,13 @@ class _LineGrouper:
     Native ggml/llama.cpp stderr often alternates between a handful of
     DISTINCT lines rather than repeating one line twice in a row (e.g.
     ggml-cuda's "CUDA graph warmup complete" / "...warmup reset", toggled
-    every call): a lookback of exactly 1 (the original design) never
-    re-matches either line, so nothing ever collapses and a long generation
-    floods the live console/ring-buffer views with the full pair forever.
-    The same stream also carries "CUDA Graph id N reused", where N varies.
+    every call), and the same stream also carries "CUDA Graph id N reused",
+    where N varies.
 
-    THIS CLASS ORIGINALLY EXEMPTED THAT LINE, on the premise that it "changes
-    every occurrence" and so "can never be grouped by exact match, which is fine
-    and expected". MEASURED 2026-08-05 against a real 9012-line capture
-    (issues/cuda graphs.txt): the premise is FALSE. N cycles through a BOUNDED,
-    REPEATING set - 21 distinct values in that capture, each recurring roughly
-    425 times. Those lines are verbatim repeats; they are merely spaced 21 apart
-    against an LRU that then held 8, so every one was evicted before it came
-    round and NOTHING grouped: 8934 of 9012 lines emitted individually, to the
-    console and the GUI activity ring, not just the debug log.
-
-    Worse, the exemption defeated the very thing this class exists to protect.
-    With 21 ids interleaved, the 8 slots were consumed entirely by graph ids, so
-    the warmup pair was evicted too - "warmup reset" appears 23x ungrouped
-    against 4x grouped in that same file.
-
-    So grouping is keyed on a DIGIT-NORMALISED template, not the raw line. Exact
-    match genuinely cannot collapse a varying integer - that part was true - but
-    that is a property of exact match, not a reason to accept the flood. Raising
-    _MAX_PENDING was rejected: the capture holds 105 distinct ids overall, so the
-    working set changes between phases and no fixed size is correct in general,
-    only sizes correct for the workload someone happened to measure.
-
-    A template seen with ONE variant renders exactly as before, so every line
-    that groups correctly today is byte-identical; only the previously
-    ungroupable case changes, to "<template> (xCOUNT, N distinct)".
+    Grouping is therefore keyed on a DIGIT-NORMALISED template, not the raw
+    line. A template seen with ONE variant renders as the bare line or
+    "line(N)"; a template collapsed across variants renders as
+    "<template> (xCOUNT, N distinct)".
 
     Up to _MAX_PENDING distinct lines are held open at once as an LRU set,
     each with its own running count: a line that matches one already pending
@@ -650,25 +605,21 @@ class _LineGrouper:
     straight through the set without evicting a slot that IS actively
     repeating - otherwise every unrelated one-off line between repeats would
     reset the count on the very thing this class exists to collapse.
-    _MAX_PENDING=1 reduces to the original single-line-lookback behaviour
-    exactly. Nothing is dropped: every distinct line is eventually emitted
-    exactly once, either bare (a run of 1) or with its repeat count.
+    _MAX_PENDING=1 reduces to a single-line lookback exactly. Nothing is
+    dropped: every distinct line is eventually emitted exactly once, either
+    bare (a run of 1) or with its repeat count.
 
-    Deliberately generic - no CUDA-specific string ever appears in this
-    class - so the next backend's own repeating cycle collapses too."""
+    Generic - no CUDA-specific string appears in this class - so another
+    backend's own repeating cycle collapses too."""
 
-    # Small and bounded on purpose: enough to hold a short repeating cycle
-    # (the observed case is 2 lines) open across one-off lines interleaved
-    # with it, while keeping a genuinely non-repeating stream's reordering
-    # latency (at most _MAX_PENDING lines, versus 1 before this class
-    # existed) small enough not to meaningfully change the live view's
-    # responsiveness.
+    # Small and bounded: enough to hold a short repeating cycle open across
+    # one-off lines interleaved with it, while keeping a genuinely
+    # non-repeating stream's reordering latency (at most _MAX_PENDING lines)
+    # small.
     _MAX_PENDING = 8
 
     # Grouping key: the line with every run of digits replaced, so lines that
-    # differ ONLY in an embedded number share one pending slot. See the class
-    # docstring for why exact-string matching could not collapse the measured
-    # case no matter how large _MAX_PENDING got.
+    # differ ONLY in an embedded number share one pending slot.
     _DIGITS_RE = re.compile(r"\d+")
     _PLACEHOLDER = "<N>"
 
@@ -678,23 +629,18 @@ class _LineGrouper:
     # count is reported as "N+".
     _MAX_VARIANTS = 256
 
-    # TEMPLATE COLLAPSE IS A FALLBACK FOR WHAT EXACT MATCHING CANNOT SERVE, not
+    # Template collapse is a FALLBACK for what exact matching cannot serve, not
     # a replacement for it. Two conditions, BOTH required:
     #
     #   1. more distinct variants than _MAX_PENDING. At or below that, every
     #      variant fits in its own slot and exact matching already groups each
-    #      one with its own count - which is strictly more informative than a
-    #      placeholder. Collapsing there would DESTROY working output.
+    #      one with its own count, which is more informative than a
+    #      placeholder.
     #   2. genuine repetition - the average variant seen at least
     #      _COLLAPSE_MIN_REPEATS times. Without this, "load_tensors: layer 0
     #      assigned to device ROCm0" through "layer 27 ..." would compress 28
-    #      informative lines into one, losing every layer number to save
-    #      nothing. That is a LIST of distinct messages, not a flood.
-    #
-    # The measured cases separate cleanly on both, so neither is a fine
-    # judgement: the captured flood is 105 variants at 85 repeats each; a load
-    # report is 28 variants at 1; the two-id case in the tests is 2 variants,
-    # which condition 1 alone already protects.
+    #      informative lines into one, losing every layer number. That is a
+    #      LIST of distinct messages, not a flood.
     _COLLAPSE_MIN_REPEATS = 2
 
     def __init__(self, emit) -> None:
@@ -726,26 +672,22 @@ class _LineGrouper:
         self._pending[key] = [1, {line: 1}, False]
 
     def _emit_one(self, count: int, variants: dict, overflowed: bool) -> None:
-        # ONE variant -> byte-identical to the pre-template behaviour, so every
-        # line that groups correctly today keeps its exact present output.
+        # ONE variant -> the bare line, or the line with its repeat count.
         if len(variants) == 1 and not overflowed:
             line, n = next(iter(variants.items()))
             self._emit(line if n <= 1 else f"{line}({n})")
             return
         # Anything exact matching could have handled, or that is a list rather
-        # than a flood, is emitted per-variant with its own count - byte-identical
-        # to the pre-template behaviour. See _COLLAPSE_MIN_REPEATS for both
-        # conditions and why each is load-bearing.
+        # than a flood, is emitted per-variant with its own count. See
+        # _COLLAPSE_MIN_REPEATS for both conditions.
         if not overflowed and (len(variants) <= self._MAX_PENDING
                                or count < self._COLLAPSE_MIN_REPEATS * len(variants)):
             for line, n in variants.items():
                 self._emit(line if n <= 1 else f"{line}({n})")
             return
         # A genuine flood. The varying part becomes a placeholder rather than one
-        # arbitrary value, because picking one would misreport it as THE value.
-        # The distinct count is KEPT - 105 distinct graph ids is a different
-        # situation from 2, and rule 5 asks for a counted line, never a silenced
-        # one.
+        # arbitrary value, and the distinct count is KEPT, so the line is
+        # counted rather than silenced.
         n_distinct = f"{len(variants)}+" if overflowed else str(len(variants))
         template = self._key(next(iter(variants)))
         self._emit(f"{template} (x{count}, {n_distinct} distinct)")
@@ -794,8 +736,7 @@ def dedup_native_stderr():
     # write end instead of the real stderr - every "print to the terminal"
     # would then loop straight back into the same pipe the reader thread is
     # draining, which reads it again and re-emits it forever: a silent,
-    # CPU-spinning infinite loop with no forward progress (this exact bug
-    # was caught live - the whole generation call hung indefinitely).
+    # CPU-spinning infinite loop with no forward progress.
     console = _stable_console_stream()
 
     saved_fd = os.dup(2)
@@ -821,8 +762,7 @@ def dedup_native_stderr():
             if not _debug_write_failed:
                 _debug_write_failed = True
                 # The line still reaches the console and the ring buffer (via
-                # _emit / grouper below), so this is degraded, not a silent drop;
-                # the docstring's "nothing silently lost" holds because we say so.
+                # _emit / grouper below), so this is degraded, not a silent drop.
                 logger.warning("debuglog: native stderr line could not be written "
                                "to the persisted debug log (%s); further such "
                                "failures this session are suppressed", e)

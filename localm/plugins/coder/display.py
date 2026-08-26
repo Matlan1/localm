@@ -69,9 +69,8 @@ def print_banner(
 # ---------------------------------------------------------------------------
 
 def print_tool_call(tool_name: str, args: dict, index: int = 0) -> None:
-    # A tool's name and its argument values/keys can all carry text a model
-    # generated (an MCP tool's own name, a hostile path/command argument) -
-    # composed via Text so none of it is ever parsed as Rich markup.
+    # The tool name and every argument key/value are model-generated text,
+    # composed via Text so none of it is parsed as Rich markup.
     line = Text("  ")
     line.append("● ", style="bold yellow")
     line.append(_strip_esc(tool_name), style="bold")
@@ -150,11 +149,10 @@ def print_assistant_response(text: str, name: str = "Agent") -> None:
 
 
 def print_streaming_token(token: str) -> None:
-    # R31 (CLI half): append-only streaming with end="" - styling escapes only, never
-    # cursor repositioning / alt-screen / a Live region. The terminal owns scrolling,
-    # so scrolling up mid-stream pauses auto-follow natively (the CLI analogue of the
-    # GUI's chat.stick latch; no latch needed because we never re-pin the viewport).
-    # Guarded by tests/test_cli_stream_scroll.py.
+    # Append-only streaming with end="": styling escapes only, never cursor
+    # repositioning, an alt-screen switch, or a Live region, so the terminal
+    # keeps ownership of scrolling.
+    # See test_coder_stream_renderer_streams_without_viewport_control.
     #
     # Model-generated text; an unmatched closing tag raises MarkupError from a
     # plain console.print. See test_streaming_token_survives_a_leaked_control_token.
@@ -163,8 +161,7 @@ def print_streaming_token(token: str) -> None:
 
 def print_reasoning_token(token: str) -> None:
     """Stream a thinking model's reasoning dimmed, so it reads as an aside next
-    to the visible answer rather than being indistinguishable from it (H4,
-    AUD-HIGH-17-3) - mirrors the chat REPL's ``_ThinkPrinter`` styling."""
+    to the visible answer rather than being indistinguishable from it."""
     console.print(_sanitized_text(token, style="dim"), end="", highlight=False)
 
 
@@ -204,9 +201,8 @@ def print_warning(msg: str) -> None:
 
 
 def print_error(msg: str) -> None:
-    # msg often embeds an exception's own text (repl.py's "Agent error: {e}"),
-    # which can itself carry the very content that raised - printed unsafely,
-    # this handler would raise on its own message. See
+    # msg can embed an exception's own text, which may itself carry markup, so
+    # it is sanitized rather than printed directly. See
     # test_print_error_survives_a_message_that_would_itself_crash_markup.
     console.print(_sanitized_text(msg, style="red"))
 
@@ -283,8 +279,8 @@ def print_diff_preview(
 def confirm_diff(path_label: str) -> bool:
     """Prompt 'Apply changes to <path>? [y/N]' and return True on yes."""
     try:
-        # path_label names a file the model chose to write to, so it is
-        # composed via Text rather than embedded in a markup string.
+        # path_label is model-chosen text, composed via Text rather than
+        # embedded in a markup string.
         prompt = Text("Apply changes to ", style="yellow")
         prompt.append(_strip_esc(path_label), style="bold yellow")
         prompt.append("? [y/N] ", style="yellow")

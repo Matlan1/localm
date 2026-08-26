@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""KEY-SCOPE-2: a background job is bound to the key that created it. The shared
-JobManager bus means /api/jobs/{id}/events + /cancel stay baseline (any valid key),
-so they are hardened by OWNER-binding instead: only the creating key (or an
-admin/owner) may stream or cancel a job. A non-owner gets an indistinguishable 404
-(never a 403 that would confirm the unguessable id exists)."""
+"""A background job is bound to the key that created it. The shared JobManager
+bus keeps /api/jobs/{id}/events and /cancel baseline (any valid key), so they are
+gated by OWNER-binding instead: only the creating key, or an admin/owner, may
+stream or cancel a job. A non-owner gets a 404, never a 403 that would confirm
+the unguessable id exists."""
 
 import uuid
 from pathlib import Path

@@ -2,37 +2,24 @@
 """`run_or_die` (localm/cli/errors.py) is the shared exception-to-exit-code
 helper behind plugins.py/rag.py's error reporting: on ``KeyError`` it prints
 *missing_msg* (or a generic fallback) in red; on ``ValueError`` it prints the
-exception text in red. Both interpolate directly into a Rich
-``Console.print()`` f-string, so a bracketed value silently loses its
-bracketed span or has it consumed as a bogus style directive - the same bug
-``tests/test_rag_cli_markup_escaping.py`` documents for ``rag.py``:
+exception text in red. Both interpolate into a Rich ``Console.print()``
+f-string, where a bracketed value loses its bracketed span or has it consumed
+as a style directive:
 
     Console().print('report[draft].txt')      -> prints "report.txt"
     Console().print('notes[bold red].md')     -> prints "notes.md"
 
-*missing_msg* and the ``ValueError`` text are both caller/exception-supplied
-and ``run_or_die`` itself has no way to guarantee either is restricted to a
-safe character class for every caller.
+``ValueError`` branch: ``localm plugin install <name>`` runs its target
+through ``PluginManager._installed_dir`` -> ``_check_plugin_name``
+(localm/plugins/engine.py) before any "not found" check, and a name that
+fails ``str.isidentifier()`` raises
+``ValueError(f"invalid plugin name: {name!r}")``, whose repr keeps any
+bracket characters verbatim. Driven through the real CLI command.
 
-``ValueError`` branch, real trigger: ``localm plugin install <name>`` runs
-its target through ``PluginManager._installed_dir`` -> ``_check_plugin_name``
-(localm/plugins/engine.py) BEFORE any "not found" check, and a name that
-fails ``str.isidentifier()`` (which a bracketed name always does) raises
-``ValueError(f"invalid plugin name: {name!r}")`` - the repr preserves any
-bracket characters verbatim. So this is driven through the real CLI command,
-matching test_rag_cli_markup_escaping.py's own convention of exercising real
-code end to end.
-
-``KeyError`` branch (``missing_msg``): the SAME identifier check runs before
-any "no such plugin" KeyError can be raised by any current caller (plugins.py
-builds ``missing_msg`` from the identical CLI-typed name), so a bracketed
-``missing_msg`` cannot occur through any real command today - it is
-defense-in-depth only, exactly like rag.py's already-validated collection
-names. Tested directly against ``run_or_die`` with a synthetic click command,
-the same convention test_cli_graceful_handler.py uses for the OTHER shared,
-non-subcommand piece of CLI infrastructure (_GracefulGroup) - run_or_die is
-infrastructure invoked BY commands, not a command with its own real-world
-"missing_msg contains a bracket" trigger to hang a test off.
+``KeyError`` branch (``missing_msg``): the same identifier check runs before
+any "no such plugin" KeyError can be raised by any current caller, so a
+bracketed ``missing_msg`` cannot occur through a real command. Tested
+directly against ``run_or_die`` with a synthetic click command.
 """
 
 from __future__ import annotations
@@ -42,17 +29,14 @@ from click.testing import CliRunner
 
 from localm.cli.errors import run_or_die
 
-# One name Rich DROPS outright, one it consumes as a (bogus) style tag - the
-# two distinct failure shapes test_rag_cli_markup_escaping.py's docstring
-# describes.
+# One name Rich drops outright, one it consumes as a style tag.
 BRACKET_DROP_TEXT = "report[draft].txt"
 BRACKET_STYLE_TEXT = "notes[bold red].md"
 
 
 def _synthetic_group():
-    """A purpose-built click group exercising run_or_die directly, real
-    console.print included - the same shape test_cli_graceful_handler.py
-    uses for _GracefulGroup."""
+    """A click group exercising run_or_die directly, real console.print
+    included."""
     @click.group()
     def g():
         pass
@@ -71,8 +55,7 @@ def _synthetic_group():
 
     @g.command("keyerror-default")
     def keyerror_default():
-        # No missing_msg: exercises the `missing_msg or 'Not found'` fallback
-        # expression itself, so the fix must not break the plain-literal path.
+        # No missing_msg: exercises the `missing_msg or 'Not found'` fallback.
         def boom():
             raise KeyError("unused")
         run_or_die(boom)
@@ -81,9 +64,8 @@ def _synthetic_group():
 
 
 class TestRunOrDieKeyErrorMissingMsgEscaping:
-    """Defense-in-depth: no real caller can put a bracket in missing_msg
-    today (see module docstring), but run_or_die cannot know that for a
-    future caller, so it is escaped anyway and tested directly."""
+    """No current caller can put a bracket in missing_msg; run_or_die escapes
+    it regardless, exercised here directly."""
 
     def test_bracket_drop_missing_msg_survives_verbatim(self):
         r = CliRunner().invoke(_synthetic_group(), ["keyerror-drop"])
@@ -107,10 +89,8 @@ class TestRunOrDieKeyErrorMissingMsgEscaping:
 
 
 class TestRunOrDieValueErrorRealCliPath:
-    """Real end-to-end trigger: `localm plugin install <bracketed name>`
-    (localm/cli/plugins.py:132-133) - see module docstring for the exact
-    mechanism (_check_plugin_name's ValueError, raised before any KeyError
-    path, repr-preserves the raw name)."""
+    """End-to-end trigger: `localm plugin install <bracketed name>`, which
+    raises _check_plugin_name's ValueError before any KeyError path."""
 
     def _cli_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))

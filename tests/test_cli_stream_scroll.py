@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""R31 (CLI half): the user must be able to scroll up to re-read earlier text while a
-reply is still streaming, exactly as the GUI half (#226, chat.stick latch) guarantees.
+"""The user must be able to scroll up to re-read earlier text while a reply is
+still streaming.
 
-The GUI needed a latch because its JS re-pinned the message box to the bottom on every
-token. The CLI chat renderers do NOT have that bug: they stream append-only (plain
-print / rich console.print(end="")) with only SGR styling escapes - no alternate
-screen, no cursor repositioning, no scroll-region, no spinner/Live region. With nothing
-repositioning the viewport, the terminal emulator's own scrollback gives the user
-scroll-priority for free; there is no latch to add.
+The CLI chat renderers stream append-only (plain print / rich
+console.print(end="")) with only SGR styling escapes: no alternate screen, no
+cursor repositioning, no scroll-region, no spinner/Live region. With nothing
+repositioning the viewport, the terminal emulator's own scrollback gives the
+user scroll priority.
 
-This test LOCKS that property: if a future change wraps CLI streaming in a rich Live
-region / alt-screen / a \\r-redraw, it would emit viewport-control sequences and fight
-the user's scroll - and these tests would go red. A negative-control test proves the
-detector actually catches such sequences (so the guard is not vacuous).
+These tests pin that property: CLI streaming must emit no viewport-control
+sequence. A negative-control test proves the detector actually catches such
+sequences.
 """
 
 from __future__ import annotations
@@ -25,12 +23,10 @@ from localm.cli import _ThinkPrinter
 from localm.plugins.coder import display
 
 
-# Terminal control sequences that REPOSITION/erase the viewport (the toolkit a redraw or
-# autoscroll-fight would use). Deliberately EXCLUDES SGR styling (sequences ending in
-# 'm' - dim/colour/reset), which is legitimate and expected on a TTY. A bare carriage
-# return is intentionally not matched: model text may legitimately contain '\r', and the
-# app never emits a \r-based redraw; the unambiguous, app-driven culprits are these CSI /
-# ESC controls.
+# Terminal control sequences that REPOSITION/erase the viewport. EXCLUDES SGR
+# styling (sequences ending in 'm' - dim/colour/reset), which is legitimate and
+# expected on a TTY, and a bare carriage return, which model text may legitimately
+# contain.
 _VIEWPORT_CTRL = re.compile(
     r"\x1b\[\?[0-9;]*[hl]"               # private modes: alt-screen (?1049/?47), hide-cursor (?25l) = Live/Status fingerprint
     r"|\x1b\[[0-9;]*[ABCDEFGHJKSTfsu]"   # cursor move / erase line+screen / scroll / absolute-position / save+restore
@@ -71,7 +67,7 @@ def test_cli_think_printer_streams_without_viewport_control(monkeypatch):
     monkeypatch.setattr(sys, "stdout", fake)
 
     printer = _ThinkPrinter()
-    # Proves we are on the real TTY (escape-emitting) branch, not the plain no-op branch.
+    # On the real TTY (escape-emitting) branch, not the plain no-op branch.
     assert printer._dim == "\x1b[2m"
 
     for tok in ["Here is ", "line one\n", "<think>", "some reasoning\n",
@@ -105,10 +101,9 @@ def test_coder_stream_renderer_streams_without_viewport_control(monkeypatch):
 
 
 def test_viewport_control_detector_is_not_vacuous():
-    """NEGATIVE CONTROL: the detector must actually catch the sequences a Live region /
-    alt-screen / spinner / \\r-redraw would emit, and must ignore benign SGR styling.
-    Without this, the two tests above could pass simply because the detector matches
-    nothing."""
+    """NEGATIVE CONTROL: the detector must catch the sequences a Live region /
+    alt-screen / spinner / \\r-redraw would emit, and must ignore benign SGR
+    styling."""
     must_flag = [
         "\x1b[?1049h",   # enter alternate screen
         "\x1b[?1049l",   # leave alternate screen

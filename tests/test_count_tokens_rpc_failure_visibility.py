@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GgufBackend.count_messages_tokens's RPC-failure warning (found sweeping for
-siblings of the chatml-fallback visibility bug, see
-tests/test_chatml_fallback_visibility.py) had the identical shape: the
-in-code comment states the intent is to surface a permanently-failing worker
-RPC "without ever saying so above --debug (rule 5)", but the only call was
-`_dbg.warning(...)` (debuglog.logger), invisible without --debug. Fixed by
-adding a console.print alongside the existing debug-log line, guarded by the
-same once-per-process latch.
+"""GgufBackend.count_messages_tokens must surface a permanently-failing worker
+RPC where a user can see it. A `_dbg.warning(...)` (debuglog.logger) alone is
+invisible without --debug, so a console.print runs alongside the debug-log line,
+guarded by the same once-per-process latch.
 
-These tests assert visibility WITHOUT --debug - that is the exact condition
-the bug lived in."""
+These tests assert visibility WITHOUT --debug."""
 
 from __future__ import annotations
 
@@ -89,8 +84,8 @@ def test_rpc_failure_warns_once_per_process(capsys):
 
 
 def test_a_transient_busy_worker_stays_silent(capsys):
-    """RunnerBusy (a live stream in progress, HON-02) is expected and
-    transient - it must never trip the permanent-failure console notice."""
+    """RunnerBusy (a live stream in progress) is expected and transient, and must
+    never trip the permanent-failure console notice."""
     backend = _backend()
     backend._runner = _FakeRunnerBusy()
 

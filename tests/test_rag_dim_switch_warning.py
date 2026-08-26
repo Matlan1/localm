@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-RAG-DIM-NO-REEMBED item 3: switching the embedding model
-(``POST /api/rag/embedding``) used to end with a generic "click reindex on a
-collection below" - it never enumerated collections, never compared any
-stored dimension, and never named what it was about to invalidate. A
-collection built under the OLD model still shows "hybrid" in
+"""Switching the embedding model (``POST /api/rag/embedding``) must enumerate the
+collections it is about to invalidate, comparing each stored dimension, rather
+than ending with a generic "click reindex on a collection below".
+
+A collection built under the OLD model still shows "hybrid" in
 ``/api/rag/collections`` right after the switch (``has_vectors`` is a purely
 offline fact, never compared against the live model) - only an actual query
 discovers the mismatch and silently drops to BM25.
 
-Covers, bottom-up: ``Collection.vector_dim()`` (the new accessor), then
+Covers, bottom-up: ``Collection.vector_dim()`` (the accessor), then
 ``_collection_dim_report()`` (the enumeration/comparison), then the real
-``POST /api/rag/embedding`` job end to end with only the embedder mocked, so
-the wiring between them - not just each piece in isolation - is exercised.
+``POST /api/rag/embedding`` job end to end with only the embedder mocked, so the
+wiring between them - not just each piece in isolation - is exercised.
 """
 from __future__ import annotations
 
@@ -174,9 +174,9 @@ class TestCollectionDimReport:
     def test_an_unreadable_collection_directory_is_reported_unknown_not_dropped(
             self, rag_home):
         """A hand-placed or half-deleted directory that fails to even
-        construct as a Collection must not silently vanish from the report -
-        AGENTS rule 5: best-effort here means naming the failure, not folding
-        it into a false "nothing to see"."""
+        construct as a Collection must not silently vanish from the report:
+        best-effort here means naming the failure, not folding it into a
+        false "nothing to see"."""
         rogue = rag_home / "not a valid name!"
         rogue.mkdir(parents=True)
         (rogue / "meta.json").write_text("{}", encoding="utf-8")
@@ -288,12 +288,11 @@ class TestEmbeddingSwitchRouteEndToEnd:
 
 
 # --------------------------------------------------------------------------- #
-#  FIX3: POST /api/rag/embedding without confirm=True is a DRY RUN - the      #
-#  warning must land BEFORE the switch takes effect, not only after (as a    #
-#  job-log line once config was already written and the embedder already     #
-#  reset). No embedder mocking here on purpose: an unconfirmed request must   #
-#  never touch resolve_embedding_model_path/get_embedder at all - it answers  #
-#  from meta.json alone (embedding_model()), same as _collection_dim_report.  #
+#  POST /api/rag/embedding without confirm=True is a DRY RUN: the warning      #
+#  lands BEFORE the switch takes effect. No embedder mocking here: an           #
+#  unconfirmed request must never touch                                         #
+#  resolve_embedding_model_path/get_embedder at all - it answers from           #
+#  meta.json alone (embedding_model()), same as _collection_dim_report.         #
 # --------------------------------------------------------------------------- #
 
 class TestEmbeddingSetConfirmGate:
@@ -331,9 +330,8 @@ class TestEmbeddingSetConfirmGate:
             {"name": "docs", "built_with": "old-model", "n_chunks": 2}]
         assert "may invalidate" in data["note"]
         assert "1 existing collection" in data["note"]
-        # The whole point: no dimension is asserted anywhere in the report -
-        # that would require loading the candidate model, which confirm=False
-        # must never do.
+        # No dimension is asserted anywhere in the report - that would require
+        # loading the candidate model, which confirm=False must never do.
         assert "768" not in data["note"]
         assert "dim" not in str(data["collections"])
 
@@ -361,15 +359,13 @@ class TestEmbeddingSetConfirmGate:
 
     def test_unconfirmed_names_an_unreadable_collection_without_leaking_the_exception(
             self, embedding_route_app, rag_home, caplog):
-        """CodeQL py/stack-trace-exposure (alert #292): a construction failure
-        must still be NAMED in the response (rule 5 - not silently dropped,
-        mirroring _collection_dim_report's own 'unknown' bucket), but the raw
-        exception text must never reach the HTTP response body - only the
-        server-side log. _collection_dim_report's identical 'reason' field
-        never had this problem because its only reader is _setup(), which logs
-        just the collection NAME, never re-serializes 'reason' into a
-        response; this route serializes its whole report straight into JSON,
-        so the exception text itself must be kept out of the field it returns."""
+        """A construction failure must still be NAMED in the response, not
+        silently dropped (mirroring _collection_dim_report's own 'unknown'
+        bucket), but the raw exception text must never reach the HTTP response
+        body - only the server-side log. _collection_dim_report's identical
+        'reason' field has no such exposure because its only reader is _setup(),
+        which logs just the collection NAME and never re-serializes 'reason';
+        this route serializes its whole report straight into JSON."""
         rogue = rag_home / "not a valid name!"
         rogue.mkdir(parents=True)
         (rogue / "meta.json").write_text("{}", encoding="utf-8")
@@ -388,7 +384,7 @@ class TestEmbeddingSetConfirmGate:
         body_text = r.text
         assert "ValueError" not in body_text
         assert "Traceback" not in body_text
-        # The failure is still surfaced, just server-side (rule 5: noted, not muted).
+        # The failure is still surfaced, just server-side: noted, not muted.
         assert "not a valid name!" in caplog.text
         assert "ValueError" in caplog.text
 
@@ -416,14 +412,12 @@ class TestEmbeddingSetConfirmGate:
 
 
 # --------------------------------------------------------------------------- #
-#  NEW-RAG-DIM-NO-REEMBED (2026-08-12 follow-up): PATCH /v1/config is the     #
-#  OTHER GUI writer of embedding_model (the Settings page's editable field),  #
-#  and it used to switch with no impact preview at all. It now shares         #
-#  collection_provenance_report()/_note() (relocated to localm/rag/store.py   #
-#  so this core route can reach them) with the RAG picker above. Unlike that  #
-#  always-two-step route, PATCH /v1/config is a generic multi-key settings    #
-#  save, so it only gates on a REAL value change with something to lose -     #
-#  a no-op or nothing-at-risk write must still complete in one round trip.    #
+#  PATCH /v1/config is the OTHER GUI writer of embedding_model (the Settings   #
+#  page's editable field). It shares collection_provenance_report()/_note()    #
+#  (in localm/rag/store.py) with the RAG picker above. Unlike that             #
+#  always-two-step route, PATCH /v1/config is a generic multi-key settings     #
+#  save, so it only gates on a REAL value change with something to lose - a    #
+#  no-op or nothing-at-risk write completes in one round trip.                 #
 # --------------------------------------------------------------------------- #
 
 CONFIG_OWNER_KEY = "owner-admin-key-rag-dim-no-reembed"
@@ -488,9 +482,8 @@ class TestPatchConfigEmbeddingConfirmGate:
     def test_no_affected_collections_writes_directly_no_gate(
             self, config_app, rag_home):
         # Nothing has embeddings yet - nothing at risk, so a plain PATCH (no
-        # confirm) must still write in one round trip, same as before this
-        # change. The gate exists to warn about real risk, not to add
-        # friction to every embedding_model write.
+        # confirm) still writes in one round trip. The gate warns about real
+        # risk, not every embedding_model write.
         from fastapi.testclient import TestClient
         with TestClient(config_app) as client:
             r = client.patch("/v1/config", headers=_owner_headers(),
@@ -557,16 +550,11 @@ class TestPatchConfigEmbeddingConfirmGate:
 
 
 # --------------------------------------------------------------------------- #
-#  #1078 post-merge review: the ONE-SHOT job-log warning above (deliberately  #
-#  cheap - it loads and test-embeds the NEW model, which is only worth it     #
-#  once, at switch time) never touched the PERSISTENT list/detail badge,      #
-#  which is the gap this file's own module docstring names but only the      #
-#  switch-time report closed. A collection revisited well after that job's   #
-#  log has scrolled by still showed a bare "hybrid" with no hint the active   #
-#  model had moved on. dim_mismatch is the best-effort (never a load, never   #
-#  a false "matches") fix: compare each collection's own vector_dim (already  #
-#  cached, free) against embedder.loaded_dim() (whatever happens to already   #
-#  be resident - also free, and documented as safe for exactly this).        #
+#  The one-shot job-log warning above loads and test-embeds the NEW model, so  #
+#  it only runs at switch time and never reaches the PERSISTENT list/detail    #
+#  badge. dim_mismatch is the best-effort badge (never a load, never a false   #
+#  "matches"): it compares each collection's own vector_dim (already cached,   #
+#  free) against embedder.loaded_dim() (whatever is already resident).         #
 # --------------------------------------------------------------------------- #
 
 def _dim_mismatch(stats, active_dim):

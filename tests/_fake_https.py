@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The monkeypatch seam for localm's shared outbound-HTTPS opener.
 
-``http_ssl.verified_urlopen`` used to call ``urllib.request.urlopen`` directly
-whenever no caller supplied a handler, so a test isolated it by patching
-``urlopen``. It cannot any more: a redirect guard has to be installed as a
-handler, and the only way to install one is to build an opener. So the seam is
-now ``urllib.request.build_opener`` and the SSL context arrives via
-``urllib.request.HTTPSHandler`` instead of an ``urlopen`` keyword.
+``http_ssl.verified_urlopen`` installs its redirect guard as a handler, which
+needs an opener, so the seam is ``urllib.request.build_opener`` and the SSL
+context arrives via ``urllib.request.HTTPSHandler`` rather than an ``urlopen``
+keyword.
 
-This keeps that a ONE-LINE change per test rather than a rewrite: *responder* is
-called with exactly the old signature, ``responder(req, timeout=..., context=...)``,
-so an existing ``fake_urlopen`` works unmodified. Swap
+*responder* is called as ``responder(req, timeout=..., context=...)``, so an
+existing ``fake_urlopen`` works unmodified. Swap
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
@@ -18,11 +15,9 @@ for
 
     patch_https_transport(monkeypatch, fake_urlopen)
 
-Patching ``urlopen`` alone is now WORSE THAN NOT PATCHING, which is why this
-exists rather than each test hand-rolling it: the fake is simply never
+Patching ``urlopen`` alone is WORSE THAN NOT PATCHING: the fake is never
 consulted, the code under test dials the real network, and the test still looks
-isolated. Two tests in tests/test_cuda_setup.py did exactly that and reported
-upstream's live release tag instead of their fixture's.
+isolated.
 """
 
 from __future__ import annotations
@@ -43,8 +38,7 @@ def patch_https_transport(monkeypatch, responder):
 
     def capture_https_handler(*_a, context=None, **_k):
         seen["context"] = context
-        # build_opener is faked below, so this stand-in is never installed
-        # anywhere - it only has to be a distinct object.
+        # Stand-in handler; build_opener is faked below and never installs it.
         return object()
 
     class _Opener:

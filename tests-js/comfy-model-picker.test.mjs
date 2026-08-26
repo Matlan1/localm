@@ -14,8 +14,7 @@ function bad(status = 500) {
 }
 
 // A stateful stub covering the image plugin's workflow-management routes
-// (/api/image/*) and generation/ComfyUI routes (/api/imagine/*) - the same
-// prefix split the real plugin uses (see workflow.js's GENERATE_PREFIX).
+// (/api/image/*) and generation/ComfyUI routes (/api/imagine/*).
 function makeFetch(calls, { reachable = false, slots = [], workflows = [], selected = null } = {}) {
   return async (url, opts = {}) => {
     const method = opts.method || "GET";
@@ -45,8 +44,7 @@ function makeFetch(calls, { reachable = false, slots = [], workflows = [], selec
       return ok({ job_id: "j1" });
     }
     if (url === "/api/jobs/j1/events") {
-      // Streaming is not exercised here - only the initial POST body matters,
-      // so fail it fast rather than modelling SSE.
+      // Streaming is not exercised here; fail fast instead of modelling SSE.
       return bad(500);
     }
     return ok({ models: [], active: "", conversations: [], plugins: [] });
@@ -120,10 +118,8 @@ test("model picker renders one dropdown per slot, defaulting to the workflow's c
 });
 
 test("model picker surfaces a slot ComfyUI has zero live options for, instead of hiding it", async () => {
-  // Reproduces the bug: ComfyUI is reachable but has none of a required file
-  // type installed, so the backend still resolves the slot (current value is
-  // a real filename) but its live `options` array is empty. The panel must
-  // show it as "not installed", not silently omit it or render a blank <select>.
+  // ComfyUI is reachable, and one slot has a real `current` filename but an
+  // empty live `options` array.
   const slots = [
     { node_id: "1", class_type: "UnetLoaderGGUFAdvanced", input_name: "unet_name",
       current: "flux1-dev-Q8_0.gguf", options: [] },
@@ -155,13 +151,12 @@ test("changing a dropdown records the override and it survives a plain panel ref
   sel.value = "b.gguf";
   sel.onchange();
 
-  // modelOverrides lives in jsdom's own realm (set by an injected script) -
-  // compare via JSON, since strict deepEqual rejects cross-realm objects on
-  // constructor identity even when structurally identical.
+  // modelOverrides lives in jsdom's own realm, so compare via JSON: strict
+  // deepEqual rejects cross-realm objects on constructor identity.
   runScript(win, "window.__mo = modelOverrides;");
   assert.equal(JSON.stringify(win.__mo.image), JSON.stringify({ "1": { unet_name: "b.gguf" } }));
 
-  // Re-entering the tab re-renders the panel - the pick must not be lost.
+  // Re-entering the tab re-renders the panel.
   box = await render(win);
   sel = box.querySelector(".comfy-model-select");
   assert.equal(sel.value, "b.gguf", "the override survives a plain refresh");

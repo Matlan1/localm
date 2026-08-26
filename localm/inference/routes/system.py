@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """System routes: health, CA download, instance identity, and on-demand GUI mount.
 
-Extracted verbatim from create_app(); behavior unchanged. The api_landing "/"
-route and all middleware stay in create_app (they are conditional / framework
-plumbing). Reads the live engine from the http_server module global so a model
-swap is reflected here.
+The api_landing "/" route and all middleware stay in create_app. Reads the live
+engine from the http_server module global, so a model swap is reflected here.
 """
 
 from __future__ import annotations
@@ -33,24 +31,16 @@ def register(app: FastAPI, ctx) -> None:
                 "model":  _hs._engine.display_name,
                 "loaded": _hs._engine.loaded,
             }
-        # No engine is warm right now, but that is not the same question as
-        # "is there nothing here": an eviction (unload_all_models, e.g. the
-        # embedder freeing VRAM for a chat model) deliberately keeps the
-        # Engine in _engines for a lazy reload, and get_engine's own
-        # unnamed-request resolution (PR #1139) already recovers it on the
-        # very next chat turn. Reporting a bare 503 here during exactly that
-        # window told a GUI health check "no model" while chat itself would
-        # have reloaded one on the spot - a plausible reason a user reaches
-        # for a manual load instead of just sending a turn. Mirror the SAME
-        # resolution chat uses, so /health cannot disagree with it, and only
-        # 503 when there truly is nothing to recover.
+        # No engine is warm. An eviction (unload_all_models) keeps the Engine in
+        # _engines for a lazy reload, so resolve the unnamed model the way
+        # get_engine does and 503 only when there is nothing to recover.
         name = _hs._resolve_unnamed_model_name()
         if name and name in _hs._engines:
             return {"status": "ok", "model": name, "loaded": False}
         raise HTTPException(503, "No engine initialised")
 
     # ---------------------------------------------------------------- #
-    #  Instance identity (H6 server-rework, phase 3)                    #
+    #  Instance identity                                                 #
     # ---------------------------------------------------------------- #
 
     @app.get("/whoami", include_in_schema=False)
@@ -63,8 +53,7 @@ def register(app: FastAPI, ctx) -> None:
 
         root_dir is an absolute host path that can carry the OS username, so it is
         disclosed only on a loopback bind and omitted over the network. Discovery
-        matches root_dir from the 0600 registry file (not from /whoami), so this
-        omission breaks nothing (security review 2026-06-20)."""
+        matches root_dir from the 0600 registry file, not from /whoami."""
         from localm import instances
         st = request.app.state
         root = getattr(st, "root_dir", None)
@@ -79,29 +68,29 @@ def register(app: FastAPI, ctx) -> None:
         )
 
     # ---------------------------------------------------------------- #
-    #  Surface management: on-demand GUI mount (H6 phase 5)              #
+    #  Surface management: on-demand GUI mount                           #
     # ---------------------------------------------------------------- #
 
     @app.post("/v1/surfaces/gui", include_in_schema=False)
     async def mount_gui(request: Request):
-        """Mount the GUI surface on this running instance (the phase-5 on-demand
-        mount). An ``api``-mode instance (``localm serve``) serves only /v1; a
-        later ``localm gui`` in the same dir calls this to add the GUI + coder
-        live - one process, no second model load - then opens it.
+        """Mount the GUI surface on this running instance.
 
-        Mounting the GUI exposes the coder agent (shell + file edits), so this is
-        an OWNER-level action. Authorized by EITHER this instance's attach token
-        (the local same-user secret in the 0600 ``run/`` file, which the
-        attaching process reads) OR an API key granting ADMIN. It is exempt from
-        the same-origin guard (a local non-browser caller has no Origin); this
-        token/key check is the gate. Idempotent: a full instance returns
+        An ``api``-mode instance (``localm serve``) serves only /v1; a later
+        ``localm gui`` in the same dir calls this to add the GUI + coder live, in
+        the one process and with no second model load, then opens it.
+
+        OWNER-level: mounting the GUI exposes the coder agent (shell + file
+        edits). Authorized by EITHER this instance's attach token (the local
+        same-user secret in the 0600 ``run/`` file, which the attaching process
+        reads) OR an API key granting ADMIN. Exempt from the same-origin guard;
+        this token/key check is the gate. Idempotent: a full instance returns
         already_mounted."""
         from localm.auth import ct_equal
         presented = _bearer_token(request)
         st = request.app.state
         inst_token = getattr(st, "instance_token", None)
         # ct_equal, not compare_digest: the presented token is a caller-supplied,
-        # latin-1 decoded header, so a non-ASCII one would raise instead of 403.
+        # latin-1 decoded header and may be non-ASCII.
         ok = ct_equal(presented, inst_token)
         if not ok and presented:
             # Fall back to an owner/ADMIN API key (protected mode).
@@ -118,17 +107,15 @@ def register(app: FastAPI, ctx) -> None:
                 "mode": "full"}
 
     # ---------------------------------------------------------------- #
-    #  Built-in TLS: CA download (NET-1)                                 #
+    #  Built-in TLS: CA download                                         #
     # ---------------------------------------------------------------- #
 
     @app.get("/localm-ca.crt", include_in_schema=False)
     async def localm_ca_cert():
-        """Serve localm's local CA certificate so a browser or phone can trust
-        the built-in TLS once - removing the warning and enabling PWA install.
-        Deliberately public and unauthenticated: a CA *certificate* carries no
-        secret (the CA private key never leaves ``<home>/tls``), and the client
-        needs it before it can present a key. 404 when this install has no CA
-        (e.g. a loopback / plain-HTTP run that never generated one)."""
+        """Serve localm's local CA certificate, so a browser or phone can trust
+        the built-in TLS. Public and unauthenticated; the CA private key never
+        leaves ``<home>/tls``. 404 when this install has no CA (e.g. a loopback
+        / plain-HTTP run that never generated one)."""
         from localm import tls
         from localm.config import home_dir
         ca = tls.ca_cert_path(home_dir())

@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Install provenance ledger - so uninstall removes ONLY what install recorded.
 
-The lesson of the famous data-loss incidents (Valve's Steam ``rm -rf
-"$STEAMROOT/"*`` wiping ``/`` when the variable was empty; Pop!_OS/apt removing
-the desktop as a "dependency") is the same: an uninstaller must never *derive*,
-*glob*, or *guess* what to delete. It must delete only the exact paths the
-installer wrote down at install time, validate each before touching it, and
-refuse anything it does not have a record for.
+An uninstaller must never *derive*, *glob*, or *guess* what to delete. It must
+delete only the exact paths the installer wrote down at install time, validate
+each before touching it, and refuse anything it does not have a record for.
 
 This module is that record. ``record()`` writes ``.localm-install.json`` listing
 the venv, the provisioned native binaries (by name, inside their dir), the
@@ -162,10 +159,8 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) 
                             "no install record - not certain we created this"))
         report["venv"] = str(root / ".venv")
     elif (m.get("schema") or 0) > SCHEMA_VERSION:
-        # Refuse a manifest NEWER than this installer understands (its fields may
-        # mean something we do not know). An OLDER schema is processed normally -
-        # missing v2 keys just read as absent - so an upgrade never strands a v1
-        # install's uninstall.
+        # Refuse a manifest newer than this installer understands. An older schema
+        # is processed normally; missing v2 keys read as absent.
         log(f"[uninstall] Manifest schema {m.get('schema')!r} is newer than this "
             "installer understands - aborting for safety. Nothing removed.")
         report["ok"] = False
@@ -197,11 +192,9 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) 
         elif data_dir:
             report["skipped"].append(
                 (data_dir, "data kept (pass --purge-data to remove)"))
-        # v2: the Contained-install runtime dirs (in-clone Python + uv cache +
-        # uv's own binary dir, when setup installed uv itself into this clone).
-        # Removed ONLY when we pulled them into the clone; a SHARED runtime lives in
-        # the user's global uv dir and is reused by other clones, so report but
-        # NEVER delete it.
+        # v2: the contained-install runtime dirs, removed only when they were
+        # pulled into the clone. A shared runtime lives in the user's global uv
+        # dir and is reported but never deleted.
         if m.get("runtime_contained"):
             for key in ("python_dir", "cache_dir", "uv_dir"):
                 d = m.get(key, "")
@@ -250,15 +243,12 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) 
                 continue                      # listed under 'warned', don't double-list
         _remove(path, kind)
 
-    # v2: reverse the optional global `localm` command (its shim + our one PATH
-    # entry), via the same safe registry method that added it - never setx, and
-    # only ever removing OUR entry, every other PATH entry left untouched.
+    # v2: reverse the optional global `localm` command, removing only our own
+    # shim and PATH entry via the registry, never setx.
     if m is not None and (m.get("command_shim") or m.get("path_modified")):
         shim = m.get("command_shim", "")
-        # Take our dir back OFF PATH ONLY if WE put it there (path_modified).
-        # Otherwise remove just our shim and leave PATH exactly as we found it -
-        # so a re-run (where the dir was already present) or a manually pre-added
-        # entry is never stripped by our uninstall.
+        # Take our dir off PATH only if we put it there. Otherwise remove just the
+        # shim and leave PATH as found.
         path_dir = m.get("path_dir", "") if m.get("path_modified") else ""
         if dry_run:
             if shim:

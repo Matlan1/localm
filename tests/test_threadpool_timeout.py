@@ -1,26 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""run_in_threadpool_bounded() (_threadpool_timeout.py) - the follow-up to
-#1057 that bounds how long an HTTP request waits on a genuinely stuck
-run_in_threadpool call, instead of hanging forever.
+"""run_in_threadpool_bounded() (_threadpool_timeout.py) bounds how long an HTTP
+request waits on a genuinely stuck run_in_threadpool call, instead of hanging
+forever.
 
-Every test here earned its place from a real, measured failure mode while
-building this module - not speculative coverage:
-
-- test_wrapping_run_in_threadpool_itself_does_nothing: proves the naive
-  "just wrap run_in_threadpool in a deadline" design does not work at all
-  (starlette never sets abandon_on_cancel), which is WHY this module exists
-  instead of a two-line change at each call site.
-- test_a_functions_own_timeouterror_propagates_unrelabeled: proves a bug
-  that was caught live by tests/test_config_reg586_reg566_regressions.py
-  during this change - an early ``except TimeoutError`` implementation could
-  not distinguish "our deadline fired" from "the wrapped function raised its
-  own TimeoutError well within budget" (localm.config.update_config's
-  cross-process-lock timeout does exactly this), and relabeled the latter
-  with a confusing, wrong message.
-- test_abandoning_releases_the_capacity_limiter_token_immediately: a
-  regression guard for a non-obvious anyio behaviour this module's whole
-  "safe to timeout" reasoning depends on - if a future anyio release changes
-  it, this test (not a production incident) should be what catches it.
+- test_wrapping_run_in_threadpool_itself_does_nothing: wrapping
+  run_in_threadpool in a deadline does not bound the call at all, because
+  starlette never sets abandon_on_cancel.
+- test_a_functions_own_timeouterror_propagates_unrelabeled: an
+  ``except TimeoutError`` implementation cannot distinguish "our deadline
+  fired" from "the wrapped function raised its own TimeoutError well within
+  budget" (localm.config.update_config's cross-process-lock timeout does
+  exactly this), and must not relabel the latter.
+- test_abandoning_releases_the_capacity_limiter_token_immediately: pins the
+  anyio behaviour this module's "safe to timeout" reasoning depends on.
 """
 
 from __future__ import annotations
@@ -60,9 +52,9 @@ async def test_slow_call_raises_threadcalltimeout_within_budget_not_full_duratio
 
 
 async def test_threadcalltimeout_is_a_timeouterror_subclass():
-    # So existing `except TimeoutError` call sites (e.g. anything already
-    # handling localm.config.update_config's own cross-process TimeoutError)
-    # keep working unchanged if they end up wrapping a bounded call too.
+    # Existing `except TimeoutError` call sites (e.g. anything already handling
+    # localm.config.update_config's own cross-process TimeoutError) keep working
+    # unchanged if they end up wrapping a bounded call too.
     assert issubclass(ThreadCallTimeout, TimeoutError)
 
 
@@ -75,11 +67,10 @@ async def test_underlying_exception_propagates_unchanged_within_budget():
 
 
 async def test_a_functions_own_timeouterror_propagates_unrelabeled():
-    """THE bug this module's implementation had to be fixed for. A wrapped
-    function that raises its OWN plain TimeoutError well within budget (like
-    update_config's cross-process-lock timeout) must surface THAT exact
-    exception - not get relabeled as an abandoned/leaked ThreadCallTimeout,
-    which would hide the real, more specific message an operator needs."""
+    """A wrapped function that raises its OWN plain TimeoutError well within
+    budget (like update_config's cross-process-lock timeout) must surface THAT
+    exact exception, never a relabeled abandoned/leaked ThreadCallTimeout,
+    which would hide the more specific message an operator needs."""
     def _raises_own_timeout():
         time.sleep(0.05)
         raise TimeoutError("held by another localm process")
@@ -92,9 +83,8 @@ async def test_a_functions_own_timeouterror_propagates_unrelabeled():
 
 
 async def test_timeout_is_a_required_keyword_argument():
-    # No default on purpose (see the module docstring) - a caller must
-    # consciously pick a budget rather than silently inherit a one-size-
-    # fits-all number that is wrong for most call sites.
+    # No default: a caller must pick a budget rather than inherit a
+    # one-size-fits-all number.
     with pytest.raises(TypeError):
         await run_in_threadpool_bounded(_blocking_sleep, 0.01)
 
@@ -111,11 +101,10 @@ async def test_timeout_logs_a_warning_naming_the_call_and_budget(caplog):
 
 
 async def test_wrapping_run_in_threadpool_itself_does_nothing():
-    """Documents WHY this module bypasses fastapi.concurrency.run_in_threadpool
-    instead of wrapping it: starlette's run_in_threadpool calls
+    """This module bypasses fastapi.concurrency.run_in_threadpool instead of
+    wrapping it: starlette's run_in_threadpool calls
     anyio.to_thread.run_sync(func) with anyio's default abandon_on_cancel=False,
-    so a deadline placed around it never actually unblocks the caller - the
-    naive fix a reviewer might reach for silently does nothing."""
+    so a deadline placed around it never actually unblocks the caller."""
     from fastapi.concurrency import run_in_threadpool
 
     start = time.monotonic()
@@ -133,20 +122,18 @@ async def test_wrapping_run_in_threadpool_itself_does_nothing():
 
 
 async def test_abandoning_releases_the_capacity_limiter_token_immediately():
-    """Regression guard for the non-obvious anyio behaviour run_in_threadpool_
-    bounded's whole "safe against permanently reducing pool capacity" claim
-    depends on: CONFIRMED BY DIRECT TEST (see the module docstring) that
-    abandoning a call frees its CapacityLimiter token right away, not when
-    the real (still-running) thread eventually returns. If a future anyio
-    release changes this, THIS test should catch it, not a production
-    incident where new requests mysteriously queue forever behind a wedged
-    call that "should" have freed its slot."""
+    """run_in_threadpool_bounded's "safe against permanently reducing pool
+    capacity" claim depends on a non-obvious anyio behaviour: abandoning a call
+    frees its CapacityLimiter token right away, not when the real (still
+    running) thread eventually returns. This pins it, so a future anyio release
+    that changes it fails here rather than making new requests queue forever
+    behind a wedged call that should have freed its slot."""
     limiter = anyio.CapacityLimiter(1)
 
-    # anyio.to_thread.run_sync doesn't take a limiter kwarg through our
-    # wrapper (it uses the default pool, matching run_in_threadpool), so
-    # exercise the underlying primitive directly here to pin the limiter
-    # semantics run_in_threadpool_bounded relies on.
+    # anyio.to_thread.run_sync does not take a limiter kwarg through our wrapper
+    # (it uses the default pool, matching run_in_threadpool), so exercise the
+    # underlying primitive directly here to pin the limiter semantics
+    # run_in_threadpool_bounded relies on.
     abandon_start = time.monotonic()
     with pytest.raises(TimeoutError):
         with anyio.move_on_after(0.1) as scope:
@@ -179,22 +166,19 @@ async def test_abandoning_releases_the_capacity_limiter_token_immediately():
 
 
 # --------------------------------------------------------------------------- #
-#  RMW-safety fires-control: an abandoned call must not defeat an existing    #
-#  lock's serialization guarantee (the #1045 shape).                          #
+#  An abandoned call must not defeat an existing lock's serialization          #
+#  guarantee.                                                                  #
 # --------------------------------------------------------------------------- #
 
 async def test_media_workflows_lock_survives_an_abandoned_writer():
-    """Fires-control for the #1045 race shape, now that these routes are
-    timeout-wrapped: an abandoned (timed-out) writer's REAL thread must keep
-    holding media_workflows._lock_for's lock for as long as it actually
-    runs, so a request that arrives after seeing the timeout (e.g. a user
-    retry) still queues behind it instead of racing it.
+    """An abandoned (timed-out) writer's REAL thread must keep holding
+    media_workflows._lock_for's lock for as long as it actually runs, so a
+    request that arrives after seeing the timeout (e.g. a user retry) still
+    queues behind it instead of racing it.
 
     Synchronized deterministically throughout (a threading.Event polled from
-    async code, matching test_gpu_probe_nonblocking.py's own pattern) rather
-    than fixed sleeps - a hardcoded sleep here could in principle flake under
-    box load (see the test-quality finding this replaced), and every ordering
-    fact this test needs has a genuine event to wait on instead."""
+    async code) rather than with fixed sleeps, so it cannot flake under box
+    load."""
     from localm import media_workflows
 
     key = "test-threadpool-timeout-abandoned-lock"
@@ -215,11 +199,11 @@ async def test_media_workflows_lock_survives_an_abandoned_writer():
             order.append("B-in")
 
     try:
-        # Awaiting this to completion IS the synchronization: it only
-        # returns once run_in_threadpool_bounded's own 0.15s deadline has
-        # fired and the caller has given up - A's real thread keeps running
-        # in the background, still holding the lock, exactly the abandoned-
-        # call state this test needs to exist before dispatching B.
+        # Awaiting this to completion IS the synchronization: it returns only
+        # once run_in_threadpool_bounded's own 0.15s deadline has fired and the
+        # caller has given up. A's real thread keeps running in the background,
+        # still holding the lock - the abandoned-call state this test needs
+        # before dispatching B.
         with pytest.raises(ThreadCallTimeout):
             await run_in_threadpool_bounded(slow_holder, timeout=0.15)
         assert order == ["A-in"], "A should still be inside the lock at this point"
@@ -231,11 +215,10 @@ async def test_media_workflows_lock_survives_an_abandoned_writer():
                 break
             await anyio.sleep(0.005)
         assert b_attempting.is_set(), "B's worker thread never started"
-        # B is now either blocked on lock.acquire() or has just barely
-        # slipped through - but structurally it CANNOT have appended "B-in"
-        # yet, because `proceed` has not been set and A's real thread still
-        # unconditionally holds the lock. This is a guarantee from the lock
-        # semantics, not a timing race, so it needs no further wait.
+        # B is now either blocked on lock.acquire() or has just barely slipped
+        # through, but it cannot have appended B-in yet: `proceed` has not been
+        # set and A's real thread still unconditionally holds the lock. That is a
+        # lock-semantics guarantee, not a timing race, so no further wait.
         assert "B-in" not in order, (
             "B entered the critical section while A's abandoned thread "
             "still holds the lock - the timeout defeated the existing "
@@ -250,12 +233,10 @@ async def test_media_workflows_lock_survives_an_abandoned_writer():
 
 
 async def test_remove_managed_comfy_lock_survives_an_abandoned_caller(tmp_path, monkeypatch):
-    """Same fires-control as above, for managed_comfy.py's new _remove_lock -
-    proves a client retry after a timeout cannot start a second concurrent
-    rmtree against the same managed ComfyUI install while an abandoned
-    first call's thread is still deleting files. Synchronized deterministically
-    throughout - see test_media_workflows_lock_survives_an_abandoned_writer's
-    docstring for why."""
+    """The same property for managed_comfy.py's _remove_lock: a client retry
+    after a timeout cannot start a second concurrent rmtree against the same
+    managed ComfyUI install while an abandoned first call's thread is still
+    deleting files. Synchronized deterministically throughout."""
     from localm.media import managed_comfy
 
     order = []

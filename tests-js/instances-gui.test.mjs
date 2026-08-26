@@ -1,11 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// PARITY-AUDIT-CLI-GUI-2026-08-19.md CLI-only gap #7: `localm ps` / `localm
-// stop <id>` had no GUI form. The Settings page now lists every OTHER running
-// localm instance and offers a Stop control per row - this covers the card's
-// render (self filtered out, empty state, address column), the confirm-then-
-// POST flow, and error surfacing. Mirrors models-relocate.test.mjs's shape for
-// the sibling relocate control (same harness, same page, same discipline).
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";

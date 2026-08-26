@@ -60,12 +60,11 @@ def test_schema_json_serializable_with_defaults():
 
 
 class TestShippedDefaultAnnotation:
-    """NEW-DEFAULT-VALUE-PLACEHOLDER: `default` is the CURRENT value (base=
-    load_config() in the real server route), which after a save is the user's
-    own override - so the GUI needs a SEPARATE, always-factory value to tell
-    "still shipped default" apart from "user set it to this". `shipped_default`
-    is that value: always from DEFAULT_CONFIG, regardless of what `values` the
-    caller passed."""
+    """`default` is the CURRENT value (base=load_config() in the real server
+    route), which after a save is the user's own override - so the GUI needs a
+    SEPARATE, always-factory value to tell "still shipped default" apart from
+    "user set it to this". `shipped_default` is that value: always from
+    DEFAULT_CONFIG, regardless of what `values` the caller passed."""
 
     def test_shipped_default_matches_default_config_regardless_of_override(self):
         overridden = dict(DEFAULT_CONFIG)
@@ -108,11 +107,10 @@ class TestMediaPerPluginAnnotation:
     """schema_json's media_per_plugin annotation: the GUI's Media section skips
     group="Media" fields in the flat form and renders per-plugin-mapped globals
     ONLY in the per-plugin boxes - so it must be able to tell, from the schema
-    alone, which Media fields those are. Before this annotation the client
-    special-cased two keys by name and every other Media field silently
-    rendered NOWHERE (comfy_launch_timeout / comfy_disable_auto_launch /
-    comfy_func_shim were GUI-invisible; 2026-07-22 settings-exposure audit).
-    MEDIA_PLUGIN_FIELDS is the single source of truth."""
+    alone, which Media fields those are. Without the annotation a client has to
+    special-case keys by name, and every other Media field
+    (comfy_launch_timeout / comfy_disable_auto_launch / comfy_func_shim) renders
+    NOWHERE. MEDIA_PLUGIN_FIELDS is the single source of truth."""
 
     def test_media_fields_carry_the_annotation(self):
         js = ss.schema_json()
@@ -126,9 +124,9 @@ class TestMediaPerPluginAnnotation:
                 f"{f['key']}: media_per_plugin must mirror MEDIA_PLUGIN_FIELDS")
 
     def test_the_previously_orphaned_fields_are_not_per_plugin(self):
-        """The three fields the Media section historically dropped: global-only
-        reads (media/comfy_client.py), so they must be annotated for the
-        SHARED box, never left to the per-plugin boxes that cannot show them."""
+        """Three fields the Media section can drop: global-only reads
+        (media/comfy_client.py), so they must be annotated for the SHARED box,
+        never left to the per-plugin boxes that cannot show them."""
         js = {f["key"]: f for f in ss.schema_json()}
         for key in ("comfy_launch_timeout", "comfy_disable_auto_launch",
                     "comfy_func_shim"):
@@ -142,11 +140,11 @@ class TestMediaPerPluginAnnotation:
 
 class TestComfyFloatTypeGlobalKey:
     """The per-plugin float_type field (MEDIA_PLUGIN_FIELDS) and the media
-    backends both fall back to a GLOBAL comfy_float_type key - which did not
-    exist in DEFAULT_CONFIG or the schema, so the documented fallback could
-    only ever be set by hand-editing config.json (the validated PATCH/CLI
-    paths reject unknown keys). Make the fallback real: present, typed, and
-    validated with the same options as the per-plugin field."""
+    backends both fall back to a GLOBAL comfy_float_type key. Absent from
+    DEFAULT_CONFIG and the schema, that fallback can only be set by hand-editing
+    config.json, since the validated PATCH/CLI paths reject unknown keys. The
+    key must be present, typed, and validated with the same options as the
+    per-plugin field."""
 
     def test_key_exists_with_a_null_default(self):
         assert "comfy_float_type" in DEFAULT_CONFIG
@@ -176,8 +174,8 @@ def test_fields_by_owner_partitions():
 
 
 def test_every_visible_field_has_a_description():
-    """The settings overhaul requires EVERY rendered field to carry a clear
-    description (HIDDEN fields are not rendered, so they are exempt)."""
+    """EVERY rendered field must carry a clear description (HIDDEN fields are
+    not rendered, so they are exempt)."""
     missing = [f.key for f in ss.CORE_FIELDS
                if f.widget != ss.Widget.HIDDEN and not (f.help or "").strip()]
     assert not missing, f"fields missing a description: {missing}"
@@ -190,7 +188,7 @@ def test_every_field_has_a_label():
 
 def test_binary_dir_schema_exposes_auto_resolved_path():
     """Blank binary_dir must surface the auto-detected path so the GUI can show
-    it (the 'blank autodetect leaves the field empty' complaint)."""
+    it rather than leaving the field empty."""
     by_key = {f["key"]: f for f in ss.schema_json()}
     assert "auto" in by_key["binary_dir"], "binary_dir must carry an 'auto' value"
 
@@ -221,21 +219,15 @@ def test_rag_indexing_fields_are_owner_only():
 
 # Outbound-target deployment keys: each names WHERE data goes or comes from, so
 # each widens network reach the same way net_allow_private does. They are also
-# stored VERBATIM by validate_update (no coercion branch above the HIDDEN tail),
-# so HIDDEN was doing no gating at all and a non-owner config:write key could
-# re-point the live "Send to maintainer" channel (found sweeping finding X8).
+# stored VERBATIM by validate_update (no coercion branch above the HIDDEN tail).
 OUTBOUND_OWNER_KEYS = {"bugreport_upload_url", "bugreport_upload_token",
                        "update_url", "update_token"}
 
-# --- REC-MEDIA-CMD sweep of all CORE_FIELDS (2026-07-28) --------------------- #
+# --- All CORE_FIELDS, grouped by capability --------------------------------- #
 #
-# The sweep asked one question per field: what can a non-owner config:write key
-# DO by setting it? PATCH /v1/config gates on admin_only_keys() |
-# engine_managed_keys() and nothing else, so a capability-bearing field carrying
-# neither flag is reachable by any delegated key.
-#
-# Grouped into named constants rather than one long literal so that concurrent
-# work adds a line instead of editing a shared expression.
+# PATCH /v1/config gates on admin_only_keys() | engine_managed_keys() and nothing
+# else, so a capability-bearing field carrying neither flag is reachable by any
+# delegated key.
 
 # Code or process execution.
 EXEC_OWNER_KEYS = {
@@ -250,12 +242,10 @@ EXEC_OWNER_KEYS = {
 # The privacy contract: whether localm writes the user's content to disk at all.
 PRIVACY_OWNER_KEYS = {"mode", "chat_mode", "coder_mode", "keep_diagnostics"}
 
-# Selects a file the server OPENS and parses, with no path confinement. Not code
-# execution like EXEC_OWNER_KEYS, so it is kept separate rather than folded in:
-# embedder.py:262-264 accepts any caller-chosen path and hands it to llama.cpp's
-# native GGUF parser (a UNC path on Windows also makes the probe an outbound
-# SMB/NTLM auth). Requested by local_3df0c67b, whose independent live run
-# confirmed the 403 and the unchanged value on master's gate shape.
+# Selects a file the server OPENS and parses, with no path confinement:
+# embedder.py accepts any caller-chosen path and hands it to llama.cpp's native
+# GGUF parser (a UNC path on Windows also makes the probe an outbound SMB/NTLM
+# auth).
 LOAD_PATH_OWNER_KEYS = {"embedding_model"}
 
 # Controls whose only job is to be restrictive, so CLEARING one widens reach.
@@ -266,95 +256,44 @@ GUARD_OWNER_KEYS = {
     "coder_untrusted_provenance",   # indirect-prompt-injection hardening
 }
 
-# The GUI-settable server bind (F1). bind_host decides WHICH NETWORK can reach
-# the server at all - the widest reach-widening key in the schema after the
-# EXEC set - and the TLS trio decides whether/with what certificate that
-# traffic is encrypted (tls_enabled off = the API key crosses the network in
-# cleartext). All owner-only so a delegated config:write key can never expose
-# the server or strip its transport encryption. Note the startup guard is a
-# second, independent layer: even the OWNER writing bind_host cannot cause an
-# unauthenticated network bind (no strong key -> the server stays on loopback;
-# --insecure has no config form). See tests/test_bind_host_config.py.
+# The GUI-settable server bind. bind_host decides WHICH NETWORK can reach the
+# server at all, and the TLS trio decides whether, and with what certificate,
+# that traffic is encrypted. All owner-only, so a delegated config:write key
+# cannot expose the server or strip its transport encryption.
 NETWORK_BIND_OWNER_KEYS = {"bind_host", "tls_enabled", "tls_cert", "tls_key"}
 
 
 def test_admin_only_keys_lists_the_owner_only_settings():
     # The rag_* folder keys widen a filesystem-read boundary; net_allow_private
-    # disables the SSRF guard (a network trust boundary). Both are owner-only, so
-    # a non-owner config:write key cannot flip either (pentest finding LM-PT-001).
-    # The bug-report / update endpoints are the same class of boundary.
-    # cors_origins names which browser origins may call the authenticated API -
-    # the same class of trust-widening boundary - and must be owner-only too
-    # (security-checkup finding 2026-07-23).
+    # disables the SSRF guard. The bug-report / update endpoints are the same
+    # class of boundary, cors_origins names which browser origins may call the
+    # authenticated API, and hf_trust_remote_code lets a downloaded model
+    # directory run its OWN Python inside the localm process.
     #
-    # EXACT SET EQUALITY, DELIBERATELY - do not weaken this to a subset check.
-    # The exactness is what makes a REMOVED flag fail loudly: drop admin_only in
-    # the schema and admin_only_keys() changes, so this assertion goes red. A
-    # subset check would make adding a key convenient and silently surrender the
-    # drop detection, which is the property worth having.
-    #
-    # WHY THIS FILE AND localm/settings_schema.py MUST BE EDITED TOGETHER, BY ONE
-    # OWNER, AND NEVER SPLIT ACROSS BRANCHES: the assertion catches an
-    # INCONSISTENT drop (schema loses a flag, this set keeps it). It CANNOT catch
-    # a CONSISTENT one. If a rebase or merge takes one side wholesale for BOTH
-    # files, a key vanishes from the schema AND from the expected set together,
-    # the suite stays green, and a security flag is gone with no failing test and
-    # no conflict marker. No assertion living in these two files can ever catch
-    # that, because the evidence and the oracle are both inside the blast radius.
-    # Single ownership of the pair is the control; this test is not. Resolve any
-    # conflict here ADDITIVELY, keeping both sides' keys.
-    # hf_trust_remote_code lets a downloaded model directory run its OWN Python
-    # inside the localm process, i.e. arbitrary code execution on this machine.
-    # That is the widest boundary of the lot, so it is owner-only too (CodeQL 49).
-    # Kept on its own line: it arrived from another lane while this sweep was in
-    # flight, and the conflict was resolved ADDITIVELY exactly as the note above
-    # instructs, rather than by taking either side wholesale.
+    # EXACT SET EQUALITY, not a subset check. Resolve any conflict here
+    # ADDITIVELY, keeping the keys from both sides.
     assert ss.admin_only_keys() == (
         RAG_OWNER_KEYS | OUTBOUND_OWNER_KEYS | EXEC_OWNER_KEYS
         | PRIVACY_OWNER_KEYS | GUARD_OWNER_KEYS | LOAD_PATH_OWNER_KEYS
         | {"hf_trust_remote_code"}
         | {"net_allow_private", "cors_origins"}
-        # update_allow_prerelease decides WHICH BUILDS the updater suggests
-        # installing - same trust-widening class as OUTBOUND_OWNER_KEYS right
-        # above it, but not itself an outbound endpoint, so kept on its own line
-        # (see UPDATER-VERSION-RECOGNITION / prerelease-channel unit).
+        # update_allow_prerelease decides which builds the updater suggests
+        # installing.
         | {"update_allow_prerelease"}
-        # gui_proxy_remote_images decides whether RENDERING A REPLY causes an
-        # outbound request at all - the same "where does data go" boundary as
-        # OUTBOUND_OWNER_KEYS, so a non-owner config:write key must not be able
-        # to switch it on. Own line, per the additive-resolution note above: it
-        # arrived with the remote-image proxy and this expected set was not
-        # updated with it, which is what the exactness above is for.
+        # gui_proxy_remote_images decides whether rendering a reply causes an
+        # outbound request at all.
         | {"gui_proxy_remote_images"}
-        # update_ignore_net_policy EXEMPTS the update channel from net_mode=off
-        # (a real kill switch everywhere else) - same trust-widening class as
-        # update_allow_prerelease right above it, kept on its own line for the
-        # same reason (see the "make the update check obey net policy" unit).
+        # update_ignore_net_policy exempts the update channel from net_mode=off.
         | {"update_ignore_net_policy"}
-        # llama_runtime_pin decides WHICH NATIVE BUILD setup-llama downloads and
-        # the server then loads in-process - the closest relative in this set is
-        # update_allow_prerelease ("which builds get installed"), one step nearer
-        # the metal. It is NOT binary_dir's planted-file escalation: the repo is
-        # fixed and the asset is checksum-verified, so it cannot name an
-        # arbitrary path or host. What it CAN do is hold an install on a chosen
-        # older upstream build, and a downgrade to a known-bad or known-vulnerable
-        # runtime is not a lower-privileged principal's call. llama_runtime_history
-        # rides along because it is what --rollback reads: a writable history is a
-        # writable choice of downgrade target, so gating one without the other
-        # would leave the decision reachable through the back door. Own line, per
-        # the additive-resolution note above.
+        # llama_runtime_pin decides which native build setup-llama downloads and
+        # the server then loads in-process; llama_runtime_history is what
+        # --rollback reads.
         | {"llama_runtime_pin", "llama_runtime_history"}
-        # allow_network_drives decides which HOST LOCATIONS the folder picker,
-        # folder creation/rename, log export and RAG indexing may treat as a
-        # normal local folder - the same "which host locations may localm
-        # touch" boundary as RAG_OWNER_KEYS right at the top of this union
-        # (S9: the classification gap that made a mapped drive letter
-        # indistinguishable from an ordinary local one). Own line, per the
-        # additive-resolution note above.
+        # allow_network_drives decides which host locations the folder picker,
+        # folder creation/rename, log export and RAG indexing treat as a normal
+        # local folder.
         | {"allow_network_drives"}
-        # The GUI-settable server bind + TLS trio (F1) - see the constant's own
-        # comment above for the boundary each widens. Added additively, per the
-        # additive-resolution note above.
+        # The GUI-settable server bind + TLS trio.
         | NETWORK_BIND_OWNER_KEYS)
 
 
@@ -382,14 +321,11 @@ def test_cors_origins_is_admin_only():
         "cors_origins widens the browser-origin trust boundary and must be owner-only"
 
 
-# --- non-finite (NaN / inf) numbers are rejected (fuzzing finding LM-FZ-001) --- #
+# --- non-finite (NaN / inf) numbers are rejected ---------------------------- #
 #
-# _to_number coerced with float(val)/int(val) and NO isfinite guard, so a NaN
-# slipped past every bounds check (NaN fails all < / > comparisons), an inf
-# slipped past any field with no upper bound, and an int field given inf raised
-# an uncaught OverflowError. A persisted NaN then 500s every GET/PATCH /v1/config
-# (FastAPI renders with allow_nan=False), bricking the Settings page across
-# restarts. The coercion must reject non-finite values up front.
+# _to_number rejects non-finite values up front: NaN slips past every bounds
+# check, inf slips past any field with no upper bound, and an int field given
+# inf raises OverflowError.
 
 @pytest.mark.parametrize("key, bad", [
     ("temperature", float("nan")),     # bounded [0,2]: NaN slips past both bounds
@@ -398,8 +334,8 @@ def test_cors_origins_is_admin_only():
     ("max_tokens", float("inf")),      # int field: int(inf) is an OverflowError
     ("top_k", float("inf")),           # int field, no upper bound: OverflowError
     ("main_gpu_index", float("inf")),  # separate hand-rolled int() path (not the
-                                       # generic NUMBER branch): int(inf) used to
-                                       # leak an uncaught OverflowError -> API 500
+                                       # generic NUMBER branch), where int(inf)
+                                       # raises OverflowError
 ])
 def test_validate_update_rejects_non_finite_numbers(key, bad):
     with pytest.raises(ValueError):
@@ -437,14 +373,9 @@ def test_schema_json_hides_admin_only_for_non_owner():
     guest = {f["key"] for f in ss.schema_json(is_owner=False)}
     assert RAG_OWNER_KEYS <= owner, "owner must see the owner-only fields"
     assert not (RAG_OWNER_KEYS & guest), "non-owner must NOT see any of them"
-    # A normal (non-admin_only) field is unaffected by the owner filter. This is
-    # the OVER-GATING control: without it the test would pass just as happily if
-    # the guest view were empty. `mode` used to play this role and no longer can -
-    # the REC-MEDIA-CMD sweep gated it (it is the privacy master switch, and
-    # flipping it to "full" makes the server start writing conversation content).
-    # `temperature` is a plain sampling knob a delegated key legitimately sets, so
-    # it is a durable choice for this control rather than another field a later
-    # sweep is likely to gate.
+    # A normal (non-admin_only) field is unaffected by the owner filter: the
+    # over-gating control. `temperature` is a plain sampling knob a delegated key
+    # legitimately sets.
     assert "temperature" in owner and "temperature" in guest
     # The owner view advertises the admin_only flag so the client/UI can label it.
     by_key = {f["key"]: f for f in ss.schema_json(is_owner=True)}

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Oracle for the reactive, opt-in ComfyUI ``__func__`` regression shim (MEDIA-1).
+"""Oracle for the reactive, opt-in ComfyUI ``__func__`` regression shim.
 
 The shim is a localm-owned ``sitecustomize.py`` that localm puts on the PYTHONPATH
-of a ComfyUI process it SPAWNS ITSELF, to patch a ComfyUI core regression in memory
-(Comfy-Org/ComfyUI #12116). The absolute invariant: localm writes NOTHING into the
-user's ComfyUI install and only ever shims a ComfyUI it launched.
+of a ComfyUI process it SPAWNS ITSELF, to patch a ComfyUI core regression in
+memory. The absolute invariant: localm writes NOTHING into the user's ComfyUI
+install and only ever shims a ComfyUI it launched.
 
 Four checks, each with a built-in negative case so it fails on known-bad work:
   1. DEFAULT no-op: a normal spawn never puts the shim dir on the child PYTHONPATH.
@@ -27,7 +27,7 @@ import pytest
 
 # --- fixtures: fake ComfyUI internals written to real files so getsource works ----
 
-# Faithful copy of the upstream buggy body (the `.__func__` access is what breaks).
+# Copy of the upstream body; the `.__func__` access is the line that raises.
 _BUGGY_SRC = '''\
 import asyncio
 
@@ -99,7 +99,7 @@ def make_locked_method_func(type_obj, func, class_clone):
         return wrapped_func
 '''
 
-# Different signature -> unexpected shape -> shim must no-op (never risk breaking it).
+# Different signature -> unexpected shape -> shim must no-op.
 _WRONGSHAPE_SRC = '''\
 def lock_class(cls):
     return cls
@@ -162,8 +162,8 @@ def test_exec_error_message_is_actionable_only_for_the_regression(monkeypatch):
     # unrelated error keeps the plain wording (no false offer)
     generic = c.comfy_exec_error_message("CUDA out of memory", "http://127.0.0.1:8188")
     assert generic == "ComfyUI execution failed: CUDA out of memory"
-    # the regression gets a richer, actionable message: names the upstream ref and the
-    # localm-side toggle, and promises it writes nothing into the install.
+    # The known shape gets a richer message: it names the upstream ref and the
+    # localm-side toggle, and states that nothing is written into the install.
     rich = c.comfy_exec_error_message(
         "'function' object has no attribute '__func__'", "http://127.0.0.1:8188")
     assert rich != generic
@@ -214,9 +214,8 @@ def test_shim_noops_on_unpatchable_module(tmp_path, src, name):
 
 
 def _tree_snapshot(root):
-    # Relative file paths under root, excluding Python's own bytecode cache (which any
-    # import writes and which is NOT a localm-authored file - the invariant is about
-    # localm writing into the install, not CPython's import machinery).
+    # Relative file paths under root, excluding Python's own bytecode cache,
+    # which any import writes.
     out = set()
     for dirpath, _dirs, files in os.walk(root):
         if "__pycache__" in dirpath:
@@ -251,7 +250,7 @@ def test_shim_applies_via_pythonpath_in_a_real_subprocess(tmp_path):
     shim = str(comfy_shim_dir())
 
     base_env = dict(os.environ)
-    # Do not write .pyc so the "nothing added to the install" assertion is airtight.
+    # Do not write .pyc: the assertion below counts files added to the install.
     base_env["PYTHONDONTWRITEBYTECODE"] = "1"
 
     # WITH the shim on PYTHONPATH -> patched: node runs, and the INFO line is emitted.
@@ -263,7 +262,7 @@ def test_shim_applies_via_pythonpath_in_a_real_subprocess(tmp_path):
     assert "RESULT ('sync'," in r.stdout
     assert "Applied an in-memory ComfyUI __func__ compatibility shim" in r.stderr
 
-    # WITHOUT the shim -> the fixture reproduces the real bug (proves the shim is the fix).
+    # WITHOUT the shim -> the fixture raises.
     env_off = dict(base_env)
     env_off["PYTHONPATH"] = str(install)
     r2 = subprocess.run([sys.executable, str(driver)], capture_output=True,
@@ -271,7 +270,7 @@ def test_shim_applies_via_pythonpath_in_a_real_subprocess(tmp_path):
     assert r2.returncode != 0
     assert "has no attribute '__func__'" in r2.stderr
 
-    # The invariant: nothing was written into the fake ComfyUI install.
+    # Nothing was written into the fake ComfyUI install.
     assert _tree_snapshot(install) == before
 
 
@@ -316,10 +315,9 @@ def _capture_spawn_env(monkeypatch, tmp_path, *, once=False, remember=False,
     if remember:
         cfg["comfy_func_shim"] = True
 
-    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
-    # double-checked re-check under _launch_lock_for), then up after spawn -
-    # ensure_comfy() now makes THREE _comfy_alive() calls minimum before a
-    # launch is confirmed, not two.
+    # dead, dead-under-lock (the double-checked re-check under _launch_lock_for),
+    # then up after spawn: ensure_comfy() makes three _comfy_alive() calls
+    # minimum before a launch is confirmed.
     alive = iter([False, False, True])
     with patch("localm.config.load_config", return_value=cfg), \
          patch("subprocess.Popen", side_effect=fake_popen), \

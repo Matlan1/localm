@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CODER-2: resume a past coder session. A checkpoint saved for a cwd can be
-restored into a new session (owner / coder:full only); the GET /api/coder/resumable
-probe is owner-gated and reflects whether a checkpoint exists for a directory."""
+"""Resume a past coder session. A checkpoint saved for a cwd can be restored into
+a new session (owner / coder:full only); the GET /api/coder/resumable probe is
+owner-gated and reflects whether a checkpoint exists for a directory."""
 
 import os
 from pathlib import Path
@@ -12,9 +12,8 @@ from fastapi.testclient import TestClient
 
 from localm.plugins.coder.agent import Agent
 
-# Same non-routable RFC5737 (TEST-NET-1) address test_admin_fs_routes.py and
-# test_mcpserver.py use: guaranteed never to route anywhere, so even a total
-# fix failure cannot dial a real host from this machine or CI.
+# A non-routable RFC5737 documentation address, so nothing here can reach a real
+# host.
 _UNC = r"\\192.0.2.1\share"
 _UNC_FWD = "//192.0.2.1/share"
 _DEVICE = r"\\.\PhysicalDrive0"
@@ -241,11 +240,11 @@ def test_resumable_validates_cwd(tmp_path, monkeypatch):
 @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
 def test_create_session_rejects_unc_and_device_cwd_without_touching_the_filesystem(
         tmp_path, monkeypatch, bad):
-    """H1 (2026-07-29 sweep): the owner/coder:full branch called
-    Path(req.cwd).expanduser().is_dir()/.resolve() with no lexical check at
-    all. The `restricted` branch just above it already ignores req.cwd
-    entirely (uses root_dir instead), so this is the MORE-trusted branch -
-    not the less-trusted one - that was actually unguarded."""
+    """The owner/coder:full branch calls
+    Path(req.cwd).expanduser().is_dir()/.resolve(), so it needs a lexical check
+    first. The `restricted` branch just above it ignores req.cwd entirely (it
+    uses root_dir), so this is the MORE-trusted branch, not the less-trusted
+    one."""
     seen = _install_fs_spy(monkeypatch, "is_dir")
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
     app.state.root_dir = str(tmp_path)
@@ -264,10 +263,10 @@ def test_create_session_rejects_unc_and_device_cwd_without_touching_the_filesyst
 @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
 def test_resumable_rejects_unc_and_device_cwd_without_touching_the_filesystem(
         tmp_path, monkeypatch, bad):
-    """H2 (2026-07-29 sweep): coder_resumable is a GET route with no CSRF
-    check (CSRF only applies to unsafe methods), so an unguarded cwd here is
-    reachable via a plain cross-origin request from any page the user has
-    open - no local foothold on the machine required."""
+    """coder_resumable is a GET route with no CSRF check (CSRF only applies to
+    unsafe methods), so an unguarded cwd here is reachable via a plain
+    cross-origin request from any page the user has open - no local foothold on
+    the machine required."""
     seen = _install_fs_spy(monkeypatch, "is_dir")
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
     app.state.root_dir = str(tmp_path)
@@ -291,24 +290,22 @@ def test_resumable_rejects_unc_and_device_cwd_without_touching_the_filesystem(
 def test_create_session_rejects_a_cwd_that_expands_into_unc_via_userprofile(
         tmp_path, monkeypatch):
     """Regression pin for the expanduser-then-check ORDERING, not just the
-    guard's existence: a raw `~`-prefixed cwd is NOT UNC-shaped as written, so
-    a guard that checked the RAW string (the ordering this fix replaced)
-    would pass it straight through - only AFTER expanduser() runs (which
-    resolves ~ against the server's own USERPROFILE) does it become a UNC
-    string. This is a real, if unusual, Windows configuration (a roaming
-    profile pointing the home directory at a network share), not attacker
-    input - the SERVER's own environment, not something a client controls.
-    The point is the invariant: the guard must check the string that
-    actually reaches the syscall, not an earlier form of it, which is what
-    silently breaks if the check is ever "simplified" back to pre-expansion.
-    Every other UNC test in this file uses an already-UNC-shaped raw string,
-    so none of them would fail if this ordering were reverted - this one is
-    designed to."""
+    guard's existence: a raw `~`-prefixed cwd is NOT UNC-shaped as written, so a
+    guard that checked the RAW string would pass it straight through - only
+    AFTER expanduser() runs (resolving ~ against the server's own USERPROFILE)
+    does it become a UNC string. That is a real, if unusual, Windows
+    configuration (a roaming profile pointing the home directory at a network
+    share), not attacker input - the SERVER's own environment, not something a
+    client controls.
+
+    The invariant is that the guard must check the string that actually reaches
+    the syscall, not an earlier form of it. Every other UNC test in this file
+    uses an already-UNC-shaped raw string, so none of them would fail if this
+    ordering were reverted - this one is designed to."""
     monkeypatch.setenv("USERPROFILE", _UNC)
     monkeypatch.delenv("HOMEDRIVE", raising=False)
     monkeypatch.delenv("HOMEPATH", raising=False)
-    # Confirm the environment actually produces a UNC string, rather than
-    # trusting env-var precedence blindly.
+    # Confirm the environment actually produces a UNC string.
     expanded = str(Path("~/proj").expanduser())
     assert _is_unc_or_device(expanded), (
         f"test setup did not produce a UNC path: expanduser() gave {expanded!r}")
@@ -379,11 +376,10 @@ def test_agent_persist_then_resume_roundtrip_offline(tmp_path, monkeypatch):
 
 
 def test_resume_recap_strips_a_fenced_json_tool_call(tmp_path, monkeypatch):
-    """CODER-2 recap parity: a ```json-fenced call (one of the 5 shapes
-    parse_tool_calls recognises, name-gated) used to survive into the recap
-    as raw fence markers and JSON because resume_from_checkpoint only knew
-    the <tool_call> XML wrapper. It must now be removed exactly like an XML
-    call always was, leaving only the surviving prose."""
+    """A ```json-fenced call (one of the five shapes parse_tool_calls
+    recognises, name-gated) must be removed from the recap exactly like an XML
+    call is, leaving only the surviving prose - resume_from_checkpoint knowing
+    only the <tool_call> XML wrapper leaves raw fence markers and JSON in."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"; proj.mkdir()
@@ -410,10 +406,10 @@ def test_resume_recap_strips_a_fenced_json_tool_call(tmp_path, monkeypatch):
 
 
 def test_resume_recap_strips_a_bare_json_tool_call(tmp_path, monkeypatch):
-    """The other shape that used to leak raw: a bare top-level JSON object
-    with no wrapper at all. A pure-call message (no prose) must vanish from
-    the recap exactly like a pure XML tool-call message always has; prose
-    alongside one must survive while the JSON itself does not."""
+    """The other shape that can leak raw: a bare top-level JSON object with no
+    wrapper at all. A pure-call message (no prose) must vanish from the recap
+    exactly like a pure XML tool-call message does; prose alongside one must
+    survive while the JSON itself does not."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"; proj.mkdir()
@@ -439,7 +435,5 @@ def test_resume_recap_strips_a_bare_json_tool_call(tmp_path, monkeypatch):
     assert b.resume_from_checkpoint() is True
 
     texts = [e["text"] for e in b.history if e.get("type") == "history"]
-    # The pure-call third message (no prose) contributes no row at all -
-    # matching how a pure <tool_call>...</tool_call> message has always
-    # been dropped.
+    # The pure-call third message (no prose) contributes no row at all.
     assert texts == ["write it out", "Let me check that file."]

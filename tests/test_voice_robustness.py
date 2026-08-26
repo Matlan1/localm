@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""VOICE-1: speech-to-text must never take the whole server down.
+"""Speech-to-text must never take the whole server down.
 
 faster-whisper's native engine (ctranslate2) and PyAV can fault at the C level
 on some inputs/builds - an abort()/access-violation that no Python ``try/except``
@@ -12,7 +12,7 @@ These tests prove the containment property with REAL, uncatchable faults (a hard
 process exit, a genuine segfault, and a hang) injected into the worker via the
 ``LOCALM_VOICE_FAULT_FOR_TEST`` hook - the same code path a real ctranslate2
 crash would take. The premise test below shows that, without isolation, such a
-fault bypasses ``try/except`` entirely (which is why isolation is required)."""
+fault bypasses ``try/except`` entirely."""
 
 import io
 import math
@@ -63,15 +63,14 @@ def test_empty_audio_raises_clean_voiceerror():
 
 def test_status_checks_do_not_load_native_stack():
     # The server process must never import faster-whisper/ctranslate2 just to
-    # answer a status probe: that stack initialises OpenMP and can abort the
-    # whole process (the very crash VOICE-1 is about). It must ALSO not import
-    # huggingface_hub (R24): that heavy transitive import (requests, fsspec,
-    # filelock, tqdm, ...) can take tens of seconds on a cold start and, because
-    # /api/voice/status is an ``async def``, froze the event loop and stalled the
-    # whole first /api/* batch. Run in a clean subprocess (so other tests that
-    # imported the stack do not pollute the check) and load this worktree's
-    # voice.py by file path (so an editable install of localm cannot shadow it
-    # with a different copy).
+    # answer a status probe: that stack initialises OpenMP and can abort the whole
+    # process. It must ALSO not import huggingface_hub: that heavy transitive
+    # import (requests, fsspec, filelock, tqdm, ...) can take tens of seconds on a
+    # cold start and, because /api/voice/status is an ``async def``, would freeze
+    # the event loop and stall the whole first /api/* batch. Run in a clean
+    # subprocess (so other tests that imported the stack do not pollute the check)
+    # and load this worktree's voice.py by file path (so an editable install of
+    # localm cannot shadow it with a different copy).
     from pathlib import Path
     worktree = Path(__file__).resolve().parents[1].as_posix()
     vpath = (Path(__file__).resolve().parents[1] / "localm" / "voice.py").as_posix()
@@ -93,11 +92,11 @@ def test_status_checks_do_not_load_native_stack():
 
 
 def test_stt_model_cached_resolves_hub_path_without_import(monkeypatch, tmp_path):
-    # R24: stt_model_cached reads the documented hub-cache layout directly (the same
+    # stt_model_cached reads the documented hub-cache layout directly (the same
     # models--<org>--<repo>/snapshots/<rev>/ layout download_root produces, since
     # faster-whisper passes it through as huggingface_hub's cache_dir). Lay down the
-    # snapshot file the resolver expects inside localm's OWN cache dir; it must report
-    # cached=True without importing huggingface_hub, and False when absent.
+    # snapshot file the resolver expects inside localm's OWN cache dir; it must
+    # report cached=True without importing huggingface_hub, and False when absent.
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     import localm.config as _cfg
     monkeypatch.setattr(_cfg, "load_config", lambda: {"voice_stt_model": "base"})
@@ -116,12 +115,10 @@ def test_stt_model_cached_resolves_hub_path_without_import(monkeypatch, tmp_path
 def test_stt_cache_dir_is_contained_in_the_data_dir(monkeypatch, tmp_path):
     """The Whisper model lands inside LOCALM_HOME, never the user's home profile.
 
-    The user consents to the DOWNLOAD, never to the location: left to itself
-    faster-whisper caches into the global HF hub cache (~/.cache/huggingface/hub, up
-    to ~1.5 GB) outside the data dir, which is the rule-4 containment leak this pins
-    shut. An ambient HF_* env var must NOT be able to pull it back out: containment
-    that any unrelated environment variable can silently switch off is not a
-    guarantee. LOCALM_HOME is the knob, so the cache follows the data dir."""
+    Left to itself faster-whisper caches into the global HF hub cache
+    (~/.cache/huggingface/hub, up to ~1.5 GB) outside the data dir. An ambient
+    HF_* env var must NOT be able to pull it back out. LOCALM_HOME is the knob,
+    so the cache follows the data dir."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     for k in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(k, str(tmp_path / "somewhere-else"))
@@ -137,11 +134,10 @@ def test_stt_request_carries_the_contained_download_root(monkeypatch, tmp_path):
     """The parent sends the resolved cache dir WITH each request, and the worker
     hands it to WhisperModel as download_root.
 
-    Pinned because these are two processes: if the worker recomputed the path
-    itself, the parent's stt_model_cached() probe and the actual download could
-    silently disagree (a consent prompt for a model already on disk, or a re-download
-    into a second location). Asserting the value crosses the queue proves they cannot.
-    Uses a fake queue - no worker spawn - so it stays fast and hermetic."""
+    These are two processes: a worker that recomputed the path itself could
+    disagree with the parent's stt_model_cached() probe (a consent prompt for a
+    model already on disk, or a re-download into a second location), so the value
+    crosses the queue. Uses a fake queue, so no worker is spawned."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     sent = []
 
@@ -184,8 +180,8 @@ def test_garbage_audio_raises_voiceerror_not_crash():
 
 def test_native_fault_bypasses_try_except():
     # A child that wraps a genuine native abort in `except BaseException` still
-    # dies: this is exactly why an in-process model.transcribe() crash took the
-    # server down, and why the real fix is process isolation, not a try/except.
+    # dies, so an in-process try/except cannot contain it - hence the process
+    # isolation.
     code = (
         "import os, ctypes\n"
         "if os.name == 'nt':\n"

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R40: the conversations sidebar index used to download EVERY conversation's full
-// message bodies (incl. data-URI images) just to render a list of titles. The GUI
-// now fetches a lightweight, paginated meta index and lazy-loads each
-// conversation's messages on open.
+// The conversations sidebar fetches a lightweight paginated meta index and
+// lazy-loads each conversation's messages on open.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

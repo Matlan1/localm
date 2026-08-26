@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """reload_chat_after_media must report the REAL reload outcome, not a blanket
-"Chat model ready." (honesty audit, AGENTS.md rule 5).
+"Chat model ready.".
 
-Regression: the function discarded the /v1/models/load response and always pushed
-"Chat model ready.", so a non-2xx (503 "No model specified", 401, or a 500 when
-the media backend still holds VRAM) was reported as success. It now mirrors its
-sibling unload_chat_for_media's resp.ok check and defers honestly on failure.
+A non-2xx from /v1/models/load (503 "No model specified", 401, or a 500 while the
+media backend still holds VRAM) is reported as a deferral, matching its sibling
+unload_chat_for_media's resp.ok check.
 """
 
 from localm import vram
@@ -55,17 +54,17 @@ def test_reload_success_reports_ready(monkeypatch):
 
 
 def test_reload_http_error_is_not_reported_as_success(monkeypatch):
-    """A 503 must NOT surface as "Chat model ready." - the exact false success the
-    audit flagged. It must defer honestly with the HTTP status."""
+    """A 503 must NOT surface as "Chat model ready."; it must defer with the HTTP
+    status."""
     job = _reload(monkeypatch, _Resp(ok=False, status_code=503))
     text = job.text()
-    assert "Chat model ready." not in text          # the falsehood is gone
+    assert "Chat model ready." not in text          # no false success line
     assert "deferred" in text.lower()
     assert "503" in text
 
 
 def test_reload_transport_error_still_defers(monkeypatch):
-    """The pre-existing transport-exception path stays honest."""
+    """The transport-exception path defers instead of claiming success."""
     job = _reload(monkeypatch, RuntimeError("connection refused"))
     text = job.text()
     assert "Chat model ready." not in text

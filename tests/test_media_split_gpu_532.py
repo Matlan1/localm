@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-532: media generation names a PREFERRED GPU without MASKING the others away.
+"""Media generation names a PREFERRED GPU without MASKING the others away.
 
-WHY THIS EXISTS (verified against the real ComfyUI source at git 867404b):
 ComfyUI core ships per-component GPU PLACEMENT - `SelectModelDevice` /
 `SelectCLIPDevice` / `SelectVAEDevice` (`comfy_extras/nodes_multigpu.py`, registered at
 `nodes.py:2440`), which call `deepclone_multigpu` to rehome a component onto another
 card with its own independent weights. So a second GPU CAN carry real work.
 
-That capability is destroyed by masking. ComfyUI has two flags that both read as "use
+Masking destroys that capability. ComfyUI has two flags that both read as "use
 this card", and they are NOT interchangeable:
 
   --cuda-device N    -> CUDA_VISIBLE_DEVICES = "N"        (main.py:78-81)  DELETES the
@@ -16,16 +15,10 @@ this card", and they are NOT interchangeable:
   --default-device N -> CUDA_VISIBLE_DEVICES = "N,0,1,.." (main.py:69-76)  REORDERS so
                         N leads and the rest stay usable.
 
-localm shipped `--cuda-device` (f094d3d0) and thereby made multi-GPU media impossible by
-construction, while claiming to have improved multi-GPU support. These tests exist so
-that cannot come back.
-
 The swap gate (`vram.decide_media_swap`) reads COMBINED free VRAM across the split; the
 loader must agree about which card leads, or a 4 GB job "fits" in 2x4 GB combined, the
 chat model is kept, and the media model OOMs on one 4 GB card. Naming the preferred card
 makes them agree WITHOUT amputating the box.
-
-Spec + full rationale: dev-notes/media-split-gpu/SPEC.md
 """
 
 from __future__ import annotations
@@ -40,7 +33,7 @@ from localm.media import managed_comfy as mc
 def home(tmp_path, monkeypatch):
     """Throwaway LOCALM_HOME wired through both the lazy home_dir() and the
     import-frozen config module attrs, so load_config() and managed_comfy path
-    resolution agree on the same tmp dir (see "Test home isolation (import-time)")."""
+    resolution agree on the same tmp dir."""
     h = tmp_path / ".localm"
     h.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LOCALM_HOME", str(h))
@@ -58,11 +51,9 @@ def _fake_gpus(monkeypatch, *specs):
     (resolve_gpu_split's validation, the device chooser) sees the same fake box.
 
     Also pins non-Vulkan so resolve_gpu_split's membership validation actually runs,
-    regardless of what native backend is provisioned in the ambient environment
-    (GPU-SPLIT-VKINDEX: on Vulkan, list_gpus() cannot see Vulkan-only devices, so
-    resolve_gpu_split deliberately passes the configured indices through UNCHECKED -
-    which would make these tests depend on how the box that runs them happens to be
-    provisioned). Same pin, same reason, as #671.
+    regardless of what native backend is provisioned in the ambient environment: on
+    Vulkan, list_gpus() cannot see Vulkan-only devices, so resolve_gpu_split passes
+    the configured indices through UNCHECKED.
     """
     import localm.discover as disc
     gpus = [{"index": i, "name": f"fake{i}", "free": free, "total": free * 2}
@@ -87,17 +78,16 @@ def _flag(cmd: str, name: str):
 
 
 # --------------------------------------------------------------------------- #
-#  THE REGRESSION THAT MATTERS: never mask.                                    #
+#  Never mask.                                                                 #
 # --------------------------------------------------------------------------- #
 
 def test_never_emits_cuda_device_which_would_mask_the_other_cards(home, monkeypatch):
-    """--cuda-device must NEVER be emitted. This is the whole point of the fix.
+    """--cuda-device must NEVER be emitted.
 
     It sets CUDA_VISIBLE_DEVICES to a single id (main.py:78-81), which deletes every
     other card from torch's view and turns ComfyUI core's SelectModelDevice /
     SelectCLIPDevice / SelectVAEDevice nodes into silent no-ops - a gpu:1 that does not
-    exist does nothing. localm shipped exactly this in f094d3d0 and made multi-GPU media
-    impossible while claiming to support it.
+    exist does nothing.
     """
     _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
     cfg.save_config({"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]})
@@ -112,11 +102,10 @@ def test_never_emits_cuda_device_which_would_mask_the_other_cards(home, monkeypa
 def test_split_box_prefers_the_card_with_most_free_vram(home, monkeypatch):
     """Split [0,1]; card 1 has MORE free VRAM -> ComfyUI defaults to card 1.
 
-    Also the #661 trap negative-test: resolve_main_gpu_index(None) returns 0
-    (discover.py:528-540), so an unset main_gpu_index does NOT mean "no split", it means
-    "device 0". Choosing via that IDENTITY default would silently pick card 0 and ignore
-    the split - the bug PR #661 shipped and reverted. Which card leads is a CAPACITY
-    question.
+    resolve_main_gpu_index(None) returns 0 (discover.py:528-540), so an unset
+    main_gpu_index does NOT mean "no split", it means "device 0". Choosing via that
+    identity default would silently pick card 0 and ignore the split. Which card
+    leads is a CAPACITY question.
     """
     _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
     cfg.save_config({"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]})
@@ -140,8 +129,8 @@ def test_single_gpu_box_with_main_gpu_index_names_that_card(home, monkeypatch):
 def test_unconfigured_box_emits_no_device_flag(home, monkeypatch):
     """NEGATIVE-TEST: nothing configured -> do NOT invent a device.
 
-    A plain box must keep working byte-identically to today. Naming a device here would
-    invent a choice the user never made, and would mask any second card they later add.
+    Naming a device here would invent a choice the user never made, and would mask
+    any second card they later add.
     """
     _fake_gpus(monkeypatch, (0, 8 * GB))
     cfg.save_config({})
@@ -206,7 +195,7 @@ def test_own_comfy_child_env_unset_when_nothing_configured(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_split_with_no_torch_visible_device_names_nothing(home, monkeypatch):
-    """GPU-SPLIT-VKINDEX: a split whose indices torch cannot see must name NO device.
+    """A split whose indices torch cannot see must name NO device.
 
     resolve_gpu_split() passes indices through UNVALIDATED on the `vulkan` llama.cpp
     build, because list_gpus() is structurally blind to Vulkan-only devices. Those
@@ -241,8 +230,8 @@ def test_gpu_option_is_a_position_in_the_order_we_impose(home, monkeypatch):
     the visible order is [1, 0] and therefore:
         our device 1 -> gpu:0   (it LEADS, so it is torch index 0)
         our device 0 -> gpu:1
-    Getting this backwards puts a component on the wrong card and STILL RENDERS. That is
-    a silent wrong answer, which is why it is pinned here.
+    Getting this backwards puts a component on the wrong card and STILL RENDERS:
+    a silent wrong answer.
     """
     import localm.discover as disc
     _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))

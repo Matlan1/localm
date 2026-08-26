@@ -1,22 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0009 P9 + P10: the pull path must say which stage it is in.
+"""The pull path must say which stage it is in.
 
-THE DEFECT IS NOT MERE ABSENCE, which is why these two ship together. The
+THE DEFECT IS NOT MERE ABSENCE, and the two halves ship together. The
 download's own terminal event announces 100% and THEN the caller hashes the
-file, which for a multi-GB model is minutes of total silence. So the old
-behaviour did not say too little, it said "the download is finished" and kept
-working - and the only field that could have told those apart, `phase`, was
-dead: `_emit_progress` defaults it to "download" and all seven call sites in
-`pull.py` took the default, so no consumer could distinguish the stages even in
-principle.
+file, which for a multi-GB model is minutes of total silence - so the channel
+says "the download is finished" and keeps working. The only field that could
+tell the stages apart, `phase`, was dead: `_emit_progress` defaults it to
+"download" and every call site in `pull.py` took the default.
 
-WHAT THE FIXTURES HAVE TO BE ABLE TO EXPRESS (item 19 of the diff-review
-catalogue - a test cannot fail on a case its fixture cannot build):
+WHAT THE FIXTURES HAVE TO BE ABLE TO EXPRESS, since a test cannot fail on a case
+its fixture cannot build:
 
 * One 4 MiB block yields exactly ONE callback, which can never demonstrate
   throttling and can never distinguish "throttled" from "emitted every block".
   `_HASH_BLOCK_BYTES` is therefore shrunk through `_mm` (this module's own
-  documented convention) so a small fixture file spans many blocks.
+  convention) so a small fixture file spans many blocks.
 * A file whose size always stats can never produce the no-denominator case, so
   one test makes `stat` raise.
 * A GUI-mode-only fixture can never catch the regression that matters most to a
@@ -61,7 +59,7 @@ def big_file(tmp_path):
     return p
 
 
-# ------------------------------------------------- the stage is now nameable
+# ----------------------------------------------------- the stage is nameable
 
 class TestThePhaseFieldDistinguishesTheStages:
     def test_verification_reports_the_verify_phase(self, gui, big_file, capsys):
@@ -72,9 +70,9 @@ class TestThePhaseFieldDistinguishesTheStages:
             f"verification did not identify its own stage: {evs[:3]}")
 
     def test_the_download_stage_still_says_download(self, gui, capsys):
-        """The other half of P9: the two stages must be TELLABLE APART. A test
-        that only pinned 'verify' would pass just as well if every stage were
-        relabelled, which is the bug in a different costume."""
+        """The two stages must be TELLABLE APART. A test that only pinned
+        'verify' would pass just as well if every stage were relabelled, which
+        is the bug in a different costume."""
         with mm._snapshot_progress(lambda: 50, 100) as outcome:
             outcome.ok()
         phases = {e["phase"] for e in _events(capsys)}
@@ -88,7 +86,7 @@ class TestThePhaseFieldDistinguishesTheStages:
         _events(capsys)                          # drain, keeps output off stdout
 
 
-# --------------------------------------------------- honest numbers, per ADR-0008
+# ------------------------------------------------------------- honest numbers
 
 class TestTheNumbersAreHonest:
     def test_it_reaches_the_end_of_the_file(self, gui, many_blocks, big_file,
@@ -125,9 +123,7 @@ class TestTheNumbersAreHonest:
         mm._verify_digest(big_file)
         counts = [e["downloaded"] for e in _events(capsys)]
         # Non-emptiness first: `[] == sorted([])` is true, so without this the
-        # assertion below is satisfied by emitting nothing at all. Measured -
-        # this test stayed green under the fires-control that removed verify
-        # reporting entirely, which is the whole "could not have failed" class.
+        # assertion below is satisfied by emitting nothing at all.
         assert counts, "emitted no verify progress to be monotonic about"
         assert counts == sorted(counts), f"verify progress went backwards: {counts}"
 
@@ -139,8 +135,7 @@ class TestTheEmitRateIsThrottled:
                                              capsys):
         """`_sha256_file` calls back after EVERY block, at a rate set by disk
         and CPU throughput. Forwarding that 1:1 puts hundreds of events a second
-        on the GUI's stdout pipe for a large model - catalogue item 2, a per-call
-        cost multiplied by somebody else's timer."""
+        on the GUI's stdout pipe for a large model."""
         mm._verify_digest(big_file)              # 4096 / 64 = 64 blocks
         evs = _events(capsys)
         # `0 < 64` too, so emitting nothing would "pass" a bare upper bound.
@@ -153,11 +148,8 @@ class TestTheEmitRateIsThrottled:
         """The throttle must never swallow the LAST event: that is the one that
         says the wait is over. Frozen time makes every event throttle-eligible,
         so only the explicit final-block exemption can let one through."""
-        # Patched on the module that DEFINES _verify_digest. It moved from
-        # `pull` to `_shared` so `registry` could reach it without an import
-        # cycle, and `_pull.time` stopped being the clock it reads - the test
-        # went red on exactly that, which is what a patch surface pinned to the
-        # wrong module looks like when it is caught rather than silently inert.
+        # Patched on the module that DEFINES _verify_digest: it lives in `_shared`,
+        # not in `pull`, and `_pull.time` is not the clock it reads.
         monkeypatch.setattr(_shared.time, "monotonic", lambda: 10_000.0)
         mm._verify_digest(big_file)
         evs = _events(capsys)
@@ -181,11 +173,11 @@ class TestTheCliSurface:
 
     def test_the_cli_bar_is_told_what_it_is_waiting_for(self, monkeypatch,
                                                         big_file):
-        """Asserted from OUTSIDE the call (catalogue item 13): a side_effect
-        that raises would be an input to the code under test, not an assertion.
+        """Asserted from OUTSIDE the call: a side_effect that raises would be an
+        input to the code under test, not an assertion.
 
-        Patched on the PACKAGE, because _verify_digest reads _mm._hash_with_progress
-        at call time rather than binding it at import."""
+        Patched on the PACKAGE, because _verify_digest reads
+        _mm._hash_with_progress at call time rather than binding it at import."""
         spy = MagicMock(return_value="deadbeef")
         monkeypatch.delenv("LOCALM_PROGRESS_JSON", raising=False)
         monkeypatch.setattr(mm, "_hash_with_progress", spy)

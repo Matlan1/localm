@@ -1,24 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-COMFY-REDIRECT (LM-DA-045): sanitize_comfy_url (CHK-COMFY-APIURL) only
-screens the CONFIGURED comfy_api_url, at resolution time. A redirect target is
-chosen by the remote ComfyUI AFTER that check has already run, and urllib's
-default opener follows up to 10 such redirects with no validation at all - so a
-hostile or compromised ComfyUI (SECURITY.md: it "may be another machine, over
-plain http") could answer any request with a 3xx straight past the guard, e.g.
-to a cloud-metadata address. ComfyUI's HTTP API has no legitimate reason to
-redirect, so the connection itself must refuse every hop outright.
+"""sanitize_comfy_url only screens the CONFIGURED comfy_api_url, at resolution
+time. A redirect target is chosen by the remote ComfyUI AFTER that check has
+already run, and urllib's default opener follows up to 10 such redirects with no
+validation at all, so a hostile or compromised ComfyUI (SECURITY.md: it "may be
+another machine, over plain http") could answer any request with a 3xx straight
+past the guard, e.g. to a cloud-metadata address. ComfyUI's HTTP API has no
+legitimate reason to redirect, so the connection itself refuses every hop
+outright.
 
-TWO real (loopback) HTTP stubs, not one: "hop A" plays the compromised/hostile
-ComfyUI and answers every request with a 302 to "hop B", which plays the
-redirect target and answers with real, valid-looking data (the way an actual
-cloud metadata endpoint or an internal service would). This is deliberate: a
-single stub whose Location points at a genuinely unreachable address (e.g. the
-literal 169.254.169.254) cannot tell "refused the redirect" apart from
-"reached for it and failed for an unrelated network reason" - both look like
-the same benign False/None to a best-effort caller. Routing the redirect to a
-second stub that WOULD succeed if followed is what actually proves the guard:
-under the fix, hop B is never contacted at all; under a regression, hop B's
-data comes back to the caller exactly as a real SSRF would deliver it.
+TWO real (loopback) HTTP stubs: "hop A" plays the compromised/hostile ComfyUI
+and answers every request with a 302 to "hop B", which plays the redirect target
+and answers with real, valid-looking data. Under the fix, hop B is never
+contacted at all; under a regression, hop B's data comes back to the caller
+exactly as a real SSRF would deliver it.
 """
 
 from __future__ import annotations
@@ -73,9 +67,8 @@ class _RedirectToHopB(BaseHTTPRequestHandler):
 
 class _HopBHandler(BaseHTTPRequestHandler):
     """Hop B: what the redirect target answers with IF a broken client
-    followed it. Real, valid, ComfyUI-shaped responses - so a fix regression
-    is observable as real second-hop data flowing back to the caller, not
-    just as some exception or other."""
+    followed it. Real, valid, ComfyUI-shaped responses, so a regression is
+    observable as real second-hop data flowing back to the caller."""
 
     def log_message(self, *_a):
         pass
@@ -154,8 +147,8 @@ def hops():
 
 def test_object_info_refuses_redirect_never_reaches_hop_b(hops):
     a, b = hops
-    # Best-effort: a refused redirect reads the same as "could not be
-    # fetched" (None) - it must NOT surface hop B's data.
+    # A refused redirect reads the same as could-not-be-fetched (None) and never
+    # surfaces hop B's data.
     assert c.comfy_object_info(a.base_url, timeout=2) is None
     assert b.hit_paths == []          # the redirect target was NEVER dialed
     assert a.hit_paths == ["/object_info"]
@@ -213,10 +206,9 @@ def test_upload_image_refuses_redirect_never_reaches_hop_b(hops, tmp_path):
 
 def test_poll_until_done_refuses_redirect_never_reaches_hop_b(hops):
     a, b = hops
-    # The loop retries on ANY exception (ComfyUI may just be busy) rather than
-    # propagating, so the observable contract is POLL_TIMEOUT with the
-    # refusal as the last error - never POLL_FINISHED with hop B's fabricated
-    # history entry, which is what a compromised ComfyUI could otherwise fake.
+    # The loop retries on any exception, so the observable contract is
+    # POLL_TIMEOUT with the refusal as the last error, never POLL_FINISHED with
+    # hop B's fabricated history entry.
     status, value = c.comfy_poll_until_done(
         a.base_url, "pid-1", max_poll_seconds=0.3, history_timeout=1,
         sleep_seconds=0.05)

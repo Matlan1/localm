@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """localm/plugins/gui/web.py's server-computed sw.js CACHE value.
 
-Replaces the hand-bumped version string scripts/check_hygiene.py used to gate (see
-tests/test_check_hygiene_sw_cache.py for what that check still enforces: SHELL
-precache coverage and the placeholder line's shape). GET /sw.js now computes CACHE
-fresh on every request from a content digest of the actual static assets being
-served, so nothing is checked into git for two branches to conflict over, and
-nothing needs a human to remember to bump.
+GET /sw.js computes CACHE fresh on every request from a content digest of the
+actual static assets being served, so nothing is checked into git for two
+branches to conflict over and nothing needs a human to remember to bump. See
+tests/test_check_hygiene_sw_cache.py for what the hygiene check still enforces:
+SHELL precache coverage and the placeholder line's shape.
 """
 
 import logging

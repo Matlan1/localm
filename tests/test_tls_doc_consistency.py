@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Bind docs/tls.md's CA-lifecycle claims to localm/tls.py.
 
-docs/tls.md used to promise, unconditionally, that "The CA is reused even then,
-so a device you trusted once stays trusted". That stopped being true when
-_leaf_is_reusable started forcing a regenerate on a CA that has reached its own
-expiry, and nothing connected the prose to the code, so the drift was silent.
+``_leaf_is_reusable`` forces a regenerate on a CA that has reached its own
+expiry, so the doc must not promise that "The CA is reused even then, so a
+device you trusted once stays trusted".
 
 These tests read the CONSTANTS out of localm.tls rather than restating the
-numbers, so changing a validity window in the code fails here instead of
-quietly making the documentation wrong again.
+numbers, so changing a validity window in the code fails here.
 """
 
 import re
@@ -22,13 +20,10 @@ _DOC = Path(__file__).resolve().parents[1] / "docs" / "tls.md"
 def _doc() -> str:
     """The doc with every run of whitespace collapsed to one space.
 
-    The prose is hard-wrapped at ~80 columns, so ANY sentence-level assertion
-    against the raw text is decided by where the line break happens to fall.
-    Caught by the fires-control on the very first run of this file: the
-    retired-claim test below passed against the pre-fix doc, which contains
-    that claim, because it is wrapped as "The CA is\\n  reused even then" and
-    the substring therefore did not appear. A test that cannot fail on the
-    input it exists to reject is worse than no test.
+    The prose is hard-wrapped at ~80 columns, so a sentence-level assertion
+    against the raw text would be decided by where the line break falls: a
+    claim wrapped as "The CA is\\n  reused even then" contains no matching
+    substring.
     """
     return re.sub(r"\s+", " ", _DOC.read_text(encoding="utf-8"))
 
@@ -50,11 +45,8 @@ def test_ca_lifetime_stated_in_the_doc_matches_the_code():
 
 
 def test_doc_does_not_promise_the_ca_is_always_reused():
-    """The specific false sentence this file exists to keep out.
-
-    Asserting the ABSENCE of a retired claim, rather than the presence of a
-    particular rewording, so the test cannot pressure anyone into deleting
-    legitimate prose to satisfy it.
+    """Asserts the ABSENCE of the retired claim, rather than the presence of a
+    particular rewording.
     """
     assert "The CA is reused even then" not in _doc()
 
@@ -68,8 +60,7 @@ def test_doc_states_the_ca_replacement_consequence():
 
 
 def test_doc_documents_deleting_the_tls_dir_as_recovery():
-    """Recovery by deleting <LOCALM_HOME>/tls/ was undocumented anywhere in
-    docs/ before this change."""
+    """The docs name deleting <LOCALM_HOME>/tls/ as the recovery step."""
     doc = _doc()
     assert "<LOCALM_HOME>/tls/" in doc
     assert re.search(r"delete\s+`?<LOCALM_HOME>/tls/`?", doc)

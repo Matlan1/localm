@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Seamless updates: the GUI shell and its assets must be served with a
-revalidation cache policy so a new app.js / index.html / sw.js is picked up
-automatically, without the user (or a tester) clearing the browser cache.
+"""The GUI shell and its assets are served with a revalidation cache policy, so
+a new app.js / index.html / sw.js is picked up without clearing the browser
+cache.
 
-Starlette's StaticFiles sends an ETag but NO Cache-Control, so browsers fall back
-to heuristic caching and can serve stale code. `Cache-Control: no-cache` keeps
-caching (cheap 304s via the ETag) but forces a revalidation every load, so the
-server - not the user - delivers current code.
+Starlette's StaticFiles sends an ETag but NO Cache-Control, so browsers fall
+back to heuristic caching and can serve stale code. `Cache-Control: no-cache`
+keeps caching (cheap 304s via the ETag) while forcing a revalidation on every
+load.
 """
 
 from pathlib import Path
@@ -28,9 +28,9 @@ _STATIC = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "gui" / "
 
 
 def _a_served_js() -> str:
-    """A served GUI JS module path that exists, robust to the ESM split (app.js and
-    pages.js became app/*.js + pages/*.js). Excludes the service worker
-    (special-cased separately) and vendored third-party libs."""
+    """A served GUI JS module path that exists, found by walking static/.
+    Excludes the service worker (special-cased separately) and vendored
+    third-party libs."""
     for p in sorted(_STATIC.rglob("*.js")):
         if "vendor" in p.parts or p.name == "sw.js":
             continue
@@ -39,10 +39,10 @@ def _a_served_js() -> str:
 
 
 def test_assets_revalidate():
-    """JS/CSS assets must carry Cache-Control: no-cache so new code is picked up
+    """JS/CSS assets carry Cache-Control: no-cache, so new code is picked up
     without a manual cache clear. Covers a per-module JS file discovered under
-    static/ (ARCH-1 split app.js/pages.js into app/*.js + pages/*.js) to prove the
-    policy reaches subdirectory assets, not just top-level files."""
+    static/, so the policy is checked on a subdirectory asset as well as
+    top-level files."""
     with _client() as c:
         for path in ("/style.css", "/sw.js", _a_served_js()):
             r = c.get(path)
@@ -53,7 +53,7 @@ def test_assets_revalidate():
 
 
 def test_shell_revalidates():
-    """The shell document (/ and /index.html) must never be served stale."""
+    """The shell document (/ and /index.html) is never served stale."""
     with _client() as c:
         for path in ("/", "/index.html"):
             r = c.get(path)

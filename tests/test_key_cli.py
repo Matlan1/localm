@@ -1,4 +1,4 @@
-"""H10: the `localm key` CLI group (advertised in auth.py but previously missing).
+"""The `localm key` CLI group.
 
 show / generate / set / clear / list / create / rm over the owner key and the
 scoped named-key store. Secrets are masked by default and shown in full only
@@ -38,7 +38,7 @@ class TestOwnerKey:
         r = runner.invoke(main, ["key", "generate"])
         assert r.exit_code == 0
         key = auth.get_api_key()
-        assert key is not None                      # NEGATIVE pre-fix: no command
+        assert key is not None                      # a key was generated
         assert key in r.output                      # shown so the user can copy
         assert r.output.count(key) == 1             # never echoed twice
 
@@ -108,7 +108,7 @@ class TestOwnerKey:
 
 
 # --------------------------------------------------------------------------- #
-#  LM-PT-002: recover / clear must revoke live browser sessions                #
+#  recover / clear must revoke live browser sessions                           #
 # --------------------------------------------------------------------------- #
 
 class TestOwnerSessionRevocation:
@@ -139,7 +139,7 @@ class TestOwnerSessionRevocation:
         monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
         sid = self._mint_owner_session()
         # A scoped DEVICE key exists too; recovery must rotate the owner key and
-        # drop sessions but leave the device key working (the docstring promise).
+        # drop sessions but leave the device key working.
         auth.create_key("phone", ["models:read"], allow_privileged=False)
         assert sessions.lookup(sid) is not None            # session valid pre-recover
         r = runner.invoke(main, ["key", "recover"])
@@ -182,9 +182,8 @@ class TestNamedKeys:
     def test_create_with_rag_roots_round_trips_and_lists(self, runner):
         # --rag-root is repeatable, following the exact CLI shape as --fs-access:
         # a key created with it is CONFINED to exactly those folders for RAG.
-        # Short synthetic paths (not tmp_path, which under this repo's test
-        # workspace runs long): the RAG-roots column is a Rich table cell and
-        # gets ellipsized past a certain width, unrelated to the feature itself.
+        # Short synthetic paths, not tmp_path: the RAG-roots column is a Rich
+        # table cell and gets ellipsized past a certain width.
         root_a, root_b = "C:/docs/a", "C:/docs/b"
         r = runner.invoke(main, ["key", "create", "scoped-rag",
                                  "--scope", "rag",
@@ -214,9 +213,8 @@ class TestNamedKeys:
         assert auth.list_keys() == []
 
     def test_create_allow_privileged_mints_privileged_scope(self, runner):
-        # --allow-privileged is the explicit opt-in: same scope as the refused
-        # case above succeeds once asked for deliberately, and the confirmation
-        # message calls it out rather than blending it in silently.
+        # --allow-privileged is the explicit opt-in: the same scope refused above
+        # succeeds once asked for, and the confirmation message names it.
         r = runner.invoke(main, ["key", "create", "manager",
                                  "--scope", "keys:admin", "--allow-privileged"])
         assert r.exit_code == 0, r.output
@@ -261,9 +259,7 @@ class TestNamedKeys:
         assert "expired" in listed.output.lower()
 
     def test_list_shows_age_expires_used_columns(self, runner):
-        # Columns are named Age/Expires/Used (not Created/Last used) - short
-        # relative headers, since the absolute-timestamp form does not fit
-        # alongside the five pre-existing columns at a normal terminal width.
+        # Columns are named Age/Expires/Used, not Created/Last used.
         runner.invoke(main, ["key", "create", "dash", "--scope", "models:read"])
         r = runner.invoke(main, ["key", "list"])
         assert r.exit_code == 0
@@ -313,7 +309,7 @@ class TestTimestampFormatting:
 
     def test_fmt_ts_formats_a_real_epoch(self):
         from localm.cli.keys import _fmt_ts
-        # 2026-01-01 00:00:00 UTC-ish; only checking it renders the year/date
+        # A fixed epoch timestamp; only checking it renders the year/date
         # shape, not a specific timezone-dependent clock reading.
         out = _fmt_ts(1767225600)
         assert out != "-"

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A REAL ctypes-backed LlamaBatch for unit tests, so the native batch-fill loop
-in LlamaCpp._create_batch runs against real memory instead of being short-
-circuited by a mock. Lets a test assert the actual layout the native decoder
-sees (token ids, per-token positions, seq ids, logits flags, n_tokens).
+"""A REAL ctypes-backed LlamaBatch for unit tests: the native batch-fill loop in
+LlamaCpp._create_batch runs against real memory. Lets a test assert the actual
+layout the native decoder sees (token ids, per-token positions, seq ids, logits
+flags, n_tokens).
 
 Use it as the side_effect for a mocked ``api.llama_batch_init``:
 
@@ -16,8 +16,7 @@ import ctypes
 from localm.inference.backends.llamacpp._structs import LlamaBatch
 
 # Keeps the backing ctypes arrays for each created batch alive (a LlamaBatch only
-# holds raw void* pointers; without this the arrays would be GC'd) and lets a
-# test read back what _create_batch wrote.
+# holds raw void* pointers) and lets a test read back what _create_batch wrote.
 _BACKING: dict = {}
 
 

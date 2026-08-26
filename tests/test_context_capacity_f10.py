@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F10 regression suite (memory-audit 2026-07-02): the loaded model's resolved
-context ceiling must be reported and consumed, so compaction budgets against the
-real window.
-
-Pre-fix Engine.context_capacity() read attributes the GGUF backend does not have
-and ALWAYS returned None, so the server safety net never fired, the CLI budgeted
-the static config, and the coder measured fill against the initial 4096-token
-window (over-compacting at ~5% of a large model's real capacity).
+"""The loaded model's resolved context ceiling is reported by
+Engine.context_capacity() and consumed by its callers, so compaction budgets
+against the real window rather than the static config or the initial
+4096-token one.
 """
 
 from __future__ import annotations
@@ -60,8 +56,8 @@ def test_coder_ctx_window_prefers_backend_capacity():
         def __init__(self, backend):
             self.backend = backend
 
-    # A backend reporting a large resolved window: the coder must budget against
-    # it, not the 4096 default.
+    # A backend reporting a large resolved window: the coder budgets against it,
+    # not the 4096 default.
     backend = types.SimpleNamespace(context_capacity=lambda: 65536)
     assert _Agent(backend)._ctx_window_tokens() == 65536
 

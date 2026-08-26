@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// checkModelsBeforeGenerate(): the pre-generate model-existence check offered
-// before images.js/music.js/video.js submit their real generate request. A
-// missing model WITH a curated source shows a real confirm modal (repo/file/
-// size, a Download button, never a silent auto-pull); one WITHOUT a curated
-// source, or nothing missing at all, falls straight through with no modal.
+// checkModelsBeforeGenerate(): the pre-generate model-existence check. A missing
+// model with a curated source shows a confirm modal (repo/file/size plus a
+// Download button); one without a curated source, or nothing missing at all,
+// falls through with no modal.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -60,12 +59,6 @@ test("nothing missing: resolves true, no modal, no pull POST", async () => {
 });
 
 test("missing WITHOUT a curated source: no modal, but an honest toast+log message", async () => {
-  // Previously this fell through completely silent - the user learned nothing
-  // until the real generate call failed. checkModelsBeforeGenerate must still
-  // never block (no modal, no pull POST - the real preflight_models() gate
-  // stays authoritative), but it must now say something, generically, for ANY
-  // non-curated class_type (a LoRA is the motivating case, but this asserts a
-  // plain CheckpointLoaderSimple miss too, proving the message is not LoRA-only).
   const pulls = [];
   const missing = [{ class_type: "CheckpointLoaderSimple", input_name: "ckpt_name",
                      filename: "custom.safetensors", source: null, dest_dir: null }];
@@ -88,8 +81,6 @@ test("missing WITHOUT a curated source: no modal, but an honest toast+log messag
 });
 
 test("missing WITHOUT a curated source: a LoRA miss gets the same honest message", async () => {
-  // The generic path exercised with the motivating case: a LoraLoader's
-  // lora_name slot behaves identically to any other non-curated class_type.
   const pulls = [];
   const missing = [{ class_type: "LoraLoader", input_name: "lora_name",
                      filename: "my_style.safetensors", source: null, dest_dir: null }];
@@ -128,10 +119,9 @@ test("missing WITH a curated source: shows repo/file/size, offers Download", asy
   assert.ok(buttons.includes("Download"), "a real Download button, never silent auto-pull");
   assert.ok(buttons.includes("Not now"));
 
-  // Clicking Download POSTs the exact filename, plus which plugin's own
-  // ComfyUI folder to resolve the destination against
-  // (NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR) - and nothing else
-  // (server re-resolves repo/path itself - the client never sends one).
+  // Clicking Download POSTs the filename and the plugin whose ComfyUI folder the
+  // destination resolves against, and nothing else; the server re-resolves
+  // repo/path itself.
   [...win.document.querySelectorAll("#modal-body button")]
     .find((b) => b.textContent === "Download").click();
   await tick(); await tick(); await tick();

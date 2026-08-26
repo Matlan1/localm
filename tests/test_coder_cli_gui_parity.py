@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""O5: the six coder options that used to exist only on the CLI now have a web
-form, per the standing rule that anything available in the CLI must be available
-in SOME form in GUI mode.
+"""The six coder options that exist on the CLI each have a web form, per the
+standing rule that anything available in the CLI must be available in SOME form
+in GUI mode.
 
   --estimate       POST /api/coder/sessions/{id}/estimate
   --patch-mode     patch_mode on create + GET .../patch and .../patch/download
@@ -9,12 +9,12 @@ in SOME form in GUI mode.
   --output-format  GET .../result (the CLI's json payload, no SSE needed)
   --episodes       GET /api/coder/episodes?cwd=
   --until          unified onto the existing verify oracle; its retry cap
-                   (the CLI's --goal-max-iters) is now settable as
+                   (the CLI's --goal-max-iters) is settable as
                    verify_max_retries
 
-The two properties these tests exist to pin, because both fail SILENTLY:
-reading a patch must not consume it, and an option the server cannot honour
-must be reported as not applied rather than echoed back as if it were.
+The two properties these tests pin, because both fail SILENTLY: reading a patch
+must not consume it, and an option the server cannot honour must be reported as
+not applied rather than echoed back as if it were.
 """
 
 import inspect
@@ -24,15 +24,15 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-# Non-routable RFC5737 (TEST-NET-1), same as test_coder_resume.py: guaranteed
-# never to route anywhere, so even a total guard failure cannot dial a real host.
+# Non-routable RFC5737 documentation address: guaranteed never to route anywhere,
+# so even a total guard failure cannot dial a real host.
 _UNC = "\\\\192.0.2.1\\share"
 _UNC_FWD = "//192.0.2.1/share"
 _DEVICE = "\\\\.\\PhysicalDrive0"
 
 
 # --------------------------------------------------------------------------- #
-#  Harness (same shape as test_coder_resume.py's)                              #
+#  Harness                                                                     #
 # --------------------------------------------------------------------------- #
 
 class _StubBackend:
@@ -157,9 +157,8 @@ def test_estimate_refuses_an_empty_task_and_a_busy_session(tmp_path, monkeypatch
         busy = client.post("/api/coder/sessions/%s/estimate" % sid, headers=owner,
                            json={"text": "real task"})
         assert busy.status_code == 409
-        # "busy" and "closed" are both 409 but mean opposite things to the user
-        # - come back in a moment, versus this session is gone - so they must
-        # not collapse into one message.
+        # "busy" and "closed" are both 409 but carry different messages: come
+        # back in a moment, versus this session is gone.
         assert "busy" in busy.json()["detail"]
         sess.busy = False
         sess.closed = True
@@ -260,8 +259,7 @@ def test_reading_the_patch_does_not_consume_it(tmp_path, monkeypatch):
                               json={"cwd": str(proj), "patch_mode": True}).json()
         sid = created["id"]
         # has_patch is about CONTENT, not about the mode: a patch-mode session
-        # that has captured nothing has nothing to download, and saying
-        # otherwise would offer a button that 404s.
+        # that has captured nothing reports false.
         assert created["has_patch"] is False
         sess = app.state.coder_sessions.get(sid)
         sess.agent._patch_chunks.append(
@@ -279,8 +277,8 @@ def test_reading_the_patch_does_not_consume_it(tmp_path, monkeypatch):
             "the patch was consumed by reading it")
         assert sess.agent._patch_chunks, "the agent's patch buffer was drained"
 
-        # The download is the web form of --patch-mode FILE, and it is the same
-        # bytes - checked AFTER two reads, so a drain anywhere shows up here.
+        # The download is the web form of --patch-mode FILE and carries the same
+        # bytes, checked AFTER two reads so a drain anywhere shows up here.
         dl = client.get("/api/coder/sessions/%s/patch/download" % sid, headers=owner)
         assert dl.status_code == 200
         assert "print(1)" in dl.text
@@ -320,7 +318,7 @@ def test_native_tools_is_reported_as_not_applied_against_localms_own_server(
         tmp_path, monkeypatch):
     """localm's /v1/chat/completions declares no tools/tool_choice, so the
     fields are dropped and the run proceeds exactly as if the option had never
-    been passed. Nothing breaks - which is why silence was the problem. The
+    been passed. Nothing breaks, so silence is the problem. The
     response must say it did not take effect."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
@@ -333,8 +331,7 @@ def test_native_tools_is_reported_as_not_applied_against_localms_own_server(
             "the EFFECTIVE value must not echo the request")
         assert any("native_tools was not applied" in n for n in body["notes"])
 
-        # The request really did reach the backend - this is a report about the
-        # server's capability, not a field quietly dropped on the way there.
+        # The request really did reach the backend.
         sess = app.state.coder_sessions.get(body["id"])
         assert sess.agent.backend.native_tools is True
         assert sess.agent.backend.supports_native_tools is False
@@ -351,10 +348,9 @@ def test_not_asking_for_native_tools_produces_no_note(tmp_path, monkeypatch):
 
 
 def test_localm_chat_request_really_has_no_tools_field():
-    """The measured premise the whole native_tools decision rests on. If localm
-    ever DOES implement the tools API, this test fails and the "not applied"
-    note above becomes a lie that needs removing - which is exactly the reminder
-    a future reader needs."""
+    """The premise the whole native_tools decision rests on. If localm ever DOES
+    implement the tools API, this test fails and the "not applied" note above
+    becomes a lie that needs removing."""
     from localm.inference.protocol import ChatRequest
     req = ChatRequest(model="m", messages=[{"role": "user", "content": "hi"}],
                       tools=[{"type": "function"}], tool_choice="auto")
@@ -383,8 +379,7 @@ def test_result_route_carries_the_clis_json_payload(tmp_path, monkeypatch):
     with TestClient(app) as client:
         sid = client.post("/api/coder/sessions", headers=owner,
                           json={"cwd": str(proj)}).json()["id"]
-        # Before any task there is no result, and that is a 404 rather than an
-        # empty body: "nothing ran" and "it ran and produced nothing" differ.
+        # Before any task there is no result: a 404 rather than an empty body.
         assert client.get("/api/coder/sessions/%s/result" % sid,
                           headers=owner).status_code == 404
 
@@ -450,8 +445,7 @@ def test_episodes_lists_the_projects_stored_lessons(tmp_path, monkeypatch):
         rows = r.json()["episodes"]
         assert len(rows) == 1
         # The id is what --forget-episode / --restore-episode address, so it has
-        # to travel: a list you cannot act on from the CLI afterwards is a dead
-        # end.
+        # to travel.
         assert rows[0]["id"] == ep.id
         assert rows[0]["lesson"] == "always run the tests"
         assert rows[0]["outcome"] == "ok"
@@ -464,15 +458,13 @@ def test_episodes_is_owner_only_and_validates_cwd(tmp_path, monkeypatch):
         _seed_episode(proj, lesson="the owner's private lesson")
         scoped = auth.create_key("phone", ["coder"])
         sh = {"Authorization": "Bearer %s" % scoped["key"]}
-        # A scoped key is never shown the owner's lessons (same posture as
-        # /api/coder/resumable): an empty list, not a 403.
+        # A scoped key is never shown the owner's lessons: an empty list, not a 403.
         assert client.get("/api/coder/episodes", headers=sh,
                           params={"cwd": str(proj)}).json()["episodes"] == []
         assert client.get("/api/coder/episodes", headers=owner).status_code == 400
         # A directory that does not exist is NOT an error: lessons live under the
         # localm data dir keyed by the resolved project path, so a project you
-        # moved or deleted still has an entry - and that is exactly when you want
-        # to read it. Same shape /api/coder/resumable answers with.
+        # moved or deleted still has an entry.
         gone = client.get("/api/coder/episodes", headers=owner,
                           params={"cwd": str(tmp_path / "nope")})
         assert gone.status_code == 200
@@ -487,10 +479,9 @@ def test_episodes_refuses_unc_and_device_cwd(tmp_path, monkeypatch, bad):
 
     The spy covers ``resolve`` AND ``is_dir``, not merely whichever one this
     route calls today. A spy pointed at a single method goes structurally DEAD
-    the moment the code reaches for the other one - and a dead fault injector is
+    the moment the code reaches for the other one, and a dead fault injector is
     indistinguishable from a guard that correctly found nothing to refuse, since
-    both produce a clean green. This test was written against ``is_dir`` and the
-    route stopped calling it in the same change."""
+    both produce a clean green."""
     real = {"resolve": Path.resolve, "is_dir": Path.is_dir}
 
     def make_spy(name):
@@ -512,13 +503,14 @@ def test_episodes_refuses_unc_and_device_cwd(tmp_path, monkeypatch, bad):
 
 
 # --------------------------------------------------------------------------- #
-#  --until  (unified onto verify; the retry cap is the missing half)           #
+#  --until                                                                     #
 # --------------------------------------------------------------------------- #
 
 def test_verify_max_retries_is_settable_from_the_web(tmp_path, monkeypatch):
-    """--goal-max-iters had no web equivalent at all: the GUI got the Agent's
-    hardcoded default and no way to change it. Bounded 1..50, matching the CLI's
-    own IntRange, so a request cannot pin the shared engine on an endless loop."""
+    """--goal-max-iters needs a web equivalent, or the GUI gets the Agent's
+    hardcoded default with no way to change it. Bounded 1..50, matching the
+    CLI's own IntRange, so a request cannot pin the shared engine on an endless
+    loop."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         r = client.post("/api/coder/sessions", headers=owner,
@@ -549,10 +541,9 @@ def test_verify_max_retries_is_bounded(tmp_path, monkeypatch, bad):
 
 
 def test_the_web_oracle_is_the_same_one_until_uses():
-    """The reason --until is unified rather than rebuilt: the agent's pre-done
-    gate runs verify.py's own primitives, so a web session and ``--until`` judge
-    a task by the same exit code and feed back the same anti-gaming text. If
-    this ever diverges, "unify" stops being the right answer."""
+    """--until is unified rather than rebuilt: the agent's pre-done gate runs
+    verify.py's own primitives, so a web session and ``--until`` judge a task by
+    the same exit code and feed back the same anti-gaming text."""
     from localm.plugins.coder import verify as v
     from localm.plugins.coder.cli import goal as g
     assert g._run_verify is v.run_verify

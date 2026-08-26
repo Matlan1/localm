@@ -49,18 +49,13 @@ class ToolCall:
     raw:   str      # the original matched text (for replacement)
     start: int      # char offset in the full response
     end:   int
-    # True when this call was recovered ONLY via a name-gated fallback path
-    # (a bare top-level JSON object, or a ```json/bare ``` fence) that carries
-    # no marker of its own signalling the model intended to call a tool at
-    # all - it is accepted purely because its shape happens to match a real
-    # tool name. False (the default) for every path that DOES carry such a
-    # marker, however mangled: the canonical <tool_call> XML wrapper, an
-    # explicit ```tool_call/```tool_code fence, and marker-variant dialects
-    # like <|tool_call>. See parse_tool_calls's docstring for why this
-    # distinction exists - execution.py's confirmation gate keys on it to
-    # require a human look at a destructive call the grammar never had a
-    # chance to constrain, since a model that skips every intent marker also
-    # skipped whatever the lazy-grammar trigger was waiting for.
+    # True when this call was recovered ONLY via a name-gated fallback path (a
+    # bare top-level JSON object, or a ```json/bare ``` fence) carrying no marker
+    # that the model meant to call a tool, and accepted purely because its shape
+    # matches a real tool name. False for every path that does carry such a
+    # marker, however mangled: the canonical <tool_call> XML wrapper, an explicit
+    # ```tool_call/```tool_code fence, and marker-variant dialects like
+    # <|tool_call>. execution.py's confirmation gate keys on this flag.
     lenient: bool = False
 
 
@@ -68,76 +63,35 @@ class ToolCall:
 #  Patterns
 # ---------------------------------------------------------------------------
 
-# Primary: <tool_call>…</tool_call>, matched as an OPENER paired with the next
-# CLOSER rather than as one opener-body-closer regex (same shape as the fence
-# below; see _iter_xml_tool_calls for why the pairing is linear).
-#
-# The single-regex form ``>\s*(?P<body>.+?)\s*</tool_call>`` was superlinear two
-# independent ways, and BOTH had to go. All figures below are min-of-3 on this
-# project's venv, quiet box.
-# (1) The ``\s*`` either side of a lazy body are two ambiguous quantifiers around
-#     it: CUBIC, 0.08 / 0.62 / 7.03s on 500 / 1000 / 2000 trailing spaces after a
-#     bare ``<tool_call>``, i.e. a few hundred BPE tokens of hostile model output.
-# (2) Independently of that, a lazy ``.+?`` scans to end-of-text whenever no
-#     closer follows, and it does so from EVERY opener position. Folding the
-#     whitespace into the body group does NOT fix this: that intermediate form
-#     still cost 2.33s on ``'<tool_call>{{' * 5000`` and 2.21s on
-#     ``'<tool_call>' * 5000``. Only the pairing fixes (2), and it takes both to
-#     0.0000s.
-# CodeQL alert 189 reports two witnesses for this pattern and they are wildly
-# different in cost: at n=2000, ``'<tool_call>'`` + spaces is 7.03s while
-# ``'<tool_call>a'`` + spaces is 0.0095s. Both are genuinely superlinear; the
-# second just needs n=24,000 to become painful. Fixing only the loud one would
-# have left a real alert open.
+# Primary: <tool_call>...</tool_call>, matched as an OPENER paired with the next
+# CLOSER rather than as one opener-body-closer regex, which keeps the scan linear
+# (see _iter_xml_tool_calls).
 _RE_XML_OPEN = re.compile(
     r"<tool_call(?:\s+name=['\"](?P<name_attr>[^'\"]+)['\"])?>",
     re.IGNORECASE,
 )
 _RE_XML_CLOSE = re.compile(r"</tool_call>", re.IGNORECASE)
 
-# Marker-variant wrapper. Finetunes mangle the canonical <tool_call> tags in
-# the wild: <|tool_call>, <|tool_call|>, closing as <tool_call|> or
-# <|/tool_call>, an optional "call:NAME" prefix (sometimes the literal
-# "call:tool_call"), and whitespace before the JSON. The JSON body itself is
-# usually valid - only the wrapper is broken - so accept any delimiter variant
-# and recover the call from the body.
+# Marker-variant wrapper. Finetunes mangle the canonical <tool_call> tags in the
+# wild: <|tool_call>, <|tool_call|>, closing as <tool_call|> or <|/tool_call>, an
+# optional "call:NAME" prefix (sometimes the literal "call:tool_call"), and
+# whitespace before the JSON. The JSON body itself is usually valid, so any
+# delimiter variant is accepted and the call recovered from the body. There is no
+# regex for it: the body is brace-matched instead, in _iter_marker_variant_calls.
 #
-# There is deliberately NO regex for this any more. Every regex form of it was
-# either quadratic (a lazy `\{.*?\}` body scans to end-of-text from every marker
-# when no closing brace follows: measured 2.08s on 5,000 repetitions of
-# `'<tool_call>{{'`) or, once tempered to stop at the next marker, unable to
-# accept a body that legitimately CONTAINS one. The two cannot be reconciled in
-# a pattern that treats the body as opaque text, so the body is brace-matched
-# instead - see _iter_marker_variant_calls.
 # Fenced code block, matched as an OPENER paired with the next CLOSER rather than
 # as one opener-body-closer regex. The optional language tag tells an explicit
 # tool fence (```tool_call / ```tool_code) from an ambiguous one (```json or a
-# bare ```), which is only treated as a call when its name matches a real tool
+# bare ```), which is treated as a call only when its name matches a real tool
 # (the tool_names gate in parse_tool_calls).
-#
-# The single-regex form was superlinear two independent ways, and CodeQL alert 190
-# reports one witness for each. All figures min-of-1 to min-of-3, quiet box.
-# (1) Its opener was ``[ \t]*(?P<lang>...)?[ \t]*``, two adjacent ambiguous
-#     quantifiers: 1.36 / 7.22 / 26.74s at 12.5k / 25k / 50k tabs after ``` and
-#     95.9s at 100,000. Wrapping the trailing ``[ \t]*`` inside the lang group
-#     fixes that, and is kept below.
-# (2) A lazy ``.+?`` body scans to end-of-text whenever no closer follows, and it
-#     does that from EVERY opener position, which is quadratic INDEPENDENTLY of
-#     (1): 0.08 / 0.28 / 1.10 / 5.03s at 1k / 2k / 4k / 8k repetitions of
-#     ``'```\na'``. De-ambiguating the lang group does not touch it. Only the
-#     pairing below fixes it.
-# Fixed, those same two inputs cost 0.0051s and 0.0009s. Tempering the body
-# against ``` instead would have been a regression: a write_file call whose JSON
-# content contains an inline code fence is ordinary coder traffic.
 _RE_FENCE_OPEN = re.compile(r"```[ \t]*(?:(?P<lang>[A-Za-z_][\w+.-]*)[ \t]*)?\r?\n")
 _RE_FENCE_CLOSE = re.compile(r"\r?\n[ \t]*```")
 
 # Fence languages that explicitly signal a tool call (no name gate needed).
 _EXPLICIT_FENCE_LANGS = frozenset({"tool_call", "tool_code", "tool"})
 
-# Signals that the model TRIED to call a tool even when nothing parsed - used
-# to fire a one-shot "reformat your tool call" repair turn instead of printing
-# the broken call as the final answer.
+# Signals that the model TRIED to call a tool even when nothing parsed. Fires a
+# one-shot repair turn instead of printing the broken call as the final answer.
 _RE_TOOL_MARKER = re.compile(r"<\|?/?tool_call\|?>", re.IGNORECASE)
 # The optional "call:NAME" prefix some finetunes put before the JSON body.
 _RE_CALL_PREFIX = re.compile(r"call:(\w+)")
@@ -154,21 +108,10 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
 
     When *tool_names* is supplied, ALSO recognises an XML-ish open tag naming
     one of those tools - ``<read_file``, ``<edit_file ...>`` - even with none
-    of the markers above: some finetunes (observed live on a "thinking"
-    heretic-abliterated model) hallucinate a per-tool XML convention (closer
-    to Anthropic's own ``<function_calls><invoke name="...">`` shape) instead
-    of this project's ``<tool_call>{"name": ...}`` wrapper, while still
-    getting the TOOL NAME itself exactly right (it is in the system prompt).
-    Before this, such a response matched none of the checks above, so it fell
-    through as if the model had never attempted anything at all - the exact
-    failure NEW-CODER-NO-TOOLCALL-SILENT is about, just one layer more subtle
-    than "no output at all": the model DID try, in a foreign dialect nothing
-    here was watching for. A plain prose answer does not coincidentally
-    contain ``<read_file`` as literal text, so this is a low-false-positive
-    signal of intent even in a shape :func:`parse_tool_calls` cannot recover -
-    and same as every other case this function reports, a false hit costs
-    only one repair re-prompt, which explicitly tells the model to ignore it
-    and give its plain-text final answer if it did not mean to call a tool."""
+    of the markers above, which is the shape some finetunes emit instead of
+    this project's ``<tool_call>{"name": ...}`` wrapper. A false hit costs one
+    repair re-prompt, which tells the model to give its plain-text final answer
+    if it did not mean to call a tool."""
     if _RE_TOOL_MARKER.search(text) or _RE_TOOL_FENCE.search(text):
         return True
     if _RE_NAME_KEY.search(text) and _RE_ARGS_KEY.search(text):
@@ -186,10 +129,9 @@ def _detriple_quoted(s: str) -> str:
     """Convert Python triple-quoted string VALUES into valid JSON strings.
 
     Local models frequently emit multi-line ``content`` as a Python triple-quoted
-    string (``"content": \"\"\"...\"\"\"``), which is NOT valid JSON, so the call
-    silently failed to parse (an empty assistant bubble, no file written). Replace
-    each ``\"\"\"...\"\"\"`` run with a properly escaped JSON string. Best-effort:
-    a fallback recovery, so a wrong guess just fails json.loads and we move on.
+    string (``"content": \"\"\"...\"\"\"``), which is NOT valid JSON. Each
+    ``\"\"\"...\"\"\"`` run is replaced with a properly escaped JSON string.
+    Best-effort: a wrong guess just fails json.loads and the caller moves on.
     """
     return re.sub(r'"""(.*?)"""',
                   lambda m: json.dumps(m.group(1)), s, flags=re.DOTALL)
@@ -216,19 +158,17 @@ def _lenient_json(body: str) -> Optional[dict]:
 
     - literal newlines/tabs inside string values (strict=False) - models
       write multi-line file content without escaping it
-    - a doubled outer brace:  call:write_file{{"path": "x"}}  (seen from
-      Gemma finetunes in the wild; it silently broke tool calling)
+    - a doubled outer brace:  call:write_file{{"path": "x"}}
     - single-quoted keys:  {'path': "x"}
-    - Python triple-quoted string VALUES:  {"content": \"\"\"...\"\"\"} (a very
-      common local-model mistake that used to silently break write_file)
+    - Python triple-quoted string VALUES:  {"content": \"\"\"...\"\"\"}
     - trailing commas before } or ]
     - unescaped backslashes in Windows file paths
     """
     candidates = [body]
     if body.startswith("{{") and body.endswith("}}"):
         candidates.append(body[1:-1])
-    # Each transform is a recovery layer; the last applies all of them so a body
-    # with several mangles at once (triple-quotes + a trailing comma) still parses.
+    # Each transform is a recovery layer; the last applies all of them, so a body
+    # with several mangles at once still parses.
     transforms = (
         lambda s: s,
         _quote_single_keys,
@@ -279,28 +219,24 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
     SECOND CONSUMER, outside this module: agent/context.py's
     ``_stream_hiding_tool_calls`` (the live streaming hider shared by the CLI
     and the GUI) imports and calls this directly, so it decides whether a
-    name-gated fence is a real call using the EXACT SAME rule this module's
-    own ``parse_tool_calls`` uses - deliberately, so the two can never
-    disagree (see coder-display-vs-execution-two-detectors in project
-    memory). A change to this function's contract (return shape, what counts
-    as a match) reaches that consumer too; check it before changing this.
+    name-gated fence is a real call by the same rule ``parse_tool_calls``
+    uses. A change to this function's contract (return shape, what counts as
+    a match) reaches that consumer too.
     """
     body = body.strip()
     obj = _lenient_json(body)
     if obj is None:
         return None
 
-    # Full format: {"name": "...", "args": {...}}
-    # "arguments" is accepted as an alias for "args" - models trained on the
-    # OpenAI function-call schema emit that key.
+    # Full format: {"name": "...", "args": {...}}, with "arguments" accepted as an
+    # alias for "args".
     if "name" in obj:
         name = obj["name"]
         args = obj.get("args")
         if args is None:
             args = obj.get("arguments", {})
-        # A non-string name is a malformed call, treated like malformed JSON.
-        # An unhashable one (dict/list) would even raise TypeError at the set/
-        # dict lookups downstream ("in tool_names", "in disabled_tools").
+        # A non-string name is a malformed call, treated like malformed JSON. An
+        # unhashable one would raise TypeError at the set/dict lookups downstream.
         if not isinstance(name, str) or not isinstance(args, dict):
             return None
         return name, args
@@ -315,27 +251,21 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
 def _pair_delimited(text: str, opener_re, closer_re, min_body: int = 1):
     """Yield ``(opener_match, closer_match)`` for each opener paired with the next
     closer after it, left to right and non-overlapping - exactly the spans a
-    single ``OPEN (?P<body>.+?) CLOSE`` regex would have matched, at linear cost
-    instead of quadratic.
+    single ``OPEN (?P<body>.+?) CLOSE`` regex would have matched, at linear cost.
 
-    The cost fix is the second ``return``: a closer search that fails from one
-    opener can never succeed from a LATER one (a later opener ends further right,
-    so it would search a suffix of the range that just came up empty), so the
-    scan stops instead of re-walking the tail once per opener. That is the whole
-    defect - with a lazy ``.+?`` body, an unterminated opener costs a scan to
-    end-of-text, and hostile text can plant thousands of them.
+    The second ``return`` is what keeps the scan linear: a closer search that
+    fails from one opener can never succeed from a LATER one (a later opener ends
+    further right, so it would search a suffix of the range that just came up
+    empty), so the scan stops instead of re-walking the tail once per opener.
 
     ``pos = closer.end()`` reproduces finditer's non-overlapping advance.
 
-    ``min_body`` is the minimum body length the replaced regex allowed, and it is
-    a parameter because the callers do NOT agree on it. The two patterns behind
-    parse_tool_calls used ``.+?`` (at least one character, so min_body=1), but the
-    transcript splitter stands in for a regex that used ``.*?`` (min_body=0). With
-    the wrong value a zero-length ``<tool_call></tool_call>`` is skipped, the
-    opener pairs with a LATER closer, and everything between - prose and any real
-    tool call - is swallowed into one unparseable body. Equivalence to the regexes
-    these replaced is pinned by differential fuzzes in tests/test_redos_bounds.py,
-    one per replaced pattern, not by inspection.
+    ``min_body`` is the minimum body length to accept, and callers do NOT agree on
+    it: the two patterns behind parse_tool_calls need 1 (at least one character),
+    the transcript splitter needs 0. With the wrong value a zero-length
+    ``<tool_call></tool_call>`` is skipped, the opener pairs with a LATER closer,
+    and everything between - prose and any real tool call - is swallowed into one
+    unparseable body.
     """
     pos = 0
     while True:
@@ -360,21 +290,12 @@ def strip_xml_tool_calls(text: str) -> tuple[list[tuple[Optional[str], str]], st
     """Split *text* into its ``<tool_call>`` calls and the text around them.
 
     Returns ``([(name_attr, body), ...], text_without_the_blocks)``. The coder's
-    session transcript and the resume recap both need those halves, and each used
-    to carry its OWN copy of the regex - agent/session.py had
-    ``<tool_call>\\s*(.*?)\\s*</tool_call>`` and sessions.py an inline
-    ``<tool_call>.*?</tool_call>``. Both had a superlinear shape, and the
-    transcript one re-ran over EVERY stored assistant message at teardown, so one
-    poisoned response re-hung the Markdown export on every later close, forever.
-    One implementation, one place to fix.
+    session transcript and the resume recap both consume those halves.
 
-    ``min_body=0`` because both replaced regexes used ``.*?``: an empty
-    ``<tool_call></tool_call>`` is a real match for them and must stay one here.
+    ``min_body=0``, so an empty ``<tool_call></tool_call>`` is a match.
 
-    ``name_attr`` is returned, not discarded: the replaced regexes did not match
-    the ``name=`` attribute form at all, so those blocks used to survive into the
-    transcript as raw XML that at least NAMED the tool. Now they are stripped, so
-    the name has to come back out this way or the transcript renders a bare "?".
+    ``name_attr`` is returned rather than discarded, so a caller rendering the
+    stripped transcript can still name the tool.
     """
     calls: list[tuple[Optional[str], str]] = []
     kept: list[str] = []
@@ -399,19 +320,13 @@ def _iter_fenced_blocks(text: str):
 def _object_end_from(text: str, i: int, last_close: int) -> int:
     r"""Index just past the brace-balanced ``{...}`` starting at *i*, or -1.
 
-    Scanned LOCALLY from *i*, with string state local to this object. A global
-    brace map was tried first and is wrong: the text around a tool call is model
-    PROSE, and an unmatched ``{`` in prose (``use { to open``) leaves the map's
-    depth non-zero, so a later stray quote enters string mode and silently voids
-    every brace after it. A differential fuzz caught that - it lost calls the old
-    pattern found, on exactly that shape.
+    Scanned LOCALLY from *i*, with string state local to this object, so an
+    unmatched ``{`` or stray quote in the surrounding prose cannot void the
+    braces of a later object.
 
     *last_close* is the index of the final ``}`` in the whole text, computed once
-    by the caller. Without it, a body that never balances costs a scan to
-    end-of-text FROM EVERY MARKER, which is the quadratic this whole change
-    exists to remove (measured 19.3s on 5,000 repetitions of ``'<tool_call>{{'``,
-    worse than the 2.08s regex it replaced). With it, a text containing no
-    closing brace after *i* costs nothing at all.
+    by the caller. It bounds the scan, so a text containing no closing brace
+    after *i* costs nothing.
     """
     if i >= len(text) or text[i] != "{" or last_close < i:
         return -1
@@ -429,7 +344,7 @@ def _object_end_from(text: str, i: int, last_close: int) -> int:
                 in_str = False
             elif c == chr(10):
                 # JSON forbids a raw newline inside a string, so this was never a
-                # string - recover rather than swallowing the rest of the text.
+                # string: recover instead of consuming the rest of the text.
                 in_str = False
         elif c == '"':
             in_str = True
@@ -455,45 +370,18 @@ def _iter_top_level_json_objects(text: str, last_close: int = None):
             continue
         end = _object_end_from(text, i, last_close)
         if end < 0:
-            # Unbalanced from here: the old scan-based form advanced past the
-            # end of text at this point, so stopping matches it exactly.
+            # Unbalanced from here, so stop.
             return
         yield i, end, text[i:end]
         i = end
 
 
-# A real (i.e. text[i] == "{", in range) failed brace-balance scan in
-# _iter_marker_variant_calls costs O(last_close - i). #895 tried to make a
-# failed scan skip straight to last_close+1 on the theory that "this scan
-# already covered every position through last_close, so no marker before it
-# can balance either" - which is FALSE: a scan started fresh at a LATER
-# marker resets its own depth to 0, so it can balance at an EARLIER position
-# than last_close even though the scan from an EARLIER marker, carrying that
-# marker's own unclosed depth, never returned to 0. Measured directly: an
-# unclosed <tool_call> followed by a well-formed one later in the SAME
-# response went from 1 call recovered (pre-#895) to 0 (post-#895) - a real
-# tool call silently dropped, not merely a quadratic-input edge case (see
-# tests/test_parser_variants.py::test_marker_variant_recovers_a_later_call_
-# after_an_earlier_one_fails_to_balance).
-#
-# Retrying every failure from the very next marker (restoring pre-#895
-# behaviour) is correct but reintroduces the O(n^2) #895 measured on
-# thousands of CONSECUTIVE never-balancing markers before a single stray
-# closing brace. There is no cheap, general, and correct way to tell those
-# two shapes apart in advance: whether a later marker can balance depends on
-# whether the accumulated depth ever returns to THAT marker's own baseline,
-# which needs O(n) bookkeeping per candidate to answer without the string
-# hazard the module docstring's history warns about (a stray quote parses
-# differently depending on where string-tracking last reset). So: cap how
-# many EXPENSIVE retries a single call gets, not which markers are worth
-# retrying. Any genuine model turn realistically has a handful of tool-call
-# attempts at most; this cap is never reached by real output, and exists
-# only so a doctored/adversarial response cannot reintroduce the quadratic
-# blowup. Once exhausted, fall back to the fast (and, on adversarial input
-# only, lossy) skip - see test_marker_variant_stays_linear_when_none_of_
-# many_markers_balance for the bound this keeps: with this cap, n=4,000
-# never-balancing markers cost at most _MAX_EXPENSIVE_MARKER_RESCANS full
-# rescans instead of n, staying comfortably under the same 2.0s CPU budget.
+# Cap on how many EXPENSIVE retries one _iter_marker_variant_calls call gets. A
+# failed brace-balance scan is retried from the very next marker, which is the
+# only correct recovery: a scan started at a LATER marker resets its own depth to
+# 0, so it can balance at a position an earlier scan never reached. Once the
+# budget is spent the scan falls back to skipping past the last closing brace,
+# which is fast but lossy, and bounds the cost of many never-balancing markers.
 _MAX_EXPENSIVE_MARKER_RESCANS = 32
 
 
@@ -502,27 +390,17 @@ def _iter_marker_variant_calls(text: str, last_close: int = None):
 
     Finetunes emit ``<|tool_call>``, ``<tool_call|>``, ``<|/tool_call>`` and an
     optional ``call:NAME`` prefix. Structured as marker -> balanced body ->
-    marker rather than one regex, for two reasons that pull the same way:
-
-    COST. The regex form ``MARKER \s* (call:\w+)? \{.*?\} \s* MARKER`` scans to
-    end-of-text from EVERY marker when no closing brace follows - quadratic, and
-    measured at 2.08s on 5,000 repetitions of ``'<tool_call>{{'``. Here each
-    marker is visited once and the body scan is bounded by the object itself.
-
-    CORRECTNESS. The regex could not allow a marker inside the body without
-    reintroducing that scan, so the shipped fix forbade it - which silently
-    dropped a real case: the coder editing its own parser docs or test fixtures
-    emits a write_file whose CONTENT contains ``<tool_call>``. A brace-balanced,
-    string-aware scan has no such trade: it knows the marker is inside a string.
+    marker rather than one regex: each marker is visited once, the body scan is
+    bounded by the object itself, and because the scan is brace-balanced and
+    string-aware a marker INSIDE the body (a write_file whose content contains
+    ``<tool_call>``) does not terminate it.
 
     Also the safety net for a well-formed canonical ``<tool_call>...</tool_call>``
     that pass 1's strict opener/closer PAIRING (``_iter_xml_tool_calls``) mis-reads
-    because an EARLIER, unclosed ``<tool_call>`` stole its closing tag: pass 1
-    then treats everything between the two as one unparseable body and drops
-    both. ``_RE_TOOL_MARKER`` matches plain ``<tool_call>``/``</tool_call>`` too
-    (not just the ``<|...|>`` finetune dialects), so this pass gets a second,
-    independent try at the later call by brace-matching FROM ITS OWN MARKER
-    rather than from the broken opener pass 1 paired it with.
+    because an EARLIER, unclosed ``<tool_call>`` stole its closing tag.
+    ``_RE_TOOL_MARKER`` matches plain ``<tool_call>``/``</tool_call>`` too (not
+    just the ``<|...|>`` finetune dialects), so this pass gets a second,
+    independent try at the later call by brace-matching FROM ITS OWN MARKER.
     """
     if last_close is None:
         last_close = text.rfind("}")
@@ -545,23 +423,18 @@ def _iter_marker_variant_calls(text: str, last_close: int = None):
         body_end = _object_end_from(text, i, last_close)
         if body_end < 0:
             if i < len(text) and text[i] == "{" and i <= last_close:
-                # A real (expensive) failed scan. Retry from the very next
-                # marker - the only CORRECT recovery, see the module-level
-                # comment above _MAX_EXPENSIVE_MARKER_RESCANS - until the
-                # retry budget for this call runs out, then fall back to the
-                # fast skip to keep hostile many-marker input bounded.
+                # A real (expensive) failed scan. Retry from the very next marker
+                # until the retry budget for this call runs out, then fall back to
+                # the fast skip.
                 if expensive_retries_left > 0:
                     expensive_retries_left -= 1
                     pos = opener.end()
                 else:
                     pos = last_close + 1
             else:
-                # No object could ever start here (text[i] is not "{", or
-                # there is no closing brace left to reach at all) - that is
-                # an O(1) check, not a scan, so it is both cheap and
-                # necessary to keep looking for the next marker: a marker
-                # followed by plain prose must not stop recovery of a real
-                # tool call further on in the same response.
+                # No object could ever start here (text[i] is not a brace, or
+                # there is no closing brace left to reach), so keep looking for
+                # the next marker.
                 pos = opener.end()
             continue
         j = body_end
@@ -590,10 +463,9 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
       - a bare top-level JSON object: ``{"name": "...", "args": {...}}``
 
     Passing *tool_names* is how the agent opts into the lenient, name-gated
-    formats; callers that omit it get only the explicit wrappers (preserving
-    the original behaviour). Every call recovered via one of those two
-    name-gated formats has ``ToolCall.lenient`` set True - see that field's
-    own comment for why.
+    formats; callers that omit it get only the explicit wrappers. Every call
+    recovered via one of those two name-gated formats has ``ToolCall.lenient``
+    set True.
     """
     calls: list[ToolCall] = []
     seen_spans: list[tuple[int, int]] = []
@@ -688,34 +560,18 @@ def strip_tool_calls(text: str, tool_names: Optional[set] = None) -> tuple[list[
     Returns ``(calls, clean_text, malformed_count)``. ``calls`` is exactly what
     :func:`parse_tool_calls` returns, so passing *tool_names* opts into the same
     name-gated fenced/bare-JSON forms it does; ``clean_text`` is *text* with every
-    one of those spans removed via :func:`split_response`, the same two-value shape
-    :func:`strip_xml_tool_calls` has always returned for the XML-only case, so both
-    existing call sites (the session transcript and the resume recap) only needed a
-    name to change, not their control flow.
+    one of those spans removed via :func:`split_response`.
 
-    ``malformed_count`` exists because parse_tool_calls only returns a call when the
-    body actually parsed as JSON. A response that hits the tool-call repair path in
-    agent/loop.py's ``_handle_no_tool_calls`` (a ``<tool_call>`` wrapper whose JSON
-    body is malformed, a real and not rare local-model failure mode) is persisted to
-    history via ``self._add_assistant(response)`` before the repair succeeds, so
-    persisted history can legitimately contain a tagged block that never parses.
-    Dropping that block silently would trade the raw-text leak this function exists
-    to fix for a different one, so after every parseable call is removed, a second
-    pass with strip_xml_tool_calls (a pure delimiter match, no JSON validation)
-    clears out whatever ``<tool_call>...</tool_call>`` blocks are still in the
-    remainder and reports how many there were, so a caller can render a generic
-    placeholder instead of raw tag soup - the same thing the session transcript
-    already did for this case before this function existed.
+    ``malformed_count`` counts ``<tool_call>...</tool_call>`` blocks whose JSON
+    body never parsed, so parse_tool_calls returned no call for them. After every
+    parseable call is removed, a second pass with strip_xml_tool_calls (a pure
+    delimiter match, no JSON validation) clears those out of the remainder and
+    reports how many there were, so a caller can render a generic placeholder
+    instead of raw tag soup.
 
-    That second pass only ever understood the XML wrapper, same as
-    strip_xml_tool_calls always has: a malformed marker-variant (``<|tool_call>...``)
-    or a malformed explicit fence that reaches history through the same repair-path
-    gap is NOT cleaned up here and still surfaces raw, exactly as it does today. That
-    is a pre-existing gap in strip_xml_tool_calls, not a new one this function opens;
-    closing it for every shape is separate work from what this function targets (the
-    ```json fence and the bare top-level JSON object - the two forms that used to
-    leak raw and unsummarised even though the agent's own live loop already
-    understood and executed them).
+    That second pass only understands the XML wrapper: a malformed marker-variant
+    (``<|tool_call>...``) or a malformed explicit fence is NOT cleaned up here and
+    still surfaces raw.
     """
     calls = parse_tool_calls(text, tool_names=tool_names)
     clean = "".join(s for s in split_response(text, calls) if isinstance(s, str))

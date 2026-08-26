@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the shared delegated-work presentation (localm.plugins.coder.delegated).
 
-The invariant under test is not cosmetic: session_diff() is an INPUT to the
-self-reviewer (agent/loop.py:381) and to episodic memory (agent/session.py:190),
-so foreign content there would corrupt two model-facing loops. These tests pin
-that delegated work is POINTED AT and never merged in.
+session_diff() is an INPUT to the self-reviewer (agent/loop.py) and to episodic
+memory (agent/session.py), so delegated work is POINTED AT there and never
+merged in.
 """
 
 from __future__ import annotations
@@ -33,8 +32,7 @@ def test_changeset_without_a_branch_is_not_advertised():
 
 def test_footer_names_branch_file_count_and_view_command():
     out = d.render_footer([_cs()])
-    # The heading is the one fixed by the joint decision, verbatim: the user must
-    # be told these changes are NOT in their tree, or they may assume they are.
+    # The heading says the changes are not in the user's working tree.
     assert "Delegated work (NOT in your working tree)" in out
     assert "child1" in out
     assert "3 file(s)" in out
@@ -49,7 +47,7 @@ def test_inlined_diff_is_labelled_as_not_in_this_tree():
     out = d.render_footer([_cs(diff="diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n")])
     assert "NOT in your working tree" in out
     assert "have not been merged" in out
-    # The hunks are present, but the branch that holds them is named right there.
+    # The hunks are present and the branch that holds them is named.
     assert "@@" in out
     assert "coder/child1-ab12ef34" in out
 

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Built-in TLS for network binds (NET-1).
+"""Built-in TLS for network binds.
 
 localm serves HTTPS itself the moment it binds past loopback, so the API key and
 all traffic are encrypted out of the box - no reverse proxy, no tailscale, no
-manual certificate wrangling. We run a tiny local certificate authority: a
+manual certificate wrangling. It runs a tiny local certificate authority: a
 long-lived CA whose certificate the user installs ONCE per device (one tap),
 plus a short-lived leaf certificate that the server actually presents.
 
@@ -12,8 +12,7 @@ install. Because the CA is REUSED when the leaf is regenerated, a device trusted
 once stays trusted even if this machine's LAN IP later changes. That reuse is
 not unconditional: ``_load_or_make_ca`` mints a NEW CA when the old one has
 reached its own expiry or its files are missing/unreadable, and every device
-then has to trust the new one. Say "when", never "whenever" - the unconditional
-version of this sentence is what made ``docs/tls.md`` wrong.
+then has to trust the new one.
 
 This is the same model as Caddy's ``tls internal`` and mkcert. The CA and leaf
 private keys are stored as unencrypted PEM under ``<LOCALM_HOME>/tls/`` (uvicorn
@@ -35,41 +34,19 @@ from typing import Iterable, Optional
 
 from localm.debuglog import logger
 
-# Validity windows. The CA outlives many leaf regenerations, so trusting it once
-# survives an IP change; the leaf stays under Apple's 825-day ceiling (iOS and
-# Safari reject longer-lived server certs even from a privately trusted CA).
+# Validity windows. The CA outlives many leaf regenerations; the leaf stays
+# under the 825-day ceiling iOS and Safari enforce.
 _CA_DAYS = 3650          # ~10 years
 _LEAF_DAYS = 730         # ~2 years (< 825)
-# Regenerate a leaf this far ahead of its real expiry so a long-running or
-# rarely-restarted instance never ends up serving an expired certificate.
+# How far ahead of real expiry a leaf is regenerated.
 _RENEW_MARGIN_DAYS = 30
 
 # Tailscale hands out addresses in the 100.64.0.0/10 CGNAT range.
 _TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
 
-# Adapter-NAME markers for a VPN/tunnel virtual interface rather than a real
-# physical LAN NIC. Most VPN clients (WireGuard, OpenVPN, and virtually every
-# commercial VPN app) hand their tunnel adapter an ordinary RFC1918 address -
-# e.g. 10.x.x.x - and install it as the default route, which would otherwise be
-# indistinguishable from a genuine LAN address by IP range alone.
-#
-# Matched on WORD BOUNDARIES, never as a bare substring (REG-533). The short
-# generic markers are interface *names* (tun0, tap5, utun3) or a leading word in
-# a Windows friendly name ("TAP-Windows Adapter V9"), so an unanchored substring
-# match also hit any real NIC whose name merely CONTAINS those three letters
-# ("Fortune", "Neptune", "Datapath"). A false positive here is not cosmetic:
-# _primary_lan_ip() discards the address and san_targets() then leaves it out of
-# the leaf certificate, so a device reaching that machine on its real address
-# gets a TLS SAN mismatch that used to validate.
-#
-# "ppp" is deliberately NOT a marker. It is ambiguous - a PPPoE/DSL link (ppp0,
-# often the default route and the machine's REAL address) and a legacy PPTP/L2TP
-# VPN both use it - and the two failure directions are not symmetric: wrongly
-# calling a real WAN a VPN breaks TLS for an address the user genuinely reaches,
-# while wrongly calling a VPN real only adds an extra SAN entry / a less useful
-# suggested address. Prefer the harmless error.
-#
-# Best-effort, not exhaustive; matched case-insensitively.
+# Adapter-name markers for a VPN/tunnel virtual interface rather than a physical
+# LAN NIC. Matched on word boundaries and case-insensitively, so a real NIC whose
+# name merely contains these letters does not match. Best-effort, not exhaustive.
 _VPN_ADAPTER_NAME_RE = re.compile(
     r"\b(?:tap|tun|utun|wintun|vpn|wireguard|nordlynx|openvpn|globalprotect"
     r"|anyconnect|zscaler)\d*\b",
@@ -136,9 +113,8 @@ def _vpn_adapter_ips() -> set[str]:
                 if getattr(a, "family", None) == socket.AF_INET:
                     out.add(a.address)
     except Exception:
-        # Best-effort, same as _iface_ips: an enumeration failure just means we
-        # cannot tell a VPN adapter apart from a real one this call, not a
-        # reason to fail whatever the caller was doing.
+        # Best-effort: an enumeration failure means a VPN adapter cannot be told
+        # apart from a real one this call.
         pass
     return out
 
@@ -181,9 +157,7 @@ def _host_ips() -> list[str]:
         _, _, addrs = socket.gethostbyname_ex(hostname)
         out.extend(addrs)
     except OSError:
-        # Best-effort SAN enrichment: if reverse/forward resolution fails we just
-        # certify fewer addresses. The loopback/explicit SANs added elsewhere
-        # still cover the working case; never fail cert minting over this.
+        # Best-effort: a resolution failure just certifies fewer addresses.
         pass
     return out
 
@@ -228,13 +202,9 @@ def san_targets(
 
     for h in extra_hostnames or ():
         h = (h or "").strip()
-        # A bare IP passed as a hostname (e.g. -H 0.0.0.0 / a specific bind IP)
-        # belongs in the IP SAN list, not the DNS one. Both wildcards mean "all
-        # interfaces" and neither is ever itself a connectable address, so they
-        # are dropped rather than certified: nothing can present a certificate
-        # for an address no client can dial. ``::1`` is NOT a wildcard and is
-        # already in the default IP SAN set above, so an IPv6 loopback bind is
-        # covered without a special case here.
+        # A bare IP passed as a hostname belongs in the IP SAN list, not the DNS
+        # one. Both wildcards are dropped: neither is a connectable address.
+        # ``::1`` is not a wildcard and is already in the default IP SAN set.
         if not h or h in ("0.0.0.0", "::"):
             continue
         norm = _norm_ip(h)
@@ -275,9 +245,7 @@ def _iface_ips() -> list[str]:
                 if getattr(a, "family", None) == socket.AF_INET:
                     out.append(a.address)
     except Exception:
-        # Best-effort: enumerating interface IPs via psutil is optional. If psutil
-        # is absent or errors we return whatever was gathered; the caller (the
-        # Companion address card) degrades to fewer addresses, not a failure.
+        # Best-effort: without psutil the caller gets fewer addresses.
         pass
     return out
 
@@ -298,8 +266,8 @@ def companion_addresses() -> dict:
     primary = _norm_ip(_primary_lan_ip()) or ""
     vpn_ips = _vpn_adapter_ips()
     seen: set[str] = set()
-    # Candidate IPv4s this machine owns: the primary outbound interface first
-    # (the preferred LAN pick), then hostname + per-interface addresses.
+    # Candidate IPv4s: the primary outbound interface first, then hostname and
+    # per-interface addresses.
     for ip in (primary, *_host_ips(), *_iface_ips()):
         norm = _norm_ip(ip)
         if not norm or norm in seen:
@@ -311,8 +279,8 @@ def companion_addresses() -> dict:
             continue
         if addr.version != 4:
             continue
-        # Check Tailscale BEFORE is_private: Python treats 100.64.0.0/10 as
-        # private, so this ordering keeps a Tailscale IP out of the LAN slot.
+        # Checked before is_private: Python treats 100.64.0.0/10 as private, so
+        # this ordering keeps a Tailscale IP out of the LAN slot.
         if is_tailscale_ip(norm):
             if not tailscale:
                 tailscale = norm
@@ -321,8 +289,8 @@ def companion_addresses() -> dict:
             continue
         if norm in vpn_ips:
             continue
-        # The primary outbound interface always wins the LAN slot; otherwise
-        # take the first private address seen.
+        # The primary outbound interface wins the LAN slot; otherwise the first
+        # private address seen.
         if norm == primary:
             lan = norm
         elif not lan:
@@ -363,17 +331,12 @@ def _lock_down_dir(path: Path) -> None:
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # Defense-in-depth, proven low-risk. mkdir only fails here on a location
-        # nothing could write to anyway, which ensure_cert's own writes will hit
-        # and surface next; nothing further to report at this layer.
+        # Best-effort: ensure_cert's own writes surface an unwritable location.
         return
     from localm.config import restrict_file_perms
     if not restrict_file_perms(path, mode=0o700):
-        # LM-DA-044: this directory holds the CA private key. Unlike a digest
-        # file (sessions.json, jobs.json), a leaked CA key mints certificates
-        # every device that ever trusted this install's CA will accept - the
-        # compromise is not local - so this is louder than
-        # config._perm_warn's debug-only default for an ordinary credential.
+        # This directory holds the CA private key, so a failure to restrict it is
+        # reported at warning level rather than debug.
         logger.warning(
             "could not restrict %s to the current user; its contents "
             "(including the CA private key) rely on the data directory's own "
@@ -395,10 +358,7 @@ def _write_private(path: Path, data: bytes) -> None:
         os.close(fd)
     from localm.config import restrict_file_perms
     if not restrict_file_perms(path):
-        # LM-DA-044: a leaked CA or leaf private key mints certificates every
-        # device that ever trusted this install's CA will accept - the
-        # compromise is not local - so this is louder than
-        # config._perm_warn's debug-only default for an ordinary credential.
+        # Key material, so a failure to restrict is reported at warning level.
         logger.warning(
             "could not restrict %s to the current user; the data "
             "directory's own permissions are this key's only remaining "
@@ -475,10 +435,8 @@ def _load_or_make_ca(home: Path):
             if cert.not_valid_after_utc > _now():
                 return cert, key
         except Exception:
-            # The files EXIST (guarded above) but are corrupt/unreadable: fall
-            # through and mint a fresh CA. The "missing" case is the other branch
-            # (the enclosing if), so this only ever handles the genuinely-bad file,
-            # by regenerating - never by serving a broken CA.
+            # The files exist but are corrupt or unreadable: mint a fresh CA
+            # rather than serve a broken one. The missing case is the other branch.
             pass
     return _make_ca(home)
 
@@ -545,9 +503,7 @@ def _make_leaf(home: Path, ca_cert, ca_key, hostnames: list[str], ips: list[str]
             "not_after": cert.not_valid_after_utc.isoformat(),
         }, indent=2), encoding="utf-8")
     except OSError:
-        # Best-effort: the meta sidecar is a reuse optimization (lets us skip
-        # re-minting when the SANs are unchanged). If it cannot be written the
-        # leaf is simply regenerated next time; the cert itself is already saved.
+        # Best-effort: without the meta sidecar the leaf is regenerated next time.
         pass
     return cert
 
@@ -563,9 +519,8 @@ def _cert_sans(cert) -> tuple[set[str], set[str]]:
         hosts.update(ext.get_values_for_type(x509.DNSName))
         ips.update(str(ip) for ip in ext.get_values_for_type(x509.IPAddress))
     except x509.ExtensionNotFound:
-        # A cert with no SubjectAlternativeName simply has no SANs to report;
-        # return the empty sets. Narrow catch (only ExtensionNotFound), so a
-        # malformed-cert error would still surface, not be swallowed here.
+        # A cert with no SubjectAlternativeName has no SANs to report. Narrow
+        # catch, so a malformed-cert error still surfaces.
         pass
     return hosts, ips
 
@@ -577,17 +532,13 @@ def _leaf_is_reusable(home: Path, hostnames: list[str], ips: list[str]) -> bool:
     covers every required SAN. Anything else (missing, an expired leaf OR CA,
     a signature that does not verify, a missing SAN) forces a regenerate.
 
-    LM-DA-043: the issuer check used to be ``cert.issuer != ca.subject`` -
-    this module mints EVERY CA with the identical constant subject
-    (``CN=localm local CA, O=localm``), so that compared a fixed string to
-    itself and could never tell a rotated CA keypair from the one on disk.
-    Verifying the signature is the same check a TLS client performs when it
-    validates the chain, so "reusable" and "will validate" cannot diverge -
-    and because this is the ONLY gate that reaches ensure_cert's early return,
-    it is also the only place that can force a CA regenerated in place (e.g.
-    restored from a partial backup) to bring its leaf along with it, and the
-    only place that notices the CA itself has reached expiry (the leaf's own
-    _RENEW_MARGIN_DAYS check never looked at the CA it was signed by)."""
+    The chain is checked by verifying the SIGNATURE, not by comparing
+    ``cert.issuer`` to ``ca.subject``: every CA this module mints carries the
+    identical constant subject (``CN=localm local CA, O=localm``), so a name
+    comparison cannot tell a rotated CA keypair from the one on disk. This is
+    the ONLY gate that reaches ensure_cert's early return, so it is also the
+    only place that forces a CA regenerated in place to bring its leaf along,
+    and the only place that notices the CA itself has reached expiry."""
     from cryptography import x509
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric import padding
@@ -601,17 +552,14 @@ def _leaf_is_reusable(home: Path, hostnames: list[str], ips: list[str]) -> bool:
     except Exception:
         return False
 
-    # A CA nearing (or past) its own expiry must force regeneration of BOTH:
-    # a leaf signed by an expiring CA is no safer than an expiring leaf, and
-    # _load_or_make_ca's own expiry check is unreachable in the steady state
-    # (ensure_cert only calls it once the leaf is judged NOT reusable).
+    # A CA at or near its own expiry forces regeneration of both it and the leaf.
     if ca.not_valid_after_utc - timedelta(days=_RENEW_MARGIN_DAYS) <= _now():
         return False
     if cert.not_valid_after_utc - timedelta(days=_RENEW_MARGIN_DAYS) <= _now():
         return False
 
-    # Prove the leaf actually chains to the CA we currently serve for
-    # download - not merely that their subject/issuer NAMES match.
+    # Verify the leaf chains to the CA now on disk, not merely that their
+    # subject and issuer names match.
     try:
         ca.public_key().verify(
             cert.signature,
@@ -652,8 +600,7 @@ def ensure_cert(
     The CA survives an ordinary leaf regeneration, but NOT unconditionally:
     ``_load_or_make_ca`` reuses it only while it is unexpired and its files are
     readable, and mints a fresh one otherwise. A new CA means every device
-    repeats the one-time trust step, which is why the distinction is worth
-    stating here rather than leaving a reader to infer "always".
+    repeats the one-time trust step.
     """
     home = Path(home)
     _lock_down_dir(tls_dir(home))

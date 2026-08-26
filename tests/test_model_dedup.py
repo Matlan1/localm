@@ -16,8 +16,8 @@ from localm import model_manager as mm
 
 
 def _backdate(path, seconds=60):
-    """Set path's mtime `seconds` in the past, so sync_models_dir's R45
-    settle check reads it as settled rather than possibly still mid-copy."""
+    """Set path's mtime `seconds` in the past, so sync_models_dir's settle check
+    reads it as settled rather than possibly still mid-copy."""
     old = time.time() - seconds
     os.utime(path, (old, old))
 
@@ -35,8 +35,8 @@ def fake_registry(tmp_path, monkeypatch):
         store.clear()
         store.update(reg)
     monkeypatch.setattr(mm, "save_registry", _save)
-    # _register now goes through update_registry (atomic read-modify-write);
-    # route it at the in-memory store so the fake stays faithful.
+    # _register goes through update_registry (atomic read-modify-write), routed
+    # here at the in-memory store.
     def _update(mutator):
         reg = dict(store)
         mutator(reg)
@@ -101,9 +101,7 @@ class TestAliasModel:
         store["b"] = {"path": "q", "source": "local"}
         assert mm.alias_model("a", "b") is False
 
-    # ---- alias sanitizes its new name (GAP-CLI-1: it was the one registry-key
-    #      path that skipped _sanitize_name, so `alias real ../../evil` etc. wrote
-    #      a raw/unsafe key). --------------------------------------------------
+    # ---- alias sanitizes its new name -----------------------------------------
     @pytest.mark.parametrize("raw, expected", [
         ("../../evil", "evil"),        # traversal collapses to a bare component
         ("a/b/c", "a-b-c"),            # path separators -> hyphen
@@ -227,11 +225,11 @@ class TestAddLocalDedup:
 
     def test_move_registry_update_is_atomic_on_failure(
             self, fake_registry, tmp_path, monkeypatch):
-        """L7: a move updates the registry in ONE atomic write. If that write
+        """A move updates the registry in ONE atomic write. When that write
         fails after the file is physically moved, the registry is left FULLY
-        pre-move - never a half-update where the pre-existing alias is repointed
-        but the new name is missing. The file still lands under MODELS_DIR, where
-        a launch-time sync_models_dir recovers it."""
+        pre-move, never half-updated with the pre-existing alias repointed and
+        the new name missing. The file still lands under MODELS_DIR, where a
+        launch-time sync_models_dir recovers it."""
         store, models_dir = fake_registry
         f = _file(tmp_path, "m.gguf")
         mm.add_local(str(f), "first", on_duplicate="register")   # 'first' -> external f
@@ -252,11 +250,10 @@ class TestAddLocalDedup:
         assert "moved" not in store
 
     def test_move_crash_state_is_recovered_by_sync(self, fake_registry, tmp_path):
-        """L7 end to end: the state a crash mid-move leaves behind - the file
-        already under MODELS_DIR, the registry still pointing the alias at the
-        vanished old path - is reconciled by sync_models_dir (which runs on
-        launch): the moved file is re-registered (not lost) and the stale entry
-        is flagged missing (not silently dropped)."""
+        """The state a crash mid-move leaves behind - the file already under
+        MODELS_DIR, the registry still pointing the alias at the vanished old
+        path - is reconciled by sync_models_dir, which runs on launch: the moved
+        file is re-registered and the stale entry is flagged missing."""
         store, models_dir = fake_registry
         gone = tmp_path / "downloads" / "m.gguf"        # external path, file moved away
         store["first"] = {"path": str(gone.resolve()), "source": "local"}
@@ -300,14 +297,11 @@ class TestAddLocalDedup:
             mm.add_local(str(f), "second")   # default: ask
         assert "second" not in store
 
-    # ---- NEW-STORE-MOVE-REGISTRY-DESYNC: --store move/copy used to move or
-    # copy the file into MODELS_DIR BEFORE the name-collision check, then
-    # discard _register_with_dedup's (always-None) result and report success
-    # anyway - the file displaced, the registry untouched, add_local() -> True.
-    # test_name_conflict_different_file_skipped_non_tty above covers the same
-    # collision WITHOUT --store, which is exactly why it never caught this:
-    # with store=None there is nothing to move, so the buggy ordering was
-    # never exercised. -------------------------------------------------------
+    # ---- --store move/copy checks the name collision BEFORE moving or copying
+    #      the file into MODELS_DIR, and reports the collision rather than
+    #      success. test_name_conflict_different_file_skipped_non_tty above
+    #      covers the same collision WITHOUT --store.
+    #      ---------------------------------------------------------------------
     def test_store_move_name_conflict_does_not_touch_file_non_tty(
             self, fake_registry, tmp_path):
         store, models_dir = fake_registry
@@ -350,8 +344,8 @@ class TestAddLocalDedup:
 
     def test_store_move_still_succeeds_without_a_collision(
             self, fake_registry, tmp_path):
-        """The new pre-move gate must not false-positive on an ordinary,
-        non-colliding --store move - it only refuses a GENUINE name conflict."""
+        """The pre-move gate refuses only a GENUINE name conflict, so an
+        ordinary non-colliding --store move still succeeds."""
         store, models_dir = fake_registry
         external = _file(tmp_path, "mymodel.gguf")
 
@@ -367,9 +361,8 @@ class TestAddLocalDedup:
     def test_store_move_name_conflict_interactive_decline_reports_failure(
             self, fake_registry, tmp_path):
         """Interactively declining an overwrite still leaves the file moved
-        (there IS a real prompt here, unlike the non-tty case) - add_local
-        must report that honestly (False) rather than claiming success, since
-        this used to unconditionally return True regardless of the answer."""
+        (there IS a real prompt here, unlike the non-tty case), so add_local
+        reports False rather than success."""
         store, models_dir = fake_registry
         existing = _file(tmp_path, "existing.gguf", b"one")
         mm.add_local(str(existing), "collision", on_duplicate="register")
@@ -385,9 +378,8 @@ class TestAddLocalDedup:
 
 
 class TestNameCollision:
-    """_name_collision: the pure, shared predicate add_local's pre-move gate
-    and _register_with_dedup's own conflict check both use - one definition,
-    so they can never drift apart on what counts as a conflict."""
+    """_name_collision: the shared predicate add_local's pre-move gate and
+    _register_with_dedup's conflict check both use."""
 
     def test_no_entry_at_all_is_no_conflict(self, fake_registry, tmp_path):
         from localm.model_manager.registry import _name_collision
@@ -505,7 +497,7 @@ class TestPullDedup:
             def iter_content(self, n): yield content
 
         # check_url resolves the host; pin it public so the SSRF guard passes, and
-        # double the pinned-transport seam the pull path now uses (SSRF-REBIND).
+        # double the pinned-transport seam the pull path uses.
         monkeypatch.setattr(
             "socket.getaddrinfo",
             lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
@@ -521,10 +513,9 @@ class TestPullDedup:
 
 # ---------------------------------------------------------------------------
 #  Registry read-modify-write must be atomic (no lost update on a concurrent
-#  writer). These mutate-then-save sites had the same non-atomic pattern that
-#  #318 fixed for the move path: load_registry() (lock, read, release) -> mutate
-#  a stale snapshot -> save_registry() (lock, write) clobbers a write that landed
-#  in between. update_registry() re-reads inside the lock, so nothing is lost.
+#  writer): load_registry() (lock, read, release) -> mutate a stale snapshot ->
+#  save_registry() (lock, write) clobbers a write that landed in between.
+#  update_registry() re-reads inside the lock, so nothing is lost.
 # ---------------------------------------------------------------------------
 
 class TestRegistryRmwAtomicity:
@@ -581,11 +572,9 @@ class TestRegistryRmwAtomicity:
 
 
 # ---------------------------------------------------------------------------
-#  Malformed registry entries must never crash a read/list/remove/dedup/sync
-#  (a single JSON-valid-but-wrong-shape entry once wedged the whole model CLI:
-#  list/rm/add all raised an uncaught traceback and offered a bug report, with
-#  no in-tool way to remove the bad entry). load_registry already promises a
-#  damaged FILE never takes the app down; this extends it to a damaged ENTRY.
+#  Malformed registry entries must never crash a read/list/remove/dedup/sync.
+#  load_registry already promises a damaged FILE never takes the app down; this
+#  extends it to a damaged ENTRY.
 # ---------------------------------------------------------------------------
 
 # The shapes a hand-edited / half-written / cross-version registry.json can take.
@@ -682,10 +671,9 @@ class TestMalformedRegistryResilience:
                                                  bad_key, bad_val):
         # Registering a NEW file under the exact name of a corrupt entry must not
         # crash: _register_with_dedup's "same name, different file" conflict branch
-        # looked up reg[name].get("path") with no dict guard, so a non-dict entry
-        # (str / null) raised AttributeError before the overwrite prompt. Non-tty
-        # -> it reports the conflict and skips, leaving the corrupt entry in place
-        # (cleared with `localm rm <name>`), the good model untouched.
+        # guards against a non-dict entry. Non-tty -> it reports the conflict and
+        # skips, leaving the corrupt entry in place (cleared with `localm rm
+        # <name>`) and the good model untouched.
         store, _ = fake_registry
         self._seed(store, tmp_path, bad_key, bad_val)
         new = _file(tmp_path, "brand-new.gguf")

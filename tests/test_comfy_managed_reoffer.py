@@ -41,10 +41,9 @@ def home(tmp_path, monkeypatch):
 
 
 def _install_managed():
-    """Create the on-disk markers is_managed_comfy_installed() checks (main.py +
-    the managed venv interpreter + the completion marker - #621 follow-up: the
-    first two alone mean "still installing"), so the REAL detector reports
-    installed - no mock of the thing under test."""
+    """Create the on-disk markers is_managed_comfy_installed() checks (main.py,
+    the managed venv interpreter, and the completion marker - the first two alone
+    mean "still installing"), so the REAL detector reports installed."""
     from localm.media.managed_comfy import managed_comfy_paths
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     p = managed_comfy_paths()
@@ -140,7 +139,7 @@ def test_cli_reoffer_surfaced_alongside_shim_and_marks_offered(home, monkeypatch
     r = _drive_cli(monkeypatch, "o", _REGRESSION, spawned_pid=123)
     # the durable-fix offer appeared...
     assert "localm comfy setup" in r["printed"]
-    # ...ALONGSIDE T1's shim offer (prompt shown + retried) - T1 not broken
+    # ...alongside the shim offer (prompt shown + retried)
     assert r["prompted"] is True
     assert r["retried"] == 1
     assert r["ok"] and r["out"] == "Saved"
@@ -154,7 +153,7 @@ def test_cli_reoffer_not_repeated_but_shim_still_offered(home, monkeypatch):
     r = _drive_cli(monkeypatch, "n", _REGRESSION)
     # NO repeat of the durable-fix offer (never nags)...
     assert "localm comfy setup" not in r["printed"]
-    # ...but T1's shim offer/prompt is still presented
+    # ...but the shim offer/prompt is still presented
     assert r["prompted"] is True
     assert "12116" in r["printed"] or "__func__" in r["printed"]
 
@@ -171,7 +170,7 @@ def test_cli_reoffer_skipped_when_managed_installed(home, monkeypatch):
 
 def test_cli_reoffer_absent_for_unrelated_error(home, monkeypatch):
     r = _drive_cli(monkeypatch, "o", _UNRELATED)
-    # neither offer for an unrelated error (unchanged T1 behavior)
+    # neither offer for an unrelated error
     assert "localm comfy setup" not in r["printed"]
     assert r["prompted"] is False        # T1 does not even prompt for a non-__func__ error
     assert r["retried"] == 0

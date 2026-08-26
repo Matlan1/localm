@@ -1,28 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-507 (regression audit 2026-07-14): a spawn_agent child could no longer do
-ANY destructive work in the default interactive REPL.
+"""A spawn_agent child must still be able to do destructive work in the default
+interactive REPL.
 
-The 2026-07-09 checkup fix (#11) correctly stopped a child from BYPASSING the
-parent's confirmation posture: it stopped hardcoding the child's
-``auto_approve=True`` and instead inherited ``auto_approve`` / ``dry_run`` /
-``always_confirm`` / ``confirm_handler`` from the parent. But it over-corrected.
+Inheriting the parent's confirmation posture - ``auto_approve`` / ``dry_run`` /
+``always_confirm`` / ``confirm_handler`` instead of hardcoding the child's
+``auto_approve=True`` - is what stops a child BYPASSING that posture. Inherited
+naively it also blocks every delegation.
 
 In the default interactive REPL (``localm coder`` without ``--yes``) the CLI
 builds the parent with ``auto_approve=False`` and ``confirm_handler=None`` - the
-terminal REPL confirms via ``_confirm_tool``, not a handler. The child inherited
-``auto_approve=False`` AND ``confirm_handler=None``, and always runs
-``run_task`` -> ``_loop(interactive=False)``. So in execution.py the child hit
-``needs_confirm=True`` with no handler and ``interactive=False``, took the
-fail-closed branch, and DENIED every write/shell/git - even though the user was
-sitting right there and the parent's own tools prompt fine on that same terminal.
+terminal REPL confirms via ``_confirm_tool``, not a handler. A child inheriting
+``auto_approve=False`` AND ``confirm_handler=None`` always runs ``run_task`` ->
+``_loop(interactive=False)``, so in execution.py it hits ``needs_confirm=True``
+with no handler and ``interactive=False``, takes the fail-closed branch, and
+DENIES every write/shell/git - even though the user is sitting right there and
+the parent's own tools prompt fine on that same terminal.
 
-The intent of "inherit the parent's confirmation posture" was to ASK, not to
-block. So the child now inherits the parent's ACTUAL confirmation CHANNEL: the
-GUI handler when there is one, and otherwise the parent's terminal prompt when
-the parent is genuinely running an interactive loop.
+"Inherit the parent's confirmation posture" means ASK, not block. So the child
+inherits the parent's ACTUAL confirmation CHANNEL: the GUI handler when there is
+one, and otherwise the parent's terminal prompt when the parent is genuinely
+running an interactive loop.
 
-The security fix must survive intact, which is what the negatives here pin: a
-parent that is NOT interactive and has no handler (a scheduled/unattended run)
+The security property must survive intact, which is what the negatives here pin:
+a parent that is NOT interactive and has no handler (a scheduled/unattended run)
 must still fail closed, and a child must never self-approve.
 """
 
@@ -103,13 +103,13 @@ def _spawn_and_capture_child(tmp_path, parent_kwargs, *, interactive_parent=Fals
 
 
 # --------------------------------------------------------------------------- #
-#  THE REGRESSION: an interactive parent can delegate real work again          #
+#  An interactive parent can delegate real work                                #
 # --------------------------------------------------------------------------- #
 
 class TestInteractiveDelegation:
     def test_child_asks_the_terminal_and_executes_when_approved(self, tmp_path):
-        """The reported break: `localm coder` without --yes, model delegates via
-        spawn_agent, user approves at the terminal -> the work actually happens."""
+        """`localm coder` without --yes, model delegates via spawn_agent, user
+        approves at the terminal -> the work actually happens."""
         asked = []
         child = _spawn_and_capture_child(
             tmp_path, {"auto_approve": False}, interactive_parent=True)
@@ -169,7 +169,7 @@ class TestInteractiveDelegation:
 
 
 # --------------------------------------------------------------------------- #
-#  NEGATIVES: the 2026-07-09 bypass fix must survive intact                    #
+#  NEGATIVES: the bypass fix must survive intact                               #
 # --------------------------------------------------------------------------- #
 
 class TestConfirmationPostureStillEnforced:

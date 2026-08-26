@@ -3,10 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
-// The Settings "Companion app" card must show a phone-REACHABLE address (the
-// host's LAN / Tailscale IP), never the loopback origin - 127.0.0.1 on a phone
-// is the phone itself. companionView() is the pure decision point; the URLs are
-// built from THIS page's own scheme + port (one port across every interface).
+// companionView() decides which addresses the Settings "Companion app" card
+// offers: the host's LAN / Tailscale IP, never the loopback origin. URLs are
+// built from this page's own scheme and port.
 
 const tick = () => new Promise((r) => setTimeout(r, 50));
 
@@ -56,8 +55,6 @@ test("companionView: loopback bind shows the -H 0.0.0.0 hint and no address", ()
 });
 
 test("companionView: loopback hint names the GUI path (Bind address + Restart)", () => {
-  // F1: the card must no longer concede that only a terminal can cause the
-  // bind - Settings > Server > Bind address is the first-class route now.
   const { window } = loadAppWithPages({});
   const view = window.companionView(
     { network_bind: false, lan: "", tailscale: "" },
@@ -67,9 +64,7 @@ test("companionView: loopback hint names the GUI path (Bind address + Restart)",
 });
 
 test("companionView: a bind_fallback reason outranks every generic hint", () => {
-  // The server REFUSED a configured network bind (e.g. no strong API key) and
-  // stayed on loopback: the card must say WHY, or the Settings change looks
-  // like it silently did nothing.
+  // The server refused a configured network bind and stayed on loopback.
   const { window } = loadAppWithPages({});
   const reason = "The configured bind address (0.0.0.0) was not applied: no API key is set.";
   const view = window.companionView(

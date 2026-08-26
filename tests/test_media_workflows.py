@@ -131,10 +131,9 @@ def test_router_endpoints_list_upload_select_delete():
 
 
 def test_upload_route_504s_when_the_write_hangs_past_budget(monkeypatch):
-    """Follow-up to #1057: before this fix, a wedged save_workflow() call left
-    the HTTP request hanging forever. Now it returns a clear 504 within the
-    configured budget - proven end to end through the real route, not just
-    the underlying wrapper (see test_threadpool_timeout.py for that)."""
+    """A wedged save_workflow() call must not leave the HTTP request hanging:
+    the route returns a clear 504 within the configured budget, proven end to
+    end through the real route rather than only the underlying wrapper."""
     import time as _time
 
     from fastapi import FastAPI
@@ -165,48 +164,39 @@ def test_upload_route_504s_when_the_write_hangs_past_budget(monkeypatch):
 
 
 def test_rmw_timeout_has_headroom_over_a_single_holders_own_work_ceiling():
-    """Structural guard (diff-review-discipline: assert the ARITHMETIC, not
-    the literal): _WORKFLOW_RMW_TIMEOUT_S is the budget every route actually
-    uses, but all four routes share ONE _lock_for(media) lock acquired INSIDE
-    that same bounded call - so a request's own clock also covers however
-    long it waits behind another holder. If this ever regresses to matching
+    """Structural guard, asserting the ARITHMETIC rather than the literal:
+    _WORKFLOW_RMW_TIMEOUT_S is the budget every route actually uses, but all
+    four routes share ONE _lock_for(media) lock acquired INSIDE that same
+    bounded call, so a request's own clock also covers however long it waits
+    behind another holder. If this regresses to matching
     _WORKFLOW_OWN_WORK_TIMEOUT_S exactly, a merely-slow (not hung) writer can
-    again collaterally 504 a concurrently-queued, otherwise-instant reader
-    sharing the same lock (see test_a_merely_slow_write_does_not_collaterally_
-    504_a_queued_read below for the reproduction)."""
+    collaterally 504 a concurrently-queued, otherwise-instant reader sharing
+    the same lock (see test_a_merely_slow_write_does_not_collaterally_
+    504_a_queued_read below)."""
     assert mw._WORKFLOW_RMW_TIMEOUT_S >= 2 * mw._WORKFLOW_OWN_WORK_TIMEOUT_S
 
 
 @pytest.mark.anyio
 async def test_a_merely_slow_write_does_not_collaterally_504_a_queued_read(monkeypatch):
-    """Regression for a cascade found in adversarial review of the #1057
-    follow-up: a write that is merely slow (not hung, and would have
-    exceeded a naive single-holder budget) must not push a concurrently-
-    queued, trivially-fast read past ITS OWN budget purely from waiting on
-    the shared per-media lock. Reproduced end to end over real concurrent
-    HTTP requests, not just at the function level."""
+    """A write that is merely slow (not hung, and over a naive single-holder
+    budget) must not push a concurrently-queued, trivially-fast read past ITS
+    OWN budget purely from waiting on the shared per-media lock. Driven end to
+    end over real concurrent HTTP requests, not just at the function level."""
     import asyncio
 
     import httpx
     from fastapi import FastAPI
 
-    # Scale down for a fast test while preserving the real >=2x relationship,
-    # with generous margins (not the tight 0.4s/0.6s this test originally
-    # used, which itself flaked under ordinary box scheduling jitter -
-    # exactly the timing-margin fragility a review of this same change
-    # flagged elsewhere; a timing-based test needs real headroom, not just a
-    # mathematically-sufficient one).
+    # Scaled down for a fast test while preserving the >=2x relationship, with
+    # generous margins.
     monkeypatch.setattr(mw, "_WORKFLOW_RMW_TIMEOUT_S", 3.0)
 
     write_entered = threading.Event()
 
     def _slow_but_legitimate_write(media, name, content):
         write_entered.set()
-        # 1.0s: a third of the ACTUAL 3.0s budget (comfortable margin against
-        # scheduling jitter), but would have exceeded a naive single-holder
-        # ceiling of 1.5s (what _WORKFLOW_RMW_TIMEOUT_S would be without the
-        # 2x headroom, scaled the same way) - the "merely slow, not hung"
-        # case the review reproduced.
+        # 1.0s: a third of the 3.0s budget, but over a naive single-holder ceiling
+        # of 1.5s - the merely-slow, not-hung case.
         time.sleep(1.0)
         return "x.json"
 
@@ -219,9 +209,8 @@ async def test_a_merely_slow_write_does_not_collaterally_504_a_queued_read(monke
         write_task = asyncio.ensure_future(
             client.post("/api/image/workflows",
                        json={"name": "x", "workflow": {"3": {"class_type": "K"}}}))
-        # Deterministic hand-off (not a hardcoded sleep - see the test-quality
-        # finding this replaced): wait until the write has genuinely entered
-        # its critical section (holding the lock) before firing the read.
+        # Deterministic hand-off: wait until the write is genuinely inside its
+        # critical section before firing the read.
         for _ in range(500):
             if write_entered.is_set():
                 break
@@ -242,8 +231,8 @@ def test_generator_uses_selected_workflow(monkeypatch):
 
     from localm.image_gen import comfy
     # Isolate from a personal flux_workflow.json that may exist in a dev checkout
-    # (it is gitignored and takes precedence over the example), so the cleared-
-    # selection case deterministically falls back to the committed example.
+    # (gitignored, and it takes precedence over the example), so the cleared-
+    # selection case falls back to the committed example.
     monkeypatch.setattr(comfy, "_WORKFLOW_PATH",
                         Path(__file__).parent / "_no_personal_flux_workflow.json")
     custom = mw.save_workflow("image", "custom.json", _WF)
@@ -255,7 +244,7 @@ def test_generator_uses_selected_workflow(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-#  Legacy in-package override migration (rescued from the self-update wipe)
+#  Legacy in-package override migration
 # ---------------------------------------------------------------------------
 
 
@@ -333,9 +322,8 @@ def test_migration_idempotent_second_run_removes_duplicate(tmp_path):
 
 def test_migration_reactivates_legacy_when_selection_is_dangling(tmp_path):
     # The selection marker points at a workflow whose file has since vanished, so
-    # the legacy override is the EFFECTIVE active workflow (the generators fall
-    # back to it). Migration must keep it active - gating on the marker alone
-    # would let generation silently drop to the committed example.
+    # the legacy override is the effective active workflow. Migration keeps it
+    # active.
     mw.save_workflow("image", "myflow.json", _WF)
     mw.select_workflow("image", "myflow.json")
     (mw.workflows_dir("image") / "myflow.json").unlink()     # selected file vanishes
@@ -387,9 +375,7 @@ def test_migrate_legacy_override_is_skipped_under_pytest():
 
 def test_subprocess_migration_guard_flag_is_set_by_conftest():
     # conftest sets this so a localm SUBPROCESS a test spawns (no pytest in its
-    # sys.modules) still skips the destructive in-package migration. Losing it
-    # would let the suite move a developer's real flux_workflow.json/etc. out of
-    # their working tree.
+    # sys.modules) still skips the destructive in-package migration.
     import os
     assert os.environ.get("LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION") == "1"
 
@@ -433,9 +419,7 @@ def test_legacy_override_survives_self_update_via_migration(tmp_path, monkeypatc
 
 
 def test_in_package_override_is_destroyed_by_update_without_migration(tmp_path):
-    # Documents the bug the migration prevents: an override left INSIDE localm/ is
-    # wiped by the whole-tree package swap. This is the oracle's negative case -
-    # if the swap did NOT delete it, the survival test above would prove nothing.
+    # An override left inside localm/ is wiped by the whole-tree package swap.
     from localm import _apply_update as up
 
     install = tmp_path / "install"
@@ -451,14 +435,9 @@ def test_in_package_override_is_destroyed_by_update_without_migration(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  _lock_for: per-media mutual exclusion (2026-08-05 adversarial review of the
-#  event-loop-offload fix, PR #1045). run_in_threadpool removed the free
-#  atomicity these check-then-act sequences depended on when they ran inline
-#  on the single event loop; _lock_for restores it. These tests reproduce the
-#  EXACT scenarios the review confirmed live, now under the lock, using real
-#  OS threads (not a scripted single-threaded interleaving) so the lock's
-#  actual mutual-exclusion behavior is what is being proven, not a simulation
-#  of it.
+#  _lock_for: per-media mutual exclusion. These tests drive the check-then-act #
+#  sequences from real OS threads, so what is proven is the lock's actual      #
+#  mutual-exclusion behavior.                                                  #
 # --------------------------------------------------------------------------- #
 
 def test_lock_for_serializes_concurrent_operations_on_the_same_media():
@@ -516,12 +495,10 @@ def test_lock_for_does_not_serialize_different_media():
 
 
 def test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_file(home):
-    """CONFIRMED by the adversarial review (live reproduction against the
-    real save_workflow(), 59-74% corruption rate across several trial
-    shapes): two real OS threads racing to save the SAME filename, with no
-    lock, produced torn/invalid JSON on disk. Under the per-media lock the
-    writes must serialize, so the file on disk must ALWAYS be valid JSON
-    matching one of the two payloads, in full, never a mix of both."""
+    """Two real OS threads racing to save the SAME filename with no lock
+    produce torn/invalid JSON on disk. Under the per-media lock the writes must
+    serialize, so the file on disk must ALWAYS be valid JSON matching one of the
+    two payloads, in full, never a mix of both."""
     small_data = {"3": {"class_type": "KSampler", "inputs": {"a": "x" * 500}}}
     large_data = {"3": {"class_type": "KSampler", "inputs": {"a": "y" * 50_000}}}
     small = json.dumps(small_data).encode()
@@ -541,10 +518,8 @@ def test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_file(home):
             t.join(timeout=5)
         raw = (mw.workflows_dir("image") / "race.json").read_bytes()
         try:
-            # save_workflow re-serializes (indent=2, platform newlines), so
-            # comparing PARSED content is the correct check - a raw byte
-            # comparison against either input would fail even on a genuine
-            # success, since neither input matches the on-disk format.
+            # save_workflow re-serializes (indent=2, platform newlines), so parsed
+            # content is what gets compared.
             data = json.loads(raw)
         except json.JSONDecodeError:
             corruptions += 1
@@ -637,12 +612,11 @@ def test_lockless_reader_never_observes_a_torn_write(home):
 
 
 def test_concurrent_list_survives_a_racing_delete(home):
-    """CONFIRMED by the adversarial review (live reproduction): a DELETE
-    landing between list_workflows' is_file() check and its later stat()
-    calls raised an unhandled FileNotFoundError -> 500. Under the lock, a
-    listing and a delete for the same media can no longer interleave at
-    all - list_workflows must never raise, no matter how many concurrent
-    deletes are racing it."""
+    """A DELETE landing between list_workflows' is_file() check and its later
+    stat() calls raises an unhandled FileNotFoundError -> 500. Under the lock, a
+    listing and a delete for the same media cannot interleave at all:
+    list_workflows must never raise, no matter how many concurrent deletes are
+    racing it."""
     d = mw.workflows_dir("image")
     d.mkdir(parents=True, exist_ok=True)
     names = [f"wf{i}.json" for i in range(20)]
@@ -676,13 +650,12 @@ def test_concurrent_list_survives_a_racing_delete(home):
 
 
 def test_concurrent_select_and_delete_never_orphans_the_selection(home):
-    """CONFIRMED by the adversarial review (live reproduction): a select and a
-    delete of the SAME file, racing, could leave config["plugins"]["image"]
-    ["workflow"] pointing at a file that no longer exists on disk - the
-    documented invariant ("a generation is never left pointing at a missing
-    file") violated. Under the lock the two operations fully serialize, so
-    after both finish, the invariant must hold: whatever is selected (if
-    anything) must still exist on disk."""
+    """A select and a delete of the SAME file, racing, can leave
+    config["plugins"]["image"]["workflow"] pointing at a file that no longer
+    exists on disk, violating the documented invariant ("a generation is never
+    left pointing at a missing file"). Under the lock the two operations fully
+    serialize, so after both finish whatever is selected (if anything) must
+    still exist on disk."""
     d = mw.workflows_dir("image")
     d.mkdir(parents=True, exist_ok=True)
     (d / "x.json").write_bytes(_WF)

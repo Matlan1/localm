@@ -24,17 +24,14 @@ CTRL_CLOSE_EVENT = 2
 CTRL_LOGOFF_EVENT = 5
 CTRL_SHUTDOWN_EVENT = 6
 
-# Events that TERMINATE the process without raising KeyboardInterrupt, so Python
-# finally/atexit never run. We must clean up (free native GPU/model contexts) in
-# the control handler itself, or they get freed during interpreter teardown -
-# the segfault-on-window-close the user reported. Ctrl+C / Ctrl+Break are NOT in
-# this set: they are passed through to Python's default handler so the existing
-# KeyboardInterrupt shutdown path keeps working.
+# Console events that terminate the process without running Python
+# finally/atexit, so cleanup must happen inside the handler itself. Ctrl+C and
+# Ctrl+Break are excluded and fall through to Python's default handler.
 _TERMINATING_EVENTS = frozenset(
     {CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT})
 
-# Keep registered ctypes callbacks alive for the process lifetime (Windows holds
-# only a raw pointer; if the Python object is GC'd the callback faults).
+# Keeps registered ctypes callbacks alive for the process lifetime; Windows
+# holds only a raw pointer.
 _console_handlers: list = []
 
 
@@ -128,8 +125,8 @@ def set_console_title(title: str) -> bool:
 
     Windows uses SetConsoleTitleW; other platforms emit an OSC title escape, but
     ONLY when stdout is a real terminal (never into a redirected file, a pipe, or
-    a service log). Best-effort and fully guarded: the title is purely cosmetic,
-    so a failure never blocks startup. Returns True if a title was set.
+    a service log). Best-effort and fully guarded: a failure never raises and
+    never blocks startup. Returns True if a title was set.
     """
     text = _sanitize_title(title)
     try:

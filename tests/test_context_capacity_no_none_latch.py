@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """HttpEngine.context_capacity must not permanently latch a None from an early
-failure (Antigravity-audit LOW).
+failure.
 
-The method set _ctx_capacity_cached = True BEFORE the fetch and cached whatever
-came back - so a transient/early failure (the model is not loaded yet, a non-200,
-a network blip) latched None forever, and every later call returned None even
-once /v1/config would answer. The docstring says "cached after the first
-SUCCESSFUL fetch"; the code cached after the first ATTEMPT.
+Setting _ctx_capacity_cached = True BEFORE the fetch caches whatever comes back,
+so a transient or early failure (the model is not loaded yet, a non-200, a
+network blip) latches None forever and every later call returns None even once
+/v1/config would answer. The cache is populated after the first SUCCESSFUL
+fetch, not after the first attempt.
 """
 
 from unittest.mock import MagicMock

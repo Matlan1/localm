@@ -1,22 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``GgufWorker`` - owns the real native model. Runs ONLY inside the isolated
-child process spawned by ``_runner.py``; never imported/constructed in the
+child process spawned by ``_runner.py``; never imported or constructed in the
 main server process.
 
-Why this class exists (see ``_runner.py``'s module docstring for the full
-account): ``llama_load_model_from_file`` and every subsequent
+``llama_load_model_from_file`` and every subsequent
 ``llama_init_from_model``/``llama_decode`` call (context growth,
 token-by-token generation) can hard-abort the whole process on a native
 CUDA/HIP driver failure - no Python ``try/except`` can catch it. Isolating
 just the model handle is not possible (a ``ctypes.c_void_p`` is meaningless
 outside the process that created it) and isolating just the load is not
-sufficient (context growth hits the same abort-prone call class) - so the
+sufficient (context growth hits the same abort-prone call class), so the
 model's WHOLE lifecycle runs here, inside a disposable child, and a native
-abort only ever kills this process, never the server.
-
-Everything here is moved close to verbatim from what used to be
-``GgufBackend``'s native-call-touching methods - the isolation boundary is
-new, the logic is not."""
+abort only ever kills this process, never the server."""
 
 from __future__ import annotations
 
@@ -103,22 +98,21 @@ class GgufWorker(VramSizingMixin):
         "weight_placement", "moe_skip_reason"}``.
         ``weight_placement`` is llama.cpp's own per-backend load report (VRAM vs
         system RAM), the only ground truth for whether ``n_cpu_moe`` actually
-        moved anything - this worker is the only process that can see it (the
-        native call that produces it runs here). ``[]`` means "not reported"
+        moved anything - this worker is the only process that can see it, since
+        the native call that produces it runs here. ``[]`` means "not reported"
         (verbose mode, or a parse miss), never "0 bytes everywhere".
-        ``moe_skip_reason`` is a key into ``llama.MOE_SKIP_MESSAGES`` (or
-        None) naming why ``n_cpu_moe`` did not apply - carried out here
-        rather than printed by ``_apply_cpu_moe`` itself, because THIS
-        process is the isolated child: only the parent (GgufBackend) may
-        render a user-facing message, per isolated-child-must-not-console-
-        print.
+        ``moe_skip_reason`` is a key into ``llama.MOE_SKIP_MESSAGES`` (or None)
+        naming why ``n_cpu_moe`` did not apply - carried out here rather than
+        printed by ``_apply_cpu_moe`` itself, because THIS process is the
+        isolated child and only the parent (GgufBackend) may render a
+        user-facing message.
 
         Raises :class:`~localm.inference.backends.base.ModelLoadCancelled` if
         ``cancel_event`` was set during the load (native progress-callback
         abort), or any other exception on a genuine load failure. A native
         ABORT is not, and must not be, caught here - it kills this whole
-        process, which is exactly the isolation this class exists inside; the
-        parent detects the dead child and reports it (see ``_runner.py``)."""
+        process, which is the isolation this class exists inside; the parent
+        detects the dead child and reports it (see ``_runner.py``)."""
         from localm.inference.backends.llamacpp._loader import load_lib
         from localm.inference.backends.llamacpp.llama import _capture_stdio
         from localm.debuglog import suppress_console_mirror
@@ -129,21 +123,20 @@ class GgufWorker(VramSizingMixin):
         # load_lib() has already run. Left unredirected it lands mid-line in
         # whatever this process's inherited console is currently rendering -
         # the parent's live Rich load spinner - corrupting it. Paired with
-        # suppress_console_mirror() for the same reason llama.py's own merged
-        # native-call scope needs it: load_lib()'s logger.warning calls (e.g.
+        # suppress_console_mirror(): load_lib()'s logger.warning calls (e.g.
         # "no ggml compute backends registered") go through Python's logging
-        # module, not fd 1/2, and the debug-mode console mirror is BY DESIGN
-        # immune to an fd redirect (see suppress_console_mirror's docstring).
+        # module, not fd 1/2, and the debug-mode console mirror is immune to an
+        # fd redirect (see suppress_console_mirror's docstring).
         with suppress_console_mirror(), _capture_stdio() as captured:
             try:
                 load_lib()   # ensure DLLs are loaded before importing the class
             except Exception as e:
                 # A genuine failure's native cause (e.g. the OS loader's own
                 # dlopen error text) may be sitting in the very output just
-                # suppressed - never let the capture swallow it (AGENTS.md
-                # rule 5). Append it to load_lib()'s own already-actionable
-                # message rather than raising a fresh exception, so this
-                # stays the same type callers already handle.
+                # suppressed - never let the capture swallow it. Append it to
+                # load_lib()'s own already-actionable message rather than
+                # raising a fresh exception, so this stays the same type
+                # callers already handle.
                 detail = captured.tail()
                 if detail:
                     extra = f"\n\nCaptured native output during load:\n{detail}"
@@ -201,11 +194,9 @@ class GgufWorker(VramSizingMixin):
 
     def count_messages_tokens(self, messages: List[dict]) -> int:
         """Exact token count of the structured messages formatted with the
-        model's embedded chat template. Raises on failure (unlike the old
-        in-process method's own try/except) - the parent's RPC wrapper is
-        what falls back to the chars/4 heuristic, exactly mirroring the old
-        try/except's effect but at the process boundary instead of around
-        the native call directly."""
+        model's embedded chat template. Raises on failure: the parent's RPC
+        wrapper is what falls back to the chars/4 heuristic, at the process
+        boundary rather than around the native call directly."""
         from .llama import _apply_model_template
         text_messages = []
         for m in messages:
@@ -261,7 +252,7 @@ class GgufWorker(VramSizingMixin):
         unconstrained and sets ``grammar_unsupported_this_call`` so the caller
         can report it upward. Any OTHER fault is NOT caught here: it
         propagates out of this generator, uncaught, all the way out of the
-        runner's dispatch loop - deliberately allowed to crash this process
+        runner's dispatch loop - allowed to crash this process
         (see the module docstring / ``_runner.py``: a native fault leaves the
         loaded model in an unknown state, so continuing to serve from a
         possibly-corrupted context is the wrong call; the parent detects the

@@ -2,21 +2,17 @@
 """GgufBackend._vram_holder_hint(): the low-VRAM warning's "who is holding
 this VRAM" attribution.
 
-Regression coverage for the self-attribution bug: the registry lookup used
-to name a live registry entry as "another localm instance" without ever
-checking whether that entry was THIS SAME PROCESS's OWN. From a real 0.1.4
-run (issues/foru.txt, not tracked here): a server on port 8642 emitted
-"Low VRAM ... Likely cause: another localm instance (port 8642) is running
-'gemma...' - POST /v1/models/unload on port 8642 to free it" while IT was
-port 8642 - telling the user to unload the model they were talking to. See
-dev-notes/ROOTCAUSE-2026-08-05-chat-no-reload-after-embedder-eviction.md,
-defect (i).
+Regression coverage for the self-attribution bug: a registry lookup that does
+not check whether an entry is THIS SAME PROCESS's OWN names it as "another
+localm instance", so a server on port 8642 emits "Low VRAM ... Likely cause:
+another localm instance (port 8642) is running 'gemma...' - POST
+/v1/models/unload on port 8642 to free it" while IT is port 8642, telling the
+user to unload the model they are talking to.
 
 These tests exercise the real gpu_registry.list_gpu_peers() / own_entry()
 logic end to end (only the process-boundary and hardware-detection seams -
-pid_alive, _try_whoami, resolve_main_gpu_index - are mocked), so the fix
-inside gpu_registry.py is what is actually under test, not a re-statement
-of it.
+pid_alive, _try_whoami, resolve_main_gpu_index - are mocked), so the logic
+inside gpu_registry.py is what is under test, not a re-statement of it.
 """
 
 import os
@@ -26,8 +22,8 @@ from localm.inference.backends.gguf import GgufBackend
 
 
 def _backend(tmp_path):
-    # A tiny real file (constructor only resolves the path; no header is
-    # read for _vram_holder_hint()) - same pattern as test_auto_gpu_layers.py.
+    # A tiny real file: the constructor only resolves the path, and no header is
+    # read for _vram_holder_hint().
     f = tmp_path / "model.gguf"
     f.write_bytes(b"\0" * 4096)
     return GgufBackend(str(f), n_gpu_layers=99, n_gpu_layers_auto=False, n_ctx=4096)
@@ -48,9 +44,8 @@ class TestVramHolderHint:
     def test_self_is_never_blamed_as_another_instance(self, tmp_path, monkeypatch):
         """The ONLY registry entry on this GPU is this same process's own
         (pid == os.getpid()). The hint must NOT claim "another localm
-        instance" - that is the exact false attribution that told a real
-        user to unload the model they were talking to - and instead names
-        this server's own model."""
+        instance" - that false attribution tells a user to unload the model
+        they are talking to - and instead names this server's own model."""
         d = _stub_registry(monkeypatch, tmp_path)
         gpu_registry.write_entry(
             d, instance_id="self-iid", pid=os.getpid(), port=8642,
@@ -64,8 +59,8 @@ class TestVramHolderHint:
 
     def test_genuine_other_instance_is_still_named(self, tmp_path, monkeypatch):
         """A live, identity-verified peer on a DIFFERENT pid must still be
-        named exactly as before - the fix must not blind the hint to real
-        siblings, only to itself."""
+        named - the self-exclusion must not blind the hint to real siblings,
+        only to itself."""
         d = _stub_registry(monkeypatch, tmp_path)
         gpu_registry.write_entry(
             d, instance_id="peer-iid", pid=os.getpid() + 1, port=9111,

@@ -138,10 +138,8 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
     if env in _VALID_MODES:
         return SessionMode(env)
 
-    # A project-local .localcoder/config.toml mode overrides the global coder_mode
-    # for the coder surface (REC-CODER-MODE-TOML). It needs the project dir, so it
-    # only applies when the caller passes cwd (the GUI coder session does; the
-    # localcoder CLI reads the same file itself before it gets here).
+    # A project-local .localcoder/config.toml mode overrides the global
+    # coder_mode; it applies only when the caller passes cwd.
     if surface == "coder" and cwd is not None:
         try:
             from localm.plugins.coder.project_config import (
@@ -152,12 +150,9 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
             if isinstance(pmode, str) and pmode.strip().lower() in _VALID_MODES:
                 return SessionMode(pmode.strip().lower())
         except ProjectConfigUnreadable:
-            # The project file is the one place a user can say "this project is
-            # private", and it did not parse, so we cannot know whether it did.
-            # Continuing to the global coder_mode would write a transcript for a
-            # session that may have been marked private - the one direction that
-            # cannot be undone afterwards. Fail safe, exactly as the load_config
-            # failure below does.
+            # The project file did not parse, so its mode is unknown. Fail safe
+            # to privacy rather than write a transcript for a session that may
+            # have been marked private.
             return SessionMode.PRIVACY
         except Exception:
             pass
@@ -269,10 +264,10 @@ class AuditLog:
         self._write("user", {"content": content[:2000]})
 
     def llm(self, content: str, tokens: int = 0, reasoning: str = "") -> None:
-        """Record one LLM turn. ``reasoning`` (H4 ``reasoning_content``, when the
-        caller's backend/consumer separates it - AUD-HIGH-17-3) is stored in its
-        OWN field, never appended to ``content``, so the visible-answer field
-        stays exactly what was shown/resent."""
+        """Record one LLM turn. ``reasoning`` (the separated
+        ``reasoning_content``, when the caller's backend/consumer provides it) is
+        stored in its OWN field, never appended to ``content``, so the
+        visible-answer field stays exactly what was shown or resent."""
         self._write("llm", {
             "content": content[:2000],
             "reasoning": reasoning[:2000] if reasoning else "",
@@ -287,12 +282,9 @@ class AuditLog:
         self._write("tool_result", {"name": name, "ok": ok, "summary": summary[:200]})
 
     def notice(self, kind: str, message: str) -> None:
-        """Record a session-level condition that is neither a turn nor a tool call.
-
-        The trail could previously only describe user/llm/tool events, so a
-        safety-relevant condition with no tool behind it (a self-review that
-        crashed, a scope that does not confine shell execution) had nowhere to be
-        recorded and went unlogged. ``kind`` groups them for later reading."""
+        """Record a session-level condition that is neither a turn nor a tool call
+        - a self-review that crashed, a scope that does not confine shell
+        execution. ``kind`` groups them for later reading."""
         self._write("notice", {"kind": kind, "message": str(message)[:500]})
     def episodes_recalled(self, episodes: list) -> None:
         """Record WHICH past lessons were injected into this session (id + the
@@ -323,9 +315,8 @@ class AuditLog:
             self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             self._fh.flush()
         except Exception as e:
-            # never crash the host due to logging; but surface a one-time
-            # warning so a disk-full/permission failure does not silently
-            # truncate the audit trail with no signal at all
+            # Never crash the host over logging; warn once so a disk-full or
+            # permission failure does not truncate the trail with no signal.
             if not self._warned_write_fail:
                 self._warned_write_fail = True
                 logger.warning("audit log write failed: %s; trail may be incomplete", e)
@@ -357,10 +348,10 @@ class MarkdownTranscript:
     def exchange(self, user: str, assistant: str) -> None:
         """Append one user/assistant exchange. Best-effort, never raises.
 
-        The model's ``<think>`` reasoning (H4) is separated from the answer and
-        written to a collapsed ``<details>`` block after it, so the transcript
-        reads as the conversation while still preserving the reasoning instead of
-        dumping the raw tags inline."""
+        The model's ``<think>`` reasoning is separated from the answer and written
+        to a collapsed ``<details>`` block after it, so the transcript reads as
+        the conversation while still preserving the reasoning instead of dumping
+        the raw tags inline."""
         from localm.textnorm import split_think
         answer, reasoning = split_think(assistant)
         try:

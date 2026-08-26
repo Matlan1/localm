@@ -3,10 +3,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
 
-// renderNav() builds the dynamic nav from the top-level `pluginState` (a `let`,
-// so it lives in the realm's global lexical env, not on window). We seed it and
-// invoke renderNav from an injected script, stubbing the tail calls
-// (rebuildViews / reconcileActiveView) that touch unrelated view machinery.
+// renderNav() builds the dynamic nav from the top-level `pluginState`, a `let`
+// in the realm's global lexical env rather than a window property, so it is
+// seeded from an injected script. rebuildViews / reconcileActiveView are
+// stubbed out.
 function renderWith(plugins) {
   const { window } = loadApp();
   runScript(window, `

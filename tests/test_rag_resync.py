@@ -344,8 +344,7 @@ def test_a_secret_file_dropped_into_an_indexed_folder_is_not_swept_in(base, docs
     unattended re-sync too."""
     coll = _indexed(base, docs)
     # The filters key on the NAME and suffix (is_secret_index_name /
-    # SECRET_SUFFIXES), never on content, so placeholder bodies are enough - and
-    # this repo's hygiene gate rightly refuses a real key header in a tracked file.
+    # SECRET_SUFFIXES), never on content, so placeholder bodies are enough.
     (docs / "id_rsa").write_text("placeholder key material", encoding="utf-8")
     (docs / "deploy.pem").write_text("placeholder key material", encoding="utf-8")
 

@@ -3,18 +3,13 @@
 into "line(N)" for the live terminal/GUI views, without losing anything from
 the persisted debug-log record.
 
-test_console_stream_is_captured_before_fd_redirect is a regression guard for
-a real bug caught during development: _stable_console_stream() was called
-AFTER fd 2 was redirected to the context's own pipe, so the "stable" console
-duplicate actually pointed back at that SAME pipe (confirmed empirically -
-console.fileno() equalled the pipe's own write_fd, and writes to it arrived
-back on the pipe's own read end). Every emitted grouped line looped back in
-as fresh input, got re-grouped, and re-emitted - a real generation request
-hung indefinitely because of this (only reproduces outside pytest's own fd
-capture, which substitutes a plain file for fd 2 and happens to break the
-feedback chain; a live standalone script and a direct fd probe both
-confirmed the mechanism). Asserting the call order directly is deterministic
-and fast, unlike trying to reproduce the hang itself under pytest.
+test_console_stream_is_captured_before_fd_redirect pins an ORDERING invariant:
+_stable_console_stream() must be called BEFORE fd 2 is redirected to the context's
+own pipe. Called after, the "stable" console duplicate points back at that SAME
+pipe, so every emitted grouped line loops back in as fresh input, is re-grouped and
+re-emitted, and a generation request hangs indefinitely. The loop does not
+reproduce under pytest's own fd capture, which substitutes a plain file for fd 2,
+so the call order is asserted directly instead of the hang.
 """
 
 import logging
@@ -81,9 +76,9 @@ def test_single_line_is_not_suffixed():
 
 
 def test_two_line_cycle_is_grouped_with_count():
-    """The real native pattern this class exists for (#952/#963): two DISTINCT
-    lines alternating, never repeating immediately after themselves, so the
-    original single-line lookback never collapsed either one."""
+    """The native pattern this class exists for: two DISTINCT lines alternating,
+    never repeating immediately after themselves, so a single-line lookback
+    collapses neither one."""
     before = len(debuglog.recent_activity())
     with debuglog.dedup_native_stderr():
         for _ in range(20):
@@ -148,21 +143,17 @@ def test_nothing_written_is_a_clean_noop():
 
 
 def test_persisted_write_failure_warns_once_and_keeps_ring_buffer(monkeypatch, caplog):
-    """Honesty audit (finding 6): if the persisted debug-log write fails, the
-    native line is NOT silently lost - it still reaches the ring buffer, and
-    exactly ONE warning is emitted. The latch suppresses further warnings so a
-    persistently-failing fd cannot spam the log (and the warning is itself
-    drained back through this same reader). Guards all three regression modes:
-    never-warns, warns-every-time (log spam), and line-dropped-on-failure.
-
-    Pre-fix, os.write(debug_fd,...) was wrapped in contextlib.suppress(OSError)
-    with no warning, so this test's warning-count assertion fails on old code."""
-    # A sentinel debug_fd that os.write always rejects. Using a fake fd number +
-    # a pass-through os.write is deterministic and platform-independent: a
-    # pre-closed real fd would get REUSED by the dup/pipe fds dedup_native_stderr
-    # allocates after native_stderr_target() is called, so its os.write would
-    # then wrongly succeed. Real os.write is used for the console/pipe elsewhere,
-    # so only the sentinel is failed; os.close(sentinel) at teardown is suppressed.
+    """If the persisted debug-log write fails, the native line is NOT lost - it
+    still reaches the ring buffer, and exactly ONE warning is emitted. The latch
+    suppresses further warnings so a persistently-failing fd cannot spam the log
+    (and the warning is itself drained back through this same reader). Covers all
+    three failure modes: never-warns, warns-every-time (log spam), and
+    line-dropped-on-failure."""
+    # A sentinel debug_fd that os.write always rejects. A fake fd number plus a
+    # pass-through os.write is deterministic and platform-independent; a pre-closed
+    # real fd would be REUSED by the dup/pipe fds dedup_native_stderr allocates
+    # after native_stderr_target() is called. Only the sentinel is failed;
+    # os.close(sentinel) at teardown is suppressed.
     sentinel_fd = 987654
     monkeypatch.setattr(debuglog, "native_stderr_target", lambda: sentinel_fd)
     real_os_write = os.write
@@ -193,14 +184,10 @@ def test_persisted_write_failure_warns_once_and_keeps_ring_buffer(monkeypatch, c
 
 
 # --------------------------------------------------------------------------- #
-#  Template grouping: the varying-integer flood the class originally exempted
+#  Template grouping: a varying-integer flood
 #
-#  Measured 2026-08-05 from a real 9012-line capture (issues/cuda graphs.txt):
-#  "CUDA Graph id N reused" does NOT change every occurrence, as the old
-#  docstring assumed. N cycles a bounded set - 21 distinct values there, each
-#  recurring ~425 times - so the lines ARE verbatim repeats, merely spaced wider
-#  than the LRU is deep. 8934 of 9012 lines were emitted individually, to the
-#  console and the GUI activity ring.
+#  "CUDA Graph id N reused" cycles N over a bounded set, so the lines are
+#  verbatim repeats spaced wider than the LRU is deep.
 # --------------------------------------------------------------------------- #
 
 def _group(lines):
@@ -214,9 +201,8 @@ def _group(lines):
 
 
 def test_varying_integer_flood_collapses_to_one_counted_line():
-    """The reported symptom. A cycle LONGER than _MAX_PENDING never groups by
-    exact match no matter how the LRU is sized, because every entry is evicted
-    before it comes round."""
+    """A cycle LONGER than _MAX_PENDING never groups by exact match no matter how
+    the LRU is sized, because every entry is evicted before it comes round."""
     cap = debuglog._LineGrouper._MAX_PENDING
     cycle = [f"CUDA Graph id {700 + 2 * i} reused" for i in range(cap * 3)]
     out = _group(cycle * 40)
@@ -226,18 +212,14 @@ def test_varying_integer_flood_collapses_to_one_counted_line():
 
 
 def test_the_flood_no_longer_evicts_the_lines_that_DO_repeat_verbatim():
-    """The second-order damage, and the thing the class was built to prevent:
-    with more varying ids in flight than slots, the genuinely-repeating pair is
-    evicted before it can accumulate a count. In the real capture
-    'warmup reset' appeared 23x ungrouped against only 4x grouped.
+    """With more varying ids in flight than slots, a genuinely-repeating pair is
+    evicted before it can accumulate a count.
 
-    THE INTERLEAVING RATIO IS LOAD-BEARING - do not "simplify" this to one id
-    per pair. With a single id between them the pair is touched every third
-    line, so move_to_end keeps it most-recently-used and it is NEVER the LRU
-    victim; the test then passes with OR without the fix and proves nothing
-    (measured - the first version of this test did exactly that). The real
-    stream emits many CONSECUTIVE ids between warmup lines, which is what
-    actually evicts the pair."""
+    THE INTERLEAVING RATIO IS LOAD-BEARING - do not "simplify" this to one id per
+    pair. With a single id between them the pair is touched every third line, so
+    move_to_end keeps it most-recently-used and it is NEVER the LRU victim, and
+    the test then passes with OR without the fix. The real stream emits many
+    CONSECUTIVE ids between warmup lines, which is what evicts the pair."""
     cap = debuglog._LineGrouper._MAX_PENDING
     rounds = 24
     stream = []
@@ -250,10 +232,9 @@ def test_the_flood_no_longer_evicts_the_lines_that_DO_repeat_verbatim():
 
 
 def test_a_LIST_of_distinct_messages_is_never_collapsed():
-    """Guards the fix against over-reach, which is the real risk of templating.
-    28 layer-assignment lines that each appear ONCE are a list, not a flood -
-    collapsing them would lose every layer number to save nothing. Both
-    conditions in _emit_one exist for this."""
+    """Guards against over-reach: 28 layer-assignment lines that each appear ONCE
+    are a list, not a flood, and collapsing them would lose every layer number to
+    save nothing. Both conditions in _emit_one are required for this."""
     lines = [f"load_tensors: layer {i} assigned to device ROCm0" for i in range(28)]
     out = _group(lines)
     assert out == lines, "a non-repeating list must pass through verbatim"
@@ -274,8 +255,8 @@ def test_lines_without_digits_are_completely_unaffected():
 
 def test_distinct_variant_count_is_bounded_but_still_reported():
     """The retained-variant set is capped so a never-repeating stream cannot
-    make this unbounded memory; past the cap the count is reported as 'N+'
-    rather than silently understated."""
+    make this unbounded memory; past the cap the count is reported as 'N+', never
+    silently understated."""
     cap = debuglog._LineGrouper._MAX_VARIANTS
     out = _group([f"thing {i} done" for i in range(cap + 50)] * 3)
     assert len(out) == 1

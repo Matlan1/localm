@@ -1,23 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// jsdom harness for the localm GUI (localm/plugins/gui/static/app.js).
+// jsdom harness for the localm GUI. Loads the real index.html so every element
+// the app's $() expects exists, stubs the browser and vendor globals the app
+// touches at top level, and injects the app scripts as classic scripts, which
+// jsdom executes in the window context. Parsing has already completed, so
+// DOMContentLoaded does not fire again and the network-driven init never runs.
 //
-// app.js is a 3200-line top-level "use strict" script (not a module). It defines
-// top-level functions (renderNav, runCompletion, ...) that become properties of
-// the window when run as a script, and wires a DOMContentLoaded handler that
-// fetches /api/plugins etc. on load. We load the real index.html so every
-// element app.js's $() expects exists, stub the browser/vendor globals app.js
-// touches at top level, run app.js as an injected <script> (jsdom executes it in
-// the window context) WITHOUT firing DOMContentLoaded again - parsing already
-// completed, so the network-driven init never runs - then drive functions.
-//
-// BLIND SPOT, worth knowing before trusting a green run here: jsdom parses
-// HTML and builds a DOM, but it does NOT lay out or paint. A test asserting
-// each piece of text is individually correct cannot see that two adjacent
-// elements' text reads as a duplicated word once composed on screen (#1078
-// shipped "runningrunning 21s" past 15 targeted, all-green tests this way -
-// only a real browser caught it). A large green count here is evidence of
-// logic correctness, not visual correctness - see AGENTS.md's "use the
-// feature in a browser" instruction, which this is the concrete reason for.
+// jsdom builds a DOM but never lays out or paints, so nothing here observes
+// rendered geometry or composed on-screen text.
 
 import { JSDOM } from "jsdom";
 import { after } from "node:test";
@@ -30,15 +19,9 @@ const STATIC = join(ROOT, "localm", "plugins", "gui", "static");
 
 const read = (p) => readFileSync(join(STATIC, p), "utf-8");
 
-// The GUI ships as native ES modules (app/*.js, pages/*.js, entry app/main.js).
-// jsdom does NOT execute <script type="module">, and the conversion only ADDED
-// import/export lines (bodies are byte-identical to the pre-module classic
-// split). So for the unit tests we strip those generated lines back to the
-// classic form and inject the modules as classic scripts in the same realm -
-// exactly what jsdom can run. This tests the real module BODIES (identical to
-// the browser) and keeps the shared-global test access (window.foo,
-// runScript("chat...")) working; the real module GRAPH/resolution is covered by
-// node --check + the `localm gui` browser smoke, which jsdom could never run.
+// The GUI ships as native ES modules, which jsdom does not execute. Strip the
+// generated import/export lines back to classic form so the module bodies can be
+// injected as classic scripts sharing one realm.
 const _IMPORT_BLOCK = /^\/\/ --- ES module imports.*\r?\n(?:import [^\n]*\r?\n)*\r?\n?/m;
 function moduleToClassic(code) {
   return code
@@ -48,12 +31,9 @@ function moduleToClassic(code) {
 }
 const readClassic = (p) => moduleToClassic(read(p));
 
-// Every loadApp() builds a jsdom window. With pretendToBeVisual: true jsdom
-// runs an internal requestAnimationFrame timer loop that keeps node's event
-// loop alive AFTER the tests finish, so a bare `node --test` would hang forever
-// (only `npm test`, which passes --test-force-exit, escaped it). Track the
-// windows and close them in a root after-hook so the process exits on its own,
-// whatever command launched it - no footgun for the next person (or agent).
+// pretendToBeVisual: true runs an internal requestAnimationFrame loop that keeps
+// node's event loop alive after the tests finish, so every window is tracked and
+// closed in a root after-hook.
 const _openWindows = new Set();
 after(() => {
   for (const win of _openWindows) {
@@ -62,9 +42,7 @@ after(() => {
   _openWindows.clear();
 });
 
-// Minimal stubs for the vendored browser libs app.js references at top level
-// (it calls marked.setOptions on load). We do not need their real behaviour for
-// the nav / abort logic under test.
+// Stubs for the vendored browser libs the app references at top level.
 function installStubs(win, { fetchImpl } = {}) {
   win.marked = { setOptions() {}, parse: (s) => s };
   win.DOMPurify = { sanitize: (s) => s };
@@ -79,38 +57,33 @@ function installStubs(win, { fetchImpl } = {}) {
   }
   win.EventSource = class { constructor() {} close() {} addEventListener() {} };
   if (!win.AbortController) win.AbortController = AbortController;   // node global
-  // jsdom does not expose these on window by default (a real browser does).
-  // helpers.js's readSSE() needs TextDecoder to decode a streamed fetch body;
-  // without this, any test that drives streamJob/readSSE for real (rather
-  // than stubbing streamJob itself, the pre-existing pattern) fails with a
-  // silent "TextDecoder is not defined" swallowed by readSSE's own caller.
+  // jsdom does not expose these on window; readSSE() needs TextDecoder to decode
+  // a streamed fetch body.
   if (!win.TextDecoder) win.TextDecoder = TextDecoder;   // node global
   if (!win.TextEncoder) win.TextEncoder = TextEncoder;   // node global
   win.fetch = fetchImpl
     || (async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" }));
-  // speechSynthesis (speak()) - record calls so abort tests can assert it was NOT called.
+  // speechSynthesis: speak() calls are recorded in win.__spoken.
   win.__spoken = [];
   win.speechSynthesis = { speak: (u) => win.__spoken.push(u), cancel() {}, getVoices: () => [] };
   win.SpeechSynthesisUtterance = class { constructor(t) { this.text = t; } };
 }
 
-// app.js was split per section into app/<name>.js (same load order). Inject in
-// this exact order to preserve the original top-level execution order; they share
-// one global lexical environment so cross-section references resolve as before.
+// The app/<name>.js sections, in load order. They share one global lexical
+// environment, so this order must be preserved.
 const APP_SCRIPTS = [
   "client-log", "helpers", "icons", "picker", "theme", "logo", "tabs", "models-sidebar",
   "chat", "media-gallery", "cmdk", "settings-perf", "coder", "slash", "init",
 ];
 
 /**
- * Build a jsdom window with the app scripts loaded but the DOMContentLoaded init
- * NOT run. Returns { dom, window }. Pass fetchImpl to control network.
+ * Builds a jsdom window with the app scripts loaded and the DOMContentLoaded
+ * init not run. Returns { dom, window }. Pass fetchImpl to control network.
  */
 export function loadApp({ fetchImpl, url, shellToken, seedLocalStorage } = {}) {
   const html = read("index.html");
   const dom = new JSDOM(html, {
-    // Pass url: "https://..." to exercise the HTTPS-only paths (e.g. the
-    // built-in-TLS "Install certificate" link on the key gate).
+    // Pass url: "https://..." to exercise the HTTPS-only paths.
     url: url || "http://localhost:8642/",
     runScripts: "dangerously",   // execute scripts we inject (vendor src tags are not loaded)
     pretendToBeVisual: true,
@@ -118,27 +91,19 @@ export function loadApp({ fetchImpl, url, shellToken, seedLocalStorage } = {}) {
   const win = dom.window;
   _openWindows.add(win);   // closed in the after-hook so the process can exit
   installStubs(win, { fetchImpl });
-  // Seed the open-mode shell token BEFORE the app scripts run, since helpers.js
-  // reads window.__LOCALM_SHELL_TOKEN__ into a const at load. Pass shellToken to
-  // exercise the open-mode (loopback shell) auth path.
+  // Seeded before the app scripts run: helpers.js reads
+  // window.__LOCALM_SHELL_TOKEN__ into a const at load.
   if (shellToken) win.__LOCALM_SHELL_TOKEN__ = shellToken;
-  // Seed localStorage BEFORE the app scripts run: some module-level state
-  // (e.g. chat.js's `conversations`) reads localStorage at import/eval time, so
-  // a test simulating "this origin already had cached data from a PRIOR page
-  // load" (AUD-INSTANCEID: a different backend's cache left behind at the same
-  // origin) must seed it before injection - mirroring a real browser, where
-  // localStorage persists across page loads at the same origin.
+  // Also seeded before the app scripts run: some module-level state reads
+  // localStorage at eval time.
   if (seedLocalStorage) {
     for (const [k, v] of Object.entries(seedLocalStorage)) win.localStorage.setItem(k, v);
   }
 
-  // app.js was split per section into app/<name>.js (same load order). Inject
-  // each as a classic script in order: jsdom executes them in the window context;
-  // top-level function declarations land on the window and the shared global
-  // lexical environment holds the top-level const/let exactly as a single app.js
-  // did. The HTML's own <script src> tags are not fetched (no resource loader),
-  // so this does not auto-run and the DOMContentLoaded init (already fired during
-  // parse) does not re-run.
+  // Injected in order as classic scripts: top-level function declarations land
+  // on the window, top-level const/let in the shared global lexical environment.
+  // The HTML's own <script src> tags are never fetched, so nothing auto-runs and
+  // the DOMContentLoaded init does not re-run.
   for (const name of APP_SCRIPTS) {
     const script = win.document.createElement("script");
     script.textContent = readClassic(`app/${name}.js`);
@@ -148,11 +113,10 @@ export function loadApp({ fetchImpl, url, shellToken, seedLocalStorage } = {}) {
 }
 
 /**
- * Run a snippet of code as a classic script in the window's realm. Top-level
- * `let`/`const` in app.js (pluginState, chat, ...) live in the shared global
- * lexical environment - not on `window` - so the only way to set them from a
- * test is to assign them from another classic script in the same realm. Use
- * this to seed state (e.g. `pluginState = [...]`) and invoke functions.
+ * Runs a snippet of code as a classic script in the window's realm. Top-level
+ * `let`/`const` (pluginState, chat, ...) live in the shared global lexical
+ * environment rather than on `window`, so they can only be set from another
+ * classic script in the same realm.
  */
 export function runScript(win, code) {
   const s = win.document.createElement("script");
@@ -160,31 +124,21 @@ export function runScript(win, code) {
   win.document.body.appendChild(s);
 }
 
-// pages.js was split per page into pages/<name>.js (same load order). They are
-// classic scripts that share the realm's global lexical environment with app.js,
-// so their helpers ($, el, authHeaders, toast, ...) resolve by bare name. Inject
-// in this exact order to preserve the original top-level execution order.
+// The pages/<name>.js scripts, in load order. They share the realm's global
+// lexical environment with the app scripts, so helpers ($, el, authHeaders,
+// toast, ...) resolve by bare name.
 const PAGE_SCRIPTS = [
   "dispatch", "models", "images", "plugins", "settings",
   "workflow", "music", "video", "knowledge",
 ];
 
 /**
- * Load app.js (via loadApp) and then the per-page scripts in the same realm. They
- * hold the Models / Images / Plugins / Settings page logic (refreshSettingsPage,
- * the config-save click handler, ...) and rely on helpers from app.js, so they
- * run AFTER app.js. Their top-level `$("...").onclick = ...` wiring runs against
- * the real index.html elements.
- *
- * Takes the SAME options as loadApp and forwards all of them. `url` and
- * `seedLocalStorage` matter here in a way they do not for loadApp alone: the
- * boot deep-link/restore path in init.js is driven by the query string
- * (`?view=`, `?shared=`, `?pull=`) and by localStorage (`localm.activeView` +
- * `localm.instanceId`), and it ends in showView() -> window.onViewShown, which
- * ONLY pages/dispatch.js installs. So a test of that path has to load the page
- * scripts AND be able to seed its trigger - with `loadApp` alone the fetches it
- * is meant to observe are unreachable in two independent ways (no trigger, and
- * no onViewShown to fire), which is fixture blindness, not a passing test.
+ * Loads the app scripts via loadApp, then the per-page scripts in the same
+ * realm. The page scripts rely on helpers from the app scripts, so they run
+ * after them, and their top-level `$("...").onclick = ...` wiring runs against
+ * the real index.html elements. Takes and forwards the same options as loadApp.
+ * window.onViewShown, which the boot deep-link/restore path ends in, is
+ * installed only by pages/dispatch.js, so that path needs this loader.
  */
 export function loadAppWithPages(opts = {}) {
   const { dom, window } = loadApp(opts);

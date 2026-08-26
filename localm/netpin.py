@@ -1,26 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """DNS-pinning HTTP transport for the network policy.
 
-Closes the SSRF DNS-rebinding TOCTOU (SSRF-REBIND). ``netpolicy.check_url``
-resolves a hostname and validates the resulting IP, but a plain ``requests.get``
-re-resolves the *same* hostname at connect time - so an attacker running
-authoritative DNS with TTL 0 can answer a public address for the validation and
-an internal one (127.0.0.1, 169.254.169.254, an RFC1918 service) for the actual
-connection. Nothing in between is re-checked.
+Closes the SSRF DNS-rebinding TOCTOU. ``netpolicy.check_url`` resolves a hostname
+and validates the resulting IP, but a plain ``requests.get`` re-resolves the
+*same* hostname at connect time - so an attacker running authoritative DNS with
+TTL 0 can answer a public address for the validation and an internal one
+(127.0.0.1, 169.254.169.254, an RFC1918 service) for the actual connection.
+Nothing in between is re-checked.
 
-The fix is to resolve the host ONCE, validate every address it returns, then pin
-the socket to that address so there is no second lookup to poison. The original
+The host is resolved ONCE, every address it returns is validated, and the socket
+is pinned to that address so there is no second lookup to poison. The original
 hostname is still presented for TLS SNI, certificate matching and the ``Host``
-header, so pinning is transparent to normal servers (virtual hosts and HTTPS
-keep working).
+header, so pinning is transparent to normal servers (virtual hosts and HTTPS keep
+working).
 
 Mechanism: a ``requests`` transport adapter whose connection pools override
 ``_new_conn`` to (1) preserve ``server_hostname`` (SNI + cert hostname) from the
 real host before (2) repointing urllib3's ``_dns_host`` at the validated IP - the
 attribute urllib3 hands to ``socket.create_connection``. The ``Host`` header is
 set explicitly by the caller so virtual-host routing is unaffected. No new
-dependency; no global ``socket`` monkeypatch (thread-safe - the pin lives on the
-per-request adapter, not process-wide state).
+dependency; no global ``socket`` monkeypatch, and the pin lives on the
+per-request adapter rather than process-wide state, so it is thread-safe.
 """
 
 from __future__ import annotations
@@ -52,8 +52,8 @@ class _PinnedHTTPSConnectionPool(HTTPSConnectionPool):
     def _new_conn(self):
         conn = super()._new_conn()
         if self._pinned_ip:
-            # conn.host is still the real hostname here; capture it for SNI /
-            # cert matching BEFORE repointing the socket at the pinned IP.
+            # Capture the real hostname for SNI and cert matching before
+            # repointing the socket at the pinned IP.
             if conn.server_hostname is None:
                 conn.server_hostname = conn.host
             conn._dns_host = self._pinned_ip

@@ -84,9 +84,9 @@ class ManagedServer:
 
         # Launch the SAME localm/venv that is running the coder, not a bare
         # "localm" resolved via PATH. In the self-contained-clone model the
-        # venv's Scripts dir is deliberately not on PATH, so a bare name finds a
-        # different (or broken) global localm, or nothing at all. Using
-        # sys.executable + "-m localm" guarantees this interpreter's localm.
+        # venv's Scripts dir is not on PATH, so a bare name finds a different (or
+        # broken) global localm, or nothing at all. sys.executable + "-m localm"
+        # names this interpreter's localm.
         cmd = [
             sys.executable, "-m", "localm", "serve", self.model,
             "--host", self.host,

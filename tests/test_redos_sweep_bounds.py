@@ -1,20 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Superlinear-backtracking bounds for the sites found by the repo-wide sweep.
 
-tests/test_redos_bounds.py covers the six CodeQL alerts. This file covers what
-the sweep found AFTER those closed, which is the more interesting half: CodeQL
-flagged 6 patterns, the sweep found 11, and the extras are not a long tail of the
-same thing. Three of them say something about how this class hides.
+The sibling bounds file covers the statically-flagged patterns. This file covers
+what the sweep found after those closed, and the extras are not a long tail of
+the same thing:
 
-  * jobs/webtool.py carried a SECOND COPY of two patterns the coder's parser had
-    already been fixed for. Nothing flagged the copy.
+  * jobs/webtool.py carries a SECOND COPY of two patterns the coder's parser was
+    already fixed for, and nothing flags the copy.
   * _top_level_objects is NOT A REGEX. It is a hand-rolled brace scanner with the
-    identical many-start-positions defect, so no regex-shaped query could ever
-    have found it.
-  * rag/extract.py had ALREADY been hardened for exactly this class - its
-    comments describe fixing a quadratic ``<w:p\\b.*?</w:p>`` that burned ~135s.
-    That pass fixed the CONTENT group and left the ATTRIBUTE group with the same
-    shape. And it is reached by a crafted .docx, not by model output.
+    identical many-start-positions defect, so no regex-shaped query could find
+    it.
+  * rag/extract.py had already been hardened for this class in its CONTENT group
+    and left the ATTRIBUTE group with the same shape. It is reached by a crafted
+    .docx, not by model output.
 
 Same two assertions per site as the alert file: a wall-clock bound on the witness
 (the defect), and a semantic check that real input still parses (the regression
@@ -47,11 +45,9 @@ def _timed_cpu(fn, *a, **kw):
     """Like _timed, but measures CPU time (time.process_time), not wall-clock.
 
     Wall-clock elapsed time includes time this process spent DESCHEDULED while
-    an unrelated process on the same box used the CPU - exactly the shared-load
-    contention this box's test coordinator has to account for once targeted
-    test runs go concurrent. CPU time only counts cycles actually spent
-    executing this process, so a sibling process hogging a core cannot inflate
-    it."""
+    an unrelated process on the same box used the CPU, so a sibling process
+    hogging a core inflates it. CPU time only counts cycles actually spent
+    executing this process."""
     start = time.process_time()
     result = fn(*a, **kw)
     return result, time.process_time() - start
@@ -63,17 +59,15 @@ def _timed_cpu(fn, *a, **kw):
 
 # The witnesses are built by a FACTORY and the params are named. Parametrizing
 # over the literal 50,000-character strings puts them in the pytest node id,
-# which pytest then exports as PYTEST_CURRENT_TEST - and Windows refuses an
-# environment variable over 32,767 characters, so every case ERRORS in teardown
-# with its assertions never evaluated. Caught by CI on both legs after I had
-# already fixed the identical thing in tests/test_redos_bounds.py and then
-# reintroduced it here.
+# which pytest exports as PYTEST_CURRENT_TEST, and Windows refuses an
+# environment variable over 32,767 characters, so every case would ERROR in
+# teardown with its assertions never evaluated.
 @pytest.mark.parametrize("name, make_witness", [
-    # _THINK_RE: openers that never close. Pre-fix 1.22s.
+    # _THINK_RE: openers that never close.
     ("think_openers", lambda: "<r >" * 8_000),
-    # _WRAP_RE: the adjacent-quantifier cubic. Pre-fix 30.0s at 4,000.
+    # _WRAP_RE: the adjacent-quantifier cubic.
     ("wrap_spaces", lambda: "<tool_call>" + " " * 4_000),
-    # _top_level_objects: unmatched braces, one full scan each. Pre-fix 2.84s.
+    # _top_level_objects: unmatched braces, one full scan each.
     ("unmatched_braces", lambda: "{" * 16_000),
     # _FENCE_RE: the two adjacent [ \t]* quantifiers.
     ("fence_tabs", lambda: "```" + "\t" * 50_000),
@@ -94,13 +88,10 @@ def test_parse_web_call_is_bounded_on_hostile_model_output(name, make_witness):
     ("unmatched_braces", lambda: "{" * 16_000),
     ("fence_tabs", lambda: "```" + "\t" * 50_000),
     ("wrap_openers", lambda: "<|tool_call>" * 5_000),
-    # The one that is genuinely NEW, and the reason this test exists: 2,000
-    # well-formed but unparseable wrapped bodies AFTER the real call. limit=1
-    # never looks at them; limit=2 runs _lenient_json (4 regex passes) over
-    # every one. MEASURED on this box at limit=2: 0.022s / 0.041s / 0.095s /
-    # 0.248s at n = 500 / 1,000 / 2,000 / 4,000, i.e. ~linear (8x input, 11x
-    # time) rather than the quadratic shape this file exists to catch. n=2,000
-    # sits ~5x under BUDGET, which survives a loaded box without going soft.
+    # 2,000 well-formed but unparseable wrapped bodies AFTER the real call.
+    # limit=1 never looks at them; limit=2 runs _lenient_json (4 regex passes)
+    # over every one. At limit=2 the cost is about linear in n, and n=2,000 sits
+    # roughly 5x under BUDGET.
     ("junk_bodies_after_a_real_call",
      lambda: ("<tool_call>" + "'a" * 200 + "</tool_call>") * 2_000),
 ])
@@ -175,18 +166,13 @@ def test_top_level_objects_stays_linear_when_many_opens_never_balance():
     ``"{" * n + "}"`` forces exactly that: n opens, one stray close far away.
     ``last_close`` sits at the very end, so every one of the n opens passes
     the ``i > last_close`` guard and pays a real scan through last_close that
-    fails, and the pre-fix recovery (``i += 1``) retried the SAME scan from
-    the very next character - O(n) per position, O(n^2) overall. Measured
-    pre-fix on this project's venv: 0.01s at n=500, 3.1s at n=8000 (~4x per
-    doubling, i.e. quadratic). Fixed, this should be near-instant, so 2.0s
-    leaves a wide margin while still catching the 3+s regression.
+    fails; a recovery that retries the SAME scan from the very next character
+    is O(n) per position, O(n^2) overall. Bounded, this is near-instant, so
+    2.0s leaves a wide margin while still catching a multi-second regression.
 
-    Asserted on CPU time (_timed_cpu), not wall-clock: this test can now run
-    concurrently with other targeted test-slot work on this box (the test
-    coordinator's budget model allows it), and a wall-clock bound would be
-    flaky under that shared load. CPU time only counts cycles this process
-    actually executed, so contention from a sibling process cannot inflate
-    it."""
+    Asserted on CPU time (_timed_cpu), not wall-clock: this test can run
+    concurrently with other work on this box, and a wall-clock bound would be
+    flaky under that shared load."""
     hostile = ("{" * 8_000) + "}"
     result, cpu_elapsed = _timed_cpu(parse_web_call, hostile)
     assert cpu_elapsed < 2.0, (
@@ -209,10 +195,10 @@ _DOCX_RUN_FIND = re.compile(r"<w:t\b[^<>]*>([^<]*)</w:t>")
     ("run_find_unclosed_t", _DOCX_RUN_FIND, lambda: "<w:t" * 20_000),
 ])
 def test_docx_tag_scans_are_bounded(label, pattern, make_witness):
-    """Pre-fix 16.21s and 1.69s. The attribute class was ``[^>]*``: bounded only
-    by ``>``, so a document with no ``>`` after an opener ran to end-of-text and
-    backtracked once per opener. Excluding ``<`` as well stops each attempt at
-    the next tag, which XML guarantees is where an attribute value ends."""
+    """The attribute class ``[^>]*`` is bounded only by ``>``, so a document with
+    no ``>`` after an opener runs to end-of-text and backtracks once per opener.
+    Excluding ``<`` as well stops each attempt at the next tag, which XML
+    guarantees is where an attribute value ends."""
     witness = make_witness()
     _, elapsed = _timed(lambda: pattern.findall(witness))
     assert elapsed < BUDGET, f"{label} took {elapsed:.2f}s"
@@ -234,8 +220,8 @@ def test_well_formed_docx_xml_is_parsed_identically():
 # ---------------------------------------------------------------------------
 
 def test_log_line_pattern_is_bounded_on_a_long_space_run():
-    """``\\s+([^:]+)`` let both quantifiers claim the same run, because whitespace
-    is a SUBSET of ``[^:]``. Pre-fix 0.594s on one line."""
+    """``\\s+([^:]+)`` lets both quantifiers claim the same run, because whitespace
+    is a SUBSET of ``[^:]``."""
     line = "2026-01-01 00:00:00,000 X" + " " * 8_000 + "y" * 8_000
     _, elapsed = _timed(_LOG_LINE_RE.match, line)
     assert elapsed < BUDGET, f"log-line match took {elapsed:.2f}s"
@@ -247,7 +233,7 @@ def test_log_line_pattern_is_bounded_on_a_long_space_run():
     # A message containing further colons must still be captured whole.
     ("2026-07-29 06:12:03,123 ERROR localm.rag.store: failed: nested: colons",
      ("ERROR", "localm.rag.store", "failed: nested: colons")),
-    # A logger name containing a space is unusual but was accepted before.
+    # A logger name containing a space is unusual but accepted.
     ("2026-07-29 06:12:03,123 WARNING my logger: message",
      ("WARNING", "my logger", "message")),
 ])
@@ -292,8 +278,8 @@ def test_tolerant_edit_fallback_still_lands_below_the_cap():
 
 
 def test_tolerant_edit_fallback_declines_a_pathological_input_quickly():
-    """The defect: O(len(text) x len(pattern)) with BOTH sides model-supplied.
-    Measured 0.646s for a 16 KB file against an 8 KB `old`, which squares.
+    """The defect: O(len(text) x len(pattern)) with BOTH sides model-supplied,
+    which squares with file size.
 
     Asserting the DECLINE, not just the speed - a bound that happened to be fast
     for some other reason would pass a timing-only check. `old` here is over the

@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F8 regression suite (memory-audit 2026-07-02): forgetting and semantic recall
-must work in real operation.
+"""Forgetting and semantic recall in real operation.
 
 - prune (decay + size cap) must run even when a consolidation extracts zero
-  facts (it used to be reachable only through a fact-producing run);
+  facts, not only through a fact-producing run;
 - vectors must backfill so semantic recall turns on retroactively after an
   embedding model is installed later;
 - the vector path must be used on a small store (< TINY_CORPUS), where the
@@ -58,8 +57,7 @@ def test_prune_runs_when_consolidation_extracts_nothing(tmp_path, allow_writes):
     res = run_consolidation(s, "User: hello there", lambda p: '{"facts": []}',
                             now=NOW)
     assert res["added"] == 0
-    # Pre-fix: prune never ran on a zero-fact consolidation, so the stale record
-    # survived. Now it is forgotten.
+    # The stale record is forgotten even on a zero-fact consolidation.
     assert s.get(stale.id) is None, "prune did not run on a zero-fact consolidation"
 
 
@@ -131,8 +129,8 @@ def test_small_store_uses_vectors_when_present(tmp_path):
                        importance=0.5), embed_fn=_fake_embed)
     s.add(MemoryRecord(text="User lives somewhere", source="synth",
                        importance=0.5), embed_fn=_fake_embed)
-    # Paraphrased query about units: on a tiny store the vector path must still
-    # rank the metric record first (pre-fix recall was query-blind below 8).
+    # Paraphrased query about units: on a tiny store the vector path still ranks
+    # the metric record first.
     hits = s.recall("which unit system", k=1, embed_fn=_fake_embed)
     assert hits and "metric" in hits[0].text
 

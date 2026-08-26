@@ -10,9 +10,9 @@ Routes (mounted by the engine, auto-scoped to the ``image`` capability):
   POST   /api/imagine/file/{name}/rename    - rename an image in place
 
 Generation runs as a background job streamed through the kernel's /api/jobs/*
-SSE endpoint. It no longer requires the GUI: since ADR-0008 the job registry is
-created by ``attach_engine``, so a headless ``localm serve`` can generate too.
-The one thing it still needs is this server's OWN address, for the chat/media
+SSE endpoint. It does not require the GUI: the job registry is created by
+``attach_engine``, so a headless ``localm serve`` can generate too.
+The one thing it needs is this server's OWN address, for the chat/media
 VRAM handover; ``resolve_self_url`` derives that from the advertised bind
 coordinates when the GUI never published ``.self_url``, and the generate route
 503s with that specific reason if it genuinely cannot be determined. The backend
@@ -98,22 +98,18 @@ async def imagine(req: ImagineRequest, request: Request):
         input_image = media_paths.confined_input_image(req.input_image)
     lora_name = _validate_lora_name(req.lora_name) if req.lora_name else None
 
-    # The background-job registry is kernel-level since ADR-0008, so this no
-    # longer needs the GUI. The guard stays, but it now guards a CONSTRUCTION
-    # error rather than a mode: any app built through attach_engine has one, so
+    # Any app built through attach_engine has a background-job registry, so
     # reaching this branch means the router was mounted on an app that never ran
-    # it. Keep it a clean 503 rather than the unguarded AttributeError -> opaque
-    # 500 that was audit item 8, and do NOT blame the GUI, which stopped being
-    # the reason.
+    # it. That is a construction error, answered with a clean 503 rather than an
+    # unguarded AttributeError and an opaque 500.
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
         raise HTTPException(503, "Image generation needs this server's "
                                  "background job registry, which is "
                                  "unavailable.")
-    # What a headless server genuinely may not know is its OWN address, which
-    # the VRAM handover below needs (self_request raises on an empty base_url).
-    # Gate on that, and say so - the old message blamed the GUI's absence, which
-    # stopped being the reason.
+    # A headless server may not know its OWN address, which the VRAM handover
+    # below needs (self_request raises on an empty base_url). Gate on that and
+    # say so.
     self_url = resolve_self_url(request.app)
     if not self_url:
         raise HTTPException(503, "Image generation needs this server's own "
@@ -132,7 +128,6 @@ async def imagine(req: ImagineRequest, request: Request):
         from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
         # Resolved here, in the job's own worker thread, not the route above.
-        # See tests/test_comfy_media_routes_offloaded.py.
         _cfg = load_config()
         s = _backend.settings(_cfg)
         if s.get("warning"):
@@ -152,10 +147,9 @@ async def imagine(req: ImagineRequest, request: Request):
         if notice:
             job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
-        # REG-532: the gate above reads COMBINED free VRAM across a configured GPU split,
+        # The gate above reads COMBINED free VRAM across a configured GPU split,
         # but each media model component loads WHOLE onto ONE card (localm ORDERS the
-        # cards via --default-device, never masks - the model still lands on one). 2x4 GB
-        # free reads as 8 GB and "fits" a 4 GB job that then OOMs on one 4 GB card. When
+        # cards via --default-device, never masks - the model still lands on one). When
         # the card actually chosen cannot hold it, swap anyway: unloading the chat model
         # frees VRAM on every split card, including that one.
         shortfall = media_single_device_shortfall(s)
@@ -208,20 +202,13 @@ async def imagine(req: ImagineRequest, request: Request):
         if ok:
             job.result = out_path.name
             gallery.stamp_owner("image", out_path.name, owner)
-        # The real deliverable is decided right here - mark it before the VRAM
-        # handover below, which is best-effort cleanup that can itself raise
-        # (e.g. a non-comfy backend's free_vram()) and must never be able to
-        # turn a genuinely successful generation into a reported failure (jobs.py
-        # start_fn's mark_outcome contract - the in-process sibling of #1126's
-        # CLI-side outcome sentinel).
+        # Mark the outcome BEFORE the VRAM handover below, which is best-effort
+        # cleanup that can itself raise (e.g. a non-comfy backend's free_vram())
+        # and must never turn a successful generation into a reported failure.
         job.mark_outcome("done" if ok else "failed")
-        # Restore VRAM on EVERY exit path once we have unloaded the chat model -
-        # success, failure, OR cancel. The old code reloaded only on success, so
-        # hitting Stop mid-generation left the chat model unloaded AND ComfyUI's
-        # model resident in VRAM (the reported "fails unloading the image model,
-        # loading chat - not sure it even tried"). reload_chat_after_media frees
-        # the backend's VRAM first, then reloads the chat model, so it is the
-        # right restore on both the cancel and the error paths too.
+        # Restore VRAM on EVERY exit path once the chat model has been unloaded -
+        # success, failure, OR cancel. reload_chat_after_media frees the
+        # backend's VRAM first, then reloads the chat model.
         if swap:
             from localm.vram import reload_chat_after_media
             reload_chat_after_media(job, self_url, s, _backend, "image", instance_token)
@@ -257,8 +244,7 @@ async def imagine_move(name: str, req: MoveFileRequest, request: Request):
     machine - e.g. into a project or pictures directory.
 
     The destination is checked BEFORE the mkdir: require_owner proves artifact
-    ownership, not authority over the host filesystem, so without this a
-    media-scoped key had a create-directory-anywhere primitive."""
+    ownership, not authority over the host filesystem."""
     path = _image_path(name)
     dest_dir = media_paths.confined_move_dest(request, req.dest)
     try:
@@ -328,7 +314,7 @@ async def imagine_comfy_models(request: Request):
     """Model-file slots the active image workflow exposes (for the Workflow
     panel's model-picker dropdowns), plus the LoRA files ComfyUI currently has
     installed (for the generation form's LoRA picker), resolved against the
-    live ComfyUI. Honest about unreachability (rule 5) - never a
+    live ComfyUI. Reports unreachability rather than returning a
     silently-empty picker.
 
     LoRAs are enumerated separately from ``slots``: a LoraLoader node is not
@@ -344,33 +330,27 @@ async def imagine_comfy_models(request: Request):
     that generation then refuses. ``roles`` reports every declared role including
     ones this workflow has no slot for, and ``registry_models`` lists this box's
     own registered component models by type. Both are answered from the registry,
-    so they are returned even when ComfyUI is unreachable - "we could not ask
-    ComfyUI" is a different answer from "you have nothing" (rule 5), and the
-    panel is no longer a dead end when ComfyUI is down.
+    so they are returned even when ComfyUI is unreachable: "we could not ask
+    ComfyUI" is a different answer from "you have nothing".
 
     The slot/LoRA resolution is a blocking urlopen of ComfyUI's /object_info
-    (commonly several MB, 10s timeout), so it runs OFF the event loop - inline
-    it froze the whole server, and every concurrent chat stream and job SSE
-    with it, whenever ComfyUI was slow or cold (REG-638), the same way the
-    /comfy-launch route below already offloads its own slow call.
+    (commonly several MB, 10s timeout), so it runs OFF the event loop, the same
+    way the /comfy-launch route below offloads its own slow call.
 
-    Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
-    urlopen timeout, so this only ever fires for a call genuinely stuck
-    beyond that (a wedged native call, not ordinary slow-ComfyUI load). That
-    one budget now also covers the registry read the role join needs - a small
-    local JSON, well inside the ~10s of slack, and deliberately inside the SAME
-    offload so it cannot land back on the event loop. settings() itself gets
-    its own offload below: it can reach sanitize_comfy_url's blocking DNS
-    lookup, a second way onto the event loop distinct from the /object_info
-    fetch (see tests/test_comfy_media_routes_offloaded.py)."""
+    Bounded at a bit over comfy_object_info's own 10s urlopen timeout, so this
+    only fires for a call genuinely stuck beyond that (a wedged native call, not
+    an ordinary slow-ComfyUI load). That one budget also covers the registry
+    read the role join needs, a small local JSON, and that read sits inside the
+    SAME offload so it cannot land back on the event loop. settings() gets its
+    own offload below: it can reach sanitize_comfy_url's blocking DNS lookup, a
+    second way onto the event loop distinct from the /object_info fetch."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
     )
     from localm.plugins.media_roles import plugin_model_roles
     # Read in the request, not in the worker: this walks the plugin manager's
-    # in-memory descriptors (no I/O), and handing app state to a thread is not
-    # something to do for a lookup that costs nothing here.
+    # in-memory descriptors and does no I/O.
     roles = plugin_model_roles(request.app, "image")
     try:
         s = await run_in_threadpool_bounded(_backend.settings, load_config(), timeout=20.0)
@@ -392,12 +372,12 @@ async def imagine_comfy_launch():
     same ensure_available() path a real generation uses, off the event loop
     since a cold ComfyUI start can take minutes. settings() itself is also
     offloaded (a separate, short budget): it can reach sanitize_comfy_url's
-    blocking DNS lookup (tests/test_comfy_media_routes_offloaded.py).
+    blocking DNS lookup.
 
-    Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
-    itself will honour (comfy_launch_wait_seconds), plus a buffer - not an
-    independent guess, or this could silently abort a launch that was still
-    legitimately progressing under a larger user-configured timeout."""
+    Bounded at the SAME comfy_launch_timeout ensure_comfy itself will honour
+    (comfy_launch_wait_seconds), plus a buffer, never an independent value: a
+    smaller bound would abort a launch still progressing under a larger
+    user-configured timeout."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
@@ -433,10 +413,8 @@ def register(host) -> None:
     host.register_model_role(ModelRoleDescriptor("image-vae", "VAE", "vae", required=False))
     host.register_model_role(ModelRoleDescriptor("image-lora", "LoRA", "lora", required=False))
 
-    # "On app start" readiness check (one of the 5 trigger points ComfyUI
-    # status gets checked at - see comfy_client.py's readiness-cache
-    # docstring): fire-and-forget, does not block plugin registration or
-    # attempt to launch ComfyUI.
+    # "On app start" readiness check: fire-and-forget, does not block plugin
+    # registration and does not attempt to launch ComfyUI.
     from localm.media.comfy_client import warm_comfy_status_async
     warm_comfy_status_async()
 

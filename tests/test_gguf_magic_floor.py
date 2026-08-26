@@ -6,13 +6,12 @@ A file that has the 4-byte GGUF magic but almost no body (a placeholder, a
 half-written copy that got just the header) must be skipped by auto-registration
 instead of passing the magic check and crashing a later model load with an
 opaque ggml error. A file that clears BOTH the magic and size checks can still
-be an in-progress copy (R45) - _gguf_recently_written is the second gate that
-catches that case, by refusing to trust a file whose mtime is too fresh.
+be an in-progress copy - _gguf_recently_written is the second gate that catches
+that case, by refusing to trust a file whose mtime is too fresh.
 
 A file can defeat BOTH of those at once: the magic and the size floor live at
 the START of the file, so they survive a copy truncated at the TAIL, and a
-backdated mtime reads as settled rather than mid-copy
-(NEW-TRUNCATED-GGUF-DEFEATS-REGISTRATION-GUARDS). _has_gguf_magic's third
+backdated mtime reads as settled rather than mid-copy. _has_gguf_magic's third
 check - the file must reach at least as far as its own header declares its
 last tensor starts - is what TestDeclaredSizeCheck below pins."""
 
@@ -65,7 +64,7 @@ def test_bad_magic_rejected_even_when_large(tmp_path):
 
 def test_magic_just_below_floor_rejected(tmp_path):
     # Covers the header-only-stub case too: any size < floor takes this same
-    # `<` branch, and the floor-1 boundary is the strictly more precise check.
+    # `<` branch.
     f = tmp_path / "below.gguf"
     f.write_bytes(b"GGUF".ljust(_GGUF_MIN_BYTES - 1, b"\x00"))
     assert _has_gguf_magic(f) is False
@@ -110,12 +109,11 @@ def test_missing_file_is_not_recently_written(tmp_path):
 
 
 class TestDeclaredSizeCheck:
-    """NEW-TRUNCATED-GGUF-DEFEATS-REGISTRATION-GUARDS: a copy cut short keeps
-    its magic (start of file) and can have an old mtime (backdated here, as a
-    stand-in for a genuinely settled but incomplete copy) - both the magic
-    check and the settle check pass. _has_gguf_magic's third check - does the
-    file reach as far as its own header says its last tensor starts - is what
-    catches this shape."""
+    """A copy cut short keeps its magic (start of file) and can have an old
+    mtime (backdated here, as a stand-in for a genuinely settled but incomplete
+    copy) - both the magic check and the settle check pass. _has_gguf_magic's
+    third check - does the file reach as far as its own header says its last
+    tensor starts - is what catches this shape."""
 
     def test_truncated_file_with_backdated_mtime_is_rejected(self, tmp_path):
         f = tmp_path / "truncated.gguf"
@@ -127,7 +125,7 @@ class TestDeclaredSizeCheck:
         old = time.time() - (_GGUF_SETTLE_SECONDS + 5)
         os.utime(f, (old, old))
 
-        # Reproduce the bug first: both existing guards read this as fine.
+        # The magic+floor guard and the settle guard both read this as fine.
         assert f.stat().st_size >= _GGUF_MIN_BYTES
         assert _gguf_recently_written(f) is False
 
@@ -136,9 +134,8 @@ class TestDeclaredSizeCheck:
         assert _has_gguf_magic(f) is False
 
     def test_complete_small_file_is_still_accepted(self, tmp_path):
-        # Regression guard: a genuinely complete file - actual size covers
-        # every declared tensor offset - must not be rejected by the new
-        # check just because it happens to be small.
+        # A genuinely complete file - actual size covers every declared tensor
+        # offset - must not be rejected just because it happens to be small.
         f = tmp_path / "complete.gguf"
         header = _gguf_header([("weight.0", 2000)])
         data = b"\xAB" * 2000
@@ -147,10 +144,9 @@ class TestDeclaredSizeCheck:
         assert _has_gguf_magic(f) is True
 
     def test_unparseable_header_is_not_treated_as_truncated(self, tmp_path):
-        # The existing fixtures elsewhere in this file (magic + zero padding)
-        # have no real tensor-info section at all - version reads as 0, which
-        # must read as "no signal", not "truncated", so those files keep
-        # registering exactly as they did before this check existed.
+        # The other fixtures in this file (magic + zero padding) have no real
+        # tensor-info section at all - version reads as 0, which must read as
+        # "no signal", not "truncated", so those files still register.
         f = tmp_path / "no-real-header.gguf"
         f.write_bytes(b"GGUF".ljust(_GGUF_MIN_BYTES, b"\x00"))
         assert _gguf_declared_min_size(f) is None

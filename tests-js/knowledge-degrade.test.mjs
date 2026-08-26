@@ -3,9 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// L6 (GUI surface): a corrupt / stale / mismatched vectors index is SHOWN in the
-// collection info modal, not silently hidden. The server reports it via
-// stats().vector_degrade_reason on GET /api/rag/collections/<name>.
+// A degraded vectors index is shown in the collection info modal. The server
+// reports it as vector_degrade_reason on GET /api/rag/collections/<name>.
 
 function setup(collData) {
   const fetchImpl = async (url) => {

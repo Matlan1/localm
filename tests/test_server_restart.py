@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""R18: an in-app RESTART endpoint so the user can restart the server from Settings
+"""An in-app RESTART endpoint so the user can restart the server from Settings
 (it comes back on the same port) instead of only being able to shut down. The
-restart sequence unloads the model BEFORE relaunching, like the shutdown sequence."""
+restart sequence unloads the model BEFORE relaunching, like the shutdown
+sequence."""
 
 import os
 import sys
@@ -55,13 +56,12 @@ def test_do_restart_unloads_before_relaunch(monkeypatch):
 
 def test_do_restart_sets_restart_in_progress_flag_before_relaunch(monkeypatch):
     """A restart's re-exec'd process must not auto-open a NEW browser tab: the
-    tab the user is already looking at shows a reconnect overlay that resumes
-    in place (tests-js/server-restart.test.mjs, models.js's
-    onServerUnreachable). _do_restart signals this to the re-exec'd process by
-    setting LOCALM_RESTART_IN_PROGRESS right before os.execv, so it is present
-    in the environment the new process image inherits;
-    plugins/gui/cli.py's _should_auto_open_browser consumes it on the other
-    end (see test_gui_restart_no_new_tab.py)."""
+    tab the user is already looking at shows a reconnect overlay that resumes in
+    place (models.js's onServerUnreachable). _do_restart signals this to the
+    re-exec'd process by setting LOCALM_RESTART_IN_PROGRESS right before
+    os.execv, so it is present in the environment the new process image
+    inherits; plugins/gui/cli.py's _should_auto_open_browser consumes it on the
+    other end."""
     monkeypatch.setattr(http_server, "_engine", None)
     seen = {}
 
@@ -83,13 +83,12 @@ def test_do_restart_sets_restart_in_progress_flag_before_relaunch(monkeypatch):
 
 def test_do_restart_releases_embedder(monkeypatch):
     """The shared embedder (localm.inference.embedder) is a separate lifecycle
-    from _engines - it was previously never released before a restart's
-    re-exec, leaking its native VRAM/RAM allocation across the restart.
+    from _engines and must be released before a restart's re-exec, or its native
+    VRAM/RAM allocation leaks across the restart.
 
     Released via release_for_exit(), NOT reset_embedder(): the latter takes the
-    embedder's load lock, which get_embedder() holds for a whole model load, so
-    a restart issued mid-load blocked here and never reached the teardown at
-    all. See tests/test_embedder_worker_reaped_on_exit.py for that contract."""
+    embedder's load lock, which get_embedder() holds for a whole model load, so a
+    restart issued mid-load blocks there and never reaches the teardown."""
     from localm.inference import embedder as emb
 
     def _fake_relaunch(exe, argv):
@@ -99,10 +98,9 @@ def test_do_restart_releases_embedder(monkeypatch):
     monkeypatch.setattr(emb, "release_for_exit", lambda: (calls.append(1), True)[1])
     monkeypatch.setattr(http_server, "_engine", None)
     monkeypatch.setattr(os, "execv", _fake_relaunch)
-    # release_for_exit() returning True makes _do_restart's own VRAM-release
-    # wait fire (see the NEW-CRASH-NOTICE-USELESS tests below) - unmeasurable
-    # here so it skips immediately instead of hitting the real GPU probe,
-    # which this test has nothing to do with.
+    # release_for_exit() returning True makes _do_restart's own VRAM-release wait
+    # fire - unmeasurable here so it skips immediately instead of hitting the
+    # real GPU probe.
     import localm.discover as discover
     monkeypatch.setattr(discover, "vram_capacity", lambda *a, **kw: {})
 
@@ -133,11 +131,11 @@ def test_do_restart_disarms_crash_guard_before_relaunch(monkeypatch):
     assert disarmed == [True]
 
 
-# ------------------------ LM-DA-011: post-update watchdog -------------------
+# ------------------------ post-update watchdog ------------------------------
 #
 # _do_restart's update_watchdog param is the ONLY thing that distinguishes the
 # post-update auto-restart from a plain /v1/server/restart click; these tests
-# prove the plain path is untouched and the update path wires through correctly.
+# cover the plain path and the update path's wiring.
 
 def test_do_restart_spawns_watchdog_when_given(monkeypatch):
     from localm import updater
@@ -227,18 +225,12 @@ def test_request_restart_threads_update_watchdog_through(monkeypatch):
     assert captured == [watchdog]
 
 
-# ------------- NEW-CRASH-NOTICE-USELESS item C: VRAM-release wait ----------
+# ------------------------------ VRAM-release wait -------------------------
 #
-# switch_engine's eviction loop already waits for a native free to land
-# (wait_for_vram_release, AUDIT-MED-11) before constructing the replacement
-# engine - but the restart path went straight from unload to os.execv with no
-# wait at all, so the re-exec'd process could spawn a fresh GGUF worker into
-# VRAM the driver had not finished reclaiming yet, matching this item's own
-# 2026-07-26 field crash (a fresh llama_context dying mid-construction right
-# after a restart, log going dark, empty native trace). These tests pin the
-# fix: the restart path now waits too, only when there is something ACTUALLY
-# loaded to wait for (not merely present in _engines - see the stale-entry
-# test below), and never blocks the restart on failure.
+# switch_engine's eviction loop waits for a native free to land
+# (wait_for_vram_release) before constructing the replacement engine. The restart
+# path waits too, only when there is something ACTUALLY loaded to wait for (not
+# merely present in _engines), and never blocks the restart on failure.
 
 def test_do_restart_waits_for_vram_release_when_engines_present(monkeypatch):
     order = []
@@ -309,9 +301,9 @@ def test_do_restart_skips_vram_wait_when_nothing_was_loaded(monkeypatch):
 
 
 def test_do_restart_skips_vram_wait_for_a_stale_unloaded_engine_entry(monkeypatch):
-    """unload_all_models/idle-unload deliberately KEEP a now-unloaded engine's
-    entry in _engines so a later request reloads it lazily (see their own
-    docstrings) - so _engines can be non-empty with nothing actually loaded.
+    """unload_all_models/idle-unload KEEP a now-unloaded engine's entry in
+    _engines so a later request reloads it lazily, so _engines can be non-empty
+    with nothing actually loaded.
     A dict-non-emptiness check would make every restart on a server that ever
     idle-unloaded a model pay the wait's full timeout for nothing freed."""
     class _StaleEngine:

@@ -4,10 +4,8 @@
 
 ``localm/setup_llama.py`` installs ``_PINNED_TAG`` - one release we decided on -
 rather than whatever upstream published most recently. This script is what earns
-that word "confirmed". It exists because the bar is explicit: a build that merely
-LOADS is not confirmed, since "it loads so it will be fine" is exactly what shipped
-the b10373 outage (a release that loaded fine for upstream and that localm's own ABI
-gate then refused, leaving a fresh install dead on arrival).
+that word "confirmed": a build that merely LOADS is not confirmed, because a
+release can load fine for upstream and still be refused by localm's own ABI gate.
 
 WHAT IT DOES, per requested backend:
 
@@ -19,15 +17,15 @@ WHAT IT DOES, per requested backend:
   4. loads a small real GGUF and GENERATES tokens through the product's own
      GgufBackend, in the isolated worker process a real chat uses.
 
-WHAT IT DELIBERATELY DOES NOT DO: touch the provisioned runtime. It never calls
-setup-llama and never writes into the localm-llama-runtime wheel, so running it
-cannot disturb the runtime this machine (or another session) is using. The build
-under test is injected with ``LLAMA_CPP_LIB``, a documented first-class override.
+WHAT IT DOES NOT DO: touch the provisioned runtime. It never calls setup-llama and
+never writes into the localm-llama-runtime wheel, so running it cannot disturb the
+runtime this machine (or another session) is using. The build under test is
+injected with ``LLAMA_CPP_LIB``, a documented first-class override.
 
-PROVING THE INJECTION TOOK, which is the whole reason a verdict here is worth
-anything. An override that silently failed to apply looks EXACTLY like a healthy
-run against the build under test - it would load the ALREADY-PROVISIONED runtime,
-generate perfectly, and report PASS for a binary it never opened. So:
+PROVING THE INJECTION TOOK. An override that silently failed to apply looks
+exactly like a healthy run against the build under test - it would load the
+ALREADY-PROVISIONED runtime, generate perfectly, and report PASS for a binary it
+never opened. So:
 
   * the probe asserts ``runtime_binary_dir()`` resolves inside the throwaway dir,
     and reports INCONCLUSIVE rather than PASS when it does not;
@@ -37,23 +35,20 @@ generate perfectly, and report PASS for a binary it never opened. So:
     is checked to be the one under test. A worker that mapped a different llama
     library, or one whose modules cannot be read, is INCONCLUSIVE - never PASS.
 
-Three outcomes, kept distinct on purpose (collapsing them is the failure this
-whole area keeps producing): PASS (loaded and generated, and both were proven to
+Three outcomes, kept distinct: PASS (loaded and generated, and both were proven to
 be the build under test), FAIL (the build is bad - it did not load, or the ABI
 gate refused it, or it produced no tokens), and INCONCLUSIVE (we could not
 measure: no network, no model, an override that did not apply, an unreadable
 worker). Exit code 0 / 1 / 2 in that order.
 
-WHAT ONE RUN CAN AND CANNOT COVER, because a confirm job that is green because it
-SKIPPED what it could not test would be worse than no job at all:
+WHAT ONE RUN CAN AND CANNOT COVER:
 
   * The ABI/struct property is BACKEND-INDEPENDENT by construction. Upstream ships
     ONE ``llama.dll`` for every backend of a given tag - the backend lives in the
     separate ``ggml-*`` plugin libraries - so a single backend's ABI verdict covers
     them all. This script hashes the library for every backend it fetched and
     prints whether they are byte-identical, so that premise is re-measured at each
-    tag rather than inherited. That property is also precisely the one that broke
-    in the incident this exists to prevent.
+    tag rather than inherited.
   * GENERATION is backend-specific and hardware-specific. A cpu run says nothing
     about whether a cuda build produces tokens on an NVIDIA card. Only the
     backends actually run here are confirmed for generation; the summary names the
@@ -83,9 +78,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# The same small instruct model tests/test_gguf_smoke_integration.py drives, and
-# for the same reason: ~88 MB, a real causal chat model (not merely a small file),
-# and already proven to generate through this exact backend.
 _MODEL_REPO = "bartowski/SmolLM2-135M-Instruct-GGUF"
 _MODEL_FILE = "SmolLM2-135M-Instruct-Q4_K_M.gguf"
 
@@ -93,8 +85,8 @@ PASS, FAIL, INCONCLUSIVE = "PASS", "FAIL", "INCONCLUSIVE"
 
 
 # --------------------------------------------------------------------------- #
-#  The probe - runs in a FRESH interpreter with LLAMA_CPP_LIB pointed at the   #
-#  extracted build. Its stdout's LAST line is a JSON verdict.                  #
+#  The probe: runs in a fresh interpreter with LLAMA_CPP_LIB pointed at the    #
+#  extracted build. Its stdout's last line is a JSON verdict.                  #
 # --------------------------------------------------------------------------- #
 _PROBE = r'''
 import json, os, sys
@@ -264,12 +256,10 @@ def _place_build(backend: str, tag: str, dest: Path, attempts: int = 3
     """Download and extract *backend* at *tag* into *dest*. Returns (lib_path,
     error).
 
-    Retried, because the release CDN drops connections: measured twice while
-    writing this, both times as "Remote end closed connection without response"
-    after 0 bytes. A transient drop and a build we could not test are the same
-    INCONCLUSIVE outcome to the caller, so without a retry the common case would
-    be a run that measured nothing - and a maintenance check that usually
-    measures nothing is one people stop reading."""
+    Retried, because the release CDN drops connections ("Remote end closed
+    connection without response" after 0 bytes). A transient drop and a build we
+    could not test are the same INCONCLUSIVE outcome to the caller, so without a
+    retry the common case would be a run that measured nothing."""
     from localm import setup_llama as sl
     try:
         url, sha, _tag = sl._resolve_backend_asset(backend, tag=tag)
@@ -297,11 +287,7 @@ def _place_build(backend: str, tag: str, dest: Path, attempts: int = 3
 
 def _run_probe(lib: Path, model: str) -> dict:
     env = dict(os.environ)
-    # Point at the FILE, not the directory: _candidate_dirs takes `p.parent if
-    # p.suffix else p`, so a directory whose name contains a dot (a tag like
-    # "cuda-13.3-b10361") would otherwise be read as a file and its PARENT
-    # searched instead - a real measured failure that once produced a confident
-    # false "this backend is unaffected".
+    # Point at the library FILE, not its directory.
     env["LLAMA_CPP_LIB"] = str(lib)
     env["LOCALM_CONFIRM_EXPECT_DIR"] = str(lib.parent.resolve())
     env["LOCALM_CONFIRM_LIB_NAME"] = lib.name
@@ -328,7 +314,7 @@ def confirm(tag: str, backends: "list[str]", workdir: Path) -> dict:
     libs: dict = {}
     for backend in backends:
         print(f"\n=== {backend} @ {tag} ===", flush=True)
-        # No dots in this directory name, deliberately - see _run_probe.
+        # The directory name must contain no dots.
         dest = workdir / f"build-{backend}"
         lib, err = _place_build(backend, tag, dest)
         if err:
@@ -368,7 +354,6 @@ def _report(summary: dict, backends: "list[str]") -> int:
         if r.get("verdict") != PASS:
             print(f"             {r.get('why', '')}")
 
-    # The one-constant premise, re-measured at THIS tag rather than inherited.
     if len(libs) > 1:
         distinct = set(libs.values())
         print("\n  llama library across the fetched backends: "

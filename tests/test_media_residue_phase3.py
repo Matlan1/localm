@@ -1,33 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Media-containment residue regression tests (M2 Phase 3).
+"""Media-containment residue regression tests.
 
-Two leaks are covered here, both about a generation leaving a trace that the
-per-plugin containment knobs were supposed to prevent:
+Two leaks, both about a generation leaving a trace the per-plugin containment
+knobs are supposed to prevent:
 
-FAC-3  - the per-plugin ``comfy.output_dir`` is honoured for image generation
-         but was silently dropped by the music and video backends, so their
-         containment knob did nothing. ComfyUI's output dir is what
-         ``contain_comfy_artifacts`` needs to delete its on-disk copy AND to
-         locate the input/ dir for the uploaded img2img/i2v source. The real
-         ``generate_music`` / ``generate_video`` take no ``comfy_output_dir``
-         argument (resolution is via the ``COMFY_OUTPUT_DIR`` env var, the same
-         fallback the shipped containment test relies on), so the backend must
-         publish the per-plugin value on that env var for the duration of the
-         call. We mock ``generate_*`` and assert the value is visible to it.
+  * the per-plugin ``comfy.output_dir`` must reach the music and video backends.
+    ComfyUI's output dir is what ``contain_comfy_artifacts`` needs to delete its
+    on-disk copy AND to locate the input/ dir for the uploaded img2img/i2v
+    source. The real ``generate_music`` / ``generate_video`` take no
+    ``comfy_output_dir`` argument (resolution is via the ``COMFY_OUTPUT_DIR``
+    env var), so the backend publishes the per-plugin value on that env var for
+    the duration of the call. These mock ``generate_*`` and assert the value is
+    visible to it.
 
-GAP-MG-1 - the img2img / image-to-video ``input_image`` accepted ANY readable
-         local path (only ``is_file()`` was checked) and uploaded it to
-         ComfyUI's input/ dir. That is an arbitrary-file-read-into-ComfyUI
-         primitive (e.g. /etc/passwd, a private key, another user's docs). The
-         path must be confined; anything outside an allowed root is a 400.
+  * the img2img / image-to-video ``input_image`` must be confined. Accepting any
+    readable local path on an ``is_file()`` check alone is an
+    arbitrary-file-read-into-ComfyUI primitive (e.g. /etc/passwd, a private key,
+    another user's docs), so anything outside an allowed root is a 400.
 
-         The allowed set was NARROWED (CodeQL WS8, alerts 55/58): it used to be
-         the whole localm home, which is the credential store (auth.key,
-         auth.json, sessions.json, rag/, coder/, bug-reports/), so the original
-         confinement retargeted the primitive at localm's own secrets instead of
-         removing it. It is now the upload inbox plus the generated-media
-         galleries - see ``localm.media.paths.allowed_input_roots``. The
-         data-dir ROOT is therefore rejected now, which is asserted below.
+    The allowed set is the upload inbox plus the generated-media galleries - see
+    ``localm.media.paths.allowed_input_roots`` - never the whole localm home,
+    which is the credential store (auth.key, auth.json, sessions.json, rag/,
+    coder/, bug-reports/). The data-dir ROOT is therefore rejected, which is
+    asserted below.
 """
 
 from __future__ import annotations
@@ -46,7 +41,7 @@ from localm.plugins.builtin.video import plug as video_plug
 
 
 # --------------------------------------------------------------------------- #
-#  FAC-3: music / video backends forward the per-plugin output dir
+#  music / video backends forward the per-plugin output dir
 # --------------------------------------------------------------------------- #
 
 def _cfg_with_output_dir(name: str, output_dir: str) -> dict:
@@ -170,7 +165,7 @@ def test_music_backend_no_output_dir_leaves_env_untouched(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  GAP-MG-1: input_image must be confined to an allowed root
+#  input_image must be confined to an allowed root
 # --------------------------------------------------------------------------- #
 
 def _outside_path(tmp_path) -> Path:
@@ -274,12 +269,12 @@ def test_input_image_in_an_allowed_root_accepted(tmp_path, monkeypatch, subdir,
                          ids=["data-root-file", "owner-key", "rag-store"])
 def test_input_image_in_the_data_dir_root_rejected(tmp_path, monkeypatch, relname,
                                                    request_cls, handler_coro_fn):
-    """The data dir itself is NO LONGER an allowed root (CodeQL WS8).
+    """The data dir itself is NOT an allowed root.
 
     It holds auth.key - the plaintext owner key - plus auth.json, sessions.json
     and the rag/coder stores, and these routes are mounted under the
-    non-privileged image/video scopes, so "confined to the data dir" left a
-    scoped key able to have localm's own secrets uploaded to a ComfyUI that may
+    non-privileged image/video scopes, so "confined to the data dir" would leave
+    a scoped key able to have localm's own secrets uploaded to a ComfyUI that may
     legitimately be a LAN or public host over plaintext http."""
     home = tmp_path / "home"
     home.mkdir()
@@ -295,7 +290,7 @@ def test_input_image_in_the_data_dir_root_rejected(tmp_path, monkeypatch, relnam
     assert ei.value.status_code == 400
     assert "input" in str(ei.value.detail).lower()
     # The rejection must not disclose the data dir (it carries the OS username)
-    # to a non-owner caller - see the disclosure workstream's same rule.
+    # to a non-owner caller.
     assert str(home) not in str(ei.value.detail)
 
 

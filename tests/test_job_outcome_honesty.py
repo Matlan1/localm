@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Board item #27: jobs.py's start_cli decided a job's status PURELY from the
-subprocess exit code, so any exception raised by a CLI command AFTER its real
-work already succeeded (the #1111 pull.py class of bug; cli/comfy.py:204 was
-the uncovered instance - see
-dev-notes/ROOTCAUSE-pull-success-reported-as-failed-2026-08-05.md) reported a
-completed operation as failed.
+"""jobs.py's start_cli must not decide a job's status purely from the subprocess
+exit code: an exception raised by a CLI command AFTER its real work succeeded
+would report a completed operation as failed.
 
-The fix is a terminal {"type": "outcome", "status": ...} sentinel frame
-(_shared._emit_outcome) a CLI command can send BEFORE any risky display step,
+A terminal {"type": "outcome", "status": ...} sentinel frame
+(_shared._emit_outcome) is sent by a CLI command BEFORE any risky display step,
 once real work is verifiably done. start_cli's stdout reader treats it as an
-override for the exit-code guess - in EITHER direction - and NEVER as license
-to invent success from silence: absent the frame, the exit-code rule is
-untouched, so a job that genuinely dies mid-work, or a job kind that has not
-adopted the new frame at all, still reports failed/done exactly as it always
-has.
+override for the exit-code guess, in EITHER direction, and never as licence to
+invent success from silence: absent the frame the exit-code rule is untouched,
+so a job that dies mid-work, or a job kind that does not emit the frame, still
+reports failed/done.
 """
 
 from __future__ import annotations

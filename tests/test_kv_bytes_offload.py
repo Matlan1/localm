@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""BUG-2: a large GGUF that fills VRAM must keep generating, not crash.
+"""A large GGUF that fills VRAM must keep generating, not crash.
 
-A model whose weights nearly fill the card was loaded with its KV cache in VRAM,
-leaving no room for the first decode's compute buffers; on the Vulkan backend that
-faults with a native C++ crash (0xe06d7363) instead of spilling to RAM (as ROCm
-does). Root cause: a file-size KV heuristic under-counted the real KV cache ~2.6x,
-so the load "fit" per the estimate yet overflowed VRAM for real.
+A model whose weights nearly fill the card, loaded with its KV cache in VRAM,
+leaves no room for the first decode's compute buffers; on the Vulkan backend that
+faults with a native C++ crash (0xe06d7363) instead of spilling to RAM as ROCm
+does. A file-size KV heuristic under-counts the real KV cache by roughly 2.6x, so
+such a load "fits" per the estimate and overflows VRAM for real.
 
-These tests cover the fix, WITHOUT the native DLL (the api module / metadata are
-mocked): the architecture-accurate per-token KV size, the load-time offload_kqv
+These tests run WITHOUT the native DLL (the api module and metadata are mocked)
+and cover the architecture-accurate per-token KV size, the load-time offload_kqv
 decision (keep KV in system RAM when it will not fit alongside compute), that the
-placement is sticky across a grow, and that the grow check now reasons with the
-accurate size. The real-runtime symbol export + real generation are covered by the
-@integration tests at the bottom and by the on-hardware Vulkan run.
+placement is sticky across a grow, and that the grow check reasons with the
+accurate size. The real-runtime symbol export and real generation are covered by
+the @integration tests at the bottom.
 """
 
 from __future__ import annotations
@@ -110,8 +110,7 @@ class TestReadKvBytesPerToken:
             assert llm._read_kv_bytes_per_token() == 131072
 
     def test_gqa_is_smaller_than_full_multi_head(self):
-        # n_head_kv < n_head (grouped-query) yields a proportionally smaller KV;
-        # the whole point of using n_head_kv and not n_head.
+        # n_head_kv < n_head (grouped-query) yields a proportionally smaller KV.
         llm = _bare_model(n_layers=40)
         gqa = _fake_api(n_embd=5120, n_head=40, n_head_kv=8)
         mha = _fake_api(n_embd=5120, n_head=40, n_head_kv=40)
@@ -184,15 +183,9 @@ class TestForceVulkanDedicatedVram:
             self, tmp_path, monkeypatch, preset):
         """An opt-out must reach GGML, not merely survive in os.environ.
 
-        This assertion used to be `== "0"`, which is a true statement about
-        Python and disconnected from the effect. ggml reads
-        `getenv(...) != nullptr`, so "0" disables host-visible vidmem exactly as
-        "1" does - the UMA/iGPU user this opt-out exists for got the OPPOSITE of
-        what they asked for, and the old test could never have failed on it
-        because it stopped at the Python boundary.
-
-        ABSENCE is therefore the property, and it is the only value of this
-        variable that ggml reads as "off".
+        ggml reads `getenv(...) != nullptr`, so "0" disables host-visible
+        vidmem exactly as "1" does. ABSENCE is the property: it is the only
+        value of this variable that ggml reads as "off".
         """
         assert self._run(tmp_path, monkeypatch, platform="win32",
                          files=["llama.dll", "ggml-vulkan.dll"],
@@ -220,14 +213,9 @@ class _StubLlm:
 
 def _gguf_backend(tmp_path, size_bytes, n_ctx=4096, n_gpu_layers=99):
     # A tiny REAL file (so is_file()/stat work), with the multi-GB "on disk" size
-    # FAKED via _model_bytes - the same pattern test_auto_gpu_layers.py uses.
-    # NEVER truncate() to the real size here: Windows truncate() is not sparse and
-    # allocates REAL disk (memory: windows-truncate-not-sparse). Measured on this
-    # box: one truncate(2GB) consumed 1.61 GB. This helper is called with sizes up
-    # to 9 GB, ~20 GB per pass, once per test's own tmp_path - times the xdist
-    # workers, times pytest's retention of the last 3 basetemps. That is what
-    # filled D: to 99.5% and crashed the box (2026-07-15). The size is only ever
-    # READ back through _model_bytes(), so allocating it was never needed.
+    # FAKED via _model_bytes. NEVER truncate() to the real size here: Windows
+    # truncate() is not sparse and allocates REAL disk. The size is only ever
+    # READ back through _model_bytes().
     from localm.inference.backends.gguf import GgufBackend
     f = tmp_path / "model.gguf"
     f.write_bytes(b"\0" * 4096)
@@ -268,12 +256,12 @@ class TestGrowCheckUsesAccurateKv:
 
 
 class TestRamResidentKvChargesFullTarget:
-    """Once a prior grow placed the KV cache in SYSTEM RAM (offload_kqv=False), the
-    GPU holds no KV, so free VRAM reads large. The delta-only charge then wrongly
-    says a further grow 'fits VRAM', offload_kqv flips back to True, and the FULL
-    target KV overflows VRAM -> llama_init_from_model NULLs -> _prefill_fresh_context
-    raises and truncates a reply that was generating fine (defeats #554). When the
-    resident KV is already in RAM, the FULL target must be charged, not the delta."""
+    """Once a prior grow placed the KV cache in SYSTEM RAM (offload_kqv=False),
+    the GPU holds no KV, so free VRAM reads large. A delta-only charge would then
+    say a further grow fits VRAM, offload_kqv would flip back to True, and the
+    FULL target KV would overflow VRAM -> llama_init_from_model NULLs ->
+    _prefill_fresh_context raises and truncates a reply that was generating fine.
+    When the resident KV is already in RAM, the FULL target is charged."""
 
     def test_ram_resident_kv_charges_full_target_stays_ram(self, tmp_path):
         b = _gguf_backend(tmp_path, size_bytes=2_000_000_000, n_ctx=4096)
@@ -295,8 +283,8 @@ class TestRamResidentKvChargesFullTarget:
             assert b._check_context_fit(12288, current_ctx=8192) is True
 
     def test_vram_resident_kv_still_uses_net_delta(self, tmp_path):
-        # Regression guard: when the current KV is in VRAM (the normal case), the net
-        # delta is charged (the old VRAM KV IS reclaimed on recreation).
+        # When the current KV is in VRAM (the normal case), the net delta is
+        # charged (the old VRAM KV IS reclaimed on recreation).
         b = _gguf_backend(tmp_path, size_bytes=2_000_000_000, n_ctx=4096)
         b._llm = _StubLlm(300_000)
         b._llm._offload_kqv = True               # current KV in VRAM
@@ -307,11 +295,9 @@ class TestRamResidentKvChargesFullTarget:
 
 
 class TestRamOffloadHintFiresOnce:
-    """The RAM-offload notice is documented (and #554's commit) as a 'one-time
-    hint', so a conversation that keeps growing past free VRAM must explain the
-    slowdown ONCE, not spam the debug log on every grow. A card-filling model with
-    the default grow step overflows on EVERY grow, so without a guard the warning
-    repeats indefinitely."""
+    """The RAM-offload notice is a one-time hint: a conversation that keeps
+    growing past free VRAM explains the slowdown ONCE rather than on every grow.
+    A card-filling model with the default grow step overflows on EVERY grow."""
 
     def test_hint_fires_once_across_repeated_ram_grows(self, tmp_path, caplog):
         import logging
@@ -380,15 +366,11 @@ class TestGpuMemory:
 
 
 class TestFreeVramBytesPrefersBackend:
-    """_free_vram_bytes()'s source-of-truth for the KV-placement decision this
-    file covers (BUG-2): torch.cuda is now ALWAYS preferred when it can answer,
-    and the direct native loader.gpu_memory() call is never made from here at
-    all (only its crash-safe, subprocess-isolated wrapper gpu_memory_isolated()
-    is used, as a fallback, when torch cannot answer) - see
-    tests/test_vram_preflight.py::TestFreeVramBytesUsesIsolatedNativeFallback
-    for the full behavior + the native-abort root cause this order is built
-    around. Updated from the original "prefers the native backend over torch"
-    expectation, which that fix intentionally reversed."""
+    """_free_vram_bytes()'s source of truth for the KV-placement decision this
+    file covers: torch.cuda is ALWAYS preferred when it can answer, and the
+    direct native loader.gpu_memory() call is never made from here at all - only
+    its crash-safe, subprocess-isolated wrapper gpu_memory_isolated(), as a
+    fallback when torch cannot answer."""
 
     def test_prefers_torch_over_isolated_fallback(self, monkeypatch):
         from localm.inference.backends.llamacpp import _loader
@@ -398,13 +380,10 @@ class TestFreeVramBytesPrefersBackend:
         # the isolated fallback would say something different; torch must win.
         monkeypatch.setattr(GgufBackend, "_free_total_vram_bytes",
                             staticmethod(lambda: (7 * 1024 ** 3, 16 * 1024 ** 3)))
-        # Since #706, _free_vram_bytes applies a device-global correction on a
-        # Windows + ROCm/HIP box (real ADL/PDH adapter usage), which silently
-        # replaces the faked free above with a REAL measurement on exactly that
-        # hardware - the same trap test_auto_gpu_layers.py's _patch_vram_reads
-        # documents (a faked 7/16 GB reading came back as ~14 GB free live).
-        # Patch it to None so this test asserts source SELECTION (torch vs
-        # isolated), not the separately-tested correction step.
+        # _free_vram_bytes applies a device-global correction on a Windows +
+        # ROCm/HIP box, which would replace the faked free above with a REAL
+        # measurement. Patch it to None so this test asserts source SELECTION
+        # (torch vs isolated), not the correction step.
         monkeypatch.setattr(GgufBackend, "_device_global_free_bytes",
                             staticmethod(lambda total: None))
         assert GgufBackend._free_vram_bytes() == 7 * 1024 ** 3
@@ -416,15 +395,15 @@ class TestFreeVramBytesPrefersBackend:
                             lambda: (5 * 1024 ** 3, 16 * 1024 ** 3))
         monkeypatch.setattr(GgufBackend, "_free_total_vram_bytes",
                             staticmethod(lambda: (None, None)))
-        # See the sibling test above: isolate from the real device-global
-        # correction so this asserts fallback SELECTION, not the correction.
+        # Isolate from the device-global correction so this asserts fallback
+        # SELECTION, not the correction.
         monkeypatch.setattr(GgufBackend, "_device_global_free_bytes",
                             staticmethod(lambda total: None))
         assert GgufBackend._free_vram_bytes() == 5 * 1024 ** 3
 
 
 # --------------------------------------------------------------------------- #
-#  Integration: the real runtime must export the symbols the fix relies on
+#  Integration: the real runtime exports the symbols this code relies on
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.integration
@@ -466,7 +445,7 @@ def test_real_runtime_gpu_memory_query(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  The same defect, post-load: n_layers * n_head_kv on a HYBRID stack          #
+#  n_layers * n_head_kv on a HYBRID stack                                      #
 #                                                                              #
 #  llama_model_n_head_kv reports LAYER 0 only - upstream llama_hparams::       #
 #  n_head_kv() takes an il parameter defaulting to 0, and the exported wrapper  #
@@ -533,16 +512,14 @@ class TestHybridStackIsRefused:
             assert llm._read_kv_bytes_per_token() == 0
 
     def test_the_same_shape_still_computes_when_the_stack_is_uniform(self):
-        # The control. Without it, a version that returned 0 unconditionally
-        # would pass both tests above and look like a working fix.
+        # The control: a uniform stack still computes a nonzero per-token KV.
         llm = _bare_model(n_layers=48)
         with patch(_API, _fake_api(n_embd=2048, n_head=16, n_head_kv=2)):
             assert llm._read_kv_bytes_per_token() == 48 * 2 * 128 * 2 * 2
 
     def test_a_build_without_the_predicates_keeps_the_old_answer(self):
-        # An exotic stripped build that cannot answer "is this hybrid?" must
-        # degrade to the previous behaviour rather than refuse everything, which
-        # would drop every model back onto the size-class heuristic.
+        # A build that cannot answer "is this hybrid?" degrades to the previous
+        # behaviour rather than refusing everything.
         llm = _bare_model(n_layers=48)
         with patch(_API, _fake_api(n_embd=2048, n_head=16, n_head_kv=2,
                                    has_hybrid=False, hybrid=True)):

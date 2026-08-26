@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The chat composer must not emit an empty-model request the server can only
-// answer with a 503 "No model loaded" (Antigravity-audit gui-empty-model): when
-// modelCache.active is "" (no model loaded), sendChat should refuse locally and
-// tell the user, instead of round-tripping a doomed request.
+// sendChat refuses locally when modelCache.active is "" and nothing is resumable.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -12,8 +9,7 @@ function _fetchRecorder(window) {
   const calls = [];
   window.fetch = (...a) => {
     calls.push(String(a[0]));
-    // A minimal 503-ish response; the guard should prevent us from getting here
-    // for a chat send with no model.
+    // A minimal 503 "No model loaded" response.
     return Promise.resolve({
       ok: false, status: 503, body: null,
       json: async () => ({ detail: "No model loaded" }),
@@ -42,8 +38,7 @@ test("sendChat proceeds past the guard when a model IS loaded", async () => {
   window.document.getElementById("chat-input").value = "hello there";
   const calls = _fetchRecorder(window);
 
-  // The full streaming path may throw on the stubbed response; we only care that
-  // the guard did NOT block the send (a request was attempted).
+  // The streaming path may throw on the stubbed response.
   await window.sendChat().catch(() => {});
 
   const chatReqs = calls.filter((u) => u.includes("/chat/completions"));
@@ -52,18 +47,8 @@ test("sendChat proceeds past the guard when a model IS loaded", async () => {
 });
 
 // --------------------------------------------------------------------------- //
-//  ...but "nothing is resident" is NOT the same state as "nothing to load".    //
-//                                                                              //
-//  An idle-unload, and the sidebar's own Unload button, both leave the server  //
-//  with no ACTIVE model while keeping the Engine for lazy reload - and both    //
-//  tell the user it "reloads on the next chat request" (the idle-unload log    //
-//  line, and the button's tooltip). The server honours that: an unnamed        //
-//  request reloads and is served. The guard above used to refuse anyway,       //
-//  because modelCache.active is "" in that state too - so the promise was      //
-//  false and chat looked permanently broken until a model was re-picked.       //
-//                                                                              //
-//  /api/models now reports `resumable` for exactly that state, mirroring what  //
-//  /health already resolves. The guard must tell the two apart.                //
+//  modelCache.resumable names a model the server reloads on the next request,  //
+//  so active === "" alone does not mean there is nothing to send to.           //
 // --------------------------------------------------------------------------- //
 
 test("sendChat SENDS when the model is unloaded but resumable (idle-unload / Unload button)", async () => {
@@ -81,7 +66,7 @@ test("sendChat SENDS when the model is unloaded but resumable (idle-unload / Unl
 
 test("sendChat still refuses when there is nothing to resume either", async () => {
   const { window } = loadApp();
-  // The genuine dead end: no active model AND nothing the server could resolve.
+  // No active model and nothing to resume.
   runScript(window, "modelCache.active = ''; modelCache.resumable = '';");
   window.document.getElementById("chat-input").value = "hello there";
   const calls = _fetchRecorder(window);

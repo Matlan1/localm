@@ -68,17 +68,15 @@ def _prerelease_suffix(v: str):
     final release, for ordering purposes). E.g. ``"0.1.4-rc1"`` -> ``("rc", 1)``;
     ``"0.1.4-rc"`` -> ``("rc", 0)``; ``"0.1.4"`` -> ``None``.
 
-    Scoped to the LAST segment only (not a scan of the whole string) so this
-    matches ``_parse``'s own per-segment leading-digit extraction exactly for
-    every part before it - a non-numeric remainder in an EARLIER segment (not
-    a shape this project's tags ever use) is silently dropped from the release
-    tuple by ``_parse``, same as before this function existed; it is not also
-    picked up here as a suffix. Not a full PEP 440/SemVer implementation
-    (no epoch, build metadata, dev/post releases) - covers this project's
-    actual scheme (``MAJOR.MINOR.PATCH`` with an optional ``-TAG[N]`` suffix)
-    on purpose, per the "hand-rolled is fine for this version scheme, do not
-    adopt `packaging`" call - `packaging` is only pulled in by this project's
-    optional GPU/dev extras, not a safe dependency for a core-install module."""
+    Scoped to the LAST segment only (not a scan of the whole string), matching
+    ``_parse``'s own per-segment leading-digit extraction for every part before
+    it: a non-numeric remainder in an EARLIER segment is dropped from the release
+    tuple by ``_parse`` and is not picked up here as a suffix either.
+
+    Not a full PEP 440/SemVer implementation (no epoch, build metadata, dev/post
+    releases) - it covers this project's scheme, ``MAJOR.MINOR.PATCH`` with an
+    optional ``-TAG[N]`` suffix. ``packaging`` is only pulled in by the optional
+    GPU/dev extras, so it is not available to a core-install module."""
     parts = normalize(v).split(".")
     if not parts:
         return None
@@ -130,13 +128,12 @@ def comparable(candidate: str, current: str) -> bool:
     ``_leading_digit``); a bare ``candidate`` (falsy) is never comparable.
 
     Read this ALONGSIDE ``is_newer()``'s result, never as a replacement for it:
-    when ``is_newer`` already returns True the ordering is already known
-    regardless of this function (e.g. a malformed *current* against a
-    well-formed *candidate* still resolves True, "fails open toward offering" -
-    see ``test_is_newer_prerelease_never_more_permissive_than_before``). This
-    function exists for the OTHER case: ``is_newer`` returns False and the
-    caller needs to know whether that means "genuinely not newer" or "could not
-    tell", so it is not reported as a false "up to date"."""
+    when ``is_newer`` already returns True the ordering is known regardless of
+    this function (a malformed *current* against a well-formed *candidate* still
+    resolves True, failing open toward offering). This function answers the OTHER
+    case: ``is_newer`` returned False, and the caller needs to know whether that
+    means "genuinely not newer" or "could not tell", so it is not reported as a
+    false "up to date"."""
     cand = normalize(candidate)
     cur = normalize(current)
     if not cand:
@@ -159,11 +156,11 @@ def is_newer(candidate: str, current: str) -> bool:
     is NOT newer, matching a plain re-offer of the same build.
 
     This function GATES anti-rollback (see ``updater._refuse_downgrade``) as
-    well as whether an update is OFFERED - it must never become MORE
-    permissive in the wrong direction. The prerelease tie-break above only
-    ADDS resolution to cases that previously tied at ``False`` (never newer);
-    it never turns an already-``True`` numeric comparison ``False``, and it
-    never makes an actually-older or actually-equal candidate compare newer.
+    well as whether an update is OFFERED, so it must never become MORE
+    permissive in the wrong direction. The prerelease tie-break only resolves
+    cases that would otherwise tie at ``False``; it never turns a ``True``
+    numeric comparison ``False``, and it never makes an actually-older or
+    actually-equal candidate compare newer.
 
     ``"unknown"`` current => any real candidate is newer (so a fresh install
     with no signal still sees updates)."""

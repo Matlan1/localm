@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""COMFY_MODEL_SOURCES: the curated filename -> HuggingFace source table used to
-offer a download when ComfyUI preflight detects a missing workflow model. Exact-
-filename lookup only (no fuzzy matching) - a different keyspace from
+"""COMFY_MODEL_SOURCES: the curated filename -> HuggingFace source table that
+offers a download when ComfyUI preflight detects a missing workflow model.
+Exact-filename lookup only (no fuzzy matching) - a different keyspace from
 MODEL_SHORTCUTS (a user-typed alias for `localm pull <alias>`, not an installed
 filename ComfyUI reports)."""
 
@@ -27,8 +27,8 @@ class TestResolveComfyModelSource:
         assert resolve_comfy_model_source("") is None
 
     def test_is_exact_match_only_not_fuzzy(self):
-        # A near-miss (different case, or a substring) must NOT resolve - V1 is
-        # curated exact-filename lookup only, never a heuristic guess.
+        # A near-miss (different case, or a substring) does not resolve: lookup
+        # is curated exact-filename only, never a heuristic guess.
         assert resolve_comfy_model_source("Clip_L.safetensors") is None
         assert resolve_comfy_model_source("clip_l") is None
 
@@ -48,8 +48,7 @@ class TestResolveComfyModelSource:
 
     def test_flux_vae_sourced_from_ungated_repo(self):
         # ae.safetensors is byte-identical in the gated FLUX.1-dev repo and the
-        # ungated FLUX.1-schnell repo - it must be sourced from the ungated one
-        # so a download never hits a HuggingFace license-gate failure.
+        # ungated FLUX.1-schnell repo, and is sourced from the ungated one.
         source = resolve_comfy_model_source("ae.safetensors")
         assert source.spec == "black-forest-labs/FLUX.1-schnell:ae.safetensors"
         assert "FLUX.1-dev" not in source.spec

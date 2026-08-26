@@ -1,30 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0009 P5: an in-process job must be able to report structured progress.
+"""An in-process job must be able to report structured progress.
 
-WHAT WAS ACTUALLY MISSING, stated precisely because the obvious version is
-wrong. Only one thing in the tree PRODUCED a `{"type": "progress"}` event:
-`start_cli`'s stdout reader, keyed on PROGRESS_SENTINEL. `start_fn`'s worker
-pushed only `line` and `end`, and no in-thread job - not one of the three RAG
-kinds, the three media kinds, embed-setup or embedding-warmup - ever reported a
-percentage. `rag-reembed` computes a true `n/total` over uniform batches and
-could only print it as prose, invisible to /api/activity, to the CLI and to MCP.
+`Job.push` is public and latches any dict whose type is "progress", so a
+hand-rolled `job.push({"type": "progress", "pct": 12.5})` from an in-thread job
+already reaches `Job.summary()`. What this unit adds is the shared constructor:
+without one, each call site derives `pct` itself, and `done * 100 / total` with
+no total either raises or - after the guard everyone reaches for - reports a
+fabricated 0%. The honest derivation belongs in one place.
 
-**But it was not IMPOSSIBLE, and an earlier draft of this file said it was.**
-MEASURED against master before this change: `Job.push` is public and latches any
-dict whose type is "progress", so a hand-rolled
-`job.push({"type": "progress", "pct": 12.5})` from an in-thread job already
-reached `Job.summary()`. The channel existed; the AFFORDANCE did not.
-
-That is what P5 adds, and it is the reason it is worth a unit rather than a
-note: without a shared constructor, each of the four call sites that need it
-would derive `pct` itself, and `done * 100 / total` with no total either raises
-or - after the guard everyone reaches for - reports a fabricated 0%. **The
-honest derivation belongs in one place that cannot be got wrong four times.**
-
-WHAT THE FIXTURES MUST BE ABLE TO EXPRESS (item 19). A fixture that always
-passes a total can never produce the R1 case, which is the one worth pinning: an
-operation with no denominator must report pct null, NEVER 0. Half the cases
-below therefore withhold the total on purpose, and one withholds the numerator.
+WHAT THE FIXTURES MUST BE ABLE TO EXPRESS: a fixture that always passes a total
+can never produce the case worth pinning - an operation with no denominator must
+report pct null, NEVER 0. Half the cases below therefore withhold the total, and
+one withholds the numerator.
 """
 
 from __future__ import annotations
@@ -43,7 +30,7 @@ def _progress_events(job: Job) -> list:
     return [e for e in job._history if e.get("type") == "progress"]
 
 
-# --------------------------------------------- R1: absence, never a fabricated 0
+# --------------------------------------------- absence, never a fabricated 0
 
 class TestAnUnknownPercentageIsNullNeverZero:
     def test_no_total_reports_null_not_zero(self):
@@ -71,10 +58,10 @@ class TestAnUnknownPercentageIsNullNeverZero:
         assert "done" not in ev
 
     def test_a_measured_zero_is_still_reported_as_zero(self):
-        """The mirror case, so the fix above does not overshoot: a caller that
-        MEASURED 0 of 128 is making a true statement and must not be silently
-        converted to unknown. The defect is fabricating a zero, not reporting
-        one that was observed."""
+        """The mirror case, so the suppression above does not overshoot: a caller
+        reporting an observed 0 of 128 is making a true statement and must not be
+        converted to unknown. Fabricating a zero is the defect; reporting an
+        observed one is not."""
         job = _job()
         job.progress(phase="indexing", done=0, total=128, unit="files")
         assert _progress_events(job)[-1]["pct"] == 0.0
@@ -109,13 +96,13 @@ class TestThePayload:
 
     def test_a_numerator_past_its_denominator_is_not_clamped(self):
         """Clamping to 100% would hide a caller bug AND make a false completion
-        claim at the same time (AGENTS.md rule 5). It stays visible."""
+        claim at the same time. The over-100 value stays visible."""
         job = _job()
         job.progress(done=150, total=100)
         assert _progress_events(job)[-1]["pct"] == 150.0
 
 
-# ------------------------------------------- the point: a LISTING can read it
+# ------------------------------------------------- a LISTING can read it
 
 class TestTheListingCanRenderIt:
     def test_progress_reaches_summary(self):
@@ -140,18 +127,14 @@ class TestTheListingCanRenderIt:
         assert job.summary()["pct"] == 90.0
 
 
-# ------------------------------- the gate: an in-process job can actually do this
+# ------------------------------- an in-process job can do this
 
 class TestAnInProcessJobCanReportAPercentage:
     def test_a_start_fn_job_puts_a_percentage_where_a_listing_reads_it(self):
-        """End to end through the real worker thread, because the unit's value
-        is the whole path and not the dict: a job function calls one method and
-        a listing row carries the percentage.
-
-        This is NOT phrased as "previously impossible" - see the module
-        docstring; a hand-rolled push always worked. What it pins is that the
-        affordance reaches the listing through `start_fn`'s thread, so the four
-        units that will use it inherit a path that is already proven."""
+        """End to end through the real worker thread, because the value is the
+        whole path and not the dict: a job function calls one method and a
+        listing row carries the percentage. Pins that the affordance reaches the
+        listing through `start_fn`'s thread."""
         mgr = JobManager()
         done = threading.Event()
 

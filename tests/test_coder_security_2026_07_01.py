@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 coder-security backlog cluster.
+"""Regression tests for the coder-security backlog cluster.
 
-  AUD-CODERTOOLS - scope allowlist is default-deny (contract test)
-  REC-N1-PROSE   - RULES prose + subagent prompt omit run_shell when disabled
-  R19a           - unattended one-shot gates run_shell (fail-closed, opt-out --yes)
+  scope allowlist is default-deny (contract test)
+  RULES prose + subagent prompt omit run_shell when disabled
+  unattended one-shot gates run_shell (fail-closed, opt-out --yes)
 """
 
 from pathlib import Path
@@ -24,7 +24,7 @@ class _StubBackend:
 
 
 # --------------------------------------------------------------------------- #
-#  AUD-CODERTOOLS - every file-touching tool is scoped or explicitly exempt
+#  Every file-touching tool is scoped or explicitly exempt
 # --------------------------------------------------------------------------- #
 
 _PATHY_NAMES = {"path", "glob", "output_path", "input_image",
@@ -105,7 +105,7 @@ def test_nested_path_tool_scope_check_reads_the_nested_paths():
 
 
 # --------------------------------------------------------------------------- #
-#  REC-N1-PROSE - the prose stops advertising run_shell when it is disabled
+#  The prose stops advertising run_shell when it is disabled
 # --------------------------------------------------------------------------- #
 
 def test_rules_prose_omits_run_shell_when_disabled():
@@ -132,7 +132,7 @@ def test_full_system_prompt_run_shell_free_when_disabled(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  R19a - the one-shot shell gate (auto_approve on, but run_shell confirmed)
+#  The one-shot shell gate (auto_approve on, but run_shell confirmed)
 # --------------------------------------------------------------------------- #
 
 def _shell_call():
@@ -141,9 +141,9 @@ def _shell_call():
 
 
 def test_oneshot_shell_denied_without_yes(tmp_path):
-    # This is the config the one-shot CLI now builds when --yes is NOT passed:
-    # auto_approve=True (so file writes proceed unattended) but run_shell in
-    # always_confirm -> a non-interactive run has no confirmer -> fail closed.
+    # The config the one-shot CLI builds when --yes is NOT passed: auto_approve=True
+    # (file writes proceed unattended) but run_shell in always_confirm, so a
+    # non-interactive run has no confirmer and fails closed.
     agent = Agent(_StubBackend(), cwd=tmp_path,
                   auto_approve=True, always_confirm={"run_shell"})
     res = agent._execute_tool(_shell_call(), interactive=False)
@@ -153,7 +153,7 @@ def test_oneshot_shell_denied_without_yes(tmp_path):
 
 def test_oneshot_shell_runs_with_yes(tmp_path):
     # With --yes the one-shot does NOT add run_shell to always_confirm, so under
-    # auto_approve the shell runs (proving the gate is opt-out, not always-on).
+    # auto_approve the shell runs.
     agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
     res = agent._execute_tool(_shell_call(), interactive=False)
     assert res.ok, res.output

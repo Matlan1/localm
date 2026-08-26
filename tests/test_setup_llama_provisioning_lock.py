@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """_provisioning_lock: cross-process single-flight around setup-llama's own
-provisioning steps (diff-review-discipline.md item 26 - the identical hazard
-that bit managed_comfy_update.py, now reachable here too because the GUI's
-standalone runtime-update button is a SECOND trigger onto the same directory
-that a `localm update` re-provision or a user's own `setup-llama` invocation
-can already be mutating).
+provisioning steps. The GUI's standalone runtime-update button is a SECOND
+trigger onto the same directory that a `localm update` re-provision or a user's
+own `setup-llama` invocation can already be mutating.
 
 Cross-process atomicity is the actual claim, so the load-bearing test spawns a
 REAL second interpreter rather than mocking pid_alive - a unit test that only
-monkeypatches the liveness check cannot demonstrate that mkdir is atomic
-across two processes, only that the Python-level logic branches correctly.
+monkeypatches the liveness check cannot demonstrate that mkdir is atomic across
+two processes, only that the Python-level logic branches correctly.
 """
 
 from __future__ import annotations
@@ -25,13 +23,9 @@ import pytest
 
 from localm import setup_llama as sl
 
-# The holder subprocess is spawned as `python <script>.py ...`, which does NOT
-# get cwd inserted onto sys.path (only `-m`/`-c` do) - it would otherwise fall
-# through to the venv's editable install and import a DIFFERENT localm tree
-# than the one this test process itself resolved `sl` from (worktree-
-# preflight.md: "ANY SCRIPT RUN BY PATH FROM A WORKTREE IMPORTS THE MAIN
-# CHECKOUT"). Force it explicitly so the holder verifiably runs the SAME
-# source this test imported, never a stale sibling checkout.
+# The holder subprocess is a script run by path, which does NOT get cwd inserted
+# onto sys.path (only -m and -c do), so PYTHONPATH is forced explicitly to make
+# it import the SAME localm tree this test process resolved `sl` from.
 _REPO_ROOT = str(Path(sl.__file__).resolve().parents[1])
 
 # A fixed, argv-driven holder script (no string interpolation into code: every

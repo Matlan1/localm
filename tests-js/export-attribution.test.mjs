@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// NEW-WEBSEARCH-UX-EXPORT-ATTRIBUTES-TOOL-RESULTS-TO-USER: web-search results,
-// retrieved knowledge-base excerpts, and attached-document text are pushed
-// with role:"user" (settings-perf.js) so the MODEL reads them as
-// conversation context - a deliberate choice, not a bug, and not something
-// this fix touches. But exportConversation() used to label every message
-// purely by role, so those messages rendered in the exported markdown as
-// "**You:**", exactly as if the human had typed raw search-result text.
-// This asserts the export now uses noteLabel() (chat.js), the same
-// Web/Doc/Sources override renderChat() already applies on screen, so the
-// exported transcript and the live UI can never disagree about who "said"
-// an injected message.
+// exportConversation() labels injected role:"user" messages (web-search
+// results, knowledge-base excerpts, attached-document text) via noteLabel(),
+// the same Web/Doc/Sources override renderChat() applies on screen.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

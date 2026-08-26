@@ -151,9 +151,8 @@ def test_rollback_restores_exact_pre_apply_state(tmp_path):
 
 # --------- preserve provisioned native binaries across a swap -----------
 # The runtime wheel's lib/ holds the .dll/.so that `localm setup-llama` provisions.
-# They are gitignored, so a build.zip carries only the empty scaffold; a blunt
-# whole-tree replace of runtime/ would DELETE them (breaking inference) and, while
-# localm is running, choke on the loaded (locked) DLL. PRESERVE_WITHIN keeps them.
+# They are gitignored, so a build.zip carries only the empty scaffold.
+# PRESERVE_WITHIN keeps them across a whole-tree replace of runtime/.
 
 _LIB = "runtime/localm_llama_runtime/lib"
 
@@ -203,7 +202,7 @@ def test_swap_preserves_provisioned_binaries_and_updates_scaffold(tmp_path):
 
     au.swap_with_backup(staged, inst, bdir)
 
-    # Provisioned binaries SURVIVE (the bug: a whole-tree replace would wipe them).
+    # Provisioned binaries SURVIVE.
     assert (inst / _LIB / "llama.dll").read_bytes() == b"PROVISIONED-NATIVE-BINARY"
     assert (inst / _LIB / "ggml-base.dll").exists()
     # ... while the rest of runtime/ (scaffold source) still updates.
@@ -229,11 +228,11 @@ def test_rollback_keeps_provisioned_binaries_and_restores_scaffold(tmp_path):
 
 
 def test_swap_does_not_choke_on_a_held_open_binary(tmp_path):
-    """Regression: while localm runs, a loaded DLL is file-locked on Windows; a swap
-    that deletes it raises WinError 32 and can strand a half-applied tree. The preserve
+    """While localm runs, a loaded DLL is file-locked on Windows, and a swap that
+    deletes it raises WinError 32 and can strand a half-applied tree. The preserve
     keeps the swap off the binary entirely, so it completes with the binary intact.
-    (On POSIX an open file is deletable, so this also pins that the binary is preserved
-    rather than replaced by the empty scaffold.)"""
+    On POSIX an open file is deletable, so this also pins that the binary is
+    preserved rather than replaced by the empty scaffold."""
     inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
     inst.mkdir(); staged.mkdir()
     _install_with_runtime(inst)
@@ -278,24 +277,21 @@ def test_post_swap_command_runtime_forces_and_never_prompts():
 
 
 def test_bare_localm_argv_on_the_launcher_exe_fails_with_exit_2(tmp_path):
-    """Live repro of the underlying failure mode this fix avoids. The native launcher
-    build (LocaLM.exe) is literally a renamed copy of the interpreter (see
-    applaunch.py's `os.path.basename(sys.executable).lower() == "localm.exe"` check),
-    and the original incident confirmed a bare "localm" argv[0] resolves straight back
-    to that same exe on the default install (Windows favors a same-directory match over
-    a PATH-installed console-script shim). Reproduce the resulting failure directly: a
-    copy of the interpreter, invoked with the OLD post_swap_command's trailing args,
-    fails to do what was asked - exactly what rolled back every "runtime"-class update.
-    The fix's absolute sys.executable argv never depends on that name resolution, so it
-    can't hit this failure mode (verified separately above).
+    """The native launcher build (LocaLM.exe) is a renamed copy of the
+    interpreter (see applaunch.py's
+    `os.path.basename(sys.executable).lower() == "localm.exe"` check), and a bare
+    "localm" argv[0] resolves back to that same exe on the default install
+    (Windows favors a same-directory match over a PATH-installed console-script
+    shim). A copy of the interpreter invoked with a bare-name post-swap argv
+    therefore fails to do what was asked; the absolute sys.executable argv the
+    code uses does not depend on that name resolution.
 
     The EXACT failure signature depends on what sys.executable is in the process
-    running this test: a standalone interpreter treats "setup-llama" as a script path
-    it can't open and exits 2; a venv's own python.exe (the common case under a test
-    runner, since pytest itself usually runs inside a project .venv) refuses to run
-    away from its venv at all ("No pyvenv.cfg file", a distinct nonzero code). Both are
-    the bare-copy approach breaking, which is the only thing this test needs to prove -
-    it does not assert a fully-loaded backend actually started."""
+    running this test: a standalone interpreter treats "setup-llama" as a script
+    path it cannot open and exits 2; a venv's own python.exe refuses to run away
+    from its venv at all ("No pyvenv.cfg file", a distinct nonzero code). Both
+    are the bare-copy approach breaking, which is all this test asserts - it
+    does not check that a fully-loaded backend started."""
     launcher = tmp_path / ("localm.exe" if sys.platform == "win32" else "localm")
     shutil.copy2(sys.executable, launcher)
     if sys.platform != "win32":
@@ -339,9 +335,9 @@ def test_unsafe_member_detection():
 # ----------------- rollback surfaces restore failures -------------------
 
 class TestRollbackRefusesPoisonedManifestNames:
-    """CodeQL 172: rollback() names can come from <home>/updates/applied_names.json,
-    an ordinary file in the data dir, previously validated only as list[str]. Each
-    name reached `installed / name` and then shutil.rmtree/unlink.
+    """rollback() names come from <home>/updates/applied_names.json, an ordinary
+    file in the data dir, and each name reaches `installed / name` and then
+    shutil.rmtree/unlink.
 
     update_watchdog.py calls main(['--yes']) automatically after a failed health
     probe with stdin=DEVNULL, so the isatty() confirmation is skipped and this can
@@ -358,15 +354,10 @@ class TestRollbackRefusesPoisonedManifestNames:
         _fake_install(inst)
         return inst, bdir
 
-    # EVERY vector must resolve INSIDE tmp_path. A negative test runs the
-    # deliberately-vulnerable code for real, so a payload naming a REAL location
-    # is not a test, it is a live deletion of that location. This was learned the
-    # hard way: an earlier revision of this test used the literal "C:/Users/Public"
-    # and, run against the reverted code, shutil.rmtree emptied it. Absolute and
-    # drive-qualified vectors are therefore BUILT from tmp_path (which is itself
-    # drive-qualified and absolute on Windows), so they exercise the identical
-    # code path - an absolute component REPLACES the base under pathlib - with the
-    # blast radius contained in the fixture.
+    # EVERY vector resolves INSIDE tmp_path: the absolute and drive-qualified
+    # vectors are BUILT from tmp_path rather than naming a real location, so
+    # they exercise the identical code path (an absolute component REPLACES the
+    # base under pathlib) with the blast radius inside the fixture.
     ABS = "<ABS_OUTSIDE>"          # -> tmp_path/victim, absolute + drive-qualified
     UNC_HOST = "<UNC>"             # -> a UNC form; never dialed, rejected lexically
 
@@ -448,7 +439,7 @@ class TestRollbackRefusesPoisonedManifestNames:
             assert au._unsafe_swap_name(bad), f"should be unsafe: {bad!r}"
         for ok in ["localm", "VERSION", "pyproject.toml", "runtime", "docs"]:
             assert not au._unsafe_swap_name(ok), f"should be safe: {ok!r}"
-        # The gap this helper exists to close: an escape-only test passes these.
+        # Names an escape-only check accepts.
         assert not au._unsafe_member("")
         assert not au._unsafe_member(".")
         assert not au._unsafe_member("home")
@@ -483,10 +474,8 @@ def test_swap_with_backup_surfaces_double_failure(tmp_path, monkeypatch):
 
 
 # --------- _prune surfaces a file it cannot remove (do not hide) ---------
-# _prune used to `except OSError: pass`, collapsing a benign already-empty-dir rmdir
-# with a REAL file-unlink failure (e.g. a Windows AV lock on a freshly written file).
-# A stale file then survived while apply()/rollback() reported success. _prune now
-# RETURNS the file-removal failures so the caller surfaces them.
+# _prune RETURNS the file-removal failures so the caller surfaces them, while a
+# benign already-empty-dir rmdir failure stays swallowed.
 
 
 

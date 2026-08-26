@@ -1,27 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The "Advanced" disclosure (.adv-fold) on chat's #params drawer and the three
 // Studio generation forms.
-//
-// The interesting bug this guards is NOT "does the triangle open". It is that
-// folding a field makes it possible for a value to be SET and UNSEEN: two flows
-// write into fields that now live behind a fold ("reuse settings" on an image
-// history entry, and applyPersona, also reached by /persona) and then report
-// success. If the fold stays shut they claim to have restored settings that the
-// user cannot see - a rule 5 violation manufactured by a layout change.
-//
-// So the load-bearing tests here are the two that drive the REAL writers and
-// assert on the fold's `open`, plus their negatives (a writer that set nothing
-// must leave the fold shut) and the boot case (nothing may open on page load, or
-// the feature has quietly undone itself).
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
 
-// Every field, by surface, exactly as the spec assigns it. Written out rather
-// than derived from the DOM on purpose: a derived expectation agrees with
-// whatever the markup happens to say, including after someone moves a field by
-// accident, which is the one thing this table exists to catch.
+// Every field, by surface, as the spec assigns it.
 const SURFACES = {
   "chat #params": {
     fold: "p-advanced",
@@ -90,9 +75,6 @@ for (const [label, spec] of Object.entries(SURFACES)) {
 }
 
 test("no fold opens on a bare page load", () => {
-  // If any advanced field ever ships a value= (or a select whose first option is
-  // non-empty), revealFilledAdvanced would open its fold on every load and the
-  // whole feature would silently undo itself. Nothing else would notice.
   const { window: win } = loadApp();
   runScript(win, "window.__opened = revealFilledAdvanced(document);");
   assert.equal(win.__opened, 0, "a freshly loaded page has nothing set to reveal");
@@ -112,8 +94,7 @@ test("revealFilledAdvanced opens a fold holding a value, and only that fold", ()
 });
 
 test("a select resting on its blank option does not count as set", () => {
-  // img-lora's first option is value="" ("None"). If a blank select counted, the
-  // images fold would open on every reuse, defeating the point.
+  // img-lora's first option is value="" ("None").
   const { window: win } = loadApp();
   const lora = win.document.getElementById("img-lora");
   assert.equal(lora.value, "", "precondition: the LoRA select starts blank");
@@ -149,12 +130,12 @@ test("typing into a folded field updates its badge without any per-fold wiring",
   assert.equal(badge.textContent, "1 set");
 });
 
-/* ---- the two real writers: the reason this feature needs code at all ---- */
+/* ---- the writers: applyPersona and "reuse settings" ---- */
 
 test("applyPersona reveals the sampling values it just restored", () => {
   const { window: win } = loadApp();
-  // personaCache is a top-level `export let`, so it lives in the shared lexical
-  // environment rather than on window - seed it from a script in the same realm.
+  // personaCache is a top-level `export let`, not on window: seed it from a
+  // script in the same realm.
   runScript(win, `personaCache = [{
     name: "tight", system: "Be terse.",
     params: { temperature: 0.2, top_k: 20, max_tokens: 512 },
@@ -171,9 +152,7 @@ test("applyPersona reveals the sampling values it just restored", () => {
 });
 
 test("applyPersona leaves the fold shut when it restored nothing advanced", () => {
-  // The negative half. applyPersona writes "" for unset params, so a persona
-  // carrying only a temperature genuinely CAN express the not-opening case -
-  // without this the test above would pass on code that opens unconditionally.
+  // applyPersona writes "" for unset params.
   const { window: win } = loadApp();
   runScript(win, `personaCache = [{
     name: "warm", system: "Be friendly.", params: { temperature: 0.9 },
@@ -185,8 +164,8 @@ test("applyPersona leaves the fold shut when it restored nothing advanced", () =
 });
 
 test("'reuse settings' reveals the seed and guidance it just restored", () => {
-  // showImageDetail fires fetchImageURL(...).then(...) with no .catch, so the
-  // fetch stub must resolve or node --test reports an unhandled rejection.
+  // showImageDetail calls fetchImageURL(...).then(...) with no .catch, so the
+  // fetch stub must resolve.
   const { window: win } = loadAppWithPages({
     fetchImpl: async () => ({
       ok: true, status: 200, json: async () => ({}), text: async () => "",

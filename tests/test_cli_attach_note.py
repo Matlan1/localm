@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CLI-1: `localm run` must not silently load the model in-process when it fails
-to attach to a background server - it should say why (or that none was found).
---no-server stays quiet (the user opted out)."""
+"""`localm run` never loads the model in-process silently when it fails to attach
+to a background server: it says why, or that none was found. --no-server stays
+quiet."""
 
 from localm.cli import _attach_fallback_note
 
 
 def test_no_server_opt_out_is_silent():
     assert _attach_fallback_note(no_server=True, attach_error=None) is None
-    # even with an error, --no-server means the user chose in-process: stay quiet
+    # --no-server stays quiet even when attaching errored.
     assert _attach_fallback_note(no_server=True, attach_error=RuntimeError("x")) is None
 
 
@@ -28,9 +28,8 @@ def test_attach_error_is_surfaced():
 
 
 def test_autostart_timeout_is_acknowledged():
-    # CLI-3: after a background auto-start that timed out, the note must ACKNOWLEDGE
-    # that (not tell the user "no server here; start one", which contradicts the
-    # `Starting one in the background...` line they just saw).
+    # After a background auto-start that timed out, the note acknowledges the
+    # timeout.
     note = _attach_fallback_note(no_server=False, attach_error=None,
                                  autostart_attempted=True)
     assert note is not None
@@ -42,10 +41,8 @@ def test_autostart_timeout_is_acknowledged():
 
 
 def test_run_autostart_timeout_note(monkeypatch):
-    # Real path: drive the actual `run` command so run() enters the auto-start
-    # block and the poll times out. Only the external subprocess + server discovery
-    # are stubbed (fully-unmocked would spawn a real server we must not kill by
-    # port); the real run() control flow + note selection execute.
+    # Drives the real `run` command so run() enters the auto-start block and the
+    # poll times out. Only the subprocess and server discovery are stubbed.
     from unittest.mock import MagicMock
 
     from click.testing import CliRunner
@@ -61,7 +58,7 @@ def test_run_autostart_timeout_note(monkeypatch):
 
     runner = CliRunner()
     result = runner.invoke(run, ["definitely-not-a-real-model-xyz", "-p", "hi"])
-    # Collapse rich's line-wrapping so phrase assertions are wrap-proof.
+    # Collapse rich's line-wrapping into a single line.
     flat = " ".join(result.output.split()).lower()
     assert "starting one in the background" in flat          # auto-start was attempted
     assert "background server did not come up in time" in flat   # timeout acknowledged

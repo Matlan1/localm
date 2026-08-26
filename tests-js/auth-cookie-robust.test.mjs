@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// authHeaders() no longer reads any cookie: the CSRF token is DERIVED from the
-// session server-side and delivered via GET /api/session (stashed in
-// window.__LOCALM_CSRF__), so it can never desync from the session (the old
-// "missing CSRF token on every action" bug) and a malformed cookie can never brick
-// the client into a false offline state. These tests pin that new contract plus the
-// 403-CSRF self-heal (refetch the token and retry a write once).
+// authHeaders() reads no cookies; the CSRF token comes from window.__LOCALM_CSRF__,
+// populated from GET /api/session.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,8 +19,7 @@ test("authHeaders sends the in-memory session CSRF token", async () => {
 test("a malformed cookie is IRRELEVANT to authHeaders (it reads no cookies)", async () => {
   const { window } = loadApp();
   await tick();
-  // A value that is NOT valid percent-encoding used to make readCookie throw and
-  // brick authHeaders. authHeaders no longer touches cookies, so this cannot happen.
+  // "ab%cd" is not valid percent-encoding.
   runScript(window, `document.cookie = "localm_csrf=ab%cd";`);
   window.__LOCALM_CSRF__ = "";
   let headers;
@@ -52,10 +47,7 @@ test("a malformed cookie does NOT report a reachable server as unreachable", asy
 });
 
 test("a cookie-authed write that 403s on a stale CSRF token self-heals and retries once", async () => {
-  // Simulate the server rotating its per-process CSRF secret (a restart): the first
-  // write with the stale token 403s; the client refetches the token from
-  // /api/session and retries ONCE, which succeeds. Safe: a 403 is rejected before
-  // the handler runs, so nothing is duplicated.
+  // The stub 403s the unload unless the sent token is "FRESH"; /api/session serves "FRESH".
   let unloadCalls = 0;
   const { window } = loadApp({
     fetchImpl: async (url, init) => {
@@ -73,7 +65,7 @@ test("a cookie-authed write that 403s on a stale CSRF token self-heals and retri
     },
   });
   await tick();
-  window.__LOCALM_CSRF__ = "STALE";   // the token the client currently believes in
+  window.__LOCALM_CSRF__ = "STALE";
 
   const res = await window.fetch("/v1/models/unload", {
     method: "POST",

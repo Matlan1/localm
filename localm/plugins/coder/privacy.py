@@ -67,34 +67,31 @@ def refuse_move_into_stricter_project(session_mode: str, dest_cwd) -> str | None
 
     A session's persistence mode is resolved ONCE, from the directory it started
     in, and cannot be changed afterwards - the audit log is already open, which
-    is what the REPL's /mode tells anyone who asks. Changing the DIRECTORY is
-    therefore the one way a session's mode and its location can come to
-    disagree, and the disagreement is not harmless: the Markdown transcript is
-    written to the session's CURRENT cwd at close, so a ``full`` session moved
-    into a project marked private leaves a complete record inside a project that
-    asked for none. MEASURED before this guard existed: the transcript landed in
-    <dest>/.localcoder/sessions/, and the episodic store took the work too.
+    is what the REPL's /mode reports. Changing the DIRECTORY is therefore the one
+    way a session's mode and its location can come to disagree, and the
+    disagreement is not harmless: the Markdown transcript is written to the
+    session's CURRENT cwd at close, so a ``full`` session moved into a project
+    marked private would leave a complete record in <dest>/.localcoder/sessions/
+    and the episodic store would take the work too.
 
-    Since the mode cannot be lowered to match, such a move is REFUSED and the
-    reason named - the only option that neither writes into a project that
-    declared itself private nor pretends the setting was honoured (AGENTS.md
-    rule 5: a privacy step that cannot run must never report success).
+    The mode cannot be lowered to match, so such a move is REFUSED and the reason
+    named: nothing is written into a project that declared itself private, and
+    nothing pretends the setting was honoured.
 
     KEYED ON THE PROJECT'S OWN DECLARATION, NOT ON effective_mode(). The global
     default coder mode is ``privacy``, so effective_mode() answers "privacy" for
-    every ordinary directory that has said nothing at all - and keying on it
-    refused moving a recording session ANYWHERE, which is a blanket ban wearing
-    a privacy control's clothes. Only ``.localcoder/config.toml`` is a project
-    SAYING something, so only that is treated as a claim to respect. A project
-    that has said nothing is not asserting privacy; the session's own mode,
-    chosen when it started, still governs.
+    every ordinary directory that has said nothing at all, and keying on it would
+    refuse moving a recording session anywhere. Only
+    ``.localcoder/config.toml`` is a project SAYING something, so only that is
+    treated as a claim to respect; a project that has said nothing is not
+    asserting privacy, and the session's own mode still governs.
 
-    An UNREADABLE project config refuses too, for exactly the reason
-    audit.effective_mode gives at the same fork: the file is the one place a
-    user can mark a project private, and we cannot tell whether this one did.
+    An UNREADABLE project config refuses too, for the reason
+    audit.effective_mode gives at the same fork: the file is the one place a user
+    can mark a project private, and this cannot tell whether this one did.
 
-    Shared by the web cwd route and the REPL's /cd deliberately: fixing one
-    surface and not the other would put the two back out of step.
+    Shared by the web cwd route and the REPL's /cd, so the two surfaces cannot
+    drift.
     """
     from pathlib import Path as _Path
 
@@ -135,28 +132,26 @@ def refuse_move_into_stricter_project(session_mode: str, dest_cwd) -> str | None
 
 
 def subprocess_privacy_env() -> dict[str, str]:
-    """
-    Return a copy of the current environment with shell history vars zeroed.
+    """Return a copy of the current environment with shell history vars zeroed.
 
     Used by ``tool_run_shell`` in privacy mode so that any bash/sh/zsh child
-    process cannot write command history to disk.  For non-interactive shells
-    (our normal case) these are no-ops, but they are an explicit statement of
-    intent and guard against edge cases where a script opens an interactive
-    sub-shell.
+    process cannot write command history to disk. For non-interactive shells
+    (the normal case) these are no-ops, and they also guard the edge case where a
+    script opens an interactive sub-shell.
 
     Variables overridden:
       HISTFILE       - path where bash/zsh writes history on exit.
       HISTSIZE       - in-memory history depth (0 = disabled in bash).
       HISTFILESIZE   - max lines written to HISTFILE (0 = truncate to empty).
       HISTIGNORE     - ``*`` ignores every command in bash history.
-      HISTCONTROL    - ``ignorespace:ignoredups`` (belt-and-suspenders).
+      HISTCONTROL    - ``ignorespace:ignoredups``.
       LESSHISTFILE   - less pager history.
       MYSQL_HISTFILE - mysql CLI history.
       SQLITE_HISTORY - sqlite3 CLI history.
 
-    We deliberately do NOT set env vars for fish or PowerShell because:
+    No env vars are set for fish or PowerShell:
       * fish: non-interactive fish sessions never save history regardless.
-      * PowerShell: PSReadLine only runs in interactive sessions; our
+      * PowerShell: PSReadLine only runs in interactive sessions, and these
         subprocesses use ``cmd.exe /C`` (Windows) or ``/bin/sh -c`` (Unix),
         neither of which loads PSReadLine.
     """
@@ -258,10 +253,9 @@ def _scrub_history_file(path: Path, pattern: re.Pattern) -> bool:
         return False
 
     # Read bytes (not read_text) so the original newline style is observable:
-    # read_text() applies universal-newline translation, turning \r\n into \n
-    # before we can detect it, which made the "preserve CRLF" logic below a
-    # no-op everywhere except Windows (where text-mode WRITE re-added \r\n by
-    # accident). Detect from the raw bytes and write byte-exact instead.
+    # read_text() applies universal-newline translation, turning CRLF into LF
+    # before it can be detected, which would defeat the "preserve CRLF" logic
+    # below. Detect from the raw bytes and write byte-exact.
     raw = data.decode("utf-8", errors="replace")
     crlf = b"\r\n" in data
     lines = raw.splitlines()
@@ -300,8 +294,7 @@ def _scrub_history_file(path: Path, pattern: re.Pattern) -> bool:
 
 
 def clear_shell_history_traces(binary_name: str = "localcoder") -> int:
-    """
-    Scrub lines referencing the coder invocation from shell history on exit.
+    """Scrub lines referencing the coder invocation from shell history on exit.
 
     Matches BOTH spellings of the coder command:
       * the standalone ``binary_name`` console-script (default ``localcoder``);
@@ -309,9 +302,9 @@ def clear_shell_history_traces(binary_name: str = "localcoder") -> int:
         invocation), allowing any inter-word whitespace.
 
     A bare ``localm`` line for some *other* subcommand (``localm gui``,
-    ``localm serve``, the chat REPL, ...) is intentionally left untouched: only
-    the coder pollutes its own history, and wiping every ``localm`` line would
-    delete unrelated history.
+    ``localm serve``, the chat REPL, ...) is left untouched: only the coder
+    pollutes its own history, and wiping every ``localm`` line would delete
+    unrelated history.
 
     Cleans:
       Windows  - PSReadLine ConsoleHost_history.txt
@@ -355,14 +348,13 @@ _PROVIDER_NAMES = {
 
 
 def warn_external_provider(provider: str) -> None:
-    """
-    Print a prominent warning when privacy mode is active but prompts will be
+    """Print a prominent warning when privacy mode is active but prompts will be
     sent to an external API.
 
-    Note: using an external provider is always an explicit opt-in (--online /
-    --anthropic flags).  This warning fires only when privacy mode is also
-    active, to surface the contradiction clearly (e.g. mode = "privacy" in
-    config.toml but --online on the CLI).
+    Using an external provider is always an explicit opt-in (--online /
+    --anthropic flags). This warning fires only when privacy mode is also active,
+    to surface the contradiction (e.g. mode = "privacy" in config.toml but
+    --online on the CLI).
 
     Privacy mode suppresses *local* persistence (no log files, no readline
     history, shell history cleaned on exit), but it cannot prevent the API

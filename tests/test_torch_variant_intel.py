@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Intel HF torch routing: a vendor-neutral runtime pick (vulkan/own) on an Intel box
-must route the optional HuggingFace PyTorch to the native XPU wheels, not skip Intel.
-(Before: Intel fell through to "none" - the dropped-Intel bug.) The backend pick still
-fully drives the variant for explicit vendor picks, and a neutral pick NEVER pulls ROCm."""
+routes the optional HuggingFace PyTorch to the native XPU wheels rather than
+falling through to "none". The backend pick fully drives the variant for explicit
+vendor picks, and a neutral pick NEVER pulls ROCm."""
 
 from localm.hwdetect import Detection, recommended_torch_variant
 
@@ -21,7 +21,7 @@ def test_explicit_backend_picks_drive_the_variant():
 
 
 def test_neutral_pick_routes_intel_to_xpu_not_none():
-    # THE fix: vulkan/own on an Intel box -> xpu (was "none" = Intel dropped).
+    # vulkan/own on an Intel box -> xpu.
     assert recommended_torch_variant("vulkan", _INTEL) == "xpu"
     assert recommended_torch_variant("own", _INTEL) == "xpu"
 

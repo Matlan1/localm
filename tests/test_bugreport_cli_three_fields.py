@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#958: ``localm bug-report`` used to take a single ``-m`` and ship it (or the
-``<!-- Please describe... -->`` placeholder) through report_failure with no
-"what happened"/"what expected" fields and no log-attach option at all - a
-DIFFERENT producer with a different, weaker template than the GUI/API path
-(save_user_report). Now it shares the SAME three-field template and the same
-report_title/offer_to_send machinery, so a fix to one producer is a fix to
-both."""
+"""``localm bug-report`` shares the SAME three-field template and the same
+report_title/offer_to_send machinery as the GUI/API producer
+(save_user_report): "what I was doing", "what I expected" and "what happened",
+plus the log-attach option."""
 
 import glob
 import os
@@ -35,8 +32,8 @@ def test_three_flags_produce_the_same_three_distinct_sections_as_the_gui(cli_run
 
 
 def test_message_only_renders_not_stated_not_a_duplicate(cli_runner):
-    """#958's own artifact, reproduced through the CLI producer specifically:
-    -m alone used to echo into the title AND the "What happened" body."""
+    """-m alone must not echo into both the title and the "What happened"
+    body."""
     from localm.cli import main
     result = cli_runner.invoke(main, [
         "bug-report", "-m", "the image generator crashed when I clicked twice",
@@ -102,10 +99,8 @@ def test_interactive_no_flags_prompts_for_all_three_fields(cli_runner, monkeypat
     questions the GUI form asks, not a bare one-line prompt.
 
     CliRunner.invoke() REPLACES sys.stdin with a fresh
-    click.testing._NamedTextIOWrapper for the duration of the call, so
-    patching the object captured before invoke() (the usual monkeypatch
-    shape) never reaches the code under test - the CLASS must be patched
-    instead, since that is what the freshly-constructed instance inherits."""
+    click.testing._NamedTextIOWrapper for the duration of the call, so the
+    CLASS is patched rather than the object captured before invoke()."""
     from click.testing import _NamedTextIOWrapper
     from localm.cli import main
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
@@ -125,8 +120,8 @@ def test_interactive_no_flags_prompts_for_all_three_fields(cli_runner, monkeypat
 
 
 def test_interactive_flags_skip_only_their_own_prompt(cli_runner, monkeypatch):
-    """A flag already answering a question means that question is not asked
-    again - only the remaining, un-answered ones are."""
+    """A flag that already answers a question suppresses that question; only
+    the remaining, un-answered ones are asked."""
     from click.testing import _NamedTextIOWrapper
     from localm.cli import main
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)

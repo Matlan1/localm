@@ -3,9 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
 
-// Issues 3/4: after auth, a phone that has not installed localm yet lands on a
-// one-time install gate (Install on Android / Add-to-Home-Screen steps on iOS),
-// then Continue enters the app. Desktop / installed / returning visits skip it.
+// After auth, a phone that has not installed localm lands on a one-time install
+// gate (Install on Android, Add-to-Home-Screen steps on iOS) and Continue enters
+// the app. Desktop, installed and returning visits skip it.
 
 const allOk = () => Promise.resolve({
   ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "",
@@ -61,9 +61,7 @@ test("shouldShowInstallGate: true on a coarse-pointer device not yet onboarded",
 test("shouldShowInstallGate: false once the onboarded flag is set (no nagging)", () => {
   const { window } = loadApp({ fetchImpl: allOk });
   window.matchMedia = (q) => ({ matches: q.includes("coarse") });
-  // AUD-INSTANCEID: an "onboarded" flag is only honoured once this origin has
-  // confirmed pairing with the connected backend (localm.instanceId cached) -
-  // otherwise it could belong to a different install (see the next test).
+  // The onboarded flag is honoured only once a localm.instanceId is cached.
   window.localStorage.setItem("localm.instanceId", "instance-a");
   window.localStorage.setItem("localm.onboarded", "1");
   assert.equal(window.shouldShowInstallGate(), false);
@@ -73,8 +71,7 @@ test("shouldShowInstallGate: AUD-INSTANCEID - an onboarded flag with no confirme
      "instance id is NOT trusted (a fresh backend pairing still onboards)", () => {
   const { window } = loadApp({ fetchImpl: allOk });
   window.matchMedia = (q) => ({ matches: q.includes("coarse") });
-  // No localm.instanceId cached: this "onboarded" flag could have been left
-  // behind by an entirely different backend that shared this browser origin.
+  // No localm.instanceId cached.
   window.localStorage.setItem("localm.onboarded", "1");
   assert.equal(window.shouldShowInstallGate(), true,
     "an unverified onboarded flag must not silently skip onboarding for a new pairing");

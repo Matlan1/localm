@@ -62,16 +62,14 @@ def load_project_config(cwd: Path) -> dict[str, Any]:
     Returns an empty dict when NO file is found. Raises ProjectConfigUnreadable
     when a file EXISTS but cannot be read or parsed.
 
-    That distinction is load-bearing rather than tidy. Returning ``{}`` for an
-    unparseable file is byte-identical to "there is no project config here", and
-    two of the keys it silently dropped are SAFETY settings rather than
-    preferences: ``always_confirm`` (the user's "prompt me before a shell
-    command even under --yes") empties at cli/_main.py, so shell tool calls run
-    unprompted, and ``mode = "privacy"`` is dropped there and in
-    audit.effective_mode, so a session the user marked private falls through to
-    the global coder_mode and a transcript is written to disk. A TOML typo is an
-    extremely reachable input and nothing told the user their file was ignored
-    (AGENTS.md rule 5).
+    That distinction is load-bearing. Returning ``{}`` for an unparseable file is
+    byte-identical to "there is no project config here", and two of the keys it
+    would silently drop are SAFETY settings rather than preferences:
+    ``always_confirm`` (the user's "prompt me before a shell command even under
+    --yes") empties at cli/_main.py, so shell tool calls run unprompted, and
+    ``mode = "privacy"`` is dropped there and in audit.effective_mode, so a
+    session the user marked private falls through to the global coder_mode and a
+    transcript is written to disk.
 
     The message names the full path because every consumer is a LOCAL surface
     (the coder CLI and the debug log, which pathscrub redacts for bug reports);

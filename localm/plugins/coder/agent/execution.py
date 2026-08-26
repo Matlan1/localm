@@ -40,16 +40,13 @@ def _looks_like_drive_path(tok: str) -> bool:
     """True for a Windows drive-qualified token: ``C:``, ``C:\\x``, ``d:/x``.
 
     The drive letter must be a single ASCII letter followed by a separator or the
-    end of the token. Testing only for a colon in position 1 made every ``a:b``
-    token a path, so ``5:30`` and ``4:3`` (an ffmpeg offset, an aspect ratio) and
-    ``s:old:new:`` (a sed delimiter) were all reported as out-of-scope paths.
-    ``C:foo``, drive-relative with no separator, is given up deliberately: it is
-    rare and cannot be told apart from an ordinary key:value argument.
+    end of the token, so ``5:30`` and ``4:3`` (an ffmpeg offset, an aspect ratio)
+    and ``s:old:new:`` (a sed delimiter) are not paths. ``C:foo``, drive-relative
+    with no separator, is not recognised: it cannot be told apart from an
+    ordinary key:value argument.
 
-    A real drive-qualified path carries exactly ONE colon, so requiring that
-    also rejects ``s:/usr/local:/opt:g``. That is the COMMON sed form (a colon
-    delimiter is chosen precisely because the pattern contains slashes), and the
-    separator rule alone would still have read it as a drive path.
+    A real drive-qualified path carries exactly ONE colon, so requiring that also
+    rejects ``s:/usr/local:/opt:g``, the common sed form.
     """
     if len(tok) < 2 or tok[1] != ":" or tok.count(":") != 1:
         return False
@@ -63,8 +60,8 @@ def _is_path_like(tok: str) -> bool:
 
     Absolute, drive-qualified (``C:\\x``, bare ``E:``), explicitly relative
     (``./``, ``../``, ``~/``), or carrying a ``/../`` segment. Everything else is
-    treated as not-a-path: see ``_shell_paths_outside_scope`` for why this may
-    never fall back to asking the filesystem, and what that costs.
+    treated as not-a-path, and this never falls back to asking the filesystem -
+    see ``_shell_paths_outside_scope``.
     """
     norm = tok.replace("\\", "/")
     return (norm.startswith(("./", "../", "~/", "/"))
@@ -79,44 +76,26 @@ class _ExecutionMixin:
         matching, or return None if it escapes cwd.
 
         Relative paths are joined onto cwd; absolute paths are accepted only
-        when they live inside cwd (an in-cwd absolute path that matches the
-        scope must pass - BUG-6). Glob metacharacters in *value* (e.g.
-        ``**/*.py`` for grep/search_replace) survive resolution: they are kept
-        verbatim in the relative string and matched against the scope as-is.
+        when they live inside cwd, so an in-cwd absolute path that matches the
+        scope passes. Glob metacharacters in *value* (e.g. ``**/*.py`` for
+        grep/search_replace) survive resolution: they are kept verbatim in the
+        relative string and matched against the scope as-is.
 
-        The VALUE is never touched on disk, not even to refuse it. This gate ran
-        ``Path(raw).resolve()`` on an absolute path that was not lexically under
-        cwd, so a ``--scope`` session where the model emitted an absolute path
-        anywhere on the machine stat-ed precisely that path (realpath + stat,
-        measured) in order to decide it was out of scope. A stat is an access:
-        at the access point a legitimate gate-check, a command gone wrong and a
-        live injection attempt are indistinguishable, so the gate must not have
-        the capability rather than try to use it carefully. Same defect class the
-        shell WARNING path was cleared of (see :meth:`_scope_rel_lexical`), which
-        deliberately left this one; this closes it.
+        The VALUE is never touched on disk, not even to refuse it. A stat is an
+        access, and at the access point a legitimate gate-check, a command gone
+        wrong and a live injection attempt are indistinguishable, so the gate
+        does not have the capability at all. See :meth:`_scope_rel_lexical`.
 
-        The cwd ANCHOR still resolves, and that is a different thing: it is not a
-        model-supplied value but the owner's own working directory, which this
-        process is already running in. It is kept exactly as it was so this change
-        has one behavioural delta and one only.
+        The cwd ANCHOR does resolve: it is not a model-supplied value but the
+        owner's own working directory, which this process is already running in.
 
-        That delta is strictly in the fail-CLOSED direction, which a confinement
-        gate requires. With R = ``self.cwd.resolve()``, a path was allowed when R
-        prefixed it OR R prefixed its resolved form; it is now allowed only when R
-        prefixes it. The new set is a strict subset of the old one, so refusal can
-        only widen, never narrow. Nor can dropping the fallback open an escape:
-        the escape direction (a path lexically INSIDE cwd that symlinks OUT)
-        satisfies the FIRST ``relative_to`` and never reached the fallback at all.
-        Real escapes are caught by ``tools/base.py::_confine``, which resolves at
-        actual execution time (where the tool is about to open the file anyway,
-        so the stat is inherent) and is untouched.
-
-        Cost, accepted: an absolute path that is lexically OUTSIDE cwd but reaches
-        INSIDE through a symlink now reads as outside. The fallback was added
-        speculatively ("for symlinks etc.") rather than for a reported case, no
-        scope or confinement test covers it, and the variant where cwd ITSELF is
-        symlinked cannot arise - every Agent construction site passes an
-        already-resolved cwd.
+        With R = ``self.cwd.resolve()``, a path is allowed only when R prefixes
+        it, so an absolute path that is lexically OUTSIDE cwd but reaches INSIDE
+        through a symlink reads as outside. The escape direction (a path
+        lexically INSIDE cwd that symlinks OUT) satisfies the ``relative_to``
+        here and is caught by ``tools/base.py::_confine``, which resolves at
+        actual execution time. Every Agent construction site passes an
+        already-resolved cwd, so cwd itself is never symlinked here.
         """
         raw = str(value).replace("\\", "/")
         p = Path(raw)
@@ -148,26 +127,19 @@ class _ExecutionMixin:
     def _scope_rel_lexical(self, value: str) -> Optional[str]:
         """Filesystem-free twin of :meth:`_scope_rel`, for the shell WARNING only.
 
-        Same contract (cwd-relative POSIX string, or None if it escapes cwd). The
-        two no longer differ in how they treat the model-supplied VALUE: neither
-        resolves it, because neither may stat what it is deciding about. What is
-        left is the cwd ANCHOR, and that difference is deliberate.
+        Same contract (cwd-relative POSIX string, or None if it escapes cwd).
+        Neither this nor :meth:`_scope_rel` resolves the model-supplied VALUE.
+        The one difference is the cwd ANCHOR.
 
         ``os.path.abspath`` rather than ``resolve()`` for cwd here: it normalises
         and anchors without a symlink lookup, so no part of this call stats
-        ANYTHING at all. That total property is what a warning needs, because it
-        runs over a command the model has merely PROPOSED, before any confirmation
-        and before anything executes. :meth:`_scope_rel` keeps ``resolve()`` for
-        its anchor instead, because it is a hard gate whose refusal set must not
-        widen or narrow by accident, and swapping the anchor would change which
-        paths match (in the cwd-is-symlinked case, in the more permissive
-        direction). Statting the owner's own working directory is not the exposure
-        this rule is about; statting a value the model named is.
+        ANYTHING at all, which is what a warning needs - it runs over a command
+        the model has merely PROPOSED, before any confirmation and before
+        anything executes. :meth:`_scope_rel` keeps ``resolve()`` for its anchor,
+        so its refusal set does not shift in the cwd-is-symlinked case.
 
-        Cost, shared with the enforcement twin: a path that reaches cwd only
-        through a symlink reads as outside. For a best-effort warning that is the
-        safe direction (it can over-report a link, never miss a real escape), and
-        it is the only one that keeps the check from touching what it inspects.
+        A path that reaches cwd only through a symlink reads as outside, so this
+        can over-report a link and never misses a real escape.
         """
         raw = str(value).replace("\\", "/")
         p = Path(raw)
@@ -205,14 +177,13 @@ class _ExecutionMixin:
         """
         # MCP and PLUGIN tools are registered dynamically with unknown arg schemas,
         # so an owner's --scope confines their file ops via a broad set of common
-        # path-arg names (CHK-MCP-SCOPE / CHK-SCOPE-PLUGIN). Best-effort: an unusual
-        # path-arg name is not caught (the tool's author is the owner's own config).
+        # path-arg names. Best-effort: an unusual path-arg name is not caught.
         if call.name.startswith(("mcp_", "plugin_")):
             arg_names = _MCP_SCOPE_PATH_ARGS
         else:
             # A nested-path tool (edit_files) has NO top-level `path` arg, so
             # checking arg names alone would find nothing and let the call
-            # through - fail-OPEN. Check its real targets first.
+            # through. Check its real targets first.
             for value in _call_target_paths(call.name, call.args):
                 if not self._scope_allows(value):
                     return value
@@ -229,33 +200,22 @@ class _ExecutionMixin:
         active scope. Empty when nothing suspicious was found OR when the check
         simply could not tell - it is a heuristic, never a gate.
 
-        PURELY LEXICAL, and that is the point: a model-supplied token is never
-        stat-ed, resolved, or ``.exists()``-ed. This runs over a command the model
-        has merely PROPOSED, before any confirmation and before anything executes,
-        so a filesystem probe here reaches out of the workspace on the model's say
-        so alone. ``(self.cwd / tok)`` drops cwd entirely for a drive-anchored
-        token, so the old exists-under-cwd guess stat-ed precisely whatever the
-        model named, anywhere on the machine. There is no safe stat at this point:
-        a legitimate probe, a command gone wrong, and a live injection attempt are
-        indistinguishable at the access point, so the check must not have the
-        capability at all rather than try to use it carefully.
+        PURELY LEXICAL: a model-supplied token is never stat-ed, resolved, or
+        ``.exists()``-ed. This runs over a command the model has merely PROPOSED,
+        before any confirmation and before anything executes, so a filesystem
+        probe here would reach out of the workspace on the model's say so alone.
+        A legitimate probe, a command gone wrong, and a live injection attempt
+        are indistinguishable at the access point.
 
-        A token therefore counts as path-like only by SYNTAX (``_is_path_like``).
-        An arg the tool's own schema DECLARES to be a path (run_tests' ``path``)
-        needs no heuristic and is checked whole, spaces and all.
+        A token counts as path-like only by SYNTAX (``_is_path_like``). An arg
+        the tool's own schema DECLARES to be a path (run_tests' ``path``) needs
+        no heuristic and is checked whole, spaces and all.
 
-        Trade-off, accepted: a bare-relative path that merely exists
-        (``cat secrets.txt``, ``git -C docs``) is no longer flagged, because
-        telling it apart from ``npm test`` in a repo that has a ``test/`` folder
-        is exactly what the removed probe did. A separator rule is not a
-        replacement - it re-flags ``sed s/foo/bar/``, ``sed s:/usr/local:/opt:g``
-        and a quoted ``-m 'fix a/b handling'``, the false positives that cost this
-        check its credibility once already. What survives is the high-signal case
-        with no false positives: a command reaching OUT of the workspace. And the
-        trade weakens no boundary, because this was never one: it is a warning
-        that never blocked anything, while hard confinement (the disabled-tool
-        gate, and ``_scope_violation`` for file tools) is enforced elsewhere and
-        is unchanged by this.
+        A bare-relative path that merely exists (``cat secrets.txt``, ``git -C
+        docs``) is therefore not flagged. What is flagged is the case with no
+        false positives: a command reaching OUT of the workspace. This warning
+        blocks nothing; hard confinement (the disabled-tool gate, and
+        ``_scope_violation`` for file tools) is enforced elsewhere.
         """
         flagged: list[str] = []
         for arg in _SHELL_COMMAND_ARGS.get(call.name, ()):
@@ -265,24 +225,20 @@ class _ExecutionMixin:
             text = str(raw)
             declared = arg in _SHELL_DECLARED_PATH_ARGS.get(call.name, ())
             if declared:
-                # A path by contract: no path-likeness question to answer, and no
-                # tokenising either, since a path may legitimately hold spaces.
+                # A path by contract: checked whole rather than tokenised, since a
+                # path may hold spaces.
                 tokens = [text]
             else:
                 try:
                     # posix=False keeps Windows backslashes intact; quotes survive
                     # as part of the token and are stripped below.
                     #
-                    # Deliberately NOT tools/shell.py:_split_command, which is what
-                    # actually EXECUTES the command. posix=False honours a quote
-                    # only where one opens a token, so a quoted path containing
-                    # spaces arrives here as fragments. The warning still fires on
-                    # it (every fragment is checked, and a path reaching out of the
-                    # workspace is out of scope in pieces too); it can just name a
-                    # fragment. Kept as is on purpose: this is a lexical
-                    # best-effort warning that blocks nothing, and its tokenising
-                    # is what the false-positive classes fixed in #800 and #802
-                    # were tuned around.
+                    # Not tools/shell.py:_split_command, which is what actually
+                    # EXECUTES the command. posix=False honours a quote only where
+                    # one opens a token, so a quoted path containing spaces arrives
+                    # here as fragments. The warning still fires on it - every
+                    # fragment is checked - it can just name a fragment. This is a
+                    # lexical best-effort warning that blocks nothing.
                     tokens = shlex.split(text, posix=False)
                 except ValueError:
                     # Unbalanced quotes: fall back to whitespace splitting rather
@@ -330,8 +286,8 @@ class _ExecutionMixin:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         # Hard gate: a tool disabled for this session (e.g. run_shell for a
         # restricted, shareable coder key) can never execute, whatever the model
-        # emits. This is the security boundary - the prompt/parse exclusions below
-        # are only there so the model does not waste turns trying.
+        # emits. This is the security boundary; the prompt/parse exclusions below
+        # only stop the model wasting turns.
         if call.name in self.disabled_tools:
             result = ToolResult.error(
                 f"'{call.name}' is disabled for this session and was not run.")
@@ -340,14 +296,13 @@ class _ExecutionMixin:
             return result
 
         # Second hard gate: a skill loaded with use_skill restricts this turn to
-        # its declared allowed-tools (core._skill_gate_denial). Sited here, AFTER
+        # its declared allowed-tools (core._skill_gate_denial). Sited AFTER
         # disabled_tools and never instead of it, so the two compose as an
-        # INTERSECTION - a skill can only ever subtract, never hand back a tool
-        # the operator disabled. Deliberately mirrors the branch above rather
-        # than the richer ones below: neither has emitted a "tool_call" event yet
-        # (that happens after the registry lookup), so emitting a "tool_result"
-        # here would leave the GUI a result with no call to attach it to. The
-        # audit notice is what keeps the refusal from being invisible.
+        # INTERSECTION - a skill can only subtract, never hand back a tool the
+        # operator disabled. No "tool_result" event is emitted here: no
+        # "tool_call" event has been emitted yet (that happens after the registry
+        # lookup), so a result would have no call to attach to. The audit notice
+        # carries the refusal instead.
         skill_denial = self._skill_gate_denial(call.name)
         if skill_denial is not None:
             result = ToolResult.error(skill_denial)
@@ -372,25 +327,22 @@ class _ExecutionMixin:
             print_tool_call(call.name, call.args)
         self._emit("tool_call", tool=call.name, args=call.args)
 
-        # Patch-mode: intercept write tools, accumulate diffs, don't touch disk.
-        # A write tool the interceptor can't express as a diff must NOT fall
-        # through to a real disk write - patch-mode promises no changes.
-        # search_replace is eligible too (_PATCH_MODE_ELIGIBLE_TOOLS), via its
-        # own dry_run rather than the pre-call snapshot _UNDOABLE_TOOLS uses -
-        # see that constant's comment for why the two sets differ.
+        # Patch-mode: intercept write tools, accumulate diffs, do not touch disk.
+        # A write tool the interceptor cannot express as a diff must NOT fall
+        # through to a real disk write. search_replace is eligible too
+        # (_PATCH_MODE_ELIGIBLE_TOOLS), via its own dry_run rather than the
+        # pre-call snapshot _UNDOABLE_TOOLS uses.
         if self.patch_mode and call.name in _PATCH_MODE_ELIGIBLE_TOOLS:
             t_start = time.monotonic()
             chunk = self._patch_mode_intercept(call)
             duration_s = time.monotonic() - t_start
             if chunk is not None:
                 self._patch_chunks.append(chunk)
-                # Name the files the DIFF actually covers, not every path the
-                # call mentioned: a file whose edit produced no change is not
-                # "captured", and saying it was overstates what patch mode holds.
-                # search_replace has no pre-known targets at all (its files are
-                # discovered by the sweep, not named in the call args), so read
-                # them off the diff's own "+++ b/<path>" headers instead - the
-                # only source of truth available for it.
+                # Name the files the DIFF covers, not every path the call
+                # mentioned: a file whose edit produced no change is not captured.
+                # search_replace has no pre-known targets (its files are discovered
+                # by the sweep, not named in the call args), so they are read off
+                # the diff's own "+++ b/<path>" headers.
                 if call.name == "search_replace":
                     covered = re.findall(r"^\+\+\+ b/(.+)$", chunk, re.MULTILINE)
                 else:
@@ -411,10 +363,9 @@ class _ExecutionMixin:
                 )
                 if interactive:
                     console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
-            # A REAL duration, not omitted: unlike the never-ran paths below,
-            # _patch_mode_intercept actually does the diffing work (a
-            # search_replace sweep can cover many files), so "how long did
-            # this take" is a real fact here, not a fabricated one.
+            # A real duration: unlike the never-ran paths below,
+            # _patch_mode_intercept does the diffing work, so the elapsed time is
+            # a fact about this call.
             self._emit("tool_result", tool=call.name, ok=result.ok,
                        summary=result.summary, output=result.output[:4000],
                        duration_s=duration_s)
@@ -422,9 +373,9 @@ class _ExecutionMixin:
 
         # Scope check - reject file operations that fall outside the active glob.
         # MCP (mcp_*) AND plugin (plugin_*) tools are included so an owner's --scope
-        # confines those dynamically-registered file tools too - built-in file tools
-        # are default-denied at authoring time (_SCOPED_TOOLS), but the dynamic
-        # families are not in the registry then, so they are gated here by prefix.
+        # confines those dynamically-registered file tools too: built-in file tools
+        # are default-denied at authoring time (_SCOPED_TOOLS), while the dynamic
+        # families are not in the registry then and are gated here by prefix.
         if self.scope and (call.name in _SCOPED_TOOLS
                            or call.name.startswith(("mcp_", "plugin_"))):
             offending = self._scope_violation(call)
@@ -435,17 +386,13 @@ class _ExecutionMixin:
                 )
                 if interactive:
                     print_tool_error(call.name, result.output)
-                # No duration_s: never reached tool_def.fn (F5 - see the
-                # network-policy branch below for why 0.0 would be wrong here).
+                # No duration_s: never reached tool_def.fn.
                 self._emit("tool_result", tool=call.name, ok=False,
                            summary=f"outside scope '{self.scope}'")
                 return result
 
-        # The shell tools are deliberately NOT in _SCOPED_TOOLS: a path-arg check
-        # cannot confine a process, so pretending otherwise would be worse than
-        # honest. But that trade-off used to be invisible at runtime, leaving a
-        # user who set --scope believing the session was confined when it was not.
-        # Flag it instead of hiding it - a warning, never a block.
+        # The shell tools are NOT in _SCOPED_TOOLS: a path-arg check cannot confine
+        # a process. Flag the gap at runtime instead - a warning, never a block.
         if self.scope and call.name in _SHELL_UNSCOPED_TOOLS:
             self._warn_shell_outside_scope(call)
 
@@ -475,42 +422,30 @@ class _ExecutionMixin:
                 )
                 if interactive:
                     print_tool_error(call.name, result.output)
-                # No duration_s: the tool never ran, which is a different fact
-                # from "ran and took 0.0s" - the client renders nothing for an
-                # absent field and a real "0.0s" for a present zero, so the two
-                # must not collapse into the same value.
+                # No duration_s: the tool never ran, which is a different fact from
+                # "ran and took 0.0s". The client renders nothing for an absent
+                # field and a real "0.0s" for a present zero.
                 self._emit("tool_result", tool=call.name, ok=False,
                            summary="blocked by network policy (net_mode=off)")
                 return result
 
-        # Confirmation for destructive tools (diff preview for write_file),
-        # for network tools when net_mode is "ask", and for a non-mutating
-        # tool that opts in via ask_by_default (e.g. rag_search: content not
-        # scoped to the coder's cwd can otherwise enter the model's context
-        # unprompted - see ToolDef.ask_by_default's own comment, registry.py).
+        # Confirmation for destructive tools (diff preview for write_file), for
+        # network tools when net_mode is "ask", and for a non-mutating tool that
+        # opts in via ask_by_default (see ToolDef.ask_by_default, registry.py).
         #
         # call.lenient forces confirmation too, same as always_confirm: a call
-        # recovered only via parser.py's name-gated fallback (a bare JSON
-        # object or an unlabelled fence, with no marker of its own signalling
-        # the model meant to call a tool at all) never had the lazy-grammar
-        # trigger engage, so nothing constrained its content - the model could
-        # be free-generating garbage that merely happens to parse. auto_approve
-        # is exactly the setting meant to skip a human look, and exactly the
-        # one an ungated hallucination must not be allowed to ride past on a
-        # destructive/network/ask-by-default tool. See ToolCall.lenient.
+        # recovered only via parser.py's name-gated fallback (a bare JSON object
+        # or an unlabelled fence) never engaged the lazy-grammar trigger, so
+        # nothing constrained its content. auto_approve does not skip the human
+        # look for such a call on a destructive/network/ask-by-default tool.
+        # See ToolCall.lenient.
         #
-        # isinstance-gated, not a bare call.lenient or getattr(call, "lenient",
-        # False): many tests build a ToolCall-shaped MagicMock() with only
-        # .name/.args ever set, and MagicMock auto-vivifies ANY attribute
-        # access - including through getattr's default arg, which only ever
-        # applies on a genuine AttributeError - as a fresh, TRUTHY MagicMock.
-        # A bare `call.lenient` (or `getattr(call, "lenient", False)`, which
-        # does not help here) would therefore read True on every one of those
-        # doubles and demand confirmation across unrelated tests that never
-        # touch the real parser. Only a genuine ToolCall's lenient field
-        # (dataclass default False) is trusted; anything else defaults to
-        # non-lenient, which is the correct assumption for a test double that
-        # predates this field.
+        # isinstance-gated rather than a bare call.lenient or getattr(call,
+        # "lenient", False): a ToolCall-shaped MagicMock auto-vivifies any
+        # attribute access as a fresh, TRUTHY MagicMock, which would demand
+        # confirmation for every such double. Only a genuine ToolCall's lenient
+        # field (dataclass default False) is trusted; anything else counts as
+        # non-lenient.
         needs_confirm = (
             (tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default) and (
                 not self.auto_approve or call.name in self.always_confirm
@@ -524,13 +459,12 @@ class _ExecutionMixin:
             elif interactive:
                 approved = self._confirm_tool(call)
             else:
-                # Fail CLOSED: this tool requires confirmation, but there is no way
-                # to obtain it (non-interactive run, no approval handler). Deny it
-                # rather than silently executing - so a configured always_confirm or
-                # auto_approve=off is honoured, and an unattended run can never be
-                # steered into an unconfirmed destructive/network action. (RULE 5: a
-                # safety gate that cannot run must not be treated as passed. The safe
-                # default for an unattended coder is the restricted, no-shell agent.)
+                # Fail CLOSED: this tool requires confirmation and there is no way
+                # to obtain it (non-interactive run, no approval handler), so deny
+                # it rather than execute. A safety gate that cannot run is not
+                # treated as passed, so a configured always_confirm or
+                # auto_approve=off is honoured and an unattended run cannot be
+                # steered into an unconfirmed destructive or network action.
                 result = ToolResult.error(
                     f"{call.name} requires confirmation, but this run is "
                     "non-interactive with no approval handler - denied. Run "
@@ -546,15 +480,15 @@ class _ExecutionMixin:
                            summary="rejected by user")
                 return result
 
-        # Snapshot file content before undoable writes so /undo can restore
-        # it and the changed-files tracker can diff against the original
-        # (edit_files targets several files in one call, so this is a list: one
-        # undo entry per file, or /undo would restore only the first of them.)
+        # Snapshot file content before undoable writes so /undo can restore it and
+        # the changed-files tracker can diff against the original. A list, because
+        # edit_files targets several files in one call and needs one undo entry
+        # per file.
         snapshots: dict[str, bytes | None] = {}
         if call.name in _UNDOABLE_TOOLS:
-            # One id per CALL: a multi-file call pushes several entries, and
-            # undo() reverts them together (see persistence.undo) so /undo can
-            # never leave a batch half-restored.
+            # One id per CALL: a multi-file call pushes several entries and undo()
+            # reverts them together (see persistence.undo), so /undo never leaves a
+            # batch half-restored.
             self._undo_seq = getattr(self, "_undo_seq", 0) + 1
             undo_call_id = self._undo_seq
             for path_arg in dict.fromkeys(_call_target_paths(call.name, call.args)):
@@ -571,48 +505,40 @@ class _ExecutionMixin:
                     "call_id": undo_call_id,
                 })
 
-        # Episodic change-detection baseline: snapshot the git work-tree state
-        # just before the FIRST run_shell, PRE-execution, so a mutating shell
-        # command's writes (git apply, a formatter, codegen) can be attributed to
-        # THIS session at close - the write-tool tracker never sees them (audit
-        # cluster 11). Captured before the shell runs so the shell's own changes
-        # are the delta, not part of the baseline; only for episodic sessions.
+        # Episodic change-detection baseline: snapshot the git work-tree state just
+        # before the FIRST run_shell, pre-execution, so a mutating shell command's
+        # writes (git apply, a formatter, codegen) can be attributed to this session
+        # at close - the write-tool tracker never sees them. Captured before the
+        # shell runs so the shell's own changes are the delta rather than part of
+        # the baseline. Episodic sessions only.
         if (call.name in _SHELL_EXEC_TOOLS and self._episodic
                 and not self._shell_baseline_captured):
             self._shell_baseline_captured = True
             self._git_baseline = self._git_status_paths()
 
-        # Inject hidden runtime args into specific tools. Injected AFTER the copy
-        # so a model-supplied "_parent_agent" cannot win: without that, a model
-        # emitting the key itself would slip past the tool's own is-None guard and
-        # fail much deeper, inside a worker thread.
+        # Inject hidden runtime args into specific tools, AFTER the copy so a
+        # model-supplied "_parent_agent" cannot win.
         args = dict(call.args)
         if call.name in _PARENT_AGENT_TOOLS:
             args["_parent_agent"] = self
-        # The task-list tools operate on THIS session's state (tools/tasks.py),
-        # and use_skill arms this session's active-skill restriction (skills.py).
-        # Injected after the copy, so a model-supplied "_session" cannot win -
-        # which matters more for use_skill than for the todo tools: without it a
-        # model could pass its own object and choose its own restriction.
+        # The task-list tools operate on THIS session's state (tools/tasks.py), and
+        # use_skill arms this session's active-skill restriction (skills.py).
+        # Injected after the copy, so a model-supplied "_session" cannot win and
+        # choose its own restriction.
         if call.name in _TODO_TOOLS or call.name in _SKILL_STATE_TOOLS:
             args["_session"] = self
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True
-        # Which session a background job belongs to. Injected after the copy for
-        # the same reason as _parent_agent above: a model-supplied "_owner"
-        # would otherwise let a call attribute its job to another session, and
-        # the whole point of the field is that a caller can trust it. The
-        # sibling spawn_agent_background needs no injection - it already
-        # receives _parent_agent and reads job_owner straight off it.
+        # Which session a background job belongs to. Injected after the copy, so a
+        # model-supplied "_owner" cannot attribute a job to another session. The
+        # sibling spawn_agent_background needs no injection - it already receives
+        # _parent_agent and reads job_owner off it.
         if call.name == "run_shell_background":
             args["_owner"] = self.job_owner
 
-        # Timed around the invocation ONLY - not the bookkeeping below - so this
-        # is genuinely "how long the tool took", the number the GUI shows next
-        # to the card. Previously this duration was never sent at all: the GUI
-        # guessed it client-side from the gap between two render events, which
-        # read ~0.0s whenever both arrived in the same tick (coder.js#buildToolCard).
+        # Timed around the invocation ONLY, not the bookkeeping below, so this is
+        # how long the tool took - the number the GUI shows next to the card.
         t_start = time.monotonic()
         try:
             result = tool_def.fn(self.cwd, **args)
@@ -646,11 +572,11 @@ class _ExecutionMixin:
         breaker flags it sets are checked back in _loop."""
         # Track consecutive failures and inject escalating recovery hints;
         # at 4 identical failures the circuit breaker stops the task after
-        # this batch (checked in _loop) instead of burning the turn budget.
+        # this batch (checked in _loop).
         if not result.ok:
-            # Record the ORIGINAL error (before the hint augmentation below) into
-            # the bounded session error trace, so the close-time episode reflection
-            # has real evidence for what_failed (audit cluster 13).
+            # Record the ORIGINAL error, before the hint augmentation below, into
+            # the bounded session error trace that feeds the close-time episode
+            # reflection's what_failed.
             self._record_error(call.name, result.output)
             streak = self._consecutive_errors.get(call.name, 0) + 1
             self._consecutive_errors[call.name] = streak
@@ -705,16 +631,14 @@ class _ExecutionMixin:
                     self._unverified_writes.clear()
 
         # search_replace: tracked from its OWN result.changes (populated by the
-        # tool once it knows which files the sweep actually touched), not the
-        # result.ok-gated branch above. A PARTIAL apply reports ok=False (a
-        # failed batch must not read as a success) but the files written
-        # before the failure are real mutations on disk and must still be
-        # tracked/undoable - result.changes carries exactly those, whether the
-        # call as a whole succeeded or partially failed. Guarded on the
-        # TOOL'S OWN dry_run arg (distinct from self.dry_run/self.patch_mode,
-        # already excluded above and by the early-return interceptors) because
-        # a model-requested preview populates the same field with data that
-        # was never written.
+        # tool once it knows which files the sweep touched), not the result.ok-gated
+        # branch above. A PARTIAL apply reports ok=False, but the files written
+        # before the failure are real mutations on disk and are still tracked and
+        # undoable - result.changes carries exactly those, whether the call
+        # succeeded or partially failed. Guarded on the TOOL'S OWN dry_run arg
+        # (distinct from self.dry_run / self.patch_mode, already excluded above and
+        # by the early-return interceptors), because a model-requested preview
+        # populates the same field with data that was never written.
         if (not self.dry_run and not self.patch_mode
                 and call.name == "search_replace"
                 and not call.args.get("dry_run") and result.changes):
@@ -737,15 +661,14 @@ class _ExecutionMixin:
 
         Returns the diff string, or None if the diff cannot be computed.
         """
-        # edit_files spans several files, so it has no single old_content -
-        # without this branch compute_tool_diff returns None, the intercept
-        # reports "cannot be captured", and patch mode silently loses the edit.
+        # edit_files spans several files, so it has no single old_content: without
+        # this branch compute_tool_diff returns None and the intercept reports
+        # "cannot be captured".
         if call.name == "edit_files":
             return compute_multifile_diff(self.cwd, call.args.get("edits"))
-        # search_replace's targets are a glob + regex sweep, not a `path` arg -
-        # there is no old_content to read ahead of time, so it gets its own
-        # helper (which runs the real sweep via dry_run rather than touching
-        # disk) instead of falling through to the single-file path below.
+        # search_replace's targets are a glob + regex sweep, not a `path` arg, so
+        # there is no old_content to read ahead of time. It gets its own helper,
+        # which runs the real sweep via dry_run rather than touching disk.
         if call.name == "search_replace":
             return compute_search_replace_diff(
                 self.cwd, call.args.get("pattern", ""),
@@ -759,23 +682,17 @@ class _ExecutionMixin:
     def current_patch(self) -> str:
         """The accumulated unified diff so far, WITHOUT clearing the buffer.
 
-        Split out of :meth:`flush_patch` for readers that only want to LOOK:
-        a GUI "show me the patch" request, a status poll, a preview. Reaching
-        for ``flush_patch`` there would destroy the very thing it was asked to
-        display, and the destruction is invisible at the call site because the
-        RESULT looks identical the first time.
+        For readers that only want to LOOK: a GUI "show me the patch" request, a
+        status poll, a preview. :meth:`flush_patch` clears the buffer.
         """
         return "\n".join(c for c in self._patch_chunks if c)
 
     def has_patch(self) -> bool:
         """Is there anything in the patch buffer? Cheap, and exactly equivalent
-        to ``bool(self.current_patch())``.
+        to ``bool(self.current_patch())`` without joining the diff.
 
-        Separate from ``current_patch`` because ``CoderSession.info()`` needs
-        only the boolean and is called once PER SESSION by the session-list
-        route: joining every session's whole diff to throw the string away
-        would put an O(patch size) allocation on whatever timer that endpoint
-        ends up being polled on.
+        ``CoderSession.info()`` needs only the boolean and is called once per
+        session by the session-list route.
         """
         return any(c for c in self._patch_chunks)
 
@@ -798,19 +715,15 @@ class _ExecutionMixin:
         ``parent`` is set only when this Agent IS a sub-agent, so it - not the name,
         which every Agent has - is what distinguishes "a child is asking on the
         human's shared confirmation channel" from "the session the human started is
-        asking for itself". The top-level agent deliberately gets None so its own
-        prompts are worded exactly as they always were.
+        asking for itself". The top-level agent gets None.
 
         This is the ONE place a child's identity enters the confirm chain, so every
         delegation path (worktree-isolated parallel dispatch, spawn_agent, background
-        sub-agents) is attributed by construction rather than each re-implementing it.
+        sub-agents) is attributed by construction.
 
-        A child with a falsy name still gets a label. ``spawn_agent``'s ``name`` comes
-        straight from the model's tool-call arguments, and an empty one would collapse
-        to "no label" - making a delegated request look exactly like the human's own,
-        which is the confusion this whole path exists to prevent. Being unable to say
-        WHICH child is asking is tolerable; letting a child's prompt pass for the
-        user's own is not.
+        A child with a falsy name still gets a label: ``spawn_agent``'s ``name``
+        comes straight from the model's tool-call arguments, and an empty one would
+        collapse to "no label", making a delegated request look like the human's own.
         """
         if self.parent is None:
             return None
@@ -824,8 +737,8 @@ class _ExecutionMixin:
         before the prompt so the user can see exactly what will happen.
         For all other destructive tools, falls back to a plain y/N prompt.
         """
-        # Live-attribute access so tests patching agent.confirm / confirm_diff /
-        # print_diff_preview are honoured (the names moved into this submodule).
+        # Live attribute lookup, so a patched agent.confirm / confirm_diff /
+        # print_diff_preview is honoured.
         confirm = _agent.confirm
         confirm_diff = _agent.confirm_diff
         print_diff_preview = _agent.print_diff_preview
@@ -833,12 +746,11 @@ class _ExecutionMixin:
             path_arg = call.args.get("path", "")
             old_content, readable = read_old_content_checked(self.cwd, path_arg)
             if not readable:
-                # This is a CONSENT surface. old_content is "" because the file
-                # could not be READ, not because it is new, and print_diff_preview
-                # reads "" as "does not exist yet" - so the diff below shows the
-                # whole write as an addition and NOTHING as deleted. Say so, or
-                # the user approves an overwrite whose destructive half is
-                # invisible to them.
+                # A consent surface: old_content is "" because the file could not be
+                # READ, not because it is new, and print_diff_preview renders "" as
+                # "does not exist yet", showing the whole write as an addition and
+                # nothing as deleted. Say so, so the user is not approving an
+                # overwrite whose destructive half is invisible.
                 from ..display import console as _con
                 _con.print(
                     f"[yellow]![/yellow] Could not read the current contents of "
@@ -849,8 +761,8 @@ class _ExecutionMixin:
             print_diff_preview(old_content, new_content, path_label=path_arg)
             return confirm_diff(path_arg or "file")
 
-        # A multi-file edit is the LAST thing to approve blind, so show the same
-        # kind of diff, concatenated over every file the call would touch.
+        # Show the same kind of diff for a multi-file edit, concatenated over
+        # every file the call would touch.
         if call.name == "edit_files":
             targets = dict.fromkeys(_call_target_paths(call.name, call.args))
             label = ", ".join(targets) if targets else "files"
@@ -887,13 +799,11 @@ class _ExecutionMixin:
 
         run_shell is a step further: it has no `path`-shaped arg AT ALL (only
         a free-form `command` string), so there is no path to resolve even
-        post-call. Mark the whole map dirty instead and return - deliberately
-        NOT calling _rebuild_system_prompt() here, unlike every other branch
-        below. That rebuild is what actually reconciles the map (see
-        ProjectMap._rescan_if_dirty via context._build_messages, called once
-        per turn), so triggering it eagerly on every run_shell call would scan
-        on every call instead of once for however many run_shell calls happen
-        before the map is next actually read.
+        post-call. It marks the whole map dirty and returns, without calling
+        _rebuild_system_prompt() as every other branch below does. That rebuild
+        is what reconciles the map (see ProjectMap._rescan_if_dirty via
+        context._build_messages, called once per turn), so it runs once before
+        the map is next read rather than once per run_shell call.
         """
         if call.name == "run_shell":
             self._project_map.mark_dirty()

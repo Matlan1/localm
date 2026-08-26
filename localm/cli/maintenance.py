@@ -15,18 +15,15 @@ from ._core import console, main
 
 def _wire_plugin_cli_entries() -> None:
     """Wire each first-party plugin's CLI Click group from its manifest's
-    ``cli`` entry point (PluginManager.cli_entries()) instead of one hardcoded
-    try/except-ImportError block per plugin - so shipping a new first-party
-    plugin with a CLI surface needs a manifest line, not a new block here.
-    A plugin's optional pip extras gate it via ImportError, exactly like the
-    hardcoded blocks this replaces (CF-3/PLUGIN-ENGINE unification) - it is
-    NOT gated on `plugin install`/enabled state, since e.g. `localm coder`
-    must stay reachable regardless of that toggle.
+    ``cli`` entry point (PluginManager.cli_entries()), so shipping a new
+    first-party plugin with a CLI surface needs a manifest line, not a new
+    block here. A plugin's optional pip extras gate it via ImportError. It is
+    NOT gated on `plugin install`/enabled state, so e.g. `localm coder` stays
+    reachable regardless of that toggle.
 
     The Click command/group's OWN declared name (e.g. jobs/cli.py's
     ``@click.group(name="job")``) is used as-is, not the plugin's catalog
-    name - jobs' catalog name is "jobs" but its CLI verb is "job", a
-    pre-existing quirk this loop preserves rather than silently renames."""
+    name: jobs' catalog name is "jobs" but its CLI verb is "job"."""
     import importlib
 
     from ..plugins.engine import PluginManager
@@ -40,16 +37,14 @@ def _wire_plugin_cli_entries() -> None:
             main.add_command(getattr(mod, attr))
             wired.add(name)
         except ImportError as e:
-            # Usually a plugin's optional pip extras are simply not installed
-            # (benign - the verb is just unavailable). But this ALSO catches a
-            # genuinely broken first-party plugin module, which would otherwise
-            # vanish from the CLI with no trace. Record so the two are
-            # distinguishable without failing startup over an optional extra.
+            # An ImportError here is usually an optional pip extra that is not
+            # installed (the verb is simply unavailable), but it also catches a
+            # broken first-party plugin module. Recorded rather than failing
+            # startup, so the two stay distinguishable.
             #
-            # defer_log, NOT logger.debug: this runs at module-import time (see
-            # the _wire_plugin_cli_entries() call below), before Click invokes
-            # main() to install any handler, so a direct logger.debug() is
-            # dropped at the call and the diagnostic is silently lost.
+            # defer_log, NOT logger.debug: this runs at module-import time,
+            # before Click invokes main() to install any handler, so a direct
+            # logger.debug() is dropped at the call.
             defer_log(logging.DEBUG, "plugin CLI %r not wired (import failed): %s",
                       name, e)
     if "coder" not in wired:
@@ -76,8 +71,7 @@ def _wire_gui_cli() -> None:
         main.add_command(_gui_main, name="gui")
     except ImportError as e:
         # defer_log, NOT logger.debug: this runs at module-import time, before
-        # Click invokes main() to install any handler - see the identical note
-        # on _wire_plugin_cli_entries() above.
+        # Click invokes main() to install any handler.
         defer_log(logging.DEBUG, "gui CLI not wired (import failed): %s", e)
 
         @main.command("gui", context_settings={"ignore_unknown_options": True})
@@ -114,13 +108,8 @@ def setup_embeddings(model, yes=False):
     """Install the on-device embedding model for semantic search (memory + RAG).
 
     Semantic retrieval uses a small dedicated model (bge-small, ~25 MB) rather
-    than the chat model, for three reasons: the bundled GGUF runtime CANNOT embed
-    a chat model (the ctypes binding exposes no create_embedding); loading a
-    multi-GB chat model just to embed would be wasteful (and evict the resident
-    one); and a chat model's pooled hidden states make poor embeddings anyway -
-    measured 2026-07-15, Qwen2.5-0.5B's max unrelated-pair cosine (0.7523)
-    EXCEEDS its min related-pair cosine (0.7518), so no threshold separates them,
-    versus bge-small's 0.29 margin. This downloads it into
+    than the chat model: the bundled GGUF runtime cannot embed a chat model (the
+    ctypes binding exposes no create_embedding). This downloads it into
     <home>/models/embeddings/ so memory and RAG retrieval become semantic instead
     of lexical. Respects net_mode=off (a hard kill switch). A freshly downloaded
     known model is also synced into the Model Manager registry (type "embedding")
@@ -137,13 +126,9 @@ def setup_embeddings(model, yes=False):
     if model:
         current = str(load_config().get("embedding_model") or "")
         if model != current:
-            # NEW-RAG-DIM-NO-REEMBED: the third writer of embedding_model,
-            # alongside the RAG picker (POST /api/rag/embedding) and PATCH
-            # /v1/config, both of which already warn what a switch is about to
-            # invalidate BEFORE it happens rather than only in a post-switch
-            # note (see the ready message far below, which still states what
-            # each capability can do but no longer carries the whole warning
-            # alone).
+            # The third writer of embedding_model, alongside the RAG picker
+            # (POST /api/rag/embedding) and PATCH /v1/config. Like those two, it
+            # warns what the switch is about to invalidate BEFORE it happens.
             from ..rag import collection_provenance_note, collection_provenance_report
             affected = collection_provenance_report()
             if affected:
@@ -155,14 +140,10 @@ def setup_embeddings(model, yes=False):
                     chunks = f" - {c['n_chunks']} chunks" if c.get("n_chunks") is not None else ""
                     console.print(f"  - {escape(c['name'])}{built}{chunks}")
                 if not yes:
-                    # Deliberately NOT abort=True (REG-589's shape, cli/rag.py):
-                    # nothing here is destroyed by proceeding - a collection's
+                    # NOT abort=True: a script or non-interactive run with
+                    # nobody to answer PROCEEDS with the switch. A collection's
                     # chunk text and existing vectors stay on disk either way,
-                    # they only fall back to lexical search until re-embedded -
-                    # so unlike rag repair's embeddings-loss prompt, a script or
-                    # non-interactive run with nobody to answer should PROCEED
-                    # rather than abort: there is nothing to lose that was not
-                    # already disclosed above.
+                    # falling back to lexical search until re-embedded.
                     try:
                         proceed = click.confirm("Continue with the switch?")
                     except click.Abort:
@@ -203,21 +184,17 @@ def setup_embeddings(model, yes=False):
     except Exception as e:
         # Best-effort visibility sync only - the embedding model itself is
         # already installed and fully functional regardless of whether this
-        # optional Model-Manager registration succeeds; surfaced at debug
-        # level rather than silenced (AGENTS.md rule 5).
+        # optional Model-Manager registration succeeds. Surfaced at debug
+        # level rather than silenced.
         from ..debuglog import logger as _logger
         _logger.debug("setup-embeddings: could not sync into the model registry (%s)", e)
 
     # Memory records written before an embedder existed carry NO vector, and
     # nothing else fills them in: backfill_vectors' only other caller is the
     # consolidation pass, which is optional and may never run. Below
-    # VEC_COVERAGE the semantic gate is unusable, so recall falls back to
-    # promoting profile facts by IMPORTANCE - which is how "greet my friend
-    # Memo" was answered with an unrelated person from days earlier
-    # (2026-08-14). Claiming "memory now retrieves semantically" without doing
-    # this was untrue for every record already stored, while the very next
-    # sentence correctly warned that RAG stays lexical until re-embedded.
-    # Do the work, then say what actually happened.
+    # VEC_COVERAGE the semantic gate is unusable and recall falls back to
+    # promoting profile facts by IMPORTANCE, so backfill them here and report
+    # what actually happened in the ready message below.
     mem_note = ""
     try:
         from ..inference.embedder import embed_texts
@@ -245,8 +222,8 @@ def setup_embeddings(model, yes=False):
                 mem_note = (f"\nMemory: {res['embedded']} stored item(s) embedded, "
                             "so recall is semantic for those too.")
     except Exception as e:
-        # Never fail the install over the backfill - but never claim it happened
-        # either (AGENTS.md rule 5).
+        # Never fail the install over the backfill, and never claim it happened
+        # either.
         from ..debuglog import logger as _logger
         _logger.debug("setup-embeddings: memory vector backfill skipped (%s)", e)
         mem_note = ("\nMemory: stored items could not be embedded just now, so "
@@ -315,13 +292,11 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     """Generate an editable bug report and offer to send it to the maintainer.
 
     Three DISTINCT questions - what you were doing, what you expected, what
-    actually happened - the same three the GUI's "Report a bug" form asks and
-    the same template it builds from, so a report never derives its title AND
-    its whole "What happened" section from one echoed string (#958). Answer
-    inline with -m/-e/-w for a scripted or non-interactive run; run with no
-    flags in a real terminal and you are prompted for each (Enter to skip).
-    At least one of "what were you doing" / "what actually happened" is
-    required - an empty report helps no one.
+    actually happened - the same three the GUI's "Report a bug" form asks, built
+    from the same template. Answer inline with -m/-e/-w for a scripted or
+    non-interactive run; run with no flags in a real terminal and you are
+    prompted for each (Enter to skip). At least one of "what were you doing" /
+    "what actually happened" is required.
 
     Collects a useful, safe diagnostic snapshot (OS, GPU, driver, backend, the
     loaded model, an allowlisted config subset, key dependency versions, and the
@@ -356,8 +331,8 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     summary = bugreport.report_title("", what_happened, description)
     console.print(f"[bold]Filing a bug report:[/bold] {escape(summary)}")
     # The reporter's server may have hung in a DIFFERENT process (this CLI is not
-    # it), so its captured freeze trace can only be found via the live instance
-    # registry, not this process's pid (REG-736).
+    # it), so its captured freeze trace is found via the live instance registry,
+    # not this process's pid.
     hang = bugreport.live_server_hang_trace()
     path = bugreport.save_user_report(
         description, what_i_expected=what_expected, what_happened=what_happened,
@@ -449,7 +424,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
     try:
         res = updater.apply(asset["id"], signature=info.get("signature"))
     except LocalmError as e:
-        # apply() already rolled back; surface honestly, never a false success.
+        # apply() has already rolled back by this point.
         console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")
         return
     console.print(f"[green]Updated to {escape(res['version'])}[/green] "
@@ -491,10 +466,9 @@ def issues_cmd(number, state) -> None:
                 console.print(f"[yellow]Issue #{number} not found.[/yellow]")
                 return
             st = it.get("state", "?")
-            # number/state/title come straight from the GitHub API via the proxy
-            # (issue_tracker.get_issue's own docstring: "trimmed", not sanitized),
-            # so they are attacker-controlled content, not local/trusted text -
-            # escaped so a bracketed issue title cannot be parsed as markup.
+            # number/state/title come straight from the GitHub API via the
+            # proxy, so they are untrusted content and are escaped: a bracketed
+            # issue title must not be parsed as markup.
             console.print(
                 f"[bold]#{escape(str(it.get('number')))}[/bold] {escape(str(st))}: "
                 f"{escape(str(it.get('title', '')))}")

@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SEC-5 regression: numeric / short-form IPv4 SSRF bypass.
+"""Numeric / short-form IPv4 SSRF bypass.
 
 '2130706433', '0x7f000001', '0177.0.0.1' and '127.1' all resolve to the
-loopback address 127.0.0.1, but they evade the ipaddress-based public-address
-check because:
+loopback address 127.0.0.1 while evading the ipaddress-based public-address
+check:
 
   * ipaddress.ip_address() refuses these dotless / hex / octal / short forms,
     so the getaddrinfo result loop never classifies them, and
   * socket.getaddrinfo may raise (or be patched to raise) for them, and the
     guard's documented behavior is "unresolvable hosts pass".
 
-The fix normalizes such hosts with socket.inet_aton into canonical dotted form
-and classifies THAT with the ipaddress module before the public-address check.
-These tests pin that each adversarial form is refused when net_allow_private is
-False, while a genuine public hostname still passes.
+The guard normalizes such hosts with socket.inet_aton into canonical dotted
+form and classifies THAT with the ipaddress module before the public-address
+check. These tests pin that each adversarial form is refused when
+net_allow_private is False, while a genuine public hostname still passes.
 """
 
 import socket
@@ -29,9 +29,8 @@ def _with_config(monkeypatch, cfg: dict):
 
 def _no_dns(monkeypatch):
     """Make getaddrinfo unavailable so the test exercises the literal-IP
-    normalization path, not host resolution. The pre-fix guard treats a
-    raising getaddrinfo as 'unresolvable -> pass', so this is the exact
-    adversarial condition SEC-5 describes."""
+    normalization path, not host resolution. A raising getaddrinfo is treated
+    as 'unresolvable -> pass', which is the adversarial condition."""
     def boom(host, port, *a, **k):
         raise socket.gaierror("forced: numeric host not resolved")
     monkeypatch.setattr("socket.getaddrinfo", boom)
@@ -53,9 +52,8 @@ _LOOPBACK_FORMS = [
 
 @pytest.mark.parametrize("host", _LOOPBACK_FORMS)
 def test_numeric_loopback_forms_refused(monkeypatch, host):
-    """The adversarial case from the spec: each numeric/short IPv4 that maps
-    to loopback is refused when private access is off, even when DNS would not
-    resolve it."""
+    """Each numeric/short IPv4 that maps to loopback is refused when private
+    access is off, even when DNS would not resolve it."""
     _with_config(monkeypatch, {"net_mode": "allow", "net_allow_private": False})
     _no_dns(monkeypatch)
     with pytest.raises(NetworkPolicyError, match="non-public"):
@@ -64,8 +62,8 @@ def test_numeric_loopback_forms_refused(monkeypatch, host):
 
 @pytest.mark.parametrize("host", _LOOPBACK_FORMS)
 def test_numeric_loopback_message_names_canonical_ip(monkeypatch, host):
-    """The refusal should classify the canonical 127.0.0.1, so the message is
-    actionable rather than echoing the obfuscated literal."""
+    """The refusal classifies the canonical 127.0.0.1 rather than echoing the
+    obfuscated literal."""
     _with_config(monkeypatch, {"net_mode": "allow", "net_allow_private": False})
     _no_dns(monkeypatch)
     with pytest.raises(NetworkPolicyError, match="127.0.0.1"):
@@ -82,8 +80,7 @@ def test_numeric_private_class_a_refused(monkeypatch):
 
 
 def test_numeric_loopback_allowed_when_private_enabled(monkeypatch):
-    """With net_allow_private True the same obfuscated loopback must pass:
-    the normalization must not over-block when the operator opts in."""
+    """With net_allow_private True the same obfuscated loopback must pass."""
     _with_config(monkeypatch, {"net_mode": "allow", "net_allow_private": True})
     _no_dns(monkeypatch)
     check_url("http://2130706433/v1/models")   # no raise

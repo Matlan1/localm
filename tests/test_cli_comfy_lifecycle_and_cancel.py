@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The CLI can now drive ComfyUI's process and cancel a server operation.
+"""The CLI drives ComfyUI's process and cancels a server operation.
 
-Four capabilities existed only in the GUI: whether ComfyUI is alive and whether
-localm launched it, starting it without generating, stopping/restarting it, and
-cancelling one in-flight operation. `/api/activity` was already handing the CLI
-a per-operation id and a `cancellable` flag and `_print_activity` was dropping
-both, so a terminal could WATCH a two-hour re-embed with no verb to stop it.
+Four capabilities: whether ComfyUI is alive and whether localm launched it,
+starting it without generating, stopping/restarting it, and cancelling one
+in-flight operation.
 
-Everything here is about the honesty of the seams, because that is where this
-change can go wrong:
+Everything here is about the honesty of the seams:
 
   - `launched_by_localm` is only knowable inside the process holding the
     subprocess handle (`comfy_client._spawned_procs` is a process-local module
@@ -18,9 +15,7 @@ change can go wrong:
     they handled cleanly, so a 2xx is not by itself success.
   - A 404 means "this server has no such route" on `/v1/comfy/status` and "no
     such job" on `/api/jobs/<id>/cancel`. One status code, two unrelated
-    answers. And a POST to a path the server does not serve is 405, not 404 -
-    measured, after the first version of this file assumed otherwise and the
-    bug reached a live run.
+    answers. And a POST to a path the server does not serve is 405, not 404.
   - Cancelling an operation that already finished must not report "cancelling",
     which is what a blind POST would produce (the route returns the same body
     either way).
@@ -58,9 +53,9 @@ class _Resp:
 class _Server:
     """A fake localm server: records every request and answers from a route map.
 
-    Recording the calls is the point. Several assertions below are about a
+    The recorded calls are what several assertions below read: they are about a
     request NOT being made (a blind cancel, a launch that would abort a live
-    render), and "it printed the right thing" cannot express that.
+    render), which the printed output cannot express.
     """
 
     def __init__(self, routes: dict):
@@ -72,14 +67,8 @@ class _Server:
         self.calls.append((method, path))
         answer = self.routes.get((method, path), self.routes.get(path))
         if answer is None:
-            # MEASURED against a real localm server, not assumed - and the
-            # first version of this double got it wrong, which is precisely
-            # how the 405 bug reached a live run. A POST to a path the server
-            # does not serve comes back 405 Method Not Allowed; only GET
-            # gives 404 there. A fixture that answered 404 for both made the
-            # "no media plugin installed" case untestable while looking
-            # covered: the code fell through correctly against the fake and
-            # reported "Could not start ComfyUI (HTTP 405)" against reality.
+            # A POST to a path the server does not serve comes back 405 Method
+            # Not Allowed; only GET gives 404 there.
             return (_Resp(404, {"detail": "Not Found"}) if method == "GET"
                     else _Resp(405, {"detail": "Method Not Allowed"}))
         if isinstance(answer, Exception):
@@ -134,9 +123,9 @@ def test_the_two_404_meanings_do_not_print_the_same_sentence(capsys):
 
 
 def test_an_unserved_post_path_reports_405_as_no_such_route(monkeypatch):
-    """MEASURED on a real server: a POST to a path it does not serve answers
-    405, not 404. Treating only 404 as "no such route" is what made `comfy
-    start` fail on a server with no media plugin instead of falling back."""
+    """A POST to a path the server does not serve answers 405, not 404, so
+    treating only 404 as "no such route" makes `comfy start` fail on a server
+    with no media plugin instead of falling back."""
     monkeypatch.setattr(requests, "request", lambda *a, **k: _Resp(405, {}))
     state, _ = server_call("http://x", {}, "POST", "/api/imagine/comfy-launch")
     assert state == "unsupported"
@@ -501,9 +490,8 @@ def test_the_render_aborting_fallback_is_never_used_on_an_unconfirmed_comfyui(mo
     (they only bring ComfyUI up), but /v1/comfy/restart aborts the running
     prompt, so it must not be reached on a guess.
 
-    Relying on "those three routes shipped together, so an old server has
-    neither" would make this safe by accident of release history rather than by
-    construction."""
+    The guard is on the status answer itself, not on an assumption that the
+    three routes always shipped together."""
     srv = _install(monkeypatch, comfy_cli,
                    _Server({("GET", "/v1/comfy/status"): _Resp(404, {}),
                             ("POST", "/v1/comfy/restart"): _LAUNCHED}))
@@ -559,10 +547,10 @@ class _Comfy:
 
 
 def test_ctrl_c_tells_comfyui_to_abort_the_render_and_free_vram(monkeypatch):
-    """Before this, Ctrl-C ended localm while ComfyUI kept rendering and kept
-    its VRAM. interrupt_comfy/free_comfy_vram are plain HTTP, so they work from
-    any process - unlike stop_comfy, which needs a handle only the launching
-    process has."""
+    """Ctrl-C must not leave ComfyUI rendering and holding its VRAM.
+    interrupt_comfy/free_comfy_vram are plain HTTP, so they work from any
+    process, unlike stop_comfy, which needs a handle only the launching process
+    has."""
     comfy = _Comfy().install(monkeypatch)
 
     def _boom():

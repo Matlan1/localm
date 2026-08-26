@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Scoped API key routes (auth.json): list, create, revoke.
-
-Extracted verbatim from create_app(); behavior unchanged.
-"""
+"""Scoped API key routes (auth.json): list, create, revoke."""
 
 from __future__ import annotations
 
@@ -57,16 +54,11 @@ def register(app: FastAPI, ctx) -> None:
                 expires = float(expires)
             except (TypeError, ValueError):
                 raise HTTPException(400, "'expires' must be an epoch number or null")
-        # Only an owner/ADMIN caller may grant privileged scopes; a key holding
-        # merely keys:admin must not be able to mint itself owner-equivalent
-        # access. In open mode (caller is None) privileged grants are refused.
+        # Only an owner/ADMIN caller may grant privileged scopes. In open mode
+        # (caller is None) privileged grants are refused.
         is_owner = caller is not None and scopes.ADMIN in caller
-        # Same owner-only gate, extended to host-filesystem reach: a merely
-        # keys:admin-scoped caller minting fs_access=host would hand the new
-        # key access to the whole server disk, which is not a scope but is an
-        # equivalent-severity grant. Refuse rather than silently downgrading to
-        # "none" (AGENTS rule 5: a security step must never report success on a
-        # request it did not actually honour).
+        # The same owner-only gate covers host-filesystem reach, refused rather
+        # than silently downgraded to "none".
         fs_access = auth.norm_fs_access(body.get("fs_access"))
         if fs_access != "none" and not is_owner:
             raise HTTPException(
@@ -74,15 +66,10 @@ def register(app: FastAPI, ctx) -> None:
                 f"Refusing to grant fs_access={fs_access!r}: only the owner key "
                 "may grant a new key host-filesystem reach."
             )
-        # Same owner-only gate, extended to RAG-indexing reach: a key-scoped
+        # The same owner-only gate covers RAG-indexing reach: a key-scoped
         # rag_roots list REPLACES the whitelist rather than narrowing it
-        # (rag/store.py's confine_index_path), so it can point a new key at any
-        # folder on the host disk - including ones outside home/cwd/the
-        # configured rag_allowed_roots a merely keys:admin caller's own keys are
-        # bound to. That is host-filesystem reach, not a scope, so it gets the
-        # same refusal as fs_access=host rather than silently downgrading to
-        # unrestricted (AGENTS rule 5: a security step must never report success
-        # on a request it did not actually honour).
+        # (rag/store.py's confine_index_path). Refused rather than silently
+        # downgraded to unrestricted.
         rag_roots_in = body.get("rag_roots")
         if rag_roots_in is not None and not isinstance(rag_roots_in, list):
             raise HTTPException(400, "'rag_roots' must be a list of folder paths")
@@ -112,25 +99,18 @@ def register(app: FastAPI, ctx) -> None:
             if warns:
                 created = {**created, "warnings": warns}
         # Lockout guard: in open mode the loopback GUI is trusted via the
-        # per-process shell token, which the server STOPS honouring the instant auth
-        # turns on (a key now exists). Without this, minting your first key from the
-        # local GUI would orphan the browser session and lock the owner out. So on the
-        # FIRST key minted from a loopback bind, seed a persistent owner key and hand
-        # THIS browser an owner session cookie (future `localm gui` loads re-establish
-        # it; web.py). Loopback + open-mode only: a network bind already requires a key
-        # up front, so this never fires there and grants no authority the local user
-        # did not already hold via the shell token.
+        # per-process shell token, which the server stops honouring the instant
+        # auth turns on. On the FIRST key minted from a loopback bind, seed a
+        # persistent owner key and hand THIS browser an owner session cookie
+        # (future `localm gui` loads re-establish it; web.py). Loopback plus
+        # open-mode only.
         if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
             owner = auth.get_api_key() or auth.regenerate_key()
-            # Hand this browser an OPAQUE owner session (id in the cookie, never the
-            # key), so it keeps full access and survives a later key roll - same
-            # decoupled-session model as the login/auto-seed paths.
+            # An OPAQUE owner session (id in the cookie, never the key), so this
+            # browser keeps full access across a later key roll.
             from localm import sessions
-            # owner_key_minted: see sessions.create. `owner` IS the owner key here
-            # by construction (read back, or just seeded), but the proof is taken
-            # rather than assumed - _is_owner_key re-compares against the live
-            # value, so a seed that somehow did not take reports False instead of
-            # stamping a privilege nothing established.
+            # owner_key_minted: see sessions.create. _is_owner_key re-compares
+            # against the live value, so a seed that did not take reports False.
             sid = sessions.create(scopes={scopes.ADMIN},
                                   key_hash=auth._hash_key(owner), fs_access="host",
                                   owner_key_minted=auth._is_owner_key(owner))

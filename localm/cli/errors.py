@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Shared CLI domain-error-to-exit translation.
-
-Every CLI-surfaced feature independently wrote "run a domain call, catch
-KeyError/ValueError, print red text, sys.exit(1)" (plugin commands, key
-commands, doctor probes, rag commands) - part of the same duplication shape
-``localm/inference/errors.py`` closes for HTTP routes (see
-PATHFINDER-2026-07-11/03-unified-proposal.md section 1.5). ``run_or_die``
-covers the exception-to-exit-code shape; ``_run_probe_subprocess`` and
-``_report_add_paths_result`` are two structurally different shapes (a
-subprocess probe, and a partial-failure result list) that do NOT get forced
-into ``run_or_die``'s shape.
-"""
+"""Shared CLI domain-error-to-exit translation."""
 
 from __future__ import annotations
 
@@ -43,11 +32,9 @@ def run_or_die(fn, *args, missing_msg=None, **kwargs):
 
 
 def _note_env_override(message: str) -> None:
-    """Print a note when ``LOCALM_API_KEY`` (auth.ENV_VAR) is set, since it
-    overrides the on-disk key while set. *message* is the action-specific tail
-    describing what that means right now (CLI-4: three ``key_*`` commands
-    repeated the same env-var check with near-identical, sometimes
-    contextually different, wording)."""
+    """Print a note when ``LOCALM_API_KEY`` (auth.ENV_VAR) is set and non-blank.
+    While set it overrides the on-disk key. *message* is the action-specific
+    tail describing what that means for the command being run."""
     import os
 
     from localm import auth
@@ -57,16 +44,10 @@ def _note_env_override(message: str) -> None:
 
 
 def _run_probe_subprocess(code: str, prefix: str) -> dict | None:
-    """Run *code* in a fresh subprocess (isolates a native-library-touching
-    probe so a broken DLL/lib can never crash the caller) and parse the one
-    stdout line starting with *prefix* as JSON, e.g. ``"GPU_PROBE:{...}"``.
-    Returns None on any failure (timeout, crash, no matching line).
-
-    The implementation moved to ``localm.diagnostics`` when the active doctor
-    probes did (that module must not import click or rich, so it cannot import
-    this one). Kept here as the CLI's name for it rather than deleted: the GPU
-    device probe still calls it from doctor, and one copy of these ten lines is
-    the whole point of the move."""
+    """Run *code* in a fresh subprocess, isolating a native-library-touching
+    probe from the caller, and parse the one stdout line starting with *prefix*
+    as JSON, e.g. ``"GPU_PROBE:{...}"``. Returns None on any failure (timeout,
+    crash, no matching line). Delegates to ``localm.diagnostics``."""
     from localm.diagnostics import run_probe_subprocess
 
     return run_probe_subprocess(code, prefix)
@@ -74,8 +55,7 @@ def _run_probe_subprocess(code: str, prefix: str) -> dict | None:
 
 def _report_add_paths_result(result: dict) -> None:
     """Print each ``Collection.add_paths()`` failure and exit(1) if anything
-    failed. Shared by ``rag add``/``rag repair``, whose summary lines differ
-    but whose failure reporting is identical."""
+    failed."""
     from rich.markup import escape
 
     for f in result["failed"]:

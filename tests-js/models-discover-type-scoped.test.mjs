@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// HuggingFace discovery has EXPLICIT, always-visible filters: a row of model
-// TYPE checkboxes (LLMs/Embedding/Diffusion/Encoders/VAEs/LoRAs/Other) and a
-// FORMAT row (GGUF/Safetensors). Both are independent of the Registered-models
-// tabs, so what the search covers is never inferred silently from the active
-// tab (an earlier design scoped search by the tab, which was invisible to the
-// user). These tests cover: the filters are present + functional, the search
-// sends types=/formats= from the checkboxes, empty-selection guards, result
-// type badges, and the pull type-hint (detected type, or the single narrowed-to
-// type). Same page/harness/fetch-mock style as models-discover-formats.test.mjs.
+// HuggingFace discovery has always-visible filters: a row of model TYPE
+// checkboxes (LLMs/Embedding/Diffusion/Encoders/VAEs/LoRAs/Other) and a FORMAT
+// row (GGUF/Safetensors), both independent of the Registered-models tabs. Covers
+// the filter rows, the types=/formats= search params, the empty-selection guards,
+// result type badges, and the pull type-hint (detected type, or the single
+// narrowed-to type).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -72,10 +69,8 @@ test("discover-filters: the Type + Format filter rows are present, visible, all 
 });
 
 test("discover-filters: each chip's active .on class stays in sync with its checkbox", async () => {
-  // style.css colours `.disc-chip.on span` (not a CSS :checked selector, which
-  // some engines fail to repaint on a programmatic toggle), so the `.on` class
-  // is the real visual-state contract. It must match the checkbox on load and
-  // after every change.
+  // style.css colours `.disc-chip.on span`, not a CSS :checked selector, so the
+  // `.on` class must track the checkbox on load and after every change.
   const { window } = loadAppWithPages({ fetchImpl: makeFetch() });
   const chips = [...window.document.querySelectorAll(".disc-chip")];
   assert.ok(chips.length >= 9, "every type + format toggle is a chip");
@@ -196,7 +191,7 @@ test("discover-filters: adding a result badged with a known type hints THAT type
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload, calls }) });
   stubStreamJobDone(window);
-  setTypes(window, ALL_TYPES);   // many types checked, but the badge is confident
+  setTypes(window, ALL_TYPES);   // many types checked
   await window.discoverSearch();
   const row = window.document.querySelector("#disc-results .disc-repo");
   [...row.querySelectorAll("button")].find((b) => b.textContent === "add full repo").click();

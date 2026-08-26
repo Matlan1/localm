@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S4: setup-llama must ship the upstream MIT license text alongside the bundled
-llama.cpp/ggml binaries. _copy_binaries copied only .dll/.exe/.so/.dylib and
-discarded the archive's LICENSE; now it captures the license (or a bundled MIT
-fallback) into the runtime lib/.
+"""setup-llama must ship the upstream MIT license text alongside the bundled
+llama.cpp/ggml binaries: _copy_binaries captures the archive's license, or a
+bundled MIT fallback, into the runtime lib/.
 """
 
 import sys

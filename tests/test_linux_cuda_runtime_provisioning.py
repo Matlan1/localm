@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Self-contained CUDA on Linux end to end - see dev-notes/ADR-0010:
+"""Self-contained CUDA on Linux, end to end:
   - fetching NVIDIA's CUDA runtime libraries (cudart/cublas) as plain
-    PyPI wheels (Unit 1);
+    PyPI wheels;
   - resolving the compiled binary from a third-party prebuilt
     (hybridgroup/llama-cpp-builder), since upstream publishes none for
-    Linux and localm does not build its own binaries (Unit 3);
-  - _provision_backend wiring the two together on Linux (Unit 3).
+    Linux and localm does not build its own binaries;
+  - _provision_backend wiring the two together on Linux.
 
 These tests exercise the REAL zip validation and extraction path (a wheel is
-a zip); only the network transfer itself (``_download``) is faked, so a
-regression in the sha256 check, the archive-shape check, or the .so-only
-filter is caught here, not just "the function was called." The resolver
-tests mock only ``_release_assets``/``_latest_tag``, matching this repo's
-existing convention for the sibling amd-rocm resolver tests.
+a zip); only the network transfer itself (``_download``) is faked, so the
+sha256 check, the archive-shape check, and the .so-only filter all run for
+real. The resolver tests mock only ``_release_assets``/``_latest_tag``,
+matching the sibling amd-rocm resolver tests.
 """
 
 from __future__ import annotations
@@ -31,13 +30,10 @@ def _make_wheel_zip(path: Path, so_names: tuple, extra_names: tuple = ()) -> Non
     """A real, valid zip shaped like an nvidia-* wheel: some .so* files under a
     package dir, plus non-.so metadata files that must NOT be copied out.
 
-    Padded well past _MIN_ARTIFACT_BYTES (256 KiB): a real cudart/cublas .so is
-    genuinely multi-MB, and a too-small fixture would trip _validate_archive's
-    own anti-truncation floor before ever reaching the logic under test here -
-    that is not a fixture detail, it is what a real download would do too, so
-    the fixture must not be smaller than a real one could ever legitimately be.
-    Uncompressible (random) bytes so ZIP_STORED-vs-DEFLATED cannot shrink the
-    archive back under the floor."""
+    Padded past _MIN_ARTIFACT_BYTES (256 KiB), which _validate_archive's
+    anti-truncation floor requires and a real multi-MB cudart/cublas .so
+    exceeds. Uncompressible (random) bytes, so ZIP_STORED-vs-DEFLATED cannot
+    shrink the archive back under the floor."""
     import os
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as zf:
         for name in so_names:
@@ -88,9 +84,8 @@ class _FakeResponse:
 # ------------------------- _pypi_wheel_url_and_sha ------------------------- #
 
 def test_pypi_wheel_url_and_sha_picks_linux_x86_64_wheel(monkeypatch):
-    """Matches the REAL PyPI JSON shape (confirmed live against pypi.org this
-    session) - must pick the x86_64 linux .whl, never the aarch64 wheel or the
-    sdist tarball that also satisfy a looser match."""
+    """Against the real PyPI JSON shape: picks the x86_64 linux .whl, never the
+    aarch64 wheel or the sdist tarball that also satisfy a looser match."""
     import json as _json
     monkeypatch.setattr(sl, "verified_urlopen",
                         lambda req, timeout=10: _FakeResponse(
@@ -149,8 +144,7 @@ def test_fetch_pypi_runtime_lib_copies_only_so_files(monkeypatch, tmp_path):
 
 
 def test_fetch_pypi_runtime_lib_refuses_wrong_checksum(monkeypatch, tmp_path):
-    """THE NEGATIVE CASE: a checksum mismatch must refuse the file entirely -
-    proves the guard actually guards, not just that the happy path works."""
+    """THE NEGATIVE CASE: a checksum mismatch refuses the file entirely."""
     wheel_src = tmp_path / "src" / "fake.whl"
     wheel_src.parent.mkdir()
     _make_wheel_zip(wheel_src, so_names=("libcublas.so.12",))
@@ -193,8 +187,8 @@ def test_fetch_cuda_runtime_libs_fetches_every_package_for_the_line(monkeypatch,
 
 
 def test_fetch_cuda_runtime_libs_stops_on_first_failure(monkeypatch, tmp_path):
-    """A partially-assembled CUDA runtime is worse than none - must not
-    swallow one package's failure and silently continue with the rest."""
+    """One package's failure stops the fetch rather than leaving a partially
+    assembled CUDA runtime."""
     calls = []
 
     def fake_fetch(pkg, target):
@@ -210,9 +204,8 @@ def test_fetch_cuda_runtime_libs_stops_on_first_failure(monkeypatch, tmp_path):
 
 
 def test_cuda_13_line_uses_unsuffixed_package_names():
-    """Pins the naming-migration finding from this session (verified live
-    against PyPI: nvidia-cublas-cu13 etc. are deprecated stubs) so a future
-    edit cannot silently regress to the deprecated -cu13 names."""
+    """The cuda-13 line uses the UNSUFFIXED package names; the -cu13 spellings
+    (nvidia-cublas-cu13 and friends) are deprecated stubs on PyPI."""
     pkgs = sl._CUDA_RUNTIME_PYPI_PACKAGES["cuda-13"]
     assert "nvidia-cublas" in pkgs
     assert "nvidia-cuda-runtime" in pkgs
@@ -221,22 +214,17 @@ def test_cuda_13_line_uses_unsuffixed_package_names():
 
 
 def test_no_line_fetches_nccl():
-    """hybridgroup/llama-cpp-builder's actual binary was checked directly -
-    none of its 26 shared libraries reference libnccl at all (unlike an
-    earlier prototype against a different build - see dev-notes/ADR-0010) -
-    so fetching it would be pure waste. Pins the omission so a future edit
-    cannot silently re-add it without re-verifying against the binary
-    actually in use at the time."""
+    """No CUDA line fetches nccl: none of the shared libraries in
+    hybridgroup/llama-cpp-builder's binary reference libnccl."""
     for pkgs in sl._CUDA_RUNTIME_PYPI_PACKAGES.values():
         assert not any("nccl" in p for p in pkgs)
 
 
 # ------------------------- linux cuda binary resolver ------------------------ #
-# _resolve_backend_asset's linux-cuda special case (Unit 3, corrected): resolves
-# against hybridgroup/llama-cpp-builder (a third-party prebuilt) instead of
-# upstream's (which has none), mirroring the sibling amd-rocm special case's own
-# test conventions (mock only _release_assets/_latest_tag, never the network
-# itself).
+# _resolve_backend_asset's linux-cuda special case: resolves against
+# hybridgroup/llama-cpp-builder (a third-party prebuilt) instead of upstream,
+# which publishes none. Only _release_assets/_latest_tag are mocked, never the
+# network itself.
 
 _DUMMY_LINUX_CUDA_ASSETS = [
     {
@@ -276,18 +264,16 @@ def test_resolve_linux_cuda_asset_finds_tarball(monkeypatch):
     assert url == _DUMMY_LINUX_CUDA_ASSETS[0]["browser_download_url"]
     assert sha == "dummylinuxcudasha"
     # Resolved against hybridgroup's repo, by the SAME bare tag every other
-    # Linux backend uses - not upstream (ggml-org/llama.cpp), which
-    # publishes nothing here, and not a prefixed tag scheme (that was the
-    # self-built mechanism's own naming, now parked, not this one's).
+    # Linux backend uses, not upstream (ggml-org/llama.cpp) and not a prefixed
+    # tag scheme.
     assert seen["repo"] == sl._CUDA_LINUX_REPO
     assert seen["tag"] == sl._PINNED_TAG
 
 
 def test_resolve_linux_cuda_asset_picks_cuda13_line(monkeypatch):
-    """THE cuda_line-AWARENESS CASE: hybridgroup publishes both a cuda-12
-    asset (bare "-cuda-x64.tar.gz") and a cuda-13 one
-    ("-cuda-13-x64.tar.gz") - a Blackwell GPU (NvidiaInfo.cuda_line ==
-    'cuda-13') must get the cuda-13 asset, never the cuda-12 default."""
+    """hybridgroup publishes both a cuda-12 asset (bare "-cuda-x64.tar.gz")
+    and a cuda-13 one ("-cuda-13-x64.tar.gz"); a Blackwell GPU
+    (NvidiaInfo.cuda_line == 'cuda-13') gets the cuda-13 asset."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
     monkeypatch.setattr(
         sl, "_latest_tag",
@@ -302,9 +288,8 @@ def test_resolve_linux_cuda_asset_picks_cuda13_line(monkeypatch):
 
 
 def test_resolve_linux_cuda_asset_never_picks_the_sha256_sidecar(monkeypatch):
-    """THE NEGATIVE CASE: the release also lists a .sha256 sidecar file -
-    it must never be mistaken for the tarball itself (which would then get
-    "extracted" as an archive and fail confusingly downstream)."""
+    """THE NEGATIVE CASE: the release also lists a .sha256 sidecar file, which
+    is never mistaken for the tarball itself."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
     monkeypatch.setattr(
         sl, "_latest_tag",
@@ -321,26 +306,21 @@ def test_resolve_linux_cuda_asset_never_picks_the_sha256_sidecar(monkeypatch):
 
 
 def test_resolve_linux_cuda_asset_raises_when_not_yet_built(monkeypatch):
-    """A real, occasionally-expected state (hybridgroup has not built this
-    exact upstream tag yet) - must raise click.ClickException, which
-    _provision_with_fallback's caller already turns into the vulkan
-    fallback, never construct a guessed URL (a guessed URL against a third
-    party's naming is even less trustworthy than one against upstream's)."""
+    """When hybridgroup has not built this upstream tag yet, the resolver
+    raises click.ClickException - which _provision_with_fallback's caller turns
+    into the vulkan fallback - rather than constructing a guessed URL."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
-    # Matched on the PIN rather than a stubbed tag: the message has to name the
-    # build that was actually looked for, and under the pin that is _PINNED_TAG.
-    # A stale literal here would still "match" a message about a different tag
-    # only by accident.
+    # Matched on the PIN rather than a stubbed tag: the message names the build
+    # that was actually looked for, which under the pin is _PINNED_TAG.
     with pytest.raises(click.ClickException, match=sl._PINNED_TAG):
         sl._resolve_backend_asset("cuda")
 
 
 def test_resolve_backend_asset_windows_cuda_unaffected_by_linux_branch(monkeypatch):
-    """Regression guard: the linux-cuda special case must never intercept
-    the EXISTING Windows cuda path, which has its own resolver
-    (_resolve_cuda_pair, exercised in test_cuda_setup.py) predating this."""
+    """The linux-cuda special case does not intercept the Windows cuda path,
+    which has its own resolver (_resolve_cuda_pair)."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(
         sl, "_latest_tag",
@@ -361,16 +341,15 @@ def test_resolve_backend_asset_windows_cuda_unaffected_by_linux_branch(monkeypat
 
 
 # ------------------------- linux cuda provisioning wiring --------------------- #
-# _provision_backend's new linux-cuda branch (Unit 3): fetches the binary via
-# the resolver above, then the runtime libs via _fetch_cuda_runtime_libs
-# (Unit 1) - both real mechanisms, only the network itself is mocked here.
+# _provision_backend's linux-cuda branch: fetches the binary via the resolver
+# above, then the runtime libs via _fetch_cuda_runtime_libs. Both are the real
+# mechanisms; only the network itself is mocked here.
 
 def test_provision_backend_linux_cuda_fetches_binary_and_runtime_libs(monkeypatch, tmp_path):
-    # sys.platform, not _platform_key(): _provision_backend's new branch
-    # checks sys.platform directly (matching its own neighboring win32
-    # branch) - mocking _platform_key alone leaves sys.platform untouched
-    # and the win32 branch still wins on a real Windows test box, exactly
-    # the failure this test caught once already.
+    # sys.platform, not _platform_key(): _provision_backend's branch checks
+    # sys.platform directly, matching its neighbouring win32 branch, so mocking
+    # _platform_key alone would leave sys.platform untouched and the win32
+    # branch would still win on a real Windows test box.
     monkeypatch.setattr(sl.sys, "platform", "linux")
     monkeypatch.setattr(sl, "_resolve_backend_asset",
                         lambda backend, cuda_line=None, tag=None: ("https://dummy/linux-cuda.tar.gz", "binsha", "bTEST"))
@@ -388,9 +367,9 @@ def test_provision_backend_linux_cuda_fetches_binary_and_runtime_libs(monkeypatc
 
 
 def test_provision_backend_linux_cuda_never_calls_windows_cuda_pair(monkeypatch, tmp_path):
-    """Regression guard: the Linux branch must take its own path, never fall
-    through into the Windows-only _resolve_cuda_pair/cudart-bundle logic
-    directly above it in the same function."""
+    """The Linux branch takes its own path and does not fall through into the
+    Windows-only _resolve_cuda_pair/cudart-bundle logic above it in the same
+    function."""
     monkeypatch.setattr(sl.sys, "platform", "linux")
     monkeypatch.setattr(sl, "_resolve_backend_asset",
                         lambda backend, cuda_line=None, tag=None: ("https://dummy/linux-cuda.tar.gz", None, "bTEST"))
@@ -408,10 +387,9 @@ def test_provision_backend_linux_cuda_never_calls_windows_cuda_pair(monkeypatch,
 
 @pytest.mark.integration
 def test_resolve_linux_cuda_asset_real_network(monkeypatch):
-    """Not mocked at all beyond forcing the linux branch: a real GitHub
-    Releases lookup against hybridgroup/llama-cpp-builder, proving the
-    actual asset-name convention and repo are correct right now, not just
-    matching a fixture of them."""
+    """Not mocked beyond forcing the linux branch: a real GitHub Releases
+    lookup against hybridgroup/llama-cpp-builder, so the asset-name convention
+    and repo are checked against the live release rather than a fixture."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
     url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
     assert url.startswith(f"https://github.com/{sl._CUDA_LINUX_REPO}/releases/download/")
@@ -421,12 +399,10 @@ def test_resolve_linux_cuda_asset_real_network(monkeypatch):
 
 @pytest.mark.integration
 def test_fetch_pypi_runtime_lib_real_network(tmp_path):
-    """Not mocked at all: a real PyPI JSON lookup and a real wheel download,
-    proving the actual mechanism this feature depends on, not a fixture of
-    it. Picks the smallest real package (cuda-runtime, not cublas, which is
-    ~100MB+) to keep this fast. Excluded from the default run
-    (-m "not integration") like every other network-touching test in this
-    repo; run explicitly to verify the real thing."""
+    """Not mocked: a real PyPI JSON lookup and a real wheel download. Picks the
+    smallest real package (cuda-runtime, not cublas, which is ~100MB+).
+    Excluded from the default run (-m "not integration") like every other
+    network-touching test here."""
     target = tmp_path / "runtime"
     target.mkdir()
     n = sl._fetch_pypi_runtime_lib("nvidia-cuda-runtime-cu12", target)

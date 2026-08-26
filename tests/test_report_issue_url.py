@@ -2,17 +2,16 @@
 """The standalone reporter must only ever POST to an http/https endpoint, and
 must show the user WHERE the report is going before they confirm.
 
-scripts/report_issue.py built its outbound Request straight from the URL that
-read_proxy() returned, with no scheme check anywhere in the file. That URL has
-only two producers - the LOCALM_BUGREPORT_URL environment variable and a regex
-over the install's own localm/config.py - so this is NOT remotely reachable and
-these tests do not claim it is; an actor who can set either already controls the
-process or the code. It is cheap defence in depth on a sink that hands whatever
-it is given to urlopen(), plus a visible destination so a redirected reporter
-cannot be silent.
+scripts/report_issue.py builds its outbound Request from the URL read_proxy()
+returns. That URL has only two producers - the LOCALM_BUGREPORT_URL environment
+variable and a regex over the install's own localm/config.py - so this is NOT
+remotely reachable and these tests do not claim it is; an actor who can set
+either already controls the process or the code. It is defence in depth on a sink
+that hands whatever it is given to urlopen(), plus a visible destination so a
+redirected reporter cannot be silent.
 
 The override's documented purpose - pointing the reporter at your own proxy or a
-test double - is preserved exactly: http and https both stay accepted.
+test double - is preserved: http and https both stay accepted.
 """
 
 from __future__ import annotations
@@ -74,7 +73,7 @@ def test_read_proxy_drops_a_non_http_override(url, tmp_path, monkeypatch, capsys
     got_url, got_token = ri.read_proxy(tmp_path / "no-config.py")
     assert got_url is None
     assert got_token == "tok"          # only the endpoint is dropped
-    # Rule 5: the rejection is SAID, not silent.
+    # The rejection is reported, not silent.
     out = capsys.readouterr().out
     assert "Ignoring bug-report endpoint" in out
     assert "http:// and https://" in out
@@ -132,11 +131,8 @@ def test_post_report_still_sends_over_http_and_https(url):
 
 
 def test_post_report_rejection_message_does_not_leak_url_credentials(monkeypatch):
-    # The opener and the real sink are BOTH stubbed to fail the test. Without
-    # them this passes vacuously against unfixed code: the send would be
-    # attempted for real, DNS would fail, and the resulting RuntimeError also
-    # happens not to contain the password. It would also make a live outbound
-    # connection from a test whose whole point is that nothing is sent.
+    # The opener and the real sink are BOTH stubbed to fail the test, so nothing
+    # here can make a live outbound connection.
     _explode_urlopen(monkeypatch)
 
     def _must_not_open(u, data, hdrs, to):

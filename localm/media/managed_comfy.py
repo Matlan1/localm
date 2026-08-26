@@ -3,23 +3,20 @@
 localm-managed ComfyUI: paths, install detection, coexistence routing.
 
 STAGE S1 (scaffolding). This module knows WHERE a localm-owned ComfyUI would
-live (under LOCALM_HOME, AGENTS.md rule 4: self-contained), how to tell whether
-one is actually installed, and which ComfyUI localm should target when it is
-(the coexistence resolver, decision 6). It deliberately does NOT provision
-anything: copying the user's stack is S2, the fresh hardware-matched install is
-S3. Everything here is inert until a managed instance exists on disk.
+live (under LOCALM_HOME), how to tell whether one is actually installed, and
+which ComfyUI localm should target when it is. It provisions nothing: copying
+the user's stack is S2, the fresh hardware-matched install is S3. Everything
+here is inert until a managed instance exists on disk.
 
 The single source of truth for "which ComfyUI does localm talk to" is
-``resolve_comfy_target()``. The rule (decision 6, simplified from an earlier
-two-flag design - see git history for the retired ``managed_comfy_enabled``
-toggle, which never had a reachable state distinct from ``comfy_target``):
+``resolve_comfy_target()``. The rule:
 
     target the MANAGED instance  IFF  comfy_target == "own"
                                   AND  a managed instance is actually installed
     otherwise                         the user's ComfyUI, exactly as today.
 
-When nothing is set up, behaviour is byte-identical to before this module
-existed: the user's ComfyUI, untouched. The user's ComfyUI is NEVER modified.
+When nothing is set up, the user's ComfyUI is used, untouched. The user's
+ComfyUI is NEVER modified.
 
 Layout under LOCALM_HOME:
   <HOME>/comfyui/          the managed ComfyUI checkout + its own venv (S2/S3)
@@ -39,19 +36,14 @@ from typing import Optional
 
 from localm.config import home_dir, load_config
 
-# Serializes remove_managed_comfy() against itself: the CLI (`localm comfy
+# Serializes remove_managed_comfy() against itself. The CLI (`localm comfy
 # remove`) and the GUI's /api/comfy/remove + /api/comfy/repair routes are two
-# independent callers of the SAME rmtree target, and the GUI routes now wrap
-# their call in run_in_threadpool_bounded (a client-side deadline - see
-# localm/inference/_threadpool_timeout.py). That deadline only makes the
-# AWAITING request give up; the real rmtree keeps running on its abandoned
-# worker thread. Without this lock, a user who sees a timeout and retries
-# Remove/Repair would start a SECOND concurrent rmtree against the same
-# directory tree while the first is still deleting files - shutil.rmtree
-# racing itself, the same "offloading without serializing" shape
-# media_workflows.py's _lock_for already fixed for the workflow routes (see
-# its module comment). One lock is enough here (unlike per-media there):
-# there is only ever ONE managed ComfyUI install, not one per media type.
+# independent callers of the SAME rmtree target, and the GUI routes wrap their
+# call in run_in_threadpool_bounded, whose deadline only makes the AWAITING
+# request give up while the real rmtree keeps running on its abandoned worker
+# thread. Without this lock a retry after a timeout starts a SECOND concurrent
+# rmtree against the same tree. One lock is enough: there is only ever ONE
+# managed ComfyUI install, not one per media type.
 _remove_lock = threading.Lock()
 
 # Directory names under LOCALM_HOME. Kept as constants so S2/S3 and the CLI all
@@ -60,10 +52,9 @@ _INSTALL_DIRNAME = "comfyui"
 _MODELS_DIRNAME = "comfyui-models"
 
 # The managed instance runs on its OWN loopback port, distinct from the ComfyUI
-# default (8188) so localm's managed ComfyUI and a user's own ComfyUI can run at
-# the same time (coexistence). localm claims 8642-8741 for its own server; the
-# managed ComfyUI sits just above the ComfyUI default instead, on 8189, so it
-# reads as "a second ComfyUI" to anyone inspecting ports. S2/S3 launch it here.
+# default (8188), so localm's managed ComfyUI and a user's own ComfyUI can run at
+# the same time. localm claims 8642-8741 for its own server; the managed ComfyUI
+# sits just above the ComfyUI default, on 8189. S2/S3 launch it here.
 MANAGED_COMFY_PORT = 8189
 MANAGED_COMFY_API_URL = f"http://127.0.0.1:{MANAGED_COMFY_PORT}"
 
@@ -99,9 +90,8 @@ def _venv_python_path(root: Path) -> Path:
 def managed_comfy_paths() -> ManagedComfyPaths:
     """Where a localm-managed ComfyUI lives under the CURRENT LOCALM_HOME.
 
-    Uses the lazy ``home_dir()`` (not the import-frozen HOME_DIR) so it always
-    tracks the configured data dir - and so a test pointing LOCALM_HOME at a
-    throwaway dir is honoured immediately."""
+    Uses the lazy ``home_dir()``, not the import-frozen HOME_DIR, so it always
+    tracks the configured data dir."""
     root = home_dir() / _INSTALL_DIRNAME
     return ManagedComfyPaths(
         root=root,
@@ -117,9 +107,8 @@ def rmtree_robust(path: Path) -> None:
     git checkout (S2), and git marks its object store read-only - on Windows plain
     rmtree then raises PermissionError (WinError 5) and the delete half-fails. Both
     ``localm comfy remove`` and S2's rollback-on-failed-provision must be able to
-    remove such a tree, or a partial/old install lingers and reversibility breaks.
-    Re-raises the underlying OSError when a file genuinely cannot be removed (rule 5:
-    a delete that fails must NOT be reported as success by the caller)."""
+    remove such a tree. Re-raises the underlying OSError when a file genuinely
+    cannot be removed, so a failed delete is never reported as success."""
     def _onerror(func, p, _exc_info):
         # Clear the read-only bit and retry; let a genuine failure propagate.
         os.chmod(p, stat.S_IWRITE)
@@ -136,17 +125,12 @@ def is_managed_comfy_installed() -> bool:
     their own final self-check) IN ADDITION TO the ComfyUI entry point
     (``main.py``) and the managed venv interpreter existing.
 
-    Checking only main.py + venv_python (the original S1 design - see git
-    history) reads "installed" true as soon as step 2 of an 7-8 step pipeline
-    finishes (the git clone, then `python -m venv`) - reproduced live: for the
-    ENTIRE remaining duration of a real install (torch, ComfyUI's own
-    requirements, custom nodes, localm's patches - which can take minutes),
-    this function, `localm comfy status`, the Settings page pill, AND the
-    actual Generate-button routing (managed_comfy_active() calls this) would
-    all have reported the instance ready, and a Generate click during that
-    window would launch a ComfyUI with no torch installed. The marker is
-    written only once every earlier step has succeeded, so it is the honest
-    completion signal; main.py/venv_python alone are not."""
+    main.py and venv_python both exist after step 2 of a 7-8 step pipeline (the
+    git clone, then `python -m venv`), so on their own they report an instance
+    ready while torch, ComfyUI's own requirements, custom nodes and localm's
+    patches are still installing - and `localm comfy status`, the Settings page
+    pill and Generate-button routing all read this function. The marker is
+    written only once every earlier step has succeeded."""
     paths = managed_comfy_paths()
     try:
         if not (paths.main_py.is_file() and paths.venv_python.is_file()):
@@ -174,16 +158,15 @@ def managed_comfy_remove_targets(with_models: bool = False) -> list:
 
 def remove_managed_comfy(with_models: bool = False) -> tuple:
     """Delete the managed ComfyUI (and its models folder with ``with_models``) under
-    the localm data dir. Returns ``(removed, failed)`` - the paths deleted and, per
-    rule 5, the ones that could NOT be removed with the reason, so a caller never
-    reports success for a delete that failed. Both empty means nothing was installed
-    (an honest no-op, not a success). The single source of truth for the removal that
+    the localm data dir. Returns ``(removed, failed)`` - the paths deleted and the
+    ones that could NOT be removed with the reason, so a caller never reports
+    success for a delete that failed. Both empty means nothing was installed (an
+    honest no-op, not a success). The single source of truth for the removal that
     ``localm comfy remove`` and the GUI remove route share.
 
     Holds ``_remove_lock`` for the whole delete so two concurrent callers (the
     CLI and a GUI retry, or two GUI clicks) can never rmtree the same tree at
-    once - see the lock's own module-level comment for why this matters more
-    now that the GUI route wraps this call in a client-side timeout."""
+    once."""
     with _remove_lock:
         removed = []
         failed = []
@@ -213,37 +196,32 @@ def managed_comfy_launch_cmd(config: Optional[dict] = None) -> str:
     """The command that starts the managed instance: its OWN venv interpreter
     running its OWN ``main.py``, on the managed port - never the user's
     ``comfy_launch_cmd``/auto-discovered launcher script, which only make sense
-    for a user-provided ComfyUI (their own launcher, possibly ZLUDA-wrapped). A
-    fresh/copied managed install is a raw checkout with no bundled .bat/.sh
-    launcher of its own, so discovery would always find nothing here. Quoted the
-    same way a user's own launch command is expected to be (see ensure_comfy's
-    shlex/cmd handling).
+    for a user-provided ComfyUI. A fresh/copied managed install is a raw
+    checkout with no bundled .bat/.sh launcher of its own. Quoted the same way a
+    user's own launch command is expected to be (see ensure_comfy's shlex/cmd
+    handling).
 
-    Names a PREFERRED GPU via ``--default-device`` when the user configured a split or
-    a main GPU (REG-532), so the swap gate (which reads COMBINED free VRAM across the
-    split) and the actual loader agree on which card the work lands on. Without it a
-    media job that "fit" in 2x4 GB combined would OOM on one 4 GB card.
+    Names a PREFERRED GPU via ``--default-device`` when the user configured a
+    split or a main GPU, so the swap gate (which reads COMBINED free VRAM across
+    the split) and the actual loader agree on which card the work lands on.
+    Without it a media job that "fit" in 2x4 GB combined would OOM on one 4 GB
+    card.
 
-    ``--default-device``, NOT ``--cuda-device``. This is the whole point and it was
-    shipped wrong once (f094d3d0). Both flags express "use this card", but
-    ``--cuda-device`` sets ``CUDA_VISIBLE_DEVICES`` to that one id
-    (``main.py:78-81``), DELETING the other cards from torch's view - which silently
+    ``--default-device``, NOT ``--cuda-device``. Both flags express "use this
+    card", but ``--cuda-device`` sets ``CUDA_VISIBLE_DEVICES`` to that one id
+    (``main.py:78-81``), DELETING the other cards from torch's view, which
     disables ComfyUI core's own per-component placement nodes
     (``SelectModelDevice``/``SelectCLIPDevice``/``SelectVAEDevice``,
-    ``comfy_extras/nodes_multigpu.py``, registered ``nodes.py:2440``), since a
+    ``comfy_extras/nodes_multigpu.py``, registered ``nodes.py:2440``) because a
     ``gpu:1`` that no longer exists is a no-op. ``--default-device`` REORDERS the
     visible list so the chosen card leads and the rest stay usable
-    (``main.py:69-76``). Masking a multi-GPU box down to one card in the name of
-    "choosing the best card" is the exact soft-degrade this feature exists to remove.
-    See ``dev-notes/media-split-gpu/SPEC.md``.
+    (``main.py:69-76``).
 
-    Creates nothing on disk. No longer strictly pure, though: resolving the device
-    reads config and probes the GPU via ``discover.list_gpus()``. That probe runs
-    the driver query on a helper thread but BLOCKS THIS CALLING THREAD up to the
-    probe deadline (15s default since the deadlines were unified) - fine from the
-    media job worker threads that call it today, but it must NOT be called inline
-    on the server's event loop (PR #541; discover's module comment has the full
-    rationale).
+    Creates nothing on disk, but is not pure: resolving the device reads config
+    and probes the GPU via ``discover.list_gpus()``. That probe runs the driver
+    query on a helper thread but BLOCKS THIS CALLING THREAD up to the probe
+    deadline (15s default) - fine from the media job worker threads that call it,
+    but it must NOT be called inline on the server's event loop.
     """
     paths = managed_comfy_paths()
     cmd = (f'"{paths.venv_python}" "{paths.main_py}" '
@@ -256,9 +234,9 @@ def managed_comfy_launch_cmd(config: Optional[dict] = None) -> str:
 
 
 def managed_comfy_active(cfg: Optional[dict] = None) -> bool:
-    """True when media calls should target the MANAGED instance (decision 6):
-    the target is "own" AND an instance is installed. Either false -> the
-    user's ComfyUI, exactly as today."""
+    """True when media calls should target the MANAGED instance: the target is
+    "own" AND an instance is installed. Either false -> the user's ComfyUI,
+    exactly as today."""
     cfg = cfg if cfg is not None else load_config()
     if cfg.get("comfy_target", "own") != "own":
         return False
@@ -270,25 +248,18 @@ def legacy_comfy_value(key: str, full_config: dict) -> str:
     suppressed to "" whenever the managed instance is active.
 
     Every media backend.py (image/music/video) falls back to these global keys
-    to seed defaults for setups that pre-date per-plugin config - but
+    to seed defaults for setups that pre-date per-plugin config, and
     ``comfy_client.ensure_comfy()``'s "an explicit caller workdir/launch_cmd
     always wins over managed routing" precedence cannot tell a deliberate
     override from a years-old global default. Honouring the legacy value here
-    would silently pass it through as if it WERE a deliberate override,
-    defeating managed-instance auto-routing for anyone who ever set
-    comfy_workdir/comfy_launch_cmd - including users who set it long before a
-    managed instance existed.
+    would pass it through as if it WERE a deliberate override, defeating
+    managed-instance auto-routing for anyone who ever set
+    comfy_workdir/comfy_launch_cmd.
 
-    NOTE: a per-plugin override (the caller's own ``comfy_blk.get(...)``) used
-    to be treated as exempt from this ("a deliberate choice, not a stale
-    global default") - that turned out to be the identical ambiguity in a
-    different place: a per-plugin field set before the user ever touched
-    comfy_target, or before switching it back to "own", is indistinguishable
-    from a deliberate override and silently defeated "own" mode the same way
-    (NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). Each backend.py
-    now suppresses its OWN per-plugin comfy_blk value too, gated on the same
-    ``managed_comfy_active()`` check this function uses - so "own" means own
-    for the per-plugin field as well, not just this legacy global one."""
+    A per-plugin override (the caller's own ``comfy_blk.get(...)``) carries the
+    identical ambiguity, so each backend.py suppresses its OWN per-plugin
+    comfy_blk value too, gated on the same ``managed_comfy_active()`` check this
+    function uses. "own" means own for the per-plugin field as well."""
     if managed_comfy_active(full_config):
         return ""
     return full_config.get(key, "") or ""
@@ -298,8 +269,7 @@ def managed_comfy_api_url_if_active(cfg: Optional[dict] = None) -> Optional[str]
     """The managed api_url when managed routing is active, else None. This is the
     hook ``comfy_client.default_api_url()`` consults so that EVERY existing caller
     of default_api_url() targets the managed instance when active, without the
-    launch/spawn path having to change (S1 confines its comfy_client.py touch to
-    the target-resolution path)."""
+    launch/spawn path having to change."""
     return managed_comfy_api_url() if managed_comfy_active(cfg) else None
 
 
@@ -317,21 +287,17 @@ class ComfyTarget:
 
 def resolve_comfy_target(cfg: Optional[dict] = None,
                          plugin: Optional[str] = None) -> ComfyTarget:
-    """THE single coexistence resolver (decision 6). Returns the managed
-    instance's (api_url, workdir, launch_cmd) when managed routing is active,
-    else the user's ComfyUI exactly as today: the same api_url
-    ``default_api_url()`` yields, the ``comfy_workdir`` config value, and no
-    launch_cmd (the caller resolves/discovers its own, as before).
+    """THE single coexistence resolver. Returns the managed instance's (api_url,
+    workdir, launch_cmd) when managed routing is active, else the user's ComfyUI
+    exactly as today: the same api_url ``default_api_url()`` yields, the
+    ``comfy_workdir`` config value, and no launch_cmd (the caller resolves or
+    discovers its own).
 
     *plugin* ("image"/"music"/"video"), when given, resolves THAT plugin's own
     ``comfy.workdir`` (via ``media_config.resolve_config``, honouring
     "use config from") ahead of the legacy global ``comfy_workdir`` for the
-    non-managed branch - this function previously only ever read the bare
-    global key, so a value set solely via the per-plugin Settings field (the
-    common case; the Settings UI foregrounds it) was invisible here even
-    though it is exactly what the plugin's own launch path actually uses
-    (see NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR). Omitted by a caller
-    with no plugin context (e.g. the CLI's generic status command); that
+    non-managed branch, which is what the plugin's own launch path uses. Omit it
+    when there is no plugin context (e.g. the CLI's generic status command); that
     caller still gets a correct answer whenever the global key or the managed
     instance covers it.
 
@@ -343,8 +309,8 @@ def resolve_comfy_target(cfg: Optional[dict] = None,
         return ComfyTarget(api_url=managed_comfy_api_url(),
                            workdir=managed_comfy_workdir(),
                            launch_cmd=managed_comfy_launch_cmd(), managed=True)
-    # User's ComfyUI. Import here (not at module load) to avoid a circular
-    # import: comfy_client imports this module lazily too.
+    # User's ComfyUI. Imported here, not at module load: comfy_client imports
+    # this module lazily too, so a top-level import would be circular.
     from localm.media.comfy_client import default_api_url
     workdir = cfg.get("comfy_workdir")
     if plugin:
@@ -378,13 +344,13 @@ def comfy_models_dest_dir(subfolder: str, cfg: Optional[dict] = None,
 
 
 # --------------------------------------------------------------------------- #
-#  extra_model_paths.yaml generator (decision 9)                              #
+#  extra_model_paths.yaml generator                                           #
 #                                                                             #
 #  ComfyUI-native model sharing: point the managed ComfyUI at the user's      #
 #  existing models dir (no copy, no symlink, no re-download) AND the           #
 #  localm-managed models dir. This just WRITES the file; S2/S3 invoke it as    #
-#  part of an install. Written by hand (no PyYAML dependency in shipped code - #
-#  AGENTS.md rule 4: self-contained; PyYAML is only a transitive dep).        #
+#  part of an install. Written by hand, with no PyYAML dependency in shipped   #
+#  code.                                                                       #
 # --------------------------------------------------------------------------- #
 
 def build_extra_model_paths_config(cfg: Optional[dict] = None) -> dict:

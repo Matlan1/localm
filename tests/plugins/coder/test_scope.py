@@ -79,10 +79,9 @@ def _no_filesystem():
 
     Asserting that a check is lexical means asserting the ABSENCE of a
     capability, so the guard has to see the syscalls. Audit hooks cannot:
-    ``Path.exists()``, ``Path.resolve()`` and ``os.stat()`` emit no audit event
-    (measured on py3.12) - only ``open`` does. Patching these does see them,
-    because ``Path.exists`` routes to ``os.stat`` and ``Path.resolve`` to
-    ``os.path.realpath``.
+    ``Path.exists()``, ``Path.resolve()`` and ``os.stat()`` emit no audit event -
+    only ``open`` does. Patching these does see them, because ``Path.exists``
+    routes to ``os.stat`` and ``Path.resolve`` to ``os.path.realpath``.
     """
     targets = [(os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
                (os, "listdir"), (os.path, "realpath")]
@@ -237,9 +236,9 @@ class TestScopeEnforcement:
         assert "outside the active scope" not in result.output
 
     def test_mcp_tool_path_confined_by_scope(self, tmp_path):
-        """CHK-MCP-SCOPE: a REGISTERED mcp_* tool's path arg is confined by the
-        active scope, even though MCP tools are not in _SCOPED_TOOLS. (MCP tools are
-        registered dynamically in production; here a stub reaches the scope gate.)"""
+        """A REGISTERED mcp_* tool's path arg is confined by the active scope,
+        even though MCP tools are not in _SCOPED_TOOLS. (MCP tools are registered
+        dynamically in production; here a stub reaches the scope gate.)"""
         from localm.plugins.coder import agent as _agent
         agent = _make_agent(tmp_path, scope="src/**")
         call = _make_tool_call("mcp_fs_read_file", path=_outside_scope(tmp_path))
@@ -259,10 +258,10 @@ class TestScopeEnforcement:
         assert "outside the active scope" in result.output
 
     def test_plugin_tool_path_confined_by_scope(self, tmp_path):
-        """CHK-SCOPE-PLUGIN: a plugin_* tool's path arg is confined by the active
-        scope, same as an mcp_* tool. Plugin tools are dynamically registered (not
-        in _SCOPED_TOOLS), so, like MCP tools, they are gated by their name prefix -
-        previously they were the one dynamic file-tool family the scope check missed."""
+        """A plugin_* tool's path arg is confined by the active scope, same as an
+        mcp_* tool. Plugin tools are dynamically registered (not in
+        _SCOPED_TOOLS), so, like MCP tools, they are gated by their name
+        prefix."""
         from localm.plugins.coder import agent as _agent
         agent = _make_agent(tmp_path, scope="src/**")
         call = _make_tool_call("plugin_fs_read_file", path=_outside_scope(tmp_path))
@@ -347,18 +346,16 @@ class TestScopeEnforcement:
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-#  A scope that does not confine the shell must SAY so (work item A3)
+#  A scope that does not confine the shell must SAY so
 # ---------------------------------------------------------------------------
 
 class TestScopeEnforcementNeverStatsTheValue:
     """The hard gate must decide WITHOUT touching the path it is deciding about.
 
-    #802 made the shell WARNING path filesystem-free and deliberately left the
-    ENFORCEMENT path alone; it carried the same defect. ``_scope_rel`` fell back
-    to ``Path(raw).resolve()`` for an absolute path that was not lexically under
-    cwd, so a ``--scope`` session where the model emitted an absolute path
-    anywhere on the machine stat-ed exactly that path in order to REFUSE it
-    (measured: one ``os.path.realpath`` plus one ``os.stat``).
+    ``_scope_rel`` falling back to ``Path(raw).resolve()`` for an absolute path
+    that is not lexically under cwd means a ``--scope`` session where the model
+    emits an absolute path anywhere on the machine stats exactly that path in
+    order to REFUSE it (one ``os.path.realpath`` plus one ``os.stat``).
 
     A stat is an access. At the access point a legitimate gate-check, a command
     gone wrong and a live injection attempt are indistinguishable, so the gate
@@ -388,19 +385,14 @@ class TestScopeEnforcementNeverStatsTheValue:
 
     def test_the_recorder_still_catches_a_stat_of_the_value(
             self, tmp_path, tmp_path_factory):
-        """Fires-control for the anchor exclusion in
-        :func:`_records_touches_outside`.
-
-        Excluding the cwd anchor's ancestor chain is what makes this class
-        portable, but an exclusion that swallowed the thing it filters for
-        would turn every assertion above into theater: they would pass because
-        nothing is ever recorded, not because nothing is ever touched. So drive
-        a real stat through the recorder and require it to be SEEN.
+        """Drives a real stat through :func:`_records_touches_outside` and
+        requires it to be SEEN, so the anchor exclusion cannot swallow the
+        thing it filters for.
 
         Both shapes are covered: a value in a sibling directory (the ordinary
-        case) and a value that IS an ancestor of cwd - the one an
-        ancestor-exclusion alone would swallow, and the reason the recorder
-        checks the value before it applies either filter.
+        case) and a value that IS an ancestor of cwd, which an
+        ancestor-exclusion alone would swallow. The recorder checks the value
+        before it applies either filter.
         """
         outside = tmp_path_factory.mktemp("outside-cwd")
         target = outside / "disposable-target.txt"
@@ -434,22 +426,13 @@ class TestScopeEnforcementNeverStatsTheValue:
 
     def test_a_path_reaching_into_cwd_through_a_link_is_refused(
             self, tmp_path, tmp_path_factory):
-        """The accepted COST of the fix, pinned so it cannot be reintroduced by
-        accident or silently regress back to statting.
+        """An absolute path lexically OUTSIDE cwd that reaches INSIDE through a
+        directory link is REFUSED, and the filesystem is not touched to decide
+        it.
 
-        An absolute path lexically OUTSIDE cwd that reaches INSIDE through a
-        directory link used to be ALLOWED, because the resolve() fallback looked
-        through the link. Measured both ways before this test was written: with
-        the fallback the verdict is ALLOWED and two out-of-cwd touches are made;
-        without it the verdict is REFUSED and zero. That delta is the whole point
-        - the fallback had no other regression coverage, so a green suite alone
-        would prove nothing about removing it.
-
-        Refusing is the fail-CLOSED direction, which is the only direction a
-        confinement gate may move. The real escape direction (a path lexically
-        INSIDE cwd that links OUT) never used this fallback at all: it satisfies
-        the first ``relative_to``. Escapes are caught by ``tools/base.py::
-        _confine`` at execution time, which is untouched by this.
+        Refusing is the fail-CLOSED direction. A path lexically INSIDE cwd that
+        links OUT satisfies the first ``relative_to``; escapes in that direction
+        are caught by ``tools/base.py::_confine`` at execution time.
         """
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "a.py").write_text("# in scope\n", encoding="utf-8")
@@ -471,12 +454,9 @@ class TestScopeEnforcementNeverStatsTheValue:
 
 
 class TestScopeShellNotice:
-    """run_shell / run_tests are deliberately left out of _SCOPED_TOOLS: they
-    execute a process, and no path-arg check can confine arbitrary code. That
-    trade-off is correct and stays. What was wrong is that it was documented ONLY
-    in a source comment, so a user who set --scope got no runtime signal at all
-    and could reasonably believe the session was confined. These tests pin the
-    signal, not a sandbox."""
+    """run_shell / run_tests are outside _SCOPED_TOOLS: they execute a process,
+    and no path-arg check can confine arbitrary code. These tests pin the
+    runtime notice a scoped session prints, not a sandbox."""
 
     def _warnings(self, tmp_path, scope, **kwargs):
         with patch("localm.plugins.coder.agent.print_warning") as warn:
@@ -547,21 +527,13 @@ class TestShellArgvScopeCheck:
         would break working setups for a heuristic's benefit."""
         Path(_outside_scope(tmp_path, "secrets.txt")).write_text(
             "token\n", encoding="utf-8")
-        # This is the one test here that asserts the command really EXECUTED, so
-        # it needs a command that exists on the platform. `cat` is not a cmd.exe
-        # builtin and is not on a stock Windows PATH: it resolves only when
-        # Git-for-Windows' usr/bin happens to be there, so this passed under Git
-        # Bash and redded under PowerShell on the same machine. `type` is the
-        # cmd equivalent and needs nothing installed.
+        # The one test here that asserts the command really EXECUTED, so it needs a
+        # command that exists on the platform. `type` is a cmd.exe builtin and needs
+        # nothing installed; `cat` resolves only when Git-for-Windows' usr/bin is on
+        # PATH.
         #
-        # Written explicitly-relative so the lexical check sees a path at all,
-        # and QUOTED, which is how a path is normally written. Quoting used to
-        # break execution on Windows, which is why this said UNQUOTED before:
-        # _shell_argv kept the quote characters in the token, and the shell
-        # route handed cmd an argv list that list2cmdline re-escaped into
-        # MSVCRT syntax cmd.exe misreads. Both are fixed, so the natural form is
-        # used again here (tests/plugins/coder/test_shell_quoting.py covers the
-        # fix itself, including paths that contain spaces).
+        # Written explicitly-relative so the lexical check sees a path at all, and
+        # quoted, which is how a path is normally written.
         read_file = (r'type ".\outside\secrets.txt"' if sys.platform == "win32"
                      else 'cat "./outside/secrets.txt"')
         result, warnings, _ = self._run_shell(tmp_path, "src/**", read_file)
@@ -588,9 +560,8 @@ class TestShellArgvScopeCheck:
         is noise the user learns to ignore."""
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("pass\n")
-        # Written explicitly-relative so it IS path-like under the lexical rule:
-        # a bare `src/main.py` would now be skipped as not-a-path, which would
-        # make this control pass without testing anything.
+        # Written explicitly-relative so it IS path-like under the lexical rule;
+        # a bare `src/main.py` is skipped as not-a-path.
         _, warnings, _ = self._run_shell(
             tmp_path, "src/**", "cat ./src/main.py")
         assert not [w for w in warnings if "outside the active scope" in w], warnings
@@ -724,11 +695,9 @@ class TestShellArgvScopeHeuristicPrecision:
             repo, command="sed -i s:/old/path:/new/path: notes.txt") == []
 
     def test_position_no_longer_changes_the_answer(self, repo):
-        """The old check answered differently depending on where a word sat in the
-        command line (program slot, subcommand slot, argument), which is what all
-        the runner/wrapper/flag tables were for. Classification is by syntax now:
-        `docs` is quiet everywhere and `./docs` is loud everywhere. One rule, with
-        no positional exceptions left to get wrong."""
+        """Classification is by syntax, not position: `docs` is quiet everywhere
+        and `./docs` is loud everywhere, in the program slot, the subcommand slot
+        and any argument alike. One rule, with no positional exceptions."""
         for command in ("make docs", "cp -r docs backup", "git add docs"):
             assert self._flagged(repo, command=command) == [], command
         for command in ("cp -r ./docs backup", "git add ./docs", "./docs/gen.sh"):
@@ -748,9 +717,9 @@ class TestShellArgvScopeHeuristicPrecision:
             "../other/target"]
 
     def test_a_real_out_of_scope_reference_still_warns(self, repo, tmp_path_factory):
-        """The #781 behaviour restated for the lexical rule: an explicitly written
-        relative path, a parent traversal, and an absolute path outside cwd are all
-        still reported. The absolute target is a disposable file the test owns."""
+        """Under the lexical rule, an explicitly written relative path, a parent
+        traversal, and an absolute path outside cwd are all still reported. The
+        absolute target is a disposable file the test owns."""
         secrets = tmp_path_factory.mktemp("absolute_target") / "secrets.txt"
         secrets.write_text("disposable\n", encoding="utf-8")
         assert self._flagged(repo, command="cat ./secrets.txt") == ["./secrets.txt"]
@@ -790,7 +759,7 @@ class TestPathLikeSyntax:
         "build/run.sh",              # a bare relative path, likewise
         "a:b", "5:30", "4:3",        # colon-bearing non-paths
         "s:old:new:", "s/foo/bar/",  # sed forms
-        "Q:a",                       # drive-RELATIVE, deliberately given up
+        "Q:a",                       # drive-RELATIVE, not treated as a path
     ])
     def test_not_path_like_by_syntax(self, tok):
         assert not _is_path_like(tok)

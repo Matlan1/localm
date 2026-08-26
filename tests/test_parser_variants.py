@@ -25,7 +25,7 @@ class TestCanonicalStillWorks:
 
 class TestMangledVariants:
     def test_logged_run_shell_call(self):
-        # Verbatim from the audit log: <|tool_call>call:tool_call\n{json}\n<tool_call|>
+        # The <|tool_call>call:tool_call ... <tool_call|> dialect.
         text = ('<|channel>thought\n<channel|><|tool_call>call:tool_call\n'
                 '{"name": "run_shell", "args": {"command": "npm init -y"}}\n'
                 '<tool_call|>')
@@ -63,8 +63,7 @@ class TestMangledVariants:
         assert calls[0].args == {"path": "utils.py"}
 
     def test_doubled_braces_verbatim_from_e2e(self):
-        # Verbatim from a real gemma4-4b run: doubled outer braces silently
-        # broke tool calling - the raw call was printed as the final answer.
+        # Doubled outer braces, as emitted by a real gemma4-4b run.
         text = ('<|tool_call>call:write_file{{"path": "hello.txt", '
                 '"content": "Hello from localcoder."}}<tool_call|>')
         calls = parse_tool_calls(text)
@@ -184,10 +183,8 @@ class TestLenientFlag:
     happened to match a real tool name, with no marker of its own signalling
     the model intended to call a tool at all (a bare top-level JSON object,
     or a ```json/bare ``` fence). Every OTHER recognised shape carries such a
-    marker, however mangled, and must stay unflagged - execution.py keys a
-    confirmation requirement on this, so a false positive here would demand
-    confirmation on ordinary, already-trusted tool calls, and a false
-    negative would silently reopen the gap this exists to close."""
+    marker, however mangled, and must stay unflagged: execution.py keys a
+    confirmation requirement on this flag."""
 
     TOOLS = {"read_file", "write_file", "edit_files", "run_shell", "tree"}
 
@@ -230,10 +227,9 @@ class TestLenientFlag:
         assert calls[0].lenient is False
 
     def test_hallucinated_lorem_ipsum_edit_files_call_is_lenient(self):
-        # Shape observed live: a model with no <tool_call> training free-runs
-        # past an unfired grammar trigger, opens its own "## toolname" heading
-        # instead of the real wrapper, and the JSON body is still recovered by
-        # the bare-object fallback - this is the exact case that must be
+        # A model with no <tool_call> training free-runs past an unfired grammar
+        # trigger, opens its own ## toolname heading instead of the real wrapper,
+        # and the JSON body is still recovered by the bare-object fallback. It is
         # flagged so execution.py can require a human look at it.
         text = (
             '## edit_files\n'
@@ -265,13 +261,10 @@ class TestLooksLikeToolAttempt:
     def test_name_word_alone_not_flagged(self):
         assert not looks_like_tool_attempt('the "name" field is required')
 
-    # ---- tool_names-gated XML-tag hallucination detection (NEW-CODER-NO-TOOLCALL-SILENT) ----
-    # Live-reproduced 2026-08-05 on a "thinking" heretic-abliterated model given a
-    # real file-edit task: it hallucinated an Anthropic-style <invoke>-adjacent XML
-    # convention (<edit_file>/<read_file path="...">) using this project's REAL
-    # tool names, instead of this project's own <tool_call>{"name":...} wrapper.
-    # Before this, that response matched none of the checks above and fell
-    # through as if the model had never attempted anything at all.
+    # ---- tool_names-gated XML-tag hallucination detection ----
+    # A model can hallucinate an XML convention (<edit_file>/<read_file path=...>)
+    # built from this project's REAL tool names instead of its own <tool_call>
+    # wrapper. Such a response matches none of the checks above.
     _REAL_TOOL_NAMES = {"read_file", "write_file", "edit_file", "run_shell", "run_tests"}
 
     def test_hallucinated_xml_tag_flagged_when_tool_names_given(self):
@@ -283,9 +276,7 @@ class TestLooksLikeToolAttempt:
         assert looks_like_tool_attempt(text, self._REAL_TOOL_NAMES)
 
     def test_hallucinated_xml_tag_not_flagged_without_tool_names(self):
-        # No tool_names passed -> falls back to the original, narrower checks
-        # only (backward compatible default; every existing caller that omits
-        # the argument keeps its old behavior).
+        # No tool_names passed -> falls back to the narrower checks only.
         text = '<edit_file>\n{"path": "sample.py"}\n</edit_file>'
         assert not looks_like_tool_attempt(text)
 
@@ -297,9 +288,8 @@ class TestLooksLikeToolAttempt:
         assert not looks_like_tool_attempt(text, self._REAL_TOOL_NAMES)
 
     def test_legitimate_prose_answer_not_flagged_even_with_tool_names(self):
-        # The baseline that must never regress: a genuinely tool-free answer
-        # (no tag of any kind) stays unflagged regardless of what tool names
-        # are known, so a real Q&A turn is never routed into the repair loop.
+        # A genuinely tool-free answer (no tag of any kind) stays unflagged
+        # regardless of what tool names are known.
         text = (
             "Idempotence in HTTP: a request method is idempotent if making the "
             "same request multiple times has the same effect as making it once. "
@@ -340,11 +330,11 @@ class TestStreamHiding:
 
 
 class TestRecoveredMalformations:
-    """Local models often emit JSON that is not quite valid - recover it instead of
-    silently failing to parse (which showed an empty bubble + wrote nothing)."""
+    """Local models often emit JSON that is not quite valid - recover it instead
+    of silently failing to parse."""
 
     def test_python_triple_quoted_content(self):
-        # Verbatim iter-11 GUI failure: write_file with triple-quoted content.
+        # write_file with triple-quoted content.
         text = (
             '<tool_call>\n'
             '{"name": "write_file",\n'
@@ -395,9 +385,9 @@ class TestRecoveredMalformations:
 
 class TestNonStringName:
     """A tool call whose "name" is not a string is malformed, same as broken
-    JSON. Without the guard an unhashable name (dict/list) raised TypeError at
+    JSON. Without the guard an unhashable name (dict/list) raises TypeError at
     the parser's own `parsed[0] in tool_names` check and at execution's
-    `call.name in self.disabled_tools` (2026-07-02 coder tool sweep)."""
+    `call.name in self.disabled_tools`."""
 
     @pytest.mark.parametrize("name_literal", ["123", "null"])
     def test_scalar_name_rejected(self, name_literal):
@@ -408,10 +398,8 @@ class TestNonStringName:
         assert parse_tool_calls(text) == []
 
     def test_dict_name_rejected_without_typeerror(self):
-        # The unhashable case. Pre-guard, the bare-JSON form crashed with
-        # TypeError at `parsed[0] in tool_names`; the explicit fenced form
-        # was accepted outright and crashed later at execution's
-        # `call.name in self.disabled_tools`. Both must now parse to [].
+        # The unhashable case: both the bare-JSON form and the explicit fenced
+        # form must parse to [].
         bare = 'some text {"name": {"x": 1}, "args": {}} more text'
         assert parse_tool_calls(bare, tool_names={"read_file"}) == []
         fenced = '```tool_call\n{"name": {"x": 1}, "args": {}}\n```'

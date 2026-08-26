@@ -209,11 +209,10 @@ def test_switch_engine_seeds_per_model_activity_immediately():
 
 
 def test_switching_models_does_not_evict_the_new_one_via_the_old_ones_staleness():
-    """Regression: model A goes idle past the TTL, then the user switches to
-    model B. Before the fix, B inherited A's stale GLOBAL _last_activity the
-    instant it registered (nothing seeded a per-model entry for B), so the very
-    next idle sweep could evict B before it ever served a single request - the
-    user switches model, waits through the load, and finds it gone."""
+    """Model A goes idle past the TTL, then the user switches to model B. If
+    nothing seeds a per-model entry for B, it inherits A's stale GLOBAL
+    _last_activity the instant it registers, and the very next idle sweep can
+    evict B before it ever serves a single request."""
 
     async def scenario():
         _reset_switch_state()

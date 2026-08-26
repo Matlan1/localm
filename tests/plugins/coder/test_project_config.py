@@ -93,21 +93,19 @@ class TestLoadProjectConfig:
     def test_raises_on_invalid_toml_rather_than_reading_as_absent(self, tmp_path):
         """A file that EXISTS but does not parse must not answer ``{}``.
 
-        This assertion used to demand ``{}``, which made the collapse a
-        specification: ``{}`` is byte-identical to "no project config here", and
-        the two keys it silently drops are SAFETY settings, not preferences.
-        ``always_confirm`` (the user's "prompt me before a shell command even
-        under --yes") empties at cli/_main.py:654-657, and ``mode = "privacy"``
-        is dropped at cli/_main.py:658-660 and audit.py:96-102, so a session the
-        user marked private falls through to the global coder_mode and a
-        transcript is written. A TOML typo is an extremely reachable input.
+        ``{}`` is byte-identical to "no project config here", and the two keys
+        it would silently drop are SAFETY settings: ``always_confirm`` (prompt
+        before a shell command even under --yes) empties in cli/_main.py, and
+        ``mode = "privacy"`` is dropped there and in audit.py, so a session the
+        user marked private would fall through to the global coder_mode and
+        write a transcript.
         """
         cfg_dir = tmp_path / ".localcoder"
         cfg_dir.mkdir()
         (cfg_dir / "config.toml").write_text("this is NOT [valid toml [\n")
         with pytest.raises(ProjectConfigUnreadable) as ei:
             load_project_config(tmp_path)
-        # Actionable: the CLI is a local surface, so it may name the file.
+        # The message names the file.
         assert "config.toml" in str(ei.value)
 
     def test_absent_file_is_still_an_empty_config(self, tmp_path):
@@ -129,9 +127,8 @@ class TestCliRefusesAnUnreadableProjectConfig:
     file's settings silently dropped.
 
     `always_confirm` is what keeps shell tools prompting under --yes, and
-    `mode = "privacy"` is what keeps a transcript off disk. Starting anyway runs
-    the session WITHOUT protections the user believes they configured, so a TOML
-    typo silently disarms them. Refusing costs one edit and is recoverable.
+    `mode = "privacy"` is what keeps a transcript off disk, so starting anyway
+    would run the session without protections the user configured.
     """
 
     def _corrupt(self, tmp_path):
@@ -147,25 +144,20 @@ class TestCliRefusesAnUnreadableProjectConfig:
 
         import localm.plugins.coder.cli as ccli
 
-        # The coder ships uninstalled and the CLI gates on that FIRST, exiting
-        # non-zero. Without this bypass the refusal assertion below passes on
-        # the wrong failure entirely (measured).
+        # The CLI gates on the coder being installed first, so bypass that gate
+        # to reach the config refusal.
         monkeypatch.setattr("localm.plugins.engine.PluginManager.is_active",
                             lambda self, name: True)
         self._corrupt(tmp_path)
         res = CliRunner().invoke(
             ccli.main, ["--cwd", str(tmp_path), "--model", "m", "hi"])
 
-        # The MESSAGE first, because it is the only discriminating assertion.
-        # Measured: with the fix reverted the CLI runs on and still exits
-        # non-zero, just later and for an unrelated reason ("model not found"),
-        # so `exit_code != 0` is satisfied in BOTH arms and proves nothing on
-        # its own. Only this text distinguishes "refused the config" from "died
-        # further down".
+        # Assert the message first: it is the only assertion that separates a
+        # config refusal from a later, unrelated non-zero exit.
         assert "could not be read" in res.output.lower(), (
             "the coder did not refuse: it started with always_confirm and "
             f"mode silently dropped. output was: {res.output!r}")
-        # Actionable: it must point at the file rather than just failing.
+        # The message names the file.
         assert "config.toml" in res.output
         assert res.exit_code != 0
 

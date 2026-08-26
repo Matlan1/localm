@@ -73,12 +73,11 @@ class TestEffectiveMode:
         through to a more permissive global mode.
 
         The project file is the only place a user can say "this project is
-        private". When it does not parse we cannot know whether it said so, and
-        resolution used to continue to the global coder_mode - so a user whose
-        global mode is "log" gets a full transcript written for a session they
-        had marked private, with nothing said. Same direction as
-        test_config_failure_means_privacy above: a mode we cannot establish
-        resolves to the safest one.
+        private". When it does not parse we cannot know whether it said so, so
+        continuing to the global coder_mode gives a user whose global mode is
+        "log" a full transcript written for a session they had marked private,
+        with nothing said. Same direction as test_config_failure_means_privacy
+        above: a mode we cannot establish resolves to the safest one.
         """
         cfg_dir = tmp_path / ".localcoder"
         cfg_dir.mkdir()
@@ -88,14 +87,12 @@ class TestEffectiveMode:
         with patch("localm.config.load_config", return_value=cfg):
             assert effective_mode("coder", cwd=tmp_path) == SessionMode.PRIVACY
 
-            # The control: with NO config file the global mode must still be
-            # honoured, or this test would pass on a resolver that returned
-            # PRIVACY unconditionally. Remove the file rather than pointing at a
-            # sibling directory - find_project_config walks UP, so a subdir of
-            # tmp_path still finds tmp_path's own file (that cost a red here).
+            # With NO config file the global mode is still honoured. The file is
+            # removed rather than pointing at a sibling directory:
+            # find_project_config walks UP, so a subdir of tmp_path would still
+            # find tmp_path's own file.
             (cfg_dir / "config.toml").unlink()
-            # Self-check, so an ancestor .localcoder anywhere above the tmp tree
-            # fails loudly instead of quietly changing what this control means.
+            # Self-check: an ancestor .localcoder above the tmp tree fails loudly.
             from localm.plugins.coder.project_config import find_project_config
             assert find_project_config(tmp_path) is None
             assert effective_mode("coder", cwd=tmp_path) == SessionMode.LOG
@@ -240,9 +237,9 @@ class TestServerModes:
                        return_value=_cfg(mode="log")):
                 data = client.get("/v1/config", headers={"Authorization": f"Bearer {app.state.shell_token}"}).json()
         assert data["effective_mode"] == "log"
-        # AUD-INSTANCEID: /v1/config always carries a stable per-data-directory
-        # id so the GUI can tell a normal restart of THIS install apart from a
-        # different install sharing the same browser origin.
+        # /v1/config always carries a stable per-data-directory id so the GUI can
+        # tell a restart of THIS install apart from a different install on the
+        # same browser origin.
         assert data["instance_id"], "instance_id must be present and non-empty"
 
 
@@ -252,17 +249,9 @@ class TestServerModes:
 
 class TestCheckpointPrivacyGate:
     def _agent(self, tmp_path, mode):
-        # A REAL Agent, not a Agent.__new__(Agent) stub with hand-picked
-        # attributes: that shape broke twice (once for _todos/B2, again for
-        # _changed_files) because save_checkpoint's serialised state keeps
-        # growing and nothing forces a hand-built stub to grow with it - each
-        # gap surfaces as an AttributeError that reads exactly like a
-        # production bug, not a stale fixture (it did, here, for several
-        # minutes). A real __init__ can never go stale relative to itself, so
-        # this is immune to the NEXT field save_checkpoint learns to read.
-        # Same construction pattern as tests/plugins/coder/test_session_mode.py's
-        # _make_agent - a MagicMock backend plus patched make_audit_log/
-        # load_memory/ProjectMap keeps this as cheap as the old stub.
+        # A REAL Agent, not an Agent.__new__(Agent) stub with hand-picked
+        # attributes: a MagicMock backend plus patched make_audit_log,
+        # load_memory and ProjectMap.
         from localm.plugins.coder.agent import Agent
         backend = MagicMock()
         backend.model_id = "test-model"
@@ -276,7 +265,7 @@ class TestCheckpointPrivacyGate:
         agent._turns = 1
         agent._total_tokens = 10
         agent._messages = [{"role": "user", "content": "secret stuff"}]
-        # The checkpoint also carries the model's task list (B2).
+        # The checkpoint also carries the model's task list.
         agent._todos = [{"text": "secret plan step", "status": "in_progress"}]
         return agent
 
@@ -285,14 +274,14 @@ class TestCheckpointPrivacyGate:
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
         agent = self._agent(tmp_path, SessionMode.PRIVACY)
         agent.save_checkpoint()
-        # Nothing in the project tree, nothing under HOME (CODER-4). The task
-        # list rides in the same file, so it is covered by the same promise (B2).
+        # Nothing in the project tree, nothing under HOME. The task list rides in
+        # the same file.
         assert not (tmp_path / ".localcoder" / "checkpoint.json").exists()
         assert not (tmp_path / "home" / "checkpoints").exists()
 
     def test_log_mode_writes_checkpoint_under_home(self, tmp_path, monkeypatch):
-        # CODER-4: the checkpoint is session DATA - it lives under HOME, not in
-        # the project tree (which used to gain a stray .localcoder/ folder).
+        # The checkpoint is session DATA: it lives under HOME, not in the project
+        # tree.
         import localm.config as cfg
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
         agent = self._agent(tmp_path, SessionMode.LOG)
@@ -303,7 +292,7 @@ class TestCheckpointPrivacyGate:
         assert path.is_file()
         text = path.read_text(encoding="utf-8")
         assert "secret stuff" in text
-        assert "secret plan step" in text          # the task list rides along (B2)
+        assert "secret plan step" in text          # the task list rides along
 
 
 # ------------------------------------------------------------------ #
@@ -360,11 +349,11 @@ class TestDetectHome:
 
     def test_default_is_contained_never_user_localm(self, tmp_path, monkeypatch, capsys):
         # No LOCALM_HOME, no marker, no ./home: the default is a CONTAINED ./home
-        # inside the install, surfaced on stderr - NEVER a shared ~/.localm outside it.
+        # inside the install, surfaced on stderr, never a shared ~/.localm.
         from localm import config as cfg
         monkeypatch.delenv("LOCALM_HOME", raising=False)
-        # Path.home() must not decide the default now; point it at an obvious dir so
-        # any regression back to ~/.localm would show up as this path.
+        # Point Path.home() at an obvious dir, so a fallback to ~/.localm would
+        # show up as this path.
         monkeypatch.setattr(cfg.Path, "home", staticmethod(lambda: tmp_path))
         monkeypatch.setattr(cfg, "_warned_unconfigured_home", False)
         result = cfg._detect_home()

@@ -2,15 +2,14 @@
 """Pre-load KV sizing from the GGUF header (gguf_kv_bytes_per_token) and its use
 by VramSizingMixin._kv_bytes_per_token / _auto_gpu_layers.
 
-The defect these pin: the per-token KV cost used to be derived from the model's
-FILE SIZE (_bytes_per_token), but KV cost is a function of the ATTENTION shape
-only. That is wrong in both directions - it over-charges a sparse MoE, whose file
-is inflated by expert weights that cost no KV at all, and under-charges a wide-KV
-dense model. The MoE direction silently UNDER-offloads (weight budget shrinks, so
-_auto_gpu_layers picks fewer layers) and nothing warns.
+KV cost is a function of the ATTENTION shape only, never of the model's FILE
+SIZE: a file-size estimate over-charges a sparse MoE, whose file is inflated by
+expert weights that cost no KV at all, and under-charges a wide-KV dense model.
+An over-charged KV shrinks the weight budget, so _auto_gpu_layers offloads fewer
+layers.
 
-These tests build REAL GGUF headers byte by byte and drive the real parser and the
-real sizing path - no mock stands in for the code under test.
+These tests build REAL GGUF headers byte by byte and drive the real parser and
+the real sizing path.
 """
 
 import struct
@@ -44,9 +43,7 @@ def _gguf(path, kv, *, version=3, magic=b"GGUF", tensors=()):
     either a list (written as uint32) or a (element_type, list) pair.
 
     The pair form exists because REAL GGUF writers emit the per-layer
-    head_count_kv array as INT32 (type 5) - measured on real Granite 4 H and LFM2
-    headers. A helper that could only emit uint32 would make every element-type
-    bug invisible to every test here."""
+    head_count_kv array as INT32 (type 5), as Granite 4 H and LFM2 headers do."""
     out = [magic, struct.pack("<I", version),
            struct.pack("<QQ", len(tensors), len(kv))]
     for key, vtype, val in kv:
@@ -80,9 +77,9 @@ def _gguf(path, kv, *, version=3, magic=b"GGUF", tensors=()):
 
 
 def _hybrid_tensors(n_layers, attending):
-    """Tensor names for a hybrid stack: EVERY layer carries attn_norm (which is
-    why a bare "attn" match would count them all), only *attending* layers carry
-    attn_k/attn_v. Copied from the real Qwen3-Next / Granite 4 H / LFM2 files."""
+    """Tensor names for a hybrid stack: EVERY layer carries attn_norm, and only
+    *attending* layers carry attn_k/attn_v. Taken from the real Qwen3-Next /
+    Granite 4 H / LFM2 files."""
     names = []
     for i in range(n_layers):
         names.append(f"blk.{i}.attn_norm.weight")
@@ -114,8 +111,7 @@ def _shape(arch, n_layers, n_embd, n_head, n_head_kv, extra=()):
 class TestGgufKvBytesPerToken:
     def test_gqa_shape_matches_the_loaded_model_formula(self, tmp_path):
         # n_layers * n_head_kv * head_dim * 2 (K and V) * 2 (f16), head_dim =
-        # n_embd // n_head. Same number LlamaCpp._read_kv_bytes_per_token would
-        # compute post-load for this shape (cf. test_kv_bytes_offload.py).
+        # n_embd // n_head.
         f = _gguf(tmp_path / "m.gguf", _shape("llama", 32, 4096, 32, 8))
         assert gguf_kv_bytes_per_token(f) == 32 * 8 * 128 * 2 * 2 == 131072
 
@@ -127,8 +123,7 @@ class TestGgufKvBytesPerToken:
             extra=[("gemma3.attention.key_length", _T_UINT32, 256),
                    ("gemma3.attention.value_length", _T_UINT32, 256)]))
         assert gguf_kv_bytes_per_token(f) == 26 * 4 * (256 + 256) * 2
-        # and that is genuinely different from the fallback path, or this test
-        # would pass for the wrong reason
+        # Different from the fallback path.
         assert gguf_kv_bytes_per_token(f) != 26 * 4 * (4096 // 32) * 2 * 2
 
     def test_architecture_scoped_so_an_mmproj_clip_block_cannot_win(self, tmp_path):
@@ -166,12 +161,8 @@ class TestGgufKvBytesPerToken:
         assert gguf_kv_bytes_per_token(f) == 0
 
     def test_per_layer_array_is_summed_not_declined(self, tmp_path):
-        # SUPERSEDED BEHAVIOUR, deliberately inverted. This used to assert 0 on
-        # the grounds that "a single number would be wrong, so decline rather
-        # than guess" - correct about the single number, but it threw away the
-        # only EXACT answer in the file. The array states the KV heads of every
-        # layer individually (0 = a layer holding no KV cache), so summing it is
-        # not a guess, it is the truth.
+        # The array states the KV heads of every layer individually (0 = a layer
+        # holding no KV cache), so summing it is exact rather than a guess.
         kv = [
             ("general.architecture", _T_STRING, "llama"),
             ("llama.block_count", _T_UINT32, 4),
@@ -181,8 +172,8 @@ class TestGgufKvBytesPerToken:
         ]
         f = _gguf(tmp_path / "m.gguf", kv)
         assert gguf_kv_bytes_per_token(f) == (8 + 8 + 0 + 8) * 128 * 2 * 2 == 12288
-        # and that is genuinely NOT the whole-stack formula, or this would pass
-        # for the wrong reason: 4 layers * 8 heads would charge the silent layer.
+        # Not the whole-stack formula: 4 layers * 8 heads would charge the silent
+        # layer.
         assert gguf_kv_bytes_per_token(f) != 4 * 8 * 128 * 2 * 2
 
     def test_zero_on_gguf_v1(self, tmp_path):
@@ -202,21 +193,20 @@ class TestGgufKvBytesPerToken:
 
 
 # --------------------------------------------------------------------------- #
-#  The actual defect: file size vs attention shape                             #
+#  File size vs attention shape                                                #
 # --------------------------------------------------------------------------- #
 
 class TestSparseMoeIsNotOverCharged:
     def test_same_attention_shape_costs_the_same_kv_whatever_the_file_size(
             self, tmp_path):
         """A sparse MoE and a dense model with the SAME attention shape have the
-        SAME KV cost per token. The file-size heuristic says otherwise, and that
-        difference is the bug."""
+        SAME KV cost per token, whatever their file sizes."""
         moe = _gguf(tmp_path / "moe.gguf", _shape("qwen3moe", 48, 2048, 16, 4))
         dense = _gguf(tmp_path / "dense.gguf", _shape("qwen3", 48, 2048, 16, 4))
         assert gguf_kv_bytes_per_token(moe) == gguf_kv_bytes_per_token(dense)
 
-        # The heuristic they replace disagrees wildly for the same attention
-        # shape, purely because the MoE file carries expert weights.
+        # A file-size estimate disagrees wildly for the same attention shape,
+        # because the MoE file carries expert weights.
         heur_moe = GgufBackend._bytes_per_token(18 * GB)     # ~30B-A3B on disk
         heur_dense = GgufBackend._bytes_per_token(3 * GB)    # same attention, dense
         assert heur_moe != heur_dense, "precondition: the heuristic must differ"
@@ -226,9 +216,9 @@ class TestSparseMoeIsNotOverCharged:
 
 
 class TestAutoGpuLayersUsesTheRealShape:
-    """End-to-end: the over-charged KV shrank the weight budget, so _auto_gpu_layers
-    offloaded FEWER layers than would actually fit. This is the negative case - it
-    fails against the file-size-only code."""
+    """End-to-end: _auto_gpu_layers offloads the number of layers the REAL
+    attention shape allows, not the smaller number a file-size KV estimate
+    yields."""
 
     @staticmethod
     def _vram(free, total):
@@ -268,9 +258,8 @@ class TestAutoGpuLayersUsesTheRealShape:
         with self._vram(12 * GB, 16 * GB):
             n = b._auto_gpu_layers()
 
-        # What the old, over-charged path would have produced, computed the same
-        # way _auto_gpu_layers does it, so this is a real comparison rather than a
-        # magic number.
+        # What the file-size path produces, computed the same way
+        # _auto_gpu_layers does it.
         free = 12 * GB
         overhead = GgufBackend._VRAM_OVERHEAD_BYTES
         layers = 32                                  # _ASSUMED_LAYERS (none cached)
@@ -302,17 +291,15 @@ class TestAutoGpuLayersUsesTheRealShape:
 
 
 # --------------------------------------------------------------------------- #
-#  The GUI estimate (sysstats.estimate_vram): the SAME defect, a SEPARATE     #
-#  call site that #865 did not touch (AUDIT-KV-SYSSTATS)                      #
+#  The GUI estimate (sysstats.estimate_vram): the same shape at a separate     #
+#  call site                                                                   #
 # --------------------------------------------------------------------------- #
 
 class TestEstimateVramUsesTheRealShape:
-    """sysstats.estimate_vram powers /api/vram-estimate (the Settings performance
-    sliders' live readout). It used to derive bytes-per-token from model_bytes
-    directly - byte-identical to the heuristic #865 replaced everywhere else,
-    just left behind in a module #865 never touched. It cannot read a GGUF
-    header itself (it only ever sees a byte count), so the caller reads the
-    header and passes the result in via kv_bytes_per_token."""
+    """sysstats.estimate_vram powers /api/vram-estimate (the Settings
+    performance sliders' live readout). It cannot read a GGUF header itself, as
+    it only ever sees a byte count, so the caller reads the header and passes
+    the result in via kv_bytes_per_token."""
 
     def test_sparse_moe_lands_on_the_attention_shape_not_the_heuristic(
             self, tmp_path):
@@ -334,9 +321,7 @@ class TestEstimateVramUsesTheRealShape:
             self, tmp_path):
         from localm.inference.backends.gguf import GgufBackend
         from localm.sysstats import estimate_vram
-        # A small file with a wide (large head_dim) KV shape - the direction the
-        # old file-size heuristic under-charged (_sizing.py docstring: ~2.6x low
-        # on a 12B).
+        # A small file with a wide (large head_dim) KV shape.
         f = _gguf(tmp_path / "dense.gguf", _shape(
             "gemma3", 26, 4096, 32, 4,
             extra=[("gemma3.attention.key_length", _T_UINT32, 256),
@@ -352,10 +337,10 @@ class TestEstimateVramUsesTheRealShape:
 
     def test_falls_back_to_the_size_class_heuristic_when_no_header_was_read(
             self, tmp_path):
-        # kv_bytes_per_token=0 is the caller's signal that no header was
-        # readable (missing file, non-GGUF, unresolved shape) - estimate_vram
-        # must still answer with the last-resort heuristic, not divide by
-        # zero or silently report 0 kv_cache.
+        # kv_bytes_per_token=0 is the caller's signal that no header was readable
+        # (missing file, non-GGUF, unresolved shape). estimate_vram still answers
+        # with the last-resort heuristic rather than dividing by zero or reporting
+        # 0 kv_cache.
         from localm.inference.backends.gguf import GgufBackend
         from localm.sysstats import estimate_vram
         model_bytes = 6 * GB
@@ -364,14 +349,10 @@ class TestEstimateVramUsesTheRealShape:
         assert est["kv_cache"] > 0
 
     def test_moe_pinned_bytes_reduces_the_weights_estimate(self, tmp_path):
-        """AUDIT-KV-SYSSTATS, the sequel: _sizing.py's VramSizingMixin.
-        _effective_model_bytes_for_vram discounts a Mixture-of-Experts load's
-        weight footprint by whatever n_cpu_moe pins to system RAM - this GUI
-        estimate must apply the SAME discount, or the live readout keeps
-        showing the whole file as VRAM-needed even after the load itself
-        would succeed. moe_pinned_bytes=0 (the default) must be a no-op -
-        every existing caller/test that never passes it keeps today's
-        answer."""
+        """_sizing.py's VramSizingMixin._effective_model_bytes_for_vram
+        discounts a Mixture-of-Experts load's weight footprint by whatever
+        n_cpu_moe pins to system RAM, and this GUI estimate applies the SAME
+        discount. moe_pinned_bytes=0 (the default) is a no-op."""
         from localm.sysstats import estimate_vram
         model_bytes = 800 * 1024 * 1024   # 800 MB file, matches the real MoE test scale
         pinned = 700 * 1024 * 1024        # 700 MB of it pinned to system RAM
@@ -384,10 +365,8 @@ class TestEstimateVramUsesTheRealShape:
         assert with_moe["needed"] < without["needed"]
 
     def test_moe_pinned_bytes_never_goes_negative(self, tmp_path):
-        # A pinned count larger than the file itself (a parsing quirk, or a
-        # stale n_cpu_moe against a since-replaced smaller file) must clamp
-        # to zero, never underflow into a negative "weights" the UI would
-        # render as nonsense.
+        # A pinned count larger than the file itself clamps to zero rather than
+        # underflowing into a negative "weights" value.
         from localm.sysstats import estimate_vram
         est = estimate_vram(100, n_ctx=0, n_gpu_layers=99, moe_pinned_bytes=999)
         assert est["weights"] == 0
@@ -401,17 +380,13 @@ class TestEstimateVramUsesTheRealShape:
 #  attention layers with linear-attention / state-space / short-convolution    #
 #  layers that keep a FIXED-size recurrent state and cost no per-token KV at   #
 #  all. n_layers * n_head_kv charges every layer, so it over-charges by the    #
-#  ratio of attending layers to total layers - measured 4.0x against a real    #
-#  Qwen3-Next header, whose 48 layers attend only 12 times.                    #
-#                                                                              #
-#  Nothing errors when this is wrong: _check_context_fit never shrinks the     #
-#  window and never raises, it silently relocates the KV cache to system RAM.  #
+#  ratio of attending layers to total layers.                                  #
 # --------------------------------------------------------------------------- #
 
 def _granite_layers():
     """The real Granite 4.0 H Tiny pattern: 40 layers, attention at 5/15/25/35
-    with 4 KV heads, mamba (no KV cache) everywhere else. Read off the actual
-    published header, and corroborated by that model's config.json layer_types."""
+    with 4 KV heads, mamba (no KV cache) everywhere else, matching that model's
+    config.json layer_types."""
     return [4 if i in (5, 15, 25, 35) else 0 for i in range(40)]
 
 
@@ -438,14 +413,13 @@ class TestHybridPerLayerKvHeads:
         ])
         head_dim = 1536 // 12
         assert gguf_kv_bytes_per_token(f) == (4 * 4) * head_dim * 2 * 2 == 8192
-        # The defect's number, so this cannot pass for the wrong reason: charging
-        # all 40 layers is 10x the truth (only 4 of 40 attend).
+        # Charging all 40 layers is 10x the truth: only 4 of 40 attend.
         assert gguf_kv_bytes_per_token(f) != 40 * 4 * head_dim * 2 * 2
 
     def test_lfm2_shape_has_no_ssm_keys_at_all(self, tmp_path):
-        # lfm2 is hybrid via SHORT CONVOLUTION and declares no ssm.* key. Keying
-        # hybrid detection on ssm.* alone would miss it entirely; the array form
-        # needs no detection at all, which is exactly why it is preferred.
+        # lfm2 is hybrid via SHORT CONVOLUTION and declares no ssm.* key, so
+        # hybrid detection keyed on ssm.* alone would miss it; the array form
+        # needs no detection at all.
         f = _gguf(tmp_path / "l.gguf", [
             ("general.architecture", _T_STRING, "lfm2"),
             ("lfm2.block_count", _T_UINT32, 16),
@@ -459,9 +433,7 @@ class TestHybridPerLayerKvHeads:
         assert gguf_kv_bytes_per_token(f) != 16 * 8 * head_dim * 2 * 2
 
     def test_uint32_and_int32_arrays_agree(self, tmp_path):
-        # The element-type table must cover what real writers emit. If int32 were
-        # missing, every synthetic uint32 test would still pass while every real
-        # file silently answered 0.
+        # The element-type table covers what real writers emit, int32 included.
         def build(elem_t, name):
             return _gguf(tmp_path / name, [
                 ("general.architecture", _T_STRING, "granitehybrid"),
@@ -486,11 +458,10 @@ class TestHybridPerLayerKvHeads:
         ])
         assert gguf_kv_bytes_per_token(f) == 4 * (256 + 256) * 2
 
-    # --- refusals: a wrong number is worse than no number ------------------ #
+    # --- refusals ---------------------------------------------------------- #
 
     def test_zero_when_the_array_length_disagrees_with_block_count(self, tmp_path):
-        # One of the two is not describing the stack we think it is. Answering
-        # anyway would be exactly the confident wrong number this refuses.
+        # One of the two is not describing the same stack, so the probe refuses.
         f = _gguf(tmp_path / "m.gguf", [
             ("general.architecture", _T_STRING, "hyb"),
             ("hyb.block_count", _T_UINT32, 40),
@@ -502,7 +473,7 @@ class TestHybridPerLayerKvHeads:
 
     def test_zero_when_no_layer_attends(self, tmp_path):
         # A fully recurrent stack has no growing KV cache. 0 means "no signal"
-        # and the caller keeps its heuristic, rather than dividing by zero.
+        # and the caller keeps its heuristic.
         f = _gguf(tmp_path / "m.gguf", [
             ("general.architecture", _T_STRING, "mamba2"),
             ("mamba2.block_count", _T_UINT32, 4),
@@ -513,8 +484,7 @@ class TestHybridPerLayerKvHeads:
         assert gguf_kv_bytes_per_token(f) == 0
 
     def test_zero_when_the_array_is_not_integers(self, tmp_path):
-        # A float array is not a head count; reading it as one would be the
-        # silent mis-read the scalar reader already refuses.
+        # A float array is not a head count.
         f = _gguf(tmp_path / "m.gguf", [
             ("general.architecture", _T_STRING, "hyb"),
             ("hyb.block_count", _T_UINT32, 4),
@@ -528,12 +498,12 @@ class TestHybridPerLayerKvHeads:
 
 class TestHybridStatedAsAScalarWithoutTensorInfo:
     """Qwen3-Next states ONE head_count_kv for a stack whose layers differ, and
-    its METADATA records nothing about which layers attend (verified against the
-    real file: 44 keys, no full_attention_interval, no layer_types, no array).
+    its METADATA records nothing about which layers attend: no
+    full_attention_interval, no layer_types, no array.
 
-    These fixtures carry no tensor list, which is the case where nothing in the
-    file can answer, so the probe declines. When the tensor list IS present it
-    answers exactly - see TestScalarHybridResolvedFromTensorNames."""
+    These fixtures carry no tensor list either, so nothing in the file can
+    answer and the probe declines. When the tensor list IS present it answers
+    exactly - see TestScalarHybridResolvedFromTensorNames."""
 
     @staticmethod
     def _qwen3next(tmp_path, extra=()):
@@ -555,9 +525,8 @@ class TestHybridStatedAsAScalarWithoutTensorInfo:
             ("qwen3next.ssm.state_size", _T_UINT32, 128),
         ])
         assert gguf_kv_bytes_per_token(f) == 0
-        # The exact number the defect produced on the real file, named so a
-        # regression cannot come back quietly. Only 12 of 48 layers attend, so
-        # this is 4.0x the truth (which the header does not record).
+        # Only 12 of 48 layers attend, so the whole-stack product is 4.0x the
+        # truth (which the header does not record).
         assert gguf_kv_bytes_per_token(f) != 48 * 2 * (256 + 256) * 2 == 98304
 
     def test_scalar_plus_shortconv_marker_refuses(self, tmp_path):
@@ -566,16 +535,13 @@ class TestHybridStatedAsAScalarWithoutTensorInfo:
         assert gguf_kv_bytes_per_token(f) == 0
 
     def test_without_any_marker_the_scalar_is_still_used(self, tmp_path):
-        # The control for the two above: same shape, no recurrent marker, so the
-        # refusal must NOT fire. Without this, a probe that refused everything
-        # would pass both tests above and look correct.
+        # Same shape, no recurrent marker, so the refusal does not fire.
         f = self._qwen3next(tmp_path)
         assert gguf_kv_bytes_per_token(f) == 48 * 2 * (256 + 256) * 2 == 98304
 
     def test_another_architectures_ssm_keys_do_not_veto(self, tmp_path):
         # Arch-scoped exactly like the shape keys: an mmproj or a second tower
-        # carrying ssm.* must not make the LLM refuse. Same discipline as
-        # test_architecture_scoped_so_an_mmproj_clip_block_cannot_win.
+        # carrying ssm.* does not make the LLM refuse.
         f = _gguf(tmp_path / "m.gguf", _shape("llama", 32, 4096, 32, 8, extra=[
             ("clip.ssm.state_size", _T_UINT32, 128),
             ("someothermodel.shortconv.l_cache", _T_UINT32, 3),
@@ -589,9 +555,9 @@ class TestScalarHybridResolvedFromTensorNames:
     architecture table: an attending layer carries attn_k/attn_v weights, a
     linear-attention / SSM / short-convolution layer does not.
 
-    The industry default here is to broadcast the single head count across every
-    layer (Ollama's fs/ggml does exactly that), which over-charges Qwen3-Next by
-    4x. Reading the tensor list gets the exact figure instead."""
+    Broadcasting the single head count across every layer, as some other
+    readers do, over-charges Qwen3-Next by 4x. Reading the tensor list gets the
+    exact figure."""
 
     QWEN3NEXT_ATTENDING = frozenset(range(3, 48, 4))    # 12 of 48, from the file
 
@@ -617,15 +583,13 @@ class TestScalarHybridResolvedFromTensorNames:
         f = self._qwen3next(tmp_path)
         # 12 attending layers * 2 KV heads * (256 + 256) * 2 bytes.
         assert gguf_kv_bytes_per_token(f) == 12 * 2 * (256 + 256) * 2 == 24576
-        # NOT the whole-stack product, which is what charging every layer gives
-        # and what the size-class fallback would be even further from.
+        # Not the whole-stack product that charging every layer gives.
         assert gguf_kv_bytes_per_token(f) != 48 * 2 * (256 + 256) * 2 == 98304
 
     def test_attn_norm_on_every_layer_does_not_count_as_attending(self, tmp_path):
-        # The discriminator guard. Every layer of all three real hybrids carries
-        # blk.<i>.attn_norm.weight whether it attends or not, so matching a bare
-        # "attn" would count the whole stack and silently restore the 4x
-        # over-charge while looking like a working fix.
+        # Every layer of all three real hybrids carries blk.<i>.attn_norm.weight
+        # whether it attends or not, so matching a bare "attn" would count the
+        # whole stack.
         names = [f"blk.{i}.attn_norm.weight" for i in range(48)]
         names += [f"blk.{i}.attn_k.weight" for i in self.QWEN3NEXT_ATTENDING]
         assert sum("attn_norm" in n for n in names) == 48, "precondition"
@@ -633,15 +597,13 @@ class TestScalarHybridResolvedFromTensorNames:
         assert gguf_kv_bytes_per_token(f) == 24576
 
     def test_a_different_attending_pattern_gives_a_different_answer(self, tmp_path):
-        # Proves the count is genuinely read rather than a constant that happens
-        # to match: half the layers attending must double the answer.
+        # Half the layers attending doubles the answer.
         f = self._qwen3next(tmp_path, attending=frozenset(range(1, 48, 2)))
         assert gguf_kv_bytes_per_token(f) == 24 * 2 * (256 + 256) * 2 == 49152
 
     def test_zero_when_the_file_carries_no_tensor_list(self, tmp_path):
-        # A metadata-only prefix (or a file whose tensor list sits past the
-        # bounded read) cannot answer, so the probe declines rather than falling
-        # back to the whole-stack product it knows is wrong.
+        # A metadata-only prefix, or a file whose tensor list sits past the bounded
+        # read, cannot answer, so the probe declines.
         f = self._qwen3next(tmp_path, tensors=())
         assert gguf_kv_bytes_per_token(f) == 0
 
@@ -651,28 +613,23 @@ class TestScalarHybridResolvedFromTensorNames:
         assert gguf_kv_bytes_per_token(f) == 0
 
     def test_zero_when_more_layers_attend_than_the_stack_has(self, tmp_path):
-        # block_count and the tensor list disagree about what they describe, so
-        # neither can be trusted.
+        # block_count and the tensor list disagree about what they describe.
         names = [f"blk.{i}.attn_k.weight" for i in range(60)]
         f = self._qwen3next(tmp_path, tensors=names)
         assert gguf_kv_bytes_per_token(f) == 0
 
     def test_a_uniform_architecture_never_reads_the_tensor_list(self, tmp_path):
-        # The control for the whole mechanism: no recurrent marker means the
-        # scalar already speaks for every layer, so the second pass must not run
-        # and a tensor list claiming otherwise must not change the answer.
+        # No recurrent marker: the scalar already speaks for every layer, the
+        # second pass does not run, and a tensor list claiming otherwise does not
+        # change the answer.
         f = _gguf(tmp_path / "u.gguf", _shape("llama", 32, 4096, 32, 8),
                   tensors=[f"blk.{i}.attn_k.weight" for i in range(4)])
         assert gguf_kv_bytes_per_token(f) == 131072
 
 
 # --------------------------------------------------------------------------- #
-#  Bound to the REAL published artefacts, not to a fixture of our own design.  #
-#                                                                              #
-#  Every test above builds a header this repo invented, so it can only ever    #
-#  find a defect someone already imagined. These read the actual bytes real    #
-#  writers publish. The expected values are ground truth taken from each       #
-#  model's own config.json, NOT from this implementation.                      #
+#  Bound to the REAL published artefacts. The expected values are ground truth  #
+#  taken from each model's own config.json, not from this implementation.       #
 # --------------------------------------------------------------------------- #
 
 _REAL_HEADERS = [
@@ -705,8 +662,8 @@ def test_real_published_header(tmp_path, name, repo_path, expected, why):
     """Range-fetch a real GGUF's leading bytes, far enough in to carry both the
     metadata block and the tensor list - the tensor list is what resolves a
     hybrid that states a single head count, and it sits after the tokenizer
-    vocab (measured 5.71 MiB into the Qwen3-Next file). In production localm has
-    the whole file on disk, so this prefix stands in for that."""
+    vocab (about 5.7 MiB into the Qwen3-Next file). In production localm has the
+    whole file on disk, so this prefix stands in for that."""
     import urllib.request
     from localm.http_ssl import verified_urlopen
 
@@ -720,10 +677,8 @@ def test_real_published_header(tmp_path, name, repo_path, expected, why):
     except Exception as exc:
         pytest.skip(f"cannot reach {url}: {type(exc).__name__}: {exc}")
 
-    # Verify the FETCH before trusting anything computed from it: a probe run over
-    # an error page returns a perfectly plausible 0, which is also this test's
-    # expected answer for qwen3next. Skipping here says "could not look"; passing
-    # would say "looked and agreed", and those must never be confused.
+    # Verify the fetch before trusting anything computed from it: a probe run over
+    # an error page returns 0, which is also the expected answer for qwen3next.
     if status not in (200, 206) or body[:4] != b"GGUF":
         pytest.skip(f"{url} did not serve a GGUF header (status {status}, "
                     f"{len(body)} bytes, magic {body[:4]!r})")

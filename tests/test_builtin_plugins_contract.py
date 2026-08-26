@@ -10,8 +10,7 @@ invisible from any single file:
     declared client_entry lives under a declared assets_dir and exists on disk;
   * every builtin whose [surface] declares a client_entry actually SERVES that
     module at /plugins/<name>/<entry> with a JS MIME once enabled, and 404s once
-    disabled - so a client_entry plugin can never silently 404 again (the jobs
-    regression that motivated this suite).
+    disabled, so a client_entry plugin can never silently 404.
 
 The lists are built at import time by parsing each builtin's plugin.toml (no
 module import), so a new builtin - or a new client_entry plugin - is covered

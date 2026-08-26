@@ -51,8 +51,8 @@ class TestSplitThink:
 
     def test_streaming_matches_one_shot(self):
         full = "Pre <think>because reasons</think> Post."
-        # NEGATIVE-style: a naive concatenation of content deltas must equal the
-        # one-shot content, and the tags must never appear in either channel.
+        # A naive concatenation of content deltas must equal the one-shot
+        # content, and the tags must never appear in either channel.
         c_stream, r_stream = _stream_split(list(full))   # one char at a time
         c_once, r_once = split_think(full)
         assert c_stream == c_once
@@ -80,9 +80,9 @@ class TestSplitThink:
 
 
 class TestNativeReasoningTags:
-    """CHAT-2: native reasoning tags emitted WITHOUT a channel wrapper
-    (<reasoning>, <thinking>, <thought>, <reflection>) must normalise to canonical
-    <think> so the reasoning/content split routes them instead of leaking."""
+    """Native reasoning tags emitted WITHOUT a channel wrapper (<reasoning>,
+    <thinking>, <thought>, <reflection>) must normalise to canonical <think>, so
+    the reasoning/content split routes them instead of letting them leak."""
 
     def test_bare_reasoning_becomes_think(self):
         assert scrub_text("<reasoning>why</reasoning>The answer.") == \
@@ -124,7 +124,7 @@ class TestSharedScrub:
         assert _scrub([text]) == "<think>\nReasoning.\n</think>\nThe answer."
 
     def test_empty_thought_does_not_leak_tokens(self):
-        """The exact shape from chat_and_queue.png: an empty thought block."""
+        """An empty thought block."""
         out = _scrub(["<|channel>thought\n<channel|>"])
         assert "<|channel" not in out and "channel|>" not in out
 
@@ -165,8 +165,8 @@ class _FakeBackend:
 
 class TestEngineLayerScrub:
     def test_engine_scrubs_unscrubbing_backend(self):
-        """The leak was an HF-style backend with no scrub; the engine layer must
-        normalise it so raw channel tokens never reach the caller/GUI."""
+        """For an HF-style backend with no scrub of its own, the engine layer
+        normalises the stream so raw channel tokens never reach the caller."""
         eng = Engine.__new__(Engine)          # skip real model loading
         eng._backend = _FakeBackend()
         eng.display_name = "fake"
@@ -175,13 +175,12 @@ class TestEngineLayerScrub:
         assert out == "<think>\ninternal reasoning\n</think>\nHello there!"
 
 
-#  Turn-open markers emitted as plain text (REC-D1-ROLEWORD, structural half)
+#  Turn-open markers emitted as plain text.
 #
 #  A turn-open marker carries the role word after it, so a scrubber that removes
 #  the marker alone leaves a bare "model" / "assistant" at the head of the reply.
-#  The turn-CLOSE counterparts are deliberately absent from _MARKER_RE: the
-#  backend treats those as stop strings and ends the turn, which is a stronger
-#  response than editing the text.
+#  The turn-CLOSE counterparts are absent from _MARKER_RE: the backend treats
+#  those as stop strings and ends the turn instead of editing the text.
 
 #  Every marker string _MARKER_RE is meant to remove whole, longest first. Used
 #  both as the coverage list and as the bound the stream buffer has to clear.
@@ -202,16 +201,15 @@ _TURN_MARKERS = [
 
 class TestTurnOpenMarkers:
     def test_turn_open_marker_takes_its_role_word_with_it(self):
-        """The role word is part of the marker. Removing only the delimiter is
-        what leaks a bare 'model' or 'assistant' into the visible reply."""
+        """The role word is part of the marker and is removed with it, so no
+        bare 'model' or 'assistant' is left in the visible reply."""
         for marker in _TURN_MARKERS:
             out = scrub_text(f"{marker}Hello")
             assert out == "Hello", f"{marker!r} left {out!r}"
 
     def test_role_words_in_ordinary_prose_are_untouched(self):
         """Only the structural marker is removed. A bare role word the model
-        writes in prose is model behaviour, and stripping it would corrupt every
-        legitimate use of an ordinary English word."""
+        writes in prose survives untouched."""
         for prose in ("Model: here is the answer",
                       "the Model card says otherwise",
                       "she asked him about the assistant role",
@@ -228,9 +226,7 @@ class TestTurnOpenMarkers:
     def test_marker_hold_covers_every_marker_at_every_stream_split(self):
         """_MARKER_HOLD bounds how much text scrub_stream keeps buffered, so it
         has to stay at or above the longest marker _MARKER_RE can match. Driven
-        through the real streaming path at every split point rather than
-        asserting the literal, so the relation is what fails when either side
-        moves."""
+        through the real streaming path at every split point."""
         from localm.textnorm import _MARKER_HOLD
 
         for marker in _TURN_MARKERS:

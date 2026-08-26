@@ -3,10 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// Per-device upload: a caller WITHOUT host filesystem access adds documents by
-// uploading files from its own device (the browser file input) instead of
-// browsing the server disk. kbAddDocs routes to kbUploadDocs, which reads each
-// file to base64 and POSTs to /api/rag/collections/<name>/upload.
+// Without host filesystem access, kbAddDocs routes to kbUploadDocs, which reads
+// each device file to base64 and POSTs to /api/rag/collections/<name>/upload.
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -44,7 +42,7 @@ test("non-host add-docs uploads device files to /upload", async () => {
   assert.equal(body.files.length, 1);
   assert.equal(body.files[0].filename, "notes.md");
   assert.equal(body.files[0].content_b64, "aGVsbG8=");
-  // A non-host caller must NEVER hit the server-path /add.
+  // a non-host caller does not hit the server-path /add
   assert.equal(calls.filter((c) => c.url.endsWith("/add")).length, 0,
     "no server-path /add for a non-host caller");
 });

@@ -9,23 +9,9 @@ U+0085, U+2028 and U+2029 are NOT JSON control characters, so they are written
 RAW inside the string. A ``splitlines()`` reader then tears that one record into
 two fragments, both of which fail to parse.
 
-This is not hypothetical. Measured 2026-07-28 against a real user collection
-(``rag/Eng``): 36 raw U+0085 characters turned 1192 valid records into 1228
-"lines", 62 of which failed to parse. The consequences cascaded, and every one
-of them looked like a different bug:
-
-  1. the reader dropped 26 records (1192 -> 1166) and flagged the file corrupt;
-  2. the vector sidecar (1192 entries) no longer matched the chunk count, so it
-     was judged stale and semantic search silently degraded to lexical BM25;
-  3. the good vector index was quarantined as ``vectors.json.rejected``, and the
-     copies accumulated;
-  4. the next ordinary save rewrote the file from the 1166 survivors, PERMANENTLY
-     deleting 26 of the user's chunks - silent data loss on every load/save cycle.
-
-So: split on LINE FEED only, and escape the separators on write so the files are
-also safe for any other reader (U+2028/U+2029 additionally break JavaScript
-``JSON.parse`` consumers). Both halves matter - the read fix recovers files
-written before this module existed, the write fix stops producing new ones.
+So: this module splits on LINE FEED only, and escapes the separators on write,
+which also keeps the files safe for JavaScript ``JSON.parse`` consumers
+(U+2028/U+2029 break those too).
 """
 import json
 from typing import Any, Iterator
@@ -33,10 +19,7 @@ from typing import Any, Iterator
 __all__ = ["split_jsonl", "iter_jsonl", "dumps_line", "dumps_lines", "UNSAFE_SEPARATORS"]
 
 #: Characters ``str.splitlines()`` treats as line breaks, mapped to their JSON
-#: escapes. The C0 members are already escaped by ``json.dumps``, so replacing
-#: them is a no-op that costs nothing and documents the full set; U+0085, U+2028
-#: and U+2029 are the ones that actually leak through with ``ensure_ascii=False``,
-#: and U+0085 is the one measured in the wild.
+#: escapes.
 UNSAFE_SEPARATORS = {
     "\x0b": "\\u000b",
     "\x0c": "\\u000c",
@@ -54,7 +37,7 @@ def split_jsonl(text: str) -> list:
 
     A trailing carriage return (a CRLF-written file) is stripped, so a record is
     handed to ``json.loads`` identically on every platform. Blank records are
-    preserved rather than filtered, so callers keep their own line numbering for
+    preserved, not filtered, so callers keep their own line numbering for
     error reporting; they typically skip falsy entries.
     """
     return [ln[:-1] if ln.endswith("\r") else ln for ln in text.split("\n")]
@@ -74,14 +57,12 @@ def iter_jsonl(text: str) -> Iterator[tuple]:
 def dumps_line(obj: Any) -> str:
     """``json.dumps(obj, ensure_ascii=False)`` with every line-break-alike escaped.
 
-    ``ensure_ascii=False`` is kept deliberately: these files hold user text, and
-    escaping every non-ASCII character would roughly double the size of a
-    non-English collection and make the file unreadable. Only the characters that
-    can actually break a line-oriented reader are escaped.
+    ``ensure_ascii=False`` keeps non-ASCII user text verbatim; only the
+    characters that can break a line-oriented reader are escaped.
 
-    The replacements are safe to apply to the whole serialized record: none of
-    these characters is JSON syntax, so any occurrence is necessarily inside a
-    string literal, where the escape is exactly equivalent.
+    The replacements apply to the whole serialized record: none of these
+    characters is JSON syntax, so any occurrence is inside a string literal,
+    where the escape is exactly equivalent.
     """
     s = json.dumps(obj, ensure_ascii=False)
     for raw, esc in UNSAFE_SEPARATORS.items():

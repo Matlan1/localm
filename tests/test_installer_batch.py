@@ -1,28 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Static guard against the cmd.exe parenthesis crash class in .bat installers.
 
-Why this exists
+The crash class
 ---------------
-`setup.bat` once shipped lines like::
+cmd.exe counts UNescaped parens when it matches a parenthesised block, so a
+``)`` inside an ``echo`` terminates the enclosing ``if ... (`` block early and
+the rest of the line is parsed as a brand-new command. That produces
+``+ was unexpected at this time.``, or ``: was unexpected at this time.`` for
+the same shape with a trailing ``:``, and the installer dies.
 
-    if /i "%VENDOR%"=="amd" (
-        echo  Installing PyTorch (AMD ROCm) + transformers ...
-    )
+So parens appearing in an ``echo`` (or any command) *inside* a block MUST be
+escaped as ``^(`` / ``^)``. Parens at the top level (depth 0), e.g. the backend
+menu, are harmless and are not flagged.
 
-cmd.exe counts UNescaped parens when it matches a parenthesised block, so the
-`)` inside the echo terminates the `if (` block early and the rest of the line
-(`+ transformers ...`) is parsed as a brand-new command. The result is the
-infamous ``+ was unexpected at this time.`` and the installer dies before the
-user can do anything. The same shape with a trailing ``:`` produced
-``: was unexpected at this time.`` in the uninstall path.
-
-Nothing in CI executed the installers, so this shipped to every AMD and NVIDIA
-user. This test closes that gap: parens that appear in an ``echo`` (or any
-command) *inside* a block MUST be escaped as ``^(`` / ``^)``. Parens at the top
-level (depth 0), e.g. the backend menu, are harmless and are not flagged.
-
-This is a cheap static lint, not a full cmd parser, but it catches the entire
-known family and enforces the safe style going forward.
+This is a cheap static lint, not a full cmd parser.
 """
 
 from __future__ import annotations
@@ -42,8 +33,7 @@ def find_unescaped_block_parens(text: str) -> list[tuple[int, str]]:
     Block depth is tracked structurally: a block opens when a line ENDS with
     ``(`` (``if ... (`` / ``else (`` / ``for ... (``) and closes when a line
     STARTS with ``)``. Parens embedded mid-line in an echo do not move the
-    structural counter, which is exactly why cmd mis-handles them and why we
-    flag them.
+    structural counter.
     """
     offenders: list[tuple[int, str]] = []
     depth = 0
@@ -89,7 +79,7 @@ def test_no_unescaped_parens_inside_batch_blocks(bat: Path) -> None:
 
 
 def test_checker_flags_a_known_bad_snippet() -> None:
-    """Negative-test the oracle: it must FLAG the exact pattern we just fixed."""
+    """The checker FLAGS an in-block echo carrying unescaped parens."""
     bad = (
         '@echo off\r\n'
         'if /i "%VENDOR%"=="amd" (\r\n'
@@ -102,7 +92,7 @@ def test_checker_flags_a_known_bad_snippet() -> None:
 
 
 def test_checker_ignores_safe_patterns() -> None:
-    """Top-level parens and properly escaped in-block parens must NOT be flagged."""
+    """Top-level parens and properly escaped in-block parens are not flagged."""
     ok = (
         '@echo off\r\n'
         'echo    [1] amd-rocm   (recommended for your hardware)\r\n'   # depth 0: safe

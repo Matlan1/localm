@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B2: the Linux GPU install route must be documented as first-class, with the
+"""The Linux GPU install route must be documented as first-class, with the
 pip-extra caveat and WSL2/VM caveats (the `[gpu]` extra cannot embed an index
 URL, so Linux users need setup.sh / a manual --index-url install).
 """
@@ -15,8 +15,6 @@ def test_linux_doc_has_gpu_install_route():
 
 
 def test_linux_doc_notes_pip_extra_is_windows_only():
-    # NEGATIVE: pre-fix the doc did not warn that `pip install localm[gpu]` is
-    # Windows-only on Linux.
     text = DOC.read_text(encoding="utf-8").lower()
     assert "localm[gpu]" in text
     assert "windows-only" in text

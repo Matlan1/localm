@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// WS9 / CodeQL alert 1 (js/stack-trace-exposure): the Cloudflare proxy's
-// top-level catch sits OUTSIDE secretOk() and its response is served with
-// Access-Control-Allow-Origin: *, so it used to hand raw runtime error text to
-// any caller, readable from any web origin. It must now return an opaque
-// request_id and log the real error server-side.
-//
-// The Worker is a SEPARATE DEPLOYABLE (the maintainer deploys it; the alert
-// stays live until they do), and until now it had no automated coverage at all
-// - `npm test` only globs tests-js/*.test.mjs, which is the GUI. It is a plain
-// ES module using only web-standard globals (Request/Response/URL/crypto), so
-// it runs unmodified under node:test. tools/bugreport-proxy has no
-// package.json, so a bare `import` of a .js file would be parsed as CommonJS;
-// loading the source through a data: URL gets it evaluated as ESM.
+// Covers the Cloudflare bug-report proxy Worker: its top-level catch returns an
+// opaque request_id instead of raw error text, and logs the real error.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -22,6 +11,8 @@ import { dirname, join } from "node:path";
 const WORKER = join(dirname(fileURLToPath(import.meta.url)),
   "..", "tools", "bugreport-proxy", "worker.js");
 
+// tools/bugreport-proxy has no package.json, so the source is loaded through a
+// data: URL to have it evaluated as ESM rather than CommonJS.
 async function loadWorker() {
   const src = readFileSync(WORKER, "utf8");
   const url = "data:text/javascript;base64," + Buffer.from(src).toString("base64");
@@ -79,8 +70,6 @@ test("the caller gets an opaque id it can quote", async () => {
 });
 
 test("the real error IS logged server-side, with its stack", async () => {
-  // Rule 5: the disclosure is closed by REDIRECTING the detail to the operator,
-  // never by discarding it. A silent catch here would be the worse bug.
   const worker = await loadWorker();
   const { body, logged } = await throwingRequest(worker, {
     url: "https://proxy.example/update",
@@ -95,9 +84,7 @@ test("the real error IS logged server-side, with its stack", async () => {
 });
 
 test("an ANONYMOUS caller gets no detail either (SHARED_SECRET unset)", async () => {
-  // With SHARED_SECRET unset, secretOk() returns true and the issue routes are
-  // open by design - which is exactly the deployment where the pre-fix catch
-  // was reachable with no credential at all.
+  // With SHARED_SECRET unset, secretOk() returns true and the issue routes are open.
   const worker = await loadWorker();
   const { res, body } = await throwingRequest(worker, {
     url: "https://proxy.example/issues",
@@ -111,8 +98,6 @@ test("an ANONYMOUS caller gets no detail either (SHARED_SECRET unset)", async ()
 });
 
 test("the wide-open CORS header is still on the error response", async () => {
-  // Unchanged behaviour, asserted because it is WHY this mattered: the body is
-  // readable cross-origin by any page, so its contents are effectively public.
   const worker = await loadWorker();
   const { res } = await throwingRequest(worker, {
     url: "https://proxy.example/update",

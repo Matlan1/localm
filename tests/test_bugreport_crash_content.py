@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""BUG-1: a recovered-crash report must contain something actionable.
+"""A recovered-crash report must contain something actionable.
 
 faulthandler only writes a native trace on fault SIGNALS (SIGSEGV etc.); a
-window-close or OS-kill leaves the trace file empty, so the report had only a
-generic "recovered on the next start" line ("dont seem to actually contain any
-useful information"). build_report also never rendered the native_trace it WAS
-given (only a 4-key allowlist reached the report). Now the report renders the
-native trace when present AND attaches the crashed run's own log tail (matched by
-the pid in the log filename), home-path-scrubbed.
+window-close or OS-kill leaves the trace file empty. The report renders the
+native trace when present AND attaches the crashed run's own log tail (matched
+by the pid in the log filename), home-path-scrubbed.
 """
 
 import json
@@ -43,11 +40,9 @@ class TestRecentLogTail:
         assert "~" in tail or "<redacted>" in tail
 
     def test_raw_model_output_never_reaches_the_report_even_via_the_real_file(self, tmp_path):
-        # #961, full pipeline: a real on-disk debug log (what llama.py's
-        # logger.debug("raw model output:\n%s", ...) actually writes) must
-        # never surface in the tail returned to a report, even though the
-        # reply text below contains the word "error" - which is exactly what
-        # used to promote it to ERROR status and get it kept verbatim.
+        # Full pipeline: a real on-disk debug log (what llama.py's
+        # logger.debug writes) must never surface in the tail returned to a
+        # report, even though the reply text below contains the word error.
         _make_log(tmp_path, 444, (
             "2026-07-13 15:24:50,000 ERROR   localm: model load failed\n"
             "Traceback (most recent call last):\n"
@@ -63,12 +58,10 @@ class TestRecentLogTail:
         assert "debug record(s) withheld" in tail
 
     def test_truncated_tail_starting_mid_content_never_leaks(self, tmp_path, monkeypatch):
-        # #961 follow-up (adversarial-review finding): _recent_log_tail's own
-        # 2MB tail-truncation cap can land mid-way through a content write
-        # with NO header at all surviving into the slice - shrink the cap so
-        # a small test file can actually trigger it for real (not just via
-        # build_digest's start_tainted param in isolation), and engineer the
-        # content so the truncation point lands INSIDE the content record.
+        # Shrink _recent_log_tail's own 2MB tail-truncation cap so a small test
+        # file triggers it for real, with the content engineered so the
+        # truncation point lands INSIDE a content record and no header survives
+        # into the slice.
         monkeypatch.setattr(br, "_LOG_TAIL_READ_BYTES", 200)
         header = "2026-07-13 15:24:50,000 DEBUG   localm: raw model output:\n"
         secret = "the secret chat reply keeps going and going with password=hunter2\n" * 5
@@ -80,18 +73,15 @@ class TestRecentLogTail:
 
 
 class TestLogUnavailableIsNotSilence:
-    """H4: an empty digest used to mean THREE unrelated things - no log file
-    matched this run, the file was found but could not be READ, and the run
-    genuinely logged nothing notable - and all three rendered as no log section
-    at all. The first two are failures to collect; reporting them as silence is
-    the AGENTS.md rule 5 shape (a step that failed must not look like success),
-    and it costs the maintainer the one artifact triage needs."""
+    """An empty digest can mean THREE unrelated things: no log file matched
+    this run, the file was found but could not be READ, or the run genuinely
+    logged nothing notable. The first two are failures to collect and must not
+    render as silence."""
 
     def test_unreadable_log_is_distinguished_from_a_missing_one(self, tmp_path):
         # A REAL OSError out of a REAL filesystem state (a directory wearing the
-        # log's name), not a mock of the function under test: read_text on a
-        # directory raises PermissionError on Windows and IsADirectoryError on
-        # POSIX, and both are the OSError this must survive.
+        # log's name): read_text on a directory raises PermissionError on
+        # Windows and IsADirectoryError on POSIX, and both are OSError.
         d = tmp_path / "logs"
         d.mkdir()
         (d / "localm_2026-06-22_231715_777.log").mkdir()
@@ -108,22 +98,18 @@ class TestLogUnavailableIsNotSilence:
         assert "could not be read" not in reason
 
     def test_a_log_that_was_read_is_never_reported_as_uncollected(self, tmp_path):
-        # Case (c), the honest empty: the collection SUCCEEDED. A false "not
-        # collected" here would be the mirror defect - crying failure on a
-        # clean run - so it is pinned rather than left to chance.
+        # Case (c): the collection SUCCEEDED and the log is genuinely empty.
         _make_log(tmp_path, 888, "2026-07-13 15:24:50,000 INFO    localm: started\n")
         _, reason = br._recent_log_tail_result(home=tmp_path, pid=888)
         assert reason == ""
 
     def test_the_str_of_the_error_would_leak_the_account_name_and_is_not_used(self):
-        # THE PRIVACY PROPERTY, pinned where the fixture can actually express the
-        # leak: an OSError whose filename is under the REAL home dir. A tmp_path
-        # fixture cannot express it (pytest's basetemp is off the home tree), so
-        # a "no username" assertion there would pass no matter what the code did.
+        # The privacy property needs an OSError whose filename is under the REAL
+        # home dir; a tmp_path fixture cannot express it, since pytest's basetemp
+        # is off the home tree.
         leaky = Path.home() / "logs" / "localm_2026-06-22_231715_777.log"
         exc = PermissionError(13, "Permission denied", str(leaky))
-        # Guard the guard: confirm the naive formatting really does leak, so this
-        # test cannot quietly become vacuous if the interpreter's repr changes.
+        # Confirm the naive formatting really does leak the path.
         assert Path.home().name in str(exc)
         reason = br._log_failure_reason(exc)
         assert "Permission denied" in reason      # it still says WHY
@@ -131,8 +117,7 @@ class TestLogUnavailableIsNotSilence:
         assert Path.home().name not in reason
 
     def test_a_non_oserror_contributes_no_message_at_all(self):
-        # repr() is safe for OSError only (its __repr__ drops the filename), so
-        # this is the case that catches a "simplification" to repr(exc).
+        # repr() is safe for OSError only: its __repr__ drops the filename.
         leaky = Path.home() / "logs" / "localm_2026-06-22_231715_777.log"
         exc = ValueError(f"boom {leaky}")
         reason = br._log_failure_reason(exc)
@@ -141,11 +126,10 @@ class TestLogUnavailableIsNotSilence:
         assert Path.home().name not in reason
 
     def test_a_path_shaped_strerror_is_dropped_whole(self):
-        # The structural guard: a leak is made UNREPRESENTABLE rather than
-        # trusting strerror never to carry a path. Asserted against the
-        # instance's OWN class name, because OSError auto-subclasses on errno
-        # (errno 13 constructs a PermissionError), so a literal here would pin
-        # the constructor's behaviour rather than this function's.
+        # A leak is made UNREPRESENTABLE rather than trusting strerror never to
+        # carry a path. Asserted against the instance's OWN class name, because
+        # OSError auto-subclasses on errno (errno 13 constructs a
+        # PermissionError).
         exc = OSError(13, "denied reading sub/dir")
         reason = br._log_failure_reason(exc)
         assert "sub/dir" not in reason
@@ -164,8 +148,7 @@ class TestLogUnavailableIsNotSilence:
         )
         assert "## Recent log (tail)" in text
         assert "not collected" in text
-        # The log's own absolute path is the leak vector this fixture CAN
-        # express, and it must not reach the report.
+        # The log's own absolute path must not reach the report.
         assert str(d) not in text
         assert str(tmp_path / "logs") not in text
 
@@ -208,10 +191,9 @@ class TestBuildReportRendersCrashDetail:
 
 class TestCheckAndReportAttachesContent:
     def test_recovered_crash_report_includes_log_tail(self, tmp_path, monkeypatch):
-        # Arrange: a crash marker for pid 4242 + that run's log, no native trace.
-        # pid_alive is mocked (rather than relying on 4242 happening to be a
-        # dead pid on the test machine) so the new pid-liveness check
-        # deterministically treats this marker as a genuine crash.
+        # Arrange: a crash marker for pid 4242 + that run's log, no native
+        # trace. pid_alive is mocked so the pid-liveness check treats this
+        # marker as a genuine crash.
         from localm import instances
         monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
         run = tmp_path / "run"

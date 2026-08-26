@@ -9,9 +9,9 @@ from), and both are needed in two places: the plugin's own ``/api/tts/config``
 reader for both, so the template is never parsed by two different code paths
 that could drift.
 
-Deliberately dependency-light (stdlib + the debug logger): ``settings_schema``
-imports it lazily from inside its helpers, so importing the core settings
-schema never pulls in the plugin package.
+Dependency-light (stdlib + the debug logger): ``settings_schema`` imports it
+lazily from inside its helpers, so importing the core settings schema never pulls
+in the plugin package.
 """
 
 from __future__ import annotations
@@ -29,10 +29,9 @@ _VOICES = _PLUGIN_DIR / "static" / "vendor" / "voices.json"
 def defaults() -> dict:
     """Shipped defaults from the tracked template (sans documentation keys).
 
-    Returns {} if the template cannot be read. That is abnormal (it is a TRACKED
-    shipped file, so absent is as broken as corrupt), and silently returning {}
-    would hide a broken install behind the frontend's hardcoded fallbacks, so it
-    is surfaced as a warning rather than swallowed.
+    Returns {} if the template cannot be read, and logs a warning: it is a TRACKED
+    shipped file, so absent is as broken as corrupt, and a silent {} would hide a
+    broken install behind the frontend's hardcoded fallbacks.
     """
     try:
         data = json.loads(_TEMPLATE.read_text(encoding="utf-8"))
@@ -100,11 +99,10 @@ def asset_root() -> Path:
     plugin's path), not this in-tree source: the two are kept hash-identical by
     the builtin refresh, but a user who drops their own onnxruntime WASM folder
     into the installed copy would otherwise be told it does not exist. (The
-    plugin now VENDORS that runtime under ``static/vendor/onnxruntime/`` and
-    defaults ``wasm_paths`` to it, so this is the override case rather than the
-    only case.) Falls back to the shipped source when the plugin is not
-    installed (so the setting can still be validated before the plugin is
-    added).
+    plugin VENDORS that runtime under ``static/vendor/onnxruntime/`` and defaults
+    ``wasm_paths`` to it, so that is the override case.) Falls back to the shipped
+    source when the plugin is not installed, so the setting can still be validated
+    before the plugin is added.
     """
     try:
         from localm.config import home_dir
@@ -114,7 +112,7 @@ def asset_root() -> Path:
     except Exception as e:
         # Resolving the data directory is best effort here: the in-tree copy is
         # byte-identical in a normal install, so falling back to it keeps the
-        # validator working rather than failing every write. Logged, not hidden.
+        # validator working. Logged, not hidden.
         logger.debug("tts: could not resolve the installed asset dir (%s); "
                      "validating against the shipped copy", e)
     return _PLUGIN_DIR / "static"

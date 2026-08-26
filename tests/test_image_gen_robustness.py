@@ -25,8 +25,8 @@ def _minimal_png(width: int, height: int) -> bytes:
 
 class TestImageDimensions:
     def test_png_dimensions_read_correctly(self, tmp_path):
-        """Regression: Path.read_bytes(32) raised TypeError and silently
-        forced every img2img run to 1024x1024."""
+        """PNG dimensions are read from the real header, so an img2img run is
+        not silently forced to 1024x1024."""
         p = tmp_path / "img.png"
         p.write_bytes(_minimal_png(640, 480))
         assert comfy._image_dimensions(p) == (640, 480)
@@ -39,9 +39,9 @@ class TestImageDimensions:
 
 class TestComfyAlive:
     def test_alive_when_endpoint_responds(self):
-        # _comfy_alive now routes through comfy_client._comfy_urlopen (CHK-COMFY-
-        # REDIRECT), which builds its own opener and never calls the top-level
-        # urllib.request.urlopen - so that is the seam to patch, not urlopen.
+        # _comfy_alive routes through comfy_client._comfy_urlopen, which builds
+        # its own opener and never calls the top-level urllib.request.urlopen -
+        # so that is the seam to patch, not urlopen.
         with patch.object(comfy_client, "_comfy_urlopen") as mock_open:
             mock_open.return_value.__enter__ = MagicMock()
             mock_open.return_value.__exit__ = MagicMock(return_value=False)
@@ -56,7 +56,7 @@ class TestComfyAlive:
 
 
 class TestHistoryExecutionError:
-    """I2: surface a ComfyUI node crash from /history instead of the generic
+    """Surface a ComfyUI node crash from /history instead of the generic
     'no output found' that just sends the user to read the ComfyUI console."""
 
     def test_surfaces_node_crash(self):
@@ -144,10 +144,9 @@ class TestSidecarContent:
         the sidecar JSON lands as <output>.png.json with the seed."""
         import json
 
-        # Force the committed example workflow so the test is independent of any
-        # personal flux_workflow.json on the dev's machine (gitignored, and it
-        # takes precedence in workflow_path()); otherwise the test reads a
-        # machine-specific graph and is non-deterministic across checkouts.
+        # Force the committed example workflow so the test does not read a
+        # machine-specific flux_workflow.json, which takes precedence in
+        # workflow_path().
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
 
@@ -192,14 +191,14 @@ class TestSidecarContent:
 
 
 class TestRenderHeartbeat:
-    """ADR-0009 P8: imagine's render tick must reach on_progress (the job
-    stream / GUI's SSE feed), throttled every 15s, matching
-    generate_music/generate_video's ``_tick`` shape byte-for-byte - not just
-    the local Rich console spinner, which lives only inside this function's
-    own Console() and never reaches a GUI-triggered job. Before this, an
-    image job pushed via ``on_progress=lambda t: job.push(...)`` (see
-    plugins/builtin/image/plug.py) sat silent on the wire for as long as
-    max_poll_seconds, indistinguishable from a hang."""
+    """imagine's render tick must reach on_progress (the job stream, the GUI's
+    SSE feed), throttled every 15s, matching generate_music and
+    generate_video's ``_tick`` shape byte-for-byte - not only the local Rich
+    console spinner, which lives inside this function's own Console() and never
+    reaches a GUI-triggered job. Without it an image job pushed via
+    ``on_progress=lambda t: job.push(...)`` (see plugins/builtin/image/plug.py)
+    sits silent on the wire for as long as max_poll_seconds,
+    indistinguishable from a hang."""
 
     def _capture_tick(self, tmp_path, monkeypatch, on_progress):
         """Drive generate_image to the poll step for real (workflow load,
@@ -265,8 +264,8 @@ class TestRenderHeartbeat:
         tick(20)
 
     def test_broken_progress_sink_does_not_abort_the_render(self, tmp_path, monkeypatch):
-        # generate_music/generate_video's _say swallows on_progress exceptions
-        # for the same reason: a broken UI sink must never fail the render.
+        # generate_music/generate_video's _say also swallows on_progress
+        # exceptions.
         def boom(_text):
             raise RuntimeError("sink is down")
         tick = self._capture_tick(tmp_path, monkeypatch, on_progress=boom)
@@ -305,10 +304,8 @@ class TestSafeLoraName:
         assert comfy.is_safe_lora_name("C:evil.safetensors") is False
 
     def test_rejects_a_mid_string_colon(self):
-        # ntpath.splitdrive (the mechanism this used to rely on alone) only
-        # recognises a drive designator at position 0 - it does not see a
-        # colon anywhere else, so "foo.safetensors:hidden" passed the old
-        # check and could open an NTFS Alternate Data Stream on a
+        # ntpath.splitdrive only recognises a drive designator at position 0, so
+        # "foo.safetensors:hidden" could open an NTFS Alternate Data Stream on a
         # Windows-hosted ComfyUI. The blanket ':' rejection closes this.
         assert comfy.is_safe_lora_name("foo.safetensors:hidden") is False
 

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""KEY-SCOPE: the GUI /api/* capability routes must be gated on their scope, not
-just "any valid key" (_require_auth). Policy: chat is BASELINE (any valid key may
-chat); every OTHER capability is optional and gated by its own scope. The owner
-key (admin) and the owner-paired companion imply every scope and are unaffected;
-only deliberately under-scoped non-owner keys lose access.
+"""The GUI /api/* capability routes must be gated on their scope, not just "any
+valid key" (_require_auth). Policy: chat is BASELINE (any valid key may chat);
+every OTHER capability is optional and gated by its own scope. The owner key
+(admin) and the owner-paired companion imply every scope and are unaffected; only
+under-scoped non-owner keys lose access.
 
 Also covers GET /api/capabilities - the baseline endpoint that tells the GUI which
 tabs the CURRENT key may show (so a tab the key can't use is never rendered).
@@ -107,10 +107,9 @@ class TestModelRoutesAreScoped:
 
 class TestConfigTierRoutes:
     def test_config_read_reaches_companion_but_not_fs_or_logs(self, scoped_app):
-        # The host file browser (/api/fs/dirs) is NO LONGER config:read-gated: it
-        # requires HOST filesystem access (owner / a key with fs_access=host), so a
-        # plain config:read key can view settings + companion but cannot enumerate
-        # the server disk. Log export stays config:WRITE.
+        # The host file browser (/api/fs/dirs) is not config:read-gated: it
+        # requires HOST filesystem access (owner, or a key with fs_access=host).
+        # Log export is config:WRITE.
         from localm import auth
         reader = auth.create_key("cfgread", [S.CONFIG_READ])["key"]
         with TestClient(scoped_app) as c:
@@ -132,11 +131,10 @@ class TestConfigTierRoutes:
 
     def test_config_write_plus_fs_host_reaches_logs_export(self, scoped_app):
         from localm import auth
-        # config:write is PRIVILEGED, so only an owner may mint it (allow_privileged);
-        # that is exactly the principal that should reach the log-export route.
-        # It ALSO needs host filesystem access now: `dest` is an arbitrary host
-        # directory the route mkdir(parents=True)s and copies logs into, so it is
-        # gated on the same dial as the /api/fs/dirs picker that supplies `dest`.
+        # config:write is PRIVILEGED, so only an owner may mint it
+        # (allow_privileged). The route also needs host filesystem access: dest
+        # is an arbitrary host directory it mkdir(parents=True)s and copies logs
+        # into, so it is gated on the same dial as the /api/fs/dirs picker.
         writer = auth.create_key("cfgwrite", [S.CONFIG_WRITE],
                                  allow_privileged=True, fs_access="host")["key"]
         with TestClient(scoped_app) as c:
@@ -144,15 +142,14 @@ class TestConfigTierRoutes:
             assert r.status_code != 403
 
     def test_config_write_without_fs_host_denied_logs_export(self, scoped_app, tmp_path):
-        """CodeQL WS8 (alert 2): config:write alone is NOT enough - the route
-        writes into a caller-named host directory, and its does-it-exist 400
-        was a directory-existence oracle for the whole disk."""
+        """config:write alone is NOT enough: the route writes into a caller-named
+        host directory, and its does-it-exist 400 is a directory-existence oracle
+        for the whole disk."""
         from localm import auth
         writer = auth.create_key("cfgwrite-nofs", [S.CONFIG_WRITE],
                                  allow_privileged=True)["key"]   # fs_access="none"
         # dest must EXIST or the filesystem assertion is vacuous: export_logs
-        # 400s on a missing dest before it mkdirs anything, so "nothing was
-        # created" would hold with or without the gate.
+        # 400s on a missing dest before it mkdirs anything.
         dest = tmp_path / "exfil"
         dest.mkdir()
         with TestClient(scoped_app) as c:

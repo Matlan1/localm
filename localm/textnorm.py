@@ -23,10 +23,9 @@ import re
 from typing import Iterator
 
 # Reasoning-channel openers/closers -> canonical think tags. Whitespace inside
-# the tag (around "channel"/"message" and the bars) is tolerated so spaced
-# variants do not leak.
+# the tag is tolerated.
 # Harmony: <|channel|>analysis<|message|>REASONING ... <|channel|>final<|message|>ANSWER
-# Gemma 4: <|channel>thought\nREASONING\n<channel|>ANSWER
+# Gemma 4: <|channel>thought / REASONING / <channel|>ANSWER
 _THINK_OPEN_RE = re.compile(
     r"<\|?\s*channel\s*\|?>"
     r"(thought|thinking|analysis|reasoning|commentary|reflection)"
@@ -37,12 +36,9 @@ _THINK_CLOSE_RE = re.compile(
     r"|<\|?\s*channel\s*\|?>final\n?(<\|?\s*message\s*\|?>)?"  # harmony final-channel switch
 )
 
-# Native reasoning tags some finetunes emit WITHOUT the harmony/Gemma channel
-# wrapper (e.g. a bare <reasoning>...</reasoning>, <thinking>, <thought>,
-# <reflection>). Without normalising these to canonical <think>...</think> they
-# escape the reasoning/content split and leak into the visible answer (CHAT-2).
-# "think" alone is excluded so the already-canonical <think>/</think> tags pass
-# through untouched (and stay idempotent).
+# Native reasoning tags emitted without the harmony/Gemma channel wrapper.
+# "think" alone is excluded so canonical <think>/</think> tags pass through
+# untouched and the transform stays idempotent.
 _THINK_BARE_OPEN_RE = re.compile(
     r"<\s*(?:reasoning|thinking|thought|reflection)\s*>", re.IGNORECASE)
 _THINK_BARE_CLOSE_RE = re.compile(
@@ -56,8 +52,8 @@ _MARKER_RE = re.compile(
     r"|<\|return\|>"
     r"|<\|turn>(user|model|assistant|system)?\n?"            # Gemma 4 turn open
     r"|<turn\|>"                                              # Gemma 4 turn close
-    # NOTE: <|tool_call> / <|tool_response> markers are deliberately NOT
-    # scrubbed - the coder agent parses them out of this same stream.
+    # <|tool_call> / <|tool_response> are not scrubbed: the coder agent parses
+    # them out of this same stream.
     r"|<\|tool>|<tool\|>"                                     # Gemma 4 tool declarations
     r"|<\|think\|>|<think\|>"                                 # Gemma 4 thinking enable token
     r"|<unused\d+>?"                                          # Gemma reserved tokens
@@ -100,11 +96,10 @@ def split_think(text: str) -> tuple[str, str]:
     and the concatenated reasoning with the tags removed. An unclosed ``<think>``
     runs to the end. Multiple blocks are concatenated.
 
-    Linear single pass (AUD-SPLITTHINK): scans with ``str.find`` and slices each
-    segment exactly once, so it stays O(n) even on pathologically interleaved
-    tags. The previous ThinkSplitter path re-sliced its whole buffer per tag
-    (``buf = buf[cut:]`` in a loop) - the classic O(n^2) pattern. ThinkSplitter
-    is still used for the streaming path, where each piece is small."""
+    Linear single pass: scans with ``str.find`` and slices each segment exactly
+    once, so it stays O(n) even on pathologically interleaved tags.
+    ThinkSplitter, which re-slices its whole buffer per tag, is used for the
+    streaming path, where each piece is small."""
     content: list[str] = []
     reasoning: list[str] = []
     i, n, in_think = 0, len(text), False
@@ -135,12 +130,11 @@ def strip_think(text: str) -> str:
     already-scrubbed text), then drops the think channel, including an UNCLOSED
     trailing block (a truncated thinking reply must never leak scratchpad).
 
-    This is the one helper every INTERNAL consumer of model output must run
-    before storing or parsing a reply (memory consolidation, episodic
-    summaries, job results, compaction summaries, coder reflection). The /v1
-    routes already split reasoning for clients; this covers everything that
-    never passes through them. See dev-notes/memory-audit-2026-07-02.md C1:
-    raw ``<think>`` scratchpad was stored verbatim as durable memory."""
+    This is the helper every INTERNAL consumer of model output runs before
+    storing or parsing a reply (memory consolidation, episodic summaries, job
+    results, compaction summaries, coder reflection). The /v1 routes already
+    split reasoning for clients; this covers everything that never passes
+    through them."""
     return split_think(scrub_text(text or ""))[0]
 
 
@@ -222,10 +216,8 @@ def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
         cut = len(buf) - _MARKER_HOLD
         if cut <= 0:
             continue
-        # Back the cut up to the last '<' just before the boundary so a marker
-        # straddling it stays whole in the buffer. A legit '<' in prose only
-        # delays its emission one round - the window slides past it as more
-        # text arrives.
+        # Back the cut up to the last '<' before the boundary so a marker
+        # straddling it stays whole in the buffer.
         lt = buf.rfind("<", max(0, cut - _MARKER_HOLD), cut)
         if lt != -1:
             cut = lt

@@ -3,30 +3,27 @@
 
 registry.json's stored paths are read back by ~40 stat/glob sites across the GUI,
 the /v1 API and the MCP server. Those reads are only safe if the file can only be
-written by a principal that already holds host filesystem reach. Two doors used to
-bypass require_fs_host, and three path-integrity defects rode along:
+written by a principal that already holds host filesystem reach. Covered here:
 
-  (a) POST /api/models/scan gated on `if workdir:`, so a BODYLESS post scanned
-      get_comfy_workdir() with no fs_access check at all - and comfy_workdir is
-      settable by any config:write key.
-  (b) POST /api/models/pull was MODELS_WRITE-only and forwarded `spec` verbatim;
-      pull.py registers an existing local path IN PLACE via add_local(store=None).
-  (c) _resolve_ollama_manifest joined a remote-authored manifest's `digest`
-      straight into a path.
-  (d) remove_model's delete gate was LEXICAL (is_relative_to does not resolve
-      '..') with a `startswith` fallback that prefix-matched a sibling directory,
-      immediately in front of shutil.rmtree / unlink.
-  (e) _snapshot_is_complete joined a remote HF listing's `rfilename` onto dest.
+  (a) POST /api/models/scan must not scan get_comfy_workdir() on a BODYLESS post
+      with no fs_access check - comfy_workdir is settable by any config:write key.
+  (b) POST /api/models/pull must not forward `spec` verbatim under MODELS_WRITE
+      alone; pull.py registers an existing local path IN PLACE via
+      add_local(store=None).
+  (c) _resolve_ollama_manifest must not join a remote-authored manifest's
+      `digest` straight into a path.
+  (d) remove_model's delete gate must RESOLVE before comparing: a lexical
+      is_relative_to does not resolve '..', and a `startswith` fallback
+      prefix-matches a sibling directory, immediately in front of
+      shutil.rmtree / unlink.
+  (e) _snapshot_is_complete must not join a remote HF listing's `rfilename` onto
+      dest.
 
 PAYLOAD RULE FOR THIS FILE - READ BEFORE ADDING A CASE. Several tests here drive
 code that reaches shutil.rmtree / unlink, and this file is meant to be run against
 REVERTED source as a negative pass (proving the gate fails without the fix). A
 negative pass EXECUTES THE VULNERABLE PATH FOR REAL, so a payload naming a real
-location is a live deletion of that location, not a test of it. A sibling unit
-learned this the expensive way: a parametrized "C:/Users/Public" reached rmtree
-through exactly the escape its fix prevents and emptied that directory - no
-Recycle Bin, not recoverable - while a second payload was stopped only by
-filesystem permissions, which is luck, not design.
+location is a live deletion of that location, not a test of it.
 
 So: every path that can reach a filesystem MUTATION is built from `tmp_path` (via
 the `home` fixture). tmp_path is itself absolute and drive-qualified on Windows,
@@ -39,13 +36,13 @@ touching the filesystem. UNC vectors use 192.0.2.1 (RFC5737 TEST-NET-1), which i
 non-routable by definition, so a missed rejection cannot become a real outbound
 SMB connection either. Keep it that way.
 
-WHY EVERY TEST HERE MINTS A KEY: effective_fs_access() returns "host" for EVERY
-caller when no key is configured (open/dev mode is the trusted loopback owner).
-A fixture that skips create_key would therefore pass VACUOUSLY - every assertion
-would hold for the wrong reason. `restricted_key` mints one and asserts its
-recorded level really is "none", and the first two tests in the file prove it end
-to end: the key is refused by the canonical require_fs_host route, and an UNKEYED
-client on the same route is not.
+EVERY TEST HERE MINTS A KEY: effective_fs_access() returns "host" for EVERY
+caller when no key is configured (open/dev mode is the trusted loopback owner),
+so a fixture that skips create_key passes VACUOUSLY - every assertion would hold
+for the wrong reason. `restricted_key` mints one and asserts its recorded level
+really is "none", and the first two tests in the file check that end to end: the
+key is refused by the canonical require_fs_host route, and an UNKEYED client on
+the same route is not.
 """
 
 import json
@@ -93,20 +90,17 @@ def restricted_key(home):
     routes, and NO host filesystem reach. This is the configuration
     require_fs_host exists to constrain."""
     from localm import auth
-    # allow_privileged=True is REQUIRED, not incidental: config:write is in
+    # allow_privileged=True is REQUIRED: config:write is in
     # scopes.PRIVILEGED_SCOPES, so create_key raises PermissionError without it
-    # (auth.py:452-459) and every test requesting this fixture would ERROR at
-    # setup rather than run. That is what an owner does when deliberately minting
-    # such a key, and minting it is the whole point here - the threat model IS a
-    # key that legitimately holds config:write and models:write while holding no
-    # filesystem reach at all.
+    # and every test requesting this fixture would ERROR at setup rather than
+    # run. The key under test holds config:write and models:write while holding
+    # no filesystem reach at all.
     created = auth.create_key(
         "restricted", [S.CONFIG_WRITE, S.MODELS_WRITE, S.MODELS_READ],
         allow_privileged=True, fs_access="none")
-    # Assert the key really came out the way the threat model needs. Without
-    # these, a future change to create_key's defaults could silently hand back a
-    # key with different reach and every 403 below would still pass, for the
-    # wrong reason.
+    # Assert the key really came out the way the threat model needs, so a change
+    # to create_key's defaults cannot silently hand back a key with different
+    # reach while every 403 below still passes.
     assert created["fs_access"] == "none", "fixture must not grant host fs reach"
     assert S.CONFIG_WRITE in created["scopes"], created["scopes"]
     assert S.MODELS_WRITE in created["scopes"], created["scopes"]
@@ -199,10 +193,9 @@ class TestRegistrationRequiresHostFsAccess:
                                       "https://example.invalid/m.gguf"])
     def test_the_gate_answer_does_not_depend_on_the_filesystem(
             self, app, restricted_key, captured_pull, spec):
-        """The property that keeps this from being an oracle: an ordinary remote
-        spec is allowed, and no stat is performed to decide. Path.is_file is
-        patched to blow up, so any filesystem probe on the auth path fails the
-        test loudly instead of silently reappearing in a later refactor."""
+        """An ordinary remote spec is allowed, and no stat is performed to decide.
+        Path.is_file is patched to raise, so any filesystem probe on the auth path
+        fails the test loudly."""
         with TestClient(app) as c:
             with patch.object(Path, "is_file",
                               side_effect=AssertionError("stat'ed a spec to authorise it")):
@@ -246,18 +239,15 @@ class TestRegistrationRequiresHostFsAccess:
 
     def test_curated_comfy_pull_is_403_for_a_key_without_host_fs(
             self, app, restricted_key):
-        """The THIRD door, found by an adversarial review of the first two.
-        /api/models/pull-comfy-source downloads into comfy_models_dest_dir(),
+        """/api/models/pull-comfy-source downloads into comfy_models_dest_dir(),
         which resolves through `comfy_workdir` whenever the managed ComfyUI
         instance is not active (the default on a fresh install) - so a
         config:write key chooses the directory, and the route mkdir -p's it and
         streams a multi-gigabyte file into it from the server process.
 
         The gate runs BEFORE the curated-source lookup, so the filename here is
-        deliberately arbitrary: pre-fix this request gets past the gate and is
-        answered on its merits (400 'not a curated download source', or 200 for
-        a real one), never 403. That is what makes this discriminating rather
-        than incidental."""
+        arbitrary: without the gate this request is answered on its merits (400
+        'not a curated download source', or 200 for a real one), never 403."""
         with TestClient(app) as c:
             r = c.post("/api/models/pull-comfy-source",
                        headers=_hdr(restricted_key),
@@ -290,16 +280,10 @@ class TestRegistrationRequiresHostFsAccess:
         assert captured_pull["args"] == ["pull", "--", str(victim)]
 
 
-# NOT TESTED HERE ON PURPOSE: the per-plugin `comfy.workdir` admin gate in
+# NOT TESTED HERE: the per-plugin `comfy.workdir` admin gate in
 # POST /v1/media/config/{name}. get_comfy_workdir() prefers the per-plugin block
-# over the global comfy_workdir, so that IS the same door by another name - but
-# localm/inference/routes/config.py has a single designated owner for this
-# program (three lanes were adding admin_only-style flags to it at once, and a
-# rebase taking one side wholesale silently drops another lane's flag with no
-# conflict marker and no failing test). The one-line gate change was handed to
-# that owner and lands in their diff, with the end-to-end non-ADMIN -> 403
-# assertion alongside it. The scan-route fix above closes the registry-poisoning
-# door independently of it.
+# over the global comfy_workdir, so that IS the same door by another name. The
+# scan-route fix above closes the registry-poisoning door independently of it.
 
 
 # --------------------------------------------------------------------------- #
@@ -324,7 +308,7 @@ class TestOllamaManifestDigestIsConfined:
         root = tmp_path / "ollama"
         manifest_dir = _ollama_tree(root, "../../../../etc/passwd")
         # Plant the file the traversal would find, so a successful escape is
-        # DETECTABLE: without the fix the walk-up loop finds it and returns it.
+        # DETECTABLE.
         outside = tmp_path / "etc"
         outside.mkdir()
         (outside / "passwd").write_bytes(b"root:x:0:0")
@@ -358,18 +342,13 @@ class TestOllamaManifestDigestIsConfined:
         "",
     ])
     def test_malformed_digests_are_all_rejected(self, tmp_path, digest):
-        """SHAPE PIN, not proof of the fix. Verified against pristine
-        origin/master: every case here PASSES there, because master's walk-up loop
-        only reports a blob it can actually find, and none of these name a file
-        that exists in the fixture - so master returns None for "not found" while
-        the fix returns None for "malformed", and the assertion cannot tell them
-        apart. It still earns its place: it pins the accepted SHAPE, so a later
-        loosening of _OLLAMA_BLOB_RE fails here.
+        """SHAPE PIN. None of these name a file that exists in the fixture, so a
+        None here is not distinguishable from "not found"; what it pins is the
+        accepted SHAPE, so a later loosening of _OLLAMA_BLOB_RE fails here.
 
         The discriminating test is
         test_a_traversing_digest_returns_none_and_stays_inside_blobs, which PLANTS
-        the traversal target so master's loop finds it and returns it - and which
-        does fail on master."""
+        the traversal target so the walk-up loop can find it."""
         from localm.model_manager import registry as reg
         root = tmp_path / "ollama"
         manifest_dir = _ollama_tree(root, digest)
@@ -380,8 +359,8 @@ class TestOllamaManifestDigestIsConfined:
         [{"mediaType": "application/vnd.ollama.image.model", "digest": 7}],
     ])
     def test_malformed_remote_json_never_raises(self, tmp_path, layers):
-        """A manifest is remote-authored: no shape may be assumed. Each of these
-        used to be a TypeError / AttributeError / KeyError escaping the caller."""
+        """A manifest is remote-authored: no shape may be assumed, and none of
+        these may escape as a TypeError / AttributeError / KeyError."""
         from localm.model_manager import registry as reg
         manifest_dir = tmp_path / "manifests" / "reg" / "owner" / "model"
         manifest_dir.mkdir(parents=True)
@@ -502,12 +481,11 @@ class TestIsOwnedModelPathIsTheSingleDefinition:
 
 class TestRemoveModelDeleteGate:
     def test_a_traversing_entry_does_not_delete_outside_models_dir(self, home, monkeypatch):
-        """`<models>/../../victim` passed the OLD lexical is_relative_to test and
-        was rmtree'd. Two independent layers now stop it - _entry_path reads a
-        '..' entry as malformed, and the delete gate resolves before comparing -
-        so this asserts the OUTCOME rather than which layer fired. The sibling
-        test below covers the gate on its own, with a path holding no '..' at
-        all."""
+        """`<models>/../../victim` must not be rmtree'd. Two independent layers
+        stop it - _entry_path reads a '..' entry as malformed, and the delete gate
+        resolves before comparing - so this asserts the OUTCOME, not which layer
+        fired. The sibling test below covers the gate on its own, with a path
+        holding no '..' at all."""
         import localm.model_manager as _mm
         from localm.model_manager import registry as reg
         monkeypatch.setattr(_mm, "HOME_DIR", home)
@@ -527,18 +505,14 @@ class TestRemoveModelDeleteGate:
         assert "evil" not in _mm.load_registry(), "the name should still be dropped"
 
     def test_a_sibling_prefix_directory_is_not_deleted(self, home, monkeypatch):
-        """`<data dir>/models-old` string-prefix-matched `<data dir>/models` in the
-        old startswith fallback.
+        """`<data dir>/models-old` string-prefix-matches `<data dir>/models` under
+        a startswith containment test, and must not be deleted.
 
-        NON-DISCRIMINATING BY MEASUREMENT, kept as a regression pin only. Verified
-        against pristine origin/master: this PASSES there, because the startswith
-        arm was dead code - `hasattr(path, "is_relative_to")` is always true on the
-        pinned 3.12 interpreter, so master took the is_relative_to branch, which
-        happens to answer this case correctly. The discriminating test for the
-        startswith variant is
+        NON-DISCRIMINATING, a regression pin only: an is_relative_to containment
+        test answers this case correctly too, so a green here is not evidence
+        about the startswith variant. The discriminating test for that is
         TestIsOwnedModelPathIsTheSingleDefinition::test_it_rejects_what_the_startswith_variant_accepted,
-        which asserts the old predicate's answer directly and DOES fail on master.
-        Do not read a green here as evidence the delete gate is fixed."""
+        which asserts that predicate's answer directly."""
         import localm.model_manager as _mm
         from localm.model_manager import registry as reg
         monkeypatch.setattr(_mm, "HOME_DIR", home)
@@ -624,9 +598,9 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         # A drive letter on a NESTED component. pathlib only parses a drive at
         # position 0, so this survives an is_absolute/.drive check and a
         # containment check both - joinpath treats it as drive-relative, and when
-        # it matches the base's drive the "C:" is silently DROPPED, handing back a
-        # path that names a different file than was requested. Measured, and the
-        # reason the rejection is per-component rather than per-string.
+        # it matches the base's drive the "C:" is silently DROPPED, handing back
+        # a path that names a different file than was requested. The rejection is
+        # per-component rather than per-string.
         "a/C:evil",
         "sub/dir/C:evil",
     ])
@@ -636,18 +610,13 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
             pathsafe.confined_under(tmp_path, rfilename)
 
     @pytest.mark.parametrize("rfilename", [
-        # FALSE-POSITIVE TRAPS for confined_under. A hostile-only corpus passes an
-        # over-matching guard silently, and over-matching is not the safe
-        # direction: the guard gets loosened later to accept the real input it
-        # broke, and the property it was protecting is what dies in the loosening.
+        # FALSE-POSITIVE TRAPS for confined_under.
         #
-        # These are all RELATIVE, deliberately. confined_under's contract is
-        # "a relative component, confined under base", so an ABSOLUTE path is
-        # correctly refused by it and belongs in the rejection corpus above, not
-        # here - an earlier draft of this list carried "/usr/local/share/x.gguf"
-        # and would have failed for that reason. The false-positive traps that
-        # need an absolute or UNC-shaped value live one test down, asserted
-        # against the PREDICATE, which is where that question actually belongs.
+        # These are all RELATIVE. confined_under's contract is "a relative
+        # component, confined under base", so an ABSOLUTE path is correctly
+        # refused by it and belongs in the rejection corpus above, not here. The
+        # false-positive traps that need an absolute or UNC-shaped value live one
+        # test down, asserted against the PREDICATE.
         "sharepoint/model.gguf",              # "share" as a name prefix
         "a/share/b.gguf",                     # "share" as a whole component
         "usr/local/share/x.gguf",             # "share" mid-path
@@ -667,8 +636,8 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
     ])
     def test_the_unc_predicate_does_not_over_match(self, raw):
         """Pinned directly on the predicate, not only through confined_under, so
-        a future edit that reintroduces a .strip() fails here with the reason
-        attached rather than surfacing as a mysterious rejection downstream."""
+        an edit that adds a .strip() fails here with the reason attached instead
+        of surfacing as a rejection downstream."""
         import ntpath
         from pathlib import PureWindowsPath
         from localm import pathsafe
@@ -702,17 +671,12 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         what the OS parser calls them.
 
         `\\\\.\\` and `\\\\?\\` are the device namespace, NOT a UNC share, and
-        CPython's ntpath has changed how it reports these across versions. An
-        earlier draft of this file lumped them in with the share cases above and
-        asserted `PureWindowsPath(raw).drive != ""` for them too - an unverified
-        claim about the platform, in a test, which is worse than no test at all:
-        it would either fail for a reason unrelated to the code under test, or
-        pass while teaching a future reader something untrue.
+        CPython's ntpath has changed how it reports these across versions, so no
+        claim is made here about `PureWindowsPath(raw).drive`.
 
-        What this unit actually needs from the predicate is behavioural and does
-        not depend on that question: a device path must never be treated as an
-        ordinary relative component, because these routes reach `stat`, `mkdir`
-        and `unlink`. So assert exactly that, and nothing about `drive`."""
+        What the predicate must guarantee is behavioural and does not depend on
+        that: a device path is never treated as an ordinary relative component,
+        because these routes reach `stat`, `mkdir` and `unlink`."""
         from localm import pathsafe
         assert pathsafe.is_unc_or_device_path(raw) is True, raw
 
@@ -722,9 +686,9 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
 
         Compared against the RESOLVED expectation: confined_under returns a
         resolved path, so an unresolved join is not the same object on a host
-        where tmp_path is reached through a symlink or an 8.3 name. Resolving
-        both sides keeps this a test of "which file was named" rather than an
-        accidental test of the temp directory's spelling."""
+        where tmp_path is reached through a symlink or an 8.3 name. Both sides are
+        resolved, so this tests which file was named, not the temp directory's
+        spelling."""
         from localm import pathsafe
         got = pathsafe.confined_under(tmp_path, "subdir/model-00001-of-2.safetensors")
         expected = (tmp_path / "subdir" / "model-00001-of-2.safetensors").resolve()

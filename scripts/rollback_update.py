@@ -11,9 +11,9 @@ PATH so a broken ``localm`` package cannot stop the rollback. Run it via
 ``rollback.bat`` / ``rollback.sh`` in the install root, or
 ``python scripts/rollback_update.py``.
 
-It NEVER reports success it did not achieve (do-not-hide-problems): if there is no
-backup, the restore helper cannot load, or a restore step fails, it says so, keeps the
-backup intact, and exits non-zero, pointing at the backup dir for a manual copy.
+It NEVER reports success it did not achieve: if there is no backup, the restore
+helper cannot load, or a restore step fails, it says so, keeps the backup intact,
+and exits non-zero, pointing at the backup dir for a manual copy.
 """
 
 from __future__ import annotations
@@ -25,8 +25,7 @@ import os
 import sys
 from pathlib import Path
 
-# The install root is the parent of this script's scripts/ dir. Recovery restores INTO
-# this tree, so it is derived from __file__, never a hardcoded path.
+# The install root is the parent of this script's scripts/ dir, derived from __file__.
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -45,7 +44,7 @@ def _detect_home(install_root: Path) -> Path:
                 if line:
                     return Path(line).expanduser()
             except OSError:
-                pass   # unreadable marker: fall through to ./home (surfaced below by absence)
+                pass   # unreadable marker: fall through to ./home
         portable = install_root / "home"
         if portable.is_dir():
             return portable
@@ -65,7 +64,7 @@ def _load_apply_update(install_root: Path):
         spec.loader.exec_module(mod)
         return mod
     except Exception:
-        return None   # a corrupt helper -> manual-recovery path, never a false success
+        return None   # a corrupt helper takes the manual-recovery path
 
 
 def _read_names(updates_dir: Path, backup_dir: Path) -> list:
@@ -80,10 +79,8 @@ def _read_names(updates_dir: Path, backup_dir: Path) -> list:
                 return loaded
         except (OSError, ValueError):
             pass
-        # The manifest EXISTS but is unreadable or malformed: we can still roll back from
-        # the backup dir, but that listing lacks the brand-new top-level entries the update
-        # ADDED, so those will not be removed. Say so rather than silently doing a partial
-        # rollback (do-not-hide-problems). Stdlib-only path, so warn via stderr.
+        # The manifest exists but is unreadable or malformed: roll back from the backup
+        # dir instead, whose listing lacks the top-level entries the update added.
         print("Warning: applied_names.json exists but is unreadable; new files added by "
               "the update will not be removed by this rollback.", file=sys.stderr)
     return [p.name for p in backup_dir.iterdir()]

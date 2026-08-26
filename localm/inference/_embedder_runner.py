@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Subprocess isolation for the embedding-model lifecycle (load, embed, unload) -
-the same fix PR #606 gave the chat GGUF backend (see
-``backends/llamacpp/_runner.py``), applied to ``embedder.py``'s separate,
-previously-unisolated GGUF/llama.cpp load path (honesty-audit follow-up,
-2026-07-14): ``llama_load_model_from_file`` and ``llama_decode`` (called by
-every ``embed()``) can hard-``abort()`` the whole process on a native CUDA/HIP
-driver failure - no Python ``try/except`` can catch that.
+"""Subprocess isolation for the embedding-model lifecycle (load, embed, unload).
 
-Lighter-weight than the chat runner on purpose: the embedder's usage pattern
-is load-once-serve-many, with no streaming and no mid-call cancellation, so
-this needs only a plain request/response protocol - closer in shape to
-``localm/voice.py``'s worker than to ``llamacpp/_runner.py``'s. Still a
-long-lived child (not one process per call, unlike ``voice.py``'s
-respawn-per-death-only model) so a small embedding model is not reloaded on
-every ``embed()``.
+``llama_load_model_from_file`` and ``llama_decode`` (called by every ``embed()``)
+can hard-``abort()`` the whole process on a native CUDA/HIP driver failure, and
+no Python ``try/except`` can catch that.
+
+Lighter-weight than the chat runner (``backends/llamacpp/_runner.py``): the
+embedder's usage pattern is load-once-serve-many, with no streaming and no
+mid-call cancellation, so this needs only a plain request/response protocol,
+closer in shape to ``localm/voice.py``'s worker. Still a long-lived child, so a
+small embedding model is not reloaded on every ``embed()``.
 
 Protocol (two ``multiprocessing.Queue``s, tagged tuples):
 
@@ -41,12 +37,10 @@ import time
 from typing import List
 
 # Fault-injection hook, honoured by the child ONLY when this environment
-# variable is set. Exists exclusively so the test suite can prove the
-# crash-containment property with a REAL uncatchable fault (the same code
-# path a genuine native abort would take); never set in production. Values:
-# "abort" (a genuine uncatchable native abort), "exit" (a hard process exit,
-# no Python traceback), "hang" (a wedged native call). Mirrors
-# llamacpp/_runner.py's _FAULT_ENV / voice.py's _FAULT_ENV.
+# variable is set; never set in production. Values: "abort" (a genuine
+# uncatchable native abort), "exit" (a hard process exit, no Python traceback),
+# "hang" (a wedged native call). Mirrors llamacpp/_runner.py's _FAULT_ENV and
+# voice.py's _FAULT_ENV.
 _FAULT_ENV = "LOCALM_EMBEDDER_FAULT_FOR_TEST"
 
 
@@ -61,18 +55,10 @@ def _simulate_fault(mode: str) -> None:
 
 # How long the "embed" dedup_native_stderr scope (see _runner_main below) may
 # sit open with nothing pending before it is closed on idle. A bursty caller
-# (one RAG index pass, many embed() calls back to back with no real gap)
-# stays inside ONE scope, so genuinely repeated native lines actually get
-# grouped; a quiet server between bursts still flushes within this bound
-# instead of holding output until the next embed() (minutes/hours away, or
-# never) or process shutdown - #963's adversarial follow-up measured that
-# BOTH extremes are real failures: wrapping per-call groups nothing (a
-# single-line scope has nothing to collapse), wrapping the whole child
-# lifetime can silence the live view indefinitely (debuglog.py's
-# _LineGrouper only flushes early once 8 OTHER distinct lines evict the
-# pending one - a small, low-variety repeat like this one may never reach
-# that). Single-digit seconds, matching the existing load-wrap's own
-# "however long the bounded operation takes" order of magnitude.
+# (one RAG index pass, many embed() calls back to back with no real gap) stays
+# inside ONE scope, so genuinely repeated native lines get grouped; a quiet
+# server between bursts flushes within this bound instead of holding output
+# until the next embed() or process shutdown.
 _EMBED_STDERR_IDLE_CLOSE_SECS = 5.0
 
 
@@ -88,27 +74,17 @@ def _arm_native_crash_trace(path) -> None:
     leaves a trace the parent can relay into the debug log.
 
     THIS IS THE ONLY THING THAT CAN CAPTURE THAT CLASS. A SIGILL/SIGSEGV/
-    SIGABRT inside native code (llama.dll's own load, or the torch/ROCm
-    conflict this worker's VRAM checks are known to hit - see _sizing.py)
-    never returns to Python at all, so no ``except`` clause anywhere in this
-    child can run, and the parent's "see the debug log for the native stack
-    trace" had nothing behind it.
-
-    Ported from ``llamacpp/_runner.py``, where the same gap was closed first;
-    issues 1222 / 1223 are that shape (``worker exit -4`` is SIGILL, since
-    multiprocessing reports ``-N`` for signal N) and neither field log contains
-    any trace.
+    SIGABRT inside native code (llama.dll's own load, or the torch/ROCm conflict
+    this worker's VRAM checks hit - see _sizing.py) never returns to Python at
+    all, so no ``except`` clause anywhere in this child can run.
 
     Armed as early as possible - before the native library is anywhere near
     loaded - because a fault can only be captured by a handler that was already
     installed when it happened.
 
     Failures are logged, never raised: losing the trace must not stop the worker
-    from doing its job. But it is NOT silenced (AGENTS.md rule 5) and
-    ``is_enabled()`` is checked rather than trusting "enable() did not raise" -
-    that exact silent-no-op is on record in bugreport.arm_crash_guard, where
-    every native-trace file on the maintainer's box came out 0 bytes with no
-    clue why."""
+    from doing its job. ``is_enabled()`` is checked rather than trusting that
+    ``enable()`` did not raise."""
     global _crash_trace_fh
     if path is None:
         return
@@ -133,11 +109,9 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
     """Long-lived child: owns one GGUFEmbedder (one loaded model) for its
     whole process lifetime, dispatching one request at a time.
 
-    *crash_trace_path* defaults to None because this dispatch loop is also
-    driven IN-PROCESS by the test suite (tests/test_embedder_runner_isolation
-    .py calls it directly with two positional args); an in-process caller has
-    no child to trace and must not have faulthandler repointed underneath it.
-    A real spawn always passes the parent-chosen path."""
+    *crash_trace_path* defaults to None for an in-process caller, which has no
+    child to trace and must not have faulthandler repointed underneath it. A
+    real spawn always passes the parent-chosen path."""
     _arm_native_crash_trace(crash_trace_path)
     from localm.debuglog import attach_child_logging, dedup_native_stderr
     attach_child_logging()   # native load-failure diagnostics land in the
@@ -159,23 +133,15 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
     embedder = None
 
     # Lazily entered on the FIRST "embed" command and held open across every
-    # "embed" that follows with no real gap between them - never re-entered
-    # per call, and closed on idle (see _EMBED_STDERR_IDLE_CLOSE_SECS above)
-    # rather than held for the child's whole remaining lifetime. Every
+    # "embed" that follows with no real gap between them - never re-entered per
+    # call, and closed on idle (see _EMBED_STDERR_IDLE_CLOSE_SECS above). Every
     # llama_decode call (embedder.py's embed()) writes a native line like
     # "decode: cannot decode batches with this context (calling encode()
-    # instead)" to raw stderr, and #963's adversarial follow-up measured
-    # that a RAG/memory workload fires it once per embed() RPC - many small,
-    # separate calls, not one big loop. dedup_native_stderr's grouper only
-    # collapses lines seen WITHIN one open scope, so wrapping each embed()
-    # call individually (measured, then reverted - see embedder.py's
-    # embed() docstring) collapses nothing: a single-text call feeds the
-    # grouper exactly one line, which flushes raw the moment that call's own
-    # scope closes. "load" is deliberately excluded - GGUFEmbedder.__init__
-    # already wraps the model load in its own dedup_native_stderr scope
-    # (#993), and nesting two scopes would dup2 fd 2 onto the OUTER scope's
-    # pipe instead of the real stderr (see that context manager's own
-    # docstring on why that hangs).
+    # instead)" to raw stderr, and dedup_native_stderr's grouper only collapses
+    # lines seen WITHIN one open scope, so a per-call scope collapses nothing.
+    # "load" is excluded: GGUFEmbedder.__init__ already wraps the model load in
+    # its own dedup_native_stderr scope, and nesting two scopes would dup2 fd 2
+    # onto the OUTER scope's pipe instead of the real stderr.
     embed_stderr_ctx = None
 
     def _close_embed_stderr_ctx() -> None:
@@ -215,27 +181,19 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
             payload = dict(payload)
             # cpu_only: n_gpu_layers=0 alone only controls WEIGHT placement -
             # ggml's scheduler still considers a REGISTERED GPU backend for
-            # individual ops (a large enough matmul dispatches to vendor BLAS
-            # regardless of how many layers were offloaded; confirmed live:
-            # a small model like bge-small never crosses that threshold and
-            # is unaffected either way, but a multi-billion-parameter model
-            # like Qwen3-Embedding-4B does, and hits the identical rocBLAS/
-            # Tensile crash on a "CPU-only" n_gpu_layers=0 load - issue #749).
-            # Clearing the vendor-visible-device env vars BEFORE importing
-            # anything native makes the HIP/ROCm/CUDA runtime itself report
-            # ZERO devices, so ggml's backend registration finds none and the
-            # scheduler has only CPU to dispatch to - a guarantee, not a
-            # heuristic, independent of model size. Set in THIS child process
-            # only (freshly spawned, isolated) - never touches the parent's
-            # environment or a concurrently-loading chat model.
+            # individual ops, so a large enough matmul dispatches to vendor BLAS
+            # regardless of how many layers were offloaded. Clearing the
+            # vendor-visible-device env vars BEFORE importing anything native
+            # makes the HIP/ROCm/CUDA runtime itself report ZERO devices, so
+            # ggml's backend registration finds none and the scheduler has only
+            # CPU to dispatch to, independent of model size. Set in THIS child
+            # process only - never touches the parent's environment or a
+            # concurrently-loading chat model.
             if payload.pop("cpu_only", False):
-                # "-1" (not "") - Windows' CRT putenv("VAR=") with nothing
-                # after '=' REMOVES the variable rather than setting it empty
-                # (confirmed live: an empty string left the device visible,
-                # "llama_prepare_model_devices: using device ROCm0" still
-                # fired). "-1" is the standard CUDA/HIP convention for "no
-                # valid device index", which the runtime cannot silently
-                # treat as "unset".
+                # "-1", not "": Windows' CRT putenv("VAR=") with nothing after
+                # '=' REMOVES the variable instead of setting it empty. "-1" is
+                # the standard CUDA/HIP convention for "no valid device index",
+                # which the runtime cannot treat as "unset".
                 os.environ["HIP_VISIBLE_DEVICES"] = "-1"
                 os.environ["ROCR_VISIBLE_DEVICES"] = "-1"
                 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -269,15 +227,13 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
             except Exception as e:
                 resp_q.put(("error", str(e)))
             # Same as above: a native abort during llama_decode propagates
-            # out of this whole function, uncaught, on purpose - the open
-            # dedup_native_stderr scope is simply never closed, which is
-            # fine (the process is dying anyway; nothing pending needs to
-            # be flushed to a stderr no reader will ever see again).
+            # out of this whole function, uncaught. The open
+            # dedup_native_stderr scope is then never closed; the process is
+            # dying, so nothing pending needs flushing.
             continue
 
         # An unrecognized command is a bug in this module's own parent-side
-        # caller, not untrusted input - but rule 5 says never silently drop
-        # it either way.
+        # caller, not untrusted input. It is reported, never dropped.
         resp_q.put(("error", f"unknown embedder-runner command: {name!r}"))
 
 
@@ -290,19 +246,16 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
 # command's own deadline (see the timeouts below).
 _POLL_INTERVAL = 0.2
 
-# Default model-load timeout. Embedding models are far smaller than chat
-# models (24-90 MB for the built-in bge/nomic choices - see embedder.py's
-# module docstring), but a user-configured `embedding_model` can still be
-# multi-GB (confirmed live: Qwen3-Embedding-8B-Q8_0.gguf, 7.49 GB, from the
-# incident that prompted this module). Generous but bounded, mirroring
-# llamacpp/_runner.py's LOAD_TIMEOUT_DEFAULT reasoning - a stalled load has no
-# safe "unmeasurable" fallback, it must raise rather than hang forever.
+# Default model-load timeout. Embedding models are far smaller than chat models
+# (24-90 MB for the built-in bge/nomic choices), but a user-configured
+# `embedding_model` can be multi-GB. Generous but bounded: a stalled load must
+# raise, never hang forever.
 LOAD_TIMEOUT_DEFAULT = 300.0
 
 # Bounded wait for one embed() RPC. A large RAG re-index batch can embed
 # hundreds of chunks in one call, so this is generous rather than per-token
 # tight like the chat runner's stream-chunk timeout; a genuinely wedged child
-# is still detected via the is_alive() poll below well before this elapses.
+# is still detected via the is_alive() poll below, well inside this bound.
 _EMBED_TIMEOUT_DEFAULT = 300.0
 
 
@@ -325,10 +278,9 @@ class EmbedderRunner:
         """The child's exit code DECODED - "-4 (killed by signal SIGILL)" rather
         than "-4".
 
-        Every user-facing report of a dead worker goes through this rather than
+        Every user-facing report of a dead worker goes through this, never
         interpolating the raw code, mirroring ``ModelRunner._exit_reason``. The
-        decoder lives in ``_mp_spawn`` precisely so this runner reuses it
-        instead of growing a second version."""
+        decoder itself lives in ``_mp_spawn``."""
         from localm._mp_spawn import describe_exit_code
         proc = self._proc
         return describe_exit_code(None if proc is None else proc.exitcode)
@@ -337,11 +289,11 @@ class EmbedderRunner:
         """This child's captured native-fault trace, consumed and removed, or ""
         when there is none.
 
-        Consuming rather than merely reading is deliberate: the file is a
-        one-shot record of one death, so leaving it in place would let a later
-        reader (or the next spawn of a reused runner) attribute a stale trace to
-        a fresh crash. Fully guarded - a diagnostic read must never replace the
-        real crash error with an IO error."""
+        Consumed rather than merely read: the file is a one-shot record of one
+        death, so leaving it in place would let a later reader (or the next spawn
+        of a reused runner) attribute a stale trace to a fresh crash. Fully
+        guarded - a diagnostic read must never replace the real crash error with
+        an IO error."""
         path = self._crash_trace_path
         if path is None:
             return ""
@@ -369,10 +321,8 @@ class EmbedderRunner:
         captured, else a plain statement that none was.
 
         Saying "no native stack trace was captured" OUT LOUD matters as much as
-        relaying one (AGENTS.md rule 5): before this existed, the message claimed
-        a trace was in the debug log whether or not anything had ever written
-        one, so a user following that instruction found nothing and had no way to
-        tell an empty capture from their own failure to find it."""
+        relaying one: a message that points at the debug log when nothing was
+        written sends the reader looking for something that is not there."""
         trace = self._native_crash_trace()
         if not trace:
             return " No native stack trace was captured for this fault."
@@ -385,7 +335,7 @@ class EmbedderRunner:
 
     def _spawn(self) -> None:
         from localm._mp_spawn import ensure_spawn_uses_venv_python
-        ensure_spawn_uses_venv_python()   # #617: avoid a renamed-launcher WinError 2
+        ensure_spawn_uses_venv_python()   # avoid a renamed-launcher WinError 2
         ctx = mp.get_context("spawn")   # explicit: identical on every OS
         self._req_q = ctx.Queue()
         self._resp_q = ctx.Queue()
@@ -421,11 +371,10 @@ class EmbedderRunner:
         clean failure, a child crash, or a timeout - the caller (embedder.py's
         IsolatedEmbedder) decides whether/how to recover.
 
-        NOT safe to call concurrently on one runner, by design: the protocol
-        above carries no request id, so two overlapping RPCs would be two
-        threads blocked in the same resp_q.get(), each free to receive the
-        OTHER's response. The sole caller, IsolatedEmbedder.embed(), serializes
-        on its _rpc_lock to guarantee that (REG-643)."""
+        NOT safe to call concurrently on one runner: the protocol above carries
+        no request id, so two overlapping RPCs would be two threads blocked in
+        the same resp_q.get(), each free to receive the OTHER's response. The
+        sole caller, IsolatedEmbedder.embed(), serializes on its _rpc_lock."""
         self._req_q.put(("embed", texts))
         return self._wait(timeout, "embed")
 
@@ -485,10 +434,9 @@ class EmbedderRunner:
         self._proc = None
         self._req_q = None
         self._resp_q = None
-        # A worker torn down through shutdown() has had its exit accounted for by
-        # whoever called it, so any trace it left is either already relayed or
-        # describes a death nobody is going to report. Either way it must not
-        # outlive the process it describes, or the logs dir grows one file per
-        # model load for the life of the server.
+        # A worker torn down through shutdown() has had its exit accounted for
+        # by whoever called it, so any trace it left is either already relayed or
+        # describes a death nobody will report. It must not outlive the process
+        # it describes.
         self._discard_native_crash_trace()
         self._crash_trace_path = None

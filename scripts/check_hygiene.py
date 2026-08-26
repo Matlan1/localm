@@ -12,53 +12,35 @@ Scans tracked files and fails on:
      a default must never assume.
   4. A CHANGELOG.md that is not append-only: a shipped entry line removed or
      rewritten (vs the published-record baseline) instead of new entries added on
-     top. The changelog is the permanent public record of what shipped (AGENTS.md).
-     The [Unreleased] draft stays exempt from that hard gate, but a draft line
-     that existed at the baseline and is gone from the working copy is reported
-     as a WARNING (check 4b below): a textually clean rebase has silently dropped
-     a sibling branch's draft bullet before. --strict (or LOCALM_HYGIENE_STRICT=1)
-     escalates warnings to failures for CI-style use.
+     top. The [Unreleased] draft stays exempt from that hard gate, but a draft
+     line that existed at the baseline and is gone from the working copy is
+     reported as a WARNING (check 4b below). --strict (or
+     LOCALM_HYGIENE_STRICT=1) escalates warnings to failures for CI-style use.
   5. A raw call to a single-resource accessor from outside its designated
      aggregate-capacity wrapper (see _RAW_ACCESSOR_GUARDS below). When a feature's
      whole value is "combine capacity across N resources" (multi-GPU VRAM split is
      the first case; the same shape applies to any future multi-disk,
      multi-model-instance, or multi-connection-pool feature), every "does this
-     fit" decision must go through the wrapper - not just the one call site a PR
-     happened to update. This is deliberately an ENFORCED check, not a written
-     review note: a note relies on a human remembering to re-grep every call site
-     next time, which is exactly the discipline that already failed once (see
-     dev-notes/gpu-split-capacity-fix/ for the incident this check was written
-     for - vram_info() was single-GPU-only and 8 call sites read it as if it
-     were the aggregate ceiling before discover.vram_capacity() existed).
+     fit" decision must go through the wrapper.
   6. sw.js's SHELL precache array names a file that doesn't exist, or misses an
      app/*.js or pages/*.js module it promises to precache; or sw.js's CACHE
      constant line is no longer in the shape localm/plugins/gui/web.py's GET
-     /sw.js route expects to substitute a computed value into on every request
-     (that route is what actually keeps an installed PWA from serving stale
-     assets now - see check_hygiene's own "check 6" block comment for why a
-     hand-bumped version string was retired in favor of it).
+     /sw.js route expects to substitute a computed value into on every request.
   7. A module-level import CYCLE between top-level units under localm/ (e.g.
-     inference <-> plugins). Acyclicity is checked instead of a hand-written tier
-     map because a map is a maintained artifact encoding opinions - two readers
-     auditing the same tree derived different "upward edge" counts purely from
-     inventing different maps - whereas a cycle is a property of the graph. The
-     two shapes any layer map has to carve out are legal here BY CONSTRUCTION: an
-     entry point (__main__ -> cli) is a source node, and peers (image_gen /
-     music_gen / video_gen -> media) are unordered, so neither can form a cycle
-     and neither needs an allowlist. Function-local imports are ignored: deferring
-     an import is the standard, deliberate way to break a cycle in Python and this
-     codebase does it on purpose, so only eager module-level edges count.
+     inference <-> plugins). An entry point (__main__ -> cli) is a source node,
+     and peers (image_gen / music_gen / video_gen -> media) are unordered, so
+     neither can form a cycle and neither needs an allowlist. Function-local
+     imports are ignored: only eager module-level edges count.
 
-It also runs the release-file manifest gate (scripts/check_manifest.py,
-NEW-RELEASE-FILEMANIFEST): every tracked file must be classified release-include
-or release-exclude, nothing local-only may be committed, and no manifest pattern
-may go stale. Folding it in here means the ONE CI "Hygiene gate" step and the
---install-hook pre-commit hook cover both without a separate step to remember -
-WHEN scripts/check_manifest.py is present. That file is itself gitignored
-(AGENTS.md rule 6), so it is absent from a fresh CI checkout and from most
-external contributors' clones by design; when it cannot be imported this reports
-a WARNING (escalated to a failure only under --strict / LOCALM_HYGIENE_STRICT=1),
-never a silent pass - see _release_manifest_gate().
+It also runs the release-file manifest gate (scripts/check_manifest.py): every
+tracked file must be classified release-include or release-exclude, nothing
+local-only may be committed, and no manifest pattern may go stale. Folding it in
+here keeps the ONE CI "Hygiene gate" step and the --install-hook pre-commit hook
+covering both - WHEN scripts/check_manifest.py is present. That file is itself
+gitignored, so it is absent from a fresh CI checkout and from most external
+contributors' clones; when it cannot be imported this reports a WARNING
+(escalated to a failure only under --strict / LOCALM_HYGIENE_STRICT=1), never a
+silent pass - see _release_manifest_gate().
 
 Run before committing:   python scripts/check_hygiene.py
 Install as a git hook:    python scripts/check_hygiene.py --install-hook
@@ -84,19 +66,15 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # ---- check 1: dashes -------------------------------------------------------
-# Em-dash and en-dash, referenced by codepoint so this file stays clean.
-# Plain ASCII hyphen-minus only.
+# Em-dash and en-dash, referenced by codepoint. Plain ASCII hyphen-minus only.
 _EM_DASH = chr(0x2014)
 _EN_DASH = chr(0x2013)
 _DASHES = (_EM_DASH, _EN_DASH)
 
 # ---- check 2: disclosure (no escape) ---------------------------------------
-# The maintainer username is assembled from fragments so this file does not
-# itself contain the plaintext identifier it forbids in path components (rule 2).
-# The maintainer's CONTACT EMAIL is deliberately NOT scanned for: the maintainer
-# opted to publish it for bug reports (localm/bugreport.py). What stays forbidden
-# is a local username used as a filesystem path (a machine-specific bug) and any
-# real secret (API token, access key, private key).
+# The maintainer username is assembled from fragments. Flagged: a local username
+# used as a filesystem path, and real secrets (API token, access key, private
+# key). The maintainer's contact email is not scanned for.
 _MAINT_USER = "Mat" + "lan"
 _DISCLOSURE = [
     re.compile(r"[A-Za-z]:[\\/]Users[\\/]" + _MAINT_USER + r"\b", re.I),  # user dir
@@ -130,10 +108,7 @@ _BINARY_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
 
 def _tracked_files() -> list[Path]:
     try:
-        # encoding="utf-8" for the same reason as _git: git emits paths as
-        # UTF-8, but a bare text=True decodes with the locale codepage (cp1252
-        # on Windows), which would mangle - or, on a byte outside the codepage,
-        # raise and abort the whole scan for - a non-ASCII tracked filename.
+        # Decode git's UTF-8 output explicitly rather than by locale codepage.
         out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True,
                              text=True, encoding="utf-8", check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -155,13 +130,9 @@ def _scan(path: Path) -> list[str]:
     except (UnicodeDecodeError, OSError):
         return []   # binary or unreadable: not our concern here
     rel = path.relative_to(REPO).as_posix()
-    # Tests legitimately use synthetic absolute paths as fixtures (fake drive
-    # letters, nonexistent dirs, file URLs). The dash and disclosure checks
-    # still apply to them; only the absolute-path heuristic is skipped.
-    # The frontend test suites don't follow the Python tests/test_*.py
-    # convention: they live under tests-js/ and tests-e2e/ and are named
-    # *.test.mjs / *.spec.mjs, so those conventions are recognized too now
-    # that .js/.mjs are in _CODE_EXTS.
+    # Test files skip the absolute-path heuristic only; the dash and disclosure
+    # checks still apply. Covers Python tests/test_*.py plus the frontend
+    # tests-js/ and tests-e2e/ *.test.mjs / *.spec.mjs naming.
     fname = Path(rel).name
     is_test = (rel.startswith("tests/") or rel.startswith("tests-js/")
                or rel.startswith("tests-e2e/") or "/test_" in "/" + rel
@@ -185,28 +156,19 @@ def _scan(path: Path) -> list[str]:
 
 
 # ---- check 4: CHANGELOG is append-only -------------------------------------
-# "Published" means RELEASED, not merely "carries a version header": the pending
-# release (VERSION's own section, before its tag exists) is still a cuttable draft -
-# see _pending_release_version. Every other version section is frozen unconditionally.
-# The release changelog is the permanent public record of what shipped. Only the
-# PUBLISHED (versioned "## [x.y.z]") sections are frozen: a release ADDS its section
-# on top and its entries (INCLUDING its own version header and any "### " subsection
-# headers within it, e.g. "### Added") are then never deleted or rewritten (typo/
-# formatting fixes aside - see AGENTS.md). The "## [Unreleased]" draft's own header
-# (and any intro text before the first version header) is the in-progress record and
-# is FREELY rewritable until it is cut into a version. Enforced by diffing the working
-# CHANGELOG against the published-record baseline (the merge-base with origin/master,
-# else the last commit) and failing if any PUBLISHED entry line disappeared. Only the
-# "## [Unreleased]" header itself and link-reference definitions ("[label]: url") are
-# exempt: cutting a release legitimately renames the Unreleased header to a version
-# and rewrites the compare link. Compared as a multiset, so MOVING an entry from
-# [Unreleased] under a new version header is fine - only a deletion or rewrite of an
-# already-PUBLISHED entry line (body OR header) is caught.
+# Freezes every PUBLISHED (versioned "## [x.y.z]") section: its entry lines, its
+# version header and any "### " subsection headers within it. The pending release
+# (VERSION's own section, before its tag exists - see _pending_release_version),
+# the "## [Unreleased]" draft and any intro text before the first version header
+# stay rewritable. Enforced by diffing the working CHANGELOG against the baseline
+# (the merge-base with origin/master, else the last commit) and failing if a
+# published entry line disappeared. The "## [Unreleased]" header itself and
+# link-reference definitions ("[label]: url") are exempt. Compared as a multiset,
+# so MOVING an entry from [Unreleased] under a new version header passes.
 _CHANGELOG = "CHANGELOG.md"
 _CHANGELOG_LINKREF = re.compile(r"\[[^\]]+\]:\s")
-# An H2 section header opening a version section, e.g. "## [0.1.1] - date"; group 1 is
-# the version. "## [Unreleased]" does not match (no leading digit), so its section
-# stays editable.
+# An H2 section header opening a version section, e.g. "## [0.1.1] - date"; group 1
+# is the version. "## [Unreleased]" does not match (no leading digit).
 _CHANGELOG_VERSION_HEADER = re.compile(r"^##\s+\[(\d[^\]]*)\]")
 
 
@@ -217,12 +179,11 @@ def _pending_release_version() -> str | None:
 
     A ``## [x.y.z]`` header alone does NOT mean x.y.z shipped. The release ritual bumps
     VERSION and cuts the section BEFORE the tag and GitHub release exist, so between the
-    cut and the publish the section is a versioned-but-unshipped draft. Freezing it
-    protects nothing (nobody can have downloaded a release that does not exist) while
-    blocking the legitimate final cut, e.g. re-dating the section on the day it actually
-    ships, or folding newer [Unreleased] work into a prep that was never published.
+    cut and the publish the section is a versioned-but-unshipped draft, and stays
+    editable: re-dating it on the day it actually ships, or folding newer [Unreleased]
+    work into a prep that was never published, both pass.
 
-    Deliberately narrow, so a MISSING tag can never unfreeze real history:
+    Narrow, so a MISSING tag can never unfreeze real history:
       - a section whose version != VERSION is ALWAYS frozen, even in a clone with no
         tags at all, and
       - the VERSION-matching section re-freezes the moment its tag exists.
@@ -243,19 +204,8 @@ def _pending_release_version() -> str | None:
     return version
 
 
-# Versions that have a git tag but were NEVER PUBLISHED, so there is no shipped history
-# to protect: nobody can have downloaded them. This is the case _pending_release_version
-# cannot cover - it uses "a tag exists" as its proxy for "it shipped", and that proxy is
-# wrong when a tag was pushed for a release that stayed a draft.
-#
-# MEASURED 2026-08-18: `gh release list` reports 0.1.5rc1 as **Draft** while 0.1.5rc2 and
-# 0.1.5rc3 are Pre-release. A draft is visible only to maintainers, so no user ever
-# received rc1, and its changelog section described a mechanism that was replaced before
-# the release existed (the corrected version shipped in 0.1.5rc2 and is still there).
-#
-# KEEP THIS EMPTY unless a release is PROVABLY unpublished, and record the evidence here.
-# Adding a genuinely shipped version would unfreeze real public history, which is the one
-# thing this gate exists to prevent.
+# Versions carrying a git tag that were never published; their sections stay
+# editable alongside the pending release.
 _NEVER_PUBLISHED_VERSIONS = frozenset({"0.1.5rc1"})
 
 
@@ -265,35 +215,30 @@ def _changelog_protected_lines(text: str, pending_version: str | None = None) ->
     reference line sitting under it - INCLUDING a ``### Added``-style subsection
     header, not just its bullet entries. Lines under ``## [Unreleased]`` (or before
     the first version header) are the in-progress draft and are NOT protected - they
-    may be rewritten freely until the release is cut (AGENTS.md). rstrip()'d so a
-    CRLF/LF or trailing-space difference is not mistaken for a real change.
+    may be rewritten freely until the release is cut. rstrip()'d so a CRLF/LF or
+    trailing-space difference is not mistaken for a real change.
 
     Both the version header line AND subsection headers within a published section
     are protected, not just bullet entries: a version header carries the version
     number and ship date, and a subsection header carries WHICH CATEGORY an entry
     shipped under (e.g. distinguishing "Added" from "Removed" for the same bullet
-    text) - silently rewriting either is exactly the kind of history rewrite this
-    guard exists to catch, the same as editing a bullet's wording.
+    text).
 
     *pending_version* (see _pending_release_version) names the ONE version that is cut
     but not yet released; its section is still a draft and is NOT protected. None (the
-    default) protects every version section, so the pure-function callers and tests keep
-    the original semantics."""
+    default) protects every version section."""
     out = []
     published = False   # intro + [Unreleased] (before the first version header) are editable
     for raw in text.splitlines():
         line = raw.rstrip()
         stripped = line.lstrip()
-        # An H2 section header ("## ...") switches zones: a versioned header opens the
-        # protected published record; [Unreleased] (or any other H2) closes it. Once
-        # published, a DEEPER header ("### Added") does NOT change the zone, but is
-        # still protected content (handled by the generic append below).
+        # An H2 header ("## ...") switches zones: a versioned header opens the
+        # published record, any other H2 closes it. A deeper header ("### Added")
+        # does not change the zone and is appended as protected content.
         if stripped.startswith("## "):
             m = _CHANGELOG_VERSION_HEADER.match(stripped)
             ver = m.group(1).strip() if m else ""
-            # The pending (cut but unreleased) version's section is still a draft, and so
-            # is a version that was tagged but never actually published - see
-            # _NEVER_PUBLISHED_VERSIONS. Neither can have been downloaded by anyone.
+            # The pending version's section and never-published versions stay drafts.
             published = bool(m) and ver not in _NEVER_PUBLISHED_VERSIONS and not (
                 pending_version is not None and ver == pending_version
             )
@@ -328,12 +273,9 @@ def _changelog_removed_lines(old_text: str, new_text: str,
 def _git(*args: str) -> subprocess.CompletedProcess | None:
     """Run a git subcommand under REPO; None if git is unavailable at all.
 
-    Decode git's output as UTF-8 explicitly, NOT the platform default: with a
-    bare text=True, Python decodes with locale.getpreferredencoding() (cp1252 on
-    Windows), which mangles UTF-8 file content from ``git show`` into mojibake.
-    The working tree is read with encoding="utf-8" (see the CHANGELOG check), so
-    the baseline read here must match it or identical non-ASCII lines (an emoji,
-    an accented char) look "changed" and trip a false append-only violation.
+    Decodes git's output as UTF-8 explicitly, NOT the platform default. The
+    working tree is read with encoding="utf-8" (see the CHANGELOG check), and the
+    baseline read here must match it.
     """
     try:
         return subprocess.run(["git", *args], cwd=REPO,
@@ -342,9 +284,7 @@ def _git(*args: str) -> subprocess.CompletedProcess | None:
         return None
 
 
-# The baseline sha, resolved AT MOST ONCE per process and per REPO (see
-# _changelog_baseline_ref). Keyed on REPO so a caller that repoints REPO (the tests
-# do, one throwaway repo per test) still resolves afresh for the new tree.
+# The baseline sha, resolved at most once per process and per REPO.
 _BASELINE_REF_CACHE: dict[Path, str | None] = {}
 
 
@@ -362,17 +302,10 @@ def _changelog_baseline_ref() -> str | None:
 
     PINNED (resolved once per process): three separate checks call this - the
     append-only gate, the [Unreleased] warn-only checks, and the service-worker
-    cache-bump gate - and each call otherwise shells out to `git merge-base HEAD
-    origin/master` again. ``origin/master`` is a MOVING ref: worktrees share one
-    ref store, so a sibling session's fetch or a merge landing mid-run can advance
-    it between two of those calls, and the checks would then silently compare
-    against DIFFERENT baselines within a single run. That is not hypothetical - the
-    manual version of this check reported a phantom missing bullet exactly that way
-    (guard passed, a sibling lane merged seconds later, a later command re-read the
-    ref). Resolving to an immutable sha once and reusing it makes every check in a
-    run agree on one baseline; the tell that this matters is two detectors
-    disagreeing, which must always mean "one is stale", never "restore the
-    difference"."""
+    cache-bump gate. ``origin/master`` is a MOVING ref (worktrees share one ref
+    store, so a sibling session's fetch or a merge landing mid-run can advance it
+    between two calls), so it is resolved to an immutable sha once and reused,
+    making every check in a run agree on one baseline."""
     if REPO in _BASELINE_REF_CACHE:
         return _BASELINE_REF_CACHE[REPO]
     mb = _git("merge-base", "HEAD", "origin/master")
@@ -388,11 +321,10 @@ def _changelog_baseline_ref() -> str | None:
 
 
 def _changelog_append_only() -> list[str]:
-    """CHANGELOG.md must be APPEND-ONLY (AGENTS.md): report every shipped entry line
-    removed or rewritten relative to the baseline (see _changelog_baseline_ref). A
-    CHANGELOG not yet in the baseline (never committed) or a repo without git has
-    nothing to compare against, so it passes - the guard catches deletions from an
-    established record, it does not block the first commit."""
+    """CHANGELOG.md must be APPEND-ONLY: report every shipped entry line removed or
+    rewritten relative to the baseline (see _changelog_baseline_ref). A CHANGELOG
+    not yet in the baseline (never committed) or a repo without git has nothing to
+    compare against, so it passes."""
     ref = _changelog_baseline_ref()
     if ref is None:
         return []                       # no git available: nothing to diff against
@@ -415,71 +347,17 @@ def _changelog_append_only() -> list[str]:
 
 
 # ---- check 4b: [Unreleased] draft corruption (warn-only) --------------------
-# The append-only gate above deliberately exempts the [Unreleased] draft: it is
-# freely rewritable until cut. That exemption has a blind spot: when parallel
-# branches all add draft bullets, a sibling branch's bullet can disappear around
-# a rebase while every mechanical check still reports clean. It happened twice in
-# one 12-PR fan-out day (2026-07-22): a landed PR's entry simply vanished from
-# the release notes. So two warnings, not one, matching the two failure shapes
-# actually observed that day:
+# Two checks over the [Unreleased] section only, against the merge-base baseline
+# (_changelog_baseline_ref):
 #   DROP      - a baseline [Unreleased] content line missing from the working copy.
-#   DUPLICATE - a draft bullet that now appears more than once. This is the
-#               artifact of the REMEDY going wrong: the naive drop check (diff
-#               against the moving origin/master ref) false-positives on every
-#               sibling bullet merged after your branch point, and "restore
-#               anything you did not author" then re-imports a bullet that was
-#               never lost. Two sessions did exactly that.
-# Both are WARNINGS, never failures by default: rewording or deleting YOUR OWN
-# draft lines is legitimate and must stay frictionless. --strict /
-# LOCALM_HYGIENE_STRICT=1 escalates them where a hard gate is wanted.
-#
-# On the CAUSE, stated carefully because a wrong story sends people hunting the
-# wrong thing: "it happens on every rebase that replays an [Unreleased]
-# insertion" was FALSIFIED by direct comparison (a matching branch showed zero
-# drops). What is actually evidenced is a CONFLICTED rebase resolved
-# bulk-take-mine (reproduced end to end while building this check: the sibling
-# bullet is gone, the tree is clean, and the hard gate above returns nothing);
-# a squash or amend across the section is suspected but unproven. So the warning
-# text below points at the resolution step, not at rebases in general.
-#
-# Design decisions, recorded so they are not re-litigated:
-#   - Matching is EXACT (rstrip'd) line equality, so a REWORDED draft line warns
-#     too. Accepted, documented cost: a similarity heuristic that suppressed
-#     near-matches could suppress exactly the incident case (a sibling's bullet
-#     eaten while similar sibling bullets remain). For a warn-only check a false
-#     positive costs one glance; a false negative defeats the backstop.
-#   - The working side is the WHOLE file, not just its [Unreleased] section, so
-#     cutting a release (which MOVES the draft lines under a new version header)
-#     does not read as a mass drop.
-#   - Occurrences are counted on both sides (Counter), so a draft line whose
-#     text also appears in a published section is still reported when the DRAFT
-#     copy is the one deleted - the surviving published copy cannot satisfy its
-#     count. The converse is the accepted cost of counting: when a line is
-#     duplicated EXACTLY across sections, deleting the OTHER copy warns as well,
-#     because counting alone cannot tell two identical lines apart. Warning is
-#     the safe direction (the alternative attribution silently misses the real
-#     incident case), and such a deletion is either already a hard append-only
-#     FAILURE or an edit inside the pending cut section, so the extra line is
-#     noise on a run that is already asking for a human look.
-#   - Only bullet/continuation CONTENT lines are watched. Headers ("### Added"),
-#     blank lines and link-reference definitions are scaffolding a draft may
-#     freely reorganize; warning on those would be noise that trains people to
-#     ignore the one warning that matters.
-#   - Scope is [Unreleased] only, not the pending cut-but-untagged section
-#     (_pending_release_version): parallel branches land bullets in
-#     [Unreleased], while a cut section is edited by exactly one release
-#     ritual, so the rebase-collision hazard this backstops does not arise
-#     there.
-#   - The baseline is the MERGE-BASE with origin/master (_changelog_baseline_ref),
-#     never the origin/master ref itself. This is load-bearing, not incidental:
-#     worktrees share one ref store, so any sibling session's fetch advances
-#     origin/master under you, and a tip-relative comparison then reports every
-#     bullet merged after your branch point as a line YOU dropped. That false
-#     positive is what produced the duplicate-import artifact above.
-#   - DUPLICATES are reported only when NEW relative to the baseline. A duplicate
-#     already present at the baseline is master's defect, not this branch's, and
-#     nagging every session about it on every run is how a warning gets trained
-#     into background noise.
+#   DUPLICATE - a draft bullet now appearing more than once, and not already
+#               duplicated at the baseline.
+# Matching is exact (rstrip'd) line equality, so a reworded draft line reports too.
+# The working side is the whole file, not just its [Unreleased] section, so cutting
+# a release does not read as a mass drop. Occurrences are counted on both sides.
+# Only bullet/continuation content lines are watched; headers, blank lines and
+# link-reference definitions are ignored. Warnings by default; --strict /
+# LOCALM_HYGIENE_STRICT=1 escalates them to failures.
 _CHANGELOG_UNRELEASED_HEADER = re.compile(r"^##\s+\[unreleased\]", re.I)
 
 
@@ -529,10 +407,8 @@ def _changelog_new_duplicate_unreleased_bullets(
     in working-copy order.
 
     Only top-level bullets (a raw line starting with "- ") are counted, not their
-    wrapped continuations: two different bullets can legitimately wrap to the same
-    trailing words, whereas two byte-identical bullet lines are a mistake every
-    time. Baseline-relative so a duplicate that already exists on master does not
-    nag every branch (see the block comment above)."""
+    wrapped continuations. Baseline-relative, so a duplicate that already exists
+    on master is not reported (see the block comment above)."""
     from collections import Counter
     old = Counter(line for line in _changelog_unreleased_lines(old_text)
                   if line.startswith("- "))
@@ -550,10 +426,7 @@ def _changelog_new_duplicate_unreleased_bullets(
     return out
 
 
-# Baseline CHANGELOG text, cached per (REPO, ref). Safe to cache without any
-# staleness risk: the key is an immutable SHA, so its blob content cannot change.
-# Caching it turns three `git show` spawns per run into one - the three warn-only
-# checks each need the same baseline, and this gate runs as a pre-commit hook.
+# Baseline CHANGELOG text, cached per (REPO, ref); the ref is an immutable SHA.
 _BASELINE_TEXT_CACHE: dict[tuple[Path, str], str | None] = {}
 
 
@@ -561,12 +434,10 @@ def _changelog_baseline_pair() -> tuple[str, str, str] | None:
     """(ref, baseline CHANGELOG text, working CHANGELOG text), or None when there
     is nothing to compare against (no git, or no CHANGELOG in the baseline yet).
     Shared by the warn-only checks so they cannot drift apart on which baseline
-    they read - the merge-base choice is the whole correctness story here (see the
-    block comment above).
+    they read (see the block comment above).
 
     The BASELINE side is cached (immutable sha => immutable content); the WORKING
-    side is deliberately re-read every call, because it is the thing under test and
-    is cheap to read (no subprocess)."""
+    side is re-read every call."""
     ref = _changelog_baseline_ref()
     if ref is None:
         return None                     # no git available: nothing to diff against
@@ -630,8 +501,7 @@ def _changelog_added_unreleased_bullets(old_text: str, new_text: str) -> list[st
 
 def _changelog_unreleased_duplicates() -> list[str]:
     """Warn-only: an [Unreleased] bullet that is newly duplicated in the working
-    copy - the artifact left behind when a bullet is hand-restored after a
-    false-positive drop report."""
+    copy."""
     pair = _changelog_baseline_pair()
     if pair is None:
         return []
@@ -653,16 +523,8 @@ def _changelog_unreleased_duplicates() -> list[str]:
 
 def _changelog_unreleased_added_note() -> list[str]:
     """REPORT-ONLY context: the [Unreleased] bullets this branch adds relative to
-    the baseline. Not a warning and never escalated by --strict (a branch adding
-    changelog entries is the whole point), so it is emitted ONLY alongside a real
-    warning, where it answers the question the warning immediately raises: "which
-    of these bullets are mine?"
-
-    It is the import detector's readable half. A hand-restored sibling bullet that
-    is NOT a duplicate is textually indistinguishable from one you authored, so no
-    check can flag it outright; listing the additions lets the human reading the
-    warning spot one. Deliberately not printed on clean runs: this gate is a
-    pre-commit hook, and a note on every commit is how a signal becomes noise."""
+    the baseline. Not a warning and never escalated by --strict, and emitted ONLY
+    alongside a real warning - never on a clean run."""
     pair = _changelog_baseline_pair()
     if pair is None:
         return []
@@ -678,46 +540,30 @@ def _changelog_unreleased_added_note() -> list[str]:
 
 
 # ---- check 5: raw single-resource accessor guard ----------------------------
-# Each entry maps a raw single-resource function name to the wrapper that must
-# be used instead, and the file(s) allowed to still call the raw function
-# directly - only the function's own home module (definition + the wrapper's
-# own fallback call) by default. `tests/` is exempt everywhere: tests
-# legitimately call/mock the raw function directly to test IT, not just its
-# consumers. Every OTHER consumer must go through the wrapper - no single-
-# device exception is granted by default; add one here only with a
-# documented reason that survives "every relevant function should be
-# multi/split-aware" as the bar (a maintainer explicitly said so once every
-# remaining single-GPU call site turned out to have no real reason to stay
-# that way - see dev-notes/gpu-split-capacity-fix/).
-#
-# Add a new entry here whenever a similar "single -> combined N resources"
-# capability ships (see dev-notes/gpu-split-capacity-fix/ for the multi-GPU
-# VRAM case this was written for) - do not just write a review note.
+# Each entry maps a raw single-resource function name to the wrapper that must be
+# used instead, plus the file(s) still allowed to call the raw function directly.
+# `tests/` is exempt everywhere; every other consumer must go through the wrapper.
 _RAW_ACCESSOR_GUARDS = {
     "vram_info": {
         "wrapper": "localm/discover.py's vram_capacity()",
         "allowed": {
-            # home module: the definition, plus vram_capacity()'s own
-            # documented fallback to the single-GPU number.
+            # home module: the definition plus vram_capacity()'s fallback call.
             "localm/discover.py",
         },
     },
 }
 
 
-# A test may not allocate this much real disk in one call. 100 MB is far above
-# any legitimate fixture (the biggest honest one in the tree is a 2 MB split-part
-# pair) and far below the GB-scale sizes that caused the incident.
+# Maximum real disk a test may allocate in one call.
 _MAX_TEST_FILE_BYTES = 100_000_000
 
 
 def _const_bytes(node: ast.AST) -> "int | None":
     r"""Byte size of a literal size expression, or None when not resolvable.
 
-    A deliberately tiny constant-folder rather than ast.literal_eval: it needs to
-    understand only the shapes a size argument actually takes - `9_000_000_000`,
-    `b"\0" * 4096`, `2 * 1024 ** 3` - and folding them explicitly keeps this
-    guard free of any eval-family call.
+    A tiny constant-folder, not ast.literal_eval: it understands only the shapes a
+    size argument actually takes - `9_000_000_000`, `b"\0" * 4096`, `2 * 1024 ** 3`
+    - and uses no eval-family call.
     """
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bool):
@@ -746,26 +592,19 @@ def _const_bytes(node: ast.AST) -> "int | None":
 def _big_test_write_violations(files: list[Path]) -> list[str]:
     r"""Fail when a TEST allocates >= _MAX_TEST_FILE_BYTES of real disk.
 
-    Why this is a gate and not a comment: truncate() is NOT sparse on Windows/NTFS
-    (measured: one truncate(2GB) consumes 1.61 GB for real), and pytest gives each
-    test its own tmp_path, keeps the last 3 basetemps, and xdist multiplies that by
-    the worker count. Two test files doing this quietly allocated ~17.5 GB per pass
-    -> ~315 GB across a real -n 6 run, filled D: to 99.5% (9 GB free of 1863), and
-    crashed the box (2026-07-15). test_auto_gpu_layers.py had carried a "NEVER
-    truncate() to GB sizes here" comment since an earlier incident; the comment did
-    not stop two OTHER files from doing exactly that, which is the whole argument
-    for enforcing it mechanically (AGENTS.md "enforce, don't just document").
+    truncate() is NOT sparse on Windows/NTFS, pytest gives each test its own
+    tmp_path and keeps the last 3 basetemps, and xdist multiplies that by the
+    worker count, so a GB-scale allocation in a test costs real disk many times
+    over.
 
     The fix a violation wants is never "write fewer bytes" - it is to stop writing
     them at all: create a tiny real file and FAKE the size the code reads back
-    (`b._model_bytes = lambda: size_bytes`), the pattern test_auto_gpu_layers.py,
-    test_vram_preflight.py and test_kv_bytes_offload.py all use now.
+    (`b._model_bytes = lambda: size_bytes`).
 
     Two shapes are caught:
       1. a direct literal:            fh.truncate(9_000_000_000)
       2. a helper truncating a NAME (`fh.truncate(size_bytes)`) that is CALLED
-         with a big literal anywhere in the same module - the exact shape that hid
-         both real offenders behind an innocent-looking helper.
+         with a big literal anywhere in the same module.
     """
     problems = []
     for path in files:
@@ -777,7 +616,6 @@ def _big_test_write_violations(files: list[Path]) -> list[str]:
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
         except (UnicodeDecodeError, OSError, SyntaxError) as e:
-            # Not silently skipped: an unscanned file must never read as clean.
             problems.append(f"{rel}: could not parse for the big-write guard ({e})")
             continue
 
@@ -839,22 +677,16 @@ def _raw_accessor_violations(files: list[Path]) -> list[str]:
                 text = path.read_text(encoding="utf-8")
                 tree = ast.parse(text, filename=rel)
             except (UnicodeDecodeError, OSError, SyntaxError) as e:
-                # A tracked .py the guard cannot read or parse was NOT checked - report
-                # it rather than `continue`-ing past it, or a file that silently evades
-                # the raw-accessor guard reads as "clean" when it was never scanned
-                # (AGENTS.md rule 5). Genuine .py files in the tree all parse under the
-                # 3.12 interpreter this runs on, so this only fires on a real anomaly.
+                # A tracked .py the guard cannot read or parse was not checked, so
+                # it is reported rather than skipped.
                 problems.append(
                     f"{rel}: could not read/parse to check the raw-accessor guard "
                     f"({type(e).__name__}: {e}) - not checked. A .py the guard cannot "
                     "parse must not silently pass; fix the file or exclude it explicitly.")
                 continue
-            # Local names this module binds the raw accessor to: the literal
-            # name itself, PLUS any `from ... import <name> as <alias>` -
-            # an import alias is a demonstrated, real bypass of a literal-name
-            # match (verified with `... import vram_info as vi; vi()`), not
-            # a hypothetical one. A bare module-attribute call (`disc.vram_info()`)
-            # is already caught regardless of what the MODULE is aliased to,
+            # Local names this module binds the raw accessor to: the literal name
+            # plus any `from ... import <name> as <alias>`. A bare module-attribute
+            # call (`disc.vram_info()`) is caught regardless of the module alias,
             # since ast.Attribute.attr is still the literal accessor name.
             bound_names = {name}
             for node in ast.walk(tree):
@@ -880,44 +712,19 @@ def _raw_accessor_violations(files: list[Path]) -> list[str]:
 
 
 # ---- check 6: PWA service-worker cache derivation --------------------------
-# The GUI's service worker (sw.js) serves static assets CACHE-FIRST, and a browser
-# only re-runs a service worker's install (which re-fetches the assets) when sw.js's
-# OWN bytes change. sw.js's CACHE constant used to be a hand-typed version string
-# bumped whenever a cached asset changed - a value whose only requirement was "differ
-# from last time", carrying no meaning of its own.
+# The GUI's service worker (sw.js) serves static assets cache-first. Its CACHE
+# constant is not checked into git: localm/plugins/gui/web.py's GET /sw.js route
+# computes it per request from a content digest of the static assets it serves
+# (see web.py's _compute_sw_cache_value).
 #
-# That shipped stale THREE times undetected by human review before a bump gate was
-# added here (v49 for #621's settings.js fix; again for the managed_comfy_enabled
-# checkbox removal; PR #640's models.js + knowledge.js, saved only by luck when a
-# later unrelated PR happened to bump it). The gate then caught real misses for a
-# while - but a hand-maintained "must differ" line is ALSO a guaranteed merge
-# conflict between any two concurrent GUI PRs: it went v88 -> v89 -> v90 -> v91 in
-# one afternoon across three unrelated PRs, and a fourth session spent two rebase
-# rounds on that single line - during which its PR ran with NO CI at all, because a
-# conflicted PR gets no checks computed against it. One contested line silently cost
-# a session its entire verification signal.
-#
-# The fix is to stop hand-maintaining the value at all: localm/plugins/gui/web.py's
-# GET /sw.js route now computes CACHE fresh on every request, from a content digest
-# of the actual static assets being served (see web.py's _compute_sw_cache_value).
-# It changes exactly when a cacheable asset's bytes change, for every asset the
-# service worker's fetch handler can runtime-cache - not just the SHELL precache
-# list, which alone left 22 shipped files (including all 20 KaTeX fonts and
-# /vendor/jsQR.min.js) permanently unwatched. Nothing about that value is checked
-# into git, so two branches touching different assets can never conflict over it.
-#
-# What THIS check still enforces, now that "was CACHE bumped" is no longer a
-# meaningful question: SHELL precache coverage (every listed entry names a real
-# file, every app/*.js and pages/*.js module is listed - unrelated to staleness,
-# still a real drift risk on its own) and that the CACHE placeholder line web.py's
-# route substitutes into is still in the expected shape, so an edit to sw.js cannot
-# silently break that substitution without this check catching it.
+# This check enforces SHELL precache coverage (every listed entry names a real
+# file, every app/*.js and pages/*.js module is listed) and that the CACHE
+# placeholder line the route substitutes into is still in the expected shape.
 _SW_STATIC = "localm/plugins/gui/static"
 _SW_JS = f"{_SW_STATIC}/sw.js"
 
 # sw.js's SHELL comment promises to precache "every app/* and pages/* module (the
-# import graph)". Globs, NOT a copied file list: duplicating SHELL here would be the
-# very drift bug this gate exists to stop.
+# import graph)". Matched with globs, not a copied file list.
 _SW_SHELL_MODULE_GLOBS = ("app/*.js", "pages/*.js")
 
 
@@ -928,7 +735,7 @@ def _sw_shell_files(sw_js_text: str) -> set[str]:
 
     An EMPTY result means the array could not be parsed - the real SHELL is never
     empty - so callers must treat empty as a failure, never as "nothing is
-    precached" (rule 5). See _sw_cache_derivation_violations."""
+    precached". See _sw_cache_derivation_violations."""
     m = re.search(r"const SHELL = \[(.*?)\];", sw_js_text, re.S)
     if not m:
         return set()
@@ -946,33 +753,26 @@ def _sw_cache_version(sw_js_text: str) -> str | None:
 def _sw_cache_derivation_violations() -> list[str]:
     """SHELL precache coverage, plus a sanity check that sw.js's CACHE placeholder
     line is still in the shape localm/plugins/gui/web.py's GET /sw.js route expects
-    to substitute into (see check 6's block comment for what this replaced and why).
+    to substitute into (see check 6's block comment).
 
-    Every failure path here is LOUD. A silent `return []` when this check cannot do
-    its job is how it would rot into decoration: the regexes below match one exact
-    hand-maintained format, so a benign reformat of sw.js would otherwise disable the
-    gate permanently and invisibly. That is the same standard main() already applies
-    to _tracked_files() - a gate that reports clean without actually checking
-    anything is the silent pass AGENTS.md rule 5 forbids."""
+    Every failure path here is LOUD: the regexes below match one exact
+    hand-maintained format, so a reformat of sw.js reports a failure rather than a
+    silent `return []`."""
     sw_path = REPO / _SW_JS
     try:
         working_sw = sw_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        # Absent vs unreadable are different (rule 5): a checkout with no GUI service
-        # worker at all has genuinely nothing to gate, but one where the rest of the
-        # static tree is present means sw.js MOVED and the gate is now pointed at
-        # nothing - which must not pass silently.
+        # A checkout with no GUI service worker has nothing to gate; one where the
+        # rest of the static tree is present means sw.js moved, which is an error.
         still_ships = _git("ls-files", "-z", "--", _SW_STATIC)
         if still_ships is not None and still_ships.returncode == 0 and still_ships.stdout:
             return [f"{_SW_JS}: missing, but {_SW_STATIC}/ still ships assets - the PWA "
                     "cache-derivation gate is pointed at a file that no longer exists "
                     "and just checked NOTHING. Update _SW_JS in this script to the new "
                     "path (and web.py's route, which reads the same file)."]
-        # Falls through on no output (a checkout with no GUI) and on a failed git call
-        # (REPO is not a git tree). Neither is hidden: a tree git cannot enumerate
-        # ALREADY fails loud in main(), which refuses to report clean without scanning
-        # anything, so duplicating that alarm here would only fire on non-git callers
-        # that have nothing to gate in the first place.
+        # Falls through on no output (a checkout with no GUI) and on a failed git
+        # call (REPO is not a git tree). main() already fails loud on a tree git
+        # cannot enumerate.
         return []
     except OSError as e:
         return [f"{_SW_JS}: exists but could not be read ({e}) - the PWA "
@@ -1000,8 +800,7 @@ def _sw_shell_coverage_problems(shell: set[str], static_root: Path) -> list[str]
     """SHELL must name real files, and must name every shell module - sw.js promises
     "every app/* and pages/* module". A SHELL entry with no file behind it is silently
     dropped at install time (Promise.allSettled), and a module missing from SHELL is not
-    precached at all, so the installed PWA cannot open it offline. Enforced rather than
-    documented, per the "N consumers, only some updated" rule."""
+    precached at all, so the installed PWA cannot open it offline."""
     problems = []
     for url_path in sorted(shell):
         if not (static_root / url_path.lstrip("/")).is_file():
@@ -1022,15 +821,12 @@ def _sw_shell_coverage_problems(shell: set[str], static_root: Path) -> list[str]
 
 
 def _install_hook() -> int:
-    # Resolve the hooks dir through git rather than assuming REPO/.git is a
-    # directory: in a WORKTREE, .git is a FILE pointing at the main checkout, so
-    # REPO/".git"/"hooks" does not exist and installing from a worktree failed
-    # outright with "No .git/hooks directory found". --git-common-dir gives the
-    # shared .git for both a normal checkout and a worktree.
+    # Resolve the hooks dir through git: in a worktree .git is a FILE pointing at
+    # the main checkout, so REPO/".git"/"hooks" does not exist. --git-common-dir
+    # gives the shared .git for both a normal checkout and a worktree.
     base = REPO / ".git"
     try:
-        # encoding="utf-8" for the same reason as _git: a non-ASCII checkout path
-        # must not be locale-decoded (cp1252 on Windows) into a wrong hooks dir.
+        # Decode the checkout path as UTF-8 rather than by locale codepage.
         out = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=REPO,
                              capture_output=True, text=True, encoding="utf-8",
                              timeout=30)
@@ -1044,17 +840,12 @@ def _install_hook() -> int:
     if not hook.parent.is_dir():
         print(f"No hooks directory found at {hook.parent}.", file=sys.stderr)
         return 1
-    # Run THIS project's own interpreter, never a bare PATH `python`. On Windows a
-    # bare `python` hits the Store app-execution alias, which happily resolves to an
-    # interpreter that has since been uninstalled and fails the hook with a cryptic
-    # "[ERROR] Failed to launch '...python.exe' (0x80070003)" - blocking every commit
-    # in the repo, with nothing pointing at the cause (seen live, 2026-07-15). The
-    # venv is also the interpreter that actually has this project's deps.
+    # Run this project's own interpreter, never a bare PATH `python`: on Windows a
+    # bare `python` hits the Store app-execution alias.
     #
     # Resolved from the git COMMON dir's parent, not --show-toplevel: in a worktree
-    # --show-toplevel is the worktree (which has no .venv of its own), while the venv
-    # lives beside the main checkout's .git. No absolute path is baked in (rule 1);
-    # every path is derived at hook run time.
+    # --show-toplevel is the worktree, which has no .venv of its own. Every path is
+    # derived at hook run time.
     hook.write_text(
         "#!/bin/sh\n"
         'root=$(git rev-parse --show-toplevel)\n'
@@ -1084,54 +875,21 @@ def _install_hook() -> int:
 
 # ---- check 7: no module-level import cycles between packages ---------------
 #
-# WHY A CYCLE CHECK AND NOT A DECLARED LAYER MAP. localm has no declared layering,
-# and the cost of that is measurable: two readers auditing the same tree derived
-# DIFFERENT "upward edge" counts (2 and 7) purely because each invented a tier map,
-# and four of the seven were artifacts of one map omitting modules rather than real
-# inversions. A hand-written map is a maintained artifact that encodes opinions;
-# every disagreement with it becomes an allowlist entry, which is documentation
-# pretending to be enforcement.
+# Flags mutual dependencies in the module-level import graph. Function-local
+# imports are not counted: they are the intended way to break a cycle here.
 #
-# Acyclicity needs no map and no allowlist. It is a property of the graph, so the
-# two shapes that any tier map has to carve out are legal BY CONSTRUCTION:
-#   * an ENTRY POINT (localm/__main__.py importing localm.cli) is a source node;
-#   * PEERS (image_gen/music_gen/video_gen all importing media) are unordered.
-# Neither can create a cycle, so neither needs an exception. What it does catch is
-# a genuine mutual dependency, which is the thing that actually hurts: it makes
-# import order load-bearing and forces the deferred-import workarounds below.
-#
-# MODULE-LEVEL ONLY, deliberately. A function-local import is the standard,
-# intentional way to break a cycle in Python and this codebase uses it that way on
-# purpose (73% of intra-package imports are function-local). Flagging those would
-# fire on dozens of documented design choices and need exactly the allowlist this
-# check exists to avoid. Only eager, module-level edges count.
-#
-# "MODULE-LEVEL" MEANS "RUNS DURING IMPORT", NOT "UNINDENTED". A ``def``/``async
-# def``/``class`` body is genuinely deferred (never touched until called or
-# instantiated), but a module-level ``try:``/``if:`` body is NOT deferred - it
-# executes unconditionally-during-import (``try``) or whenever its guard is true
-# (``if``), same as a bare top-level statement, just indented. The common
-# "optional dependency" (``try: import X except ImportError: X = None``) and
-# "platform fallback" (``if sys.platform == ...``) idioms are exactly this shape,
-# so excluding them left real eager coupling invisible to the graph. Both branches
-# of an ``if``/``try`` are walked (either can execute depending on the runtime
-# condition/exception, and either can be the one that creates a real edge), while
-# ``def``/``class`` bodies nested inside a ``try``/``if`` still are not - the
-# import inside THEM stays deferred regardless of what encloses them. The one
-# carve-out is ``if TYPE_CHECKING:``: that guard is False at runtime by
-# definition (True only for a static type checker), so an import inside it never
-# actually executes - it is the standard way to add a type-only import without
-# creating a REAL cycle, and counting it would flag that idiom as if it did.
+# "MODULE-LEVEL" means "runs during import", not "unindented". A ``def``/``async
+# def``/``class`` body is deferred; a module-level ``try:``/``if:`` body is not, so
+# both branches of an ``if``/``try`` are walked, while ``def``/``class`` bodies
+# nested inside one are still skipped. ``if TYPE_CHECKING:`` is excluded: that
+# guard is False at runtime, so an import inside it never executes.
 #
 # RELATIVE IMPORTS (``from . import x``, ``from ..config import y``, ...) are
-# resolved to their absolute ``localm.x.y`` target the same way Python itself
-# does at runtime (anchored on the importing module's ``__package__``), not
-# skipped. A relative import is exactly as eager and exactly as capable of
-# closing a cycle as an absolute one; the only difference is spelling.
+# resolved to their absolute ``localm.x.y`` target the way Python does at runtime,
+# anchored on the importing module's ``__package__``.
 #
 # Granularity is the top-level unit under localm/ (the package name, or the module
-# name for a top-level .py), because that is the level a layering claim is made at.
-# Intra-package cycles are a separate, much noisier question and are not in scope.
+# name for a top-level .py). Intra-package cycles are out of scope.
 
 
 def _import_unit(module: str) -> str:
@@ -1150,7 +908,7 @@ def _module_name(path: Path, pkg_root: Path) -> str:
 def _is_type_checking_guard(test: ast.expr) -> bool:
     """True for ``if TYPE_CHECKING:`` or ``if typing.TYPE_CHECKING:`` - the
     conventional name either way, never True at runtime, so the body never
-    actually executes (see the check-7 block comment above)."""
+    executes."""
     if isinstance(test, ast.Name):
         return test.id == "TYPE_CHECKING"
     if isinstance(test, ast.Attribute):
@@ -1163,11 +921,10 @@ def _eager_module_statements(body: list[ast.stmt]) -> list[ast.stmt]:
     statements plus, recursively, anything inside a module-level ``try``/
     ``except``/``else``/``finally`` or ``if``/``elif``/``else`` block. Both
     branches of an ``if``/``try`` are included - either can run depending on
-    the runtime condition or exception, and either can be the one that creates
-    a real edge. ``def``/``async def``/``class`` bodies are never recursed
-    into (deferred / separately-scoped, regardless of what encloses them), and
-    neither is an ``if TYPE_CHECKING:`` body (never True at runtime). See the
-    check-7 block comment above for why."""
+    the runtime condition or exception. ``def``/``async def``/``class`` bodies
+    are never recursed into (deferred / separately-scoped, regardless of what
+    encloses them), and neither is an ``if TYPE_CHECKING:`` body (never True at
+    runtime)."""
     out: list[ast.stmt] = []
     for stmt in body:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
@@ -1195,14 +952,11 @@ def _resolve_relative_import(node: ast.ImportFrom, own_module: str,
     more components. ``__package__`` for a package's ``__init__.py`` IS the
     package's own name; for a plain module it is the module's PARENT - one
     relative level shallower inside an ``__init__.py`` than in a sibling
-    module of that same package, which is real Python import semantics, not
-    an approximation.
+    module of that same package.
 
     None when the level walks past *own_module*'s own components (an invalid
     relative import that would fail at runtime with "attempted relative
-    import beyond top-level package") - there is nothing to resolve, and this
-    never silently mis-resolves to the wrong package instead of reporting
-    that."""
+    import beyond top-level package")."""
     package = own_module if is_package else own_module.rsplit(".", 1)[0]
     parts = package.split(".")
     if node.level > len(parts):
@@ -1216,9 +970,8 @@ def _resolve_relative_import(node: ast.ImportFrom, own_module: str,
 def _module_level_import_edges(pkg_root: Path) -> dict[str, dict[str, str]]:
     """unit -> {imported unit: "file:line of one eager import that creates it"}.
 
-    A parse failure is REPORTED by the caller rather than skipped: a file this gate
-    cannot read is a file it cannot vouch for, and silently treating it as
-    edge-free would let a cycle hide behind a syntax error (rule 5)."""
+    A parse failure is REPORTED by the caller, never skipped: treating an
+    unreadable file as edge-free would let a cycle hide behind a syntax error."""
     edges: dict[str, dict[str, str]] = {}
     for path in sorted(pkg_root.rglob("*.py")):
         own_module = _module_name(path, pkg_root)
@@ -1324,62 +1077,22 @@ def _import_cycle_violations() -> list[str]:
 
 # ---- check 8: no console.print reaching an isolated child process ----------
 #
-# WHY. A native crash (a bad CUDA/HIP driver, a corrupt GGUF) can hard-abort a
-# whole process with no catchable exception, so localm isolates every such
-# call into a spawned child (multiprocessing.get_context("spawn").Process) and
-# treats a child's death as a clean, reportable error in the parent. That
-# design has one hard rule: a CHILD must never call console.print (rich
-# writes are not fork/spawn-safe against the parent's own console state, and
-# on Windows a rich/Unicode write against the child's inherited 'charmap'
-# stdout codec has crashed a worker with UnicodeEncodeError before - see
-# _hf_worker.py's own comments). A child reports FACTS as return data; only
-# the PARENT renders them.
+# localm isolates crash-prone native calls into a spawned child
+# (multiprocessing.get_context("spawn").Process). A child must never call
+# console.print; it returns facts as data and the parent renders them.
 #
-# KNOWN LIMIT, WRITTEN DOWN RATHER THAN LEFT IMPLICIT: this catches
-# console.print(...) call sites - a purely STATIC property of the code. It
+# This catches console.print(...) call sites, a static property of the code. It
 # does NOT catch a debug-mode log record (logger.info/.warning/.debug, or
-# _dbg.info/.warning as this codebase spells it) reaching the terminal
-# through debuglog.py's console-mirror handler, because whether that record
-# is live-mirrored depends on RUNTIME state (was attach_child_logging()'s
-# _add_console_handler() called in THIS process, i.e. was debug mode
-# inherited) - not on anything visible at the call site an AST pass can see.
-# That is not "not yet implemented", it is genuinely not the same kind of
-# question check 8 answers, and a blanket "flag every logger.* call in a
-# child module" would be the wrong shape too: it would fire on the large
-# majority of debug-log calls that only ever reach the FILE handler and stay
-# off the terminal, training everyone to ignore the check. This exact gap
-# shipped a real bug: LlamaCpp.__init__'s model-load span had a console.print
-# call fixed by check 8's own predecessor work, while a SIBLING _dbg.info
-# call in the identical function (_apply_cpu_moe), reaching the terminal via
-# the mirror instead, went uncaught by this check and produced a stuck
-# "0:00:00" spinner line during a real load (fixed by pairing
-# debuglog.suppress_console_mirror() with the redirect scope at that
-# specific call site - see llama.py's own comment there). If you are adding
-# a NEW debug-mode-visible write from inside a child process, ask the same
-# question by hand this check cannot ask for you: can this run while a
-# parent-owned Rich Live/Progress display might be active, and if so, is it
-# wrapped in suppress_console_mirror() (or routed through return data
-# instead, like _apply_cpu_moe's actual skip/placement facts are)?
+# _dbg.info/.warning) reaching the terminal through debuglog.py's console-mirror
+# handler, because whether that record is mirrored depends on runtime state
+# (whether attach_child_logging()'s _add_console_handler() ran in this process).
+# A new debug-mode-visible write from inside a child must be wrapped in
+# debuglog.suppress_console_mirror() or routed through return data instead.
 #
-# This existed only as a comment asserting the invariant in _hf_worker.py
-# ("GgufWorker has zero console.print calls, for the identical reason") -
-# true when written, and it drifted silently false once, when a MoE-placement
-# fix added a direct console.print to a code path that runs inside the GGUF
-# child (fixed; that fix is what this check is enforcing so it cannot recur).
-# A comment defending an invariant in a file it does not own is worse than no
-# comment once the invariant moves, because it tells the next reader not to
-# check - so the boundary is enforced here instead of merely asserted there.
-#
-# THE MODULE LIST is the transcription of the parent/child boundary as it
-# actually is: every module reachable (transitively, including function-local
-# imports) from one of the four isolated-child entry points (GGUF chat,
-# embedder, whisper/STT, HF-transformers), verified by tracing each runner's
-# own _runner_main/_worker_main. NOT auto-derived from the import graph -
-# check 7 above already covers cross-package cycles; this is a narrower,
-# deliberately hand-verified list because getting the child boundary WRONG
-# (too narrow) is exactly the failure this check exists to catch, and an
-# automated derivation would need to re-solve the same "which entry point
-# actually reaches this module" question this list already answers.
+# THE MODULE LIST is every module reachable (transitively, including
+# function-local imports) from one of the four isolated-child entry points (GGUF
+# chat, embedder, whisper/STT, HF-transformers), traced through each runner's own
+# _runner_main/_worker_main. Hand-maintained, not derived from the import graph.
 _CHILD_PROCESS_MODULES: tuple[str, ...] = (
     # GGUF chat backend (localm/inference/backends/llamacpp/_runner.py::_runner_entry)
     "localm/inference/backends/llamacpp/_runner.py",
@@ -1413,17 +1126,13 @@ _CHILD_PROCESS_MODULES: tuple[str, ...] = (
     "localm/vram.py",
 )
 
-# file -> {ClassName.method_name or bare function name} explicitly permitted to
-# call console.print despite the module being on the child-process list above.
-# Each entry needs a verified reason, not a guess: _sizing.py's VramSizingMixin
-# is inherited by BOTH a parent-side proxy (GgufBackend/IsolatedEmbedder, which
-# call these before Process.start()) and, for the GGUF backend, the child-side
-# GgufWorker - but GgufWorker only ever reaches _check_context_fit (which logs,
-# never prints), never these three. Verified by grepping every call site of
-# each name repo-wide: localm/inference/backends/gguf.py is the sole caller of
-# all three, and every call happens before that same function's
-# ModelRunner().spawn_and_load(...) - i.e. strictly parent-side, before the
-# child exists.
+# file -> {ClassName.method_name or bare function name} permitted to call
+# console.print despite the module being on the child-process list above.
+# _sizing.py's VramSizingMixin is inherited by both a parent-side proxy
+# (GgufBackend/IsolatedEmbedder, which call these before Process.start()) and the
+# child-side GgufWorker; GgufWorker only reaches _check_context_fit, which logs
+# instead of printing. localm/inference/backends/gguf.py is the sole caller of all
+# three, always before that function's ModelRunner().spawn_and_load(...).
 _CHILD_PROCESS_CONSOLE_PRINT_ALLOWLIST: dict[str, frozenset[str]] = {
     "localm/inference/backends/llamacpp/_sizing.py": frozenset({
         "VramSizingMixin._check_vram",
@@ -1436,10 +1145,9 @@ _CHILD_PROCESS_CONSOLE_PRINT_ALLOWLIST: dict[str, frozenset[str]] = {
 class _ConsolePrintFinder(ast.NodeVisitor):
     """Collects (lineno, dotted qualname) for every ``console.print(...)`` call
     in a module, tracking class/function nesting to build the qualname. Matches
-    on the literal name ``console`` (this codebase's one established spelling
-    for the shared rich Console, confirmed repo-wide - see localm/console.py)
-    rather than resolving the symbol, the same "walk the syntax, do not
-    type-resolve" convention check 7's cycle detector above already uses."""
+    on the literal name ``console`` (this codebase's one spelling for the shared
+    rich Console - see localm/console.py); it walks the syntax and does not
+    resolve the symbol."""
 
     def __init__(self) -> None:
         self.hits: list[tuple[int, str]] = []
@@ -1471,8 +1179,7 @@ class _ConsolePrintFinder(ast.NodeVisitor):
 def _child_process_console_print_violations() -> list[str]:
     """console.print(...) call sites in a child-process module (see the block
     comment above) that are not covered by the allowlist. A parse failure is
-    reported, not skipped (same reasoning as check 7: a file this gate cannot
-    read is a file it cannot vouch for)."""
+    reported, never skipped."""
     problems: list[str] = []
     for rel in _CHILD_PROCESS_MODULES:
         path = REPO / rel
@@ -1511,27 +1218,15 @@ def _strict_env() -> bool:
     recognized OFF value behaves like passing --strict (an env knob because a CI
     step or a hook cannot always edit the command line it invokes).
 
-    "off" is in the off-set alongside 0/false/no: a reviewer pointed out that
-    LOCALM_HYGIENE_STRICT=off silently turning strictness ON is the kind of
-    surprise that gets a knob mistrusted. Anything unrecognized still means ON,
+    "off" is in the off-set alongside 0/false/no. Anything unrecognized means ON,
     so a typo fails toward MORE checking, never less."""
     return os.environ.get("LOCALM_HYGIENE_STRICT", "").strip().lower() not in (
         "", "0", "false", "no", "off")
 
 
-# Files and directories that are DELIBERATELY NOT PUBLISHED. They live on a
-# contributor's disk and are listed in .gitignore, but .gitignore only stops a
-# file being added while it is UNTRACKED - it does nothing once something is in
-# the index, and nothing at all in a worktree whose .gitignore predates the
-# entry. Both of those happened: after the internals were removed, every stale
-# worktree still had the old .gitignore, so these showed as ordinary untracked
-# files and a single `git add -A` staged all 21 of them for re-publication.
-#
-# Maintainer, 2026-08-04: "NO MORE DISCLOSING OF ANY INTERNALS ON GH THAT DO NOT
-# NEED TO BE ON THERE" and "agents and CLAUDE.md do NOT belong there".
-#
-# So this is a TRACKED-state check, not a content scan: it asks git what is in
-# the index, which is the only question that decides what reaches GitHub.
+# Files and directories that must never be published. .gitignore only stops an
+# UNTRACKED file being added, so this is a TRACKED-state check: it asks git what is
+# in the index, which is what decides what reaches GitHub.
 _NEVER_TRACKED = (
     "AGENTS.md",
     "CLAUDE.md",
@@ -1545,14 +1240,13 @@ _NEVER_TRACKED = (
 def _never_tracked_violations() -> list[str]:
     """Fail if anything in _NEVER_TRACKED is tracked by git.
 
-    Uses `git ls-files` directly rather than the filtered _tracked_files() list,
-    because that one drops binaries and _SKIP_DIRS - a filter that is right for a
-    content scan and wrong here, where the question is only "is it in the index".
+    Uses `git ls-files` directly, not the filtered _tracked_files() list, which
+    drops binaries and _SKIP_DIRS; the question here is only "is it in the index".
     """
     r = _git("ls-files", "-z")
     if r is None or r.returncode != 0:
-        # Distinguish "nothing tracked" (benign) from "could not ask" (not
-        # benign): a publication gate that cannot see the index must not pass.
+        # Distinguish "nothing tracked" (benign) from "could not ask": a
+        # publication gate that cannot see the index does not pass.
         return ["could not run 'git ls-files' to verify no internal file is "
                 "tracked - this gate cannot be assumed clean, so it fails"]
     tracked = [p for p in r.stdout.split("\0") if p]
@@ -1574,32 +1268,20 @@ def _release_manifest_gate() -> tuple[list[str], list[str]]:
     """Run the full release-manifest gate (check_manifest.check_manifest()) and
     return (failures, warnings).
 
-    scripts/check_manifest.py is itself gitignored (AGENTS.md rule 6 - it is
-    release-tooling metadata, not part of the public product, same as
-    release-manifest.toml), so it is ABSENT from a fresh CI checkout and from most
-    external contributors' clones BY DESIGN - that is expected, not a bug. When it
-    cannot be imported this returns a WARNING (escalated to a failure only under
-    --strict/LOCALM_HYGIENE_STRICT=1), never a silent skip: the module docstring
-    above used to claim this gate was unconditionally "folded in" here when in fact
-    nothing ever called it - release-manifest.toml drifted 13 entries stale on
-    master with this reporting a clean pass throughout (see
-    dev-notes/release-manifest-gate-wiring.md for the incident). Reporting nothing
-    when the check cannot run would be that exact failure shape again, just
-    relocated."""
+    scripts/check_manifest.py is itself gitignored, so it is ABSENT from a fresh CI
+    checkout and from most external contributors' clones. When it cannot be
+    imported this returns a WARNING (escalated to a failure only under
+    --strict/LOCALM_HYGIENE_STRICT=1), never a silent skip."""
     try:
-        # Deliberately Path(__file__).parent, NOT the module-level REPO global:
-        # check_manifest.py always lives next to THIS file on disk regardless of
-        # what tree is under test, whereas REPO is legitimately monkeypatched to a
-        # scratch tmp_path by tests exercising the file-scanning checks in
-        # isolation. Keying this lookup off REPO would make it silently look for
-        # check_manifest.py inside that scratch tree instead of next to the real
-        # script, breaking the gate under every such test.
+        # Path(__file__).parent, not the module-level REPO global: check_manifest.py
+        # lives next to this file regardless of what tree is under test, while REPO
+        # is monkeypatched to a scratch tmp_path by tests.
         scripts_dir = str(Path(__file__).resolve().parent)
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
         import check_manifest as cm
     except ModuleNotFoundError:
-        # The file is genuinely ABSENT. Expected, and the common case.
+        # The file is absent, the common case.
         return [], [
             "release-manifest gate SKIPPED: scripts/check_manifest.py is not present "
             "in this checkout. Expected on CI and most external clones - it is "
@@ -1608,13 +1290,9 @@ def _release_manifest_gate() -> tuple[list[str], list[str]]:
             "'python scripts/check_manifest.py' by hand on a checkout that has it "
             "(e.g. the maintainer's own) before cutting a release."]
     except ImportError as e:
-        # The file IS present but failed to import (a broken internal import, a
-        # syntax-level import error, a half-finished edit). A bare `except ImportError`
-        # used to fold this into the branch above, so the gate announced
-        # "is not present in this checkout" about a file sitting right there - a
-        # FALSE reason for a real failure, which is precisely what rule 5 forbids.
-        # These two states need different words: one is expected and benign, the
-        # other means the gate CANNOT RUN on the one machine that has the checker.
+        # The file is present but failed to import (a broken internal import, a
+        # syntax-level import error, a half-finished edit). Reported separately from
+        # absence: the gate cannot run.
         return [], [
             "release-manifest gate COULD NOT RUN: scripts/check_manifest.py IS "
             f"present but failed to import ({type(e).__name__}: {e}). This is NOT "
@@ -1630,10 +1308,8 @@ def main(argv: list[str]) -> int:
     strict = "--strict" in argv or _strict_env()
     tracked = _tracked_files()
     if not tracked:
-        # `git ls-files` failed or returned nothing, so the dash/disclosure/abs-path
-        # scan and the changelog gate below would run over ZERO files and this gate
-        # would print "passed" having checked nothing. A disclosure/privacy gate that
-        # reports clean without scanning anything is a silent false pass, so fail loud.
+        # `git ls-files` failed or returned nothing, so every scan below would run
+        # over zero files and report clean without scanning anything. Fail loud.
         print("Hygiene check FAILED: could not enumerate tracked files via 'git ls-files' "
               "- nothing was scanned. Run this from a git checkout.",
               file=sys.stderr)
@@ -1650,26 +1326,19 @@ def main(argv: list[str]) -> int:
     problems.extend(_child_process_console_print_violations())
     manifest_failures, manifest_warnings = _release_manifest_gate()
     problems.extend(manifest_failures)
-    # Check 4b is warn-only by default (rewording your own [Unreleased] draft is
-    # legitimate); --strict / LOCALM_HYGIENE_STRICT=1 folds the warnings into the
-    # failures for CI-style use.
+    # Check 4b is warn-only by default; --strict / LOCALM_HYGIENE_STRICT=1 folds the
+    # warnings into the failures.
     changelog_warnings = _changelog_unreleased_drops() + _changelog_unreleased_duplicates()
     if changelog_warnings:
-        # Report-only context, FOLDED INTO the last CHANGELOG warning rather than
-        # appended as its own entry. Appending it made --strict print the note inside
-        # the FAILED list and count it as a hygiene issue ("2 issue(s)" for one real
-        # warning), which is exactly what this note must never be: it is context, and
-        # a branch adding changelog bullets is the point of the file. Gated on
-        # changelog_warnings specifically (not the combined warnings list below) so
-        # it is never misattached to an unrelated warning, e.g. manifest_warnings,
-        # when a changelog warning did not actually fire.
+        # Report-only context, folded into the last CHANGELOG warning rather than
+        # appended as its own entry, so --strict does not count it as an issue.
+        # Gated on changelog_warnings specifically so it is never attached to an
+        # unrelated warning.
         note = _changelog_unreleased_added_note()
         if note:
             changelog_warnings[-1] = changelog_warnings[-1] + "\n" + "\n".join(note)
-    # manifest_warnings joins the same escalation path: on the one machine that
-    # actually has check_manifest.py (the maintainer's), a --strict run (as used
-    # before cutting a release) should fail loud rather than silently accept a
-    # checkout that is somehow missing it.
+    # manifest_warnings join the same escalation path: on a machine that has
+    # check_manifest.py, --strict fails rather than accepting a checkout missing it.
     warnings = changelog_warnings + manifest_warnings
     if strict and warnings:
         problems.extend(warnings)

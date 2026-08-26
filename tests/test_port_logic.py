@@ -59,9 +59,8 @@ class TestPickPort:
         assert exc.value.port == occupied_port
 
     def test_busy_out_of_range_explicit_port_refuses(self):
-        # The specific trap this fixes: an explicit port OUTSIDE localm's range,
-        # deliberately chosen to avoid a collision, must not be relocated back
-        # onto the default 8642 - it must refuse instead.
+        # An explicit port OUTSIDE localm's range, chosen to avoid a collision, is
+        # not relocated back onto the default 8642; it refuses instead.
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         s.listen(1)
@@ -77,8 +76,8 @@ class TestPickPort:
             s.close()
 
     def test_default_port_auto_bumps_when_busy(self, monkeypatch):
-        # No explicit port: the configured default still auto-bumps to a free
-        # port when busy (the behavior an unspecified port should keep).
+        # No explicit port: the configured default auto-bumps to a free port
+        # when busy.
         import localm.config as cfg
         s = socket.socket()
         s.bind(("127.0.0.1", 0))

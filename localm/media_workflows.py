@@ -38,27 +38,11 @@ from typing import Optional
 MEDIA_TYPES = ("image", "music", "video")
 
 # Per-media mutual exclusion for the four workflow routes (list/upload/select/
-# delete). Before the routes were offloaded to run_in_threadpool (event-loop-
-# blocking fix), their synchronous, zero-`await` bodies ran atomically for
-# free: uvicorn is single-process/single-worker, so the event loop could never
-# preempt one handler mid-body to run another's. Moving the whole body onto a
-# real OS thread (anyio's worker pool) removed that for free serialization
-# without replacing it - two requests for the SAME media can now genuinely
-# interleave, and every check-then-act sequence here (is_file() then stat(),
-# a "not currently selected" check then unlink(), a successful save then an
-# is_file() check before recording the selection) assumed the atomicity that
-# no longer holds. Confirmed live (adversarial review, 2026-08-05): a
-# concurrent delete racing a listing produced an unhandled 500; concurrent
-# uploads to the same name corrupted the saved JSON in 59-74% of trials;
-# delete-vs-select races left the config pointing at a workflow file that no
-# longer exists.
-#
-# One lock PER MEDIA (not one global lock): image/music/video are independent
-# directory trees and independent config blocks, so serializing across all
-# three would only add contention with no correctness benefit. Acquired
-# INSIDE the run_in_threadpool-dispatched closure (on the worker thread), so
-# waiting on it never blocks the event loop - the property the original
-# offload fix exists to protect stays intact.
+# delete). The route bodies run on a threadpool worker, so two requests for the
+# same media can interleave, and every check-then-act sequence here needs
+# serialising. One lock per media: image/music/video are independent directory
+# trees and independent config blocks. Acquired inside the threadpool closure,
+# so waiting on it never blocks the event loop.
 _media_locks: dict[str, threading.Lock] = {}
 _media_locks_guard = threading.Lock()
 
@@ -71,42 +55,21 @@ def _lock_for(media: str) -> threading.Lock:
         return lock
 
 
-# Budget for run_in_threadpool_bounded() in make_workflow_router's four
-# routes below (follow-up to #1057) - module-level, not a router-local
-# variable, so a test can monkeypatch it down for a fast timeout simulation.
+# Budget for run_in_threadpool_bounded() in the four routes below. Module-level
+# so a test can monkeypatch it down.
 #
-# _WORKFLOW_OWN_WORK_TIMEOUT_S is the ceiling for how long a SINGLE holder's
-# own real work (file I/O, update_config's atomic write) should legitimately
-# take - genuinely large workflow uploads on a slow disk are the rare case
-# this is meant to eventually catch, not the common one it should ever fire
-# for.
-#
-# _WORKFLOW_RMW_TIMEOUT_S - the actual value passed to run_in_threadpool_
-# bounded - MUST exceed 2x that ceiling, not just match it. All four routes
-# share ONE _lock_for(media) lock, and the lock acquisition happens INSIDE
-# the bounded closure - so a request's own clock also covers however long it
-# waits behind another holder. If both used the SAME single-holder ceiling,
-# a writer that legitimately finishes just under ITS OWN budget could still
-# push a concurrently-queued, otherwise-instant reader (e.g. the GUI's own
-# list poll) past ITS budget purely from queueing, even though nothing ever
-# hung - CONFIRMED by direct reproduction during review: a writer at 1.3x its
-# budget (not hung, still completes) starved a queued no-op reader sharing
-# the identical constant. Budgeting 2x the single-holder ceiling guarantees
-# any request queued behind exactly one other NON-HUNG worst-case holder
-# still has a full ceiling's worth of margin left for its own (typically
-# trivial) work. A holder that is genuinely stuck well past its own ceiling
-# can still eventually starve a queued request - that residual is accepted,
-# matching _lock_for's own "queues behind it rather than racing it" design;
-# this fix only closes the ORDINARY-slowness case, not a genuine hang.
+# _WORKFLOW_OWN_WORK_TIMEOUT_S is the ceiling for one holder's own work.
+# _WORKFLOW_RMW_TIMEOUT_S is what the routes pass, and is 2x that: all four
+# routes share one _lock_for(media) lock acquired inside the bounded closure, so
+# a request's clock also covers the time it waits behind another holder.
 _WORKFLOW_OWN_WORK_TIMEOUT_S = 30.0
 _WORKFLOW_RMW_TIMEOUT_S = 2 * _WORKFLOW_OWN_WORK_TIMEOUT_S
 
 # Distinct from None, which is a legitimate VALUE for `active` (no workflow
-# selected) - using None as both "caller did not pass this" and "resolved to
-# no selection" made list_workflows re-resolve selected_name() a second time
-# whenever nothing was selected, defeating the single-config-load point of
-# passing `active` through at all (caught by
-# test_list_workflows_route_only_loads_config_once).
+# selected). Using None as both "caller did not pass this" and "resolved to no
+# selection" makes list_workflows re-resolve selected_name() a second time
+# whenever nothing is selected, defeating the single-config-load point of
+# passing `active` through at all.
 _UNSET = object()
 
 
@@ -120,15 +83,14 @@ def _confined(media: str, name: str) -> Path:
     """A path-safe handle inside the media dir. Raises ValueError on a
     traversal/invalid name.
 
-    confined_name() itself raises fastapi.HTTPException by design (pathsafe.py
-    documents it as being for HTTP call sites only) - but this module claims to
-    be framework-free (see the module docstring) and now has a non-HTTP caller
-    (the CLI), so normalize here. Every function in this module already
-    documents "Raises ValueError" for its own bad-name case; without this, that
-    was only true when the failure came from the name-not-found checks below,
-    never from confinement itself. make_workflow_router's routes already catch
-    ValueError and convert it to HTTPException(400, str(e)) themselves, so the
-    HTTP response (400, "Invalid file name") is unchanged."""
+    confined_name() itself raises fastapi.HTTPException (pathsafe.py documents it
+    as being for HTTP call sites only), but this module is framework-free (see
+    the module docstring) and has a non-HTTP caller (the CLI), so the exception
+    is normalized here. Every function in this module documents "Raises
+    ValueError" for its own bad-name case, and that covers confinement failures
+    too. make_workflow_router's routes catch ValueError and convert it to
+    HTTPException(400, str(e)) themselves, so the HTTP response (400, "Invalid
+    file name") is unchanged."""
     from fastapi import HTTPException
     from localm.pathsafe import confined_name
     try:
@@ -204,9 +166,9 @@ def list_workflows(media: str, *, active=_UNSET) -> list:
 def _list_and_selected(media: str) -> tuple:
     """(list_workflows(media), selected_name(media)) from ONE config load.
     Every route in make_workflow_router needs both together; calling them
-    independently (the previous shape) loaded config.json TWICE per request -
-    real cost on Windows, where a config read can hit the documented ~1s
-    antivirus/indexer retry (config.py's _replace_atomic doc)."""
+    independently loads config.json TWICE per request - real cost on Windows,
+    where a config read can hit the documented ~1s antivirus/indexer retry
+    (config.py's _replace_atomic doc)."""
     active = selected_name(media)
     return list_workflows(media, active=active), active
 
@@ -340,9 +302,9 @@ def _finalize_migration(media: str, legacy: Path, dest: Path) -> tuple:
     selection whose file has gone falls through to the legacy), so the moved copy
     must become the selection or generation would silently drop to the example.
 
-    Fail-safe (AGENTS.md rule 5): the original is removed ONLY once the override
-    is safely active from home, so a failed select/remove never silently
-    deactivates or loses the user's workflow."""
+    Fail-safe: the original is removed ONLY once the override is safely active
+    from home, so a failed select/remove never silently deactivates or loses the
+    user's workflow."""
     if active_workflow_path(media) is None:
         try:
             select_workflow(media, dest.name)
@@ -430,20 +392,19 @@ def make_workflow_router(media: str):
 
     # Off the event loop, all four routes: list_workflows/selected_name do
     # synchronous filesystem I/O (a directory glob + a stat per file, a
-    # config.json read) that inline blocked the WHOLE server for the duration -
-    # worst on GET, which the GUI polls on its own timer, so this was a
-    # repeating, self-inflicted stall for as long as the page was open. Same
-    # REG-638 shape as the already-offloaded comfy-model-slots route.
+    # config.json read) that inline blocks the WHOLE server for the duration -
+    # worst on GET, which the GUI polls on its own timer, so it is a repeating
+    # stall for as long as the page is open. Same shape as the already-offloaded
+    # comfy-model-slots route.
     #
     # Every route ALSO acquires _lock_for(media) around its whole body, inside
     # the threadpool closure (so it costs the worker thread, never the event
-    # loop) - see the module-level comment on _lock_for for why: offloading
-    # alone removed the free serialization these check-then-act sequences
-    # depended on, and this restores it.
+    # loop) - see the module-level comment on _lock_for: offloading alone removes
+    # the free serialization these check-then-act sequences depend on, and this
+    # restores it.
     #
-    # Bounded (follow-up to #1057) at _WORKFLOW_RMW_TIMEOUT_S - see that
-    # constant's own comment for why a client-side timeout here is still
-    # safe against corruption.
+    # Bounded at _WORKFLOW_RMW_TIMEOUT_S - see that constant's own comment for
+    # why a client-side timeout here is still safe against corruption.
 
     @router.get(f"/api/{media}/workflows")
     async def _list_workflows():

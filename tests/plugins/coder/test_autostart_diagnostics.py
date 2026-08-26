@@ -2,9 +2,8 @@
 """When the coder auto-starts a `localm gui` server and it dies fast (a busy
 --port, or any other quick non-zero exit), the CLI must surface the real reason
 instead of waiting out the full attach timeout and reporting the generic
-"Failed to attach to the auto-started server." (see PR #740 follow-up: the
-child's own refusal message prints to its own console/process, which this
-process never reads)."""
+"Failed to attach to the auto-started server." The child's own refusal message
+prints to its own console/process, which this process never reads."""
 
 import socket
 import subprocess
@@ -22,8 +21,7 @@ def _bypass_plugin_gate(monkeypatch):
 
 
 def _no_existing_instance(monkeypatch):
-    # No localm already running for this project dir, so main() takes the
-    # auto-start branch instead of attaching to one.
+    # No localm running for this project dir, so main() takes the auto-start branch.
     monkeypatch.setattr(instances, "resolve_root_dir", lambda **kw: "/tmp/proj")
     monkeypatch.setattr(instances, "attach_target", lambda *a, **kw: None)
 
@@ -33,7 +31,7 @@ class TestExplicitBusyPortFailsFast:
         _bypass_plugin_gate(monkeypatch)
         _no_existing_instance(monkeypatch)
 
-        # A real bound socket, not a mock - the port is genuinely busy.
+        # A real bound socket occupies the port.
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
         sock.listen(1)
@@ -83,11 +81,9 @@ class TestAutoStartedServerDiesFast:
 
 class TestHeadlessAutoStartSurfacesChildError:
     """Driven headlessly (MCP's run_coder_task, CI, a script - stdin is not a
-    TTY, exactly how CliRunner invokes main), the auto-start must not route
-    the child's output into a NEW CONSOLE WINDOW nobody can see: the child's
-    real refusal (e.g. gui's "Model not found: X" - the exact failure
-    reproduced live 2026-07-21, where the MCP caller could only be told
-    "exit code 1, check the console window") must reach THIS process's error
+    TTY, exactly how CliRunner invokes main), the auto-start must not route the
+    child's output into a NEW CONSOLE WINDOW nobody can see: the child's real
+    refusal (e.g. gui's "Model not found: X") must reach THIS process's error
     output, and no console window may be requested."""
 
     def test_child_error_reaches_the_error_message(self, monkeypatch):
@@ -98,9 +94,7 @@ class TestHeadlessAutoStartSurfacesChildError:
 
         def fake_popen(cmd, **kw):
             seen.update(kw)
-            # The child's output must have somewhere to land that THIS process
-            # can read back - write the real-world refusal there, as the real
-            # gui child does before exiting 1.
+            # Write the refusal to the captured stdout, as the gui child does.
             target = kw.get("stdout")
             assert target is not None, (
                 "headless spawn must capture the child's output (a new console "
@@ -114,7 +108,6 @@ class TestHeadlessAutoStartSurfacesChildError:
 
         assert result.exit_code == 1
         assert "exited immediately (exit code 1)" in result.output
-        # The child's REAL reason, not a pointer at an invisible window.
         assert "Model not found: m" in result.output
         assert "console window" not in result.output
         if sys.platform == "win32":

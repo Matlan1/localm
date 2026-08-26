@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The standalone post-restart health watchdog (scripts/update_watchdog.py,
-LM-DA-011): polls a restarted instance's own /whoami for the applied version and
-auto-invokes scripts/rollback_update.py on failure/timeout - loaded by file path,
-exactly like rollback_update.py itself loads _apply_update.py, so a broken new
-build cannot break the thing meant to detect it. Every test runs against a
-THROWAWAY install + home + fake HTTP server, never the real repo/install."""
+"""The standalone post-restart health watchdog (scripts/update_watchdog.py): polls
+a restarted instance's own /whoami for the applied version and auto-invokes
+scripts/rollback_update.py on failure/timeout. Loaded by file path, exactly like
+rollback_update.py itself loads _apply_update.py, so a broken new build cannot
+break the thing meant to detect it. Every test runs against a THROWAWAY install +
+home + fake HTTP server, never the real repo/install."""
 
 from __future__ import annotations
 
@@ -65,9 +65,9 @@ def _whoami_server(responder, port: int = 0):
 
 
 def _stage(tmp_path, monkeypatch, *, manifest, with_helper=True):
-    """Mirrors tests/test_rollback_standalone.py's _stage(): a fake install (with
-    the REAL rollback_update.py, and optionally _apply_update.py, copied in) and a
-    fake home whose updates/backup holds the pre-apply content."""
+    """Build a fake install (with the REAL rollback_update.py, and optionally
+    _apply_update.py, copied in) and a fake home whose updates/backup holds the
+    pre-apply content."""
     inst = tmp_path / "install"
     (inst / "scripts").mkdir(parents=True)
     shutil.copy2(REPO / "scripts" / "rollback_update.py",
@@ -201,14 +201,14 @@ def test_insecure_ssl_context_disables_verification():
 
 def test_survives_after_launcher_process_exits(tmp_path):
     """The watchdog must be a genuinely DETACHED OS process, not tied to its
-    immediate launcher's lifetime - the whole point is surviving a server that
-    crashes right after spawning it. A throwaway launcher spawns the watchdog with
-    the exact same detachment flags updater.spawn_health_watchdog() uses, then
-    exits immediately; the watchdog must keep running (and finish) afterward."""
+    immediate launcher's lifetime: it has to survive a server that crashes right
+    after spawning it. A throwaway launcher spawns the watchdog with the exact
+    same detachment flags updater.spawn_health_watchdog() uses, then exits
+    immediately; the watchdog must keep running (and finish) afterward."""
     closed_port = _free_port()
     logfile = tmp_path / "watchdog.log"
-    inst = tmp_path / "install"   # deliberately has no rollback helper - this test
-    inst.mkdir()                  # only cares that the watchdog ran to completion.
+    inst = tmp_path / "install"   # no rollback helper here - this test only cares
+    inst.mkdir()                  # that the watchdog ran to completion.
     launcher = tmp_path / "launcher.py"
     launcher.write_text(
         "import subprocess, sys\n"
@@ -229,20 +229,13 @@ def test_survives_after_launcher_process_exits(tmp_path):
         encoding="utf-8")
 
     subprocess.run([sys.executable, str(launcher)], check=True, timeout=10)
-    # subprocess.run() has now returned - the launcher process is confirmed gone.
-    # The watchdog it spawned must keep running independently and finish on its own.
+    # subprocess.run() has now returned, so the launcher process is confirmed
+    # gone. The watchdog it spawned must keep running independently and finish on
+    # its own.
     #
-    # This window is deliberately generous (verified, not guessed): under this
-    # suite's own full -n auto run, a captured failure here showed the watchdog
-    # WAS alive and progressing past its launcher's exit (its log had two real
-    # "attempt N" lines logged strictly after the trivial launcher had already
-    # returned - proof the detached process was not killed), but then went
-    # unscheduled for 7+ seconds under 16-way CPU contention before this test's
-    # old 8s window gave up - a low-priority detached background process getting
-    # starved of CPU time under heavy parallel load, not a survival/detachment
-    # failure. 45s leaves large margin above that observed worst case while the
-    # common (uncontended) case still exits this loop in well under a second via
-    # the early break.
+    # The window is generous: a detached low-priority background process can go
+    # unscheduled for several seconds under heavy parallel load. The uncontended
+    # case exits this loop in well under a second via the early break.
     deadline = time.monotonic() + 45.0
     content = ""
     while time.monotonic() < deadline:
@@ -263,17 +256,15 @@ def test_probe_ignores_http_proxy_env(monkeypatch):
     probe_once targets THIS machine's own just-restarted instance at a host:port
     it was handed, so a proxy is never appropriate - but urlopen()'s default
     opener honours http_proxy/HTTPS_PROXY, and urllib does NOT exempt 127.0.0.1
-    (proxy_bypass("127.0.0.1") is False). Before the fix, any such user's probe
-    failed every time, the watchdog concluded the new build was unhealthy, and it
-    ROLLED BACK A GOOD UPDATE.
+    (proxy_bypass("127.0.0.1") is False). Such a probe fails every time, and the
+    watchdog then concludes the new build is unhealthy and rolls back a good
+    update.
 
-    This also removes a cross-test poisoning route that made this file
-    non-deterministic on CI: urlopen builds its module-global _opener ONCE and
-    caches it with the proxy environment as it was then, so a test that sets
-    http_proxy to a dead port and makes a request breaks every later urlopen in
-    that xdist worker - and monkeypatch unsetting the variable does not undo it.
-    tests/test_ssrf_rebind_2026_07_01.py does exactly that, which is why these
-    tests passed and failed across two CI runs of identical code.
+    Not using the default opener also closes a cross-test poisoning route:
+    urlopen builds its module-global _opener ONCE and caches it with the proxy
+    environment as it was then, so a test that sets http_proxy to a dead port and
+    makes a request breaks every later urlopen in that xdist worker, and
+    monkeypatch unsetting the variable does not undo it.
     """
     import urllib.request
     wd = _load_wd()
@@ -282,12 +273,10 @@ def test_probe_ignores_http_proxy_env(monkeypatch):
     try:
         monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead}")
         monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{dead}")
-        # Drop urllib's cached global opener so the env above is actually consulted.
-        # Without this the test is ORDER-DEPENDENT and mostly toothless: whenever an
-        # earlier test in the same process has already triggered urlopen(), the
-        # opener was built from a clean environment and setting these variables now
-        # changes nothing - so the unfixed code passes. Measured: reverting the fix
-        # left this test GREEN until this line was added.
+        # Drop urllib's cached global opener so the env above is actually
+        # consulted. Without this the test is ORDER-DEPENDENT: once an earlier
+        # test in the same process has triggered urlopen(), the opener was built
+        # from a clean environment and setting these variables changes nothing.
         urllib.request.install_opener(None)
         body = wd.probe_once(f"http://127.0.0.1:{port}/whoami", 2)
         assert body is not None, "the probe was routed through the proxy and failed"

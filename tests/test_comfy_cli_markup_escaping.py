@@ -1,33 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm/cli/comfy.py was PARTIALLY fixed for Rich markup escaping (PR #1463's
-follow-up sweep): `_report_action`, `comfy_setup`, and `comfy_update`'s
-`result.message` prints already wrap with `rich.markup.escape()` and are not
-touched here. This file proves the REMAINING sites - workflow names, the
-LOCALM_HOME-derived install paths shown by `comfy status`/`comfy remove`, the
-config-driven `comfy_target`/`comfy_api_url` values, and the `--commit`
-preview line in `comfy update`.
+"""Rich markup escaping in localm/cli/comfy.py.
 
-`rich.console.Console.print()` (and, confirmed empirically against this repo's
-pinned rich version, `rich.table.Table.add_row()` too) parses any '[...]' in
-an interpolated string as markup:
+`_report_action`, `comfy_setup` and `comfy_update`'s `result.message` prints
+already wrap with `rich.markup.escape()` and are not covered here. This file
+covers workflow names, the LOCALM_HOME-derived install paths shown by
+`comfy status`/`comfy remove`, the config-driven `comfy_target`/`comfy_api_url`
+values, and the `--commit` preview line in `comfy update`.
+
+`rich.console.Console.print()`, and `rich.table.Table.add_row()` too, parse
+any '[...]' in an interpolated string as markup:
 
     Console().print('flux[draft].json')        -> prints "flux.json"
     Console().print('flux[bold red].json')      -> prints "flux.json"
 
-The bracketed span is either dropped outright or consumed as a (bogus) style
+The bracketed span is either dropped outright or consumed as a style
 directive, in both cases silently.
 
-Workflow names are the highest-value real-world trigger here: unlike rag.py's
-collection names (restricted to ``^[A-Za-z0-9_-]{1,64}$`` before this sweep
-started), `media_workflows.save_workflow`'s only validation is path-traversal
-safety (`pathsafe.confined_name`, which blocks `<>:"|?*` and control
-characters but NOT `[`/`]`) - so `localm comfy workflow add image
-"my[flux].json"` is a genuinely accepted, real filename today, not a
-hypothetical. `comfy status`/`comfy remove`'s LOCALM_HOME-derived paths and
-`comfy_target`/`comfy_api_url` are defense-in-depth (LOCALM_HOME and
-comfy_api_url are user-configurable, comfy_target is normally SELECT-validated
-but config.json can be hand-edited) - the same posture PR #1463 took for
-rag.py's already-safe collection names.
+`media_workflows.save_workflow`'s only validation is path-traversal safety
+(`pathsafe.confined_name`, which blocks `<>:"|?*` and control characters but
+NOT `[`/`]`), so `localm comfy workflow add image "my[flux].json"` is an
+accepted filename. LOCALM_HOME and comfy_api_url are user-configurable;
+comfy_target is SELECT-validated through the setters, but config.json can be
+hand-edited.
 """
 
 from __future__ import annotations
@@ -39,8 +33,7 @@ from click.testing import CliRunner
 
 import localm.cli.comfy as comfy_cli
 
-# One name Rich DROPS outright, one it consumes as a (bogus) style tag - the
-# two distinct failure shapes described in the module docstring above.
+# One name Rich drops outright, one it consumes as a style tag.
 BRACKET_DROP_NAME = "flux[draft].json"
 BRACKET_STYLE_NAME = "flux[bold red].json"
 
@@ -56,18 +49,16 @@ def _write_workflow_file(tmp_path, name, content=_WF):
 
 @pytest.fixture
 def bracket_home_runner(tmp_path, monkeypatch):
-    """Same shape as conftest.py's shared `cli_runner`, except LOCALM_HOME's
-    own basename contains a bracket - needed only for the comfy_status
-    'Installed: yes, at <path>' assertions, which must prove a REAL,
-    unmocked `managed_comfy_paths()` (derived straight from home_dir())
-    survives verbatim. The shared `cli_runner` fixture's home dir has no
-    brackets in it, so that specific claim cannot be exercised through it."""
+    """A CliRunner whose LOCALM_HOME basename itself contains a bracket.
+
+    Used by the comfy_status 'Installed: yes, at <path>' assertions, which run
+    against a real, unmocked `managed_comfy_paths()` derived from home_dir().
+    """
     import localm.config as cfg
     home = tmp_path / "home[legacy]" / ".localm"
     home.mkdir(parents=True, exist_ok=True)
-    # rich.console.Console() reads COLUMNS at construction time; without it, a
-    # non-tty width default (80) hard-wraps mid-word inside a long pytest
-    # basetemp path (see test_rag_cli_markup_escaping.py's identical fixture).
+    # rich.console.Console() reads COLUMNS at construction time; without it the
+    # non-tty default of 80 hard-wraps mid-word inside a long basetemp path.
     monkeypatch.setenv("COLUMNS", "300")
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setattr(cfg, "HOME_DIR", home)
@@ -121,9 +112,8 @@ class TestWorkflowListMarkupEscaping:
             f"workflow's real name verbatim: {header!r}")
 
     def test_table_row_shows_bracket_style_name_verbatim(self, cli_runner, tmp_path):
-        """Table.add_row() cell strings go through the SAME markup parsing as
-        console.print f-strings (confirmed empirically before writing this
-        fix), not just plain text - this is the case that proves it."""
+        """Table.add_row() cell strings go through the same markup parsing as
+        console.print f-strings, not plain text."""
         f = _write_workflow_file(tmp_path, BRACKET_STYLE_NAME)
         cli_runner.invoke(comfy_cli.workflow_add, ["image", str(f)])   # not active
 
@@ -174,11 +164,9 @@ class TestWorkflowRmMarkupEscaping:
 
 class TestComfyStatusMarkupEscaping:
     def test_preferred_target_config_value_survives_verbatim(self, cli_runner):
-        """comfy_target is normally SELECT-validated (options own/user) when
-        set through the GUI/CLI setters, but config.json can be hand-edited
-        to anything - this print does not rely on that validation holding,
-        same defense-in-depth stance PR #1463 took for rag.py's collection
-        names (already-safe, escaped anyway)."""
+        """comfy_target is SELECT-validated (own/user) through the GUI/CLI
+        setters, but config.json can be hand-edited to anything, and this
+        print does not rely on that validation."""
         from localm.config import update_config
         bracket_value = "user[legacy]"
         update_config(lambda cfg: cfg.__setitem__("comfy_target", bracket_value))
@@ -192,10 +180,10 @@ class TestComfyStatusMarkupEscaping:
             f"verbatim: {target_line!r}")
 
     def test_target_api_url_survives_verbatim(self, cli_runner):
-        """target.api_url is comfy_api_url (admin-set free text) whenever no
-        managed instance is active - genuinely user-controlled, unlike
-        MANAGED_COMFY_API_URL (a fixed loopback constant from a hardcoded
-        port, never escaped, verified safe rather than assumed)."""
+        """target.api_url is comfy_api_url, admin-set free text, whenever no
+        managed instance is active. The managed case instead uses
+        MANAGED_COMFY_API_URL, a fixed loopback constant, which is not
+        escaped."""
         from localm.config import update_config
         bracket_url = "http://127.0.0.1:9999/comfy[legacy]"
         update_config(lambda cfg: cfg.__setitem__("comfy_api_url", bracket_url))
@@ -209,12 +197,10 @@ class TestComfyStatusMarkupEscaping:
             f"verbatim: {target_now_line!r}")
 
     def test_installed_paths_survive_verbatim(self, bracket_home_runner, monkeypatch):
-        """paths.root/paths.models_dir are <LOCALM_HOME>/comfyui(-models) -
-        LOCALM_HOME itself is user-configurable (env var), so these are not
-        provably bracket-free. Uses the REAL managed_comfy_paths() (derived
-        from the bracketed home dir set up by bracket_home_runner); only
-        is_managed_comfy_installed is mocked, since actually provisioning a
-        managed ComfyUI is out of scope for this display-escaping test."""
+        """paths.root/paths.models_dir are <LOCALM_HOME>/comfyui(-models), and
+        LOCALM_HOME is user-configurable through the environment. Uses the
+        real managed_comfy_paths() derived from bracket_home_runner's home
+        dir; only is_managed_comfy_installed is mocked."""
         from localm.media import managed_comfy as mc_mod
         monkeypatch.setattr(mc_mod, "is_managed_comfy_installed", lambda: True)
 
@@ -269,8 +255,8 @@ class TestComfyRemoveMarkupEscaping:
         result = cli_runner.invoke(comfy_cli.comfy_remove, ["-y"])
         assert result.exit_code == 1, result.output
         # "home[legacy]" also appears on the earlier "This will delete:"
-        # listing line (same mocked target) - key on the failure-specific
-        # text instead so this picks the "Could not remove:" line, not that.
+        # listing line, so key on the failure-specific text to pick the
+        # "Could not remove:" line.
         failed_line = next(l for l in result.output.splitlines()
                            if "PermissionError" in l)
         assert failure_text in failed_line, (
@@ -284,11 +270,10 @@ class TestComfyRemoveMarkupEscaping:
 
 class TestComfyUpdateMarkupEscaping:
     def test_advanced_commit_preview_survives_verbatim(self, cli_runner, monkeypatch):
-        """The --commit preview line, printed BEFORE update_managed_comfy
-        runs - distinct from result.message (already escaped by the
-        pre-existing fix this sweep does not touch). --commit is raw user
-        input, unlike COMFYUI_PINNED_COMMIT (a hardcoded module constant,
-        never escaped, its sibling preview branch left untouched)."""
+        """The --commit preview line, printed before update_managed_comfy runs
+        and distinct from result.message. --commit is raw user input; the
+        sibling branch prints COMFYUI_PINNED_COMMIT, a hardcoded module
+        constant, unescaped."""
         from localm.media import managed_comfy as mc_mod
         from localm.media import managed_comfy_update as upd_mod
         from localm.media.managed_comfy_provision import ProvisionResult
@@ -300,21 +285,15 @@ class TestComfyUpdateMarkupEscaping:
                                             message="done", installed_packages=0,
                                             custom_nodes_copied=0))
 
-        # The complete "[bold]" tag must fall WITHIN the first 12 characters -
-        # commit[:12] truncates before interpolation, so a bracket pair that
-        # only closes past index 12 (e.g. "abc123[bold red]def456") is cut
-        # into an unclosed "[bold " fragment that Rich never parses as markup
-        # at all, silently defeating this test (confirmed empirically: an
-        # unclosed "[" is printed as plain literal text either way, escaped
-        # or not - the fires-control caught this on the first version of this
-        # test, which passed with escape() removed for the wrong reason).
+        # The complete bracket pair must fall WITHIN the first 12 characters:
+        # commit[:12] truncates before interpolation, and an unclosed "["
+        # fragment is printed literally whether escaped or not.
         bracket_commit = "ab[cd]ef1234567890"
         result = cli_runner.invoke(comfy_cli.comfy_update, ["--commit", bracket_commit])
         assert result.exit_code == 0, result.output
         preview_line = next(l for l in result.output.splitlines()
                             if "Updating to ComfyUI" in l)
-        # Only the first 12 chars are shown (commit[:12]) - matches the
-        # pinned-commit sibling branch's own [:12] truncation.
+        # Only the first 12 chars are shown (commit[:12]).
         assert bracket_commit[:12] in preview_line, (
             f"the '--commit' advanced-override preview must show the "
             f"truncated commit verbatim, not have '[bold red]' consumed as "

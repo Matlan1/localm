@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// 2026-07-02 honesty audit follow-up: fetch failures the GUI used to swallow.
-// - deleteConversationRemote was fire-and-forget: a failed server delete left
-//   the copy to resurrect on the next load while the UI said it was gone.
-// - the debounced conversation PUT never checked r.ok (silent stale persistence).
-// - models.js ran r.json() BEFORE the r.ok branch, so a plain-text 500 killed
-//   the error toast entirely.
-// 2026-07-14 honesty audit follow-up:
-// - the Models PAGE (refreshModelsPage) never checked r.ok, so a 403 (key lacks
-//   models.read) or 401 (expired session) returned a JSON error body that parses
-//   fine -> models=[] -> the box read "No models yet", hiding the real failure.
+// GUI fetch failures are surfaced rather than swallowed:
+// deleteConversationRemote, the debounced conversation PUT, model detail
+// lookup, and the Models page's 401/403 handling.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -62,7 +55,7 @@ test("a resolved-but-failed conversation save is logged once, not per save", asy
                       branches: [], messages: [{ role: "user", content: "hi" }] };
     pushConversation(window.__conv);
   `);
-  // Ride out the real 600ms debounce with generous margin for a loaded machine.
+  // Rides out the 600ms debounce.
   await new Promise((r) => setTimeout(r, 1000));
   runScript(window, "pushConversation(window.__conv);");
   await new Promise((r) => setTimeout(r, 1000));
@@ -87,9 +80,7 @@ test("a plain-text 500 on model detail still shows the error toast", async () =>
 });
 
 test("a 403 on the models page surfaces an honest error, not 'No models yet'", async () => {
-  // A key that lacks models.read -> 403 with a {detail:...} body (parses fine).
-  // The empty-list fallback would render the "No models yet" empty state, telling
-  // the user they have no models when really they have no permission.
+  // A 403 with a {detail:...} body, which parses as valid JSON.
   const { window } = loadAppWithPages({ fetchImpl: async (url) => {
     if (String(url).startsWith("/api/models")) {
       return { ok: false, status: 403, statusText: "Forbidden",

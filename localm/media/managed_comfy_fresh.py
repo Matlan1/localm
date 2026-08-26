@@ -15,18 +15,16 @@ localm installs a fresh one, matched to the machine's GPU, under LOCALM_HOME.
      ComfyUI needs by scanning localm's OWN shipped workflow JSONs for non-core
      class_types, each mapped to a PINNED repo+commit. Today that is exactly
      {UnetLoaderGGUFAdvanced -> city96/ComfyUI-GGUF}. A shipped-workflow class_type
-     that is neither known-core nor mapped is SURFACED (rule 5), never silently missing.
+     that is neither known-core nor mapped is SURFACED, never silently missing.
   3. ``provision_fresh()`` clones a PINNED ComfyUI, makes a fresh localm venv, installs
      the hardware-matched torch + ComfyUI's requirements + the derived pinned nodes,
      shares models via S1's extra_model_paths.yaml, drops a marker, and verifies the
-     result. A failed base step rolls the partial install back (rule 5: no facade).
+     result. A failed base step rolls the partial install back.
   4. ``setup_managed_comfy()`` is THE public entry point (the CLI command and the GUI
      button both call it): copy when a user ComfyUI is present (S2), fresh when not.
 
-The pinned-commit is a CONSTANT here; advancing it + carrying localm's own core
-patches (the __func__ tolerance) + ``localm comfy update`` are stage S4, not built here.
-
-Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
+The pinned commit is a CONSTANT here; advancing it, carrying localm's own core
+patches, and ``localm comfy update`` are stage S4 and are not built here.
 """
 
 from __future__ import annotations
@@ -50,32 +48,18 @@ from localm.media.managed_comfy_provision import (
 # --------------------------------------------------------------------------- #
 #  Pinned ComfyUI (decision 4/7)                                              #
 # --------------------------------------------------------------------------- #
-# A tagged, known-version ComfyUI to clone fresh. Advancing this pin and carrying
-# localm's own patches on top of it (e.g. the __func__ tolerance) is stage S4's
-# job; here it is a fixed CONSTANT. v0.31.1, resolved 2026-08-11 (previously v0.9.2 /
-# 8f40b43e, resolved 2026-07-08).
-#
-# VERIFIED ON THIS BOX AT THIS PIN BEFORE BUMPING (never bump an untested commit):
-# a fresh S3 provision completes; the localm patch set still applies (the __func__
-# tolerance is STILL NEEDED upstream at this commit, so it is carried, not retired);
-# the pinned city96 GGUF node installs AND registers live; the hardware-matched ROCm
-# torch + torchaudio import and see the card; and an S4 update from the previous pin
-# succeeds with its rollback exercised. Evidence and method:
-# dev-notes/comfy-pin-advance-2026-08-11.md.
+# A tagged, known-version ComfyUI to clone fresh. A fixed CONSTANT here; advancing
+# it and carrying localm's own patches on top of it is stage S4's job.
 COMFYUI_REPO = "https://github.com/comfyanonymous/ComfyUI.git"
 COMFYUI_PINNED_COMMIT = "fe4195f7f4275f2626cbafc703acc3ddde1e5490"
 COMFYUI_PINNED_VERSION = "v0.31.1"
 
 # The FIRST upstream release tag carrying comfy_extras/nodes_multigpu.py, i.e. the
 # per-component placement nodes (SelectModelDevice/SelectCLIPDevice/SelectVAEDevice).
-# Measured by walking every v* tag in the real repo: v0.22.2 lacks it, v0.23.0 has it;
-# the file landed 2026-05-25 in 0a2dd86e ("MultiGPU Work Units For Accelerated
-# Sampling", #7063), which is the date quoted throughout the placement code.
+# v0.22.2 lacks it; v0.23.0 has it.
 #
-# It lives next to the pin so "does localm's own ComfyUI offer placement?" is a
-# MECHANICAL comparison against COMFYUI_PINNED_VERSION rather than prose that silently
-# goes stale when the pin moves - which is exactly how the previous pin ended up being
-# described in Settings as a permanent limitation months after it stopped being one.
+# It lives next to the pin so a does-this-ComfyUI-offer-placement question is a
+# MECHANICAL comparison against COMFYUI_PINNED_VERSION rather than prose.
 COMFYUI_PLACEMENT_MIN_VERSION = "v0.23.0"
 
 
@@ -85,24 +69,17 @@ COMFYUI_PLACEMENT_MIN_VERSION = "v0.23.0"
 # AMD gfx103X (RDNA2 / RX 6000) has no public PyTorch ROCm wheel on Windows, so
 # localm runs on AMD's own repo build - the SAME wheels the [gpu] extra in
 # pyproject.toml pins. A fresh ComfyUI venv needs the identical stack. Keep these in
-# sync with pyproject's [gpu] extra (there is no runtime import of pyproject; this is
-# its ComfyUI-venv mirror).
+# sync with pyproject's [gpu] extra; there is no runtime import of pyproject, so
+# this is its ComfyUI-venv mirror.
 #
-# torchaudio is pinned here too (BUG: managed ComfyUI music generation broken):
-# ComfyUI's own requirements.txt lists torch/torchvision/torchaudio UNPINNED, and
-# _install_fresh's later "ComfyUI's own requirements" step runs plain
-# `pip install -r requirements.txt` with no --extra-index-url - so torch/torchvision
-# were already satisfied by the ROCm build above (pip does not reinstall a
-# satisfied bare requirement) and stayed correct, but torchaudio had no prior
-# install to satisfy it and resolved from PyPI's default index instead: a generic
-# build whose compiled C extension does not match this ROCm torch's ABI
-# (confirmed live: "OSError: Could not load this library: ..._torchaudio.pyd" on
-# import, disabling every audio-dependent ComfyUI node - VAEDecodeAudio, MMAudio,
-# the Whisper-based audio encoders - not just ACE-Step music specifically).
-# Pinning the matching ROCm build here (confirmed present on the same repo,
-# same "2.9" series and rocm7.13.0 tag as the torch pin above) makes the later
-# bare `torchaudio` requirement already-satisfied, the same way torch/torchvision
-# already are.
+# torchaudio is pinned here too. ComfyUI's own requirements.txt lists
+# torch/torchvision/torchaudio UNPINNED, and _install_fresh's later ComfyUI
+# requirements step runs plain `pip install -r requirements.txt` with no
+# --extra-index-url, so torch and torchvision stay satisfied by the ROCm build
+# above while an unpinned torchaudio would resolve from PyPI's default index to a
+# build whose compiled C extension does not match this ROCm torch's ABI, disabling
+# every audio-dependent ComfyUI node. Pinning the matching ROCm build here makes
+# the later bare torchaudio requirement already-satisfied.
 _AMD_GFX103X_ROCM_INDEX = "https://repo.amd.com/rocm/whl/gfx103X-all/"
 _AMD_GFX103X_TORCH = ("torch==2.9.1+rocm7.13.0", "torchvision==0.24.0+rocm7.13.0",
                       "torchaudio==2.9.0+rocm7.13.0")
@@ -114,8 +91,8 @@ class ComfyTorchSpec:
     """The PyTorch install spec for a fresh ComfyUI venv on THIS hardware.
     ``packages`` are pip requirement strings; ``index_url`` is the primary wheel
     index (None = PyPI); ``extra_index_url`` an additional index (the AMD ROCm repo,
-    so torch resolves there and everything else from PyPI). ``note`` carries an honest
-    reason when the pick is a degraded fallback (rule 5: surface, do not hide)."""
+    so torch resolves there and everything else from PyPI). ``note`` carries an
+    honest reason when the pick is a degraded fallback."""
     variant: str
     packages: tuple
     index_url: Optional[str] = None
@@ -136,13 +113,13 @@ def comfy_torch_spec(det=None) -> ComfyTorchSpec:
     hardware->torch function (decision 4), reusing hwdetect for GPU detection, the AMD
     gfx family, and the shared wheel-index table.
 
-    Vendor-first, and deliberately NOT hwdetect.recommended_torch_variant(): that
-    function's "never ROCm on a vendor-neutral runtime pick" rule is specific to the
-    HF/llama path, where a user who chose the vulkan runtime on AMD has opted OUT of
-    ROCm. A FRESH ComfyUI has no such prior choice - it just wants the best GPU torch
-    for the hardware - so AMD maps to ROCm torch directly. And unlike the HF path
-    (where "none" means SKIP torch), ComfyUI CANNOT run without torch, so any combo
-    with no verified GPU wheel degrades to CPU torch (with a note), never to nothing."""
+    Vendor-first, and NOT hwdetect.recommended_torch_variant(): that function's
+    never-ROCm-on-a-vendor-neutral-runtime-pick rule is specific to the HF/llama
+    path, where a user who chose the vulkan runtime on AMD has opted OUT of ROCm. A
+    FRESH ComfyUI has no such prior choice, so AMD maps to ROCm torch directly. And
+    unlike the HF path, where "none" means SKIP torch, ComfyUI CANNOT run without
+    torch, so any combo with no verified GPU wheel degrades to CPU torch (with a
+    note), never to nothing."""
     det = det or hwdetect.detect()
     vendors = det.vendors or []
     if "nvidia" in vendors:
@@ -196,7 +173,6 @@ class CustomNodePin:
 
 # The ONLY non-core node any shipped workflow uses today: city96's GGUF loader
 # (GGUF-quantised image models). Music (ACE-Step) and video (Wan) are fully core.
-# Pin resolved 2026-07-08.
 _GGUF_NODE = CustomNodePin(
     name="ComfyUI-GGUF",
     repo="https://github.com/city96/ComfyUI-GGUF.git",
@@ -213,8 +189,8 @@ CLASS_TYPE_TO_NODE: dict = {
 
 # Core ComfyUI node class_types localm's shipped workflows use. A class_type a shipped
 # workflow references that is neither here nor in CLASS_TYPE_TO_NODE is UNCLASSIFIED
-# and surfaced (rule 5) - so a workflow's new node is never silently missing from a
-# fresh install; the maintainer maps it (non-core) or adds it here (core).
+# and surfaced, so a workflow's new node is never silently missing from a fresh
+# install; the maintainer maps it (non-core) or adds it here (core).
 KNOWN_CORE_NODES = frozenset({
     # flux (image)
     "BasicGuider", "BasicScheduler", "CLIPTextEncode", "DualCLIPLoader",
@@ -321,9 +297,8 @@ def _clone_at_commit(repo: str, dest: Path, commit: str,
     core.longpaths: without it, a deeply-nested LOCALM_HOME (a long username, a
     OneDrive-redirected profile, a nested custom data dir) can push a pack
     object's path past Windows' legacy 260-char MAX_PATH, failing clone with
-    "Filename too long" / "invalid index-pack output" - reproduced live cloning a
-    custom node (#621). A per-invocation -c override, not a global git config
-    change."""
+    "Filename too long" / "invalid index-pack output". A per-invocation -c
+    override, not a global git config change."""
     ok, out = _run(["git", "-c", "core.longpaths=true", "clone", "--quiet", repo, str(dest)],
                    on_progress=on_progress, timeout=1800)
     if not ok:
@@ -344,10 +319,9 @@ def _install_custom_nodes(managed_root: Path, nodes, managed_python: Path,
                           on_progress: ProgressCb) -> tuple:
     """Clone each pinned custom node into custom_nodes/<name> at its commit and pip
     install its requirements.txt when present. Returns (installed_count, failures),
-    failures a list of "name: reason". A node that cannot be installed is SURFACED
-    (rule 5), not silently dropped, but does NOT abort the base install - it only
-    breaks the workflow that needs that node, so the rest of the fresh ComfyUI still
-    works."""
+    failures a list of "name: reason". A node that cannot be installed is SURFACED,
+    not silently dropped, but does NOT abort the base install - it only breaks the
+    workflow that needs that node, so the rest of the fresh ComfyUI still works."""
     dst = managed_root / "custom_nodes"
     dst.mkdir(parents=True, exist_ok=True)
     installed = 0
@@ -405,8 +379,8 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
     satisfied and pip does not replace it), then ComfyUI's requirements and the derived
     pinned custom nodes, write extra_model_paths.yaml (S1), drop a marker, and verify
     the result actually reads as installed. A failure at any BASE step rolls the partial
-    install back and reports the real reason (rule 5: no broken-but-reads-as-ready
-    facade). The user's own ComfyUI (if any) is never touched.
+    install back and reports the real reason. The user's own ComfyUI (if any) is never
+    touched.
 
     The repo / commit / nodes / torch_spec / install_torch args are injection points
     for a fast offline test; production callers pass none and get the real pins +
@@ -426,11 +400,11 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
         _emit(on_progress, line)
 
     def _fail(message: str) -> ProvisionResult:
-        """Roll back a PARTIAL install before returning failure: once cloned + venv'd,
-        S1's is_managed_comfy_installed() would read the half-built tree as INSTALLED
-        and reroute media to a broken instance (and a re-run would refuse "already
-        exists"). So a failure must leave NOTHING (rule 5); if the tree cannot be
-        removed, say so rather than pretend."""
+        """Roll back a PARTIAL install before returning failure: once cloned and
+        venv'd, S1's is_managed_comfy_installed() would read the half-built tree as
+        INSTALLED and reroute media to a broken instance, and a re-run would refuse
+        with "already exists". So a failure must leave NOTHING; if the tree cannot
+        be removed, say so rather than pretend."""
         note = ""
         if root.exists():
             try:
@@ -463,9 +437,9 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
         # process IS the branded LocaLM.exe copy (applaunch.py), sys.executable is a
         # renamed file whose basename never exists in the base install dir. stdlib
         # venv's EnvBuilder (and its ensurepip bootstrap) match on that basename to
-        # decide what to copy/invoke inside the new venv, so "LocaLM.exe -m venv"
-        # silently creates a venv with no launcher of its own, and the mandatory pip
-        # bootstrap then fails with WinError 2 - reproduced live (#621).
+        # decide what to copy/invoke inside the new venv, so a LocaLM.exe -m venv
+        # creates a venv with no launcher of its own and the mandatory pip bootstrap
+        # then fails with WinError 2.
         venv_python = real_base_python() or sys.executable
         _say("Creating a fresh localm venv ...")
         ok, out = _run([str(venv_python), "-m", "venv", str(root / "venv")],
@@ -473,13 +447,13 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
         if not ok or not paths.venv_python.is_file():
             return _fail(f"Could not create the managed venv: {_tail(out)}")
 
-        # 2b) Guarantee the venv actually has a working pip (NEW-MANAGED-COMFY-
-        #     VENV-MISSING-PIP): `-m venv` can report success while its own mandatory
-        #     ensurepip bootstrap silently failed - a base Python with ensurepip
-        #     stripped, or (POSIX, real_base_python() returning None) a pip-less base
-        #     venv itself created with `uv venv` and no --seed. Without this probe the
-        #     failure only surfaces two steps below as an opaque "No module named pip"
-        #     buried inside the torch install's pip transcript.
+        # 2b) Guarantee the venv actually has a working pip: `-m venv` can report
+        #     success while its own mandatory ensurepip bootstrap silently failed - a
+        #     base Python with ensurepip stripped, or (POSIX, real_base_python()
+        #     returning None) a pip-less base venv itself created with `uv venv` and
+        #     no --seed. Without this probe the failure only surfaces two steps below
+        #     as an opaque "No module named pip" buried in the torch install's
+        #     pip transcript.
         ok, out = _probe_pip(paths.venv_python, on_progress)
         if not ok:
             return _fail(
@@ -517,9 +491,9 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
             _say(f"WARNING: {f}")
 
         # 5b) Apply localm's own patch set to the managed core (S4, decision 7): direct
-        #     core edits localm carries on top of the pin (the __func__ tolerance). A
-        #     failed compat patch is SURFACED but non-fatal - like a custom-node failure,
-        #     it only breaks the workflow that needs it, not the whole install (rule 5).
+        #     core edits localm carries on top of the pin. A failed compat patch is
+        #     SURFACED but non-fatal - like a custom-node failure, it only breaks the
+        #     workflow that needs it, not the whole install.
         patch_outcomes = _apply_localm_patches(root)
         for o in patch_outcomes:
             if o.ok:
@@ -532,8 +506,8 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
         mc.write_extra_model_paths(cfg)
         _say("Wrote extra_model_paths.yaml (localm's managed models dir).")
 
-        # 7) Provenance marker (documentation for S4 AND now load-bearing for
-        #    step 8 below - is_managed_comfy_installed() requires this file too).
+        # 7) Provenance marker for S4, also load-bearing for step 8 below:
+        #    is_managed_comfy_installed() requires this file too.
         _write_fresh_marker(root, commit, spec, n_nodes, node_failures, patch_outcomes)
 
         # 8) Prove it installed (S1's contract), or roll back and say it did not.

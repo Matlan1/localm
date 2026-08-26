@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Build a bug-report-ready digest of a localm debug log.
 
-The previous ``_recent_log_tail`` (bugreport.py) took a blind last-N-lines cut
-of the log file. That misses the actual failure whenever enough routine
-activity follows it before the report is filed - issue #617's own report was
-one delay away from this: the error was followed by minutes of routine
-``GET /api/stats`` polling (every ~2.5s), and a longer wait would have pushed
-it out of the tail entirely.
-
-This module instead:
+This module:
   * Groups raw lines into RECORDS - a line matching the standard
     ``TIMESTAMP LEVEL NAME: message`` format starts a new record; anything
     that does not match (a traceback frame, a wrapped message) is a
@@ -17,44 +10,30 @@ This module instead:
   * Keeps EVERY WARNING/ERROR/CRITICAL record (or one containing a raw
     traceback, or an unleveled continuation line that reads as a crash -
     see _CONTINUATION_ERROR_SIGNAL_RE) from the whole file, not just the
-    most recent one - the point of a "digest" is that no error from the
-    session goes missing. This also covers raw native (ggml/CUDA/HIP)
-    stderr, which debuglog.py appends into the log file with no
+    most recent one. This also covers raw native (ggml/CUDA/HIP) stderr,
+    which debuglog.py appends into the log file with no
     "TIMESTAMP LEVEL NAME:" prefix of its own and so always lands as a
     continuation of whatever benign record precedes it.
   * Collapses a run of 3+ consecutive BENIGN records that are near-duplicates
     END TO END - same level/logger and EVERY line's text with the numbers
-    masked out, continuation lines included (see record_template) - so
-    ``GET /api/stats -> 200 (7 ms, loop_lag=0.26s)`` repeated every few
-    seconds collapses to one line + a repeat count, instead of listing each
-    one - the routine noise a report almost never needs, especially when it
-    is just "all is well" polling. Matching on the WHOLE record rather than
-    just its header line means two records whose continuation content
-    actually differs are never wrongly called near-duplicates of each other,
-    and the survivor of a genuine collapse keeps ALL of its own lines, not
-    just the first - so nothing on the one kept instance is silently
-    discarded either.
+    masked out, continuation lines included (see record_template) - into one
+    line plus a repeat count. The survivor keeps ALL of its own lines.
   * If the digest is still over the size budget, trims from the OLDEST
-    benign content first and never drops an error record silently - if even
-    that is not enough, it says plainly how many earlier errors were omitted
-    rather than silently truncating them (AGENTS.md rule 5).
+    benign content first and never drops an error record silently - when
+    even that is not enough it states how many earlier errors were omitted.
   * Drops every record that is a known debug_content_enabled()-gated write -
     e.g. the GGUF backend's raw (pre-scrub) model reply - BEFORE anything
     else touches it, so chat content can never survive collapsing, budget
-    fitting, or being promoted to an ERROR record by its own text (#961: a
-    generated reply routinely contains the words "error"/"exception", which
-    is exactly what promotes an otherwise-benign record to be kept verbatim).
-    See _CONTENT_MARKER_RES. This is a fixed marker on each KNOWN write site,
-    not a scrubber over arbitrary prose - a scrubber is a regex arms race
-    against free-form generated text and will not hold.
+    fitting, or being promoted to an ERROR record by its own text. See
+    _CONTENT_MARKER_RES: a fixed marker on each KNOWN write site, not a
+    scrubber over arbitrary prose.
   * Collapses a long RUN of near-duplicate lines WITHIN one benign record's
     own continuation lines, not just across records. Raw native (ggml/CUDA/
     HIP) stderr has no "TIMESTAMP LEVEL NAME:" prefix of its own, so a long
     stretch of it always glues onto ONE record as its continuation lines
-    (see parse_records) - and one giant record is never a "run" of 3+ near-
-    duplicate RECORDS for the record-level collapse above to fold, so a
-    report's whole budget could be spent on ~70 copies of one native line
-    (#958/#952). See _collapse_line_runs.
+    (see parse_records), and one giant record is never a "run" of 3+ near-
+    duplicate RECORDS for the record-level collapse above to fold. See
+    _collapse_line_runs.
 """
 
 from __future__ import annotations
@@ -69,12 +48,10 @@ class LogRecord(TypedDict):
     lines: List[str]
 
 
-# The logger group starts with `[^:\s]`, not `[^:]`. Whitespace is a SUBSET of
-# `[^:]`, so `\s+([^:]+)` let both quantifiers claim the same run and a log line
-# with a long space run and no colon after it cost O(n^2): measured 0.011 / 0.185
-# / 0.838s at 1,000 / 4,000 / 8,000 spaces. Requiring the logger's FIRST
-# character to be neither a colon nor whitespace removes the overlap without
-# narrowing what matches - a logger name never begins with a space.
+# The logger group excludes whitespace from its first character as well as the
+# colon, so the two quantifiers cannot both claim the same run of spaces. That
+# keeps matching linear on a long space run with no following colon. A logger
+# name never begins with a space.
 _LOG_LINE_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} (\w+)\s+([^:\s][^:]*): (.*)$"
 )
@@ -82,54 +59,36 @@ _NUMERIC_RE = re.compile(r"\d+(?:\.\d+)?")
 _ERROR_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})
 _TRACEBACK_MARKER = "Traceback (most recent call last)"
 
-# Raw native (ggml/CUDA/HIP) stderr is appended straight into the debug log fd by
-# debuglog.py's dedup_native_stderr()/_write_debug() with NO "TIMESTAMP LEVEL NAME:"
-# prefix of its own, so parse_records() has no choice but to attach it as a
-# CONTINUATION of whichever record precedes it - almost always a routine
-# DEBUG-level poll, given how dense e.g. GET /api/stats logging is. The literal
-# traceback marker alone misses this entirely: a crash line like "CUDA error:
-# operation not permitted when stream is capturing" contains none of it, so the
-# combined record inherited the benign DEBUG level and was eligible for
-# collapse_records' near-duplicate collapsing - which silently discarded it
-# (see _CONTINUATION_ERROR_SIGNAL_RE's use in is_error_record). This is a second,
-# broader net alongside the exact traceback marker, not a replacement for it.
+# Raw native (ggml/CUDA/HIP) stderr is appended to the debug log with no
+# "TIMESTAMP LEVEL NAME:" prefix, so parse_records() attaches it as a
+# continuation of the preceding record, usually a routine DEBUG poll. This is a
+# broader net alongside the exact traceback marker, so a crash line carrying no
+# traceback marker is not collapsed away as a benign near-duplicate.
 _CONTINUATION_ERROR_SIGNAL_RE = re.compile(
     r"\b(?:error|exception|fatal|crash(?:ed)?|segfault|segmentation fault|"
     r"core dumped|assert(?:ion)?\s+fail\w*|panic|abort(?:ed)?)\b",
     re.IGNORECASE,
 )
 
-# A run shorter than this is left expanded - collapsing "2 identical lines"
-# saves nothing and just makes a short, already-readable log harder to follow.
+# A run shorter than this is left expanded.
 _MIN_RUN_TO_COLLAPSE = 3
 
-# Debug-level writes gated on localm.debuglog.debug_content_enabled() - i.e.
-# they carry raw CHAT CONTENT (a model reply, an embed-failure snippet of a
-# memory record, a web-tool query derived from the user's prompt) rather than
-# operational data. A bug report must NEVER include chat content (the privacy
-# promise the report form itself makes), so a record matching any of these is
-# dropped whole in build_digest, before collapsing or error-promotion ever see
-# it - see is_content_record. Each pattern anchors to a KNOWN write site's own
-# stable prefix, not to prose content, so it does not rot into a scrubber
-# arms race against arbitrary generated text:
+# Debug-level writes gated on debuglog.debug_content_enabled(), i.e. carrying raw
+# chat content rather than operational data. A record matching any of these is
+# dropped whole in build_digest, before collapsing or error-promotion. Each
+# pattern anchors to a known write site's stable prefix, not to prose content.
 _CONTENT_MARKER_RES = (
-    # llama.py's _decode_stream(): logger.debug("raw model output:\n%s", ...).
-    # The message's own newline puts nothing else after the marker on the
-    # header line - the reply itself rides in as unleveled CONTINUATION
-    # lines - so anchoring to end-of-line is exact, not a substring guess.
+    # llama.py's _decode_stream() logs "raw model output:" and the reply. The
+    # reply rides in as unleveled continuation lines, so anchoring to
+    # end-of-line is exact.
     re.compile(r"raw model output:\s*$"),
-    # memory/store.py's _embed_one(): the content-bearing branch of that log
-    # statement is "memory embed_one failed for %r: %s" (the snippet is
-    # inline on the header line). Its privacy-mode sibling logs an entirely
-    # different, content-free message ("...failed (content withheld: privacy
-    # mode..."), so this prefix can only match the content-bearing branch.
+    # memory/store.py's _embed_one(): the content-bearing branch logs
+    # "memory embed_one failed for %r: %s" with the snippet inline. Its
+    # privacy-mode sibling logs a different, content-free message.
     re.compile(r"\bmemory embed_one failed for "),
-    # jobs/webtool.py's scheduled web-tool loop: the content-bearing branch is
-    # "jobs web tool: %s %s" (tool name + the model-derived args dict, e.g. the
-    # search query); the privacy-mode sibling logs the tool name ALONE with
-    # nothing after it ("jobs web tool: %s"). Matched structurally - a known
-    # tool name immediately followed by the start of the args dict's repr -
-    # rather than by content, so only the args-carrying branch has a "{" here.
+    # jobs/webtool.py's scheduled web-tool loop: the content-bearing branch logs
+    # "jobs web tool: %s %s" (tool name plus the model-derived args dict); the
+    # privacy-mode sibling logs the tool name alone. Matched structurally.
     re.compile(r"\bjobs web tool: \S+ \{"),
     # http_server.py's _log_assembled_prompt(): "assembled chat prompt (%d
     # message(s)):\n%s" - the count is on the header line, the messages ride
@@ -142,11 +101,8 @@ def is_content_record(rec: LogRecord) -> bool:
     """True when *rec*'s header line is one of the known debug_content_enabled()
     writes (see _CONTENT_MARKER_RES) - i.e. it carries chat content and must
     never appear in a bug report, regardless of its level or how it would
-    otherwise be collapsed. Only the header line is checked: every marked
-    write site puts its own message (never the caller's content) there, with
-    any actual content confined to lines[1:] (raw model output) or inline
-    after the marker on lines[0] itself (the other two) - either way the
-    marker is on lines[0]."""
+    otherwise be collapsed. Only the header line is checked; every marked
+    write site puts its marker on lines[0]."""
     if not rec["lines"]:
         return False
     header = rec["lines"][0]
@@ -196,42 +152,18 @@ def record_template(rec: LogRecord) -> str:
     masked out), so timestamps/latencies/counts that differ run to run do not
     stop two otherwise-identical records from collapsing together.
 
-    Keyed on the whole record, not just lines[0] - a record's continuation
-    lines can carry real, DIFFERING content (raw native stderr attaches as a
-    continuation of whatever benign record precedes it, so e.g. ggml-cuda's
-    "CUDA Graph id N reused" spam rides along with routine polling records).
-    Keying on the header alone would call two such records "near-duplicates"
-    whenever their headers merely mask to the same shape, even though their
-    continuations differ - which used to matter a lot, because the collapsed
-    survivor kept only lines[0] (see collapse_records) and every other line,
-    across every record in the run, was discarded. Hashing every line means
-    records only collapse when they are ACTUALLY near-duplicates end to end,
-    and the "\\x1e" join separator (vanishingly unlikely to appear in real log
-    text) stops two different line splits from concatenating to the same key.
+    Keyed on the whole record, not just lines[0], so records only collapse when
+    they are near-duplicates END TO END. The "\\x1e" join separator stops two
+    different line splits from concatenating to the same key.
 
-    KNOWN, ACCEPTED TRADE-OFF: numbers are masked in continuation lines too,
-    same as the header. This is NOT merely harmless in theory - measured, and
-    the concrete case is worse than "two numbers collapse": "native worker
-    exit code 137" vs "...139", neither containing a word
-    is_error_record's signal scan recognizes ("error"/"exception"/etc.), mask
-    to the SAME template and collapse together. On POSIX, 137 and 139 are
-    128 + SIGKILL and 128 + SIGSEGV - so what actually collapses into one
-    line with a repeat count is "the OOM killer took the worker" and "the
-    worker segfaulted": two DIFFERENT faults needing two different
-    investigations, read as one fault twice. (Windows carries no such
-    convention for those particular numbers, but the general risk is not
-    POSIX-specific, and localm ships on both.) The value itself is not lost -
-    the survivor keeps its own real line, so at least one instance's exact
-    number always survives - it is the DISTINCTION between two masked-equal-
-    but-different values that is. Turning masking off for continuation lines
-    is not a free fix either - it was measured too, and it breaks the exact
-    case this exists to serve: real
-    "CUDA Graph id 5 reused" / "id 6 reused" spam alternates, so without
-    masking no two consecutive records would ever match and nothing would
-    collapse at all. The escape valve is the signal scan, not the masking: if
-    a native diagnostic value needs to always be told apart, that is a reason
-    to widen _CONTINUATION_ERROR_SIGNAL_RE (which promotes the record to an
-    error, kept verbatim, never collapsed), not to weaken masking here."""
+    TRADE-OFF: numbers are masked in continuation lines too, so two records
+    whose only difference is a number collapse together - e.g. "native worker
+    exit code 137" and "...139" (on POSIX, 128 + SIGKILL and 128 + SIGSEGV)
+    mask to the same template. The survivor keeps its own real line, so one
+    instance's exact number always survives; the DISTINCTION does not. To keep
+    a native diagnostic value always distinguishable, widen
+    _CONTINUATION_ERROR_SIGNAL_RE so the record is promoted to an error and
+    kept verbatim, rather than weakening masking here."""
     lines = rec["lines"]
     first = lines[0]
     m = _LOG_LINE_RE.match(first)
@@ -249,13 +181,10 @@ def _collapse_line_runs(lines: List[str]) -> List[str]:
     applied WITHIN a single (already-grouped) benign record's own lines: a run
     of _MIN_RUN_TO_COLLAPSE+ consecutive near-duplicate lines (numbers masked,
     same as record_template) collapses to the last of them plus a repeat
-    count. Needed because a long run of unleveled native (ggml/CUDA/HIP)
-    stderr - no "TIMESTAMP LEVEL NAME:" prefix of its own - always lands as
-    CONTINUATION LINES of whatever record precedes it (see parse_records), so
-    it is never a run of multiple RECORDS for collapse_records itself to fold:
-    one giant multi-line record is not a "run" (#958/#952 - a report whose
-    entire tail was ~70 copies of one native line, because nothing above the
-    single-record level ever collapsed it)."""
+    count. A long run of unleveled native (ggml/CUDA/HIP) stderr - no
+    "TIMESTAMP LEVEL NAME:" prefix of its own - always lands as CONTINUATION
+    LINES of whatever record precedes it (see parse_records), so it is never a
+    run of multiple RECORDS for collapse_records itself to fold."""
     out: List[str] = []
     i, n = 0, len(lines)
     while i < n:
@@ -279,45 +208,22 @@ def collapse_records(records: List[LogRecord]) -> List[str]:
     included - see its docstring) collapses into the survivor's own lines in
     full, plus a repeat count and timespan on the last of them.
 
-    Earlier drafts of this fix excluded every multi-line (continuation-
-    carrying) record from collapsing at all, to stop a record's continuation
-    content from being silently discarded by a collapse. Measured against the
-    exact case this digest exists to help with - a CUDA-crashing box, where
-    raw native stderr rides as a continuation of routine polling records, so
-    ~all of them are multi-line - that blanket exclusion defeated collapsing
-    almost entirely: a 200-record run of otherwise near-duplicate "GET
-    /api/stream" polls, each carrying one alternating "CUDA Graph id N/N+1
-    reused" continuation line, produced a 5957-char digest with 55 uncollapsed
-    repeats instead of one collapsed line - reintroducing exactly the noise
-    this module exists to remove, on the reports that most need to be
-    readable. record_template hashing every line (not just the header) is the
-    correct fix: records only collapse when they are near-duplicates END TO
-    END, and the survivor below keeps ALL of its own lines rather than only
-    lines[0], so collapsing a genuine near-duplicate run no longer discards
-    the one kept instance's continuation content either."""
+    Multi-line (continuation-carrying) records DO take part in collapsing:
+    record_template hashes every line, so records only collapse when they are
+    near-duplicates END TO END, and the survivor below keeps ALL of its own
+    lines rather than only lines[0]."""
     out: List[str] = []
     i, n = 0, len(records)
     while i < n:
         rec = records[i]
         if is_error_record(rec):
-            # Collapse REPEATED lines within this record's own body (the same
-            # line-run collapse the benign branches below get) - not the
+            # Collapse REPEATED lines within this record's own body - not the
             # record itself, and never a different record's lines. An error
-            # record with genuinely distinct lines (the ordinary case: one
-            # header + a few different traceback frames) has no run to
-            # collapse and passes through _collapse_line_runs unchanged; only
-            # a run of _MIN_RUN_TO_COLLAPSE+ near-duplicate CONSECUTIVE lines
-            # folds. Raw native (ggml/CUDA/HIP) stderr has no header of its
-            # own, so a long repeated run of it always lands as continuation
-            # lines of whatever record precedes it - including a genuine
-            # WARNING/ERROR, not just a benign one (#958/#952: 122 identical
-            # continuation lines glued to one WARNING record survived
-            # uncollapsed here while the record-level and other line-level
-            # collapsing both worked, because this was the one branch that
-            # never called _collapse_line_runs at all). "Errors are kept
-            # verbatim" still holds: the header and one real instance of
-            # every repeated line survive, with a repeat count in place of
-            # the other copies - nothing distinct is discarded.
+            # record with genuinely distinct lines (one header plus a few
+            # different traceback frames) has no run to collapse and passes
+            # through unchanged; only a run of _MIN_RUN_TO_COLLAPSE+
+            # near-duplicate CONSECUTIVE lines folds, and the header plus one
+            # real instance of every repeated line still survive.
             out.extend(_collapse_line_runs(rec["lines"]))
             i += 1
             continue
@@ -351,37 +257,23 @@ def _drop_content_records(
     A content-marker match on a record's OWN header is not sufficient by
     itself. debuglog.py's writer is a stock logging.FileHandler with no
     boundary marker between records, so parse_records has no way to know a
-    multi-line debug_content_enabled() write's true extent. If the model's
-    OWN reply text contains a line shaped like localm's own log header
-    ("TIMESTAMP LEVEL name: message" - trivially produced by a coding
-    assistant quoting or discussing a real log line, or by adversarial text
-    injected through an untrusted web page a job tool fetched, LM-DA-014),
-    parse_records incorrectly starts a NEW record right there. That
-    fragment's own header is then attacker/model-controlled text matching
-    none of _CONTENT_MARKER_RES, so checking only each record's own header
-    lets it straight through - reproduced live: a "raw model output:" record
-    whose reply quotes one realistic-looking log line lets everything after
-    that quoted line survive untouched, chat content included.
+    multi-line debug_content_enabled() write's true extent: if the model's
+    OWN reply text contains a line shaped like localm's log header
+    ("TIMESTAMP LEVEL name: message"), parse_records starts a NEW record right
+    there, and that fragment's header matches none of _CONTENT_MARKER_RES.
 
     So once a content marker fires, every record after it is ALSO dropped -
-    regardless of its own claimed level, since a level marker in that window
-    is exactly as forgeable as any other line - until a run of
-    _MIN_RUN_TO_COLLAPSE (3) CONSECUTIVE, mutually near-duplicate (matching
-    record_template()) records appears. Real operational traffic (routine
-    polling) reliably produces such a run within moments of resuming, so the
-    digest stays useful past the immediate vicinity of a content write;
-    free-form content producing 3 back-to-back near-duplicates immediately
-    after the marker, with nothing else in between, is the residual, accepted
-    risk (same shape as the 137-vs-139 masking trade-off documented in
-    record_template - the fix for a narrower window is widening
-    _CONTENT_MARKER_RES or the resync run length, not weakening this).
+    regardless of its own claimed level, which is as forgeable as any other
+    line - until a run of _MIN_RUN_TO_COLLAPSE (3) CONSECUTIVE, mutually
+    near-duplicate (matching record_template()) records appears. Content
+    producing 3 back-to-back near-duplicates immediately after the marker,
+    with nothing else in between, is the residual, accepted risk; the fix for
+    a narrower window is widening _CONTENT_MARKER_RES or the resync run
+    length.
 
-    *start_tainted* applies the SAME distrust to the very first record:
-    bugreport.py's _recent_log_tail truncates a huge log file to its last
-    _LOG_TAIL_READ_BYTES, so the truncated text can start mid-way through a
-    content write with no header at all (parse_records' "starts mid-record"
-    branch gives it level==""). Without this, that severed fragment would be
-    trusted immediately, the same gap via a different door.
+    *start_tainted* applies the SAME distrust to the very first record, for
+    text that may itself start mid-way through a content write with no header
+    at all (parse_records' "starts mid-record" branch gives it level=="").
 
     Returns (kept, count_dropped)."""
     kept: List[LogRecord] = []
@@ -415,9 +307,9 @@ def _drop_content_records(
 
 
 def _content_withheld_notice(n: int) -> str:
-    """Placed FIRST when present (same defensive placement as the "N errors
-    omitted" notice below) so it survives the blunt front-anchored truncation
-    build_report applies on top of this digest (bugreport.py's [:4000] slice)."""
+    """The "N debug record(s) withheld" disclosure. Placed FIRST when present, so
+    it survives the front-anchored truncation build_report applies on top of this
+    digest."""
     return (f"... ({n} debug record(s) withheld - chat content is never "
             "included in a bug report) ...")
 
@@ -448,8 +340,7 @@ def build_digest(text: str, *, max_chars: int = 6000, start_tainted: bool = Fals
         return ""
 
 
-# Marker for an error kept only in part (see _fit_budget). The reader must never
-# mistake a cut-down trace for a complete one and diagnose from it as if it were.
+# Marker for an error kept only in part (see _fit_budget).
 _TRUNCATED_MARK = ("... (this error was truncated for space - its start is in "
                    "the full log file) ...\n")
 # Below this much room for actual error text, a tail is too small to be worth
@@ -466,10 +357,7 @@ def _fit_budget(records: List[LogRecord], max_chars: int, *,
     errors were omitted.
 
     The most recent error is kept even when it ALONE exceeds the budget, cut down
-    to its tail and marked as truncated. Dropping it whole (keeping only blocks
-    that fit entire) returned a digest of just the "N omitted" notice - a bug
-    report with no error in it at all, for exactly the giant native-crash
-    traceback this digest exists to carry (REG-619).
+    to its tail and marked as truncated.
 
     *content_notice*, when non-empty, is the "N debug record(s) withheld"
     disclosure from build_digest - already-dropped content records never
@@ -512,13 +400,9 @@ def _fit_budget(records: List[LogRecord], max_chars: int, *,
             used += len(block) + 1
             continue
         if not kept_blocks and room > len(_TRUNCATED_MARK) + _MIN_ERROR_TAIL:
-            # This is the MOST RECENT error and it does not fit whole. Dropping it
-            # (what the loop used to do with anything oversized) leaves the digest
-            # with nothing but the "N omitted" notice and ZERO bytes of the actual
-            # crash - strictly worse than the _recent_log_tail this replaced, which
-            # always returned the last max_chars. Keep its TAIL: a traceback's
-            # innermost exception type+message, the one line that names the
-            # failure, is at the END (REG-619).
+            # This is the MOST RECENT error and it does not fit whole. Keep its
+            # TAIL: a traceback's innermost exception type+message, the one line
+            # that names the failure, is at the END.
             tail = block[-(room - len(_TRUNCATED_MARK)):]
             kept_blocks.append(_TRUNCATED_MARK + tail)
             used += len(_TRUNCATED_MARK) + len(tail) + 1

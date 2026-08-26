@@ -43,7 +43,7 @@ def test_classifies_ci_config():
 def test_plain_source_is_not_flagged():
     flags = classify_sensitive_changes(_cf(
         "src/main.py", "lib/helpers.py", "docs/guide.md", "pyproject.toml"))
-    assert flags == {"tests": [], "ci_config": []}     # incl. pyproject (deliberate)
+    assert flags == {"tests": [], "ci_config": []}     # incl. pyproject
 
 
 def test_windows_paths_are_normalised():

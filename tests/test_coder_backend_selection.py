@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0013 / ADR-0014 stage 1: a GUI coder session can choose WHICH model
-server answers it, the way the terminal always could (--online / --anthropic /
---url).
+"""A GUI coder session can choose WHICH model server answers it, the way the
+terminal always could (--online / --anthropic / --url).
 
 Choosing a non-local model is a TRUST BOUNDARY change, not a wiring change: the
 user's prompts and whatever file contents the agent reads leave the machine. So
@@ -51,13 +50,11 @@ def test_privacy_refuses_off_machine_every_other_mode_allows_it():
 
 
 def test_refusal_names_the_setting_that_enables_it():
-    """A refusal that does not say what to change is a dead end. Memory's own
-    plug records that unifying this wording across its five call sites was a
-    deliberate fix, so this one is held to the same bar."""
+    """A refusal that does not say what to change is a dead end. One wording is
+    used across every call site, so this holds it to the same bar."""
     msg = remotegate.refusal_message("Off-machine models")
-    # The WHOLE sentence, not fragments of it. A fragment assertion passed
-    # happily on "Off-machine models is off in privacy mode", which is what
-    # actually reached a running server the first time; the message is
+    # The WHOLE sentence, not fragments of it. A fragment assertion passes
+    # happily on "Off-machine models is off in privacy mode"; the message is
     # user-facing prose, so the test has to read it as prose.
     assert msg == (
         "Off-machine models are off in privacy mode (nothing leaves this "
@@ -149,12 +146,10 @@ def test_privacy_still_allows_a_loopback_url():
     """Ollama / LM Studio on this machine are LOCAL, so privacy mode must allow
     them: this is the single most likely use of the field.
 
-    DELIBERATELY RUNS THE REAL netpolicy - no monkeypatch. The first version of
-    this test neutralised it and passed while a live server refused the exact
-    same request, because check_url's public-address arm blocks loopback by
-    default. A fixture that removes the guard cannot fail on the guard being
-    miscalibrated, which is the whole defect. If this test ever needs netpolicy
-    stubbed out to pass, the calibration has regressed."""
+    RUNS THE REAL netpolicy - no monkeypatch. check_url's public-address arm
+    blocks loopback by default, and a fixture that removes the guard cannot fail
+    on the guard being miscalibrated, which is the whole defect. If this test
+    ever needs netpolicy stubbed out to pass, the calibration has regressed."""
     backend, info, notes = _resolve(
         _req(backend="url", backend_url="http://127.0.0.1:11434/v1",
              backend_model="qwen"),
@@ -243,10 +238,9 @@ def test_netpolicy_gates_even_the_fixed_provider_bases(monkeypatch):
 
 
 def test_a_gui_supplied_url_reaches_the_ssrf_guard(monkeypatch):
-    """The reason ADR-0013 called this a blocker: this backend posts with
-    requests.post directly, so before a base URL could arrive from a web form
-    nothing was checking it against link-local metadata addresses, internal
-    hosts or private ranges."""
+    """This backend posts with requests.post directly, so a base URL arriving
+    from a web form must still be checked against link-local metadata addresses,
+    internal hosts and private ranges."""
     seen = []
     import localm.netpolicy as np
     monkeypatch.setattr(np, "check_url", lambda url: seen.append(url))
@@ -260,8 +254,8 @@ def test_a_gui_supplied_url_reaches_the_ssrf_guard(monkeypatch):
 # --------------------------------------------------------------------------- #
 # The unit tests above cannot see the ARRANGEMENT: whether create_session calls
 # the resolver at all, whether it passes the session's own resolved mode, and
-# whether the descriptor reaches the client. Extracting a helper moves the tests
-# away from the site the bug lives at, so at least one test stays at that site.
+# whether the descriptor reaches the client, so at least one test stays at that
+# site.
 
 def _coder_app(tmp_path, monkeypatch, *, api_key="ownersecret"):
     home = tmp_path / ".localm"
@@ -350,9 +344,9 @@ def test_route_default_session_is_unchanged_and_local(tmp_path, monkeypatch):
 
 
 def test_an_on_machine_url_is_not_put_through_the_destination_policy(monkeypatch):
-    """The bug this pins: check_url's public-address arm refuses loopback, so
-    applying the DESTINATION policy to a local model server broke the feature's
-    main use case. Destination policy is for destinations that leave."""
+    """check_url's public-address arm refuses loopback, so applying the
+    DESTINATION policy to a local model server breaks the feature's main use
+    case. Destination policy is for destinations that leave."""
     called = []
     import localm.netpolicy as np
     monkeypatch.setattr(np, "check_url", lambda url: called.append(url))

@@ -111,14 +111,15 @@ class TestPatchModeIntercept:
         assert "+x = 2" in diff
 
     def test_edit_file_wrong_keys_produce_no_diff(self, tmp_path):
-        """Verify the old bug is gone: 'old_string'/'new_string' no longer used."""
+        """'old_string'/'new_string' are not the keys read, so they yield empty
+        strings and no diff."""
         agent = _make_agent(tmp_path)
         agent.patch_mode = True
 
         f = tmp_path / "code.py"
         f.write_text("x = 1\n")
 
-        # Using the OLD (wrong) keys - should find empty strings, produce empty diff
+        # The wrong arg keys: they find empty strings and produce an empty diff
         call = _make_call("edit_file", path="code.py", old_string="x = 1", new_string="x = 2")
         diff = agent._patch_mode_intercept(call)
         # old="" and new="" → replace("", "", 1) → no change → no diff lines
@@ -134,7 +135,8 @@ class TestPatchModeIntercept:
         assert result == raw_diff
 
     def test_patch_file_old_key_patch_returns_none(self, tmp_path):
-        """Verify old bug is gone: 'patch' key is no longer used."""
+        """A 'patch' key is not read: with no 'diff' key the intercept returns
+        None."""
         agent = _make_agent(tmp_path)
         agent.patch_mode = True
 
@@ -179,8 +181,8 @@ class TestConfirmToolArgKeys:
 
         call = _make_call("patch_file", path="f.py", diff=raw_diff)
 
-        # _confirm_tool imports console locally as `from .display import console as _con`
-        # so we must patch it at the display module level
+        # _confirm_tool imports console from .display at call time, so patch it
+        # at the display module level.
         with patch("localm.plugins.coder.display.console") as mock_con, \
              patch("localm.plugins.coder.agent.confirm_diff", return_value=True):
             agent._confirm_tool(call)

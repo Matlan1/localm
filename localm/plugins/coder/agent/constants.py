@@ -8,63 +8,50 @@ from __future__ import annotations
 
 # Tools that mutate files - trigger a project map refresh after they run
 # (execution.py's _refresh_map_for_tool, the only consumer of this set).
+# search_replace is included, but its paths come from ToolResult.changes
+# (post-call, its own dry_run-driven sweep), not from set membership alone -
+# see _refresh_map_for_tool's *result* param.
 #
-# patch_file and edit_notebook_cell were missing here despite having a real
-# `path` arg _call_target_paths() already resolves correctly (proven by their
-# _UNDOABLE_TOOLS membership, which depends on the same resolution) - a
-# pre-existing staleness gap unrelated to search_replace, found auditing this
-# set for the same root cause. search_replace is included too, but its paths
-# come from ToolResult.changes (post-call, its own dry_run-driven sweep), not
-# from this set membership alone - see _refresh_map_for_tool's *result* param.
-#
-# run_shell has no `path`-shaped arg at all (a `command` string only), so
-# _call_target_paths() always returns [] for it - a per-file refresh_file()
-# call ahead of time is not possible, unlike every other tool in this set.
-# _refresh_map_for_tool special-cases it instead: mark the whole map dirty
-# (ProjectMap.mark_dirty) and let the next read reconcile it against the
-# filesystem with a bounded stat-diff (ProjectMap._rescan_if_dirty, triggered
-# from context._build_messages once per turn). No git and no subprocess, so
-# the blocking-subprocess-on-the-event-loop risk that deferred the OTHER
-# git-diff-based detection elsewhere (persistence._detect_shell_changes,
-# wired only to episodic close-time reflection) does not apply to this path.
+# run_shell has no path-shaped arg at all (a `command` string only), so
+# _call_target_paths() returns [] for it and no per-file refresh_file() call
+# ahead of time is possible. _refresh_map_for_tool special-cases it: mark the
+# whole map dirty (ProjectMap.mark_dirty) and let the next read reconcile it
+# against the filesystem with a bounded stat-diff (ProjectMap._rescan_if_dirty,
+# triggered from context._build_messages once per turn). No git and no
+# subprocess on this path.
 _MUTATING_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "edit_files", "run_shell",
     "patch_file", "edit_notebook_cell", "search_replace",
 })
 
-# Tools whose file changes can be undone via a PRE-call snapshot (we read the
-# target path(s) from the call args and snapshot their bytes before the tool
-# runs). These are also the tools whose pre-call snapshot feeds the
-# changed-files tracker.
+# Tools whose file changes can be undone via a PRE-call snapshot: the target
+# path(s) are read from the call args and their bytes snapshotted before the
+# tool runs. That same pre-call snapshot feeds the changed-files tracker.
 #
-# search_replace is DELIBERATELY NOT here: its targets are a glob + regex
-# sweep discovered only by actually running it, so there is no `path` arg (or
-# _NESTED_PATH_TOOLS entry) to snapshot ahead of time - _call_target_paths()
-# would return []. It is still undoable and tracked, via a SEPARATE, post-call
-# path (ToolResult.changes, populated by the tool itself once it knows which
-# files it touched) - see _PATCH_MODE_ELIGIBLE_TOOLS, _patch_mode_intercept,
-# and _post_tool_success's search_replace branch. Adding it here instead would
-# route it through the pre-call snapshot AND the single-file patch-mode diff
-# path, which cannot express a multi-file regex sweep and would silently
-# break it rather than fix it.
+# search_replace is NOT here: its targets are a glob + regex sweep discovered
+# only by running it, so there is no `path` arg (or _NESTED_PATH_TOOLS entry) to
+# snapshot ahead of time and _call_target_paths() returns []. It is undoable and
+# tracked through a separate, post-call path (ToolResult.changes, populated by
+# the tool once it knows which files it touched) - see
+# _PATCH_MODE_ELIGIBLE_TOOLS, _patch_mode_intercept, and _post_tool_success's
+# search_replace branch.
 _UNDOABLE_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "edit_files", "patch_file", "edit_notebook_cell",
 })
 
 # Tools patch mode intercepts (capture a diff, never touch disk). Superset of
-# _UNDOABLE_TOOLS: search_replace is patch-mode-eligible via its own dry_run
-# rather than the pre-call snapshot path (see _UNDOABLE_TOOLS's comment).
+# _UNDOABLE_TOOLS: search_replace is patch-mode-eligible via its own dry_run,
+# not via the pre-call snapshot path.
 _PATCH_MODE_ELIGIBLE_TOOLS: frozenset[str] = _UNDOABLE_TOOLS | frozenset({
     "search_replace",
 })
 
-# Tools whose target paths are NESTED inside a collection arg rather than sitting
-# in a top-level `path` arg. Maps tool name -> (collection arg, key within each
-# item). Every path-consuming site (scope check, undo snapshot, changed-file
-# tracker, map refresh) resolves paths through _call_target_paths(), so a tool
-# listed here is confined and tracked exactly like a single-path one. Without
-# this, a nested-path tool passes the scope check by having no `path` arg at all
-# - a silent fail-OPEN, which is why the resolution lives in one shared helper.
+# Tools whose target paths are NESTED inside a collection arg instead of a
+# top-level `path` arg. Maps tool name -> (collection arg, key within each item).
+# Every path-consuming site (scope check, undo snapshot, changed-file tracker,
+# map refresh) resolves paths through _call_target_paths(), so a tool listed here
+# is confined and tracked exactly like a single-path one. A nested-path tool left
+# out of this map passes the scope check by having no `path` arg at all.
 _NESTED_PATH_TOOLS: dict[str, tuple[str, str]] = {
     "edit_files": ("edits", "path"),
 }
@@ -100,32 +87,26 @@ def _call_target_paths(tool_name: str, args: dict) -> list[str]:
 _SCOPED_TOOLS: frozenset[str] = frozenset({
     "read_file", "write_file", "edit_file", "edit_files", "patch_file",
     "list_dir", "tree",
-    # FAC-8: the rest of the file-reading/writing tools.
+    # The rest of the file-reading/writing tools.
     "grep", "search_files", "search_replace", "read_env",
     "edit_notebook_cell", "generate_image",
 })
 
-# Tools deliberately NOT confined by the scope glob: git_diff / git_log take a git
+# Tools NOT confined by the scope glob: git_diff / git_log take a git
 # PATHSPEC (not a filesystem path), and run_tests / run_shell / the background-shell
-# trio EXECUTE a process (a path-arg check cannot confine arbitrary code). Any OTHER
-# registry tool with a path-like arg MUST be in _SCOPED_TOOLS above; the contract test
-# test_coder_scope_default_deny enforces this, so a new file tool is a test failure,
-# not "unconfined by omission" (AUD-CODERTOOLS: default-deny at authoring time, not
-# reliant on a human remembering).
+# trio EXECUTE a process, which a path-arg check cannot confine. Any OTHER registry
+# tool with a path-like arg MUST be in _SCOPED_TOOLS above; a contract test enforces
+# that, so a new file tool is a test failure rather than unconfined by omission.
 _INTENTIONALLY_UNSCOPED: frozenset[str] = frozenset({
     "run_shell", "run_tests", "git_diff", "git_log",
     "run_shell_background", "check_shell_job", "kill_shell_job",
 })
 
-# The subset of _INTENTIONALLY_UNSCOPED that EXECUTES a process, and so is the
-# part a user who set --scope can be genuinely misled by: git_diff / git_log only
-# read. The trade-off itself is deliberate and stays (a path-arg check cannot
-# confine arbitrary code), but it used to be documented ONLY here, in the source -
-# a user running under --scope had no runtime signal at all that their shell was
-# unconfined. These tools get a one-per-session notice plus a best-effort argv
-# path check (see _ExecutionMixin._warn_shell_outside_scope). Warn, never block.
-# run_shell_background belongs here for exactly the same reason as run_shell: it
-# runs the user's command line, it just does not wait for it.
+# The subset of _INTENTIONALLY_UNSCOPED that EXECUTES a process: git_diff and
+# git_log only read. These tools get a one-per-session notice plus a best-effort
+# argv path check (see _ExecutionMixin._warn_shell_outside_scope). Warn, never
+# block. run_shell_background is here for the same reason as run_shell: it runs
+# the user's command line, it just does not wait for it.
 _SHELL_UNSCOPED_TOOLS: frozenset[str] = frozenset({
     "run_shell", "run_tests", "run_shell_background",
 })
@@ -141,50 +122,36 @@ _SHELL_COMMAND_ARGS: dict[str, tuple[str, ...]] = {
 }
 
 # Which of the args above the tool's own schema DECLARES to be a path, as opposed
-# to a free-form command line. A declared path needs no path-likeness heuristic
-# at all (it IS a path by contract) and is checked whole rather than tokenised,
-# since a path may legitimately contain spaces. Everything else is a command line
-# whose tokens are ambiguous, and _shell_paths_outside_scope classifies those by
-# syntax alone - it may never ask the filesystem which of them exists.
+# to a free-form command line. A declared path is checked whole, not tokenised,
+# since a path may contain spaces. Everything else is a command line
+# whose tokens _shell_paths_outside_scope classifies by syntax alone - it may
+# never ask the filesystem which of them exists.
 _SHELL_DECLARED_PATH_ARGS: dict[str, tuple[str, ...]] = {"run_tests": ("path",)}
 
 # How many out-of-scope paths one warning names before it says "and N more".
 _MAX_SHELL_SCOPE_FLAGS = 3
 
-# NOTE: the command-line grammar tables that used to live here
-# (_SHELL_SEPARATORS / _SHELL_SUBCOMMAND_RUNNERS / _SHELL_NESTED_RUNNER_WORDS /
-# _SHELL_PATH_VALUE_FLAGS / _SHELL_TRANSPARENT_PREFIXES) existed for one purpose:
-# to stop the exists-under-cwd filesystem probe in _shell_paths_outside_scope
-# from reading "npm test" or "make docs" as paths. That probe is gone (it stat-ed
-# whatever a model-supplied token named, anywhere on the machine), so tracking
-# the program word, runners, and path-valued flags no longer decides anything.
-# Removed rather than left dead.
-
 # Tools that execute an arbitrary user command, blocking or in the background.
-# They are the same capability (RCE) and so must be gated identically everywhere:
-# privacy-env injection, the episodic git baseline, and the CLI confirmation gates.
-# A background variant that any of those forgets is a bypass of that gate, not a
-# missing nicety.
+# They are the same capability (RCE) and are gated identically everywhere:
+# privacy-env injection, the episodic git baseline, and the CLI confirmation
+# gates.
 _SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"run_shell", "run_shell_background"})
 
 # The background job-control tools. Useless without a way to start a job, so they
 # follow the shell-exec family wherever it is disabled.
 _SHELL_JOB_TOOLS: frozenset[str] = frozenset({"check_shell_job", "kill_shell_job"})
 
-# The delegation family, exactly parallel to the shell one above and for the same
-# reason: spawning a sub-agent grants a child unbounded write+shell in this cwd,
-# and the background variant is that same capability minus the wait. A caller that
-# disables spawn_agent (the restricted/shareable-key path does) must not be left
-# with spawn_agent_background still enabled - that would be an RCE escape by a
-# tool added after the caller was written, which is the precise hole the shell
-# family closes on its side.
+# The delegation family, parallel to the shell one above: spawning a sub-agent
+# grants a child unbounded write+shell in this cwd, and the background variant is
+# that same capability minus the wait. A caller that disables spawn_agent (the
+# restricted/shareable-key path does) must not be left with
+# spawn_agent_background enabled.
 #
-# A SEPARATE set, deliberately not merged into _SHELL_EXEC_TOOLS: the helper keys
-# on set intersection, so one combined family would mean disabling spawn_agent
-# also disabled run_shell (and vice versa) - welding two unrelated capabilities
-# together.
+# A SEPARATE set, not merged into _SHELL_EXEC_TOOLS: the helper keys on set
+# intersection, so one combined family would mean disabling spawn_agent also
+# disabled run_shell, and vice versa.
 # dispatch_parallel belongs here too: it spawns children with the same inherited
-# write+shell reach, so a caller that switched delegation off must not keep it.
+# write+shell reach.
 _AGENT_EXEC_TOOLS: frozenset[str] = frozenset(
     {"spawn_agent", "spawn_agent_background", "dispatch_parallel"})
 
@@ -193,14 +160,11 @@ _AGENT_EXEC_TOOLS: frozenset[str] = frozenset(
 _AGENT_JOB_TOOLS: frozenset[str] = frozenset({"check_agent_job"})
 
 # Tools that are handed the running Agent as a hidden ``_parent_agent`` argument
-# by the dispatcher. Every one of them GUARDS on it and returns an error when it
+# by the dispatcher. Every one of them guards on it and returns an error when it
 # is None, so a tool MISSING from this set is not degraded, it is dead: still
 # advertised in every system prompt, still confirmed by the user, and failing on
-# 100% of real calls. dispatch_parallel shipped exactly that way through two PRs
-# (#794 registered it without touching the set; #796 edited the set itself to add
-# spawn_agent_background and still did not add it), because every test called the
-# tool function directly instead of going through Agent._execute_tool. A named
-# set plus the registry-wide dispatch test is what keeps it from drifting again.
+# every real call. A named set plus the registry-wide dispatch test keeps it in
+# step with the registry.
 _PARENT_AGENT_TOOLS: frozenset[str] = frozenset(
     {"spawn_agent", "spawn_agent_background", "dispatch_parallel"})
 
@@ -209,23 +173,18 @@ def expand_shell_disable(disabled: frozenset) -> frozenset:
     """Disabling any tool in a capability family disables the whole family.
 
     A caller that passes ``{"run_shell"}`` means "this session must not execute
-    arbitrary commands" (that is exactly how the shareable-key path uses it).
-    Honouring that literally, tool-name by tool-name, would leave
-    ``run_shell_background`` - the same capability minus the wait - enabled, so
-    the safety choice would be silently defeated by a tool added after the
-    caller was written. Expand the intent instead.
+    arbitrary commands" (that is how the shareable-key path uses it). Honouring
+    that tool-name by tool-name would leave ``run_shell_background`` - the same
+    capability minus the wait - enabled.
 
     Two families, expanded INDEPENDENTLY: shell execution, and sub-agent
-    delegation. Keeping them separate matters - a single merged family would make
-    disabling ``spawn_agent`` also disable ``run_shell``, silently removing a
-    capability the caller never asked to lose.
+    delegation. A single merged family would make disabling ``spawn_agent`` also
+    disable ``run_shell``, removing a capability the caller never asked to lose.
 
-    Applied at BOTH boundaries that consume a disabled set: the Agent (which
-    hard-refuses at dispatch) and the prompt builders (which decide what the
-    model is told exists). Applying it in only one leaves the other advertising
-    or accepting a tool the caller meant to switch off. (The name is historical -
-    it predates the second family - but every consuming site already calls it, so
-    extending it here is what keeps both boundaries covered for free.)
+    MUST be applied at BOTH boundaries that consume a disabled set: the Agent
+    (which hard-refuses at dispatch) and the prompt builders (which decide what
+    the model is told exists). Applying it in only one leaves the other
+    advertising or accepting a tool the caller meant to switch off.
     """
     out = frozenset(disabled)
     if out & _SHELL_EXEC_TOOLS:
@@ -246,12 +205,10 @@ _SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
 
 # MCP (mcp_<server>_<tool>) and plugin (plugin_<plugin>_<export>) tools register
 # dynamically with unknown arg schemas, so they are not in _SCOPED_TOOLS /
-# _SCOPE_PATH_ARGS (the default-deny test cannot see them). When a scope is active
-# we still apply it to their common path-like args (CHK-MCP-SCOPE + CHK-SCOPE-PLUGIN,
-# defense-in-depth); best-effort, so an unusual path-arg name is not caught (its
-# author is the owner's own MCP / plugin config). Restricted, shareable keys cannot
-# reach either family at all (both disabled for a restricted session), so this only
-# tightens an owner's own --scope, never a cross-trust boundary.
+# _SCOPE_PATH_ARGS. When a scope is active it is still applied to their common
+# path-like args, best-effort, so an unusual path-arg name is not caught.
+# Restricted, shareable keys cannot reach either family at all (both are disabled
+# for a restricted session), so this only tightens an owner's own --scope.
 _MCP_SCOPE_PATH_ARGS: tuple[str, ...] = (
     "path", "file", "filename", "filepath", "file_path", "source", "source_path",
     "src", "target", "target_path", "dest", "destination", "dir", "directory",
@@ -268,9 +225,7 @@ _TODO_TOOLS: frozenset[str] = frozenset({"set_todos", "read_todos"})
 
 # Skill tools that write THIS session's active-skill state (skills.py), and so
 # are handed the Agent as the same hidden `_session` arg. Separate from
-# _TODO_TOOLS rather than merged into it: they are injected identically but for
-# unrelated reasons, and a single merged set would make the next reader think
-# use_skill touches the task list.
+# _TODO_TOOLS: injected identically, but they touch unrelated state.
 _SKILL_STATE_TOOLS: frozenset[str] = frozenset({"use_skill"})
 
 # Fraction of estimated context window at which compaction is triggered
@@ -281,36 +236,28 @@ _COMPACT_AUTO_RATIO  = 0.90   # silently compact in non-interactive mode
 _DEFAULT_CTX_TOKENS  = 4096   # fallback when n_ctx is unknown
 
 # Re-prompt count when a response looks like a tool call but cannot be parsed.
-# After this the raw attempt is SURFACED, never silently finalised as a hidden
-# <tool_call> block (which rendered as an empty bubble + no file written).
+# After this the raw attempt is SURFACED, never finalised as a hidden
+# <tool_call> block.
 _MAX_TOOL_REPAIRS = 2
 
 # Abort after this many tool calls fail in a row across ANY tools. The per-tool
-# breaker only catches N IDENTICAL failures; a weak model can spin on VARIED failing
-# calls (e.g. git_show with invented hashes) and burn the budget. Any success resets.
+# breaker only catches N IDENTICAL failures, so this one catches a spin on VARIED
+# failing calls. Any success resets it.
 _GLOBAL_ERROR_ABORT = 6
 
-# --- zero-tool-call escalation (NEW-CODER-NO-TOOLCALL-SILENT) ---------------
+# --- zero-tool-call escalation ---------------------------------------------
 #
-# A model that emits NO tool call at all used to be accepted as a finished
-# answer, turn after turn: every gate in _handle_no_tool_calls was reached only
-# via looks_like_tool_attempt(), so the MALFORMED case (the model nearly
-# succeeding) was handled and the ZERO-attempt case (total failure) fell
-# straight through. Live: a request to create files produced 6 turns, 0 tool
-# calls, and a final "I don't have the capability to create files".
-#
-# The ladder below escalates instead of accepting. Rung 1 is the same format
-# re-prompt the malformed case already gets, triggered by ABSENCE. Rung 2
-# re-runs the turn with the tool-call grammar engaged from the first token, so
-# the sampler cannot emit anything but a valid call. Only after forcing has
-# actually failed is the user told - as a report of failed enforcement, never
-# as a suggestion to choose a different model.
+# The ladder for a turn that emits NO tool call at all. Rung 1 is the same format
+# re-prompt the malformed case gets, triggered by ABSENCE. Rung 2 re-runs the
+# turn with the tool-call grammar engaged from the first token, so the sampler
+# cannot emit anything but a valid call. Only after forcing has failed is the
+# user told, as a report of failed enforcement, never as a suggestion to choose
+# a different model.
 _MAX_NOCALL_ESCALATIONS = 2
 
-# Imperative verbs that make a request an ACTION rather than a question. Read
-# verbs are deliberately included: "show me what is in config.py" needs
-# read_file just as much as "write config.py" needs write_file, and a model
-# answering either from imagination is the same failure.
+# Imperative verbs that make a request an ACTION instead of a question. Read
+# verbs are included: "show me what is in config.py" needs read_file just as
+# "write config.py" needs write_file.
 _ACTION_VERBS: frozenset[str] = frozenset({
     "add", "adjust", "append", "apply", "build", "bump", "change", "check",
     "clean", "clear", "commit", "compile", "convert", "copy", "correct",
@@ -325,10 +272,9 @@ _ACTION_VERBS: frozenset[str] = frozenset({
     "update", "upgrade", "verify", "write",
 })
 
-# Signals that a request is about THIS project rather than programming in the
-# abstract: an explicit path, a file extension, or a workspace noun. Either a
-# verb OR one of these is enough - see implies_action()'s docstring for why the
-# bar is deliberately low.
+# Signals that a request is about THIS project, not programming in the abstract:
+# an explicit path, a file extension, or a workspace noun. Either a verb OR one of
+# these is enough - see implies_action().
 _WORKSPACE_HINT = (
     r"(?:[\w./\\-]+\.[A-Za-z0-9]{1,6}\b"          # something.ext
     r"|[~./\\][\w./\\-]+"                          # a path-looking token
@@ -337,31 +283,23 @@ _WORKSPACE_HINT = (
     r"|readme|config|source|sources)\b)"
 )
 
-# Two finals this similar (difflib ratio) mean the model is restating itself
-# rather than progressing. Replaces an EXACT, CONSECUTIVE-ONLY fingerprint that
-# the measured near-duplicates (0.91 / 0.75 / 0.72 similar) never tripped: any
-# one-character difference reset that counter to zero, so a model rephrasing
-# the same refusal each turn looked like progress forever.
+# Two finals at least this similar (difflib ratio) count as the model restating
+# itself instead of progressing.
 _REPEAT_SIMILARITY = 0.85
 
 # How many earlier finals a turn is compared against. Bounded so a long session
-# cannot make this quadratic; the newest are kept because a stuck loop repeats
-# what it just said, not what it said an hour ago.
+# cannot make this quadratic; the newest are kept.
 _REPEAT_HISTORY_MAX = 12
 
-# Abort when the model emits the SAME response this many times in a row (the
-# "Message 1..4 / I will now wait" scaffold-repetition: narrates without progress).
-# Catches identical NON-failing repetition, which the error-streak breakers (FAILED
-# calls) and the repair path (malformed call) miss. Kept above the error/repair
-# thresholds so those more-specific guards fire first for a broken loop; this is the
-# last-resort catch for a succeeding-but-pointless one (REC-CODER-LOOPBREAK).
+# Abort when the model emits essentially the SAME response this many times in a
+# row. Catches non-failing repetition, which the error-streak breakers (FAILED
+# calls) and the repair path (malformed call) miss. Kept above the error and
+# repair thresholds so those more-specific guards fire first.
 _REPEAT_RESPONSE_ABORT = 5
 
 # Max entries kept in the per-session tool/command failure trace that feeds the
-# close-time episode reflection (audit cluster 13: reflection was evidence-starved,
-# so failure lessons could not be captured). Bounded so a long spin-loop cannot grow
-# it without limit; the NEWEST failures are kept (they include the ones that tripped
-# the circuit breakers / ended the run incomplete).
+# close-time episode reflection. Bounded so a long spin-loop cannot grow it
+# without limit; the NEWEST failures are kept.
 _MAX_ERROR_TRACE = 20
 
 # Code file extensions that should be verified (tests / syntax) after writes

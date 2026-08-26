@@ -3,12 +3,11 @@
 clean '[inference error: ...]' chunk, NOT crash the daemon generation thread
 (which fires a crash report and looks to the user like an empty reply).
 
-Regression guard for R16: the n_ctx-overflow RuntimeError (a conversation that
-outgrew the context window) used to kill the /v1/completions generation thread -
-its _generate() had a try/finally with no except, so the exception escaped the
-thread. The chat path caught it but then called traceback.print_exc(), which was
-the historical WinError-6 console crash source on Windows. Both paths must now
-surface the error to the client and keep the server alive.
+The n_ctx-overflow RuntimeError (a conversation that outgrew the context window)
+is the case this guards: /v1/completions' _generate() has a try/finally with no
+except, so the exception escapes the thread, and the chat path's own catch called
+traceback.print_exc(), the WinError-6 console crash source on Windows. Both paths
+must surface the error to the client and keep the server alive.
 """
 
 from unittest.mock import MagicMock
@@ -57,8 +56,7 @@ def test_chat_completions_surfaces_inference_error():
 
 
 def test_raw_completions_surfaces_inference_error():
-    # The /v1/completions streaming path had NO except: pre-fix the error was lost
-    # (silent empty reply + a crashed daemon thread). It must now surface it too.
+    # The /v1/completions streaming path surfaces the error too.
     engine = _raising_engine()
     with TestClient(create_app(engine)) as client:
         r = client.post("/v1/completions", json={
@@ -84,10 +82,9 @@ def test_server_survives_error_and_serves_next_request():
 
 
 # --------------------------------------------------------------------------- #
-# Honesty: surfacing the error text is necessary but NOT sufficient - the
-# TERMINAL frame's finish_reason must also say "error", not "stop". A
-# programmatic client keys off finish_reason and would otherwise treat the
-# (visible) error chunk as a successful completion.
+# The TERMINAL frame's finish_reason says "error", not "stop": a programmatic
+# client keys off finish_reason and would otherwise treat the visible error
+# chunk as a successful completion.
 # --------------------------------------------------------------------------- #
 
 import json   # noqa: E402
@@ -134,9 +131,8 @@ def _yielding_engine(tokens=("hel", "lo"), reason="stop"):
 
 
 def test_chat_stream_error_marks_finish_reason_error():
-    # last_finish_reason is "stop" so a passing test proves the HTTP layer sets
-    # "error" from gen_error, not merely echoing whatever the engine happened to
-    # leave behind after the exception.
+    # last_finish_reason is "stop", so a pass proves the HTTP layer sets "error"
+    # from gen_error rather than echoing what the engine left behind.
     engine = _raising_engine()
     engine.last_finish_reason = "stop"
     with TestClient(create_app(engine)) as client:
@@ -161,8 +157,8 @@ def test_completions_stream_error_marks_finish_reason_error():
 
 
 def test_chat_stream_success_keeps_stop():
-    # The happy path must still report "stop" - the error override must not leak
-    # into a clean generation.
+    # The happy path still reports "stop": the error override does not leak into
+    # a clean generation.
     engine = _yielding_engine(reason="stop")
     with TestClient(create_app(engine)) as client:
         r = client.post("/v1/chat/completions", json={
@@ -187,11 +183,9 @@ def test_completions_stream_success_keeps_stop():
 
 
 # --------------------------------------------------------------------------- #
-# The NON-STREAMING path (_generate_full) had a try/finally with NO except, so a
-# generation failure (e.g. not enough free VRAM for the prompt) escaped as a raw
-# HTTP 500 "Internal server error" instead of the clean surfacing the streaming
-# path already does. It must now match: 200, the error as content, finish_reason
-# "error".
+# The NON-STREAMING path (_generate_full): a generation failure surfaces as
+# 200, the error as content, and finish_reason "error", matching the streaming
+# path rather than raising a raw HTTP 500.
 # --------------------------------------------------------------------------- #
 
 def test_chat_completions_nonstream_surfaces_inference_error():

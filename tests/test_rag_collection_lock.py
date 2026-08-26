@@ -1,22 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Cross-process write lock for a RAG collection.
 
-PR #795 (62013ffa) documented this gap rather than closing it:
 ``store._collection_lock`` is a per-process ``threading.RLock``, so `localm rag
-add|resync` in its own OS process could interleave its read-modify-write with a
+add|resync` in its own OS process can interleave its read-modify-write with a
 running server's scheduled re-sync of the SAME collection and lose one update.
-Reusing ``config._cross_process_lock`` was rejected at the time because it
-reclaims any holder older than 30 s as abandoned, which would reap a LIVE
-indexing run. ``localm/rag/collection_lock.py`` closes it with a heartbeat
-instead of a wall-clock hold limit.
+``config._cross_process_lock`` cannot serve here because it reclaims any holder
+older than 30 s as abandoned, which would reap a LIVE indexing run;
+``localm/rag/collection_lock.py`` uses a heartbeat instead of a wall-clock hold
+limit.
 
 The load-bearing tests here spawn REAL subprocesses, because a per-process lock
-passes every same-process simulation of this bug by construction - that is
-exactly how the gap survived. Each one carries its own FIRES-CONTROL in the same
-run: the identical harness, with the cross-process lock neutralised IN THE CHILD
-(test-side, never a product switch - a product "skip the lock" flag would be the
-unserialised write path this exists to forbid), must show the interleave the
-locked version prevents. A test that cannot be made to fail proves nothing.
+passes every same-process simulation of this bug by construction. Each one
+carries its own FIRES-CONTROL in the same run: the identical harness, with the
+cross-process lock neutralised IN THE CHILD (test-side, never a product switch),
+must show the interleave the locked version prevents.
 
 The heartbeat is the lock file's MTIME (the module docstring explains why a
 rewritten timestamp field could clobber a successor's record), so a "stale"
@@ -42,11 +39,9 @@ from localm.rag import Collection, CollectionLockedError, collection_names
 from localm.rag.collection_lock import collection_write_lock, lock_path_for
 
 
-# heavy_slot (only ONE subprocess-heavy test at a time, box-wide) now lives in
-# tests/conftest.py so this file and tests/test_memory_cross_process_lock.py
-# share ONE slot. Two per-file copies under different slot names each
-# serialised their own file and raced each other, which is the starvation the
-# fixture exists to prevent. See its docstring.
+# heavy_slot (only ONE subprocess-heavy test at a time, box-wide) lives in
+# tests/conftest.py, so this file and tests/test_memory_cross_process_lock.py
+# share ONE slot rather than each serialising only itself.
 
 
 @pytest.fixture
@@ -93,16 +88,13 @@ def _flat(text: str) -> str:
 #  1. Two REAL processes writing the same collection                          #
 # --------------------------------------------------------------------------- #
 
-# Each child indexes ONE file into the SAME collection. Two things make the race
-# deterministic rather than hopeful: a file rendezvous, so both children reach
-# the write at the same moment however long their interpreter took to start; and
-# a delay INSIDE the locked read-modify-write (after _load(), before the save),
-# which is where the lost update happens. Same shape as
-# tests/test_config_cross_process_lock.py's sleeping mutator, one layer down.
+# Each child indexes ONE file into the SAME collection. A file rendezvous makes
+# both children reach the write at the same moment however long their
+# interpreter took to start, and a delay INSIDE the locked read-modify-write
+# (after _load(), before the save) widens the window a lost update needs.
 #
-# NEUTER=1 replaces the cross-process lock with a no-op IN THE CHILD ONLY. That
-# is the fires-control: it must lose an update, or this harness cannot observe
-# the bug and the passing case above it means nothing.
+# NEUTER=1 replaces the cross-process lock with a no-op IN THE CHILD ONLY: with
+# it, an update must be lost.
 _WORKER = r"""
 import contextlib, sys, time
 from pathlib import Path
@@ -136,8 +128,7 @@ coll.add_paths([doc])
 
 # Long enough to swamp the residual skew the rendezvous leaves (milliseconds),
 # short enough that four real interpreters are not held on the box any longer
-# than the race needs. Measured: at 1.0s this file's subprocesses starved a
-# neighbouring test whose own lock budget is 10s.
+# than the race needs.
 _RACE_DELAY = 0.5
 
 
@@ -149,7 +140,7 @@ def _race_two_writers(tmp_path, base, docs, name, *, neuter: bool):
     rv.mkdir()
     env = dict(os.environ)
     # Import the SAME localm this test runs (the worktree), not whatever is
-    # installed elsewhere - the worktree-venv wrong-source trap.
+    # installed elsewhere.
     env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
     procs = [
         subprocess.Popen(
@@ -181,9 +172,7 @@ def test_the_two_process_harness_does_catch_a_lost_update(heavy_slot, tmp_path,
     """FIRES-CONTROL for the test above.
 
     Same two processes, same timing, with the cross-process lock neutralised in
-    the children: one update MUST be lost. If this ever passes with both files
-    present, the test above is not evidence of anything - the harness would have
-    passed on the pre-fix code too."""
+    the children: one update MUST be lost."""
     survived = _race_two_writers(tmp_path, base, docs, "kb", neuter=True)
     assert survived != {"alpha.txt", "beta.txt"}, (
         "with the cross-process lock removed, two overlapping indexing runs "
@@ -231,45 +220,26 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
     makes an hours-long indexing run safe: hold across several staleness
     windows, and a waiter must still refuse rather than steal it.
 
-    Takes ``heavy_slot`` even though it spawns no subprocess. It is the only test
-    here whose correctness depends on a THREAD being scheduled promptly, which
-    makes it the biggest victim of the starvation that fixture already documents
-    ("four such tests landing on different workers at once measurably starved a
-    neighbour"). Under ``-n 2`` on a 2-vCPU runner the neighbour starving it is a
-    sibling in this very file spawning real interpreters. Serialising against
-    them removes the dominant source; the widened window below covers the rest."""
+    Takes ``heavy_slot`` even though it spawns no subprocess: it is the only
+    test here whose correctness depends on a THREAD being scheduled promptly,
+    so it serialises against the siblings in this file that spawn real
+    interpreters. The widened window below covers the rest."""
     # stale_after is TWELVE heartbeat intervals, the same ratio the shipped
-    # defaults use (HEARTBEAT_INTERVAL 5 s, STALE_AFTER 60 s - "STALE_AFTER is
-    # twelve of them" at collection_lock.py:386). It used to be six, i.e. the test
-    # ran on HALF the safety margin the product ships with, and failed on
-    # windows-latest with "DID NOT RAISE CollectionLockedError" (run 30363892424).
-    #
-    # Nothing was wrong with the lock: reclaim triggers on the age of the LAST
-    # beat, so a single contiguous starvation of the heartbeat thread longer than
-    # stale_after is enough, and 0.6 s of starvation is entirely ordinary on a
-    # 2-vCPU runner already running two xdist workers under coverage tracing.
-    # Raising the WINDOW is therefore the fix, not shrinking the interval: a
-    # shorter interval only makes beats more frequent, it does not survive a gap
-    # that already exceeds the window.
-    #
-    # This does not soften what the test proves - the fires-control below still
-    # requires a NON-beating record with this same stale_after to be reclaimed, so
-    # a heartbeat that stopped working entirely would still fail the test.
+    # defaults use (HEARTBEAT_INTERVAL 5 s, STALE_AFTER 60 s). Reclaim triggers
+    # on the age of the LAST beat, so the window has to survive an ordinary
+    # contiguous starvation of the heartbeat thread on a loaded runner. The
+    # control below still requires a NON-beating record with this same
+    # stale_after to be reclaimed.
     monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
     lp = lock_path_for(base / "kb")
     stale_after = 1.2
 
     with collection_write_lock(lp, collection="kb", op="a long index",
                                timeout=5.0):
-        # TWO windows, not four, purely to bound how long this test OCCUPIES
-        # heavy_slot. The slot is box-wide across xdist workers, and holding a
-        # global serialisation slot for 4.8 s of pure sleeping delays every
-        # subprocess-heavy sibling behind it. At two windows the hold is 2.4 s,
-        # i.e. exactly what this test already cost before it took the slot, so
-        # taking the slot adds no queueing anywhere. Crossing the staleness
-        # threshold twice proves the same property as crossing it four times:
-        # what is under test is that a REFRESHED record survives past the
-        # threshold at all, not how many times it can do so.
+        # TWO windows, not four, to bound how long this test occupies heavy_slot,
+        # which is box-wide across xdist workers. Crossing the staleness
+        # threshold twice proves the same property: a REFRESHED record survives
+        # past the threshold.
         time.sleep(stale_after * 2)          # two whole staleness windows
         mine = json.loads(lp.read_text(encoding="utf-8"))["token"]
         with pytest.raises(CollectionLockedError):
@@ -278,9 +248,8 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
                 pass
         assert json.loads(lp.read_text(encoding="utf-8"))["token"] == mine
 
-    # FIRES-CONTROL, same run, same stale_after: an identical record that is NOT
-    # being refreshed must be reclaimed. Without this the assertion above could
-    # be passing because the waiter never reclaims anything at all.
+    # The control, same run and same stale_after: an identical record that is
+    # NOT being refreshed is reclaimed.
     _hold(lp, _record(), silent_for=60)
     with collection_write_lock(lp, collection="kb", op="a waiter",
                                timeout=5.0, stale_after=stale_after):
@@ -455,9 +424,8 @@ def test_release_does_not_delete_a_lock_that_was_taken_over(base, capsys):
 def test_release_does_not_delete_a_lock_it_cannot_read(base, capsys):
     """The same fence, for the case that has no token to compare: a successor
     that has created its lock file but not yet written its record into it (two
-    syscalls), or a transient read failure. "I cannot read it" must never be
-    taken as "it must be mine" - a lock wrongly left behind costs one staleness
-    window, a live lock wrongly deleted costs a lost update."""
+    syscalls), or a transient read failure. "I cannot read it" is never taken
+    as "it must be mine"."""
     lp = lock_path_for(base / "kb")
     cm = collection_write_lock(lp, collection="kb", op="a test", timeout=5.0)
     cm.__enter__()
@@ -598,8 +566,8 @@ def test_cli_succeeds_once_the_holder_releases(heavy_slot, tmp_path, docs):
 def test_a_scheduled_job_reports_the_refusal_instead_of_writing(tmp_path, docs,
                                                                 monkeypatch):
     """The unattended surface. A scheduled re-sync that meets a hand-run write
-    must record WHY it did nothing - a job history that showed a clean run here
-    would be the "reported success after failing" rule 5 forbids."""
+    records WHY it did nothing, rather than showing a clean run in the job
+    history."""
     from localm.plugins.builtin.jobs import runner
     rag = tmp_path / "rag"
     monkeypatch.setattr("localm.rag.store.rag_dir", lambda: rag)
@@ -657,17 +625,14 @@ def test_env_override_reports_a_malformed_value(monkeypatch):
 # --------------------------------------------------------------------------
 # A TRANSIENT ACCESS-DENIED ON THE LOCK FILE IS A WAIT, NOT A CRASH (Windows).
 #
-# The 0.1.5rc3 release gate went red here. On Windows a lock file that exists
-# but is momentarily inaccessible (the holder's unlink in flight, a scanner
-# holding a handle) reports ERROR_ACCESS_DENIED from the O_CREAT|O_EXCL create,
-# not the ERROR_FILE_EXISTS that becomes FileExistsError. That escaped the
-# `except FileExistsError` and killed the user's command with "localm hit an
-# unexpected error" over a condition that clears in milliseconds.
+# On Windows a lock file that exists but is momentarily inaccessible (the
+# holder's unlink in flight, a scanner holding a handle) reports
+# ERROR_ACCESS_DENIED from the O_CREAT|O_EXCL create, not the
+# ERROR_FILE_EXISTS that becomes FileExistsError.
 #
-# Injected at os.open rather than by racing two real processes: the real window
-# is microseconds wide and would make this test a coin flip, which is worse than
-# no test. What is asserted is the CONTRACT - a PermissionError from the create
-# is retried within the deadline - not the Win32 condition that produces it.
+# The fault is injected at os.open rather than by racing two real processes,
+# whose window is microseconds wide. What is asserted is the CONTRACT: a
+# PermissionError from the create is retried within the deadline.
 
 def _permission_denied_then_real(lockpath, times):
     """Fail the create for *lockpath* `times` times with PermissionError, then

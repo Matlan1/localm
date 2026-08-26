@@ -1,28 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Follow-up to PR #584 (APP-LIFECYCLE-1): that PR routed cli/models.py's
-config_cmd() and inference/routes/config.py's patch_config() through
-config.py's update_config(mutator) atomic helper instead of a bare
-load_config()/save_config() pair, closing the SAME-PROCESS version of the
-read-modify-write race. But config._io_lock (threading.RLock) is purely
-in-process by construction - it cannot serialize two SEPARATE localm OS
-processes. Direct two-process reproduction against current (PR #584-fixed)
-master showed the race is still open cross-process: the CLI `localm config`
-racing a running server's PATCH /v1/config (or two CLI invocations, or a CLI
-`pull` racing the GUI for the registry) are genuinely different OS processes,
-each with its own _io_lock, and one writer's read-modify-write can complete
-entirely inside the other's read-to-write window, silently losing whichever
-change gets read-before-written-back last.
+"""update_config() and update_registry() must serialize ACROSS OS processes.
 
-Fix: update_config()/update_registry() now also hold a cross-process lock FILE
+config._io_lock (threading.RLock) is in-process by construction: it cannot
+serialize two SEPARATE localm OS processes. The CLI `localm config` racing a
+running server's PATCH /v1/config, two CLI invocations, or a CLI `pull` racing
+the GUI for the registry are genuinely different OS processes, each with its own
+_io_lock, so one writer's read-modify-write can complete entirely inside the
+other's read-to-write window, silently losing whichever change gets
+read-before-written-back last.
+
+update_config()/update_registry() therefore also hold a cross-process lock FILE
 (config._cross_process_lock, os.O_CREAT|O_EXCL) across the whole
 read-modify-write, so a second process attempting the same operation blocks
-until the first fully commits, instead of racing it.
+until the first fully commits.
 
 These tests spawn two REAL, independent Python processes - not threads - so
-they exercise actual cross-process contention, not a same-process simulation
-of it. See test_app_lifecycle_1_atomic_config.py for the same-process
-(threading) coverage of update_config()'s own locking and the actual CLI/HTTP
-call sites."""
+they exercise actual cross-process contention. See
+test_app_lifecycle_1_atomic_config.py for the same-process (threading) coverage
+of update_config()'s own locking and the CLI/HTTP call sites."""
 
 import json
 import os
@@ -45,14 +40,10 @@ def home(tmp_path, monkeypatch):
     return h
 
 
-# Each worker is a genuinely separate python process. It imports localm.config
-# fresh (LOCALM_HOME is set in the process environment BEFORE the interpreter
-# even starts, so it is picked up at config.py's import-time HOME_DIR
-# resolution - see the worktree-venv-tests-wrong-source / test-home-isolation
-# gotchas) and calls update_config()/update_registry() with a mutator that
-# sleeps BEFORE mutating, widening the read-modify-write window so two
-# processes started back-to-back reliably overlap inside it (mirrors the
-# in-process tests' delay_before_save pattern, just across a process boundary).
+# Each worker is a genuinely separate python process. LOCALM_HOME is set in the
+# process environment before the interpreter starts, so config.py picks it up at
+# import-time HOME_DIR resolution. The mutator sleeps BEFORE mutating, widening
+# the read-modify-write window so two processes started back-to-back overlap.
 _WORKER = (
     "import sys, time\n"
     "import localm.config as c\n"
@@ -64,18 +55,17 @@ _WORKER = (
     "fn(_mut)\n"
 )
 
-# Same, generous delay for BOTH processes: whichever wins the lock file holds
-# it for the full delay, so the SECOND process is guaranteed to still be
-# blocked on lock acquisition when the first commits (rather than depending on
-# fragile relative timing between a "slow" and a "fast" writer).
+# Same, generous delay for BOTH processes: whichever wins the lock file holds it
+# for the full delay, so the second process is still blocked on acquisition when
+# the first commits.
 _RACE_DELAY = 0.3
 
 
 def _spawn_two_writers(home_dir, fn_name, key_a, key_b):
     env = dict(os.environ)
     env["LOCALM_HOME"] = str(home_dir)
-    # Make the child import the SAME localm this test runs (the worktree), not
-    # whatever the venv editable-installed elsewhere - the worktree-venv gotcha.
+    # Make the child import the same localm this test runs (the worktree), not
+    # the venv's editable install.
     env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
     procs = [
         subprocess.Popen(
@@ -93,11 +83,10 @@ def _spawn_two_writers(home_dir, fn_name, key_a, key_b):
 
 
 def test_update_config_survives_a_real_concurrent_process(home):
-    """Two SEPARATE OS processes both calling update_config() concurrently -
-    the exact cross-process scenario the original bug report's own headline
-    failure_scenario describes (CLI `localm config` racing a running server's
-    PATCH /v1/config, which both route through update_config()) - must not
-    lose either process's change."""
+    """Two SEPARATE OS processes both calling update_config() concurrently
+    (the CLI `localm config` racing a running server's PATCH /v1/config, which
+    both route through update_config()) must not lose either process's
+    change."""
     cfg.save_config({"n_ctx": 4096})
     _spawn_two_writers(cfg.HOME_DIR, "update_config", "temperature", "main_gpu_index")
     final = json.loads(cfg.CONFIG_FILE.read_text(encoding="utf-8"))
@@ -127,7 +116,7 @@ def test_update_registry_survives_a_real_concurrent_process(home):
 def test_cross_process_lock_reclaims_a_stale_lock_file(home, monkeypatch, capsys):
     """A lock file left behind by a crashed holder must not wedge every future
     write forever - it is reclaimed once older than the staleness timeout, and
-    the reclaim is surfaced (do-not-hide-problems), not silent."""
+    the reclaim is surfaced, not silent."""
     monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
     monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 5.0)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
@@ -178,9 +167,7 @@ def test_cross_process_lock_is_released_on_mutator_exception(home):
 
 
 # --------------------------------------------------------------------------- #
-#  Fencing-token hardening: an adversarial review of the first version of this #
-#  fix (a bare create/delete marker, no per-acquisition token) found it could  #
-#  reopen the exact race it exists to close - see each test's docstring.      #
+#  Fencing-token hardening                                                    #
 # --------------------------------------------------------------------------- #
 
 def test_cross_process_lock_release_does_not_steal_a_reclaimed_lock(home, monkeypatch, capsys):
@@ -188,21 +175,18 @@ def test_cross_process_lock_release_does_not_steal_a_reclaimed_lock(home, monkey
     write, not a crash) and a waiter reclaims it as stale, this process's own
     release must NOT delete the new holder's still-active lock file - that would
     let a THIRD writer in while the second still believes it holds exclusive
-    access, cascading the exact silent-clobber race this whole mechanism exists
-    to close. A bare create/delete marker (no per-acquisition token) fails this:
-    its unconditional `finally: lockpath.unlink()` deletes whatever lock is on
-    disk, not specifically the one it created."""
+    access. A bare create/delete marker with no per-acquisition token fails
+    this: its unconditional `finally: lockpath.unlink()` deletes whatever lock
+    is on disk, not specifically the one it created."""
     monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
     monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 5.0)
     cfg.ensure_dirs()
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     real_getpid = cfg.os.getpid
 
-    # Two genuinely separate OS processes have DIFFERENT real pids - fake that
-    # here (rather than spawning real subprocesses, for a fast deterministic
-    # unit test) so this exercises the stale-reclaim/fencing path, not the
-    # same-process reentrancy guard (which correctly fires for a same-pid
-    # nested call - see test_cross_process_lock_nested_same_process_call_fails_fast).
+    # Two genuinely separate OS processes have different real pids; fake that
+    # here so this exercises the stale-reclaim/fencing path rather than the
+    # same-process reentrancy guard.
     monkeypatch.setattr(cfg.os, "getpid", lambda: 111111)
     cm_a = cfg._cross_process_lock(cfg.CONFIG_FILE)
     cm_a.__enter__()  # simulated "process A" acquires
@@ -211,12 +195,9 @@ def test_cross_process_lock_release_does_not_steal_a_reclaimed_lock(home, monkey
     os.utime(lockpath, (old, old))
 
     # A separate OS process has its own pid AND its own in-memory record of the
-    # locks IT holds (config._held_lock_tokens). Faking only getpid() would leave
-    # B sharing A's record and correctly concluding "I already hold this" - a
-    # nested call, which is precisely what a real second process can never be. So
-    # give B an empty record, exactly as a process boundary would. (Ownership is
-    # keyed on the fencing token rather than the pid number because pids are
-    # reused across process lifetimes - see REG-586.)
+    # locks it holds (config._held_lock_tokens), so give B an empty record as a
+    # process boundary would. Ownership is keyed on the fencing token rather than
+    # the pid number, because pids are reused across process lifetimes.
     monkeypatch.setattr(cfg, "_held_lock_tokens", {})
     monkeypatch.setattr(cfg.os, "getpid", lambda: 222222)
     cm_b = cfg._cross_process_lock(cfg.CONFIG_FILE)

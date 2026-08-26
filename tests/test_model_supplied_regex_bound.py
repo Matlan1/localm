@@ -11,29 +11,22 @@ bounded instead, with two mechanisms that are not interchangeable:
   * hard INPUT CAPS, so the common path never reaches the timeout and an
     attacker cannot burn the full budget once per file in a glob.
 
-The reason both are needed is measured, not assumed. Swapping stdlib ``re`` for
-``regex`` is NOT itself the fix, because the two engines have DIFFERENT
+Both are needed because stdlib ``re`` and ``regex`` have DIFFERENT
 catastrophic sets, neither containing the other:
 
     (\\s*)*x  on 26 spaces   stdlib 7.0044s   regex 0.0001s
     (a|a)*$  on 30 a's       stdlib 2.3561s   regex 6.4100s
 
-``regex`` is immune to the first and ~2.7x WORSE on the second - the textbook
-alternation shape a model writes by accident when searching for alternatives.
-An engine swap alone would have MOVED the vulnerability while looking like a fix.
+``regex`` is immune to the first and ~2.7x worse on the second, the alternation
+shape a model writes when searching for alternatives. An engine swap alone moves
+the vulnerability rather than removing it.
 
-A THIRD failure mode joined these two when the `regex` dependency was bumped
-from 2026.7.10 to 2026.7.19 (#967): a pathological recursive/possessive pattern
-that used to SEGFAULT the process now raises a catchable ``MemoryError``
-instead - a strict improvement, but ``_run_model_regex`` originally caught only
-``regex.error`` and ``TimeoutError``, so the new, catchable ``MemoryError`` fell
-through uncaught into each caller's GENERIC exception handler and was
-misattributed: `grep` reported it as an unreadable FILE ("N file(s) could not
-be read"), and `search_replace` let it escape to the tool-dispatch layer's
-``except Exception as e: ToolResult.error(f"Tool error: {e}")`` as a bare,
-empty ``"Tool error: "`` (``str(MemoryError())`` is ``''``). Both are wrong for
-the same reason the first two failure modes are handled specially: the fact is
-about the PATTERN, not the file.
+A THIRD failure mode: a pathological recursive or possessive pattern raises a
+catchable ``MemoryError`` from ``regex``. ``_run_model_regex`` catches it
+alongside ``regex.error`` and ``TimeoutError``, so it is attributed to the
+PATTERN. Uncaught, it reaches each caller's generic handler and is misreported -
+`grep` as an unreadable FILE, `search_replace` as a bare ``"Tool error: "``
+(``str(MemoryError())`` is ``''``).
 """
 
 from __future__ import annotations
@@ -54,11 +47,9 @@ _ENGINE_KILLER = r"(a|a)*$"
 _ENGINE_KILLER_INPUT = "a" * 60 + "!"
 
 # The witness that exhausts MEMORY rather than time: a recursive possessive
-# quantifier the `regex` engine (2026.7.19+) turns into an unbounded
-# backtracking allocation instead of an infinite loop. On regex < 2026.7.19
-# this SEGFAULTS THE PROCESS instead of raising - see the version guard below,
-# which turns that crash into a clear skip rather than a silent, whole-worker
-# crash that would take out every other test sharing the process.
+# quantifier the `regex` engine (2026.7.19+) turns into an unbounded backtracking
+# allocation instead of an infinite loop. On regex < 2026.7.19 this SEGFAULTS the
+# process instead of raising, which the version guard below turns into a skip.
 _MEMORY_KILLER = r"(?:a(?R)?b){e<=1}"
 _MEMORY_KILLER_INPUT = "aabb"
 
@@ -82,7 +73,7 @@ def _timed(fn, *a, **kw):
 
 
 # ---------------------------------------------------------------------------
-#  Fires-control: the guard must be SEEN to stop a runaway, through the real tool
+#  The guard stops a runaway, through the real tool
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -125,10 +116,9 @@ def test_the_timeout_is_what_stops_it_not_luck():
 
 
 # ---------------------------------------------------------------------------
-#  Memory exhaustion is a DIFFERENT fact than a timeout, and must be
-#  attributed to the PATTERN, not misfiled as an unreadable file or an empty
-#  "Tool error: " (MemoryError IS an Exception subclass, so it silently falls
-#  through to the generic handler unless caught specifically - see #967).
+#  Memory exhaustion is a DIFFERENT fact than a timeout, and is attributed to
+#  the PATTERN rather than to an unreadable file or an empty "Tool error: ".
+#  MemoryError is an Exception subclass, so it has to be caught specifically.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -235,15 +225,12 @@ def test_an_absurdly_long_line_is_skipped_not_searched(tmp_path):
 
 
 def test_search_replace_honours_the_file_size_cap(tmp_path, monkeypatch):
-    """`grep` had a per-file size cap and `search_replace` did not, which made
-    the MUTATING tool the more exposed of the two. Same knob, one meaning.
+    """`search_replace` honours the same per-file size cap as `grep`: one knob,
+    one meaning.
 
-    Patching ``_grep_config`` rather than the module default, because
-    ``_grep_cap`` resolves arg > CONFIG > default and the shipped config sets
-    this key - so patching the default patches a layer that is never consulted.
-    The first version of this test did exactly that, passed a 4 KB file under the
-    real 4 MB config value, and reported the cap broken when it was the test that
-    was aimed at the wrong layer.
+    Patches ``_grep_config``, not the module default: ``_grep_cap`` resolves
+    arg > CONFIG > default and the shipped config sets this key, so the default
+    is never consulted.
     """
     import localm.plugins.coder.tools.files as files_mod
     monkeypatch.setattr(files_mod, "_grep_config",
@@ -258,10 +245,9 @@ def test_search_replace_honours_the_file_size_cap(tmp_path, monkeypatch):
 
 
 def test_the_size_cap_test_above_would_fail_without_the_cap(tmp_path, monkeypatch):
-    """Fires-control for the cap test: with the ceiling raised, the same oversized
-    file IS rewritten. Without this, a cap test that patched the wrong layer -
-    which is exactly what the first version did - looks identical to a working
-    cap, because both leave the file untouched for unrelated reasons."""
+    """The control for the cap test: with the ceiling raised, the same oversized
+    file IS rewritten. A cap test that patched the wrong layer would otherwise
+    look identical to a working cap, since both leave the file untouched."""
     import localm.plugins.coder.tools.files as files_mod
     monkeypatch.setattr(files_mod, "_grep_config",
                         lambda: {"coder_grep_max_file_bytes": 10 * 1024 * 1024})
@@ -291,8 +277,7 @@ def test_regex_is_a_declared_core_dependency():
 
 def test_there_is_no_fallback_to_the_unbounded_engine():
     """A fallback to stdlib `re` when `regex` is missing would silently restore
-    the unbounded path while every caller believed it was bounded - a safety step
-    that fails and reports success, which AGENTS.md rule 5 forbids."""
+    the unbounded path while every caller believed it was bounded."""
     import inspect
 
     import localm.plugins.coder.tools.files as files_mod

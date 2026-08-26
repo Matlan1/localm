@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F11 regression suite (memory-audit 2026-07-02 cluster: "no visibility into
-what memory did to a turn").
-
-Memory recall must be OBSERVABLE:
+"""Memory recall must be OBSERVABLE:
 - the store reports WHY semantic recall degraded to lexical (a degrade reason,
   mirroring RAG's lexical fallback), plus record/vector/recall counts;
 - the chat inlet stashes the injected records + degrade reason in ctx.state so a
@@ -146,7 +143,7 @@ def test_memory_used_header_from_ctx():
 
 def test_memory_used_header_empty_list_still_reports():
     # Recall ran but injected nothing (empty store / no match): the header still
-    # reports n=0 + the degrade reason (honest, not silence).
+    # reports n=0 plus the degrade reason.
     from localm.inference.http_server import _memory_used_header
 
     ctx = ChatHookContext(model_id="m", stream=False, request_id="r")
@@ -159,11 +156,10 @@ def test_memory_used_header_empty_list_still_reports():
 
 
 # --------------------------------------------------- route wiring ---------- #
-# The real /v1/chat/completions handler must attach the X-Localm-Memory header
-# from ctx.state (built by create_app + the memory inlet). Drive the REAL route
+# The real /v1/chat/completions handler attaches the X-Localm-Memory header from
+# ctx.state (built by create_app plus the memory inlet). Drives the real route
 # with a stub engine and a synthetic inlet that stashes memory_used exactly like
-# the memory plugin does, so only the LLM backend (irrelevant to the header) is
-# faked - the route + header helper run for real, streaming and non-streaming.
+# the memory plugin does, streaming and non-streaming.
 
 import textwrap  # noqa: E402
 

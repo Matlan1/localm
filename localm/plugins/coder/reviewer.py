@@ -6,19 +6,17 @@ Before the agent declares a task done, an optional REVIEWER model reads the
 cumulative diff and looks for BLOCKING problems (correctness bugs, security holes,
 broken/missing functionality, or edits that weaken a check to pass it). If it
 flags any, they are fed back to the agent for one more fix pass; otherwise the
-agent's answer stands. The implementer is a biased grader, so a second pass -
-ideally by a DIFFERENT model - catches what the build pass missed. This is the
-local mirror of the fresh-context grading a human reviewer would do.
+agent's answer stands.
 
-The reviewer is just a ``BaseLLMBackend`` (anything with ``.chat()``), so it can be:
-  - the agent's OWN backend (same model; the default; private, zero infra), or
+The reviewer is a ``BaseLLMBackend`` (anything with ``.chat()``), either:
+  - the agent's OWN backend (same model; the default), or
   - a configured heterogeneous backend - a second OpenAI-compatible endpoint
-    (a cloud model or a 2nd local server) for a genuinely independent opinion.
+    (a cloud model or a 2nd local server).
 The heterogeneous reviewer is opt-in and is NOT used over a non-local endpoint in
-privacy mode or for a restricted session (it would send the diff off the machine);
-those fall back to the local same-model reviewer with a warning.
+privacy mode or for a restricted session; those fall back to the local same-model
+reviewer with a warning.
 
-This module is pure prompt-building + lenient parsing. The Agent owns the wiring,
+This module is prompt-building plus lenient parsing. The Agent owns the wiring,
 the config, and the privacy gate (``reviewer_for_agent``).
 """
 
@@ -29,13 +27,11 @@ from dataclasses import dataclass, field
 
 from .provenance import neutralise
 
-# Cap the diff handed to the reviewer so a huge session does not blow its context.
+# Cap on the diff handed to the reviewer.
 _MAX_DIFF_CHARS = 12_000
 
-# The diff is the agent's own work but can contain content it fetched from the web
-# / an MCP server and wrote to a file; neutralise() defangs frame/control-token
-# forgery and the guard tells the reviewer to treat the diff as data, not orders -
-# the same indirect-injection defense as the compaction and episodic paths.
+# neutralise() defangs frame/control-token forgery in the diff; the instructions
+# tell the reviewer to treat the task and diff as data, not orders.
 _REVIEW_INSTRUCTIONS = (
     "You are a STRICT senior code reviewer. Below is a unified diff of the changes "
     "a coding agent just made for a task. Review ONLY for BLOCKING problems: "
@@ -58,9 +54,8 @@ class ReviewResult:
     notes: str = ""
     raw: str = ""
     # False when the reviewer call/parse FAILED. The run still proceeds (fail-open),
-    # but ok=False is NOT an approval and must never be presented as one: the caller
-    # is required to surface it (see Agent._run_pre_done_review). ``notes`` always
-    # carries the reason when this is False, so the warning can say why.
+    # but ok=False is NOT an approval and the caller must surface it. ``notes``
+    # always carries the failure detail when this is False.
     ok: bool = True
 
 
@@ -111,8 +106,8 @@ def _extract_json(raw: str) -> dict:
 
 
 def parse_review(raw: str) -> ReviewResult:
-    """Parse a reviewer reply into a ReviewResult. Fail-OPEN (approved) on garbage,
-    so a flaky reviewer never blocks the agent - the review is a safety net, not a gate."""
+    """Parse a reviewer reply into a ReviewResult. Fail-OPEN on garbage: an
+    unparseable reply yields approved=True with ok=False."""
     data = _extract_json(raw)
     if not data:
         return ReviewResult(
@@ -123,8 +118,7 @@ def parse_review(raw: str) -> ReviewResult:
         blocking = [str(blocking)]
     blocking = [str(b).strip() for b in blocking if str(b).strip()]
     approved = bool(data.get("approved", not blocking))
-    # A model that lists blocking issues but says approved=true is contradicting
-    # itself; treat any blocking item as not-approved (the safe reading).
+    # Any blocking item forces not-approved, even when the reply says approved=true.
     if blocking:
         approved = False
     return ReviewResult(approved=approved, blocking=blocking,
@@ -145,7 +139,7 @@ class Reviewer:
             raw = self.backend.chat(
                 [{"role": "user", "content": prompt}], max_tokens=600)
         except Exception as e:
-            # Fail-open: a reviewer error must never block the agent.
+            # Fail-open: a reviewer error does not block the agent.
             return ReviewResult(approved=True, blocking=[], notes=f"reviewer error: {e}",
                                 raw="", ok=False)
         return parse_review(raw)
@@ -153,11 +147,9 @@ class Reviewer:
     def failure_warning(self, result: ReviewResult) -> str:
         """The user-facing warning for a review that FAILED, else ``""``.
 
-        A crashed or unparseable review returns approved=True so it never blocks
-        the answer (fail-open), which made it indistinguishable from a genuine
-        approval at every call site. It is not one: nothing was actually checked.
-        Callers surface this before accepting the final answer (AGENTS.md rule 5 -
-        a verification step that failed must never report success)."""
+        A crashed or unparseable review returns approved=True (fail-open) with
+        ok=False. That is not an approval - nothing was checked - so callers
+        surface this warning before accepting the final answer."""
         if result.ok:
             return ""
         who = "the separate reviewer model" if self.heterogeneous else "the review pass"
@@ -170,9 +162,8 @@ class Reviewer:
 
     def feedback_for(self, result: ReviewResult) -> str:
         """The ``[review feedback]`` message for an already-obtained *result*, or
-        ``""`` when the answer stands. Split from ``review_feedback`` so a caller
-        can inspect ``result.ok`` (a failed review is not an approval) instead of
-        being handed the same empty string for both outcomes."""
+        ``""`` when the answer stands. Takes the result the caller already holds,
+        so ``result.ok`` can be inspected separately."""
         if result.approved or not result.blocking:
             return ""
         lines = "\n".join("- " + b for b in result.blocking)
@@ -188,10 +179,10 @@ class Reviewer:
         """A ``[review feedback]`` message if the reviewer flagged blocking issues,
         else ``""`` (the agent's answer stands).
 
-        Convenience wrapper that DISCARDS the ReviewResult, so it cannot tell an
-        approval from a failed review. A caller that must not treat a crashed
-        reviewer as a pass uses ``review()`` + ``failure_warning()`` +
-        ``feedback_for()`` instead."""
+        Convenience wrapper that DISCARDS the ReviewResult, so its ``""`` cannot
+        tell an approval from a failed review. A caller that must distinguish the
+        two uses ``review()`` + ``failure_warning()`` + ``feedback_for()``
+        instead."""
         return self.feedback_for(self.review(diff, task))
 
 
@@ -203,7 +194,7 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0", ""})
 
 
 def _is_loopback(url: str) -> bool:
-    """True if *url* points at the local machine (safe to use in privacy mode)."""
+    """True if *url* points at the local machine."""
     try:
         from urllib.parse import urlparse
         return (urlparse(url).hostname or "").lower() in _LOOPBACK_HOSTS
@@ -231,10 +222,10 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool):
       - ``coder_reviewer_model`` (str): model name/path for a heterogeneous reviewer.
 
     A NETWORK reviewer (cloud, or a non-loopback URL) sends the diff off the
-    agent's own model, so it is NOT used in privacy mode or for a restricted
-    (shareable, non-owner) session - those fall back to the local same-model
-    reviewer with a warning, never silently leaking the diff. The "local" CPU
-    reviewer stays on-machine, so it is allowed in privacy mode.
+    machine, so it is NOT used in privacy mode or for a restricted (shareable,
+    non-owner) session - those fall back to the local same-model reviewer with a
+    warning. The "local" CPU reviewer stays on-machine and is allowed in privacy
+    mode.
     """
     from .display import print_warning
     try:
@@ -263,20 +254,15 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool):
     try:
         if low == "local":
             # In-process CPU reviewer: a small local model in the coder's OWN
-            # process (separate from the server's GPU model). Fully local - no
-            # network - so it is allowed even in privacy mode.
+            # process, separate from the server's GPU model. No network.
             if not rmodel:
                 print_warning(
                     "coder_reviewer='local' needs coder_reviewer_model (a model "
                     "name or path); reviewing with the agent's own model instead.")
                 return _local_same_model()
             from localm.model_manager import get_model_path
-            # allow_direct_path: coder_reviewer_model is documented as "a model
-            # name or path" (see the warning just above), and it is CONFIG, not a
-            # request field - writing it needs the config:write scope, which is in
-            # scopes.PRIVILEGED_SCOPES. That is a different trust level from the
-            # non-privileged jobs/MCP callers this gate exists to stop, so keeping
-            # the documented path form here costs nothing against that threat model.
+            # allow_direct_path: coder_reviewer_model accepts a model name or a
+            # path, and setting it needs the privileged config:write scope.
             mp = get_model_path(rmodel, allow_direct_path=True)
             if mp is None:
                 print_warning(
@@ -317,7 +303,7 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool):
                      "reviewing with the local model instead.")
         return _local_same_model()
 
-    # Unrecognised target string - fall back to the safe local reviewer.
+    # Unrecognised target string - fall back to the local reviewer.
     print_warning(f"unrecognised coder_reviewer '{target}'; "
                  "reviewing with the local model instead.")
     return _local_same_model()

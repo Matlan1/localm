@@ -9,7 +9,7 @@ and install exactly those specifiers.
 
 It runs on the HOST only: the CLI, or a loopback GUI request. A remote client
 must never reach the install path (enforced at the route). Failures surface the
-real pip/uv output instead of being swallowed (AGENTS "We do not hide problems").
+real pip/uv output instead of being swallowed.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from localm.debuglog import logger
 #: line, or a status note). Best-effort; a raising sink never breaks an install.
 ProgressCb = Optional[Callable[[str], None]]
 
-#: The installed distribution whose extras we resolve. Kept as a module constant
-#: so a test can point it at a fixture distribution.
+#: The installed distribution whose extras are resolved. A module constant, so
+#: it can be repointed at another distribution.
 DIST_NAME = "localm"
 
 
@@ -120,7 +120,7 @@ def is_satisfied(req: str) -> bool:
         spec = Requirement(req).specifier
         return spec.contains(installed, prereleases=True) if str(spec) else True
     except Exception:
-        # packaging missing or an odd specifier: present-by-name is good enough.
+        # packaging missing or an odd specifier: fall back to present-by-name.
         return True
 
 
@@ -140,11 +140,10 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
     ``(ok, combined_output)``. ``--python sys.executable`` pins uv to this venv
     regardless of the ambient VIRTUAL_ENV.
 
-    ``env`` pins uv's AND pip's caches inside the data dir (rule 4: self-contained).
-    Both are set because the uv attempt runs first and pip second, and each caches to
-    a per-user location OUTSIDE the data dir when left to its default - so without this
-    a plugin-extra install silently leaks wheels to ``%LOCALAPPDATA%`` / ``~/.cache``.
-    See ``config.contained_pip_env``."""
+    ``env`` pins uv's AND pip's caches inside the data dir. Both are set: the uv
+    attempt runs first and pip second, and each caches to a per-user location
+    OUTSIDE the data dir when left to its default. See
+    ``config.contained_pip_env``."""
     env = config.contained_pip_env()
     attempts = (
         ["uv", "pip", "install", "--python", sys.executable, *reqs],

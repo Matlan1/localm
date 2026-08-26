@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#617 follow-up: a background model-preload failure (localm gui's automatic
-warm-up load at startup) must be LOGGED, not just printed to console.
+"""A background model-preload failure (localm gui's automatic warm-up load at
+startup) must be LOGGED, not only printed to console.
 
-Real-world evidence: the reporter's own log showed "Background model load
-failed: ..." with no corresponding entry in the debug log file at all -
-console.print never reaches it. If a user's only symptom is a failed preload
-(they never explicitly try to chat), a bug report built from the log file
-would show nothing wrong. _report_preload_failure logs the exception (full
-traceback) in addition to the console notice.
+console.print never reaches the debug log file, so a user whose only symptom is a
+failed preload (they never explicitly try to chat) would file a bug report showing
+nothing wrong. _report_preload_failure logs the exception with its full traceback
+in addition to the console notice.
 """
 
 from __future__ import annotations
@@ -33,10 +31,10 @@ def test_preload_failure_is_logged_with_traceback(caplog):
         with caplog.at_level(logging.ERROR, logger="localm"):
             _report_preload_failure(console, e)
 
-    # Still notifies the console, unchanged behavior.
+    # Notifies the console.
     assert any("Background model load failed" in m for m in console.printed)
 
-    # AND now reaches the logger (what the bug-report digest reads from disk).
+    # Reaches the logger, which the bug-report digest reads from disk.
     records = [r for r in caplog.records if r.name == "localm"]
     assert any("background model preload failed" in r.message for r in records)
     assert any(r.exc_info for r in records)   # the traceback is attached

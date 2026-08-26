@@ -3,15 +3,14 @@
 Windows ``os.replace`` raises PermissionError (WinError 5) when ANOTHER handle has
 the destination open at that instant - a second localm process reading the file,
 an antivirus / indexer / backup scanner, Windows Search. The window is
-microseconds, so a bare os.replace made a config/registry SAVE crash (and a
-concurrent read spuriously fall back to .bak/defaults) whenever a reader happened
-to touch the file mid-write (AUD-WINREPLACE).
+microseconds, so a bare os.replace makes a config/registry SAVE crash (and a
+concurrent read spuriously fall back to .bak/defaults) whenever a reader touches
+the file mid-write.
 
-Both sides now ride out the transient sharing violation with a bounded retry,
-while a PERSISTENT permission problem still surfaces (do-not-hide-problems).
-These tests inject the transient fault deterministically at the OS boundary, so
-they exercise the real _atomic_write_json / _read_json code paths on every
-platform; the real Windows race was also reproduced by hand (see the PR)."""
+Both sides ride out the transient sharing violation with a bounded retry, while
+a PERSISTENT permission problem still surfaces. These tests inject the transient
+fault deterministically at the OS boundary, so they exercise the real
+_atomic_write_json / _read_json code paths on every platform."""
 
 import json
 import os
@@ -40,26 +39,17 @@ def home(tmp_path, monkeypatch):
 def test_atomic_write_rides_out_transient_replace_error(home, monkeypatch):
     """A few transient PermissionErrors from os.replace must not fail the write;
     the file ends up correct."""
-    # This retry is deliberately WINDOWS-ONLY: _is_transient_permission_error returns
-    # False when os.name != "nt", because a POSIX EACCES is a STABLE state the retry
-    # can never clear, so retrying would just burn ~1s of time.sleep while holding
-    # _io_lock (which serializes config access process-wide, including the auth path).
-    # This test asserts the RETRY, so stub the classifier rather than pinning os.name.
-    # Do NOT pin cfg.os.name here: cfg.os IS the os module, so setting name="nt" also
-    # switches os.path/tempfile to Windows semantics, and this test drives
-    # _atomic_write_json, which BUILDS a tmp path - on POSIX that yields a backslashed
-    # '\tmp\...\config.json.xxx.tmp' and the write dies with FileNotFoundError.
-    # (Measured on ubuntu CI.) The sibling REG-586/REG-566 tests can pin os.name only
-    # because they fake READS and never construct a path. Classification itself is
-    # covered there; what this test owns is "given a transient error, the write retries".
+    # The retry is Windows-only: _is_transient_permission_error returns False when
+    # os.name != nt. This test stubs the classifier rather than pinning os.name;
+    # cfg.os IS the os module, so a pin would also switch os.path/tempfile to
+    # Windows semantics and break the tmp path _atomic_write_json builds.
     monkeypatch.setattr(cfg, "_is_transient_permission_error", lambda e: True)
     real_replace = cfg.os.replace
     calls = {"n": 0}
 
     def flaky_replace(src, dst):
-        # Fail the FINAL tmp->path replace (dst ends with the real name) a few
-        # times, then let it through. The .bak replace (dst endswith .bak) is
-        # left alone so we isolate the crash site.
+        # Fail the final tmp->path replace (dst ends with the real name) a few
+        # times, then let it through. The .bak replace is left alone.
         if str(dst).endswith("config.json") and calls["n"] < 3:
             calls["n"] += 1
             err = PermissionError(13, "Access is denied")
@@ -92,10 +82,7 @@ def test_read_json_rides_out_transient_permission_error(home, monkeypatch, capsy
     import builtins
     real_open = builtins.open
     state = {"n": 0}
-    # Windows-only retry - see the note in
-    # test_atomic_write_rides_out_transient_replace_error above. Same classifier stub,
-    # for the same reason and for symmetry: it is platform-neutral by construction,
-    # where an os.name pin is not.
+    # Windows-only retry; same classifier stub as above rather than an os.name pin.
     monkeypatch.setattr(cfg, "_is_transient_permission_error", lambda e: True)
 
     def flaky_open(file, *a, **k):
@@ -167,11 +154,8 @@ def test_replace_atomic_rides_out_a_real_file_lock(home):
 
 
 # --------------------------------------------------------------------------- #
-#  Unique per-write temp: the fix for two PROCESSES writing the same file at
-#  once. _replace_atomic (above) rides out a locked DESTINATION (a concurrent
-#  reader), but a FIXED temp name meant two concurrent WRITERS still collided on
-#  that one temp source - one save crashed when the other's replace had already
-#  consumed it (WinError 2/32). A unique temp per write removes the collision.
+#  Unique per-write temp: two concurrent writers must not collide on one shared
+#  temp source.
 # --------------------------------------------------------------------------- #
 
 def test_atomic_write_uses_unique_temp_per_write(tmp_path, monkeypatch):
@@ -203,11 +187,8 @@ def test_atomic_write_leaves_no_orphan_temp(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))
 
 
-# Each worker process hammers the SAME file. With the old FIXED temp name this
-# reliably crashed on Windows (the shared temp is consumed by another process's
-# replace -> WinError 2/32); with the unique temp every process completes. This
-# exercises the REAL cross-process path (not a mock) - the in-process _io_lock
-# cannot be what makes it safe. Sized to reliably trip the old bug while light.
+# Each worker process hammers the same file through the real cross-process path,
+# with no mocks.
 _CONC_NPROC = 5
 _CONC_NWRITES = 25
 _CONC_WORKER = (
@@ -225,8 +206,7 @@ def test_concurrent_processes_no_crash_no_corruption(tmp_path):
     target.write_text("{}", encoding="utf-8")
     env = dict(os.environ)
     env["LOCALM_HOME"] = str(tmp_path / "home")
-    # Make the child import the SAME localm this test runs (the worktree), not
-    # whatever the venv editable-installed - the worktree-venv gotcha.
+    # Make the child import the same localm this test runs, not the venv install.
     env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
 
     procs = [

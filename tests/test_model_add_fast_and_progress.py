@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B6: model add SHA-256 used to block the main thread with only a static notice,
-and the only escape hatch (--no-hash) disabled content dedup entirely.
+"""`model add` SHA-256 hashing, and the option to skip it:
 
-This covers the two decided fixes:
   (a) the default add path hashes off the main thread with a live progress bar
-      for large files - exposed here as a progress callback on `_sha256_file`
-      and a `_hash_with_progress` helper that yields the same digest (including
-      via its threaded path);
+      for large files - a progress callback on `_sha256_file` and a
+      `_hash_with_progress` helper that yields the same digest, including via
+      its threaded path;
   (c) a `--fast` flag that skips content hashing and dedups on file SIZE, for
       known-unique bulk imports.
 """
@@ -137,8 +135,8 @@ def test_fast_registers_distinct_size(fake_registry, tmp_path):
 
 
 def test_default_path_still_hashes(fake_registry, tmp_path):
-    # Regression: without --fast, distinct same-size files are NOT deduped
-    # (content hash distinguishes them) and a digest is stored.
+    # Without --fast, distinct same-size files are NOT deduped (the content hash
+    # distinguishes them) and a digest is stored.
     store, _ = fake_registry
     f1 = _file(tmp_path, "a.gguf", b"AAAAAAAAAA")
     f2 = _file(tmp_path, "b.gguf", b"BBBBBBBBBB")

@@ -8,8 +8,7 @@ Usage: python _portmux_server.py <port> [<certfile> <keyfile>]
 import sys
 from pathlib import Path
 
-# Run against THIS worktree's localm, not the editable install (which points at
-# the main checkout and would lack worktree-only changes like portmux).
+# Import localm from this worktree rather than the editable install.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 

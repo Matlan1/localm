@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Registering a local model file must not phone home (Antigravity-audit HIGH-6).
+"""Registering a local model file must not phone home.
 
-f3b03dd inserted auto model-type detection at the very TOP of pull_model, before
-the is_local_path branch and before the net_mode kill switch. For any spec
-containing "/" that is not an http(s) URL - every POSIX absolute path
-(/home/u/model.gguf) and every forward-slash relative path (models/secret.gguf) -
-_hf_pipeline_tag_to_type() issued a real HTTPS GET to
+Auto model-type detection must not run before pull_model's is_local_path branch
+and the net_mode kill switch. Placed above them, it reaches
+_hf_pipeline_tag_to_type() for any spec containing "/" that is not an http(s)
+URL - every POSIX absolute path (/home/u/model.gguf) and every forward-slash
+relative path (models/secret.gguf) - which issues a real HTTPS GET to
 https://huggingface.co/api/models/<the local path>, leaking the private local
-path (and model filename) to a third party, before falling through to the
-offline add_local. Registering a local file must be fully offline.
+path and model filename to a third party.
 """
 
 import localm.model_manager.pull as pull
@@ -41,10 +40,9 @@ def test_local_path_pull_does_not_call_hf_detect(tmp_path, monkeypatch):
         "registering a local file must NOT call huggingface.co "
         f"(leaked: {hf_calls})")
     assert add_local_calls, "local file should be registered via add_local"
-    # Local files carry NO remote type probe: an 'auto' type passes None to add_local
-    # so it detects the type OFFLINE (GGUF -> llm, HF dir -> config.json, else the
-    # 'unknown' sentinel), never a huggingface.co lookup. The guard above (hf_calls
-    # == []) is the privacy property; None here is the deterministic-detection route.
+    # Local files carry NO remote type probe: an 'auto' type passes None to
+    # add_local so it detects the type OFFLINE (GGUF -> llm, HF dir -> config.json,
+    # else the 'unknown' sentinel), never a huggingface.co lookup.
     assert add_local_calls[0][1].get("model_type") is None
 
 
@@ -84,8 +82,8 @@ def test_remote_gguf_file_spec_types_llm_without_probing(monkeypatch):
     """A remote spec that names a .gguf file (owner/repo:file.gguf OR
     owner/repo/file.gguf) is a HARD LLM signal via the filename - it must type
     'llm' WITHOUT probing the repo's HF pipeline_tag, which a GGUF-quant repo often
-    lacks (mislabeling it 'unknown', which then HIDES the pulled model from the
-    launcher and blocks auto-chat). Regression for the pull-vs-add type mismatch."""
+    lacks - a probe would label it 'unknown', which HIDES the pulled model from
+    the launcher and blocks auto-chat."""
     hf_calls = []
     monkeypatch.setattr(pull, "_hf_pipeline_tag_to_type",
                         lambda repo_id: hf_calls.append(repo_id) or "unknown")

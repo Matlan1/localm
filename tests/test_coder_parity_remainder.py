@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""O5b: the parity remainder the O5 brief undercounted.
-
-O5 shipped six flags. Measured afterwards, 15 localcoder options still had no web
-form. These are the seven that were closable without a product decision:
+"""Web forms for the localcoder options that had none:
 
   --seed                  seed on CreateSessionRequest -> gen_kwargs
   --interactive-confirm   interactive_confirm -> Agent.always_confirm
@@ -354,9 +351,8 @@ def test_consolidate_reports_what_it_did(tmp_path, monkeypatch):
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         from localm.plugins.coder import episodes as _eps
-        # The route imports consolidate INSIDE its worker, so patching the
-        # module attribute is seen at call time. The stub never calls `complete`,
-        # so the HTTPBackend the route builds is never dialled.
+        # The route imports consolidate inside its worker, so patching the module
+        # attribute is seen at call time. The stub never calls `complete`.
         monkeypatch.setattr(
             _eps, "consolidate",
             lambda store, **kw: {"groups": 2, "merged": 2, "replaced": 5,
@@ -397,12 +393,10 @@ def test_every_episode_write_is_owner_only(tmp_path, monkeypatch, method,
     recalls a lesson nor writes one - so it must not be able to destroy the
     owner's.
 
-    The id in the path is the REAL seeded one, not a made-up string. With a
-    placeholder id the forget and restore arms passed with the owner gate
-    REMOVED, because the route then answered 404 for "no such episode" - the
-    same status, for the opposite reason, and the survival assertion was
-    toothless because a nonexistent lesson cannot be destroyed either way.
-    Caught by the fires-control sweep, not by review."""
+    The id in the path is the REAL seeded one, not a made-up string: with a
+    placeholder id the route answers 404 for "no such episode" whether or not the
+    owner gate is present, and the survival assertion is toothless because a
+    nonexistent lesson cannot be destroyed either way."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     from localm import auth
     from localm.plugins.coder.episodes import EpisodeStore
@@ -414,8 +408,7 @@ def test_every_episode_write_is_owner_only(tmp_path, monkeypatch, method,
                            headers={"Authorization": "Bearer %s" % scoped["key"]},
                            json={"cwd": str(proj)})
         assert r.status_code in (403, 404), r.text
-        # Assert on the DATA, not only the status: the lesson surviving is the
-        # property, and the status code is a proxy for it.
+        # Assert on the data, not only the status.
         assert [e.id for e in EpisodeStore(Path(proj)).all()] == [ep.id], (
             "the owner's lesson did not survive a scoped key's write")
 
@@ -423,8 +416,7 @@ def test_every_episode_write_is_owner_only(tmp_path, monkeypatch, method,
 def test_restore_is_owner_only_and_leaks_no_archived_text(tmp_path, monkeypatch):
     """restore gets its own test because it is not DESTRUCTIVE, so the
     lesson-survived property every other write is checked with cannot detect a
-    missing gate here - the fires-control sweep proved exactly that, passing this
-    arm with the owner gate removed.
+    missing gate here.
 
     Its two real risks are resurrecting a lesson the owner deliberately dropped,
     and leaking the archived lesson TEXT, which the success body carries."""

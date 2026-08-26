@@ -1,18 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Hang detection with recovery (ADR-0012): the server must never be able to
-hang undetected and unrecovered.
+"""Hang detection with recovery: the server must never be able to hang
+undetected and unrecovered.
 
-Born from the 2026-08-18 incident: an ABBA lock deadlock (embedder._LOCK vs
-engine._LOAD_LOCK) wedged every embedder status call while the event loop
-stayed perfectly healthy, and the server sat fully unusable for over an hour
-with 0% CPU and no signal anywhere a user looks. The pre-existing hang
-watchdog (http_server._start_hang_watchdog) watches ONLY the event-loop
-heartbeat and only writes a stack-trace file when it fires - so it neither
-detected that incident (the loop was fine) nor would its firing have been
-seen by anyone (a trace file nobody tails is not surfacing).
+The pre-existing hang watchdog (http_server._start_hang_watchdog) watches ONLY
+the event-loop heartbeat and only writes a stack-trace file when it fires, so a
+wedge that leaves the loop healthy is neither detected nor surfaced.
 
-This module is the alarm half that incident was missing. One off-loop daemon
-thread runs three detectors and drives a staged pipeline:
+This module is the alarm half. One off-loop daemon thread runs three detectors
+and drives a staged pipeline:
 
   detect -> SURFACE (unmissable: native status window turns red + CRITICAL
   log) -> if still hung, RECOVER (auto-restart via the same path as the tray
@@ -32,18 +27,15 @@ The detectors, and the honesty boundary between them:
   runs on the same loop, so a frozen loop fails this too). Catches the
   accept/portmux/socket layer dying in ways the in-process heartbeat cannot
   see. Surfaces after 4 consecutive failures, restarts after 8.
-* REQUEST STARVATION (detector S): the 2026-08-18 class - handlers wedged
-  on something (a lock, an executor) while the loop itself stays healthy.
-  Observes when requests have been in flight longer than
-  LOCALM_HANG_STARVATION_SECS (600s default) while nothing at all makes
-  response progress. LOG-ONLY FORENSICS, by explicit maintainer directive
-  (2026-08-18): no threshold separates this state from legitimate long
-  silent work with certainty (model downloads, non-streaming generations,
-  the 300s ComfyUI launch), and anything user-facing must have zero false
-  positives - so S never touches the window, never warns, never restarts.
-  What it produces instead is the record the real incident's investigation
-  had to reconstruct by hand: which requests (method + path + age), proof
-  of total starvation, an immediate stack snapshot of every thread, and a
+* REQUEST STARVATION (detector S): handlers wedged on something (a lock, an
+  executor) while the loop itself stays healthy. Observes when requests have
+  been in flight longer than LOCALM_HANG_STARVATION_SECS (600s default) while
+  nothing at all makes response progress. LOG-ONLY FORENSICS: no threshold
+  separates this state from legitimate long silent work with certainty (model
+  downloads, non-streaming generations, the 300s ComfyUI launch), and anything
+  user-facing must have zero false positives, so S never touches the window,
+  never warns, never restarts. It records which requests (method + path + age),
+  proof of total starvation, an immediate stack snapshot of every thread, and a
   follow-up snapshot one window later so identical blocked frames prove
   "genuinely wedged" over "merely idle".
 
@@ -58,9 +50,9 @@ never auto-restarts; =restart (the default) enables the full pipeline.
 A restart storm is bounded without touching disk: each auto-restart appends
 a timestamp to LOCALM_HANG_RESTART_HISTORY in this process's environment
 immediately before the re-exec, and os.execv carries the environment into
-the replacement process - more than 3 hang-restarts inside 30 minutes
+the replacement process. More than 3 hang-restarts inside 30 minutes
 downgrades further recovery to surface-only, so a hang that survives
-restarts (e.g. caused by on-disk state) cannot restart-loop forever.
+restarts cannot restart-loop forever.
 """
 
 from __future__ import annotations
@@ -90,9 +82,9 @@ def recovery_mode() -> str:
 
 
 def restart_after_seconds() -> float:
-    """How long a CONTINUOUS loop freeze must last before auto-restart.
-    Floored well above the surface threshold so the staged pipeline always
-    surfaces first and a brief transient stall never restarts anyone."""
+    """How long a CONTINUOUS loop freeze must last before auto-restart. Floored
+    well above the surface threshold, so the staged pipeline always surfaces
+    first and a brief transient stall never restarts anyone."""
     try:
         return max(15.0, float(os.environ.get(_RESTART_SECS_ENV, "60")))
     except ValueError:
@@ -100,11 +92,10 @@ def restart_after_seconds() -> float:
 
 
 def starvation_seconds() -> float:
-    """Detector S's window. 0 disables it. The default deliberately sits WELL
-    above every bounded long operation this codebase knows about on a request
-    path (the ~330s comfy-launch worst case is the longest) - S is for the
-    unbounded wedge, not for slow-but-finite work, and even its log-only
-    record should stay quiet for anything that could be legitimate."""
+    """Detector S's window. 0 disables it. The default sits WELL above every
+    bounded long operation this codebase has on a request path (the ~330s
+    comfy-launch worst case is the longest): S covers the unbounded wedge, not
+    slow-but-finite work."""
     try:
         return max(0.0, float(os.environ.get(_STARVATION_SECS_ENV, "600")))
     except ValueError:
@@ -169,20 +160,13 @@ class RequestProgress:
 
 
 class RequestProgressMiddleware:
-    """Pure ASGI (deliberately NOT BaseHTTPMiddleware - see the
-    basehttpmiddleware-masks-disconnect note in http_server): counts an http
-    request in flight from arrival to completion and records every response
-    body chunk as progress, so detector S can tell "slow but moving" from
-    "nothing is answering at all".
+    """Pure ASGI: counts an http request in flight from arrival to completion
+    and records every response body chunk as progress, so detector S can tell
+    "slow but moving" from "nothing is answering at all".
 
-    /health and /whoami are excluded on purpose: they are liveness/identity
-    instruments (this module's own self-probe, external monitors, and the
-    cross-instance discovery/pairing polls), and an instrument must not mask
-    the condition it exists to reveal - in the live incident /health
-    answered in 25ms the whole time the server was unusable, and a paired
-    second instance's /whoami polls would keep "progress" ticking through a
-    real hang the same way. Everything a user actually experiences (pages,
-    stats, activity, chat) stays tracked."""
+    /health and /whoami are excluded: they are neither counted in flight nor
+    recorded as progress. Everything else (pages, stats, activity, chat) stays
+    tracked."""
 
     _EXCLUDED_PATHS = frozenset({"/health", "/whoami"})
 
@@ -222,10 +206,9 @@ def tracker() -> RequestProgress:
 
 def _probe_once(host: str, port: int, timeout: float = 5.0) -> bool:
     """One end-to-end aliveness probe: TCP connect, minimal plaintext GET,
-    any response byte within *timeout* counts as alive. Plaintext on purpose
-    even for a TLS bind - portmux's first-byte peek answers plaintext with a
-    308 redirect, which is still the server proving it can accept, parse and
-    respond on its real listening socket."""
+    any response byte within *timeout* counts as alive. The GET stays plaintext
+    for a TLS bind too, where portmux's first-byte peek answers it with a 308
+    redirect."""
     try:
         with socket.create_connection((host, port), timeout=timeout) as s:
             s.settimeout(timeout)
@@ -241,10 +224,7 @@ def _probe_host(bind_host: Optional[str]) -> str:
     wildcard binds are reachable on loopback; a specific address is only
     guaranteed reachable on itself.
 
-    Delegates to ``bindhost.self_connect_host``, which is the same mapping this
-    function used to carry inline. It was hoisted because four other places
-    needed it and one of them (the update watchdog) had independently written a
-    version that disagreed with this one about ``::``. The result feeds
+    Delegates to ``bindhost.self_connect_host``. The result feeds
     ``socket.create_connection``, which takes a bare address, so it is NOT
     passed through ``url_host`` here - bracketing is for URL authorities only."""
     from localm.bindhost import self_connect_host
@@ -461,20 +441,17 @@ class HangAlarm:
 
     def _check_starvation(self) -> None:
         """LOG-ONLY FORENSICS - never a user-facing warning, never a restart
-        trigger, by explicit maintainer directive (2026-08-18): anything
-        shown to a user must have zero false positives, and no threshold can
-        separate "requests wedged by a defect" from "legitimately slow work"
-        with certainty (a model download, an hour-long non-streaming
-        generation, and the 300s ComfyUI launch are all real and all
-        silent). The zero-false-positive detectors (loop freeze, transport
-        death) own the user-facing alarms and restarts; this one exists so
-        that when requests DO wedge the way the 2026-08-18 incident wedged
-        them, the log already holds what that investigation needed hours and
-        an external profiler to get: WHICH requests (method + path + age),
-        the proof they were starved (nothing at all completing), a stack
-        snapshot from the moment it began showing WHERE every thread was
-        blocked, a second snapshot one window later (identical blocked
-        frames = genuinely wedged, not idle), and what to do about it."""
+        trigger: anything shown to a user must have zero false positives, and
+        no threshold can separate "requests wedged by a defect" from
+        "legitimately slow work" with certainty (a model download, an hour-long
+        non-streaming generation, and the 300s ComfyUI launch are all real and
+        all silent). The zero-false-positive detectors (loop freeze, transport
+        death) own the user-facing alarms and restarts. This one writes to the
+        log: WHICH requests (method + path + age), the proof they were starved
+        (nothing at all completing), a stack snapshot from the moment it began
+        showing WHERE every thread was blocked, a second snapshot one window
+        later (identical blocked frames = genuinely wedged, not idle), and what
+        to do about it."""
         if self._inflight is None or self.starvation_after <= 0:
             return
         entries, progress_age = self._inflight()

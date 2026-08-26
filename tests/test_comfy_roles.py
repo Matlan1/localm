@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Role-based ComfyUI node resolution (I3 / MEDIA-1).
+"""Role-based ComfyUI node resolution.
 
-These pin the contract that injection resolves nodes by class_type + graph edges
-rather than hardcoded ids, so a user's own exported graph - with arbitrary node
-ids - is driven correctly. The end-to-end test runs generate_video against a fully
-RENUMBERED Wan graph and proves the prompt/seed/latent/fps still land in the right
-places.
+Injection resolves nodes by class_type plus graph edges, never by hardcoded ids,
+so a user's own exported graph with arbitrary node ids is driven correctly. The
+end-to-end test runs generate_video against a fully RENUMBERED Wan graph and
+checks the prompt, seed, latent and fps still land in the right places.
 """
 
 import json
@@ -15,7 +14,7 @@ from localm.image_gen import comfy as shared
 from localm.media import comfy_client
 
 
-# A Wan-shaped graph with deliberately non-template ids (mix of numeric + named).
+# A Wan-shaped graph with non-template ids (a mix of numeric and named).
 RENUMBERED_WAN = {
     "100": {"inputs": {"unet_name": "wan2.2_ti2v_5B_fp16.safetensors",
                        "weight_dtype": "default"}, "class_type": "UNETLoader"},
@@ -93,7 +92,7 @@ class TestResolver:
 
     def test_set_seed_on_all_covers_every_sampler(self):
         # A two-stage graph (Wan high/low-noise, SDXL refiner): the seed must land on
-        # BOTH samplers, not just the first, or later stages stay deterministic.
+        # BOTH samplers, not just the first.
         wf = {
             "a": {"class_type": "KSampler", "inputs": {"seed": 0}},
             "b": {"class_type": "KSamplerAdvanced", "inputs": {"noise_seed": 0}},
@@ -149,7 +148,7 @@ class TestEndToEndRenumberedGraph:
                 seconds=5.0, fps=24, seed=99, steps=20, cfg=4.0)
         assert ok, msg
         wf = captured["workflow"]
-        # Injection landed on the RENUMBERED nodes, proving role resolution.
+        # Injection landed on the RENUMBERED nodes.
         assert wf["pos"]["inputs"]["text"] == "a red fox"
         assert wf["neg"]["inputs"]["text"] == "blurry"
         assert wf["ks"]["inputs"]["seed"] == 99

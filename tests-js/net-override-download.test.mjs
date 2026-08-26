@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// F1: the one-time, non-persistent network-policy override in the GUI.
-// The server decides WHO may authorize the download (can_download); the client
-// only offers the action - a greyed mic / the Knowledge panel's download
-// button - and must never POST without an explicit confirm.
+// The one-time, non-persistent network-policy override in the GUI. The server
+// decides who may authorize the download (can_download); the client offers the
+// action - a greyed mic, the Knowledge panel's download button - and POSTs only
+// after an explicit confirm.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
@@ -137,7 +137,7 @@ test("clicking Download-now POSTs the download route and streams the job", async
   const posts = calls.filter((c) => c.url === "/api/rag/embedding/download");
   assert.equal(posts.length, 1, "one POST to the download route");
   assert.equal((posts[0].opts || {}).method, "POST");
-  // and NOTHING went to the model-switch route - downloading is not selecting
+  // nothing goes to the model-switch route
   assert.equal(calls.filter((c) => c.url === "/api/rag/embedding"
                                    && c.opts && c.opts.method === "POST").length, 0,
     "the download action must never touch the model-switch route");

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 setup/UX backlog cluster.
+"""Setup/UX behaviour:
 
-  NEW-J           - console-script venv guard (localm / localcoder)
-  REC-DEBUGENV    - LOCALM_DEBUG=1 must actually open the debug log file
-  REC-LLAMALIB-SILENT - a bad LLAMA_CPP_LIB override warns instead of silent fallback
-  REC-RUNTIME-BROKEN  - a broken (installed but unimportable-as-expected)
-                        localm_llama_runtime warns instead of silent fallback
+  - the console-script venv guard (localm / localcoder)
+  - LOCALM_DEBUG=1 opens the debug log file
+  - a bad LLAMA_CPP_LIB override warns instead of falling back silently
+  - a broken (installed but unimportable-as-expected) localm_llama_runtime
+    warns instead of falling back silently
 """
 
 import logging
@@ -16,12 +16,12 @@ import pytest
 
 
 # --------------------------------------------------------------------------- #
-#  NEW-J - the venv guard, and its console-script wiring
+#  The venv guard, and its console-script wiring
 # --------------------------------------------------------------------------- #
 
 def test_require_venv_exits_when_deps_absent(monkeypatch):
-    # A bare interpreter: not a venv AND the runtime deps are not importable ->
-    # the one case the guard exists for (pre-empt the cryptic ModuleNotFoundError).
+    # A bare interpreter: not a venv AND the runtime deps are not importable,
+    # which is the one case the guard exits on.
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/usr")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # prefix == base -> not a venv
@@ -38,8 +38,8 @@ def test_require_venv_passes_inside_venv(monkeypatch):
 
 
 def test_require_venv_passes_outside_venv_when_deps_present(monkeypatch):
-    # The fix: a NON-.venv interpreter that DOES have the deps (pipx / container /
-    # system-wide / cold install / CI editable) must run, not be falsely blocked.
+    # A NON-.venv interpreter that DOES have the deps (pipx / container /
+    # system-wide / cold install / CI editable) must run, not be blocked.
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/usr")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # prefix == base -> not a venv
@@ -63,14 +63,14 @@ def test_console_main_entrypoints_import():
 
 def test_bare_main_still_importable_for_in_process_callers():
     # The `localm coder` route and the test suite call `main` directly, so it
-    # must stay importable and separate from the guarded console_main.
+    # stays importable and separate from the guarded console_main.
     from localm.cli import main as group
     from localm.plugins.coder.cli import main as coder_cmd
     assert group is not None and coder_cmd is not None
 
 
 # --------------------------------------------------------------------------- #
-#  REC-DEBUGENV - LOCALM_DEBUG=1 opens a real log file
+#  LOCALM_DEBUG=1 opens a real log file
 # --------------------------------------------------------------------------- #
 
 def test_honor_env_debug_opens_log_on_env_request(tmp_path, monkeypatch):
@@ -99,7 +99,7 @@ def test_honor_env_debug_noop_when_unset(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  REC-LLAMALIB-SILENT - a bad explicit LLAMA_CPP_LIB warns
+#  A bad explicit LLAMA_CPP_LIB warns
 # --------------------------------------------------------------------------- #
 
 def test_bad_llama_cpp_lib_warns(tmp_path, monkeypatch):
@@ -149,8 +149,8 @@ def test_bad_llama_cpp_lib_warns_once(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  REC-RUNTIME-BROKEN - a broken localm_llama_runtime install warns, but a
-#  simply-not-installed one (the normal pre-`setup-llama` state) stays silent
+#  A broken localm_llama_runtime install warns, but a simply-not-installed one
+#  (the normal pre-`setup-llama` state) stays silent
 # --------------------------------------------------------------------------- #
 
 def test_broken_llama_runtime_warns(monkeypatch):

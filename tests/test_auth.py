@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 def _req(token=None, method="GET"):
     """Minimal Starlette Request carrying an optional Bearer token, for unit-
-    calling the request-aware auth dependencies (S2: header-or-cookie auth)."""
+    calling the request-aware auth dependencies (header-or-cookie auth)."""
     from starlette.requests import Request
     headers = [(b"authorization", f"Bearer {token}".encode())] if token else []
     return Request({"type": "http", "method": method, "headers": headers,
@@ -23,9 +23,8 @@ def auth(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
-    # config.py freezes these paths at import, so LOCALM_HOME alone won't
-    # redirect load_config/save_config (used by require_auth_enabled). Point
-    # them at the throwaway dir so a test never touches the real config.
+    # config.py freezes these paths at import, so LOCALM_HOME alone does not
+    # redirect load_config/save_config. Point them at the throwaway dir.
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
     monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
@@ -82,12 +81,8 @@ def test_require_flag_env_and_config(auth, monkeypatch):
 
 
 def test_config_read_failure_resolves_required(auth, monkeypatch, caplog):
-    # LM-DA-021: an unreadable config must NOT silently downgrade an explicit
-    # require_auth: true to "not required" (fail-open). It fails SAFE to
-    # "required" and surfaces a warning, matching the newer fail-closed
-    # precedent this codebase established for the identical question in
-    # netpolicy.network_mode() (HON-2) and this module's own
-    # any_key_configured() - erring toward MORE restriction, never less.
+    # An unreadable config fails safe to "required" and surfaces a warning,
+    # rather than downgrading an explicit require_auth: true to "not required".
     def boom():
         raise OSError("config unreadable")
     monkeypatch.setattr("localm.config.load_config", boom)
@@ -99,10 +94,8 @@ def test_config_read_failure_resolves_required(auth, monkeypatch, caplog):
 
 
 def test_config_read_failure_env_var_short_circuits(auth, monkeypatch):
-    # LOCALM_REQUIRE_AUTH is checked BEFORE config is ever read, so a truthy
-    # env var must still return True without touching (or being tripped up
-    # by) an unreadable config file - proves the ordering, not just the
-    # fail-closed default above.
+    # LOCALM_REQUIRE_AUTH is checked before config is read, so a truthy env var
+    # returns True even with an unreadable config file.
     def boom():
         raise OSError("config unreadable")
     monkeypatch.setattr("localm.config.load_config", boom)
@@ -116,8 +109,7 @@ def test_require_auth_dependency(auth, monkeypatch):
     # open mode: no key, not required -> allowed
     assert _require_auth(_req()) is None
 
-    # required but no key configured -> fail closed (401; was 503). A 401 makes
-    # the GUI prompt for a key rather than show a server-down overlay.
+    # required but no key configured -> fail closed (401)
     monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
     with pytest.raises(HTTPException) as exc:
         _require_auth(_req())
@@ -138,7 +130,7 @@ def test_require_auth_dependency(auth, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  Scoped keystore + scope enforcement (Phase 1)                              #
+#  Scoped keystore + scope enforcement                                        #
 # --------------------------------------------------------------------------- #
 
 def test_keystore_create_list_revoke(auth):
@@ -168,10 +160,8 @@ def test_any_key_configured(auth):
 
 
 def test_corrupt_keystore_fails_closed(auth):
-    # SEC: a scoped-keys-only install (no owner key) must NOT silently drop to
-    # open mode if auth.json gets corrupted/truncated. Before the fix this read
-    # as "no keys" -> open. Now a present-but-unparseable keystore counts as
-    # configured (fail CLOSED: every request needs a key, none verify -> locked).
+    # A present-but-unparseable keystore counts as configured (fail closed:
+    # every request needs a key, and none verify).
     auth.create_key("k", ["chat"])
     auth.keystore_file().write_text("{ this is not valid json", encoding="utf-8")
     assert auth.any_key_configured() is True          # fail closed, not open
@@ -180,15 +170,14 @@ def test_corrupt_keystore_fails_closed(auth):
 
 def test_unreadable_keystore_fails_closed(auth):
     # A keystore path that exists but cannot be read as a file (here a directory,
-    # which makes read_text raise OSError) also counts as configured (fail
-    # closed), not open - distinct from the absent case.
+    # so read_text raises OSError) also counts as configured (fail closed),
+    # distinct from the absent case.
     auth.keystore_file().mkdir(parents=True, exist_ok=True)
     assert auth.any_key_configured() is True
 
 
 def test_empty_keystore_is_not_configured(auth):
-    # A genuinely empty ([]) keystore is "no scoped keys" -> open is correct
-    # (must stay distinct from the corrupt case above).
+    # A genuinely empty ([]) keystore is "no scoped keys" -> open.
     auth.keystore_file().write_text("[]", encoding="utf-8")
     assert auth.any_key_configured() is False
     # A valid-JSON-but-malformed (non-list) keystore is treated as broken -> closed.
@@ -197,27 +186,22 @@ def test_empty_keystore_is_not_configured(auth):
 
 
 def test_unreadable_owner_key_fails_closed(auth):
-    # SEC (checkup 2026-07-11 HIGH): an OWNER key file that EXISTS but cannot be
-    # read (here a directory, which makes read_text raise OSError) must count as
-    # auth-in-effect (fail CLOSED) - the server locks (every request needs a key,
-    # none verify) instead of silently dropping to open/keyless mode. Mirrors
-    # test_unreadable_keystore_fails_closed, for the owner key path.
+    # An owner key file that exists but cannot be read (here a directory, so
+    # read_text raises OSError) counts as auth-in-effect (fail closed): the
+    # server locks instead of dropping to open/keyless mode.
     auth.key_file().mkdir(parents=True, exist_ok=True)
     assert auth.any_key_configured() is True          # fail closed, not open
 
 
 def test_absent_owner_key_is_open(auth):
-    # The genuinely ABSENT owner key (no file, no env, no keystore) stays open by
-    # design - must remain DISTINCT from the present-but-unreadable case above.
+    # A genuinely absent owner key (no file, no env, no keystore) stays open.
     assert not auth.key_file().exists()
     assert auth.any_key_configured() is False
 
 
 def test_transient_unreadable_owner_key_is_retried(auth, monkeypatch):
-    # A TRANSIENT read failure on auth.key (a concurrent atomic replace / an
-    # antivirus / an indexer holding it for a microsecond on Windows) must be
-    # ridden out with a bounded retry, not read as "no key" for that request
-    # (which would flap the owner's own auth), matching config._read_json.
+    # A transient read failure on auth.key is ridden out with a bounded retry
+    # rather than read as "no key" for that request.
     from pathlib import Path
     auth.set_api_key("s3cret-key")
     real_read = Path.read_text
@@ -248,14 +232,14 @@ def test_ct_equal_is_total_and_correct(auth):
     operand against an ASCII secret (a token_urlsafe or a hexdigest): compare_digest
     raises if EITHER side is non-ASCII, so the ASCII side does not protect it."""
     token = "aGVsbG8-d29ybGQ_1234"          # the shape secrets.token_urlsafe emits
-    # Correct matches (the negative case: a blanket False would pass everything else).
+    # Correct matches.
     assert auth.ct_equal(token, token) is True
     assert auth.ct_equal("pässwort", "pässwort") is True
     assert auth.ct_equal("key\ud800bad", "key\ud800bad") is True
     # Wrong values reject.
     assert auth.ct_equal("wrong", token) is False
     assert auth.ct_equal("pässwort", "pässworT") is False
-    # The bug shape: non-ASCII on either side must reject, not raise.
+    # Non-ASCII on either side rejects rather than raising.
     assert auth.ct_equal("pässwort", token) is False
     assert auth.ct_equal(token, "pässwort") is False
     assert auth.ct_equal("key\ud800bad", token) is False
@@ -271,11 +255,10 @@ def test_non_ascii_presented_token_rejects_and_never_raises(auth, monkeypatch):
     turn a clean 401 into an unhandled 500 by sending a non-ASCII token."""
     from localm import scopes as S
     monkeypatch.setenv("LOCALM_API_KEY", "asciiownerkey1234")
-    # Negative cases: rejection and acceptance must both still work on ASCII, or
-    # this test would pass on a verify() that simply rejected everything.
+    # Negative cases: rejection and acceptance both still work on ASCII.
     assert auth.verify("wrong-ascii-key") is None
     assert auth.verify("asciiownerkey1234") == {S.ADMIN}
-    # The bug: a non-ASCII presented token must reject cleanly, not raise.
+    # A non-ASCII presented token rejects cleanly rather than raising.
     assert auth.verify("pässwort") is None
     assert auth.verify("ünïcode-guess") is None
 
@@ -310,8 +293,7 @@ def test_set_api_key_refuses_characters_a_header_cannot_carry(auth):
         with pytest.raises(ValueError, match="letters, numbers"):
             auth.set_api_key(bad)
         assert auth.get_api_key() is None              # nothing was persisted
-    # Negative cases: every character the generator emits must still be accepted,
-    # or `localm key generate` would reject its own output.
+    # Negative cases: every character the generator emits is accepted.
     auth.set_api_key("passwort-key")
     assert auth.get_api_key() == "passwort-key"
     auth.set_api_key("Under_scores-and-Digits123")
@@ -324,19 +306,12 @@ def test_set_api_key_accepts_every_generated_key(auth):
     feeds generate_key() straight into set_api_key(), so a mismatch here would make
     `localm key generate` fail at random.
 
-    A direct check on the charset itself removes any reliance on chance for
-    THAT specific property. The loop below stays real (real set_api_key/
-    get_api_key round trips, not mocked - see hard-won-rules.md), which is
-    what actually exercises the length/charset guards end to end; its count
-    is a statistical-confidence choice, not a correctness requirement: each
-    generated key independently has a ~49%/~48% chance of containing '_'/'-',
-    so 30 samples already puts the odds of missing either character below
-    1e-9 (0.51**30). It intentionally does NOT go anywhere near 200: each
-    call pays a real memory-hard KDF derivation via the owner-KDF path (see
-    _OWNER_KDF_KEEP in auth.py), so 200 fresh keys in a loop cost several
-    minutes on a loaded box, not because anything hangs but because that is
-    what 200 real derivations cost - see
-    dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md."""
+    A direct check on the charset itself covers THAT property without relying
+    on chance. The loop below does real set_api_key/get_api_key round trips,
+    which exercises the length/charset guards end to end; 30 samples puts the
+    odds of missing either character below 1e-9 (0.51**30). The count stays
+    small because each call pays a real memory-hard KDF derivation via the
+    owner-KDF path (see _OWNER_KDF_KEEP in auth.py)."""
     assert auth._KEY_CHARSET.match("-")
     assert auth._KEY_CHARSET.match("_")
     for _ in range(30):
@@ -346,8 +321,8 @@ def test_set_api_key_accepts_every_generated_key(auth):
 
 
 def test_non_ascii_bearer_token_gets_401_not_500(auth, monkeypatch):
-    """End-to-end shape of the bug: an UNAUTHENTICATED caller sending a non-ASCII
-    bearer token to a protected route must get a clean 401, never an unhandled 500.
+    """An UNAUTHENTICATED caller sending a non-ASCII bearer token to a protected
+    route must get a clean 401, never an unhandled 500.
     raise_server_exceptions=False so a server-side raise surfaces as a real 500
     response instead of propagating out of the client call (the house default of
     True would re-raise the TypeError and never yield a status to assert on)."""
@@ -358,13 +333,12 @@ def test_non_ascii_bearer_token_gets_401_not_500(auth, monkeypatch):
     auth.set_api_key("asciiownerkey1234")
     app = create_app(None)
     with TestClient(app, raise_server_exceptions=False) as client:
-        # httpx refuses to encode a non-ASCII str header, so send raw bytes -
-        # exactly what an attacker puts on the wire. Starlette decodes latin-1.
+        # httpx refuses to encode a non-ASCII str header, so send raw bytes.
+        # Starlette decodes latin-1.
         r = client.get("/v1/models",
                        headers={"Authorization": b"Bearer p\xc3\xa4sswort"})
         assert r.status_code == 401, f"expected a clean 401, got {r.status_code}"
-        # Negative cases: a wrong ASCII key must still 401, and the real owner
-        # key must still 200, or a blanket-reject would pass this test.
+        # Negative cases: a wrong ASCII key 401s and the real owner key 200s.
         assert client.get("/v1/models", headers={
             "Authorization": "Bearer wrong-ascii-key"}).status_code == 401
         assert client.get("/v1/models", headers={
@@ -408,14 +382,10 @@ def test_owner_key_grants_every_scope(auth, monkeypatch):
 
 
 def test_require_owner_dependency_rejects_non_owner(auth, monkeypatch):
-    """require_owner() (design-audit LM-DA-020, reaffirming LM-DA-SEC-06):
-    job_owner_ok's per-route ownership check is now Depends()-injectable, the
-    same pattern require_scope already uses, so a new per-owner route cannot
-    omit it by construction. Exercises a route wired via
-    Depends(require_owner(...)) through a real TestClient request - mirroring
-    the existing job_owner_ok route-level coverage in
-    test_jobs_owner_binding.py / test_media_gallery_ownership.py - rather than
-    unit-calling the dependency directly, since require_owner's gate composes
+    """require_owner() makes job_owner_ok's per-route ownership check
+    Depends()-injectable, the same pattern require_scope uses. Exercises a route
+    wired via Depends(require_owner(...)) through a real TestClient request
+    rather than unit-calling the dependency, since require_owner's gate composes
     with a nested path-param-reading resolve() dependency that only a real
     request can drive end to end."""
     from fastapi import Depends, FastAPI
@@ -444,8 +414,8 @@ def test_require_owner_dependency_rejects_non_owner(auth, monkeypatch):
     with TestClient(app) as c:
         # the owner reaches its own thing
         assert c.get("/things/t1", headers=_h(owner_key)).status_code == 200
-        # a different valid key gets the SAME 404 a missing id would (never 403,
-        # so a foreign key cannot even confirm the thing exists - KEY-SCOPE-2)
+        # a different valid key gets the SAME 404 a missing id would, never 403,
+        # so a foreign key cannot confirm the thing exists
         assert c.get("/things/t1", headers=_h(other_key)).status_code == 404
         assert c.get("/things/nope", headers=_h(owner_key)).status_code == 404
         # the owner/admin key reaches every principal's things
@@ -502,10 +472,9 @@ def test_keys_endpoint_blocks_privilege_self_escalation(auth, monkeypatch):
 
 
 def test_keys_endpoint_wires_fs_access_owner_only(auth, monkeypatch):
-    """POST /v1/keys forwards fs_access from the request body into create_key()
-    (it used to be dropped silently: every key got fs_access='none' regardless
-    of what the body asked for). Granting host reach follows the same owner-
-    only gate as a privileged scope: a non-owner keys:admin caller is refused
+    """POST /v1/keys forwards fs_access from the request body into create_key().
+    Granting host reach follows the same owner-only gate as a privileged scope:
+    a non-owner keys:admin caller is refused
     (403) and nothing is persisted, while the owner key succeeds and the minted
     key actually carries fs_access='host'."""
     from fastapi.testclient import TestClient
@@ -543,10 +512,8 @@ def test_keys_endpoint_wires_fs_access_owner_only(auth, monkeypatch):
 
 
 def test_keys_endpoint_wires_rag_roots_owner_only(auth, monkeypatch):
-    """POST /v1/keys forwards rag_roots from the request body into create_key()
-    (it used to be dropped silently: every GUI/API-minted key was RAG-unconfined
-    regardless of what the body asked for, while GET /v1/keys already returned
-    the field for display). A key-scoped rag_roots list REPLACES the whitelist
+    """POST /v1/keys forwards rag_roots from the request body into create_key().
+    A key-scoped rag_roots list REPLACES the whitelist
     rather than narrowing it (rag/store.py's confine_index_path), so it can point
     a new key at a folder outside the caller's own reach - granting one follows
     the same owner-only gate as fs_access=host: a non-owner keys:admin caller is
@@ -746,11 +713,8 @@ def test_second_key_does_not_reseed_owner_or_session(auth, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  resolve_bearer_token / resolve_bearer_headers precedence                   #
-#  (checkup 2026-08-11 item 12: owner key must win over an instance token     #
-#  wherever a self-call resolves its own credential - see also               #
-#  tests/test_no_untracked_authorization_header_writes.py, which enumerates  #
-#  every call site that must route through this precedence.)                 #
+#  resolve_bearer_token / resolve_bearer_headers precedence: the owner key wins #
+#  over an instance token wherever a self-call resolves its own credential.    #
 # --------------------------------------------------------------------------- #
 
 def test_resolve_bearer_token_prefers_owner_key_over_instance_token(auth):
@@ -787,12 +751,8 @@ def test_resolve_bearer_headers_matches_resolve_bearer_token(auth):
 
 
 # --------------------------------------------------------------------------- #
-#  Per-key rag_roots (S4): the exact same shape as fs_access above - a per-key #
-#  field that defaults to "no restriction" so every key minted before it       #
-#  existed is unaffected, and that only the owner/ADMIN key is exempt from     #
-#  regardless of what is stored on it (see effective_rag_roots in              #
-#  inference/http_server.py and TestRagAddRouteKeyScopedRoots in               #
-#  test_rag_confinement.py for the confinement-enforcement side).              #
+#  Per-key rag_roots: a per-key field defaulting to "no restriction", which the #
+#  owner/ADMIN key is exempt from regardless of what is stored on it.          #
 # --------------------------------------------------------------------------- #
 
 def test_norm_rag_roots_coerces_and_dedupes(auth):

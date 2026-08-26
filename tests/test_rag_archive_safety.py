@@ -1,21 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RAG archive-extraction safety (Antigravity-audit HIGH-8 / MED-17 / MED-21).
+"""RAG archive-extraction safety. Three properties:
 
-HIGH-8  _extract_zip/_extract_tar bound each single member (80 MB) but had NO cap
-        on the number of members or the running accumulated output - the
-        whole-archive MAX_TEXT_CHARS truncation was applied only AFTER every
-        member was decoded and joined in memory. A 30 MB zip of thousands of
-        highly-compressible members could build ~30 GB in RAM first (a
-        decompression-amplification DoS).
+  * _extract_zip/_extract_tar cap each single member (80 MB), the number of
+    members, AND the running accumulated output. Without the last two, a 30 MB
+    zip of thousands of highly-compressible members builds ~30 GB in RAM before
+    the whole-archive MAX_TEXT_CHARS truncation is applied.
 
-MED-17  Compressed-tar suffixes (.tgz/.tbz/.txz) were whitelisted as extractable
-        but had no dispatch branch, so a valid tarball raised "Unsupported file
-        type". And a single gzip/bzip2/xz-compressed non-tar file was sniffed to
-        ".tar" and routed to the tar extractor, which failed.
+  * Compressed-tar suffixes (.tgz/.tbz/.txz) have a dispatch branch, and a
+    single gzip/bzip2/xz-compressed non-tar file is not routed to the tar
+    extractor.
 
-MED-21  A per-member extraction error was appended into the indexed text as
-        "[file: X - error: ...]", so failures became retrievable knowledge-base
-        content instead of being surfaced/logged (AGENTS.md rule 5).
+  * A per-member extraction error is surfaced/logged, never appended into the
+    indexed text as "[file: X - error: ...]" where it becomes retrievable
+    knowledge-base content.
 """
 
 import bz2
@@ -51,7 +48,7 @@ def _targz(members: dict) -> bytes:
 
 
 def test_archive_extraction_is_bounded(monkeypatch):
-    """HIGH-8: the extractor stops once the accumulated-text budget is reached,
+    """The extractor stops once the accumulated-text budget is reached,
     instead of decoding every member into memory first."""
     # Shrink the budget so the test stays small and fast.
     monkeypatch.setattr(extract, "MAX_TEXT_CHARS", 5_000)
@@ -78,7 +75,7 @@ def test_archive_extraction_is_bounded(monkeypatch):
 
 
 def test_compressed_tarball_extracts(monkeypatch):
-    """MED-17: a real .tar.gz (and .tgz) extracts its members instead of raising
+    """A real .tar.gz (and .tgz) extracts its members instead of raising
     'Unsupported file type'."""
     data = _targz({"a.txt": "alpha content", "b.txt": "beta content"})
     out = extract_bytes(data, "bundle.tgz")
@@ -86,7 +83,7 @@ def test_compressed_tarball_extracts(monkeypatch):
 
 
 def test_single_gzip_file_extracts_inner_text(monkeypatch):
-    """MED-17: a single gzip-compressed non-tar file decompresses to its inner
+    """A single gzip-compressed non-tar file decompresses to its inner
     content instead of being mis-routed to the tar extractor and failing."""
     inner = b"this is a plain text file that was gzipped, not a tarball"
     gz = gzip.compress(inner)
@@ -114,10 +111,9 @@ def test_nested_single_stream_compression_is_bounded():
     deep enough to hit the recursion limit is O(n^2) to even build, because each
     level re-probes the whole nest as a possible tarball).
 
-    This asserts the REFUSAL (pytest.raises), which is what makes it a real
-    regression guard: without the depth bound, this shallow nesting extracts
-    silently (no error) at every level, so the test would FAIL; a stray
-    RecursionError would not match ExtractError and would fail the test too."""
+    Asserts the REFUSAL (pytest.raises): without the depth bound this shallow
+    nesting extracts silently at every level, and a RecursionError does not
+    match ExtractError either."""
     from localm.rag.extract import ExtractError, MAX_EXTRACT_DEPTH
     depth = MAX_EXTRACT_DEPTH + 5         # past the bound; small nest keeps it fast
     for name, comp in (("bomb.gz", gzip.compress),
@@ -144,7 +140,7 @@ def test_single_level_compression_still_extracts_after_depth_bound():
 
 
 def test_member_error_is_not_indexed_as_content(monkeypatch):
-    """MED-21: a member that fails extraction must NOT have its error string
+    """A member that fails extraction must NOT have its error string
     folded into the returned (indexed) text."""
     # A file that sniffs as PDF (starts with %PDF-) but is not a valid PDF, so
     # _extract_pdf raises inside the member loop.
@@ -160,21 +156,18 @@ def test_member_error_is_not_indexed_as_content(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  LM-FZ-003: a whole-archive budget on bytes INFLATED, not just text produced. #
+#  A whole-archive budget on bytes INFLATED, not just text produced.           #
 # --------------------------------------------------------------------------- #
 #
 # The per-member cap (80 MB) and the member-count cap (5,000) MULTIPLY rather
 # than compose, and the text budget only advances when a member YIELDS TEXT. A
 # member that sniffs as binary is skipped and charges nothing, so the loop runs
-# to the full member cap while still decompressing each one. Measured: 27.7 MB
-# in -> 28.0 GB out, 86.93 s CPU, all under the 30 MB request cap.
+# to the full member cap while still decompressing each one.
 #
-# These assert on BYTES ACTUALLY INFLATED, deliberately, not on wall-clock time:
-# a timing assertion measures a proxy for the defect and flakes under load on a
-# shared machine, so it would be the wrong instrument for the property.
+# These assert on BYTES ACTUALLY INFLATED, not on wall-clock time.
 
 def _binary_bomb(count: int, size: int) -> dict:
-    """The MEASURED bomb shape, not a synthetic stand-in: highly compressible NUL
+    """The bomb shape: highly compressible NUL
     blocks named .bin, so sniff_format classifies them as binary and they are
     SKIPPED - contributing nothing to the text budget while each still costs a
     full decompression."""
@@ -186,8 +179,7 @@ def _inflation_probe(monkeypatch) -> list:
 
     sniff_format is called once per successfully-read member, with that member's
     DECOMPRESSED bytes, so summing its inputs measures inflation directly. The
-    real function is still called, so routing behaviour is unchanged (patching it
-    away would delete the behaviour under test)."""
+    real function is still called, so routing behaviour is unchanged."""
     seen: list = []
     real_sniff = extract.sniff_format
 

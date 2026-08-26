@@ -35,13 +35,13 @@ def test_changelog_endpoint_serves_released_history_without_the_unreleased_secti
         monkeypatch, tmp_path):
     """RELEASED history, newest first - and NOT the in-progress section.
 
-    Serving `[Unreleased]` told users about changes that are not in their build, and
-    on a security-fix day described those fixes in detail before they shipped.
+    Serving `[Unreleased]` would tell users about changes that are not in their
+    build.
 
     Asserted on the actual TEXT of a known unreleased bullet being gone and a known
-    released bullet being present, never on a proxy like "the response got shorter" or
-    "one fewer heading" - both of those pass just as happily on a strip that removed
-    the wrong section."""
+    released bullet being present, never on a proxy like "the response got shorter"
+    or "one fewer heading", both of which also pass on a strip that removed the
+    wrong section."""
     _open_mode(monkeypatch)
     (tmp_path / "CHANGELOG.md").write_text(
         "# Changelog\n\n## [Unreleased]\n\n### Added\n- an unshipped thing\n\n"
@@ -53,8 +53,7 @@ def test_changelog_endpoint_serves_released_history_without_the_unreleased_secti
     assert data["available"] is True
     md = data["markdown"]
 
-    # Gone: the heading AND its content. The bullets are the payload - a strip that
-    # removed only the heading would leave the disclosure intact.
+    # Gone: the heading AND its content.
     assert "[Unreleased]" not in md
     assert "an unshipped thing" not in md
     assert "an unshipped security fix" not in md
@@ -136,20 +135,18 @@ def test_changelog_endpoint_serves_the_real_shipped_file(monkeypatch):
     """End-to-end with the REAL repo CHANGELOG.md (no monkeypatch): it is found and
     contains a version section - proving repo_root() resolution actually works.
 
-    Also the only test that runs against the ACTUAL file users are served, so it is
-    where the strip is proven on real content rather than on a fixture built to suit
-    it. Asserted on the heading, which is stable, rather than on today's bullets."""
+    The only test that runs against the ACTUAL file users are served, so the strip
+    is exercised on real content rather than a fixture. Asserted on the heading,
+    which is stable, rather than on today's bullets."""
     _open_mode(monkeypatch)
     data = _get(create_app(_engine()), "/api/changelog").json()
     assert data["available"] is True
     md = data["markdown"]
     assert "# Changelog" in md
     assert "## [0.1.0]" in md
-    # The HEADING, not the bare substring. Measured on the real file: "[Unreleased]"
-    # also occurs in the header sentence explaining the convention and in a bullet
-    # INSIDE a released section that refers back to a correction made in the
-    # unreleased one. Asserting the substring is absent would fail on both of those
-    # and would push a future fix toward deleting text out of a shipped release.
+    # The HEADING, not the bare substring: on the real file the substring also
+    # occurs in the header prose explaining the convention and in a bullet inside
+    # a released section.
     assert "## [Unreleased]" not in md, (
         "the real shipped changelog must reach users without its in-progress section")
     assert "\n[Unreleased]:" not in md, "the dangling link definition goes too"

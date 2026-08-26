@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""H1: `localm pull <local path>` must register the file in place instead of
-mis-parsing a Windows drive-colon as owner/repo:file or rejecting "Unknown spec".
+"""`localm pull <local path>` must register the file in place instead of
+mis-parsing a Windows drive-colon as owner/repo:file or rejecting "Unknown
+spec".
 """
 
 from pathlib import Path
@@ -15,9 +16,8 @@ from localm.model_manager import add_local, pull_model
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
     # load_registry/save_registry read the module-level REGISTRY_FILE frozen at
-    # import, so the autouse LOCALM_HOME env alone does not isolate them. Redirect
-    # the config paths to a throwaway dir (mirrors conftest.cli_runner) so these
-    # tests never touch the real registry or collide with each other.
+    # import, so the autouse LOCALM_HOME env alone does not isolate them.
+    # Redirect the config paths to a throwaway dir.
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -53,8 +53,6 @@ class TestAddLocalReturnsBool:
 
 class TestPullByLocalPath:
     def test_pull_registers_local_gguf(self, tmp_path, isolated_home):
-        # FAILS pre-fix: pull_model rejected an absolute path ("Unknown spec" /
-        # "Unsafe model filename").
         p = _gguf(tmp_path, "mymodel.gguf")
         assert pull_model(str(p)) is True
         assert "mymodel" in load_registry()
@@ -77,9 +75,9 @@ class TestPullByLocalPath:
 
 
 class TestPullLocalSha256:
-    """A user-supplied --sha256 on a LOCAL pull is a safety assertion: it must be
-    verified against the real bytes, never silently ignored while reporting
-    success (AGENTS.md rule 5: a safety step that fails must not report success)."""
+    """A user-supplied --sha256 on a LOCAL pull is a safety assertion: it must
+    be verified against the real bytes, never silently ignored while reporting
+    success."""
 
     def _sha(self, p):
         import hashlib
@@ -112,7 +110,7 @@ class TestPullLocalSha256:
 
 class TestSafeFilenameFailsClosed:
     """The download-destination guard must fail CLOSED (return None) on unsafe
-    input, never raise - a NUL byte used to escape the OSError-only guard as an
+    input, never raise: a NUL byte must not escape the OSError-only guard as an
     uncaught ValueError."""
 
     def test_nul_byte_returns_none(self, isolated_home):
@@ -129,31 +127,24 @@ class TestSafeFilenameFailsClosed:
 
 
 class TestSafeFilenameRejectsWindowsHazardClass:
-    """A filename that passes the single-component/no-traversal checks can
+    """A filename that passes the single-component and no-traversal checks can
     still be a Windows filename-CONFUSION hazard rather than a directory
-    escape: it stays confined to base_dir (the CWE-22 property CodeQL's
-    py/path-injection alert checks holds), but names something other than
-    what it appears to. Live-confirmed via a real write+listdir+read on this
-    box (not merely reasoned about) before this test was written:
+    escape: it stays confined to base_dir, but names something other than what
+    it appears to.
 
-    - 'somefile.exe:mmproj.gguf' opens an NTFS Alternate Data Stream. The
-      write succeeds, `os.listdir` shows only a 0-byte 'somefile.exe', and
-      gguf_is_mmproj's hard-verify (an ordinary open()) transparently reads
-      the hidden stream too - so a crafted CLIP-architecture payload placed
-      there passes BOTH the filename guard and the metadata hard-verify.
+    - 'somefile.exe:mmproj.gguf' opens an NTFS Alternate Data Stream. The write
+      succeeds, `os.listdir` shows only a 0-byte 'somefile.exe', and
+      gguf_is_mmproj's hard-verify (an ordinary open()) transparently reads the
+      hidden stream too - so a crafted CLIP-architecture payload placed there
+      passes BOTH the filename guard and the metadata hard-verify.
     - 'evil.gguf.' / 'evil.gguf ' - Windows silently strips a trailing dot or
-      space when resolving a path, so these name the SAME file as
-      'evil.gguf': a download using one of these forms would silently
-      overwrite an existing model, with the collision invisible in any
-      directory listing (which only ever shows the stripped form).
-
-    This is the sibling to test_registry_confinement.py:435's
-    _sanitize_name colon assertion - that whitelist already excluded ':'
-    for registry KEYS; this validator, for download-destination FILENAMES,
-    never learned the same lesson until now."""
+      space when resolving a path, so these name the SAME file as 'evil.gguf':
+      a download using one of these forms would overwrite an existing model,
+      with the collision invisible in any directory listing, which only ever
+      shows the stripped form."""
 
     @pytest.mark.parametrize("hazard", [
-        "somefile.exe:mmproj.gguf",     # NTFS ADS - live-confirmed bypass
+        "somefile.exe:mmproj.gguf",     # NTFS ADS
         "evil.gguf:hidden",             # ADS on a plausible model name
         "evil.gguf.",                   # trailing dot - silent collision
         "evil.gguf ",                   # trailing space - silent collision
@@ -196,20 +187,17 @@ class TestSafeFilenameRejectsWindowsHazardClass:
 
     def test_alias_resolving_to_a_different_existing_file_is_rejected(
             self, tmp_path, isolated_home, monkeypatch):
-        """An OS-level alias - an NTFS 8.3 short name is the live-confirmed
-        case (adversarial review, this session): on a volume with short-name
-        generation enabled, 'LONGMO~1.GGU' resolves to a pre-existing
-        'LongModelNameThatIsVeryLong.gguf' - passes every earlier check, but
-        names something other than what it appears to. A production caller's
-        own dest.exists() "already downloaded" convention (pull.py) would
-        then silently treat the victim's unrelated content as the requested
-        download - a confused-deputy substitution, not a crash.
+        """An OS-level alias - an NTFS 8.3 short name is the case here: on a
+        volume with short-name generation enabled, 'LONGMO~1.GGU' resolves to a
+        pre-existing 'LongModelNameThatIsVeryLong.gguf', passing every earlier
+        check while naming something other than what it appears to. A
+        production caller's own dest.exists() "already downloaded" convention
+        (pull.py) would then treat the victim's unrelated content as the
+        requested download.
 
-        8dot3 generation is volume/config-dependent (this session measured
-        it enabled on this box's C: and disabled on D:), so this simulates
-        the alias condition directly via Path.resolve rather than depending
-        on the OS having actually generated one - deterministic regardless
-        of which volume runs this test."""
+        8dot3 generation is volume- and config-dependent, so this simulates the
+        alias condition directly via Path.resolve rather than depending on the
+        OS having generated one."""
         base = tmp_path / "models"
         base.mkdir()
         victim = base / "LongModelNameThatIsVeryLong.gguf"
@@ -239,11 +227,11 @@ class TestSafeFilenameRejectsWindowsHazardClass:
 
     def test_case_variant_of_existing_file_still_accepted(
             self, tmp_path, isolated_home):
-        """Windows path resolution returns the ON-DISK casing regardless of
-        the requested casing (verified live: resolving 'MODEL.GGUF' against
-        an existing 'model.gguf' yields dest.name == 'model.gguf') - a
-        benign case-variant request for an already-downloaded file must not
-        be mistaken for an alias-substitution attack."""
+        """Windows path resolution returns the ON-DISK casing regardless of the
+        requested casing (resolving 'MODEL.GGUF' against an existing
+        'model.gguf' yields dest.name == 'model.gguf'), so a benign
+        case-variant request for an already-downloaded file must not be
+        mistaken for an alias-substitution attack."""
         base = tmp_path / "models"
         base.mkdir()
         (base / "model.gguf").write_bytes(b"CONTENT")
@@ -251,9 +239,10 @@ class TestSafeFilenameRejectsWindowsHazardClass:
 
 
 class TestGetModelInfoPathologicalName:
-    """get_model_info must return None for a pathological/nonexistent name, never
-    crash run/benchmark/serve. On Windows a dots-only name ('....') stats as an
-    existing dir but iterdir() on the raw string raises FileNotFoundError."""
+    """get_model_info must return None for a pathological or nonexistent name,
+    never crash run/benchmark/serve. On Windows a dots-only name ('....') stats
+    as an existing dir but iterdir() on the raw string raises
+    FileNotFoundError."""
 
     @pytest.mark.parametrize("name", ["....", "...", "..", "a..b", "doesnotexist"])
     def test_pathological_names_resolve_to_none(self, name, isolated_home):

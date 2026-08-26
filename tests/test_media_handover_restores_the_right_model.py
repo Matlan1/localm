@@ -11,19 +11,19 @@ THE SEQUENCE, which is the whole defect:
 2. The job generates.
 3. ``vram.reload_chat_after_media`` POSTs ``/models/load`` WITH NO NAME.
 
-Step 3 landed on ``_active_model_name or _default_model_name``. Step 1 had
-just set the first to None, so it fell through to ``_default_model_name`` -
-write-once at startup and never updated by a model switch. A user who booted
-on model-a, switched to model-b, generated an image, and went back to chat was
-then talking to model-a, with nothing anywhere saying so.
+Step 3 resolves ``_active_model_name or _default_model_name``. Step 1 has just
+set the first to None, so without the fix it falls through to
+``_default_model_name`` - write-once at startup and never updated by a model
+switch. A user who boots on model-a, switches to model-b, generates an image
+and goes back to chat is then talking to model-a, with nothing anywhere saying
+so.
 
-FIXTURE PREMISE (diff-review-discipline.md item 19), inherited from
-test_stale_default_model_name_after_targeted_eviction.py: the failing case
-needs a server that SWITCHED to a second model, and it needs
-``_last_active_model_name`` actually populated. A fixture with one model, or
-one that leaves that field None, cannot express this defect at all - both
-readings resolve to the same name and every assertion passes on the broken
-code. Each test asserts those premises before asserting the behaviour.
+FIXTURE PREMISE: the failing case needs a server that SWITCHED to a second
+model, and it needs ``_last_active_model_name`` actually populated. A fixture
+with one model, or one that leaves that field None, cannot express this defect
+at all - both readings resolve to the same name and every assertion passes on
+the broken code. Each test asserts those premises before asserting the
+behaviour.
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The GUI-settable bind: config 'bind_host' + the TLS trio (F1 parity gap).
+"""The GUI-settable bind: config 'bind_host' + the TLS trio.
 
 Settings > Server > Bind address lets a browser-only user bind the server past
 loopback (the phone/Companion feature) without a terminal. The security
@@ -7,8 +7,8 @@ property under test throughout: a CONFIG-driven network bind is fail-closed
 WITHOUT being able to kill the server - no strong API key means the server
 IGNORES the configured bind and stays on loopback (loudly, with the reason
 surfaced via app.state.bind_fallback), it never exits and never serves the
-network unauthenticated. Only the CLI's --insecure flag, which deliberately
-has NO config form, can override the key requirement, so an unauthenticated
+network unauthenticated. Only the CLI's --insecure flag, which has NO config
+form, can override the key requirement, so an unauthenticated
 network bind always requires a terminal. Explicit -H keeps its historical
 fail-hard behavior (exit 2).
 """
@@ -22,10 +22,9 @@ from localm import settings_schema as ss
 from localm.bindhost import is_valid_bind_host
 from localm.cli import _bind_preflight_error, _resolve_bind_host, _resolve_tls
 
-# TEST-NET-2 (RFC 5737): reserved for documentation, never assigned to a real
-# interface - so binding it fails deterministically on any machine. This is
-# the shape of the field's commonest REAL failure: a specific interface IP
-# that DHCP has since reassigned. Syntactically valid, currently unbindable.
+# TEST-NET-2 (RFC 5737): reserved for documentation and never assigned to a real
+# interface, so binding it fails deterministically on any machine.
+# Syntactically valid, currently unbindable.
 STALE_IP = "198.51.100.23"
 
 
@@ -34,8 +33,7 @@ def cfg_home(tmp_path, monkeypatch):
     """Throwaway LOCALM_HOME that load_config/save_config actually read.
 
     config.py freezes HOME_DIR/CONFIG_FILE/REGISTRY_FILE at import, so the
-    autouse LOCALM_HOME env fixture alone does not redirect them (same reason
-    conftest's cli_runner fixture patches these four)."""
+    autouse LOCALM_HOME env fixture alone does not redirect them."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -61,7 +59,7 @@ def _set(cfg_mod, **updates):
 class TestIsValidBindHost:
     @pytest.mark.parametrize("good", [
         "127.0.0.1", "0.0.0.0", "192.168.1.20", "10.0.0.7", "localhost",
-        # IPv6, accepted since the end-to-end IPv6 bind support landed.
+        # IPv6 literals are accepted.
         "::", "::1", "2001:db8::5", "fe80::1",
     ])
     def test_accepts_bindable_literals(self, good):
@@ -70,11 +68,10 @@ class TestIsValidBindHost:
     @pytest.mark.parametrize("bad", [
         "", None, 0, "myhouse", "example.com", "0.0.0.0:8642",
         "http://0.0.0.0", "127.0.0.1 ", "0.0.0.0/0",
-        # A ZONE ID stays rejected: the index names an interface as numbered
-        # on ONE machine, and the scoped form does not survive the
-        # getaddrinfo(AI_PASSIVE) the server binds through (measured: WinError
-        # 10049, while the same address unscoped binds fine). Plain IPv6
-        # literals are now ACCEPTED - see TestAcceptsIPv6 below.
+        # A ZONE ID stays rejected: the index names an interface as numbered on
+        # ONE machine, and the scoped form does not survive the
+        # getaddrinfo(AI_PASSIVE) the server binds through. Plain IPv6 literals
+        # are accepted - see TestAcceptsIPv6 below.
         "fe80::1%eth0", "[::1]", "[::]",
     ])
     def test_rejects_everything_else(self, bad):
@@ -108,13 +105,11 @@ class TestValidateUpdate:
         ("fe80::1", "fe80::1"),
     ])
     def test_bind_host_accepts_ipv6_literals(self, val, stored):
-        """Write-time acceptance of IPv6, the LAST half of the IPv6 unit.
+        """Write-time acceptance of IPv6.
 
-        This is the half that could brick a terminal-less user if it landed
-        without the serving half, so it is pinned here rather than left to the
-        predicate's own test: a regression that broke the port probe or the
-        listening socket while leaving this validator open would put the
-        Settings field back to accepting a value the server dies on."""
+        A regression that broke the port probe or the listening socket while
+        leaving this validator open would put the Settings field back to
+        accepting a value the server dies on."""
         assert ss.validate_update({"bind_host": val})["bind_host"] == stored
 
     def test_tls_paths_must_exist(self, tmp_path):
@@ -137,8 +132,7 @@ class TestValidateUpdate:
 
     def test_no_config_form_of_insecure_exists(self):
         """The unauthenticated-network override must stay terminal-only: no
-        config key may exist whose name suggests it. Guards the decision, not
-        just the current spelling."""
+        config key may exist whose name suggests it."""
         from localm.config import DEFAULT_CONFIG
         suspects = [k for k in DEFAULT_CONFIG if "insecure" in k.lower()]
         assert suspects == []
@@ -161,9 +155,8 @@ class TestResolveBindHost:
         assert _resolve_bind_host(None) == ("127.0.0.1", False)
 
     def test_hand_edited_garbage_is_ignored_not_fatal(self, cfg_home):
-        # Write-time validation cannot see a hand-edited config.json; the read
-        # site must not hand uvicorn an unbindable value (a dead server with no
-        # terminal-free way back). Bypass save-time validation deliberately.
+        # Bypass save-time validation, so a hand-edited config.json reaches the
+        # read site: it must not hand uvicorn an unbindable value.
         import json
         cfg_home.CONFIG_FILE.write_text(
             json.dumps({"bind_host": "not-an-address"}), encoding="utf-8")
@@ -176,8 +169,8 @@ class TestResolveBindHost:
 
 class TestBindPreflight:
     def test_stale_interface_ip_is_reported(self):
-        # The field's own recommended use gone stale: valid syntax, no such
-        # interface on this machine. Must return the OS reason, not raise.
+        # Valid syntax, no such interface on this machine: returns the OS reason
+        # rather than raising.
         err = _bind_preflight_error(STALE_IP)
         assert err is not None and isinstance(err, str)
 
@@ -220,9 +213,8 @@ class TestResolveTlsConfig:
                             tls_key=None) == (c2, k2)
 
     def test_broken_config_pair_falls_back_to_builtin_tls(self, cfg_home, tmp_path):
-        # A pair that exists but does not LOAD must degrade to the built-in
-        # cert (encrypted, alive) - never cleartext, never an exception that
-        # would kill a startup nobody is watching.
+        # A pair that exists but does not LOAD degrades to the built-in cert,
+        # never cleartext and never an exception.
         bad_c = tmp_path / "bad.crt"
         bad_k = tmp_path / "bad.key"
         bad_c.write_text("not a cert")
@@ -244,7 +236,7 @@ class TestResolveTlsConfig:
 
     def test_cli_pair_never_reads_config(self, cfg_home, tmp_path):
         # An explicit CLI pair is honoured verbatim even with tls_enabled=False
-        # in config: the operator typed it, and CLI wins over config.
+        # in config.
         _set(cfg_home, tls_enabled=False)
         c = tmp_path / "c.pem"
         k = tmp_path / "k.pem"
@@ -302,7 +294,7 @@ def gui_probe(cfg_home, monkeypatch):
 class TestConfigBindGuard:
     def test_config_bind_without_key_falls_back_to_loopback_alive(
             self, cfg_home, gui_probe):
-        """THE fail-closed property: config says network, no key exists ->
+        """The fail-closed property: config says network, no key exists ->
         the server neither exits nor binds the network; it continues starting
         on loopback with the refusal printed."""
         invoke, calls = gui_probe
@@ -353,8 +345,8 @@ class TestConfigBindGuard:
         moved the machine) must not kill the server at the socket bind - the
         stale address is refused by a REAL preflight bind probe (nothing
         mocked at that layer; STALE_IP is genuinely unassigned) and startup
-        continues on loopback. Found by review: without the preflight this
-        died with exit 3 inside uvicorn, past every syntax check."""
+        continues on loopback. Without the preflight this dies with exit 3
+        inside uvicorn, past every syntax check."""
         invoke, calls = gui_probe
         _set(cfg_home, bind_host=STALE_IP)
         monkeypatch.setenv("LOCALM_API_KEY", "a-strong-secret-123")

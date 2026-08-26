@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The GUI must warn before binding past loopback without auth.
-
-Regression guard for the audit finding that `localm gui` (unlike `localm serve`)
-served the shell-capable coder agent on a LAN address with no warning.
+"""The GUI must warn before binding past loopback without auth: `localm gui`
+serves the shell-capable coder agent, so a LAN bind without a key is warned
+about the same way `localm serve` warns.
 """
 
 from unittest.mock import patch
@@ -22,11 +21,11 @@ class TestGuiBindWarning:
             msg = _gui_bind_warning("0.0.0.0")
         assert msg is not None
         assert "0.0.0.0" in msg
-        # The coder-agent reach is the GUI-specific hazard the warning exists for.
+        # The warning names the coder-agent reach.
         assert "coder agent" in msg
         assert "shell" in msg
-        # Built-in TLS now encrypts a network bind, so the warning must NOT push a
-        # reverse proxy as the way to get encryption (NET-1).
+        # Built-in TLS encrypts a network bind, so the warning must NOT push a
+        # reverse proxy as the way to get encryption.
         assert "reverse proxy" not in msg
 
     def test_api_key_silences_warning(self):

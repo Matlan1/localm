@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - slash commands (split from app.js). Classic script: it
-   shares the one global lexical environment with the other app/* and
-   pages/* scripts, so every cross-section reference resolves by bare
-   name exactly as before. */
+/* localm GUI - slash commands. */
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+// --- ES module imports ---
 import { addMessageRow, chat, currentConv, newConversation, renderChat, renderConvList, saveConversations } from "./chat.js";
 import { exportCoderSession, openFilesModal } from "./coder.js";
 import { $, authHeaders, autoGrow, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
@@ -87,8 +84,8 @@ export async function runImagineInChat(promptText) {
   }
 }
 
-/** /web <query> - explicit, user-initiated web grounding: search, inject the
- *  results into the conversation, and let the model answer from them. */
+/** /web <query> - search, inject the results into the conversation, and let the
+ *  model answer from them. */
 export async function runWebInChat(query) {
   if (!query) { toast("Usage: /web <query>", true); return; }
   if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
@@ -116,8 +113,7 @@ export async function runWebInChat(query) {
   await runCompletion(conv);
 }
 
-/** /music <tags> - generate a default-length instrumental inline; the Music
- *  page has the full form (lyrics, duration, seed…). */
+/** /music <tags> - generate a default-length instrumental inline. */
 export async function runMusicInChat(tags) {
   if (!tags) { toast("Usage: /generate-music <style tags>", true); return; }
   if (!currentConv()) newConversation();
@@ -158,8 +154,7 @@ export async function runMusicInChat(tags) {
   }
 }
 
-/** /video <prompt> - generate a default-length (~5s) clip inline; the Video
- *  page has the full form (negative, duration, size, start image…). */
+/** /video <prompt> - generate a default-length (~5s) clip inline. */
 export async function runVideoInChat(promptText) {
   if (!promptText) { toast("Usage: /generate-video <prompt>", true); return; }
   if (!currentConv()) newConversation();
@@ -234,7 +229,7 @@ export function execChatCommand(cmd, arg) {
               !names.length);
         return true;
       }
-      // case-insensitive match for typing convenience
+      // case-insensitive match
       const hit = personaCache.find(
         (p) => p.name.toLowerCase() === arg.toLowerCase());
       applyPersona(hit ? hit.name : arg);
@@ -307,10 +302,8 @@ export function attachSlashMenu(textarea, commands, execute) {
   function render() {
     const value = textarea.value;
     if (!value.startsWith("/") || value.includes("\n")) { close(); return; }
-    // Once a space is typed the command token is complete and the user is
-    // entering arguments - close the menu so Enter SENDS the whole line
-    // ("/remember some note") instead of the menu's Enter handler calling
-    // pick(), which overwrites the input with "/cmd " and discards the args.
+    // A space ends the command token: close the menu so Enter sends the whole
+    // line rather than picking a command.
     const rest = value.slice(1);
     if (rest.includes(" ")) { close(); return; }
     const typed = rest.toLowerCase();
@@ -329,7 +322,7 @@ export function attachSlashMenu(textarea, commands, execute) {
   }
 
   function pick(c) {
-    if (!c) { close(); return; }   // empty list in a render/keydown race (LATENT-1)
+    if (!c) { close(); return; }   // empty list in a render/keydown race
     if (c.args) {
       textarea.value = "/" + c.cmd + " ";
       textarea.focus();

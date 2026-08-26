@@ -13,14 +13,10 @@ PyTorch build for their GPU, and the custom nodes localm's workflows need). The
 user's own ComfyUI is never touched.
 
 `start` / `stop` / `restart` drive the PROCESS, and they go through the running
-localm server rather than acting in-process. That is not indirection for its own
-sake: the handle on a ComfyUI localm launched lives in `comfy_client`'s
-process-local `_spawned_procs`, so a fresh CLI process calling `stop_comfy()`
-directly finds no handle, leaves a server-launched ComfyUI running with its VRAM
-held, and reports "localm did not launch this ComfyUI" - a false statement about
-the very thing the user asked about. Only the process that spawned it can end
-it, so the CLI asks that process. This is the same discover-instance-and-POST
-shape `localm stop` and `localm unload` already use.
+localm server rather than acting in-process: the handle on a ComfyUI localm
+launched lives in `comfy_client`'s process-local `_spawned_procs`, so only the
+process that spawned it can end it. This is the same discover-instance-and-POST
+shape `localm stop` and `localm unload` use.
 """
 
 import time
@@ -32,14 +28,12 @@ from ._core import (console, main, no_server_message, report_server_failure,
                     running_server, server_call)
 from ..media_workflows import MEDIA_TYPES
 
-# Each client timeout must exceed the SERVER-side budget for the same call, or
-# the CLI gives up while the server is still working and reports a failure that
-# did not happen. The server bounds status at _COMFY_STATUS_TIMEOUT_S (15s) and
-# stop at _COMFY_STOP_TIMEOUT_S (90s) in localm/inference/routes/config.py.
+# Each client timeout must exceed the SERVER-side budget for the same call. The
+# server bounds status at _COMFY_STATUS_TIMEOUT_S (15s) and stop at
+# _COMFY_STOP_TIMEOUT_S (90s) in localm/inference/routes/config.py.
 _STATUS_TIMEOUT = 20.0
 _STOP_TIMEOUT = 100.0
-# Transport slack added on top of a launch budget that is computed, never
-# guessed - see _launch_timeout below.
+# Transport slack added on top of the launch budget _launch_timeout computes.
 _LAUNCH_SLACK = 30.0
 
 # The image plugin serves its generation routes under /api/imagine, music and
@@ -50,20 +44,16 @@ _LAUNCH_PREFIX = {"image": "imagine", "music": "music", "video": "video"}
 
 def _launch_timeout(cfg) -> float:
     """How long to wait on a launch, derived from the SAME configured budget
-    ensure_comfy will actually honour.
-
-    comfy_launch_timeout exists because a ZLUDA/ROCm cold start compiles GPU
-    kernels and can take minutes. An independent client-side guess would drift
-    below a user's own setting and abort a launch that was still legitimately
-    progressing, so read the one number rather than inventing a second."""
+    ensure_comfy will actually honour (comfy_launch_timeout), plus transport
+    slack."""
     from ..media.comfy_client import comfy_launch_wait_seconds
     return comfy_launch_wait_seconds(cfg) + _LAUNCH_SLACK * 2
 
 
 def _restart_timeout(cfg) -> float:
     """The restart route's own budget plus slack: it stops (bounded at the
-    server's 90s stop budget) and THEN launches, so a client that only allowed
-    for the launch half would abandon a restart mid-flight."""
+    server's 90s stop budget) and THEN launches, so this budget covers both
+    halves."""
     return _STOP_TIMEOUT + _launch_timeout(cfg)
 
 
@@ -90,12 +80,10 @@ def _print_process_status(api_url: str, ping: bool) -> None:
     """The RUNNING half of `comfy status`: is that ComfyUI up, and can localm
     control it.
 
-    Asks the running localm server, because `launched_by_localm` is only
-    knowable inside the process that did the launching (see this module's
-    docstring). With no server to ask, fall back to a direct liveness probe -
-    which answers "is it up" perfectly well, and answers the control question
-    not at all. Those two are printed as different things: "no" would be a
-    claim, and the honest word is "unknown".
+    Asks the running localm server: `launched_by_localm` is only knowable
+    inside the process that did the launching. With no server to ask, falls
+    back to a direct liveness probe, which answers "is it up" but not the
+    control question - that one prints as "unknown", never "no".
     """
     console.print()
     console.print("[bold]ComfyUI process[/bold]")
@@ -123,8 +111,7 @@ def _print_process_status(api_url: str, ping: bool) -> None:
                               "[dim]aborts its render and frees its VRAM but leaves "
                               "the process running.[/dim]")
             return
-        # Could not ask the server. Say so, then still answer what a direct
-        # probe CAN answer rather than printing nothing at all.
+        # Could not ask the server: say so, then answer what a direct probe can.
         report_server_failure(state, payload, "ask the localm server about ComfyUI")
 
     _print_direct_probe(api_url, had_server=server is not None)
@@ -136,8 +123,7 @@ def _print_direct_probe(api_url: str, *, had_server: bool) -> None:
     A direct probe is a real answer to "is it running" - it is the same
     /system_stats call the server's own route makes. It is NOT an answer to
     "did localm launch it": the only process that knows is the one holding the
-    subprocess handle, so reporting `no` here would be inventing a negative out
-    of not having asked.
+    subprocess handle, so that half prints as `unknown`.
     """
     from ..media.comfy_client import _comfy_alive
 
@@ -175,8 +161,7 @@ def comfy_status(ping: bool) -> None:
     console.print("[bold]Managed ComfyUI[/bold]")
     # comfy_target is a SELECT field (options own/user) when set through the
     # GUI/CLI config setters, but config.json can be hand-edited, so this print
-    # does not rely on that validation holding - same defense-in-depth stance
-    # as rag.py's already-safe collection names (escape() is a no-op on "own").
+    # does not rely on that validation holding (escape() is a no-op on "own").
     _preferred = str(cfg.get('comfy_target', 'own'))
     _preferred_label = {"own": "localm's managed ComfyUI",
                         "user": "your own ComfyUI"}.get(_preferred)
@@ -230,9 +215,9 @@ def comfy_start(media) -> None:
         raise SystemExit(1)
     url, headers = server
 
-    # Ask first, and stop here when it is already up. The fallback below
+    # Ask first, and stop here when it is already up: the fallback below
     # (/v1/comfy/restart) would otherwise abort whatever ComfyUI is currently
-    # rendering, which is the opposite of what "start" promises.
+    # rendering.
     state, payload = _live_status(server)
     if state == "ok" and (payload or {}).get("alive"):
         console.print("[green]ComfyUI is already running.[/green]")
@@ -381,7 +366,7 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
         return
 
     # remove_managed_comfy is the shared removal (also used by the GUI route); it
-    # reports any path it could NOT delete (rule 5) instead of claiming success.
+    # reports any path it could NOT delete instead of claiming success.
     # Each failed entry is "<path> (<OSError>)" - both halves can carry the
     # same LOCALM_HOME-derived path text as `targets` above.
     _, failed = remove_managed_comfy(with_models)
@@ -444,9 +429,8 @@ def comfy_setup(copy_custom_nodes) -> None:
 
     # Emitted BEFORE any of the prints below: real work (clone/install/venv/
     # marker) is already done by this point, so a crash in one of these purely
-    # cosmetic status lines - the exact class of bug pull.py's _report_success
-    # exists to guard against - must not un-say a completed install to the GUI
-    # job runner, which otherwise infers status from the exit code alone.
+    # cosmetic status lines must not un-say a completed install to the GUI job
+    # runner, which otherwise infers status from the exit code alone.
     _emit_outcome("done")
     console.print(f"[green]{escape(result.message)}[/green]")
     if result.status == "copied":
@@ -537,17 +521,14 @@ def workflow_group() -> None:
 
 
 def _fmt_wf_size(n: int) -> str:
-    """A short size for a workflow JSON file - these run tens of KB, never the
-    GB range `localm list`'s model-file formatting assumes."""
+    """A short size for a workflow JSON file, in KB or MB."""
     if n >= 1024 * 1024:
         return f"{n / 1024**2:.1f} MB"
     return f"{n / 1024:.1f} KB"
 
 
 def _fmt_wf_age(seconds) -> str:
-    """A coarse human duration for the 'Modified' column - mirrors
-    localm.cli.keys._fmt_age's granularity (this is "how long ago", not a
-    stopwatch)."""
+    """A coarse "how long ago" for the 'Modified' column."""
     s = int(max(0, seconds))
     if s < 60:
         return f"{s}s ago"
@@ -590,7 +571,7 @@ def workflow_list(media: str) -> None:
     now = time.time()
     for w in items:
         # Table cell strings go through the SAME markup parsing as
-        # console.print f-strings (confirmed empirically), not just plain text.
+        # console.print f-strings, not just plain text.
         table.add_row(escape(w["name"]), "[green]yes[/green]" if w["is_active"] else "",
                       _fmt_wf_size(w["size_bytes"]), _fmt_wf_age(now - w["mtime"]))
     console.print(table)

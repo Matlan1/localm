@@ -65,10 +65,8 @@ def _config() -> dict:
         from localm.config import load_config
         return load_config()
     except Exception:
-        # Best-effort: if config cannot be read, name-based callers fall back to
-        # the built-in default label ("localm"). mdns_enabled() treats this
-        # sentinel as OFF (below), so a transiently unreadable config errs toward
-        # NOT advertising, never toward more. A note beats crashing the bind.
+        # Best-effort: an unreadable config falls back to the default label, and
+        # mdns_enabled() treats this sentinel as OFF.
         logger.debug("netname: config unreadable; using defaults", exc_info=True)
         return _UnreadableConfig()
 
@@ -296,15 +294,13 @@ def network_targets(*, mdns_name: Optional[str] = None,
     is returned as computed. A SPECIFIC literal answers on exactly one address, so
     everything else here would be a printed URL that cannot connect - that bind
     gets its own address, plus the mDNS name only when we are advertising THAT
-    address for it. Omitted (None) keeps the wildcard behaviour, which is what
-    every pre-IPv6 caller wanted.
+    address for it. Omitted (None) keeps the wildcard behaviour.
 
-    Note what this deliberately does NOT do: enumerate this machine's global IPv6
-    addresses for a ``::`` bind. localm binds ``::`` dual-stack, so the IPv4 LAN
-    address below reaches it from any client, and picking a "the" IPv6 address out
-    of the several a host normally holds (temporary/privacy addresses, link-local
-    with its zone id, ULA) is a guess that would often print the least reachable
-    one. An honest IPv4 target beats a speculative IPv6 one."""
+    This does NOT enumerate this machine's global IPv6 addresses for a ``::``
+    bind. localm binds ``::`` dual-stack, so the IPv4 LAN address below reaches
+    it from any client, and a host normally holds several IPv6 addresses
+    (temporary/privacy, link-local with its zone id, ULA) with no way to pick
+    the reachable one."""
     from localm import tls
     addrs = tls.companion_addresses()
     status = tailscale_status()
@@ -373,9 +369,8 @@ def _packed_address(ip: str) -> Optional[bytes]:
     IPv6 is packed as well as IPv4 because a server bound to a specific IPv6
     literal answers on that address and no other, so an A record holding this
     machine's LAN IPv4 would publish a name that resolves to nothing listening.
-    A zone-scoped link-local (``fe80::1%eth0``) is deliberately NOT advertised:
-    the zone index is meaningful only on the machine that wrote it, so the
-    address is useless to the peers mDNS exists to serve."""
+    A zone-scoped link-local (``fe80::1%eth0``) is NOT advertised: the zone
+    index is meaningful only on the machine that wrote it."""
     try:
         return socket.inet_aton(ip)
     except OSError:
@@ -418,11 +413,9 @@ def start_advertiser(port: int, *, tls: bool,
     from localm import tls as _tls
     ips = [ip for ip in (addresses or []) if ip]
     if not ips:
-        # companion_addresses()'s "lan" pick, not the raw _primary_lan_ip()
-        # probe directly: it already falls back across multiple probes and
-        # excludes a VPN's virtual tunnel adapter, so <name>.local keeps
-        # advertising the real, phone-reachable LAN address even when a VPN
-        # is active and has become this machine's default route.
+        # companion_addresses()'s "lan" pick rather than the raw _primary_lan_ip()
+        # probe: it falls back across several probes and excludes a VPN tunnel
+        # adapter.
         prim = _tls.companion_addresses().get("lan") or ""
         if prim:
             ips.append(prim)

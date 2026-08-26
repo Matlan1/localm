@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Idle-unload must keep the Engine object for lazy reload (Antigravity-audit HIGH-5).
+"""Idle-unload must keep the Engine object for lazy reload.
 
-_idle_unload_once used to DELETE the engine from _engines after unloading it,
-which breaks its own "the next inference reloads the model lazily" contract:
+Deleting the engine from _engines after unloading it breaks the "the next
+inference reloads the model lazily" contract:
 
   - a direct-path served model (``localm serve <path>``) whose display name is
     NOT in the registry cannot be rebuilt by the default factory, so it 404s

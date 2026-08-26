@@ -1,20 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-464: the recall inlet must read the SAME namespace the write path writes to.
+"""The recall inlet must read the SAME namespace the write path writes to.
 
-PR #464 collapsed every WRITE path (memory_get/put/append/patch/delete +
-memory_consolidate) and the auto-consolidate outlet to the shared "owner"
-namespace for an ADMIN/owner caller (memory_principal -> None -> "owner"), so an
-owner's memories survive a key rotation (AUDIT-MED-14). But the recall INLET was
-left reading the raw per-key-hash principal (ctx.principal), with no ADMIN->owner
-collapse. Net effect in protected mode (an API key configured, owner authed with
-an ADMIN key): the owner SAVES into the "owner" namespace but recall READS the
-key-hash namespace, so the owner's own saved memories are NEVER injected back into
-chat - the exact "recall stopped injecting" symptom #464 claimed to fix.
+Every WRITE path (memory_get/put/append/patch/delete + memory_consolidate) and
+the auto-consolidate outlet collapse to the shared "owner" namespace for an
+ADMIN/owner caller (memory_principal -> None -> "owner"), so an owner's memories
+survive a key rotation. The recall INLET must apply the same ADMIN->owner
+collapse rather than reading the raw per-key-hash principal (ctx.principal): in
+protected mode (an API key configured, owner authed with an ADMIN key) the owner
+SAVES into "owner", so an inlet reading the key-hash namespace injects nothing.
 
-The negative case this guards: a store populated through the owner-collapsed write
-path, recalled through a realistic protected-mode ctx (ADMIN scope + key-hash
-principal). Pre-fix the inlet opens the empty key-hash store and injects nothing;
-post-fix it collapses to "owner" and injects.
+The case guarded here: a store populated through the owner-collapsed write path,
+recalled through a realistic protected-mode ctx (ADMIN scope + key-hash
+principal).
 """
 
 from __future__ import annotations
@@ -50,8 +47,6 @@ def test_owner_recall_reads_owner_namespace_in_protected_mode(tmp_path, monkeypa
                 {"role": "user", "content": "help me test my python code"}]
     out = plug._memory_inlet(messages, _owner_ctx())
 
-    # Pre-fix: the inlet opened _chat_store("owner-key-hash") (empty), injected
-    # nothing, and returned None with messages unchanged.
     assert out is messages, "owner recall injected nothing (wrong namespace)"
     assert "Python and pytest" in messages[0]["content"]
 

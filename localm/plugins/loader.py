@@ -4,20 +4,14 @@ Legacy plugin manifest discovery, plus small constants shared with the plugin
 engine (``localm/plugins/engine.py``).
 
 The engine's ``register = "plug"`` contract (``PluginManager``) is the ONE
-install/enable/disable/list mechanism for a plugin's server surface - it used
-to share this module with a second, independent ``entry = "<module>:<attr>"``
-CLI-manifest mechanism, but that half (install/remove, the ``/v1/plugins`` HTTP
-API, and the ``plugin list``/``plugin remove`` CLI verbs) was dead for every
-shipped plugin and has been removed (see PATHFINDER-2026-07-11).
+install/enable/disable/list mechanism for a plugin's server surface.
 
-What remains here is still live: a third-party plugin's ``[tools] exports =
-[...]`` manifest section (this module's own ``discover_plugins``/
-``import_plugin_module``) is how ``localm/plugins/coder/plugin_tools.py``
-discovers and loads externally-exported coder-agent tools - a distinct
-capability from the engine's server-surface registration, unrelated to the
-CF-1/CF-2 install/enable/disable duplication that motivated the cut above.
-``plugins_dir()`` and ``_RESERVED_NAMES`` are also read directly by
-``engine.py``/``media_config.py``.
+What lives here is the third-party ``[tools] exports = [...]`` manifest section:
+``discover_plugins``/``import_plugin_module`` are how
+``localm/plugins/coder/plugin_tools.py`` discovers and loads externally-exported
+coder-agent tools, a distinct capability from the engine's server-surface
+registration. ``plugins_dir()`` and ``_RESERVED_NAMES`` are also read directly
+by ``engine.py``/``media_config.py``.
 
     [plugin]
     name = "myplugin"
@@ -90,7 +84,7 @@ def parse_manifest(plugin_dir: Path, *,
     """Parse and validate ``plugin.toml`` in *plugin_dir*. When *warnings* is
     given, non-fatal manifest problems (unknown/misspelled [plugin] keys) are
     appended to it as human-readable strings - surfaced, never escalated: a
-    plugin with an unknown key must still load (LM-DA-007)."""
+    plugin with an unknown key still loads."""
     manifest_path = plugin_dir / "plugin.toml"
     if not manifest_path.is_file():
         raise PluginError(f"No plugin.toml in {plugin_dir}")
@@ -121,9 +115,8 @@ def parse_manifest(plugin_dir: Path, *,
         raise PluginError(f"{manifest_path}: [tools] exports must be a list of strings")
 
     if warnings is not None:
-        # KNOWN_PLUGIN_KEYS spans both manifest formats (see contract.py), so a
-        # key valid for the engine contract never false-alarms here; only a key
-        # known to neither format (a typo) warns.
+        # KNOWN_PLUGIN_KEYS spans both manifest formats, so only a key known to
+        # neither format warns.
         unknown = sorted(set(plugin) - KNOWN_PLUGIN_KEYS)
         if unknown:
             warnings.append(
@@ -164,8 +157,8 @@ def discover_errors(root: Optional[Path] = None) -> List[str]:
 
 
 def discover_warnings(root: Optional[Path] = None) -> List[str]:
-    """Non-fatal manifest warnings (unknown/misspelled keys, LM-DA-007) for
-    plugins that still parse and load - so a typo does not degrade silently."""
+    """Non-fatal manifest warnings (unknown/misspelled keys) for plugins that
+    still parse and load, so a typo does not degrade silently."""
     _, _, warns = _scan(root)
     return warns
 
@@ -173,9 +166,10 @@ def discover_warnings(root: Optional[Path] = None) -> List[str]:
 def _is_engine_plugin(plugin_dir: Path) -> bool:
     """True for a plugin using the engine contract (``register = ...``) rather
     than the legacy CLI manifest (``entry = "<module>:<attr>"``). Both kinds live
-    in the same installed dir, so the legacy loader must IGNORE engine plugins -
-    otherwise it reports every engine-installed builtin (coder, image, ...) as a
-    broken legacy plugin. Engine plugins are owned by ``engine.PluginManager``."""
+    in the same installed dir, and the legacy loader IGNORES engine plugins
+    rather than reporting every engine-installed builtin (coder, image, ...) as
+    a broken legacy plugin. Engine plugins are owned by
+    ``engine.PluginManager``."""
     try:
         data = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):

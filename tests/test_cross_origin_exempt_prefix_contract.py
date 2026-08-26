@@ -9,20 +9,18 @@ looks like a security decision.
 
 Two things are pinned independently, and both are needed:
 
-- The route walk below watches the two DIRECTORIES the exemption used to
-  match by prefix (``/v1/surfaces/``, ``/v1/instances/``), hardcoded here
-  rather than read off the live tuple. This is deliberate: reading it off
-  the live (now-narrowed) tuple could never flag a new, unrelated route
-  under either directory, because such a route no longer matches the
-  narrowed tuple at all - which is correct production behavior, but it
-  would make the test blind to the exact "was this new route reviewed"
-  question it exists to ask. Any route appearing under either directory,
-  authenticated or not, exempt or not, needs a deliberate look before it
-  ships - this walk forces that look by failing until one is taken.
+- The route walk below watches two DIRECTORIES (``/v1/surfaces/``,
+  ``/v1/instances/``), hardcoded here rather than read off the live tuple.
+  Reading it off the live (narrowed) tuple could never flag a new, unrelated
+  route under either directory, because such a route no longer matches the
+  narrowed tuple at all - correct production behavior, but blind to the
+  "was this new route reviewed" question this walk exists to ask. Any route
+  appearing under either directory, authenticated or not, exempt or not,
+  fails this walk until someone looks at it.
 - The tuple-contents assertion catches a regression back to directory-prefix
   matching directly, which the route walk alone cannot: the two real exempt
   routes satisfy a prefix match exactly as well as a full-path match, so a
-  route walk against a reverted (prefixed) tuple still finds no offenders.
+  route walk against a prefixed tuple still finds no offenders.
 
 ``_CROSS_ORIGIN_OK`` is local to ``create_app()``, not a module attribute, so
 the second check recovers it from the live ``_origin_guard`` middleware's
@@ -35,18 +33,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from localm.inference.http_server import create_app
 
-# The two directories _CROSS_ORIGIN_OK used to match by prefix before this
-# fix. Hardcoded (not read off the live tuple - see the module docstring for
-# why) so any route appearing under either one is forced through review here,
-# independent of whether the current _CROSS_ORIGIN_OK entry happens to match
-# it.
+# The two directories watched here. Hardcoded rather than read off the live
+# tuple, so any route under either one is forced through review.
 _WATCHED_PREFIXES = ("/v1/surfaces/", "/v1/instances/")
 
-# Reviewed set of (method, path) pairs allowed to sit under a watched
-# prefix. Adding a route here is a deliberate security review, not a way to
-# silence this test - see the reasoning at each entry's definition site in
-# http_server.py and (for these two) in _BESPOKE_GATED_ROUTES,
-# tests/test_kernel_routes_scope_contract.py.
+# Reviewed set of (method, path) pairs allowed to sit under a watched prefix.
 _REVIEWED_WATCHED_ROUTES = {
     ("POST", "/v1/surfaces/gui"),
     ("POST", "/v1/instances/cooperate-unload"),
@@ -78,9 +69,7 @@ def _live_cross_origin_ok(app) -> tuple:
 def test_every_route_under_a_watched_prefix_is_reviewed():
     app = create_app(None)
     api_routes = [r for r in app.routes if isinstance(r, APIRoute)]
-    # Sanity floor, same reasoning as test_kernel_routes_scope_contract.py:
-    # if create_app()'s shape changes so drastically that far fewer routes
-    # are found, the walk below would trivially "pass" over nothing.
+    # Floor on the route count, so the walk below cannot pass over nothing.
     assert len(api_routes) >= 30, (
         f"only {len(api_routes)} kernel APIRoute(s) found - create_app() "
         "may have changed shape; re-verify this test's route walk still "

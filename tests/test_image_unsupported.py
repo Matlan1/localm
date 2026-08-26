@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A model that cannot see images must REJECT image input, not silently drop it.
 
-Regression guard for the audit finding that GGUF (and text-only HF) accepted an
-image_url part, discarded it, and answered about a picture the model never
-received. The contract now: raise UnsupportedInputError at the backend, and
-return a clean 400 at the HTTP route.
+GGUF (and text-only HF) accepting an image_url part, discarding it, and answering
+about a picture the model never received is the failure. The contract: raise
+UnsupportedInputError at the backend, and return a clean 400 at the HTTP route.
 """
 
 import importlib.util
@@ -55,7 +54,7 @@ class TestMessagesContainImage:
 
 
 # --------------------------------------------------------------------------- #
-#  Backend-level guard (the source-of-truth guarantee, covers every caller)   #
+#  Backend-level guard, covering every caller                                  #
 # --------------------------------------------------------------------------- #
 
 class TestGgufRejectsImages:
@@ -80,11 +79,9 @@ class TestHFRejectsImagesWhenTextOnly:
         assert backend.can_be_multimodal is True
         assert backend.supports_images is False        # not loaded / text-only
         # supports_images is cached from the isolated child's load response
-        # (see hf.py) rather than a live self._is_multimodal read - the real
-        # HFWorker instance now lives in a separate process. Fake a completed
-        # load the same way GgufBackend's own tests do: setting _loaded=True
-        # with no real self._runner hits the defensive "is_alive is None ->
-        # True" branch of the loaded property (mirrors GgufBackend.loaded).
+        # rather than a live self._is_multimodal read. Faking a completed load
+        # with _loaded=True and no self._runner hits the is_alive-is-None branch
+        # of the loaded property.
         backend._loaded = True
         backend._supports_images = True
         assert backend.supports_images is True
@@ -92,15 +89,14 @@ class TestHFRejectsImagesWhenTextOnly:
     def test_text_only_chat_stream_raises_on_image(self):
         from localm.inference.backends.hf import HFBackend
         backend = HFBackend("does-not-need-to-exist")
-        # Never loaded (supports_images is therefore False); the backend-level
-        # guard fires before self._runner is ever touched, importing nothing
-        # heavier than base.py - see HFBackend.chat_stream's ordering.
+        # Never loaded, so supports_images is False; the backend-level guard
+        # fires before self._runner is ever touched.
         with pytest.raises(UnsupportedInputError):
             next(backend.chat_stream(_IMAGE_MSG))
 
 
 # --------------------------------------------------------------------------- #
-#  HTTP route returns a clean 400 (the good-UX layer)                          #
+#  HTTP route returns a clean 400                                              #
 # --------------------------------------------------------------------------- #
 
 def _mock_engine(*, supports_images, can_be_multimodal, loaded=True):
@@ -166,7 +162,7 @@ class TestRouteRejectsImage(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-#  Capability-aware vision guidance (no dead-end: route or guide per install)  #
+#  Capability-aware vision guidance: a route or a guide per install            #
 # --------------------------------------------------------------------------- #
 
 class TestVisionGuidance:
@@ -181,11 +177,10 @@ class TestVisionGuidance:
     def test_no_transformers_stack_offers_gguf_route_not_a_false_claim(
             self, monkeypatch):
         """The final fallback (no HF vision model registered, no transformers
-        stack installed) used to claim 'the built-in GGUF backend is
-        text-only' - flatly false: mtmd GGUF vision IS implemented (this same
-        function's own mmproj_failed docstring says so, and #957's own live
-        E2E proves it). The message must offer the GGUF+mmproj route instead
-        of denying GGUF vision exists at all."""
+        stack installed) must not claim 'the built-in GGUF backend is
+        text-only': mtmd GGUF vision IS implemented, as this same function's own
+        mmproj_failed message says. The message offers the GGUF+mmproj route
+        instead of denying GGUF vision exists at all."""
         import localm.model_manager as mm
         import importlib.util
         monkeypatch.setattr(mm, "load_registry", lambda: {})
@@ -196,24 +191,19 @@ class TestVisionGuidance:
         assert "localm pull" in msg
 
     def test_mmproj_failed_message_is_honest_about_gguf(self, monkeypatch):
-        # The user loaded a GGUF model WITH an mmproj expecting vision but the
-        # projector did not load. GGUF vision IS implemented (#200), so the message
-        # must blame the failed projector, NOT claim vision is unimplemented.
+        # A GGUF model loaded WITH an mmproj whose projector did not load: the
+        # message names the failed projector, not an unimplemented feature.
         import localm.model_manager as mm
         monkeypatch.setattr(mm, "load_registry", lambda: {})
         msg = mm.vision_input_guidance(mmproj_failed=True)
         assert "cannot accept image" in msg               # legacy phrase still present
         assert "mmproj" in msg
         assert "failed to load" in msg
-        assert "not implemented" not in msg               # the old stale claim is gone
-        # The default (text-only) message must NOT mention mmproj - but ONLY on the
-        # branch where the HuggingFace stack IS installed. With transformers absent,
-        # vision_input_guidance deliberately points at the GGUF route and names
-        # --mmproj, which the sibling test above asserts is correct. Unpinned, this
-        # assertion silently depended on whether the runner happened to have
-        # transformers: it passed in a dev venv and failed in CI's `.[dev,rag]`,
-        # which has none - so it could never pass on the only environment that gates
-        # a merge.
+        assert "not implemented" not in msg
+        # The default (text-only) message must NOT mention mmproj, and only on
+        # the branch where the HuggingFace stack IS installed: with transformers
+        # absent, vision_input_guidance points at the GGUF route and names
+        # --mmproj, so transformers is pinned here rather than left to the venv.
         import importlib.util
         monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
         assert "mmproj" not in mm.vision_input_guidance()
@@ -252,10 +242,9 @@ class TestVisionGuidance:
         assert "vlm2" in mm.vision_capable_models()
 
     def test_gguf_with_recorded_mmproj_is_vision(self, tmp_path, monkeypatch):
-        # ADR-0008 U9 / Theme 3(c): a GGUF chat model with a recorded, resolvable
-        # mmproj is a genuinely working vision model - get_model_mmproj() is the
-        # SAME lookup the real load path uses. vision_capable_models() must not
-        # be blind to it just because it is a file, not an HF directory.
+        # A GGUF chat model with a recorded, resolvable mmproj is a working
+        # vision model, and get_model_mmproj() is the same lookup the real load
+        # path uses, so vision_capable_models() lists it.
         import localm.model_manager as mm
         model_f = tmp_path / "vision-model.gguf"
         model_f.write_bytes(b"GGUF")
@@ -273,10 +262,9 @@ class TestVisionGuidance:
         assert "could be confirmed" not in msg
 
     def test_gguf_mmproj_entry_itself_is_not_a_vision_model(self, tmp_path, monkeypatch):
-        # A standalone mmproj (projector) registry entry is not something a
-        # user can switch to - it must never be listed even though it is a
-        # GGUF file, and even in the pathological case where it happens to sit
-        # beside another mmproj file get_model_mmproj's sibling scan could match.
+        # A standalone mmproj (projector) registry entry is never listed, even
+        # though it is a GGUF file, and even when it sits beside another mmproj
+        # file that get_model_mmproj's sibling scan could match.
         import localm.model_manager as mm
         proj_f = tmp_path / "some-mmproj.gguf"
         proj_f.write_bytes(b"GGUF")
@@ -287,11 +275,8 @@ class TestVisionGuidance:
         assert mm.vision_capable_models() == []
 
     def test_transformers_absent_does_not_claim_gguf_is_text_only(self, monkeypatch):
-        # ADR-0008 U9 / Theme 3(c), third branch: when no vision model is
-        # registered at all and transformers is absent, the message must not
-        # claim "the built-in GGUF backend is text-only" - that contradicts
-        # the mmproj_failed branch of this same function, which already treats
-        # GGUF vision (the built-in mtmd path) as real and transformers-independent.
+        # With no vision model registered at all and transformers absent, the
+        # message must not claim the built-in GGUF backend is text-only.
         import localm.model_manager as mm
         monkeypatch.setattr(mm, "load_registry", lambda: {})
         real_find_spec = importlib.util.find_spec
@@ -303,22 +288,18 @@ class TestVisionGuidance:
 
         monkeypatch.setattr(importlib.util, "find_spec", _no_transformers)
         msg = mm.vision_input_guidance()
-        # "this model ... is text-only" (the head, about the model that just
-        # rejected the image) is a separate, true claim and stays. The bug was
-        # the backend-wide claim - assert that exact false sentence is gone.
+        # The head sentence about THIS model being text-only stays; the
+        # backend-wide claim must be absent.
         assert "GGUF backend is text-only" not in msg
         assert "localm pull" in msg
         assert "mtmd" in msg
 
     def test_no_vlms_message_reports_the_search_not_absolute_absence(self, monkeypatch):
-        # ADR-0008 R3: vision_capable_models() is a best-effort CONFIRMATION
-        # check, not an exhaustive one - a genuinely vision-capable GGUF whose
-        # mmproj is neither recorded nor a detectable sibling (e.g. supplied
-        # only via the CLI --mmproj flag at run time, never written back to
-        # the registry) is a real, unclosable blind spot. The message built on
-        # an empty vlms list must report what was checked, not assert the user
-        # has no vision model at all - or it launders a non-exhaustive check
-        # into an absolute claim.
+        # vision_capable_models() is a best-effort CONFIRMATION check, not an
+        # exhaustive one: a vision-capable GGUF whose mmproj is neither recorded
+        # nor a detectable sibling is invisible to it. The message built on an
+        # empty vlms list reports what was checked rather than asserting the user
+        # has no vision model.
         import localm.model_manager as mm
         monkeypatch.setattr(mm, "load_registry", lambda: {})
         msg = mm.vision_input_guidance()
@@ -327,7 +308,7 @@ class TestVisionGuidance:
 
 
 # --------------------------------------------------------------------------- #
-#  #957: already-pulled GGUF vision model with no mmproj recorded yet          #
+#  Already-pulled GGUF vision model with no mmproj recorded yet                #
 # --------------------------------------------------------------------------- #
 
 class TestVisionGuidanceActiveModelBackfillPending:
@@ -350,7 +331,7 @@ class TestVisionGuidanceActiveModelBackfillPending:
         assert "my-vlm" in msg
         assert "o/repo" in msg
         assert "not implemented" not in msg
-        # This is the #957 case, distinct from "no vision model registered":
+        # Distinct from the no-vision-model-registered case:
         assert "no vision model is registered" not in msg.lower()
 
     def test_entry_already_carrying_mmproj_falls_through(self, tmp_path, monkeypatch):
@@ -385,9 +366,8 @@ class TestVisionGuidanceActiveModelBackfillPending:
     def test_mmproj_failed_still_takes_priority_over_backfill_branch(
             self, tmp_path, monkeypatch):
         # A candidate entry is registered AND mmproj_failed=True is passed (the
-        # projector WAS resolved and attached but failed to load at runtime) -
-        # that is a more specific, more recent diagnosis than "never backfilled"
-        # and must win.
+        # projector was resolved and attached but failed to load), which is the
+        # more specific diagnosis and wins.
         import localm.model_manager as mm
         self.gguf_path = str(tmp_path / "m.gguf")
         (tmp_path / "m.gguf").write_bytes(b"GGUF")

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// jsdom tests for the Settings "Max resident models" / "Pinned models"
+// jsdom tests for the Settings "Max resident models" and "Pinned models"
 // controls (setupResidencyControls in app/settings-perf.js): both seed from
-// GET /v1/config and PATCH their own key back on change, independent of the
-// GPU-layers/context sliders and the Apply button. Mirrors
-// main-gpu-selector.test.mjs's fetch-mock shape for the same Live Tuning card.
+// GET /v1/config and PATCH their own key back on change, independently of the
+// GPU-layers/context sliders and the Apply button.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -16,8 +15,8 @@ async function waitFor(fn, timeout = 800) {
   return false;
 }
 
-// Records calls; serves /v1/config (configurable residency fields) + the
-// bootstrap endpoints every loadApp() init pass hits.
+// Records calls, and serves /v1/config with configurable residency fields plus
+// the bootstrap endpoints every loadApp() init pass hits.
 function makeFetch(calls, { maxResident = null, pinnedModels = null } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
@@ -89,8 +88,8 @@ test("clearing the cap field PATCHes max_resident_models to null", async () => {
   const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
   assert.equal(JSON.parse(patch.body).max_resident_models, null,
     "a blank field clears the cap rather than leaving it out or coercing to 0");
-  // Same PATCH-recorded-before-toast-resolves timing as the pinned-models
-  // clear test below - the toast needs its own wait.
+  // The PATCH is recorded before the handler reaches its toast() call, so the
+  // toast text needs its own wait.
   const toastEl = window.document.getElementById("toast");
   assert.ok(await waitFor(() => /Cap cleared/.test(toastEl.textContent)),
     "clearing the cap gets its own confirmation, not the generic 'Saved' text "
@@ -138,10 +137,9 @@ test("clearing the pinned-models field PATCHes pinned_models to null", async () 
   const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
   assert.equal(JSON.parse(patch.body).pinned_models, null,
     "a blank field clears every pin rather than sending an empty-string list");
-  // The PATCH is recorded (synchronously, inside the fetch mock) before the
-  // handler's own `await fetch(...)` resolves and reaches its toast() call,
-  // so the toast text needs its own wait rather than being ready the instant
-  // the PATCH shows up in `calls` (same gotcha noted in perf.test.mjs).
+  // The PATCH is recorded synchronously inside the fetch mock, before the
+  // handler's own `await fetch(...)` resolves and reaches its toast() call, so
+  // the toast text needs its own wait.
   const toastEl = window.document.getElementById("toast");
   assert.ok(await waitFor(() => /Pins cleared/.test(toastEl.textContent)),
     "the user is told the pins were cleared");

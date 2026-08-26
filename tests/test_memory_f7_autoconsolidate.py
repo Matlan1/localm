@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F7 (memory-audit 2026-07-02): the chat model must grow its memory
-UNATTENDED. After a turn, a debounced background pass distils durable facts
-into the store, so a default (opted-in) install accumulates memory with no
-manual step - the capability the audit found missing.
+"""The chat model grows its memory UNATTENDED. After a turn, a debounced
+background pass distils durable facts into the store, so a default (opted-in)
+install accumulates memory with no manual step.
 
 These tests exercise the real trigger logic in localm.plugins.builtin.chat.plug
 (the gating, debounce, privacy block, and single-flight guard), driving the

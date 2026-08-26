@@ -74,8 +74,8 @@ def test_corrupt_jsonl_line_skipped(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="localm"):
         s2 = _store(tmp_path)
     assert {r.text for r in s2.all()} == {"good fact one", "good fact two"}
-    # LM-DA-002: the skip is surfaced (the next save erases the line), never
-    # silent. The blank line is deliberate formatting, not counted.
+    # The skip is surfaced (the next save erases the line), never silent. The
+    # blank line is deliberate formatting, not counted.
     assert "skipped 1 unparseable line" in caplog.text
 
 
@@ -101,8 +101,8 @@ def test_clean_load_logs_no_skip_warning(tmp_path, caplog):
 
 
 def test_save_stamps_format_version(tmp_path):
-    """LM-DA-002: every saved line carries the JSONL format version so a future
-    breaking schema change has a migration hook instead of a silent skip."""
+    """Every saved line carries the JSONL format version so a future breaking
+    schema change has a migration hook instead of a silent skip."""
     s = _store(tmp_path)
     s.add(_rec("alpha"))
     s.add(_rec("beta"))
@@ -291,10 +291,8 @@ def _kw_embed(texts):
 
 def test_relevance_weights_semantic_over_lexical(tmp_path):
     # A record that matches SEMANTICALLY (cosine) but shares no query token must
-    # out-rank one that only matches LEXICALLY. The blend weights cosine above BM25
-    # when vectors are present (REL_LEX_SHARE < 0.5); this tuning tripled recall@1 in
-    # the memory benchmark. Under the old 50/50 blend the lexical-only record won, so
-    # this guards the change.
+    # out-rank one that only matches LEXICALLY: the blend weights cosine above
+    # BM25 when vectors are present (REL_LEX_SHARE < 0.5).
     s = _store(tmp_path)
     for i in range(TINY_CORPUS):        # >= TINY_CORPUS so the relevance signal is used
         s.add(_rec(f"unrelated filler note {i}", importance=0.5), embed_fn=_kw_embed)
@@ -318,7 +316,7 @@ def test_user_facts_exempt_from_recency_decay(tmp_path):
                    importance=0.5, last_used=NOW - i * 60))
     # All share the query's content word ("language") so all clear the relevance
     # gate; < TINY_CORPUS -> ranked by recency + importance, where the user fact's
-    # recency exemption (the fix under test) must keep it on top of recent synth.
+    # recency exemption keeps it on top of recent synth.
     top = s.recall("language", k=6, now=NOW)
     assert top and top[0].source == "user"
 
@@ -604,24 +602,15 @@ def test_neutralise_hoist_matches_coder_reexport():
 # --------------------------------------------------------------------------
 # "my friend X" IS NOT A QUESTION ABOUT THE ASKER.
 #
-# Reported live 2026-08-14. "Greet my friend Memo, who is watching right now"
-# was classified self-referential on the bare "my". With vector coverage degraded
-# the trusted-fact fallback then promoted TRUST_FALLBACK_K profile facts by
-# IMPORTANCE, and the model answered by recalling a person named Fishy from a
-# conversation days earlier. The log for that exact turn:
-#
-#     memory recall: injected 2 record(s), degrade=low_coverage
-#
-# i.e. exactly the fallback count, none of it related to the request.
-#
-# The fallback itself is right (REG-590: profile facts must survive a degraded
-# semantic signal). What was wrong is the discriminator letting a query ABOUT
-# SOMEONE ELSE through it.
+# A bare "my" must not classify a query about someone else as self-referential.
+# With vector coverage degraded, the trusted-fact fallback promotes
+# TRUST_FALLBACK_K profile facts by IMPORTANCE, so a query about someone else
+# reaching it comes back with unrelated profile facts.
 
 def test_a_possessive_naming_another_person_is_not_self_referential():
     from localm.memory.store import _is_self_referential as sr
 
-    # The reported case, and its family. These are about the OTHER person.
+    # These queries are about the OTHER person, not the asker.
     assert sr("Greet my friend Memo, who is watching right now") is False
     assert sr("say hello to my colleague") is False
     assert sr("my friend likes fish") is False
@@ -629,8 +618,8 @@ def test_a_possessive_naming_another_person_is_not_self_referential():
 
 
 def test_first_person_questions_are_still_self_referential():
-    """REG-590's contract, which the fix above must not break: the user's own
-    profile facts still have to survive a degraded semantic signal."""
+    """The trusted-fact contract, which the semantic gate must not break: the
+    user's own profile facts still have to survive a degraded semantic signal."""
     from localm.memory.store import _is_self_referential as sr
 
     assert sr("what is my name") is True
@@ -653,26 +642,17 @@ def test_a_query_about_the_world_is_still_not_self_referential():
 # A LEXICAL HIT SAYS WHAT THE QUERY IS ABOUT. Do not pad cosine-only records
 # in behind it.
 #
-# Reported 2026-08-14: "Greet my friend Memo, who is watching right now" also
-# injected "User once discussed a person named Fishy", which measured cos=0.5584
-# against a REL_COS_MIN of 0.55 - over the floor by 0.008.
-#
-# WHY NOT JUST RAISE THE FLOOR: measured on real bge-small over 16 query/record
-# pairs, no absolute threshold separates the two sets. The lowest TRUE pair was
-# 0.4480 ("what do I do for work" vs "User works on localm"); the highest FALSE
-# pair was 0.5965 ("what is my name" vs "User has a friend called Memo"). Raising
-# REL_COS_MIN drops a genuine hit before it drops a wrong one, and a
-# relative-to-best gate fails too (that false pair is 91% of its query's best).
-# Lexical overlap over the same 16 pairs: FP=0. It is never wrong; it just misses
-# paraphrases, which is what cosine is for.
+# No absolute cosine threshold separates the two sets on real bge-small
+# embeddings, and a relative-to-best gate fails too. Lexical overlap has no
+# false positives; it only misses paraphrases, which is what cosine is for.
 
 def _cos_embed(query, cosines):
     """An embed_fn where *query* sits at angle 0 and each record sits at the angle
-    whose cosine to it is the MEASURED value.
+    whose cosine to it is the given value.
 
-    Keyed to ONE query on purpose: cos(a, b) here is the cosine of the angle
-    DIFFERENCE, so a table shared across several queries silently produces
-    similarities nobody chose. Anything unlisted is far away (0.05).
+    Keyed to ONE query: cos(a, b) here is the cosine of the angle DIFFERENCE, so
+    a table shared across several queries silently produces similarities nobody
+    chose. Anything unlisted is far away (0.05).
     """
     import math
 
@@ -688,7 +668,7 @@ def _cos_embed(query, cosines):
     return embed
 
 
-# Measured on real bge-small, 2026-08-14, for these exact strings.
+# Cosine values from real bge-small embeddings of these exact strings.
 _GREET = "Greet my friend Memo, who is watching right now"
 _GREET_COS = {
     "user has a friend called memo": 0.7586,
@@ -720,7 +700,7 @@ def test_a_marginal_cosine_record_does_not_ride_in_behind_a_lexical_hit(tmp_path
 
 def test_cosine_still_carries_a_paraphrase_when_nothing_matches_lexically(tmp_path):
     """The bar must not become 'lexical only': with NO lexical hit at all the
-    semantic gate still answers, which is REG-590's contract."""
+    semantic gate still answers."""
     q = "what is my name"
     embed = _cos_embed(q, {"user is called sam": 0.6526})
     st = _store_with(tmp_path, ["User is called Sam"], embed)

@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for end-to-end IPv6 bind support (NEW-IPV6-HOST-CRASH).
+"""End-to-end IPv6 bind support.
 
-``localm gui -H ::`` used to die at startup: the port-availability probe opened
-an AF_INET socket, so resolving any IPv6 host raised ``socket.gaierror`` before
-anything was bound and the process exited through the unexpected-error path.
+``localm gui -H ::`` must start: an AF_INET-only port-availability probe raises
+``socket.gaierror`` on any IPv6 host before anything is bound, and the process
+exits through the unexpected-error path.
 
-Every test here was fires-controlled: the fix was reverted and each test
-confirmed to go RED for its own reason, then the tree restored byte-identical.
-The control is named in each test so a future reader can redo it rather than
-trust this sentence.
+Each test names the control that makes it go red.
 """
 
 from __future__ import annotations
@@ -161,10 +158,10 @@ class TestSelfConnectHost:
             assert not netlisten.is_wildcard_host(self_connect_host(bind))
 
     def test_the_probe_helpers_agree(self):
-        """They disagreed before this unit: _watchdog_probe_host returned
-        127.0.0.1 for :: while _hang_alarm._probe_host returned ::1, and
-        mount_gui_surface hardcoded 127.0.0.1 regardless of the bind. Control:
-        restore any one of the inline copies and this goes red."""
+        """_watchdog_probe_host, _hang_alarm._probe_host and mount_gui_surface
+        must all resolve the self-connect host through self_connect_host rather
+        than an inline copy. Control: restore any one of the inline copies and
+        this goes red."""
         from localm.inference._hang_alarm import _probe_host
         from localm.inference.routes.admin import _watchdog_probe_host
         for bind in (None, "", "0.0.0.0", "::", "::1", "10.0.0.5"):
@@ -199,15 +196,13 @@ class TestShowUrl:
     @pytest.mark.parametrize("host", ["fd7a:115c:a1e0::e44:2839", "fe80::1",
                                       "abcd::1", "::1", "2001:db8::5"])
     def test_a_bracketed_ipv6_url_survives_rich_markup(self, host):
-        """Rich reads ``[...]`` as a style tag, so a printed address LOST ITS
-        HOST for every literal starting with a lowercase hex letter - which is
-        every link-local (fe80::) and every unique-local (fd..). Measured: Rich
-        rendered ``[fd7a:115c:a1e0::e44:2839]`` as the empty string while
-        ``[::1]`` survived, so the bug reached only SOME addresses.
+        """Rich reads ``[...]`` as a style tag, so an unescaped printed address
+        loses its HOST for every literal starting with a lowercase hex letter -
+        every link-local (fe80::) and every unique-local (fd..), while ``[::1]``
+        survives.
 
         Control: drop the escape in console.show_url and the fd7a/fe80/abcd
-        params go red while ::1 and 2001:db8::5 stay green - which is exactly
-        why this would have shipped."""
+        params go red while ::1 and 2001:db8::5 stay green."""
         import io
 
         from rich.console import Console
@@ -254,10 +249,9 @@ class TestBindHostWidening:
         """Control for the test above: the preflight must be able to say NO, or
         its None answers prove nothing.
 
-        ``::ffff:127.0.0.1`` is the real case that forced the read site to stop
-        skipping the loopback class - it is well-formed, it IS loopback, and the
-        OS refuses to bind it, so a Settings write could otherwise have killed
-        the server for a user with no terminal."""
+        ``::ffff:127.0.0.1`` is why the read site does not skip the loopback
+        class: it is well-formed, it IS loopback, and the OS refuses to bind
+        it."""
         from localm.cli._core import _bind_preflight_error
         assert is_valid_bind_host("::ffff:127.0.0.1") is True
         assert is_loopback_host("::ffff:127.0.0.1") is True

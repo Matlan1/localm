@@ -121,9 +121,8 @@ class TestChangedFiles:
 
     def test_search_replace_tracked(self, tmp_path):
         """search_replace's targets are a glob+regex sweep, not a `path` arg,
-        so it needs its own post-hoc tracking path (ToolResult.changes) - the
-        pre-call snapshot every other tool here uses cannot cover it (there is
-        no path to snapshot before the call runs)."""
+        so it is tracked post-hoc from ToolResult.changes; there is no path to
+        snapshot before the call runs."""
         (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
         agent = _make_agent(tmp_path, [
             _tc("search_replace", pattern="x = 1", replacement="x = 2",
@@ -139,10 +138,9 @@ class TestChangedFiles:
 
     def test_search_replace_dry_run_arg_not_tracked(self, tmp_path):
         """The MODEL's own dry_run=true (a preview, distinct from the agent-
-        level dry_run tested above) must not be recorded as a change either -
-        ToolResult.changes carries the same shape for both a preview and a
-        real apply, so the tracker must gate on the call's own dry_run arg,
-        not merely on whether `changes` is populated."""
+        level dry_run tested above) is not recorded as a change.
+        ToolResult.changes carries the same shape for a preview and a real
+        apply, so the tracker gates on the call's own dry_run arg."""
         (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
         agent = _make_agent(tmp_path, [
             _tc("search_replace", pattern="x = 1", replacement="x = 2",
@@ -153,15 +151,11 @@ class TestChangedFiles:
         assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 1\n"
 
     def test_search_replace_partial_apply_still_tracks_what_was_written(self, tmp_path):
-        """End-to-end through the REAL agent dispatch path (not the tool in
-        isolation - test_tools_files_honesty.py already proves the tool's own
-        ToolResult.changes is correct on a partial apply; this proves
-        _post_tool_success actually ACTS on that data). A batch that fails
-        partway must still track the file(s) it genuinely wrote - result.ok
-        is False for the call as a whole, but _post_tool_success's
-        search_replace branch does not gate on result.ok (rule 5: a real,
-        partial mutation must not go untracked just because the batch as a
-        whole reports an error)."""
+        """End-to-end through the REAL agent dispatch path, so it covers
+        _post_tool_success acting on the data rather than the tool in
+        isolation. A batch that fails partway still tracks the file(s) it
+        genuinely wrote: result.ok is False for the call as a whole, and
+        _post_tool_success's search_replace branch does not gate on it."""
         (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
         (tmp_path / "b.py").write_text("x = 1\n", encoding="utf-8")
         real_write = Path.write_text
@@ -184,7 +178,7 @@ class TestChangedFiles:
         assert files[0]["last_tool"] == "search_replace"
         written = files[0]["path"]
         assert (tmp_path / written).read_text(encoding="utf-8") == "x = 2\n"
-        # And it is undoable, same as a full success would be.
+        # Undoable, same as a full success.
         msg = agent.undo()
         assert "restored" in msg
         assert (tmp_path / written).read_text(encoding="utf-8") == "x = 1\n"
@@ -412,11 +406,8 @@ class TestCheckpoint:
 
     def test_clear_checkpoint_failure_is_reported(self, tmp_path, monkeypatch,
                                                   caplog):
-        """A delete that FAILS must be surfaced (AGENTS.md rule 5). The loop used
-        to swallow it with a bare `pass`, so a checkpoint could outlive the
-        "clear" that was supposed to remove it and a later session could resume
-        from one the user believes is gone - exactly the state
-        NEW-CODER-RESUME-DESTROYS-SESSIONS was fixed to prevent.
+        """A delete that FAILS is surfaced, so a checkpoint cannot outlive the
+        "clear" that was supposed to remove it without anyone hearing about it.
 
         WARNING, not debug, is part of the property: the always-on
         recent-activity ring a bug report dumps is INFO+, so a debug line would
@@ -433,9 +424,8 @@ class TestCheckpoint:
         refused = []
 
         def _refuse(self, *a, **kw):
-            # Compare Path to Path, never str to str: on Windows the two sides
-            # differ by separator and case, and an injector that silently never
-            # matches is indistinguishable from a clear that had nothing to do.
+            # Compare Path to Path, not str to str: the two sides differ by
+            # separator and case on Windows.
             if self == target:
                 refused.append(self)
                 raise PermissionError(13, "Permission denied")
@@ -445,14 +435,11 @@ class TestCheckpoint:
         with caplog.at_level(logging.WARNING, logger="localm"):
             agent.clear_checkpoint()    # must NOT raise into the caller
 
-        # 1. The fault fired and the data-level loss is real: assert THAT before
-        #    the log, so a dead injector cannot read as a passing guard.
+        # 1. The fault fired and the file survived.
         assert refused == [target]
         assert target.exists()
 
-        # 2. It was reported, naming the file that survived. Asserted from
-        #    OUTSIDE: the handler catches Exception broadly, so an assertion
-        #    raised inside the stand-in would be absorbed as an input.
+        # 2. It was reported, naming the file that survived.
         warned = [r.getMessage() for r in caplog.records
                   if r.levelno >= logging.WARNING]
         assert any(str(target) in m for m in warned), warned
@@ -514,12 +501,9 @@ class TestPatchModeGuard:
         assert json.loads(nb_path.read_text(encoding="utf-8")) == nb
 
     def test_search_replace_is_captured_not_written_in_patch_mode(self, tmp_path):
-        """The regression this guards: search_replace was not in the tool set
-        the patch-mode interception gate checked (it is not pre-call-
-        snapshottable like the other undoable tools), so --patch-mode's
-        documented promise - "Capture ALL file writes as a unified diff
-        instead of modifying files" - was silently false for it: it wrote to
-        disk for real even with patch mode on."""
+        """search_replace is inside the patch-mode interception gate, even
+        though it is not pre-call-snapshottable like the other undoable tools:
+        with patch mode on it is CAPTURED, never written to disk."""
         (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
         agent = _make_agent(tmp_path)
         agent.patch_mode = True
@@ -528,17 +512,16 @@ class TestPatchModeGuard:
         result = agent._execute_tool(call, interactive=False)
         assert result.ok and "[patch-mode]" in result.output
         assert "a.py" in result.output
-        # disk untouched - the whole point of patch mode
+        # disk untouched
         assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 1\n"
         diff = agent.flush_patch()
         assert "-x = 1" in diff and "+x = 2" in diff
-        # Not tracked as a real change either - nothing was actually written.
+        # Not tracked as a real change.
         assert agent.changed_files() == []
 
     def test_search_replace_no_match_reports_uncaptured_not_blocked(self, tmp_path):
-        """0 matches is "no change", not "unsupported operation" - the
-        fallback message covers both, but this pins that a real pattern with
-        no hits in patch mode does not falsely claim a capture."""
+        """0 matches is "no change", not "unsupported operation": a real
+        pattern with no hits in patch mode does not claim a capture."""
         (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
         agent = _make_agent(tmp_path)
         agent.patch_mode = True
@@ -550,17 +533,13 @@ class TestPatchModeGuard:
 
 
 # ---------------------------------------------------------------------------
-#  Tool-result duration (#962)
+#  Tool-result duration
 # ---------------------------------------------------------------------------
 
 class TestToolResultDuration:
-    """The GUI used to guess a tool's execution time client-side, between two
-    render events (coder.js buildToolCard's card.dataset.t0) - it read ~0.0s
-    whenever both arrived in the same tick, which was most of the time. The
-    fix times the real invocation server-side and puts it on the emitted
-    "tool_result" event. A test asserting only "the field exists" would pass
-    on a hardcoded 0.0 just as easily as on a real measurement, so this pins
-    the number against a tool that deliberately takes a known amount of time."""
+    """The tool invocation is timed SERVER-side and the duration put on the
+    emitted "tool_result" event. Pinned against a tool that takes a known
+    amount of time, so a hardcoded 0.0 cannot pass."""
 
     def test_duration_reflects_real_tool_time(self, tmp_path):
         def slow(cwd, **kw):
@@ -579,18 +558,15 @@ class TestToolResultDuration:
         tool_results = [e for e in events if e.get("type") == "tool_result"]
         assert len(tool_results) == 1
         duration_s = tool_results[0]["duration_s"]
-        # Not the hang-test's full second - just enough above the client-side
-        # false floor (two same-tick renders read as ~0.0s) to prove this is a
-        # real measurement of the 0.3s sleep, not a stub value.
+        # Above the client-side false floor of ~0.0s, so this is a real
+        # measurement of the 0.3s sleep.
         assert duration_s >= 0.25
 
     def test_duration_is_omitted_when_denied_before_execution(self, tmp_path):
-        """A tool blocked by network policy never reaches tool_def.fn - the
-        event must OMIT duration_s, not report 0.0 (F5, found in review of
-        #962/S8): coder.js renders a present 0.0 as a real "0.0s", identical to
-        what the ORIGINAL bug displayed for every call. Omitting it lets the
-        client's typeof guard render nothing, distinguishing "never ran" from
-        "ran and was genuinely instantaneous"."""
+        """A tool blocked by network policy never reaches tool_def.fn, so the
+        event OMITS duration_s rather than reporting 0.0: coder.js renders a
+        present 0.0 as a real "0.0s", while an absent field renders nothing.
+        That distinguishes "never ran" from "ran and was instantaneous"."""
         events = []
         agent = _make_agent(tmp_path, on_event=events.append)
         call = _make_call("fetch_url", url="http://example.invalid/x")
@@ -607,19 +583,15 @@ class TestToolResultDuration:
 # ---------------------------------------------------------------------------
 
 class TestToolResultAlwaysEmitted:
-    """Three early-return branches in _execute_tool - patch-mode, scope-
-    violation, dry-run - used to `return result` without ever calling
-    self._emit("tool_result", ...), even though the matching "tool_call" WAS
-    emitted for all three. coder.js's pendingCards queue is a strict
-    push(tool_call)/shift(tool_result) FIFO, so a missing tool_result leaves
-    that card stuck at the head forever - the NEXT tool's tool_result then
-    resolves the WRONG card, and every result after it is off by one for the
-    rest of the session. A test that drives only ONE call at a time (as the
-    three existing patch-mode tests above do) cannot see this shape of bug at
-    all: it only shows up across a SEQUENCE. This test drives four calls
-    covering all three previously-silent branches plus one normal call, and
-    checks the tool_call/tool_result PAIRING, not just that each individually
-    "worked"."""
+    """Every "tool_call" emitted by _execute_tool gets a matching
+    "tool_result", including from its three early-return branches (patch-mode,
+    scope-violation, dry-run). coder.js's pendingCards queue is a strict
+    push(tool_call)/shift(tool_result) FIFO, so one missing tool_result leaves
+    that card stuck at the head and every later result off by one.
+
+    Drives four calls - the three early-return branches plus one normal call -
+    and checks the PAIRING across the sequence, which a single-call test cannot
+    see."""
 
     def test_dry_run_scope_violation_and_patch_mode_each_pair_with_their_call(
             self, tmp_path):
@@ -651,8 +623,7 @@ class TestToolResultAlwaysEmitted:
         assert r3.ok and "[patch-mode]" in r3.output
         assert (tmp_path / "in_scope.py").read_text(encoding="utf-8") == "x = 1\n"
 
-        # 4) a normal, fully-executed call - the one whose card would resolve
-        # to the WRONG entry if any of 1-3 above failed to emit a tool_result.
+        # 4) a normal, fully-executed call.
         r4 = agent._execute_tool(_make_call("read_file", path="in_scope.py"),
                                  interactive=False)
         assert r4.ok
@@ -661,15 +632,12 @@ class TestToolResultAlwaysEmitted:
         results = [e for e in events if e["type"] == "tool_result"]
         expected_tools = ["destructive_probe", "read_file", "write_file", "read_file"]
         assert [c["tool"] for c in calls] == expected_tools
-        # THE regression check: one tool_result per tool_call, same order. A
-        # length mismatch here is exactly a card left stuck at "…" forever;
-        # an order mismatch is exactly a later result resolving the wrong card.
+        # One tool_result per tool_call, in the same order.
         assert len(results) == len(calls)
         assert [r["tool"] for r in results] == expected_tools
 
-        # duration_s: real for patch-mode (it does real diffing work), absent
-        # for dry-run and scope-violation (never reached tool_def.fn), real
-        # for the normal call.
+        # duration_s: real for patch-mode and the normal call, absent for
+        # dry-run and scope-violation (never reached tool_def.fn).
         assert "duration_s" not in results[0]        # dry-run
         assert "duration_s" not in results[1]         # scope violation
         assert isinstance(results[2]["duration_s"], float)   # patch-mode

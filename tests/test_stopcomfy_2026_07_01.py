@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-STOPCOMFY - localm can stop/restart the ComfyUI IT launched.
+"""localm can stop and restart the ComfyUI IT launched.
 
 Covers the retained-handle registry, the graceful stop (abort render + clear
 queue + free VRAM), the never-kill-a-user's-ComfyUI rule, and the HTTP routes.
@@ -88,15 +88,10 @@ def _keyless_app(tmp_path, monkeypatch):
 
 def test_status_reports_launched_by_localm(tmp_path, monkeypatch):
     # get_comfy_status resolves _comfy_alive via `from localm.image_gen.comfy
-    # import _comfy_alive` (a fresh local import each call) - image_gen.comfy
+    # import _comfy_alive` (a fresh local import each call), and image_gen.comfy
     # imports it as its OWN module-level name (`from localm.media.comfy_client
-    # import _comfy_alive`), a SEPARATE binding from comfy_client's own
-    # attribute. Patching comfy_client._comfy_alive does not reach the route:
-    # confirmed live (route sees the ORIGINAL function object, not the patch),
-    # and the assertion below used to only check key presence, so a real
-    # unmocked network call could pass silently on a box with a real ComfyUI
-    # listening on the default port (the exact shape fixed in test_gui.py's
-    # comfy-model-picker test).
+    # import _comfy_alive`), a SEPARATE binding from comfy_client's own attribute.
+    # Patching comfy_client._comfy_alive does not reach the route.
     from localm.image_gen import comfy as ic
     monkeypatch.setattr(ic, "_comfy_alive", lambda url, timeout=1.0: True)
     app = _keyless_app(tmp_path, monkeypatch)
@@ -123,10 +118,8 @@ def test_stop_route_calls_stop_comfy(tmp_path, monkeypatch):
 
 
 def test_stop_route_504s_when_stop_comfy_hangs_past_budget(tmp_path, monkeypatch):
-    """Follow-up to #1057: before this fix, a wedged stop_comfy() call (a
-    taskkill that never returns, say) left the HTTP request hanging forever
-    - the exact gap #1057's own docstring named. Now it returns a clear 504
-    within the configured budget instead."""
+    """A wedged stop_comfy() call (a taskkill that never returns, say) returns
+    a 504 within the configured budget rather than hanging the HTTP request."""
     import time
 
     from localm.inference.routes import config as config_routes

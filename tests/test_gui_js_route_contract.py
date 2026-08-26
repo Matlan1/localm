@@ -2,21 +2,18 @@
 """Contract test: every HTTP path the GUI's JavaScript fetches must be declared
 as a real route somewhere in the Python source.
 
-This exists because of REG-585: PR #585 deleted the ``/v1/plugins`` routes (and
-the Python tests that covered them) but left ``pages/plugins.js`` fetching them,
-so the GUI's whole external-plugin surface 404'd for every user while the suite
-stayed green. Nothing tied the frontend to the backend, so nothing noticed.
+Nothing else ties the frontend to the backend, so a route deleted while its
+caller stays behind 404s for every user while the suite stays green.
 
-The check is static (it reads source, it does not build an app) on purpose: the
-route table of a live app depends on which plugins happen to be installed and
-loaded, which would make the test's coverage depend on fixture state. Route paths
-are declared as literals repo-wide (``@_router.get("/api/coder/sessions")``, no
-router prefixes), so scanning the source sees all of them, deterministically.
+The check is static - it reads source, it does not build an app: the route table
+of a live app depends on which plugins happen to be installed and loaded, which
+would make the test's coverage depend on fixture state. Route paths are declared
+as literals repo-wide (``@_router.get("/api/coder/sessions")``, no router
+prefixes), so scanning the source sees all of them, deterministically.
 
-Known, deliberate limits: a ``fetch(url)`` whose URL is built in a variable is
-not seen, and a route that is declared in source but never registered on the app
-still counts as declared. This test catches the "route deleted, caller left
-behind" class, which is the one that actually shipped.
+Limits: a ``fetch(url)`` whose URL is built in a variable is not seen, and a
+route that is declared in source but never registered on the app still counts as
+declared. This catches the "route deleted, caller left behind" class.
 """
 
 import re

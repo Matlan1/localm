@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Phase 3 (GAP-RAG-1): the BM25 tokenizer must be unicode-aware.
+"""The BM25 tokenizer must be unicode-aware.
 
-The original tokenizer used an ASCII-only regex ([a-z0-9]+), so any
-non-latin corpus (CJK, Cyrillic, Arabic, accented latin) tokenized to an
-empty list and BM25 lexical retrieval silently returned no hits. These
-tests pin the unicode behavior while guarding the existing ASCII contract.
+These tests pin the unicode behavior for CJK, Cyrillic, Arabic and accented
+latin corpora while guarding the existing ASCII contract.
 """
 
 from __future__ import annotations
@@ -14,7 +12,6 @@ from localm.rag.bm25 import BM25, tokenize
 
 class TestUnicodeTokenize:
     def test_ascii_unchanged(self):
-        # The pre-existing contract must keep working exactly as before.
         assert tokenize("Hello, World! x2") == ["hello", "world", "x2"]
 
     def test_cyrillic_tokenizes_nonempty(self):
@@ -31,8 +28,7 @@ class TestUnicodeTokenize:
         assert toks == ["مرحبا", "بالعالم"]
 
     def test_cjk_split_per_character(self):
-        # CJK has no spaces, so a run of ideographs must become per-char
-        # tokens so that a query sharing a character can match.
+        # CJK has no spaces, so a run of ideographs must become per-char tokens.
         toks = tokenize("机器学习")
         assert toks == ["机", "器", "学", "习"]
 
@@ -64,8 +60,8 @@ class TestUnicodeBM25:
         assert scores.index(max(scores)) == 0
 
     def test_non_latin_corpus_not_silently_empty(self):
-        # Adversarial: an all-CJK corpus must not score uniformly zero
-        # against a relevant CJK query (the GAP-RAG-1 silent failure).
+        # An all-CJK corpus must not score uniformly zero against a relevant CJK
+        # query.
         docs = ["数据库索引", "网络协议栈"]
         scores = BM25(docs).scores("数据库")
         assert scores != [0.0, 0.0]

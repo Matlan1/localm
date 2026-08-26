@@ -9,23 +9,19 @@ Both the HTTP server (``http_server.switch_engine``) and the MCP server plugin
        eviction at all?
     2. EVICT: if not, which resident peer is the safe one to free first?
 
-The rules used to live only inside ``switch_engine``, so the MCP server had no
-way to reach them and shipped single-resident instead. They live here now so the
-two cannot drift: a change to the admit margin or the victim-safety conditions
-lands in one place and both servers get it.
+The rules live here so a change to the admit margin or the victim-safety
+conditions lands in one place and both servers get it.
 
-The policy is deliberately conservative in the PERMIT direction. Stacking a
-second model on top of a resident one is only allowed on a reading that was
-actually taken (``probe_ok``), that the box can actually produce (``free_vram is
-not None``), that counts every process's VRAM rather than just the caller's own
-(``not is_process_scoped``), and that clears the model's requirement plus a fixed
+The policy is conservative in the PERMIT direction. Stacking a second model on
+top of a resident one is only allowed on a reading that was actually taken
+(``probe_ok``), that the box can produce (``free_vram is not None``), that counts
+every process's VRAM rather than just the caller's own (``not
+is_process_scoped``), and that clears the model's requirement plus a fixed
 headroom, with no per-device split shortfall. Anything else falls back to
-single-resident. See ``fits_alongside_residents`` for why each of those is
-load-bearing: the failure mode of a wrong PERMIT is a native OOM or a driver TDR,
-not a graceful error.
+single-resident. A wrong PERMIT ends in a native OOM or a driver TDR, not a
+graceful error.
 
-Two optional knobs sit on top of the VRAM arithmetic, both OFF by default so a
-tight-VRAM box behaves exactly as it did before this module existed:
+Two optional knobs sit on top of the VRAM arithmetic, both OFF by default:
 
     max_resident_models  cap the number of concurrent resident chat models
     pinned_models        names that are never chosen as an eviction victim
@@ -36,27 +32,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-# A loaded model costs more VRAM than its file: KV cache, compute buffers and
-# allocator slack. The same 1.2 factor switch_engine has always used.
+# Multiplier from on-disk model size to the VRAM a model is expected to occupy
+# once loaded.
 VRAM_REQUIRED_FACTOR = 1.2
-# Never fill the card to the brim - leave room for the KV cache to grow with
-# context and for whatever else shares the device (compositor, another app).
+# VRAM the admit check leaves free on the device.
 DEFAULT_HEADROOM_BYTES = 1024 ** 3  # 1 GB
-# Used only when a registered model's path is neither a file nor a directory, so
-# no real size can be read. Deliberately pessimistic: it makes the admit check
-# HARDER to pass, so an unreadable model errs toward single-resident.
+# Footprint reported when a registered model's path is neither a file nor a
+# directory, so no real size can be read.
 UNKNOWN_FOOTPRINT_BYTES = 4 * 1024 ** 3
 
 
-# Ceiling on the recursive walk below. A real model directory holds tens of files
-# (shards, tokenizer, config); thousands means we are not looking at a model. The
-# walk used to be unbounded, so a caller who could name a directory could spend
-# the server's time enumerating it (CodeQL 73-76) - a deep or huge tree, or one
-# whose contents change under us, cost an arbitrary amount of work on the calling
-# thread. Stopping early only makes the measured size SMALLER, and a smaller
-# footprint is the conservative direction for every caller: it can only make a
-# model look easier to fit, never harder, and the admit decision is re-checked
-# against real VRAM at load time.
+# Ceiling on the recursive walk in model_footprint_bytes. Stopping early only
+# makes the measured size smaller, never larger.
 _FOOTPRINT_MAX_FILES = 10_000
 
 
@@ -65,7 +52,7 @@ def model_footprint_bytes(model_path: Any) -> int:
 
     The directory walk is bounded (see _FOOTPRINT_MAX_FILES).
     """
-    from localm.debuglog import logger     # function-scoped, as elsewhere here
+    from localm.debuglog import logger     # function-scoped import
     p = Path(model_path)
     if p.is_file():
         return p.stat().st_size
@@ -73,12 +60,8 @@ def model_footprint_bytes(model_path: Any) -> int:
         total = 0
         seen = 0
         for f in p.rglob("*"):
-            # Counted BEFORE the is_file()/stat() filters, so the bound is on
-            # ENTRIES WALKED, not on files successfully measured. Counting only
-            # measured files left the walk unbounded for the two trees that cost
-            # the most and measure the least: one made entirely of directories,
-            # and one whose entries all fail stat(). Both would `continue` forever
-            # without ever reaching the ceiling.
+            # Counted before the is_file()/stat() filters, so the bound is on
+            # entries walked, not on files successfully measured.
             seen += 1
             if seen > _FOOTPRINT_MAX_FILES:
                 logger.debug(
@@ -91,9 +74,7 @@ def model_footprint_bytes(model_path: Any) -> int:
                     continue
                 total += f.stat().st_size
             except OSError as e:
-                # One unreadable entry (a broken link, a race with a delete, a
-                # permission hole) must not abort the whole measurement, but it
-                # is not silently ignored either (AGENTS.md rule 5).
+                # An unreadable entry is skipped and logged; the walk continues.
                 logger.debug("footprint: skipping unreadable %s: %s", f, e)
                 continue
         return total
@@ -117,32 +98,29 @@ def fits_alongside_residents(
     """
     True when the model may load with ZERO eviction, alongside resident peers.
 
-    Every condition is a PERMIT-direction guard, and each one has already cost
-    somebody a bad load:
+    Every condition is a PERMIT-direction guard:
 
     ``probe_ok``      the reading was actually taken. A frozen last-known-good
-                      that happens to read HIGH would otherwise admit a load on
-                      top of resident peers and OOM. (The same stale value in
-                      the LOW direction only costs a spurious refusal, which is
-                      why the REFUSE direction can be laxer than this.)
+                      that reads HIGH would otherwise admit a load on top of
+                      resident peers and OOM. The same stale value in the LOW
+                      direction only costs a spurious refusal, so the REFUSE
+                      direction is laxer.
     ``free_vram``     is not None: the box can report free VRAM at all. A
                       CPU-only / GGUF-only box reports nothing, and "nothing"
-                      must never read as "plenty".
+                      never reads as "plenty".
     ``is_process_scoped`` the reading counts only the CALLING process's own
                       VRAM allocations, not the whole device (see
                       ``discover.FREE_SCOPE_PROCESS``). Every resident model
                       lives in its OWN isolated worker subprocess
-                      (backends/gguf.py) - so a process-scoped reading is blind
-                      to exactly the VRAM this check exists to account for, and
-                      can only ever OVER-report free space, never under. Treated
-                      the same as "cannot measure": a number that is
-                      structurally incapable of seeing a resident peer's memory
-                      is not evidence the model fits alongside it.
+                      (backends/gguf.py), so a process-scoped reading is blind
+                      to exactly the VRAM this check accounts for and can only
+                      over-report free space. Treated the same as "cannot
+                      measure".
     ``+ headroom``    the requirement alone is not enough of a margin.
     ``not shortfall`` aggregate free can clear the bar while ONE device of a
-                      configured split is short, because the GGUF backend
-                      divides a model by a static ratio with no live per-device
-                      check of its own. See ``discover.gpu_split_shortfall``.
+                      configured split is short: the GGUF backend divides a
+                      model by a static ratio with no live per-device check of
+                      its own. See ``discover.gpu_split_shortfall``.
 
     Callers that cannot measure, whose probe was inconclusive, or whose reading
     is process-scoped, get False and should fall back to single-resident rather
@@ -197,14 +175,11 @@ def resident_cap(config: Optional[Mapping] = None) -> Optional[int]:
     """
     ``max_resident_models``, or None for "no cap" (the default).
 
-    None means the VRAM arithmetic alone decides how many models stay resident,
-    which is the behaviour that shipped before the knob existed. A cap of 1
-    restores strict single-resident on a box whose owner does not want localm
-    using the headroom the arithmetic says is there.
+    None means the VRAM arithmetic alone decides how many models stay resident.
+    A cap of 1 forces strict single-resident.
 
-    An unusable value (not an int, or < 1) is IGNORED with a warning rather than
-    silently coerced: a typo that quietly became "cap 1" would look like a
-    performance regression with no way to trace it.
+    An unusable value (not an int, or < 1) is IGNORED with a warning, never
+    coerced.
     """
     cfg = _config(config)
     raw = cfg.get("max_resident_models")
@@ -224,9 +199,7 @@ def pinned_model_names(config: Optional[Mapping] = None) -> frozenset:
     ``pinned_models``: display names never chosen as an eviction victim.
 
     Pinning only PROTECTS; it never loads anything on its own. A non-list value,
-    or a non-string entry, is dropped with a warning (an ignored pin that
-    silently failed to protect is exactly the kind of hidden problem rule 5 is
-    about).
+    or a non-string entry, is dropped with a warning.
     """
     cfg = _config(config)
     raw = cfg.get("pinned_models")
@@ -236,9 +209,8 @@ def pinned_model_names(config: Optional[Mapping] = None) -> frozenset:
         _warn("pinned_models=%r is not a list; ignoring it", raw)
         return frozenset()
     names = {n for n in raw if isinstance(n, str) and n}
-    # Count what was actually REJECTED, not raw-minus-set: a duplicate pin
-    # ("a,a") collapses in the set but was not rejected, and reporting it as
-    # one would be a warning about something that never happened.
+    # Counts the entries actually rejected, not raw length minus the set size:
+    # a duplicate pin collapses in the set without having been rejected.
     dropped = sum(1 for n in raw if not (isinstance(n, str) and n))
     if dropped > 0:
         _warn("pinned_models: ignored %d entr%s that were not names",

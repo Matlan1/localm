@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Regression tests for the 2026-07-01 frontend-security backlog cluster.
-//   R41-D4       - artifact CSP precedes any pre-<head> content; KaTeX trust:false
-//   NEW-M-BROWSE - an explicit accepts_path/accepts_dir flag forces a Browse button
-// (R41-D2 = the DOMPurify 3.2.6 vendor bump, verified out-of-band; P1a deferred.)
+// Frontend security checks: the artifact CSP precedes any pre-<head> content,
+// KaTeX runs with trust:false, and an explicit accepts_path / accepts_dir flag
+// forces a Browse button.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
@@ -28,15 +27,8 @@ test("artifactSrcdoc still injects a network-blocking CSP for normal docs", () =
 });
 
 test("artifactSrcdoc denies form submission, which default-src 'none' does not (R41)", () => {
-  // R41 review, 2026-08-18. This function's own comment says the pane "blocks
-  // ALL network" and "cannot phone home". default-src 'none' does not make that
-  // true on its own: form-action is a NAVIGATION directive with no default-src
-  // fallback, so an unset form-action allows submission to ANY origin. An
-  // artifact is model-authored HTML, so <form action="https://elsewhere/"> was a
-  // way for the pane to send whatever a user typed into it off the machine -
-  // with no script involved, so neither the sandbox nor the nonce was in that
-  // path. Asserted for all three shapes artifactSrcdoc emits, because each
-  // splices the CSP in by a different route and only one of them was exercised.
+  // Checked across all three shapes artifactSrcdoc emits, each of which splices
+  // the CSP in by a different route.
   const { window: win } = loadApp();
   const shapes = {
     "bare svg": win.artifactSrcdoc("<svg viewBox='0 0 1 1'></svg>", "svg"),
@@ -76,8 +68,8 @@ test("accepts_path / accepts_dir force a Browse button regardless of key/label (
              json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
   };
   const { window: win } = loadAppWithPages({ fetchImpl });
-  // Browse buttons live on host-path fields, which render only for a host-access
-  // caller. Let init.js's capabilities fetch settle, then pin host.
+  // Host-path fields render only for a host-access caller: let init.js's
+  // capabilities fetch settle, then pin host.
   await new Promise((r) => setTimeout(r, 0));
   runScript(win, `caps.fsAccess = "host"; refreshSettingsPage();`);
   await new Promise((r) => setTimeout(r, 0));

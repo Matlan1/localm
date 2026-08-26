@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """localm.inference.http_server.rekey_loaded_model: re-keys every in-memory
 record of a loaded model's identity after its registry entry is renamed, so a
-still-loaded/serving engine is not orphaned under its old name. See
-tests/test_driving_engine.py for the sibling http_server module-state test
-pattern this reuses.
+still-loaded/serving engine is not orphaned under its old name.
 
 The second half of this file covers what happens when NOBODY re-keys, which is
 not a hypothetical: `localm rename` runs in a separate process and physically
 cannot reach into a running server's memory, so it leaves the engine map keyed
 on the old name while the registry holds the new one. Every name-keyed guard on
-the remove route then missed, and the route deleted a loaded model's GGUF.
+the remove route then misses, and the route deletes a loaded model's GGUF.
 Those tests use a REAL file inside a REAL models dir, because the guard turns
 on `resolve_deletion_target`, and a fixture with a fictional path like
 "x/a.gguf" can never make it return anything - it would execute the guard and
@@ -78,13 +76,12 @@ def test_rekey_is_a_noop_when_the_old_name_is_not_loaded():
 
 
 def test_rekey_also_moves_the_startup_and_last_active_pointers():
-    """Found by the live repro, not by reasoning: after renaming the model a
-    server was STARTED with, GET /v1/models still listed a row for the old
-    name, because list_models adds _default_model_name whenever the registry
-    lacks it. The same stale pointer also makes switch_engine's registration
-    check accept a name the registry no longer has, and
-    _resolve_unnamed_model_name falls back to _last_active_model_name after an
-    eviction. All three are records of a loaded model's identity, so all three
+    """After renaming the model a server was STARTED with, GET /v1/models still
+    lists a row for the old name, because list_models adds _default_model_name
+    whenever the registry lacks it. The same stale pointer also makes
+    switch_engine's registration check accept a name the registry no longer has,
+    and _resolve_unnamed_model_name falls back to _last_active_model_name after
+    an eviction. All three are records of a loaded model's identity, so all three
     move."""
     _reset()
     eng = _FakeEngine("old")
@@ -138,9 +135,9 @@ def test_rekey_fixes_the_stale_active_model_guard_hazard():
     """The concrete hazard this function exists to close: active_model()
     reads _engine.display_name, and the GUI's remove-model guard is exactly
     `req.model == active_model()`. Without the rekey, renaming the active
-    model would leave that comparison checking the NEW registry name against
-    the engine's stale OLD display_name, so it would never match - and the
-    GUI could delete the file out from under the model still serving
+    model leaves that comparison checking the NEW registry name against
+    the engine's stale OLD display_name, so it never matches - and the
+    GUI can delete the file out from under the model still serving
     requests. Reproduces active_model()'s own read directly (it is a closure
     built per-app, but it always reduces to exactly this)."""
     _reset()
@@ -157,8 +154,8 @@ def test_rekey_fixes_the_stale_active_model_guard_hazard():
 
 
 # ---------------------------------------------------------------------------
-#  The other half: when the re-key CANNOT happen (a rename from another
-#  process), the file must still not be deletable. Guard by FILE IDENTITY.
+#  When the re-key CANNOT happen (a rename from another process), the file
+#  must still not be deletable. Guarded by FILE IDENTITY.
 # ---------------------------------------------------------------------------
 
 
@@ -178,10 +175,7 @@ def models_home(tmp_path, monkeypatch):
     model_manager.MODELS_DIR is what is_owned_model_path (and therefore
     resolve_deletion_target) reads; config.MODELS_DIR is pinned to the same
     directory so nothing can silently answer against the session's real home
-    and make these tests pass vacuously. Same reasoning as
-    tests/test_cli_rm_prompt.py's `home` fixture, which documents why leaving
-    the second one unpinned once made a whole file pass against the very bug it
-    existed to catch.
+    and make these tests pass vacuously.
     """
     home = tmp_path / ".localm"
     models = home / "models"
@@ -238,11 +232,9 @@ def gui_client(monkeypatch):
 
     attach_gui(app, self_url="http://127.0.0.1:9/v1",
                switch_model=switch_model,
-               # No engine is ACTIVE in these tests: the whole point is the
-               # loaded-but-not-active, wrongly-named case the two name-keyed
-               # guards were blind to. An active_model() that named something
-               # would let the FIRST guard answer, and the test would pass
-               # without ever reaching the one under test.
+               # No engine is ACTIVE in these tests: an active_model() that
+               # named something would let the first, name-keyed guard answer
+               # instead of the one under test.
                active_model=lambda: "")
     return app, started
 
@@ -267,10 +259,8 @@ def test_remove_refuses_a_model_whose_file_a_live_engine_still_holds(
     try:
         with TestClient(app) as client:
             r = client.post("/api/models/remove", json={"model": "new-name"})
-        # The FILE first, deliberately. A status-code assertion placed ahead of
-        # it would short-circuit on a regression and report only "409 != 200",
-        # which is a statement about the guard, not about the user's data. The
-        # property being defended is that the GGUF is still there.
+        # The FILE is asserted first: the property defended is that the GGUF is
+        # still there.
         assert gguf.exists(), (
             "the user's model file was DELETED out from under a live engine")
         assert started == [], "the removal job must not even be started"
@@ -365,14 +355,9 @@ def test_guard_ignores_an_unloaded_engine_and_an_unowned_path(models_home):
 
 
 # ---------------------------------------------------------------------------
-#  FAIL CLOSED. The question is not "do these paths compare equal" but "can I
-#  establish nothing live is using this file". Every input where the comparison
-#  cannot be MADE was answered "nothing holds it, delete away".
-#
-#  None of these cases can be expressed by the fixtures above: they all build a
-#  real, resolvable temp file, so the comparison always succeeds and the error
-#  paths are unreachable. That is precisely why they slipped past six
-#  fires-controls and a green suite.
+#  FAIL CLOSED: every input where the file-identity comparison cannot be MADE
+#  at all. The fixtures above always build a real, resolvable temp file, so
+#  the comparison always succeeds there and these error paths are unreachable.
 # ---------------------------------------------------------------------------
 
 
@@ -397,9 +382,8 @@ def _raise_on_resolve(monkeypatch, bad: str, exc=OSError("unreachable")):
 
     Compared through Path + normcase, NOT as the raw string handed in: on
     Windows ``str(Path("//share/x"))`` comes back with BACKSLASHES, so a raw
-    equality test silently never matches. The first version of this helper did
-    exactly that - the fault was never injected, nothing refused, and the file
-    was deleted. The test caught it, but only because it asserts on the FILE.
+    equality test silently never matches, no fault is injected, nothing refuses,
+    and the file is deleted.
     """
     import os as _os
     from pathlib import Path as _P
@@ -412,8 +396,7 @@ def _raise_on_resolve(monkeypatch, bad: str, exc=OSError("unreachable")):
         return real(self, *a, **kw)
 
     monkeypatch.setattr(_P, "resolve", fake)
-    # Prove the injection took. A patch that silently fails to match looks
-    # exactly like a guard that correctly found nothing to refuse.
+    # Prove the injection took effect.
     try:
         _P(bad).resolve()
     except type(exc):
@@ -424,11 +407,11 @@ def _raise_on_resolve(monkeypatch, bad: str, exc=OSError("unreachable")):
 
 def test_remove_refuses_when_a_loaded_engines_path_will_not_resolve(
         models_home, gui_client, monkeypatch):
-    """THE fail-open: `except (OSError, ValueError): continue` skipped a LOADED
-    engine and let the loop fall through to "nothing holds this file". A model
-    served off a momentarily-unreachable UNC share therefore had its GGUF
-    deleted out from under it - the same unrecoverable outcome the guard
-    exists to prevent, reached through the error path."""
+    """THE fail-open: `except (OSError, ValueError): continue` skips a LOADED
+    engine and lets the loop fall through to "nothing holds this file". A model
+    served off a momentarily-unreachable UNC share then has its GGUF deleted out
+    from under it - the same unrecoverable outcome the guard exists to prevent,
+    reached through the error path."""
     app, started = gui_client
     gguf = _make_model_file(models_home)
     _register(models_home, {"victim": {"path": str(gguf), "source": "local"}})
@@ -489,19 +472,17 @@ def test_remove_refuses_when_the_models_own_path_will_not_resolve(
     """The third case, and it is NOT a data-loss one - stated precisely
     because the other two are and it would be easy to bundle them.
 
-    MEASURED against the previous code: an unresolvable registry path made
-    find_aliases_by_path raise (it resolves the path it is handed and catches
-    only for SIBLING entries), so the guard blew up before reaching
-    resolve_deletion_target and the route answered 500. Nothing was deleted.
-    So the collapse inside resolve_deletion_target - which returns None for
-    "unresolvable" exactly as it does for "outside the models dir" and
-    "already gone" - was LATENT, not live.
+    An unresolvable registry path makes find_aliases_by_path raise (it resolves
+    the path it is handed and catches only for SIBLING entries), so the guard
+    blows up before reaching resolve_deletion_target and the route answers 500.
+    Nothing is deleted. The collapse inside resolve_deletion_target - which
+    returns None for "unresolvable" exactly as it does for "outside the models
+    dir" and "already gone" - is therefore LATENT rather than live.
 
-    Two reasons it is fixed anyway. A guard whose job is to answer a question
-    calmly should not crash the request (rule 5: a failure gets reported at
-    its own altitude, not as a stack trace). And the latent hole goes LIVE the
-    moment anything reorders those two calls - which this very change does,
-    moving the resolve probe ahead of find_aliases_by_path.
+    It is still guarded: a guard whose job is to answer a question calmly should
+    not crash the request, and the latent hole goes LIVE the moment anything
+    reorders those two calls, which moving the resolve probe ahead of
+    find_aliases_by_path does.
     """
     app, started = gui_client
     gguf = _make_model_file(models_home)
@@ -653,7 +634,7 @@ def test_loaded_engine_holding_model_file_delegates_to_registry_policy(
 
 # ---------------------------------------------------------------------------
 #  POST /v1/models/rename - the always-present route the CLI drives, so a
-#  rename from another process re-keys the live engine instead of stranding it.
+#  rename from another process re-keys the live engine.
 # ---------------------------------------------------------------------------
 
 
@@ -697,9 +678,8 @@ def test_v1_rename_route_moves_the_registry_and_rekeys_the_engine(models_home):
         assert "old-name" not in config.load_registry()
         assert hs._engines["new-name"] is eng
         assert eng.display_name == "new-name"
-        # The whole reason the CLI routes through here: after this, the file is
-        # not deletable under EITHER name, because the engine map agrees with
-        # the registry again.
+        # After this the file is not deletable under EITHER name: the engine map
+        # agrees with the registry again.
         assert hs.loaded_engine_holding_model_file("new-name").key == "new-name"
     finally:
         _reset()
@@ -762,8 +742,7 @@ def test_cli_rename_asks_a_running_server_instead_of_renaming_behind_its_back(
                                    "new_name": "b", "notes": ["note one"]})
 
     monkeypatch.setattr(requests, "post", fake_post)
-    # The local rename must NOT also run: two renames would leave the second
-    # reporting "Not found" and, worse, imply the registry move happened twice.
+    # The local rename must NOT also run.
     monkeypatch.setattr("localm.model_manager.rename_model",
                         lambda *a: pytest.fail("renamed locally as well"))
 
@@ -862,8 +841,8 @@ def test_cli_rename_warns_out_loud_before_falling_back_past_a_live_server(
         monkeypatch, capsys):
     """A 401 (a keyed server this CLI has no credential for) still leaves the
     user's rename to do, so it happens locally - but that strands the running
-    server on the old name, and saying nothing about it is exactly the silent
-    degradation that produced this bug. The warning must name the remedy."""
+    server on the old name. The warning must name the remedy rather than
+    degrading silently."""
     import requests
 
     from localm.cli import models as cli_models
@@ -879,14 +858,8 @@ def test_cli_rename_warns_out_loud_before_falling_back_past_a_live_server(
 
 
 # ---------------------------------------------------------------------------
-#  Real HTTP: the whole CLI path, through the real _origin_guard.
-#
-#  The four tests above patch `requests.post`, so they cannot see the gate that
-#  actually stands in front of this route. It is not hypothetical: the first
-#  version of the /v1 tests above passed a mocked client and 403'd the moment a
-#  real one was used ("Open-mode management requires ..."). A rename that
-#  cannot authenticate is a rename that silently falls back and strands the
-#  server, which is the bug, so this has to be exercised for real.
+#  Real HTTP: the whole CLI path, through the real _origin_guard. The four
+#  tests above patch `requests.post`, so they never exercise that gate.
 # ---------------------------------------------------------------------------
 
 

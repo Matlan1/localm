@@ -99,9 +99,8 @@ def test_no_backends_when_dir_empty(tmp_path, monkeypatch):
 
 
 def test_already_registered_skips_probing(tmp_path, monkeypatch):
-    # The bundled AMD build self-registers: a device is already present. We must
-    # NOT then call ggml_backend_load on the ggml-* libs (that probe is what
-    # printed the bogus "failed to find ggml_backend_init in ggml-cpu.dll").
+    # The bundled AMD build self-registers: a device is already present, so
+    # ggml_backend_load must NOT then be called on the ggml-* libs.
     monkeypatch.setattr(sys, "platform", "win32")
     _touch(tmp_path, ["ggml-base.dll", "ggml.dll", "ggml-cpu.dll",
                       "ggml-hip.dll", "llama.dll"])
@@ -126,7 +125,7 @@ def test_loaded_but_no_device_reports_false(tmp_path, monkeypatch):
     """A non-null ggml_backend_load handle does NOT prove a usable device. When
     the plugin loads "succeed" but the device registry still reports 0, the
     registration is a FAILURE - the authoritative device count wins over the raw
-    load signal, so setup does not report a broken build as a success (rule 5)."""
+    load signal, so setup does not report a broken build as a success."""
     monkeypatch.setattr(sys, "platform", "win32")
     _touch(tmp_path, ["ggml-base.dll", "ggml-cpu.dll", "ggml-vulkan.dll", "llama.dll"])
     lib = _FakeLib(with_loader=True, dev_count=0)   # loads return truthy, 0 devices

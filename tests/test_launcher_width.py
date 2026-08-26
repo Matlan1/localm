@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The launcher window must keep a FIXED width: a long status line or a long
-model name in the dropdown must never widen it (issues.txt)."""
+"""The launcher window keeps a FIXED width: a long status line or a long model
+name in the dropdown must never widen it."""
 
 import importlib.machinery
 import importlib.util
@@ -53,7 +53,7 @@ def test_window_width_is_fixed_against_long_content():
         app.update_idletasks()
         base = app.winfo_reqwidth()
 
-        # Slam in pathological content the user complained about.
+        # Slam in pathological content.
         app.status_msg("X" * 400)
         app.model.set("Llama3.3-8B-Instruct-Thinking-Extended-Uncensored-"
                       "Claude-4.5-Opus-High-Reasoning.i1-Q6_K" * 3)

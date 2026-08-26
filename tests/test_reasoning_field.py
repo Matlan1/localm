@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""H4: the model's <think> reasoning is separated from the visible answer.
+"""The model's <think> reasoning is separated from the visible answer.
 
 The API surfaces it in a `reasoning_content` field (message + streaming delta)
 with clean `content`; the full-mode transcript writes it to a collapsed

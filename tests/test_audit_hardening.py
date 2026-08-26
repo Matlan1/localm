@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for three issues found by the unowned-surface audit:
+"""Three guarantees on unowned surfaces:
 
 1. setup_llama._safe_extractall_tar - the Python < 3.12 tar fallback must enforce
    the same path-traversal guarantee as the 3.12+ ``filter="data"`` extraction.
 2. setup_llama._repo_runtime_lib - a failed runtime-wheel import must fall back
    (the wheel is legitimately absent pre-install) AND surface the reason at debug
-   level instead of silently swallowing it (rule 5).
+   level, never swallow it.
 3. instances.reap_stale - a malformed entry with a null pid must be reaped (read
    as dead), consistent with find_attachable, not kept forever via a swallowed
    TypeError.
@@ -27,11 +27,9 @@ from localm.setup_llama import (
     _safe_extractall_tar,
 )
 
-# _safe_extractall_tar is the Python<3.12 path (no extraction filter). Calling it
-# directly on a 3.12+ test interpreter trips 3.12's "use the filter argument"
-# deprecation on the post-validation extractall - but members are already
-# path-validated above it, so it is safe here. Silence ONLY that one message; in
-# production this helper is reached only on <3.12, where the warning never exists.
+# _safe_extractall_tar is the Python<3.12 path (no extraction filter); calling it
+# on a 3.12+ interpreter trips the extraction-filter deprecation on its
+# post-validation extractall. Silence only that message.
 pytestmark = pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
 
 
@@ -123,7 +121,7 @@ def test_contained_symlink_is_allowed(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  2. runtime-wheel import fallback surfaces, does not hard-fail (rule 5)
+#  2. runtime-wheel import fallback surfaces, does not hard-fail
 # --------------------------------------------------------------------------- #
 
 def test_repo_runtime_lib_falls_back_without_raising():
@@ -134,8 +132,8 @@ def test_repo_runtime_lib_falls_back_without_raising():
 
 
 def test_repo_runtime_lib_logs_the_swallowed_import(monkeypatch, caplog):
-    # A BROKEN install (import raises something other than not-found) must be
-    # surfaced at debug level, not silently swallowed.
+    # A broken install (the import raises something other than not-found) is
+    # surfaced at debug level.
     import builtins
     real_import = builtins.__import__
 

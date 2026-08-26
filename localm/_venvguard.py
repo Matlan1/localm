@@ -2,20 +2,18 @@
 """Shared 'can this interpreter actually run localm' guard for the entry points.
 
 ``python -m localm`` and the ``localm`` / ``localcoder`` console scripts
-(pyproject.toml [project.scripts]) call this before ``main()``. Its job is to
-turn the one confusing failure mode - localm launched from an interpreter that
-does NOT have its runtime dependencies, which otherwise dies later with a cryptic
-``ModuleNotFoundError`` for a runtime-only import (NEW-J / NEW-J-CODER) - into a
-clear, actionable message.
+(pyproject.toml [project.scripts]) call this before ``main()``. It turns an
+interpreter that does NOT have localm's runtime dependencies - which otherwise
+dies later with a cryptic ``ModuleNotFoundError`` for a runtime-only import -
+into a clear, actionable message.
 
 The check gates on whether the dependencies are actually importable, NOT on
-whether ``sys.prefix`` looks like a virtualenv. The original check
-(``sys.prefix == sys.base_prefix``) conflated "not in a .venv" with "deps
-missing" and so falsely blocked every legitimate install that is not a ``.venv``
-directory: a ``pipx`` install, a container image, a system-wide or cold install
-(the go-public "cold install must succeed" path), and CI's ``pip install -e .``.
-Those all HAVE the deps and must run; only a genuinely dep-less interpreter
-should see the message.
+whether ``sys.prefix`` looks like a virtualenv. A ``sys.prefix ==
+sys.base_prefix`` check conflates "not in a .venv" with "deps missing" and
+falsely blocks every legitimate install that is not a ``.venv`` directory: a
+``pipx`` install, a container image, a system-wide or cold install, and CI's
+``pip install -e .``. Those all HAVE the deps and must run; only a genuinely
+dep-less interpreter sees the message.
 """
 
 from __future__ import annotations

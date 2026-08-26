@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Safe-to-share coder keys (2026-06-20). The OWNER key gets the full coder; a
-MINTED, non-owner coder-scoped key gets a RESTRICTED session - run_shell removed
-(no arbitrary host command exec / RCE) and confined to the instance project root.
+"""Safe-to-share coder keys. The OWNER key gets the full coder; a MINTED,
+non-owner coder-scoped key gets a RESTRICTED session - run_shell removed (no
+arbitrary host command exec / RCE) and confined to the instance project root.
 
 run_shell is cwd-independent (it runs an arbitrary command with cwd only as the
 start dir), so confining the cwd is necessary but NOT sufficient - disabling the
@@ -37,10 +37,10 @@ def test_tool_docs_exclude_a_disabled_tool():
 
 
 def test_system_prompt_drops_the_run_shell_tool_definition(tmp_path):
-    # The callable tool DEFINITION (the "## run_shell - ..." doc block) is removed
-    # for a restricted session, so the model is not offered run_shell as a tool.
-    # (Generic rules prose may still mention the name; the dispatch hard-refusal,
-    # not the prompt, is the security guarantee.)
+    # The callable tool DEFINITION (the `## run_shell - ...` doc block) is
+    # removed for a restricted session, so the model is not offered run_shell as
+    # a tool. Generic rules prose may still mention the name; the dispatch
+    # hard-refusal is the security guarantee.
     full = build_system_prompt(tmp_path, model_name="generic")
     restricted = build_system_prompt(tmp_path, model_name="generic",
                                      disabled_tools=frozenset({"run_shell"}))
@@ -76,8 +76,8 @@ def test_gate_is_selective_other_tools_still_dispatch(tmp_path):
 
 
 def test_spawned_child_inherits_disabled_tools(tmp_path, monkeypatch):
-    # A restricted (no-shell) parent must not be able to spawn a child agent that
-    # re-enables run_shell - that would be an RCE escape from a shareable key.
+    # A restricted (no-shell) parent cannot spawn a child agent that re-enables
+    # run_shell.
     import localm.plugins.coder.agent as agent_mod
     from localm.plugins.coder.tools import tool_spawn_agent
 
@@ -116,10 +116,8 @@ def test_without_disabling_the_gate_does_not_block_run_shell(tmp_path):
 
 def test_confirm_required_without_handler_is_denied_not_executed(tmp_path):
     # always_confirm forces run_shell to need approval even under auto_approve.
-    # Non-interactive with no confirm_handler must FAIL CLOSED (deny), never
-    # silently execute - otherwise a configured always_confirm is bypassed on an
-    # unattended run. If this regressed to the old fall-through, the echo would run
-    # and res.output would be the command output, not the confirmation refusal.
+    # Non-interactive with no confirm_handler FAILS CLOSED (deny) and never
+    # executes, so res.output is the confirmation refusal, not command output.
     agent = Agent(_StubBackend(), cwd=tmp_path, always_confirm={"run_shell"})
     res = agent._execute_tool(_shell_call(), interactive=False)
     assert not res.ok
@@ -139,7 +137,7 @@ def test_confirm_handler_approval_lets_it_proceed(tmp_path):
 
 
 def test_confirm_handler_rejection_is_reported(tmp_path):
-    # A handler that says no yields the normal user-rejection result (unchanged).
+    # A handler that says no yields the normal user-rejection result.
     agent = Agent(_StubBackend(), cwd=tmp_path, always_confirm={"run_shell"},
                   confirm_handler=lambda call: False)
     res = agent._execute_tool(_shell_call(), interactive=False)
@@ -175,9 +173,7 @@ def _coder_app(tmp_path, monkeypatch, *, api_key):
 
 
 def test_scoped_coder_key_is_locked_to_safe_tools_and_confined(tmp_path, monkeypatch):
-    # Also serves as the coder:full non-regression check: proves a plain coder
-    # key's restricted behavior (run_shell disabled, cwd confined) held after
-    # coder:full was introduced.
+    # A plain coder key stays restricted: run_shell disabled, cwd confined.
     proj = tmp_path / "proj"; proj.mkdir()
     other = tmp_path / "other"; other.mkdir()
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
@@ -220,10 +216,8 @@ def test_owner_key_keeps_the_full_coder(tmp_path, monkeypatch):
 
 
 def test_cookie_authed_owner_is_recognised_for_history(tmp_path, monkeypatch):
-    # The browser GUI authenticates with the HttpOnly localm_session cookie, not an
-    # Authorization header. The coder owner-gate must accept that cookie, else the
-    # GUI (the owner) is treated as a non-owner and never sees its own past coder
-    # sessions, with the page mislabelling it as privacy mode (issue A1).
+    # The browser GUI authenticates with the HttpOnly localm_session cookie, not
+    # an Authorization header, so the coder owner-gate must accept that cookie.
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
     app.state.root_dir = str(tmp_path)
     with TestClient(app) as client:
@@ -232,7 +226,7 @@ def test_cookie_authed_owner_is_recognised_for_history(tmp_path, monkeypatch):
                        headers={"Authorization": "Bearer ownersecret"}).json()
         assert h["authorized"] is True
         # Owner via the session COOKIE (the GUI path): must ALSO be authorized.
-        # The cookie now carries an OPAQUE session id (not the key); mint an owner
+        # The cookie carries an OPAQUE session id (not the key), so mint an owner
         # session the same way login/auto-seed does.
         from localm import auth, sessions
         from localm import scopes as S
@@ -256,10 +250,10 @@ def test_cookie_authed_owner_is_recognised_for_history(tmp_path, monkeypatch):
 
 
 def test_coder_history_lists_only_coder_sessions(tmp_path, monkeypatch):
-    # coder-history-chat: regular chat (HTTP server -> "_server.jsonl", CLI REPL
-    # -> "_chat.jsonl") and coder agent ("_localcoder.jsonl") logs all share the
-    # sessions dir, distinguished only by the filename label. Coder history must
-    # list ONLY the coder logs, not the chat sessions.
+    # Regular chat (HTTP server -> _server.jsonl, CLI REPL -> _chat.jsonl) and
+    # coder agent (_localcoder.jsonl) logs all share the sessions dir,
+    # distinguished only by the filename label. Coder history lists ONLY the
+    # coder logs, not the chat sessions.
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
     app.state.root_dir = str(tmp_path)
     import localm.audit as _audit
@@ -285,8 +279,8 @@ def test_coder_history_lists_only_coder_sessions(tmp_path, monkeypatch):
 
 
 def test_scoped_key_cannot_steer_the_owners_session(tmp_path, monkeypatch):
-    # THE critical one: a scoped key must not be able to send a message to the
-    # OWNER's full session (which keeps run_shell) - that would be RCE by proxy.
+    # A scoped key must not be able to send a message to the OWNER's full
+    # session, which keeps run_shell.
     proj = tmp_path / "proj"; proj.mkdir()
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
     app.state.root_dir = str(proj)
@@ -462,9 +456,8 @@ def test_pairing_qr_renders_for_a_scoped_key(tmp_path, monkeypatch):
         assert body.startswith("<svg") and "<svg:" not in body   # DOMPurify-safe
         assert "viewBox" in body
         # The QR must be dark-on-light regardless of the GUI theme or it will not
-        # scan: the modules are pinned to fill="#000000" over a fill="#ffffff"
-        # background rect, never currentColor / a theme variable (a light-grey
-        # module on white in the dark theme would be unscannable).
+        # scan: the modules are pinned to fill #000000 over a fill #ffffff
+        # background rect, never currentColor or a theme variable.
         assert 'fill="#000000"' in body and 'fill="#ffffff"' in body
         # A non-owner (scoped) key cannot render pairing QRs - owner-gated.
         r2 = client.post("/api/pairing/qr",

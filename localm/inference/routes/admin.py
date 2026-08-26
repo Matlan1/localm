@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Server-management routes: shutdown, restart, bug report, issues, and updater.
 
-Extracted verbatim from create_app(); behavior unchanged. The shutdown/restart
-request helpers and the client-context sanitiser live on the http_server module
-and are referenced via ``_hs.``.
+The shutdown/restart request helpers and the client-context sanitiser live on
+the http_server module and are referenced via ``_hs.``.
 """
 
 from __future__ import annotations
@@ -25,50 +24,33 @@ def _watchdog_probe_host(bind_host) -> str:
     loopback it covers; a concrete single-interface bind is used AS-IS, since
     that is the only address it answers on.
 
-    Now delegates to ``bindhost.self_connect_host`` so there is one mapping
-    instead of three. That matters: this function returned ``127.0.0.1`` for
-    ``::`` while ``_hang_alarm._probe_host`` returned ``::1`` for the same bind,
-    and only one of those survives a ``::`` bind whose dual-stack upgrade did not
-    take. ``mount_gui_surface`` (http_server.py, self_url) no longer hardcodes
-    127.0.0.1 either - the note this docstring used to carry about that
-    divergence is resolved rather than merely described."""
+    Delegates to ``bindhost.self_connect_host``, the single mapping shared with
+    ``_hang_alarm._probe_host`` and ``mount_gui_surface``'s self_url, so the
+    three cannot disagree about which loopback a ``::`` bind answers on."""
     from localm.bindhost import self_connect_host
     return self_connect_host(bind_host)
 
 
-# Keep a Changelog's in-progress heading. Matched case-insensitively with flexible
-# spacing because it is prose in a hand-edited file, but anchored to the start of a
-# line and to the "## " level so it can only ever match a section heading.
+# Keep a Changelog's in-progress heading. Case-insensitive with flexible spacing,
+# anchored to the line start and the "## " level so it matches only a section heading.
 _UNRELEASED_HEADING = re.compile(r"^##[ \t]*\[unreleased\]", re.IGNORECASE)
 
-# Keep a Changelog also carries a link-reference definition per section, at the foot of
-# the file: ``[Unreleased]: https://github.com/.../compare/vX...HEAD``. With the section
-# gone that line is a dangling pointer to something the reader is not being served, so
-# it goes too. Anchored to the LINE START and to the ``]:`` definition form, which is
-# what keeps it from matching the same words used in prose - the header sentence
-# explaining the convention, and (measured on the real file) a bullet INSIDE a released
-# section that refers back to a correction made in the unreleased one. Both of those
-# must survive: the second is part of the permanent public record of a shipped release.
+# The matching link-reference definition at the foot of the file. Anchored to the
+# line start and to the ``]:`` definition form, so the same words in prose do not
+# match.
 _UNRELEASED_LINKDEF = re.compile(r"^\[unreleased\]:[ \t]", re.IGNORECASE)
 
-# bugreport.save_user_report() does local disk I/O only (read up to
-# bugreport._LOG_TAIL_READ_BYTES of the current run's log, digest/scrub it,
-# write the report markdown) - generous over even a slow-disk worst case.
-# _BUG_REPORT_SAVE_TIMEOUT_S - the value actually passed to
-# run_in_threadpool_bounded - is 2x that ceiling, not just equal to it:
-# save_user_report() acquires its own _SAVE_REPORT_LOCK INSIDE the call (never
-# around this await, per diff-review-discipline.md item 15), so a request's
-# own clock also covers however long it waits behind another concurrent save.
-# Same reasoning as media_workflows.py's _WORKFLOW_RMW_TIMEOUT_S.
+# Budget for save_user_report(), which does local disk I/O only: read the current
+# run's log tail, digest and scrub it, write the report markdown. The value passed
+# to run_in_threadpool_bounded is 2x that ceiling, because save_user_report()
+# acquires its own _SAVE_REPORT_LOCK inside the call, so this clock also covers
+# waiting behind another concurrent save.
 _BUG_REPORT_OWN_WORK_TIMEOUT_S = 10.0
 _BUG_REPORT_SAVE_TIMEOUT_S = 2 * _BUG_REPORT_OWN_WORK_TIMEOUT_S
 
-# The optional UPLOAD is a separate, slower call and needs its own budget:
-# bugreport.upload_report defaults to a 15s socket timeout, which urllib applies
-# to the connect and to each read independently. 2x that pair, on the same
-# reasoning as the save budget above - generously past the legitimate worst case
-# so it only fires for a call genuinely wedged, never for a slow proxy that is
-# still working.
+# Separate budget for the optional upload. bugreport.upload_report defaults to a 15s
+# socket timeout, which urllib applies to the connect and to each read
+# independently; this is 2x that pair.
 _BUG_REPORT_UPLOAD_TIMEOUT_S = 60.0
 
 
@@ -76,16 +58,12 @@ def _strip_unreleased(markdown: str) -> str:
     """Return *markdown* with the ``[Unreleased]`` section (and its link-reference
     definition) removed, or UNCHANGED when there is no such section.
 
-    Deliberately a LINE SCAN rather than a regex span across the whole document. The
-    file is ~3600 lines and the only realistic way to break this is a pattern that
-    matches past the section's end and silently eats a real release - a changelog
-    missing its newest shipped version is far worse than showing one extra section.
-    A line scan cannot over-match: it removes exactly from the heading up to the next
-    line beginning ``## ``, and touches nothing else.
+    A LINE SCAN, not a regex span across the whole document: it removes exactly
+    from the heading up to the next line beginning ``## `` and touches nothing else,
+    so it cannot over-match past the section's end into a real release.
 
     A section that runs to end-of-file (``[Unreleased]`` last or only, the legitimate
-    shape of a project with no releases yet) is removed to EOF. Serving it instead
-    would be serving precisely the unreleased content this exists to withhold."""
+    shape of a project with no releases yet) is removed to EOF."""
     lines = markdown.splitlines(keepends=True)
     start = next((i for i, ln in enumerate(lines) if _UNRELEASED_HEADING.match(ln)), None)
     if start is None:
@@ -105,25 +83,22 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/server/shutdown",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def server_shutdown_ep():
-        """SRV-4: stop this server cleanly (owner / config-write scope). A direct
-        method to shut down so the user is not left force-closing the window
-        (which segfaults) or relying on a Ctrl+C that sometimes does nothing. The
-        model is unloaded before exit. (A Settings button calls this - Lane E.)"""
+        """Stop this server cleanly (owner / config-write scope). The model is
+        unloaded before exit. A Settings button calls this."""
         _request_shutdown(instance_id=getattr(app.state, "instance_id", None))
         return {"stopping": True}
 
     @app.post("/v1/server/restart",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def server_restart_ep():
-        """R18: restart this server in place (owner / config-write scope). The model
+        """Restart this server in place (owner / config-write scope). The model
         is unloaded first, then the process re-execs the same command line and comes
         back on the same port - a Settings button calls this, and the GUI's reconnect
         overlay auto-reconnects when the fresh process is up.
 
-        "The same port" only holds if we say which one: the re-exec'd process
-        otherwise re-runs pick_port() and can bind elsewhere, leaving the reconnect
-        overlay waiting forever on a port nothing is listening on (the same root
-        cause as REG-605's false rollback, minus the watchdog)."""
+        The port is pinned into the re-exec: without it the new process re-runs
+        pick_port() and can bind elsewhere, leaving the reconnect overlay waiting
+        on a port nothing is listening on."""
         _request_restart(port=getattr(app.state, "instance_port", None),
                          instance_id=getattr(app.state, "instance_id", None))
         return {"restarting": True}
@@ -131,39 +106,32 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/bug-report",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def file_bug_report_ep(body: dict):
-        """R47: file a bug report from the GUI. The CLI has `localm bug-report`, but
-        the GUI had no manual trigger. Saves an editable markdown report (a safe
-        environment snapshot plus the user's note - never keys/config/chat data;
-        with ``include_log`` the home-scrubbed tail of the current run's log) and
-        returns its path so the GUI can point the user at the file to edit/send.
+        """File a bug report from the GUI. Saves an editable markdown report (a
+        safe environment snapshot plus the user's note - never keys/config/chat
+        data; with ``include_log`` the home-scrubbed tail of the current run's
+        log) and returns its path so the GUI can point the user at the file to
+        edit/send.
         Owner / config-write scoped and same-origin gated like the other management
         routes (a report can carry local diagnostics)."""
         from localm import bugreport
         # The GUI "Report a bug" button sends ``description``; ``message`` is
-        # accepted as an alias so the documented payload and CLI-shaped callers
-        # both work. Single canonical endpoint (the GUI router does not duplicate
-        # it - that would shadow this one and drop the user's text + log flag).
+        # accepted as an alias so the documented payload and CLI-shaped callers both
+        # work. This is the single canonical endpoint.
         description = (body.get("description") or body.get("message") or "").strip()
-        # #958: what the user expected vs what actually happened are DISTINCT,
-        # optional fields (the form's two new textareas) - not a duplicate of
-        # description. Both are optional so an old client sending only
-        # ``description`` still works exactly as before.
+        # What the user expected and what actually happened are distinct optional
+        # fields, not duplicates of description. A client sending only ``description``
+        # still works.
         what_i_expected = (body.get("what_i_expected") or "").strip()
         what_happened = (body.get("what_happened") or "").strip()
         if not description and not what_happened:
             raise HTTPException(400, "Please describe the problem before sending.")
         # Optional browser context the GUI attaches (user agent, page, viewport,
-        # recent JS console errors). Untrusted client input: take only known
-        # fields, coerce to strings, and cap sizes so a crafted payload cannot
-        # bloat the report. It is rendered as plain text (markdown code fence),
-        # never executed.
+        # recent JS console errors). Untrusted client input: only known fields are
+        # taken, coerced to strings and size-capped. Rendered as plain text in a
+        # markdown code fence, never executed.
         client = _sanitize_client_context(body.get("client"))
-        # Off the event loop: measured loop_lag=0.67s on this route in the
-        # field - a synchronous log read + scrub + file write on the loop
-        # stalls every concurrent request at exactly the moment the user is
-        # already having a problem, which is why they are filing. Bounded
-        # rather than a bare run_in_threadpool: see _BUG_REPORT_SAVE_TIMEOUT_S
-        # above for why the budget is 2x save_user_report()'s own ceiling.
+        # Off the event loop and bounded: a synchronous log read, scrub and file write
+        # on the loop stalls every concurrent request. See _BUG_REPORT_SAVE_TIMEOUT_S.
         def _save():
             return bugreport.save_user_report(
                 description, what_i_expected=what_i_expected, what_happened=what_happened,
@@ -175,40 +143,30 @@ def register(app: FastAPI, ctx) -> None:
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Saving the bug report timed out: {e}")
         if path is None:
-            # A failed save must not report success (we do not hide problems).
+            # A failed save must not report success.
             raise HTTPException(500, "Could not save the bug report to disk.")
         result = {"saved": True, "filename": path.name, "path": str(path),
                   "maintainer": bugreport.MAINTAINER_EMAIL}
-        # Return the saved report's markdown so the GUI can offer a browser DOWNLOAD
-        # for manual sending (a tester on a phone/LAN cannot open a server-side path).
-        # It is the user's own report; best-effort (a read failure just hides the
-        # download button, the file is still on disk).
+        # Return the saved report's markdown so the GUI can offer a browser download
+        # for manual sending. Best-effort: a read failure just hides the download
+        # button, the file is still on disk.
         try:
             result["report_markdown"] = path.read_text(encoding="utf-8")
         except OSError:
             pass
         # Optional explicit upload: file the saved report as a GitHub issue via the
-        # configured proxy. Always user-initiated (never automatic). A failed upload
-        # is surfaced with a diagnosed stage + message (NOT a false success) so the
-        # GUI can tell the user WHERE it failed and offer retry/download - the file
-        # is still saved either way (we do not hide problems).
+        # configured proxy. Only ever user-initiated. A failed upload is reported with
+        # a diagnosed stage and message, never as success, and the file stays saved.
         if body.get("upload"):
-            # Same title-derivation preference as save_user_report itself
-            # (what happened makes a more useful issue title than what the
-            # user was doing) - kept in sync so the uploaded issue title
-            # matches the report body's own H1.
+            # Same title-derivation preference as save_user_report, so the uploaded
+            # issue title matches the report body's own H1.
             title_source = what_happened or description
             title = (title_source.splitlines()[0] if title_source else "")[:120] \
                 or "user-reported issue"
             report_text = result.get("report_markdown") or path.read_text(encoding="utf-8")
 
-            # OFF THE EVENT LOOP, exactly like the save above and for a strictly
-            # worse case than the one that earned that offload. The save was
-            # moved off for a measured loop_lag of 0.67s; this is a blocking
-            # HTTPS POST to the upload proxy on upload_report's own 15s timeout,
-            # so an unreachable proxy froze every other client for up to 15s -
-            # and the offload comment explaining why that is unacceptable sat
-            # three lines above the call that did it.
+            # Off the event loop: a blocking HTTPS POST to the upload proxy on
+            # upload_report's own 15s socket timeout.
             def _upload():
                 return bugreport.upload_report(title, report_text)
 
@@ -220,7 +178,7 @@ def register(app: FastAPI, ctx) -> None:
                     result["issue_url"] = up["url"]
             except bugreport.RateLimitedError as e:
                 # Rate limited: hand the GUI a structured signal so it can count down
-                # and auto-retry, instead of a dead-end error (the file is still saved).
+                # and auto-retry. The file is still saved.
                 result["uploaded"] = False
                 result["rate_limited"] = True
                 result["retry_after"] = e.retry_after
@@ -233,24 +191,17 @@ def register(app: FastAPI, ctx) -> None:
                 result["upload_message"] = e.hint or e.summary
                 result["upload_error"] = format_localm_error(e)
             except ThreadCallTimeout:
-                # The offload's own budget, not upload_report's. Reported in the
-                # SAME shape as every other upload failure rather than raised:
-                # the report is on disk, the GUI must still offer the download
-                # and the retry, and a 500 here would throw away a saved report
-                # over a send that did not go through. A failed send is never
-                # reported as success (rule 5) - it is reported as failed.
+                # The offload's own budget, not upload_report's. Reported in the same
+                # shape as every other upload failure rather than raised: the report is
+                # on disk and the GUI still offers the download and the retry.
                 result["uploaded"] = False
                 result["upload_stage"] = "upload"
                 result["upload_message"] = (
                     "The upload did not complete in time. The report is saved - "
                     "you can retry, or download it and send it by hand.")
-                # NOT str(e): ThreadCallTimeout's message names the offloaded
-                # callable by __qualname__ ("...<locals>._upload"), which is
-                # internal detail the client has no use for - the GUI only ever
-                # reads this field to decide that the send FAILED, and shows
-                # upload_message instead. The budget and the callable are
-                # already logged at WARNING by run_in_threadpool_bounded, so
-                # nothing is hidden by keeping them out of the response.
+                # Not str(e): ThreadCallTimeout's message names the offloaded callable
+                # by __qualname__, which the client has no use for. The budget and the
+                # callable are already logged at WARNING by run_in_threadpool_bounded.
                 result["upload_error"] = (
                     f"the upload did not finish within {_BUG_REPORT_UPLOAD_TIMEOUT_S:.0f}s")
         return result
@@ -294,15 +245,13 @@ def register(app: FastAPI, ctx) -> None:
         path is resolved via updater.repo_root() so it is correct in dev AND in an
         installed release. Returns {available, version, markdown}, or {available:
         false} when the file is absent from this build - an honest signal, never a
-        faked empty success (we do not hide problems).
+        faked empty success.
 
-        The in-progress ``[Unreleased]`` section is REMOVED before serving. It
-        describes changes that are not in the running build, so showing it tells users
-        about fixes they do not have - and on a security-fix day it describes those
-        fixes in detail before they ship. Stripped HERE rather than in the GUI because
-        this endpoint is the single serving point: a client-side filter would leave the
-        raw section reachable over the API by anyone who asks. Published prereleases
-        (0.1.5rc2 and the like) are NOT stripped - they are on GitHub, so they shipped."""
+        The in-progress ``[Unreleased]`` section is REMOVED before serving: it
+        describes changes that are not in the running build. Stripped at this
+        endpoint, the single serving point, so the raw section is not reachable over
+        the API either. Published prereleases (0.1.5rc2 and the like) are NOT
+        stripped."""
         import localm
         from localm import updater
         try:
@@ -343,14 +292,10 @@ def register(app: FastAPI, ctx) -> None:
         # Restart in place so the swapped (editable) code loads - except a setup-class
         # update, which needs setup.bat re-run by the user.
         if res.get("klass") != "setup":
-            # LM-DA-011: this is the ONLY restart trigger that transitions
-            # automatically with no user watching (the CLI's `localm update` tells
-            # the user to relaunch by hand; the plain /v1/server/restart button is
-            # unrelated to updates) - so it is the one that gets a post-restart
-            # health watchdog. Built from app.state (set by advertise()); a bare
-            # create_app() test harness that never advertised leaves instance_port
-            # unset, so watchdog stays None and the restart proceeds unwatched,
-            # exactly like today.
+            # This is the only restart trigger that transitions automatically with no
+            # user watching, so it carries a post-restart health watchdog. Built from
+            # app.state (set by advertise()); with no instance_port the watchdog stays
+            # None and the restart proceeds unwatched.
             watchdog = None
             port = getattr(app.state, "instance_port", None)
             new_version = res.get("version")
@@ -367,55 +312,21 @@ def register(app: FastAPI, ctx) -> None:
                     "update applied but the instance has no bind port/version to "
                     "probe (never fully advertised); restarting WITHOUT a health "
                     "watchdog")
-            # Pin the port we are actually bound to into the re-exec, so the new
-            # process comes back on the SAME port the watchdog above is about to
-            # probe. Without it the restart re-runs pick_port() and can bind a
-            # different one (this instance may have been auto-bumped off a busy
-            # default that is free again by now), the watchdog polls a port
-            # nothing answers on, and a perfectly healthy update is auto-rolled
-            # back after its 90s timeout (REG-605).
+            # Pin the port we are bound to into the re-exec, so the new process comes
+            # back on the same port the watchdog probes. Without it the restart re-runs
+            # pick_port() and can bind a different one.
             _request_restart(update_watchdog=watchdog, port=port,
                              instance_id=getattr(app.state, "instance_id", None))
             res["restarting"] = True
         return res
 
     # -----------------------------------------------------------------------
-    #  CHK-UPDATE-ROLLBACK: why these two routes exist, why they are OWNER-only,
-    #  and why they carry no signature or anti-rollback check
+    #  Update rollback: restore the previous build (owner-only)
     # -----------------------------------------------------------------------
-    # `localm update --rollback` (cli/maintenance.py) had no GUI form at all, while
-    # the two rollback paths that DO exist cover the opposite situation: the
-    # post-apply health watchdog is a FAILURE handler (the new build did not come
-    # back), and rollback.bat / rollback.sh are for a build too broken to run at
-    # all. Neither covers "it applied cleanly, it runs, and it is worse" - which is
-    # the only case a user can actually judge, and the case in which they are
-    # sitting in the GUI having just pressed Update now, with no terminal.
-    #
-    # WHY NO SIGNATURE CHECK, and this is not an omission: there is nothing to
-    # verify. apply() verifies a downloaded build.zip against a pinned release key
-    # BEFORE extracting it (updater.verify_signature). A rollback restores a
-    # DIRECTORY that this install produced from its own files at the previous
-    # apply. It is not a signed artifact, it never crossed the network, and signing
-    # it locally would prove nothing against an attacker who can already write it.
-    # The integrity question for a local backup is filesystem access, not a
-    # signature - and anyone who can rewrite <home>/updates/backup can rewrite the
-    # install directly, without going through this route.
-    #
-    # WHY NO ANTI-ROLLBACK CHECK: updater._refuse_downgrade exists so a validly
-    # SIGNED but OLDER build cannot be replayed at an install by a compromised
-    # release channel. Applying it here would refuse every rollback, because a
-    # rollback IS a downgrade by definition. The freshness property it protects is
-    # not the property this operation has.
-    #
-    # WHAT THE REAL CONTROL IS: the residual risk is a principal reverting a
-    # security fix by restoring the previous build. config:write is privileged
-    # (scopes.PRIVILEGED_SCOPES) but it is NOT the owner, and it is what the rest of
-    # the Updates card is gated on - so gating a downgrade on it alone would hand a
-    # delegated key a capability it has nowhere else. These routes therefore use the
-    # same owner gate as the admin_only settings in routes/config.py: open mode
-    # (caller_scopes None) is the trusted local owner and passes; any key must hold
-    # scopes.ADMIN. That leaves the CLI and the GUI genuinely equivalent - both
-    # require the owner - rather than the GUI being the weaker door.
+    # Both routes are gated on the same owner check as the admin_only settings in
+    # routes/config.py: open mode (caller_scopes None) is the trusted local owner
+    # and passes; a key must hold scopes.ADMIN. Neither route runs a signature or
+    # an anti-rollback check.
 
     @app.get("/api/update/rollback",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
@@ -431,24 +342,21 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_rollback_ep(request: Request):
         """Restore the previous build from the last update backup, then restart in
-        place so it actually loads. OWNER-only (see CHK-UPDATE-ROLLBACK above).
+        place so it actually loads. OWNER-only.
 
-        THE RESTART IS NOT A CONVENIENCE, it is what makes this correct on a server.
-        rollback_last() replaces the running install's own source ON DISK, including
-        the localm package. `localm update --rollback` gets away with printing
-        "restart to load it" because that process exits moments later; a server does
-        not, and localm imports lazily throughout, so every subsequent lazy import in
-        this process would load OLD code into a NEW-code process. Re-exec ends that
-        window instead of leaving the user in it.
+        The restart is required, not a convenience: rollback_last() replaces the
+        running install's own source ON DISK, including the localm package, and
+        localm imports lazily throughout, so every subsequent lazy import in this
+        process would load OLD code into a NEW-code process. Re-exec ends that
+        window.
 
         No update watchdog on this restart, unlike /api/update/apply's: that
         watchdog's failure action IS a rollback, so arming it here would answer a
         failed rollback with another one.
 
-        HONEST LIMIT: this restores the previous build's FILES, which is exactly what
-        the CLI does. It does not undo a deps-class update's package installs, and
-        the class of the last apply is not recorded anywhere, so this cannot warn
-        about that specific case rather than guess at it."""
+        LIMIT: this restores the previous build's FILES, the same as the CLI. It
+        does not undo a deps-class update's package installs, and the class of the
+        last apply is not recorded anywhere, so it cannot warn about that case."""
         from localm import updater
         from localm.bugreport import LocalmError
         held = _hs.caller_scopes(request)
@@ -457,29 +365,21 @@ def register(app: FastAPI, ctx) -> None:
                 403, "Rolling the install back to the previous build requires an "
                 "owner (admin) key: it replaces the running code with an earlier "
                 "version, which can put back a fixed defect.")
-        # Read the target version BEFORE restoring, so the reply can name what it
-        # put back. rollback_info() is a genuine read-only probe (it never calls
-        # rollback_last), so this is not the "a call made just to check is still a
-        # call" hazard - the whole reason that probe exists as its own function.
+        # Read the target version before restoring, so the reply can name what it put
+        # back. rollback_info() is read-only and never calls rollback_last.
         target_version = (await asyncio.to_thread(updater.rollback_info)).get("version")
         try:
             res = await asyncio.to_thread(updater.rollback_last)
         except LocalmError as e:
-            # A precondition, so NOTHING was touched: either there is no backup, or
-            # an update/rollback already holds the single-flight lock. Both are a
-            # genuine 409 conflict, and both are kept distinct from the partial-
-            # restore case below, which looks similar to a caller and is the
-            # opposite situation (the install HAS been modified).
+        # A precondition failure, so nothing was touched: either there is no backup,
+        # or an update/rollback already holds the single-flight lock. Kept distinct
+        # from the partial-restore case below, where the install HAS been modified.
             raise HTTPException(409, format_localm_error(e))
         except Exception as e:
-            # _apply_update.rollback reports a PARTIAL restore by raising, listing
-            # which restores failed, and deliberately keeps the backup for manual
-            # recovery. The install may now be half-restored: that is the one
-            # outcome that must never read as a success or as the benign "nothing to
-            # roll back" above, so it is surfaced verbatim AND logged (a 500 body can
-            # be lost; the log is what a bug report carries). Broad on purpose - the
-            # exception class does not change the user's situation, and swallowing
-            # anything here would hide a half-applied install.
+        # _apply_update.rollback reports a PARTIAL restore by raising, listing which
+        # restores failed, and keeps the backup for manual recovery. The install may
+        # now be half-restored, so the error is surfaced verbatim and logged. Broad
+        # catch: any exception here leaves the same half-applied install.
             from localm.debuglog import logger
             logger.error("update rollback failed partway; the install may be "
                          "half-restored and the backup is kept: %s", e)

@@ -44,27 +44,11 @@ class LocalEngineBackend(BaseLLMBackend):
         self._loaded = False
         # supports_grammar (BaseLLMBackend) gates whether callers (context.py's
         # tool-call forcing and JSON-summary compaction) trust this backend to
-        # actually enforce a GBNF grammar it is handed, rather than silently
-        # generating unconstrained.
-        #
-        # Deferred to the Engine's own capability property (engine.py's
-        # supports_grammar -> backend.supports_grammar) instead of hardcoding
-        # "only GgufBackend" - that used to be correct because HFBackend's
-        # grammar support was a DELIBERATE, ROUTINE soft-degrade (the worker
-        # silently dropped the grammar and warned whenever the optional
-        # `[grammar]` extra was missing or failed to compile), so a caller
-        # handed grammar=... had no reliable signal it was actually applied.
-        # #1215 changed that: HFBackend.supports_grammar (hf.py) is now True
-        # only when xgrammar is actually importable, and the worker drops
-        # only a LAZY grammar - a FORCED one (the non-lazy form this flag
-        # gates for rung 2 of the no-tool-call escalation ladder) still goes
-        # through the grammar processor and is honoured. Reading the
-        # underlying backend's own honest answer means an HF-backed reviewer
-        # model with the extra installed gets forcing too, instead of being
-        # permanently denied it by a class check that predates that fix.
-        # GgufBackend still reports True unconditionally (llama.cpp applies a
-        # GBNF grammar natively, no optional dependency involved), so this
-        # changes nothing for the common case.
+        # enforce a GBNF grammar it is handed rather than generating
+        # unconstrained. Deferred to the Engine's own capability property
+        # (engine.py's supports_grammar -> backend.supports_grammar), so an
+        # HF-backed reviewer model with xgrammar installed reports True and a
+        # GgufBackend reports True unconditionally.
         self.supports_grammar = self._engine.supports_grammar
 
     def _ensure_loaded(self) -> None:

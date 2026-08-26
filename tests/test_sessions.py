@@ -110,8 +110,8 @@ def test_sweep_prunes_only_expired(_home, monkeypatch):
 
 def test_corrupt_store_fails_closed(_home, monkeypatch):
     sid = sessions.create(scopes={"admin"}, key_hash="KH")
-    # Corrupt the file after a successful create; a valid session must now be
-    # REFUSED (fail closed), never silently accepted or the file treated as empty.
+    # Corrupt the file after a successful create; a valid session is then
+    # REFUSED (fail closed), not accepted and not treated as an empty store.
     sessions.sessions_file().write_text("{ this is not json", encoding="utf-8")
     monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
     assert sessions.lookup(sid) is None

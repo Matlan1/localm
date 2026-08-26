@@ -260,15 +260,13 @@ class TestEditFileWhitespaceTolerant:
         assert "return 2" in f.read_text()
 
     def test_ambiguous_tolerant_match_refuses_to_guess(self, tmp_path):
-        # Two regions match `old` once whitespace is relaxed, and neither is an
-        # exact match. A tolerant match would hit both, so the tool must REFUSE
-        # rather than pick one (whitespace tolerance must never decide WHICH of
-        # two candidate regions gets edited).
+        # Two regions match `old` once whitespace is relaxed and neither is an
+        # exact match, so the tool refuses rather than picking one.
         original = "a = foo( x )\nb = foo(  x  )\n"   # 1-space and 2-space forms
         f = tmp_path / "code.py"
         f.write_text(original)
-        # Precondition: `old` (3 spaces) matches NEITHER region exactly, so this
-        # genuinely exercises the tolerant path, not the exact fast path.
+        # Precondition: `old` (3 spaces) matches NEITHER region exactly, so the
+        # tolerant path runs rather than the exact fast path.
         assert "foo(   x   )" not in original
         r = tool_edit_file(tmp_path, "code.py", old="foo(   x   )", new="foo(y)")
         assert not r.ok
@@ -277,9 +275,8 @@ class TestEditFileWhitespaceTolerant:
         assert f.read_text() == original
 
     def test_exact_match_wins_over_whitespace_variant(self, tmp_path):
-        # An exact occurrence exists AND a whitespace-variant occurrence exists.
-        # The exact one must be the one edited (exact match takes precedence and
-        # is never overridden by the tolerant path).
+        # An exact occurrence and a whitespace-variant occurrence both exist.
+        # The exact one is the one edited.
         f = tmp_path / "code.py"
         f.write_text("gap =  1\ngap = 1\n")   # line 1 has two spaces, line 2 one
         r = tool_edit_file(tmp_path, "code.py", old="gap = 1", new="gap = 42")

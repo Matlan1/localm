@@ -16,14 +16,15 @@ from ._core import console, main, _complete_model_name
 
 def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException],
                           autostart_attempted: bool = False) -> Optional[str]:
-    """CLI-1: the note to print when `localm run` is about to load the model in
-    THIS process instead of attaching to a background server, so the fallback is
-    never silent. None when the user opted out with --no-server (stay quiet).
+    """The note to print when `localm run` is about to load the model in THIS
+    process instead of attaching to a background server, so the fallback is never
+    silent. None when the user opted out with --no-server (stay quiet).
 
-    CLI-3: when an auto-start WAS launched but did not come up in time,
+    When an auto-start WAS launched but did not come up in time,
     ``autostart_attempted`` is True so the note acknowledges that timeout instead
-    of telling the user "no server is serving this directory; start one" - which
-    contradicts the `Starting one in the background...` line they just saw."""
+    of telling the user "no server is serving this directory; start one", which
+    would contradict the `Starting one in the background...` line they just
+    saw."""
     if no_server:
         return None
     if attach_error is not None:
@@ -41,16 +42,14 @@ def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]
 
 def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
                               is_registered: bool, engine) -> None:
-    """VIS-2: an explicit --mmproj that just PROVED it works (the backend
-    confirmed supports_images for this load, not merely a well-formed path)
-    gets recorded onto the registry entry, so a future `localm run model` -
-    including the one vision_input_guidance itself suggests - keeps seeing
-    it, instead of losing it the moment the flag is left off. Gated on
-    is_registered because there is no entry to write to for a bare direct-path
-    run, and on the CONFIRMED load (not just the flag being present) so a
-    projector that failed to load can never get recorded as working - see
-    persist_cli_mmproj's own docstring for why that would be a NEW
-    false-positive surface."""
+    """Record an explicit --mmproj onto the registry entry once the backend has
+    CONFIRMED supports_images for this load, so a later `localm run model` -
+    including the one vision_input_guidance itself suggests - keeps seeing it
+    instead of losing it the moment the flag is left off.
+
+    Gated on is_registered, since a bare direct-path run has no entry to write
+    to, and on the CONFIRMED load rather than the flag merely being present, so a
+    projector that failed to load can never be recorded as working."""
     if not (mmproj and is_registered):
         return
     backend = getattr(engine, "_backend", None)
@@ -143,7 +142,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         console.print(f"[dim]session mode: {session_mode.value} "
                       f"(audit trail in <data dir>/sessions/)[/dim]")
 
-    # H3 thin-client: ATTACH to the localm server already serving this directory
+    # Thin client: ATTACH to the localm server already serving this directory
     # (route chat through its /v1 over HTTP) instead of loading a SECOND in-process
     # copy of the model, mirroring `localm gui`. Default is to attach when a verified
     # server exists; --no-server forces an in-process load.
@@ -157,8 +156,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             target = instances.attach_target(
                 home_dir(), instances.resolve_root_dir())
         except Exception as e:
-            # CLI-1: do not swallow the reason - log it (debug) and remember it so
-            # the in-process fallback below can say WHY it did not attach.
+            # Log the failure at debug level and remember it, so the in-process
+            # fallback below can say WHY it did not attach.
             from localm.debuglog import logger as _dbg
             _dbg.exception("attach_target failed; falling back to in-process load")
             attach_error = e
@@ -166,24 +165,22 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         if target:
             from ..auth import resolve_bearer_token
             from ..inference.http_engine import HttpEngine, remote_model_status
-            # AUTH-ATTACH: the discovered instance's own per-instance token is
-            # only meaningful in OPEN mode (it satisfies the origin guard, not
+            # The discovered instance's own per-instance token is only
+            # meaningful in OPEN mode (it satisfies the origin guard, not
             # _enforce_request's key check). Once an owner key is configured,
             # _principal_from_token has no notion of instance tokens at all and
             # 401s every request that presents one - the CLI and the server
             # share the same data dir, so the owner key on disk is exactly the
-            # credential this process is entitled to use (checkup 2026-08-11
-            # item 12; same precedence already fixed for cli/models.py's
-            # unload_cmd/stop_cmd and media/comfy_client.py's _localm_unload).
+            # credential this process is entitled to use.
             attach_token = resolve_bearer_token(target.get("token"))
             state, active = remote_model_status(
                 target["base_url"], attach_token)
-            # CORRECTNESS: never let `localm run X` answer with a DIFFERENT model.
-            # When the running server serves a KNOWN model that is not the one the
-            # user asked for, attaching would stream a reply generated by that other
-            # model - indistinguishable from X answering. Refuse instead of silently
-            # overriding the user's explicit choice (hard-won rule: detect the
-            # mismatch, INFORM, and let the user decide). --no-server is the way out.
+            # Never let `localm run X` answer with a DIFFERENT model. When the
+            # running server serves a KNOWN model that is not the one the user
+            # asked for, attaching would stream a reply generated by that other
+            # model - indistinguishable from X answering. Refuse instead of
+            # silently overriding the user's explicit choice; --no-server is the
+            # way out.
             if active and active != model:
                 console.print(
                     f"[red]The localm server here serves "
@@ -214,8 +211,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 target["base_url"], token=attach_token,
                 model=active or model, display_name=active or model)
             # show_url(): target["base_url"] can carry a bracketed IPv6 host
-            # (RFC 3986), the exact case show_url()'s own docstring documents -
-            # not just an arbitrary string that happens to reach this print.
+            # (RFC 3986), which show_url()'s own docstring documents.
             console.print(
                 f"[dim]connected to the localm server at "
                 f"{show_url(target['base_url'])} (no second model load)[/dim]")
@@ -298,11 +294,11 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         else:
             display_name = _display_hint  # None or Ollama suggested name
 
-        # VIS-1: an explicit --mmproj always wins; otherwise fall back to the
-        # model's own recorded/sibling projector, or a pulled vision GGUF run
-        # straight from the CLI (no --mmproj flag given) silently loses image
-        # support (#957). allow_direct_path=True matches the get_model_info
-        # call above: *model* is operator-typed on this command line.
+        # An explicit --mmproj always wins; otherwise fall back to the model's
+        # own recorded/sibling projector, or a pulled vision GGUF run straight
+        # from the CLI (no --mmproj flag given) silently loses image support.
+        # allow_direct_path=True matches the get_model_info call above: *model*
+        # is operator-typed on this command line.
         mmproj_path = mmproj or get_model_mmproj(model, allow_direct_path=True)
 
         engine = Engine(
@@ -341,10 +337,10 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 messages.append(_build_user_message(prompt, list(images)))
                 audit.user(prompt)
                 response = _stream_once(engine, messages, **gen_opts)
-                # AUD-HIGH-17-2: the JSONL audit log is an INTERNAL consumer (see
-                # textnorm.strip_think's docstring), so it must get the visible
+                # The JSONL audit log is an INTERNAL consumer (see
+                # textnorm.strip_think's docstring), so it gets the visible
                 # answer only, not the raw <think> scratchpad - matching what
-                # transcript.exchange already does via its own split_think() call.
+                # transcript.exchange does via its own split_think() call.
                 from ..textnorm import strip_think
                 audit.llm(strip_think(response))
                 if transcript:
@@ -390,19 +386,15 @@ def _file_to_data_uri(path: str) -> str:
 
 class _ThinkPrinter:
     """Stream a reply to stdout, dimming the model's ``<think>`` reasoning so it
-    reads as an aside rather than raw ``<think>`` tags inline with the answer
-    (H4). The full raw text (tags included) is still returned by the caller for
-    the audit/transcript, which separate it themselves.
+    reads as an aside rather than raw ``<think>`` tags inline with the answer.
+    The full raw text (tags included) is still returned by the caller for the
+    audit/transcript, which separate it themselves.
 
-    R31 (CLI half): streaming here is APPEND-ONLY plain ``print`` plus SGR styling
-    (dim/colour) - no alternate screen, no cursor repositioning, no spinner/Live
-    region. So the terminal emulator owns scrolling: a user who scrolls up to
-    re-read mid-stream is left alone (output keeps appending below), which is the
-    CLI's native equivalent of the GUI's ``chat.stick`` autoscroll latch. The GUI
-    needed that latch only because its JS re-pinned the viewport to the bottom on
-    every token; we deliberately never do the terminal analogue of that here.
-    Guarded by tests/test_cli_stream_scroll.py - do not wrap streaming in a Live
-    region / alt-screen / ``\\r``-redraw, which would fight the user's scroll."""
+    Streaming here is APPEND-ONLY plain ``print`` plus SGR styling (dim/colour):
+    no alternate screen, no cursor repositioning, no spinner/Live region and no
+    ``\\r`` redraw. The terminal emulator therefore owns scrolling, so a user who
+    scrolls up to re-read mid-stream keeps their position while output continues
+    to append below."""
 
     def __init__(self) -> None:
         import sys as _sys
@@ -427,18 +419,15 @@ class _ThinkPrinter:
 
 
 # A floor on plausible per-token decode time (mirrors http_server.py's
-# _MIN_SEC_PER_TOKEN - kept local rather than imported, since this module must
-# not pull in the HTTP server's FastAPI/uvicorn import surface just for a single
-# constant). Verified live on real hardware (RX 6900 XT, qwen2.5-0.5b-instruct-
-# q4_k_m) that this is necessary: under concurrent GPU load from unrelated
-# processes, a real request measured a decode window collapsing toward zero,
-# reporting tens of thousands of tok/s. first_at is a SINGLE sample - if the GPU
-# scheduler delays the first token (contended) then delivers the rest in an
-# uncontended burst, the measured window shrinks toward zero even though every
-# timestamp is real. 1ms/token (1000 tok/s ceiling) is deliberately generous for
-# single-stream autoregressive decode (memory-bandwidth-bound: at least one full
-# weight read per token). Below it, omitting the rate is more honest than
-# printing one that cannot physically be true.
+# _MIN_SEC_PER_TOKEN - kept local rather than imported, so this module does not
+# pull in the HTTP server's FastAPI/uvicorn import surface for a single
+# constant). first_at is a SINGLE sample: if the GPU scheduler delays the first
+# token under contention and then delivers the rest in an uncontended burst, the
+# decode window shrinks toward zero and the rate runs to tens of thousands of
+# tok/s even though every timestamp is real. 1ms/token (a 1000 tok/s ceiling) is
+# generous for single-stream autoregressive decode, which is memory-bandwidth-
+# bound at a full weight read per token. Below it, the rate is omitted rather
+# than printed.
 _MIN_SEC_PER_TOKEN = 0.001
 
 
@@ -447,14 +436,13 @@ def _perf_line(n_tokens: int, t0: float, first_at: Optional[float],
     """One-line perf readout for the REPL, or None when there is nothing worth
     showing. tok/s is computed over the DECODE window only (first token -> end);
     the model-load + prompt-prefill time (the wait before the first token) is shown
-    separately as `load` rather than folded into the rate.
+    separately as `load` rather than folded into the rate, which would make the
+    first call after a load read around 100x too slow.
 
-    Folding load in made the first call after a load read ~100x too slow (e.g. a
-    cold 0.6 tok/s on a GPU that runs 64 tok/s warm), which tripped the
-    CPU-fallback heuristic in RELEASE.md. This mirrors the server's _tokens_per_sec
-    and the `localm bench` convention: "tok/s measures pure generation after the
-    first token". tok/s is omitted for a single token (no decode interval to time)
-    or an implausibly short decode window (see _MIN_SEC_PER_TOKEN)."""
+    Matches the server's _tokens_per_sec and the `localm bench` convention: tok/s
+    measures pure generation after the first token. tok/s is omitted for a single
+    token (no decode interval to time) or an implausibly short decode window (see
+    _MIN_SEC_PER_TOKEN)."""
     total = end - t0
     if first_at is None or total <= 0.5:
         return None
@@ -463,8 +451,7 @@ def _perf_line(n_tokens: int, t0: float, first_at: Optional[float],
     plausible = n_tokens >= 2 and gen >= n_tokens * _MIN_SEC_PER_TOKEN
     rate = f"{n_tokens / gen:.1f} tok/s  " if plausible else ""
     # Show the load/gen split only when the load is a meaningful slice (a cold
-    # start); a warm call's sub-100ms prefill would just be noise, so keep the
-    # familiar single-time form there.
+    # start); a warm call's sub-100ms prefill keeps the single-time form.
     if load >= 0.1:
         return f"{n_tokens} tokens  {rate}(load {load:.1f}s, gen {gen:.1f}s)"
     return f"{n_tokens} tokens  {rate}({gen:.1f}s)"
@@ -492,12 +479,11 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         printer.flush()
     except ImageDecodeUnavailable as e:
         # BEFORE the UnsupportedInputError arm below, which DISCARDS the message
-        # and prints vision-capability guidance in its place. That guidance is
-        # right for its own case and actively wrong for this one: the model is
-        # vision-capable and the picture is fine, the environment simply has no
-        # image decoder, so "pick or download a vision model" sends the user
-        # after a problem they do not have. This arm keeps the real message,
-        # which names the missing library and the fix.
+        # and prints vision-capability guidance in its place. On this path the
+        # model is vision-capable and the picture is fine, the environment simply
+        # has no image decoder, so "pick or download a vision model" would send
+        # the user after a problem they do not have. This arm keeps the real
+        # message, which names the missing library and the fix.
         console.print(f"\n[red]{escape(str(e))}[/red]")
         return ""
     except UnsupportedInputError:
@@ -583,10 +569,9 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         # visible hard trim when summarisation is unavailable.
         from ..inference.compact import maybe_compact
         # Budget against the LOADED model's RESOLVED ceiling (VRAM-derived under
-        # ctx_auto), not the static config n_ctx_max: the config value both
-        # over-compacted a small-window model and under-protected a large one
-        # (memory-audit 2026-07-02 F10). Fall back to the config only when the
-        # engine cannot report a capacity (not loaded).
+        # ctx_auto), not the static config n_ctx_max, which both over-compacts a
+        # small-window model and under-protects a large one. Fall back to the
+        # config only when the engine cannot report a capacity (not loaded).
         limit = engine.context_capacity() or load_config().get("n_ctx_max", 16384) or 0
         compacted_msgs, did_compact = maybe_compact(
             messages,
@@ -628,11 +613,11 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             if line:
                 console.print(f"[dim]{line}[/dim]")
         if response:
-            # AUD-HIGH-17-2: resend and log only the visible answer, never the raw
-            # <think> scratchpad (textnorm.strip_think's docstring: "the one
-            # helper every INTERNAL consumer of model output must run before
-            # storing"). transcript.exchange is exempt - it splits `response`
-            # itself and keeps the reasoning in a collapsed block.
+            # Resend and log only the visible answer, never the raw <think>
+            # scratchpad (textnorm.strip_think's docstring: "the one helper every
+            # INTERNAL consumer of model output must run before storing").
+            # transcript.exchange is exempt - it splits `response` itself and
+            # keeps the reasoning in a collapsed block.
             from ..textnorm import strip_think
             visible = strip_think(response)
             messages.append({"role": "assistant", "content": visible})
@@ -668,10 +653,9 @@ def _media_generate_video():
 
 
 # The gallery directory names come from localm.media.paths, which is also what
-# the image/music/video plugins and the input_image confinement policy use. They
-# were duplicated as literals here, so "the galleries" meant two independent
-# lists that a rename would silently split - and one of those lists decides which
-# directories an img2img input may be read from.
+# the image/music/video plugins and the input_image confinement policy use. One
+# list, not a duplicated set of literals here: it decides which directories an
+# img2img input may be read from.
 from ..media import paths as _media_paths  # noqa: E402
 
 
@@ -707,10 +691,10 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
         return
     from ..image_gen.comfy import default_api_url, ensure_comfy, free_comfy_vram
     api = default_api_url()
-    # Auto-launch ComfyUI from the configured comfy_launch_cmd/comfy_workdir (the
-    # GUI does this; the CLI used to just bail - H1). Only unload the chat model
-    # once ComfyUI is actually available. escape(t): progress text embeds the
-    # user's own comfy_launch_cmd/comfy_workdir config values verbatim.
+    # Auto-launch ComfyUI from the configured comfy_launch_cmd/comfy_workdir.
+    # Only unload the chat model once ComfyUI is actually available. escape(t):
+    # progress text embeds the user's own comfy_launch_cmd/comfy_workdir config
+    # values verbatim.
     ok, msg = ensure_comfy(
         api, on_progress=lambda t: console.print(f"[dim]{escape(t)}[/dim]"))
     if not ok:
@@ -910,9 +894,8 @@ def _handle_command(
             hint = catalog.suggestion(cmd)
         if hint:
             # escape(): hint is only ever non-None for a command the catalog
-            # itself recognises (a fixed, hardcoded set), so this is currently
-            # provably safe - escaped anyway as defense-in-depth, the same
-            # reasoning #1463 applied to rag.py's collection names.
+            # itself recognises (a fixed, hardcoded set), so no bracket can reach
+            # here. Escaped anyway as defense-in-depth.
             console.print(f"[yellow]{escape(hint)}[/yellow]")
         else:
             console.print(f"[dim]Unknown: /{escape(cmd)} -- try /help[/dim]")

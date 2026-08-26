@@ -109,10 +109,8 @@ def test_reviewer_fails_open_on_backend_error():
     res = rv.review("diff")
     assert res.approved is True and res.ok is False
     assert rv.review_feedback("diff") == ""       # never blocks
-    # ...but a crash is NOT an approval. The empty feedback above is the whole
-    # reason ok=False needs its own visible channel: it reads exactly like the
-    # approved case (see test_reviewer_no_feedback_when_approved), which is how a
-    # verification step that FAILED came to report as success.
+    # ...but a crash is NOT an approval: empty feedback reads exactly like the
+    # approved case, so ok=False is the only signal.
     warning = rv.failure_warning(res)
     assert warning, "a failed review must produce a visible warning, not silence"
     assert "backend down" in warning        # says WHY, not just that something broke
@@ -227,17 +225,15 @@ def _agent_that_changed_something(tmp_path: Path, **kwargs):
     """An agent whose session state says it HAS edited a file, for the review
     tests that mock session_diff to a non-empty diff.
 
-    A diff with no recorded write is not a state the agent can actually reach -
-    the diff comes FROM the writes - and leaving the fixture in it made these
-    tests describe an impossible session. That went unnoticed while nothing
-    read the write ledger at this point in the loop; the zero-tool-call
-    escalation (NEW-CODER-NO-TOOLCALL-SILENT) does read it, to tell a model
-    that is working from one that never touched a tool, and correctly judged
-    the impossible fixture to be the latter.
+    A diff with no recorded write is not a state the agent can reach - the diff
+    comes FROM the writes - so a fixture without one describes an impossible
+    session. The zero-tool-call escalation reads the write ledger to tell a model
+    that is working from one that never touched a tool, and judges such a fixture
+    to be the latter.
 
     self_verify is off because these tests are about the REVIEW gate: with
-    unverified writes present the self-verification nudge would otherwise fire
-    first and add a turn none of their response scripts allow for."""
+    unverified writes present the self-verification nudge would fire first and
+    add a turn none of their response scripts allow for."""
     kwargs.setdefault("self_verify", False)
     agent = _make_agent(tmp_path, **kwargs)
     agent._unverified_writes = {"a.py"}
@@ -246,9 +242,8 @@ def _agent_that_changed_something(tmp_path: Path, **kwargs):
 
 def test_review_gate_feeds_blocking_issues_back(tmp_path):
     agent = _agent_that_changed_something(tmp_path)
-    # Reviewer flags an issue the first time, approves the second. A REAL Reviewer
-    # over a scripted backend, so the gate exercises review()/failure_warning()/
-    # feedback_for() exactly as production does.
+    # Reviewer flags an issue the first time, approves the second. A real
+    # Reviewer over a scripted backend.
     agent._reviewer = Reviewer(_backend_returning(""))
     agent._reviewer.backend.chat.side_effect = [
         '{"approved": false, "blocking": ["fix the leak"]}',
@@ -286,7 +281,7 @@ def test_review_gate_absent_when_no_reviewer(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  A crashed review must not read as a clean approval (AGENTS.md rule 5)       #
+#  A crashed review must not read as a clean approval                          #
 # --------------------------------------------------------------------------- #
 
 def _run_with_crashing_reviewer(tmp_path):

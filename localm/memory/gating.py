@@ -8,7 +8,7 @@ must be gated on the effective session mode, exactly like chat history and coder
 episodes. ``writes_allowed(surface)`` is the single decision point callers use
 before writing; reads/recall of memories from earlier non-privacy sessions stay
 allowed ("no new traces", not amnesia). A blocked write must surface a skip, never
-report success (AGENTS.md RULE 5).
+report success.
 
 Kept in its own leaf module so ``store.py`` stays free of the audit import and is
 trivially unit-testable, and so callers (the chat inlet/routes, the coder) share

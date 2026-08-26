@@ -1,23 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SEC-8 regression: the native-binary download had no integrity check.
+"""The native-binary download needs an integrity check.
 
-``localm setup-llama`` downloaded a prebuilt release zip and extracted +
-pip-installed it verbatim. A truncated transfer, a MITM'd payload, or an HTML
-error page served with a 200 would all be unpacked and installed, with the only
-guard being a post-hoc BadZipFile catch on extraction (too late, and no defense
-against a zip that is the wrong artifact).
+``localm setup-llama`` downloads a prebuilt release zip and extracts +
+pip-installs it. Without validation, a truncated transfer, a MITM'd payload, or
+an HTML error page served with a 200 all get unpacked and installed, with the
+only guard a post-hoc BadZipFile catch on extraction - too late, and no defence
+against a zip that is the wrong artifact.
 
-The fix adds artifact validation BEFORE extraction/install:
+Artifact validation runs BEFORE extraction/install:
 
   1. size: reject a trivially small / empty download (likely an error page),
   2. shape: reject anything that is not a valid zip (zipfile.is_zipfile),
   3. provenance (opt-in): when an expected sha256 is provided, verify it and
      refuse on mismatch.
 
-The size + valid-zip checks are always on; the sha256 is opt-in (we do not
-hardcode a brittle hash for the live URL). These tests pin each adversarial case
-(non-zip body, too-small file, sha256 mismatch) is rejected with no extraction
-or install, and that a valid zip with a matching (or absent) hash proceeds.
+The size + valid-zip checks are always on; the sha256 is opt-in, since no
+brittle hash is hardcoded for the live URL. These tests pin that each
+adversarial case (non-zip body, too-small file, sha256 mismatch) is rejected
+with no extraction or install, and that a valid zip with a matching (or absent)
+hash proceeds.
 """
 
 from __future__ import annotations
@@ -152,10 +153,9 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_llama, "_runtime_pkg_dir", lambda: tmp_path / "pkg")
     monkeypatch.setattr(setup_llama, "_verify", lambda: None)
     monkeypatch.setattr(setup_llama, "_ensure_importable", lambda: None)
-    # Provisioning now load-tests the native library in a subprocess; against a
-    # stub llama.dll that would always fail (and trigger a fallback re-download),
-    # so we treat the load as successful here. The fallback path itself is
-    # covered explicitly in test_cuda_setup.py.
+    # Provisioning load-tests the native library in a subprocess; against a stub
+    # llama.dll that would always fail (and trigger a fallback re-download), so
+    # the load is treated as successful here.
     monkeypatch.setattr(setup_llama, "_native_loads_ok", lambda: (True, ""))
     monkeypatch.setattr(setup_llama, "_resolve_backend_asset", lambda backend, cuda_line=None, tag=None: ("https://dummy.url", None, "bTEST"))
     # Pretend we are on Windows so the default-URL download path is taken even
@@ -285,9 +285,9 @@ def test_url_load_failure_exits_nonzero(wired, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# R23: the "already provisioned" guard is backend-AWARE. A library being present #
-# is not enough: an EXPLICIT backend that differs from what is recorded on disk  #
-# must re-provision (so `--backend cuda` on a vulkan/cpu box actually gets cuda). #
+# The "already provisioned" guard is backend-AWARE. A library being present      #
+# is not enough: an EXPLICIT backend that differs from what is recorded on       #
+# disk must re-provision, so `--backend cuda` on a vulkan/cpu box gets cuda.     #
 # --------------------------------------------------------------------------- #
 
 
@@ -309,8 +309,8 @@ def test_guard_short_circuits_when_present(wired, args):
 
 
 def test_guard_different_explicit_backend_reprovisions(wired, monkeypatch):
-    """The R23 bug: a cuda pick on a box that already has a vulkan build must
-    actually FETCH cuda, not short-circuit on the present library."""
+    """A cuda pick on a box that already has a vulkan build must actually FETCH
+    cuda, not short-circuit on the present library."""
     target, trace = wired
     (target / "llama.dll").write_bytes(b"present")
     setup_llama._record_provisioned_backend(target, "vulkan")
@@ -324,10 +324,8 @@ def test_guard_different_explicit_backend_reprovisions(wired, monkeypatch):
     result = _run(["--backend", "cuda"])
     assert result.exit_code == 0, result.output
     # Collapse whitespace: rich word-wraps the console at ~80 cols, so the phrase
-    # may straddle a newline. The reprovision message was shortened to
-    # "replacing <old> build with <new>" (was "X already provisioned, but you
-    # asked for cuda - provisioning cuda now"); the BEHAVIOUR (cuda fetched +
-    # recorded) below is the real R23 guarantee.
+    # may straddle a newline. The BEHAVIOUR asserted below (cuda fetched +
+    # recorded) is the real guarantee.
     flat = " ".join(result.output.lower().split())
     assert "replacing vulkan build with cuda" in flat
     assert trace.extracted                                   # cuda WAS fetched

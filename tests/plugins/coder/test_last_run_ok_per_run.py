@@ -1,25 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``last_run_ok`` is PER-RUN; the session-wide failure lesson survives it.
 
-THE BUG. ``Agent._last_run_ok`` started True and was only ever set False - by
-max_turns, either circuit breaker, or a stop. ``_loop`` re-armed
-``_stop_requested`` and ``_user_stopped`` at the start of every run but not this
-flag, so it was one-way for the life of the session. In a multi-turn session
-(the REPL, or the GUI, which reports it per turn as the final event's ``"ok"``)
-one failed turn labelled every LATER turn a failure too, however clean it was.
-The user watched healthy turns come back marked failed.
+``Agent._last_run_ok`` is re-armed by ``_loop`` at the start of every run,
+alongside ``_stop_requested`` and ``_user_stopped``, so it means "the last run
+failed" rather than "any run this session failed". Both consumers read it that
+way: the GUI's per-turn badge (the final event's ``"ok"``) and the CLI's exit
+code.
 
-THE FIX re-arms it in ``_loop``, which narrows its meaning from "any run this
-session failed" to "the last run failed" - matching its name, its docstring, and
-both consumers (the GUI's per-turn badge, the CLI's exit code).
-
-THE COMPLICATION. ``session.py``'s close-time episodic reflection read the same
-flag to answer a DIFFERENT question: did anything fail this session, i.e. is
-there a failure lesson worth a 1024-token reflection (REG-594). Narrowing the
-flag would have silently narrowed that to "did the LAST run fail", losing the
-lesson from any session that failed and then recovered. ``_had_any_failure`` is
-the session-level record ``_loop`` now keeps for it, so both questions have an
-answer and neither borrows the other's.
+``session.py``'s close-time episodic reflection answers a DIFFERENT question -
+did anything fail this session, i.e. is there a failure lesson worth a
+1024-token reflection - and reads ``_had_any_failure``, the session-level
+record ``_loop`` keeps for it.
 """
 
 from __future__ import annotations
@@ -83,8 +74,8 @@ def _tc(name: str, **args) -> str:
     return "<tool_call>" + json.dumps({"name": name, "args": args}) + "</tool_call>"
 
 
-# The per-tool circuit breaker aborts after 4 identical failures, so this is a
-# run that fails for REAL through the real loop - no hand-set flags.
+# The per-tool circuit breaker aborts after 4 identical failures, so this run
+# fails through the real loop with no hand-set flags.
 _BREAKER_RUN = [_tc("read_file", path="missing.txt")] * 4
 
 
@@ -98,12 +89,12 @@ def _agent(tmp_path, responses, **kw):
 
 
 # --------------------------------------------------------------------------- #
-#  The regression: a clean turn after a failed one reports ok                  #
+#  A clean turn after a failed one reports ok                                  #
 # --------------------------------------------------------------------------- #
 
 def test_clean_run_after_a_failed_run_reports_ok(home, tmp_path):
-    """THE REGRESSION, at the Agent level. Two real runs: the first trips the
-    circuit breaker, the second answers cleanly. The second must report ok."""
+    """At the Agent level: two real runs, the first tripping the circuit
+    breaker and the second answering cleanly. The second reports ok."""
     agent = _agent(tmp_path, _BREAKER_RUN + ["All clean now."])
 
     first = agent.run_task("read the missing file")
@@ -118,8 +109,8 @@ def test_clean_run_after_a_failed_run_reports_ok(home, tmp_path):
 
 
 def test_gui_final_event_reports_the_clean_turn_as_ok(tmp_path):
-    """THE USER-VISIBLE SYMPTOM, through the real GUI session path: the done
-    event's "ok" comes straight from agent.last_run_ok, once per turn."""
+    """Through the real GUI session path: the done event's "ok" comes straight
+    from agent.last_run_ok, once per turn."""
     from localm.plugins.coder.sessions import CoderSession
 
     session = CoderSession(
@@ -142,8 +133,8 @@ def test_gui_final_event_reports_the_clean_turn_as_ok(tmp_path):
 
 
 def test_a_stopped_run_does_not_poison_the_next_one(home, tmp_path):
-    """The same one-way-flag defect via the stop path rather than a breaker: a
-    user stop clears _last_run_ok too, and the next turn must still report ok."""
+    """The same property via the stop path rather than a breaker: a user stop
+    clears _last_run_ok too, and the next turn still reports ok."""
     agent = _agent(tmp_path, ["partial answer", "All clean now."])
     original_chat = agent.backend.chat
 
@@ -163,13 +154,13 @@ def test_a_stopped_run_does_not_poison_the_next_one(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  The complication: the session-level failure lesson must NOT be lost         #
+#  The session-level failure lesson is kept                                    #
 # --------------------------------------------------------------------------- #
 
 def test_session_that_failed_then_recovered_still_reflects_at_close(home, tmp_path):
-    """REG-594's feature must survive the narrowing: the failed first run is
-    still a lesson at close, even though the session ended on a clean run and
-    wrote no files. Reading only the (now per-run) _last_run_ok would drop it."""
+    """The failed first run is still a lesson at close, even though the session
+    ended on a clean run and wrote no files: the close-time reflection reads the
+    session-level marker, not the per-run _last_run_ok."""
     agent = _agent(tmp_path, _BREAKER_RUN + ["All clean now."])
     agent._episode_task = "read the missing file"
 
@@ -183,14 +174,14 @@ def test_session_that_failed_then_recovered_still_reflects_at_close(home, tmp_pa
         "the failed run's lesson was lost when the session ended on a clean run")
     eps = agent._episode_store.all()
     assert len(eps) == 1
-    # The session DID complete in the end, so the episode says so; the lesson is
-    # carried by what_failed, not by mislabelling the outcome.
+    # The session completed, so the episode says so; the failure is carried by
+    # what_failed rather than by the outcome label.
     assert eps[0].outcome == "ok"
 
 
 def test_all_clean_session_reflects_nothing(home, tmp_path):
-    """The other half: the new session-level flag must not arm itself on a
-    healthy session, or every quit would pay for a model reflection."""
+    """The other half: the session-level flag does not arm itself on a healthy
+    session, so quitting one pays for no model reflection."""
     agent = _agent(tmp_path, ["All clean now."])
     agent._episode_task = "say something"
 
@@ -204,8 +195,8 @@ def test_all_clean_session_reflects_nothing(home, tmp_path):
 
 
 def test_failed_only_session_still_reports_incomplete(home, tmp_path):
-    """Unchanged behaviour for the single-run failure: still not ok, still
-    reflects, still recorded as an incomplete session."""
+    """A single-run failure: not ok, reflects, and is recorded as an incomplete
+    session."""
     agent = _agent(tmp_path, _BREAKER_RUN)
     agent._episode_task = "read the missing file"
 
@@ -218,9 +209,8 @@ def test_failed_only_session_still_reports_incomplete(home, tmp_path):
 
 
 def test_reset_clears_the_session_failure_marker(home, tmp_path):
-    """/clear drops the history and error trace a lesson would be built from, so
-    it drops the marker too rather than leaving a reflection armed for a run
-    whose context is gone."""
+    """/clear drops the history and error trace a lesson would be built from,
+    and drops the session failure marker with them."""
     agent = _agent(tmp_path, _BREAKER_RUN)
     agent._episode_task = "read the missing file"
     agent.run_task("read the missing file")

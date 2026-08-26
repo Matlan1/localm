@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.hwdetect: GPU-vendor detection and the install/runtime backend
 selection policy. hwdetect drives which llama.cpp backend and which PyTorch wheel
-the installers provision, so a silent regression here is exactly the costly kind
-(TEST-2). Everything is mocked - no real GPU, subprocess, or network - so the
-policy is pinned deterministically on any machine, including a GPU-less CI box."""
+the installers provision. Everything is mocked - no real GPU, subprocess, or
+network - so the policy is pinned deterministically on any machine, including a
+GPU-less CI box."""
 
 import subprocess
 
@@ -70,11 +70,10 @@ def test_run_ok_is_true_on_clean_exit_with_no_output(monkeypatch):
 
 # ------------- the three-state result: found / none / unknown -------------
 #
-# has_gpu is a BOOLEAN and so cannot express "we could not ask": it is False both
-# for a box with no GPU and for a box whose enumeration never ran. Every caller
-# branching on it therefore treated an unanswered probe as proof of absence.
-# gpu_state is the discriminator; these tests pin that the two inputs which used
-# to be indistinguishable now produce DIFFERENT values.
+# has_gpu is a BOOLEAN and cannot express "we could not ask": it is False both
+# for a box with no GPU and for a box whose enumeration never ran. gpu_state is
+# the discriminator, and these tests pin that those two inputs produce DIFFERENT
+# values.
 
 def test_probe_that_ran_and_found_nothing_is_none(monkeypatch):
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
@@ -98,9 +97,9 @@ def test_probe_that_could_not_run_is_unknown_not_none(monkeypatch):
     assert d.gpu_state == "unknown"
     assert d.probe_ok is False
     assert d.probe_error, "a failed probe must record WHY, not just that it failed"
-    # Unchanged and deliberately so: the recommendation stays conservative and
-    # has_gpu stays False. This unit makes the state VISIBLE, it does not turn a
-    # best-effort probe into a hard failure or into a positive claim.
+    # The recommendation stays conservative and has_gpu stays False: this makes
+    # the state VISIBLE without turning a best-effort probe into a hard failure
+    # or a positive claim.
     assert d.has_gpu is False
     assert d.recommended == "cpu"
 
@@ -132,10 +131,9 @@ def test_vendor_found_by_smi_stays_found_despite_a_failed_enumeration(monkeypatc
 
 
 def test_macos_uname_failure_is_unknown_not_intel(monkeypatch):
-    """detect() used to return source="macos intel" whenever uname produced
-    anything other than arm64 - INCLUDING when uname did not run at all. On an
-    Apple Silicon box that asserts the wrong architecture and costs the Metal
-    recommendation."""
+    """uname producing anything other than arm64 must not be read as
+    source="macos intel" when uname did not run at all. On an Apple Silicon box
+    that asserts the wrong architecture and costs the Metal recommendation."""
     monkeypatch.setattr(hwdetect.sys, "platform", "darwin")
     monkeypatch.setattr(hwdetect, "_run_ok", lambda cmd: ("", False))
     d = hwdetect.detect()
@@ -145,7 +143,7 @@ def test_macos_uname_failure_is_unknown_not_intel(monkeypatch):
 
 
 def test_macos_intel_still_reports_none_when_uname_answered(monkeypatch):
-    """The guard on the test above: a real Intel Mac is a MEASURED negative and
+    """The guard on the test above: a real Intel Mac is a genuine negative and
     must keep saying so."""
     monkeypatch.setattr(hwdetect.sys, "platform", "darwin")
     monkeypatch.setattr(hwdetect, "_run_ok", lambda cmd: ("x86_64\n", True))
@@ -288,9 +286,9 @@ def test_install_backend_early_return_branches(vendors, expected):
 
 
 def test_install_backend_win_nvidia_is_cuda(monkeypatch):
-    # NVIDIA on Windows -> cuda: the release ships a self-contained cudart bundle,
-    # so CUDA is out-of-the-box (no Toolkit) AND the fastest path on NVIDIA. The
-    # setup-llama driver preflight + load-test fall back to vulkan if unsupported.
+    # NVIDIA on Windows -> cuda: the release ships a self-contained cudart
+    # bundle. The setup-llama driver preflight + load-test fall back to vulkan
+    # if unsupported.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     d = Detection(vendors=["nvidia"], gpu_names="nvidia geforce rtx 4090")
     assert hwdetect.recommended_install_backend(d) == "cuda"
@@ -298,22 +296,18 @@ def test_install_backend_win_nvidia_is_cuda(monkeypatch):
 
 def test_install_backend_linux_nvidia_is_cuda(monkeypatch):
     # NVIDIA on Linux -> cuda: llama.cpp ships a self-contained cudart bundle on
-    # Linux too (setup-llama fetches the CUDA runtime libraries itself, no system
-    # Toolkit needed), and 2026-08-11 field testing on real NVIDIA Linux hardware
-    # (RTX PRO 4000 Blackwell, CC 12.0) confirmed CUDA works and outperforms
-    # vulkan there. Was vulkan until that confirmation landed - see
-    # dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.
+    # Linux too, so setup-llama fetches the CUDA runtime libraries itself and no
+    # system Toolkit is needed.
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     d = Detection(vendors=["nvidia"], gpu_names="nvidia geforce rtx 4090")
     assert hwdetect.recommended_install_backend(d) == "cuda"
 
 
 def test_install_backend_linux_nvidia_blackwell_is_cuda(monkeypatch):
-    # The exact field-evidence case: compute capability alone (not the platform)
-    # decides NVIDIA gets cuda now; recommended_install_backend does not itself
-    # branch on architecture (that is NvidiaInfo.cuda_line's job, downstream), so
-    # this just confirms a Blackwell-named/CC-bearing card is not accidentally
-    # excluded by name-based reasoning anywhere in this function.
+    # Compute capability alone, not the platform, decides NVIDIA gets cuda.
+    # recommended_install_backend does not branch on architecture itself (that is
+    # NvidiaInfo.cuda_line's job), so this confirms a Blackwell-named/CC-bearing
+    # card is not excluded by name-based reasoning.
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     d = Detection(vendors=["nvidia"], gpu_names="nvidia rtx pro 4000 blackwell")
     assert hwdetect.recommended_install_backend(d) == "cuda"
@@ -329,9 +323,8 @@ def test_install_backend_win_amd_rx6000_is_rocm(monkeypatch):
 
 
 def test_install_backend_win_amd_rx7000_without_rocm_is_vulkan(monkeypatch):
-    # RX 7000 is clearly NOT the bundled gfx103X build, and with no system ROCm
-    # toolkit detected, hip genuinely cannot run here -> vulkan is the correct
-    # fallback (not "we have not built that yet" - see _rocm_toolkit_present).
+    # RX 7000 is not the bundled gfx103X build, and with no system ROCm toolkit
+    # detected hip cannot run here, so vulkan is the fallback.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
     d = Detection(vendors=["amd"], gpu_names="amd radeon rx 7900 xtx")
@@ -339,10 +332,9 @@ def test_install_backend_win_amd_rx7000_without_rocm_is_vulkan(monkeypatch):
 
 
 def test_install_backend_win_amd_rx7000_with_rocm_is_hip(monkeypatch):
-    # The escalation this unit adds: gfx110X has no self-contained build, but
-    # `hip` is a real downloadable binary that works when the user already has
-    # the AMD HIP SDK installed - detected via the same signal detect() already
-    # probes for vendor identification, now acted on for the recommendation too.
+    # gfx110X has no self-contained build, but `hip` is a real downloadable
+    # binary that works when the AMD HIP SDK is already installed, detected via
+    # the same signal detect() probes for vendor identification.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
     d = Detection(vendors=["amd"], gpu_names="amd radeon rx 7900 xtx")
@@ -350,12 +342,10 @@ def test_install_backend_win_amd_rx7000_with_rocm_is_hip(monkeypatch):
 
 
 def test_install_backend_win_amd_unknown_name_defaults_to_rocm(monkeypatch):
-    # Policy (see docstring): an UNKNOWN AMD card on Windows DEFAULTS to the
-    # bundled gfx103X build (amd-rocm), with setup-llama's load-test + vulkan
-    # fallback as the net. Empty gpu_names ("could not read the adapter name")
-    # is the unknown case, so it must be amd-rocm, NOT vulkan - even with a
-    # system ROCm toolkit present, since the self-contained path still needs
-    # nothing extra and is the safer guess for an unidentified card.
+    # An UNKNOWN AMD card on Windows defaults to the bundled gfx103X build
+    # (amd-rocm), with setup-llama's load-test + vulkan fallback as the net.
+    # Empty gpu_names ("could not read the adapter name") is the unknown case, so
+    # it is amd-rocm and not vulkan, even with a system ROCm toolkit present.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
     assert hwdetect.recommended_install_backend(
@@ -364,8 +354,7 @@ def test_install_backend_win_amd_unknown_name_defaults_to_rocm(monkeypatch):
 
 def test_install_backend_win_amd_order_must_be_exact(monkeypatch):
     # The amd-rocm case requires vendors == ["amd"] exactly. A mixed list that
-    # includes nvidia resolves to cuda on Windows (NVIDIA is the priority vendor
-    # and the self-contained cudart path is the peak choice), NOT the AMD build.
+    # includes nvidia resolves to cuda on Windows, NOT the AMD build.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     assert hwdetect.recommended_install_backend(
         Detection(vendors=["amd", "nvidia"], gpu_names="rx 6800")) == "cuda"
@@ -381,10 +370,9 @@ def test_install_backend_linux_amd_without_rocm_is_vulkan(monkeypatch):
 
 
 def test_install_backend_linux_amd_with_rocm_is_hip(monkeypatch):
-    # The escalation this unit adds: "the amd-rocm bundle is Windows-only" never
-    # meant "Linux AMD has no real vendor path" - hip is a real downloadable
-    # binary on Linux too (setup_llama._BACKEND_ASSETS), viable the moment a
-    # working system ROCm install is detected.
+    # hip is a real downloadable binary on Linux too
+    # (setup_llama._BACKEND_ASSETS), viable the moment a working system ROCm
+    # install is detected.
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
     d = Detection(vendors=["amd"], gpu_names="amd radeon rx 6800")
@@ -410,8 +398,7 @@ def test_rocm_toolkit_present_via_opt_rocm_dir_linux_only(monkeypatch):
     monkeypatch.setattr(hwdetect.Path, "is_dir", lambda self: True)
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     assert hwdetect._rocm_toolkit_present() is True
-    # The /opt/rocm check is Linux-only (a Windows install would never have
-    # this Linux-only path be meaningful) - confirm it is NOT consulted there.
+    # The /opt/rocm check is Linux-only: confirm it is NOT consulted on Windows.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     assert hwdetect._rocm_toolkit_present() is False
 
@@ -521,12 +508,11 @@ def test_torch_pip_args_rocm_win_unknown_amd_is_empty(monkeypatch):
 # ------------------------------- main() CLI -------------------------------
 
 def test_main_prints_vendor_and_backend(monkeypatch, capsys):
-    # Pin Linux so the install-backend is deterministic (this asserts the OUTPUT
-    # FORMAT "<vendor> <backend>"; NVIDIA is cuda on both platforms now - see the
-    # policy tests above - so this and the Windows path share one expectation).
-    # NOTE: main() calls recommended_install_backend(d), NOT d.recommended (the
-    # LEGACY field) - the "vulkan" passed to Detection() below is deliberately
-    # the WRONG legacy value, to prove main() ignores it.
+    # Pin Linux so the install-backend is deterministic; this asserts the OUTPUT
+    # FORMAT "<vendor> <backend>", and NVIDIA is cuda on both platforms, so this
+    # and the Windows path share one expectation. main() calls
+    # recommended_install_backend(d), NOT d.recommended, so the "vulkan" passed
+    # to Detection() below is the WRONG legacy value and main() must ignore it.
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     monkeypatch.setattr(hwdetect, "detect",
                         lambda: Detection(vendors=["nvidia"], recommended="vulkan"))
@@ -548,8 +534,7 @@ def test_main_torch_subcommand(monkeypatch, capsys):
 
 def test_main_torch_args_subcommand(monkeypatch, capsys):
     monkeypatch.setattr(hwdetect, "detect", lambda: Detection(vendors=["nvidia"]))
-    # Deterministic regardless of the test-running machine's own hardware - see
-    # test_torch_pip_args_cuda above for the same guard on the same accessor.
+    # Deterministic regardless of the test-running machine's own hardware.
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     hwdetect.main(["torch-args", "cuda"])
     assert "cu126" in capsys.readouterr().out

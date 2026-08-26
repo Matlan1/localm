@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Standalone helper spawned as a REAL subprocess by
-test_setup_llama_provisioning_lock.py's cross-process test. Not collected by
-pytest (no test_ prefix). Takes <target-dir> <marker-file> <hold-seconds> on
-argv, acquires setup_llama._provisioning_lock on target-dir, writes marker to
-signal it is holding the lock, sleeps for hold-seconds, then releases and
-exits 0. Values arrive as plain argv elements, never templated into source
-text - the calling test builds no dynamic code string at all.
+"""Standalone helper spawned as a REAL subprocess by the cross-process
+provisioning-lock test. Not collected by pytest (no test_ prefix). Takes
+<target-dir> <marker-file> <hold-seconds> on argv, acquires
+setup_llama._provisioning_lock on target-dir, writes marker to signal it is
+holding the lock, sleeps for hold-seconds, then releases and exits 0.
 """
 
 import sys
@@ -19,9 +17,7 @@ def main() -> int:
     target = Path(sys.argv[1])
     marker = Path(sys.argv[2])
     hold_s = float(sys.argv[3])
-    # Printed so a caller reading stdout on failure can tell "the lock logic
-    # was wrong" apart from "this process imported a DIFFERENT localm tree
-    # than the one under test" - the two look identical otherwise.
+    # Report which localm tree this process imported.
     print(f"holder using localm from {sl.__file__}", flush=True)
     with sl._provisioning_lock(target):
         marker.write_text("holding", encoding="utf-8")

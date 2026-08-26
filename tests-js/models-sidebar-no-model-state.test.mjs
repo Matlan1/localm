@@ -1,22 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// NEW-MODEL-DROPDOWN-SHOWS-A-MODEL-THAT-IS-NOT-LOADED: the sidebar MODEL
-// dropdown used to represent "nothing is active" by marking no <option>
-// selected at all, so the browser fell back to displaying option INDEX 0 (an
-// arbitrary registered model) as if it were loaded - while the status line
-// directly beneath correctly said "no model". refreshModels() now inserts an
-// explicit, disabled placeholder option and selects it whenever nothing is
-// active, so the dropdown can represent that state honestly. A dedicated
-// sidebar Unload button (targeting the active model specifically) is the
-// actual action for "free this model" - the placeholder itself is inert in
-// both directions (never loads, never unloads).
+// refreshModels() inserts a disabled placeholder option in the sidebar MODEL
+// dropdown and selects it whenever no model is active. The placeholder is
+// inert: it never loads and never unloads. A separate sidebar Unload button
+// targets the active model.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
 
-// A stateful fetch stub: tracks which model is "active" server-side and lets
-// /api/models/load and /api/models/unload actually move that state, so a
-// test can drive a full refresh -> click -> refresh cycle and observe the
-// dropdown/button reflect the real result, not a canned response.
+// A stateful fetch stub: tracks which model is active server-side and lets
+// /api/models/load and /api/models/unload move that state, so a test can drive
+// a full refresh -> click -> refresh cycle.
 function makeFetch({ models, active = "" }, calls) {
   let currentActive = active;
   return async (url, opts = {}) => {
@@ -99,9 +92,8 @@ test("(c) the placeholder is inert: disabled, and forcing its value neither load
   const placeholder = placeholderOf(select);
   assert.equal(placeholder.disabled, true, "the placeholder cannot be picked as an action in a real browser");
 
-  // Defense in depth: even if something bypasses the `disabled` attribute and
-  // forces the select back to the placeholder's value, the change handler
-  // itself must treat that as a no-op rather than trying to load "".
+  // Forcing the select back to the placeholder's value past the `disabled`
+  // attribute: the change handler treats it as a no-op.
   select.value = "";
   runScript(win, "window.__onchange = modelSelect.onchange;");
   await win.__onchange();
@@ -145,9 +137,8 @@ test("the sidebar Unload button is hidden when nothing is active", async () => {
 });
 
 test("an in-use engine (HTTP 200, status 'in_use') is NOT reported as unloaded", async () => {
-  // unload_one_model() (http_server.py) answers 200 for a model that is mid-
-  // generation right now - a legitimate "not done, not an error" outcome,
-  // distinct from a real unload. r.ok alone cannot tell them apart.
+  // unload_one_model() (http_server.py) answers HTTP 200 with status "in_use"
+  // for a model that is mid-generation, so r.ok alone does not mean unloaded.
   const models = [{ name: "model-a", size_bytes: 1000 }];
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
@@ -180,13 +171,8 @@ test("an in-use engine (HTTP 200, status 'in_use') is NOT reported as unloaded",
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 
   assert.equal(calls.length, 1, "exactly one unload POST was attempted");
-  // The GET /api/models mock always answers "model-a is active" (truthfully -
-  // it never was unloaded), so refreshModels() alone would make the dropdown
-  // LOOK right even if the click handler wrongly believed it had succeeded.
-  // The discriminator that only the correct code path can produce is what
-  // the handler itself SAID happened, before any reconciling refresh: the
-  // toast text. A wrong implementation (falling through to the plain success
-  // branch on any r.ok) prints "Unloaded 'model-a'" here instead.
+  // The toast text is what the click handler itself reported, before the
+  // reconciling refresh.
   const toastText = win.document.getElementById("toast").textContent;
   assert.match(toastText, /still generating/,
     "the toast must say the model is still in use, not claim it was unloaded");

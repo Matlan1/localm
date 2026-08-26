@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B2: the model-owned task list (coder/tools/tasks.py).
+"""The model-owned task list (coder/tools/tasks.py).
 
-The load-bearing test is test_todos_survive_a_real_checkpoint_resume_cycle: it
-drives the REAL dispatch path (Agent._execute_tool, which is what injects the
-session), the REAL checkpoint file under a temp HOME, and a genuinely FRESH
-Agent for the same cwd. Both halves of the persistence wiring are pinned
-independently (the file must contain the todos; the fresh agent must read them
-back), so removing either one turns this file red.
+test_todos_survive_a_real_checkpoint_resume_cycle drives the REAL dispatch path
+(Agent._execute_tool, which injects the session), the REAL checkpoint file under
+a temp HOME, and a genuinely FRESH Agent for the same cwd. Both halves of the
+persistence wiring are pinned independently: the file must contain the todos,
+and the fresh agent must read them back.
 """
 
 import json
@@ -58,7 +57,7 @@ PLAN = ["[x] read the failing test", "[>] fix the parser", "[ ] run the suite"]
 
 
 # --------------------------------------------------------------------------- #
-#  The required test: todos survive a real checkpoint save/resume cycle
+#  Todos survive a real checkpoint save/resume cycle
 # --------------------------------------------------------------------------- #
 
 def test_todos_survive_a_real_checkpoint_resume_cycle(tmp_path, monkeypatch):
@@ -72,9 +71,8 @@ def test_todos_survive_a_real_checkpoint_resume_cycle(tmp_path, monkeypatch):
     first._messages = [{"role": "user", "content": "do the thing"}]
     first.save_checkpoint()
 
-    # 2. The plan is IN the checkpoint file (pins the save half of the wiring),
-    #    under HOME and NOT in the project tree - todos must not regress CODER-4
-    #    by dropping a .localcoder/ folder back into the user's repo.
+    # 2. The plan is IN the checkpoint file, under HOME and NOT in the project
+    #    tree.
     assert (tmp_path / "home") in first._checkpoint_path.parents
     assert not (proj / ".localcoder").exists()
     assert list(proj.iterdir()) == []
@@ -180,7 +178,7 @@ def test_resume_of_a_pre_b2_checkpoint_is_not_a_crash(tmp_path, monkeypatch):
 
 def test_garbage_todos_in_a_checkpoint_are_dropped_not_trusted(tmp_path, monkeypatch):
     """The checkpoint is plain user-writable JSON: a hand-edited or corrupted
-    todos value must normalise, not crash or land unvalidated in the store."""
+    todos value normalises rather than crashing or landing unvalidated."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"; proj.mkdir()
@@ -205,7 +203,7 @@ def test_garbage_todos_in_a_checkpoint_are_dropped_not_trusted(tmp_path, monkeyp
 
 
 # --------------------------------------------------------------------------- #
-#  Compaction: the plan is exactly what compaction used to destroy
+#  Compaction: the plan survives it
 # --------------------------------------------------------------------------- #
 
 def test_todos_survive_compaction_and_land_in_the_summary(tmp_path):
@@ -238,12 +236,9 @@ def test_registered_non_destructive_and_free_of_path_args():
     from localm.plugins.coder.tools import SAFE_RESTRICTED_TOOLS, TOOL_REGISTRY
     for name in ("set_todos", "read_todos"):
         td = TOOL_REGISTRY[name]
-        # Non-destructive on purpose: destructive=True would demand confirmation
-        # for pure bookkeeping and be hard-denied in an unattended run.
         assert td.destructive is False
         assert td.untrusted_output is False
-        # No path-like arg, so the scope allowlist has nothing to confine
-        # (test_scope_allowlist_is_default_deny covers the general contract).
+        # No path-like arg, so the scope allowlist has nothing to confine.
         assert not any(p.endswith(("path", "_file", "_dir")) for p in td.params)
         assert name in SAFE_RESTRICTED_TOOLS
 
@@ -277,8 +272,8 @@ def test_prompt_documents_the_tool_with_a_worked_example():
 # --------------------------------------------------------------------------- #
 
 def test_dry_run_still_records_todos(tmp_path):
-    """dry_run skips DESTRUCTIVE tools. Bookkeeping is not a change to skip -
-    a dry run that forgot its own plan would be useless."""
+    """dry_run skips DESTRUCTIVE tools; the task list is bookkeeping, so it is
+    still recorded."""
     proj = tmp_path / "proj"; proj.mkdir()
     a = _agent(proj, dry_run=True)
     assert _call(a, "set_todos", items=PLAN).ok
@@ -287,7 +282,7 @@ def test_dry_run_still_records_todos(tmp_path):
 
 def test_unattended_session_is_not_denied_its_own_task_list(tmp_path):
     """auto_approve=False with no confirm handler fail-closes every tool that
-    needs confirmation. The task list must not be one of them."""
+    needs confirmation; the task list does not need one."""
     proj = tmp_path / "proj"; proj.mkdir()
     a = _agent(proj, auto_approve=False)
     result = _call(a, "set_todos", items=PLAN)
@@ -339,8 +334,7 @@ def test_the_injected_session_arg_cannot_be_spoofed_by_the_model(tmp_path):
 
 
 def test_a_child_agent_gets_its_own_list(tmp_path):
-    """No inheritance: a sub-agent plans its own sub-task (kept deliberately
-    out of scope for B2 - it would need a merge policy on return)."""
+    """No inheritance: a sub-agent plans its own sub-task."""
     proj = tmp_path / "proj"; proj.mkdir()
     parent = _agent(proj)
     _call(parent, "set_todos", items=PLAN)
@@ -439,8 +433,8 @@ def test_the_store_cannot_be_mutated_through_a_returned_list(tmp_path):
     ("3. [ ] numbered",      {"text": "numbered", "status": PENDING}),
     ("[done] word marker",   {"text": "word marker", "status": DONE}),
     ("[wip] word marker",    {"text": "word marker", "status": IN_PROGRESS}),
-    # An unrecognised bracket is the model's own text, not a status marker, so
-    # it is kept verbatim instead of being silently eaten.
+    # An unrecognised bracket is the model's own text, not a status marker, and
+    # is kept verbatim.
     ("[?] unknown marker",   {"text": "[?] unknown marker", "status": PENDING}),
     ("[api] fix the handler", {"text": "[api] fix the handler", "status": PENDING}),
     ("[ ]   spaced   out ",  {"text": "spaced out", "status": PENDING}),
@@ -460,8 +454,8 @@ def test_items_without_task_text_are_dropped(raw):
 
 
 def test_a_newline_joined_string_is_accepted_as_the_list(tmp_path):
-    """A model that ignores the array type and sends one blob still gets a
-    correct list rather than a single 'task' containing its whole plan."""
+    """A model that ignores the array type and sends one newline-joined blob
+    still yields a list, not a single 'task' holding its whole plan."""
     proj = tmp_path / "proj"; proj.mkdir()
     a = _agent(proj)
     r = _call(a, "set_todos", items="[x] one\n[>] two\n[ ] three")

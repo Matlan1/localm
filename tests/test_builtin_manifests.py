@@ -48,8 +48,7 @@ def test_builtin_manifest_valid(plugin_dir):
         or (plugin_dir / mod / "__init__.py").is_file(), \
         f"{spec.name}: register module {mod!r} not found"
 
-    # Client-asset contract: a client_entry requires an assets_dir that holds it
-    # (so the SPA can import /plugins/<name>/<client_entry>).
+    # Client-asset contract: a client_entry requires an assets_dir that holds it.
     if spec.surface.client_entry:
         assert spec.surface.assets_dir, \
             f"{spec.name}: client_entry set but assets_dir is empty"
@@ -78,6 +77,6 @@ def test_rag_declares_its_pdf_extra():
     from localm.plugins import deps
     reqs = deps.plugin_requirements(["rag"])
     assert reqs, "the rag extra must resolve to at least one requirement"
-    # normally the concrete pypdf specifier; the localm[rag] fallback is tolerated
-    # only if the installed-metadata read is unavailable in some CI environment.
+    # Normally the concrete pypdf specifier; the localm[rag] fallback is accepted
+    # when the installed-metadata read is unavailable.
     assert any("pypdf" in r for r in reqs) or reqs == ["localm[rag]"], reqs

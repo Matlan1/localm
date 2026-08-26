@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""H2: `localm add <dir>` / `localm pull <dir>` over a folder of loose GGUFs must
-register each model instead of rejecting the directory as "Not a model".
+"""`localm add <dir>` / `localm pull <dir>` over a folder of loose GGUFs must
+register each model, never reject the directory as "Not a model".
 
-Pre-fix, add_local() only accepted a single .gguf file, an HF dir, or an Ollama
-blob; a directory holding several loose *.gguf files fell through to the generic
-"Not a model" rejection and registered nothing. These tests pin the new branch:
-walk *.gguf (non-recursive), register split GGUFs by their first part only.
+These tests pin the directory branch: walk *.gguf (non-recursive), register
+split GGUFs by their first part only.
 """
 
 import pytest
@@ -18,7 +16,7 @@ from localm.model_manager import add_local, pull_model
 def isolated_home(tmp_path, monkeypatch):
     # load_registry/save_registry read the module-level REGISTRY_FILE frozen at
     # import, so the autouse LOCALM_HOME env alone does not isolate them. Redirect
-    # the config paths to a throwaway dir (mirrors conftest.cli_runner).
+    # the config paths to a throwaway dir.
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -32,7 +30,7 @@ def isolated_home(tmp_path, monkeypatch):
 
 def _gguf(d, name):
     """Write a .gguf with content unique to its name so two files never collide
-    on the sha256 content-dedup path (the CI trap from #117)."""
+    on the sha256 content-dedup path."""
     p = d / name
     p.write_bytes(b"GGUF\x00\x00\x00\x00" + name.encode())
     return p
@@ -66,7 +64,6 @@ def _junk_dir(tmp_path):
 
 class TestFolderOfLooseGGUFs:
     def test_single_loose_gguf_registers(self, tmp_path, isolated_home):
-        # NEGATIVE: pre-fix this returns False (dir hit the "Not a model" reject).
         d = _folder(tmp_path, "mymodel.gguf")
         assert add_local(str(d)) is True
         assert "mymodel" in load_registry()
@@ -143,8 +140,7 @@ class TestFolderOfLooseGGUFs:
         assert reg["hfmodel"]["path"].rstrip("/\\").endswith("hfmodel")
 
     def test_import_is_recursive_by_default(self, tmp_path, isolated_home):
-        # B1: import recurses by default (was top-level only). A .gguf one
-        # subfolder deep IS now picked up.
+        # Import recurses by default: a .gguf one subfolder deep is picked up.
         d = tmp_path / "drop"
         d.mkdir()
         _gguf(d, "top.gguf")
@@ -189,7 +185,7 @@ class TestFolderOfLooseGGUFs:
 
 
 # ---------------------------------------------------------------------------
-#  pull_model delegates an absolute directory path here too (H1 routing)
+#  pull_model delegates an absolute directory path here too
 # ---------------------------------------------------------------------------
 
 class TestPullFolder:

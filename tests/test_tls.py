@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for built-in TLS (NET-1): localm/tls.ensure_cert and SAN discovery.
+"""Tests for built-in TLS: localm/tls.ensure_cert and SAN discovery.
 
 Covers the happy path (valid CA + leaf, required SANs present), reuse stability
-(no needless regeneration), and the regeneration triggers the spec calls out:
-missing / expired / wrong-SAN leaf, and an IP-set change - with the CA reused
-across regenerations so a device trusted once stays trusted.
+(no needless regeneration), and the regeneration triggers: missing / expired /
+wrong-SAN leaf, and an IP-set change - with the CA reused across regenerations
+so a device trusted once stays trusted.
 """
 
 import socket
@@ -210,14 +210,13 @@ def test_corrupt_ca_is_replaced(tmp_path):
 
 
 # ------------------------------------------------------------------ #
-#  LM-DA-043: leaf-reuse must verify against the CA actually on disk,  #
-#  not merely compare a constant subject name to itself                #
+#  leaf-reuse verifies against the CA actually on disk,              #
+#  not merely a constant subject name compared to itself             #
 # ------------------------------------------------------------------ #
 
 def _verify_chain(leaf, ca):
     """Raises (InvalidSignature or a key-mismatch error) unless *leaf* was
-    actually signed by *ca* - the same check a TLS client performs, and the
-    property _leaf_is_reusable's old issuer-name comparison could not prove."""
+    actually signed by *ca* - the same check a TLS client performs."""
     ca.public_key().verify(
         leaf.signature,
         leaf.tbs_certificate_bytes,
@@ -228,12 +227,11 @@ def _verify_chain(leaf, ca):
 
 def test_leaf_not_reused_after_out_of_band_ca_rotation(tmp_path):
     """Every CA this module mints shares the identical constant subject, so a
-    leaf's ``issuer == ca.subject`` name comparison can never distinguish a
-    rotated CA keypair from the one the leaf was actually signed by. Simulate
-    the out-of-band rotation the finding names (restoring ``tls/`` from a
-    partial backup, or copying a data dir between machines): mint a CA, mint
-    a leaf against it, then re-mint the CA in place without touching the
-    leaf - exactly what a partial restore leaves behind."""
+    leaf's ``issuer == ca.subject`` name comparison cannot distinguish a
+    rotated CA keypair from the one the leaf was actually signed by. The
+    scenario built here is an out-of-band rotation (restoring ``tls/`` from a
+    partial backup, or copying a data dir between machines): mint a CA, mint a
+    leaf against it, then re-mint the CA in place without touching the leaf."""
     cert_path, _ = tls.ensure_cert(tmp_path)
     old_leaf_serial = _load(cert_path).serial_number
     old_leaf = _load(tls._leaf_cert_path(tmp_path))
@@ -243,12 +241,11 @@ def test_leaf_not_reused_after_out_of_band_ca_rotation(tmp_path):
     # signed by the OLD CA is left untouched on disk.
     new_ca_cert, _ = tls._make_ca(tmp_path)
 
-    # The scenario is genuinely dangerous even before _leaf_is_reusable is
-    # asked anything: the old leaf's issuer NAME still matches the new CA's
-    # subject (both are the module's one constant name)...
+    # The old leaf's issuer NAME still matches the new CA's subject (both are
+    # the module's one constant name)...
     assert old_leaf.issuer == new_ca_cert.subject
     # ...but its signature does NOT verify against the CA now served for
-    # download. This is the exact gap LM-DA-043 reports.
+    # download.
     with pytest.raises(InvalidSignature):
         _verify_chain(old_leaf, new_ca_cert)
 
@@ -264,14 +261,11 @@ def test_leaf_not_reused_after_out_of_band_ca_rotation(tmp_path):
 
 
 def test_ca_past_expiry_forces_full_regeneration(tmp_path, monkeypatch):
-    """An expired CA on disk must force ensure_cert to regenerate BOTH the CA
-    and the leaf, even when the leaf itself - minted late in the CA's life -
-    is nowhere near its own expiry. Reachable through ordinary renewal timing
-    (a long-running or rarely-restarted instance), not a corrupt file: the
-    leaf's own ~2-year validity window comfortably outlives an already-past
-    CA. Before the fix, _leaf_is_reusable never looked at the CA's own
-    not_valid_after (only the leaf's own), so ensure_cert reported success
-    while continuing to serve an unvalidatable chain and never self-healed."""
+    """An expired CA on disk forces ensure_cert to regenerate BOTH the CA and
+    the leaf, even when the leaf itself - minted late in the CA's life - is
+    nowhere near its own expiry. _leaf_is_reusable reads the CA's own
+    not_valid_after, not only the leaf's, because the leaf's ~2-year validity
+    window outlives an already-past CA."""
     t0 = tls._now()
     monkeypatch.setattr(tls, "_now", lambda: t0)
     ca_cert, ca_key = tls._make_ca(tmp_path)
@@ -418,19 +412,17 @@ def test_primary_lan_ip_excludes_vpn_adapter(monkeypatch):
 
 
 def test_primary_lan_ip_keeps_real_lan_ip(monkeypatch):
-    # Same probe, but the address does not belong to a VPN-like adapter -
-    # unchanged behavior.
+    # Same probe, but the address does not belong to a VPN-like adapter.
     _mock_outbound_ip(monkeypatch, "192.168.1.50")
     monkeypatch.setattr(tls, "_vpn_adapter_ips", lambda: set())
     assert tls._primary_lan_ip() == "192.168.1.50"
 
 
 def test_companion_addresses_excludes_vpn_tunnel_as_primary(monkeypatch):
-    # The default-route trick picked the VPN's tunnel adapter (RFC1918,
-    # otherwise indistinguishable from a real LAN address) - it must not win
-    # the "lan" slot even though it is "primary"; the real LAN IP (also
-    # present via the other probes) must be picked instead. Regression for
-    # the reported "localm doesn't like it when I have a VPN active" bug.
+    # The default-route probe picked the VPN's tunnel adapter (RFC1918,
+    # otherwise indistinguishable from a real LAN address). It does not win the
+    # "lan" slot even though it is "primary"; the real LAN IP, also present via
+    # the other probes, is picked instead.
     monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "10.66.0.7")
     monkeypatch.setattr(tls, "_host_ips", lambda: ["192.168.1.50"])
     monkeypatch.setattr(tls, "_iface_ips", lambda: ["192.168.1.50", "10.66.0.7"])
@@ -440,9 +432,8 @@ def test_companion_addresses_excludes_vpn_tunnel_as_primary(monkeypatch):
 
 
 def test_companion_addresses_vpn_only_leaves_lan_empty(monkeypatch):
-    # No real LAN candidate at all (only a VPN tunnel adapter is up) - never
-    # fall back to advertising the VPN's unreachable address; empty is the
-    # honest answer, same as the "nothing detectable" case.
+    # No real LAN candidate at all (only a VPN tunnel adapter is up): "lan" is
+    # empty rather than the VPN's unreachable address.
     monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "10.66.0.7")
     monkeypatch.setattr(tls, "_host_ips", lambda: ["10.66.0.7"])
     monkeypatch.setattr(tls, "_iface_ips", lambda: ["10.66.0.7"])

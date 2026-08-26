@@ -38,10 +38,8 @@ def _plugins(cfg: dict) -> dict:
 
 
 def _own_block(name: str, cfg: dict) -> dict:
-    # Deep copy so callers can read (or even mutate) the returned block, including
-    # nested sub-blocks like {"comfy": {...}}, without ever touching the stored
-    # config. This makes the "never clears/mutates the sharer's own values"
-    # guarantee hold even against nested writes.
+    # Deep copy so callers can read or mutate the returned block, including
+    # nested sub-blocks like {"comfy": {...}}, without touching the stored config.
     blk = _plugins(cfg).get(name)
     return copy.deepcopy(blk) if isinstance(blk, dict) else {}
 
@@ -54,10 +52,10 @@ def _source_of(name: str, cfg: dict) -> Optional[str]:
 
 
 def active_plugins(cfg: dict) -> set:
-    """The set of ACTIVE plugin names = installed (physically present in the
+    """The set of ACTIVE plugin names: installed (physically present in the
     installed folder) AND enabled (config). "Installed" is disk presence in the
-    new store->installed model, NOT a config flag, so we scan the installed
-    folder rather than reading a (no-longer-written) config list."""
+    store to installed model, NOT a config flag, so this scans the installed
+    folder."""
     from pathlib import Path
 
     from localm.debuglog import logger
@@ -68,9 +66,9 @@ def active_plugins(cfg: dict) -> set:
             if child.is_dir() and (child / "plugin.toml").is_file():
                 installed.add(child.name)
     except OSError as exc:
-        # Surface a real disk/permission fault on the plugins-dir scan so it is
-        # discoverable under --debug-discoverable; an empty result here does NOT
-        # prove no plugins exist, it can just mean the scan itself failed.
+        # Surface a real disk or permission fault on the plugins-dir scan: an
+        # empty result here does NOT prove no plugins exist, the scan itself may
+        # have failed.
         logger.debug("active_plugins: failed to scan plugins dir %s: %s",
                      plugins_dir(), exc)
     enabled = set(cfg.get("plugins_enabled", []) or [])
@@ -154,15 +152,15 @@ def load_backend(package: str, name: Optional[str]):
 
 
 def backend_unavailable_warning(package: str, name: Optional[str]) -> Optional[str]:
-    """A warning when *name* is a media backend that is not the built-in ``comfy``
-    reference and cannot be imported (a typo, an unimplemented backend, or one
-    whose dependency is not installed), else None for ``comfy``/empty/loadable.
+    """A warning when *name* is a media backend that is not the built-in
+    ``comfy`` reference and cannot be imported (a typo, an unimplemented
+    backend, or one whose dependency is not installed), else None for
+    ``comfy``, empty or loadable.
 
     The caller still falls back to its inline ``comfy`` reference - a typo must
-    not hard-crash a generate - but we never silently pretend a missing backend
-    is the active one. The user is told their configured backend was ignored
-    (AGENTS rule 5, "we do not hide problems"). A plugin folds this into its
-    ``settings()['warning']`` so the surface that runs the job shows it."""
+    not hard-crash a generate - but a missing backend is never passed off as the
+    active one: the user is told their configured backend was ignored. A plugin
+    folds this into its ``settings()['warning']``."""
     nm = (name or "comfy").strip().lower() or "comfy"
     if nm == "comfy":
         return None
@@ -188,14 +186,14 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace) -> SimpleNames
     shared by every media plugin's backend.py: *comfy_ref* (the plugin's own
     inline ComfyUI reference implementation) for the default ``"comfy"`` backend,
     else ``<package>.backends.<name>`` loaded by ``load_backend`` - falling back
-    to *comfy_ref* on an unknown/missing name so a typo never hard-crashes a
-    generate (the settings ``warning`` already carries the config note, via
+    to *comfy_ref* on an unknown or missing name, so a typo never hard-crashes a
+    generate (the settings ``warning`` carries the config note, via
     ``backend_unavailable_warning``).
 
     A plugin's backend.py assigns the returned callables to its own module-level
-    names (including ``resolve`` as ``_impl``, its historical name), so both
-    ``plug.py`` call sites (``_backend.ensure_available``, etc.) and tests that
-    introspect which implementation a settings dict resolves to are unchanged."""
+    names, including ``resolve`` as ``_impl``, so both ``plug.py`` call sites
+    (``_backend.ensure_available``, etc.) and tests that introspect which
+    implementation a settings dict resolves to keep working."""
 
     def resolve(s: dict):
         name = (s.get("backend") or "comfy").strip().lower()

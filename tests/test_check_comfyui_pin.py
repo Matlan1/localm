@@ -34,8 +34,7 @@ def _release(tag, *, prerelease=False, draft=False):
 
 
 # --------------------------------------------------------------------------- #
-#  Bound to the real shipped file (item 19: a fixture-only suite here would   #
-#  never notice COMFYUI_PINNED_VERSION being renamed or reformatted).        #
+#  Bound to the real shipped file                                             #
 # --------------------------------------------------------------------------- #
 
 def test_reads_the_real_pinned_version_and_it_parses():
@@ -68,7 +67,7 @@ def test_version_ordering_is_numeric_not_lexical():
     """'v0.9.2' > 'v0.31.1' as strings ('9' > '3'), which would wrongly report
     a 22-releases-stale pin as current. This is the exact bug the pinned
     constant sat undetected behind for five weeks."""
-    assert "v0.9.2" > "v0.31.1"  # sanity: the lexical trap is real
+    assert "v0.9.2" > "v0.31.1"  # lexical comparison
     assert pincheck._parse_version("v0.9.2") < pincheck._parse_version("v0.31.1")
 
     result = pincheck._compare("v0.9.2", [_release("v0.31.1")])
@@ -171,8 +170,7 @@ def test_fetch_releases_returns_none_on_malformed_response_shape():
 
 
 # --------------------------------------------------------------------------- #
-#  main() end-to-end - only the true leaf (_fetch_releases_http) is patched,  #
-#  so main()'s real wiring and _fetch_releases' real try/except both run.     #
+#  main() end-to-end - only the true leaf (_fetch_releases_http) is patched.  #
 # --------------------------------------------------------------------------- #
 
 def test_main_reports_could_not_check_on_unreachable_api_never_current(monkeypatch, capsys):

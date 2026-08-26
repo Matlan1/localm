@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Memory-vector backfill had no automatic trigger.
+"""The debounced full-root memory-vector backfill sweep on the chat outlet.
 
-`memory.backfill.backfill_all` walks EVERY namespace to completion, but before
-this its only caller was the manual `setup-embeddings` CLI command. The
-debounced auto-consolidate outlet only backfills the ONE store for whichever
-principal just chatted, bounded to 64 records per pass
-(`MemoryStore.backfill_vectors`) - so an unrelated namespace, or a backlog
-bigger than that bound, never converged without the user re-running that
-command by hand (see tests/test_memory_backfill.py for backfill_all itself).
+`memory.backfill.backfill_all` walks EVERY namespace to completion. The
+auto-consolidate outlet only backfills the ONE store for whichever principal
+just chatted, bounded to 64 records per pass
+(`MemoryStore.backfill_vectors`), so an unrelated namespace, or a backlog
+bigger than that bound, does not converge through it.
 
-This exercises the debounced full-root sweep trigger wired into the same chat
-outlet, and specifically that it is independent of memory_auto_consolidate and
-of whether a chat model is loaded - a vector backfill needs only the embedder.
+This exercises the sweep trigger wired into the same chat outlet, and
+specifically that it is independent of memory_auto_consolidate and of whether
+a chat model is loaded: a vector backfill needs only the embedder.
 """
 
 from __future__ import annotations
@@ -50,7 +48,7 @@ def mem_home(tmp_path, monkeypatch):
 
 class _SyncThread:
     """Drop-in for threading.Thread that runs the target synchronously on
-    .start(), so the background sweep is deterministic in tests."""
+    .start()."""
 
     def __init__(self, target=None, daemon=None):
         self._target = target
@@ -61,8 +59,8 @@ class _SyncThread:
 
 
 def _record_thread(sink):
-    """A Thread stub that records the spawned target instead of running it, so
-    a test can assert whether a background sweep would have been spawned."""
+    """A Thread stub that appends the spawned target to *sink* instead of
+    running it."""
     class _Rec:
         def __init__(self, target=None, daemon=None):
             sink.append(target)
@@ -76,13 +74,13 @@ def _seed_vectorless(root, principal="owner", n=3):
     st = MemoryStore(principal, "chat", "", root=root)
     for i in range(n):
         st.add(MemoryRecord(text=f"fact {i} for {principal}", source="user"),
-               embed_fn=None)                      # no embedder: the reported state
+               embed_fn=None)                      # no embedder: no vectors
     return st
 
 
 def test_sweep_embeds_vectorless_records_across_the_whole_root(mem_home, monkeypatch):
-    """The whole point of the sweep vs. the bounded per-store consolidate pass:
-    it reaches every namespace, not just whichever principal just chatted."""
+    """The sweep reaches every namespace, not just whichever principal just
+    chatted."""
     home, plug = mem_home
     root = home / "memory"
     _seed_vectorless(root, "owner", 3)
@@ -143,9 +141,8 @@ def test_sweep_never_fires_in_privacy_mode(mem_home, monkeypatch):
 
 
 def test_sweep_runs_independent_of_memory_auto_consolidate_flag(mem_home, monkeypatch):
-    """The core design point: backfill needs only the embedder, not
-    fact-extraction, so disabling auto-consolidate must not silently disable
-    backfill too - they are unrelated capabilities."""
+    """Backfill needs only the embedder, not fact extraction, so disabling
+    auto-consolidate leaves the sweep running."""
     home, plug = mem_home
     (home / "config.json").write_text(
         '{"memory_auto_consolidate": false}', encoding="utf-8")
@@ -162,8 +159,7 @@ def test_sweep_runs_independent_of_memory_auto_consolidate_flag(mem_home, monkey
 
 
 def test_sweep_runs_with_no_chat_model_loaded(mem_home, monkeypatch):
-    """Backfill needs only the embedder - it must not require a loaded chat
-    model the way consolidation does."""
+    """Backfill needs only the embedder, not a loaded chat model."""
     home, plug = mem_home
     root = home / "memory"
     _seed_vectorless(root, "owner", 2)
@@ -208,8 +204,8 @@ def test_outlet_never_raises_when_sweep_trigger_errors(mem_home, monkeypatch):
 
 
 def test_outlet_still_runs_sweep_when_consolidate_trigger_errors(mem_home, monkeypatch):
-    """The two triggers are independent: a failure in auto-consolidate must not
-    prevent the backfill sweep from running its own turn."""
+    """The two triggers are independent: a failure in auto-consolidate still
+    leaves the backfill sweep to run its own turn."""
     home, plug = mem_home
     root = home / "memory"
     _seed_vectorless(root, "owner", 2)

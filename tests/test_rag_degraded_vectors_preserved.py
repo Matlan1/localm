@@ -2,19 +2,11 @@
 """A degraded vectors.json survives every write, above all an UNATTENDED one.
 
 ``_load`` rejects a corrupt, stale, or non-finite vectors.json, degrades
-retrieval to BM25, records WHY, and deliberately LEAVES the file on disk: it is
-both the only remaining copy of those vectors and the only evidence of the fault.
+retrieval to BM25, records WHY, and LEAVES the file on disk: it is both the only
+remaining copy of those vectors and the only evidence of the fault.
 
-The scheduled folder re-sync (PR #780) drove straight over that, unattended. Every
-ordinary tick reached ``_add_paths_locked``; ``_add_paths_locked`` ended with an
-unconditional ``_save()`` even when every file was skipped as unchanged; and
-``_save`` deleted vectors.json whenever ``self._vectors`` was None. So one tick
-destroyed the data, and the tick after it found no file, recorded no degrade
-reason, and reported a clean run over a collection that now read as legitimately
-lexical-only. Nobody would ever have seen it.
-
-These tests pin all three parts of the fix, and the two guards that keep it
-honest:
+The scheduled folder re-sync reaches ``_add_paths_locked`` on every ordinary
+tick, so these tests pin the properties that keep it from erasing the evidence:
 
   * ``_add_paths_locked`` does not run a full ``_save()`` when it indexed nothing;
   * ``_save`` never DELETES a vectors.json that ``_load`` rejected - while chunks
@@ -45,7 +37,7 @@ from localm.rag.store import _REJECTED_VECTORS
 
 
 def _embed(texts):
-    """A deterministic 3-dim fake embedder (the convention in test_rag.py)."""
+    """A deterministic 3-dim fake embedder."""
     return [[1.0, 0.0, 0.0] for _ in texts]
 
 
@@ -78,9 +70,8 @@ def _degraded(base, docs, name="kb"):
 
     That is the real shape of a partial/interrupted embed: a structurally valid
     vectors.json whose length no longer matches the chunk count. Dropping the
-    first one (rather than the last) also leaves the survivors mis-aligned with
-    the chunks they would be paired with, which is what
-    ``test_a_set_aside_index_is_never_silently_re_adopted`` turns on.
+    FIRST one also leaves the survivors mis-aligned with the chunks they would be
+    paired with.
 
     Returns a freshly loaded Collection that has already diagnosed the degrade.
     """
@@ -96,14 +87,12 @@ def _degraded(base, docs, name="kb"):
 
 
 # --------------------------------------------------------------------------- #
-#  The MAJOR: an unattended re-sync must not erase the evidence               #
+#  An unattended re-sync must not erase the evidence                          #
 # --------------------------------------------------------------------------- #
 
 def test_resync_with_nothing_changed_keeps_the_degraded_vectors_file(base, docs):
-    """The exact scheduled-job scenario: a tick where every file is unchanged.
-
-    Before the fix the first tick deleted vectors.json and the second reported a
-    clean, fully healthy run - so this drives several ticks, not one.
+    """The scheduled-job scenario: a tick where every file is unchanged. Drives
+    several ticks, not one.
     """
     coll = _degraded(base, docs)
     vec = base / "kb" / "vectors.json"
@@ -118,15 +107,14 @@ def test_resync_with_nothing_changed_keeps_the_degraded_vectors_file(base, docs)
         # The job's own output has to say so: _log.warning is not a report.
         assert "a partial embed" in (result["vector_degrade_reason"] or "")
 
-    # ... and it is still diagnosable on a COLD load, which is the half that made
-    # the original bug invisible rather than merely destructive.
+    # ... and it is still diagnosable on a COLD load.
     assert "a partial embed" in (Collection("kb", base=base).vector_degrade_reason
                                  or "")
 
 
 def test_manual_add_of_unchanged_paths_keeps_the_degraded_vectors_file(base, docs):
-    """The same erasure was reachable before the scheduler existed: `rag add` over
-    an unchanged folder also ended in an unconditional _save()."""
+    """`rag add` over an unchanged folder also ends in an unconditional _save(),
+    so the same erasure is reachable without the scheduler."""
     coll = _degraded(base, docs)
     vec = base / "kb" / "vectors.json"
 
@@ -157,13 +145,12 @@ def test_resync_that_indexes_a_changed_file_sets_the_file_aside(base, docs):
 
 
 def test_a_set_aside_index_is_never_silently_re_adopted(base, docs):
-    """Why the file is RENAMED rather than just left where it is.
+    """The file is RENAMED, not left in place.
 
     ``_load`` decides a sidecar is usable partly by comparing its length to the
-    chunk count. A rejected file left in place is therefore picked up again the
-    moment an unrelated change makes those counts agree - and every semantic score
-    after that is computed against the wrong chunk. Trading one silent fault for
-    another would not be a fix.
+    chunk count, so a rejected file left in place is picked up again the moment
+    an unrelated change makes those counts agree, and every semantic score after
+    that is computed against the wrong chunk.
     """
     coll = _degraded(base, docs)
     kept_vectors = len(json.loads(
@@ -172,9 +159,8 @@ def test_a_set_aside_index_is_never_silently_re_adopted(base, docs):
     coll.remove_doc(str((docs / "alpha.txt").resolve()))
     reloaded = Collection("kb", base=base)
 
-    # The precondition that makes this a real trap rather than a hypothetical
-    # one: the counts DO line up now, so a file left in place would have loaded
-    # clean and mis-scored every query from here on.
+    # The counts line up, so a file left in place would load clean and mis-score
+    # every query from here on.
     assert reloaded.stats()["n_chunks"] == kept_vectors
     assert not (base / "kb" / "vectors.json").exists()
     assert (base / "kb" / _REJECTED_VECTORS).is_file()
@@ -250,7 +236,7 @@ def test_the_scheduled_job_output_states_the_degrade(base, docs):
 
 
 # --------------------------------------------------------------------------- #
-#  MINOR 1: an unmounted mount point is not an "available" root               #
+#  An unmounted mount point is not an available root                          #
 # --------------------------------------------------------------------------- #
 
 def test_an_empty_mount_point_with_indexed_docs_is_skipped_whole(base, docs,
@@ -280,11 +266,8 @@ def test_an_empty_mount_point_with_indexed_docs_is_skipped_whole(base, docs,
 
 
 def test_an_ordinary_empty_folder_still_prunes(base, docs):
-    """The control that keeps the guard narrow, and proves the case above is the
-    mount check firing rather than emptiness alone: same empty folder, same
-    vanished files, but NOT a mount point, so an explicit prune still works. A
-    guard on emptiness alone would silently disable --prune-missing for anyone who
-    genuinely emptied an indexed folder."""
+    """The control that keeps the guard narrow: same empty folder, same vanished
+    files, but NOT a mount point, so an explicit prune still works."""
     coll = _indexed(base, docs)
     for f in docs.iterdir():
         f.unlink()
@@ -298,9 +281,9 @@ def test_an_ordinary_empty_folder_still_prunes(base, docs):
 
 def test_a_mounted_volume_that_still_has_files_is_indexed_normally(base, docs,
                                                                   monkeypatch):
-    """The other control: being a mount point is not itself a problem. A NAS share
-    or second drive that is mounted and legitimately indexed must keep indexing,
-    or the guard would break every volume-rooted collection."""
+    """The other control: being a mount point is not itself a problem. A NAS
+    share or second drive that is mounted and legitimately indexed keeps
+    indexing."""
     coll = _indexed(base, docs)
     monkeypatch.setattr(os.path, "ismount", lambda p: True)
     (docs / "gamma.txt").write_text("gamma content about bearings", encoding="utf-8")

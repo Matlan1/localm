@@ -2,13 +2,13 @@
 """Auto n_gpu_layers partial-offload (GgufBackend._auto_gpu_layers /
 _effective_gpu_layers) and the model_meta layer-count cache.
 
-The audit (explain-is-not-justify, gui-2/docstrings-1) found the "needs partial
-CPU offload" badge promised a fallback the default load path never delivered:
-default n_gpu_layers=99 -> _check_vram charged the FULL weight for any non-zero
-value and refused a too-big model. These tests pin the real mechanism that makes
-the promise true: when n_gpu_layers is left at 99 and auto is on, the loader sizes
-how many layers fit from free VRAM so the model LOADS (some layers on CPU) instead
-of raising, while an explicit -g is always honoured verbatim.
+The "needs partial CPU offload" badge promises a fallback the default load path
+must actually deliver: with default n_gpu_layers=99, _check_vram charging the
+FULL weight for any non-zero value refuses a too-big model. These tests pin the
+mechanism that makes the promise true: when n_gpu_layers is left at 99 and auto
+is on, the loader sizes how many layers fit from free VRAM so the model LOADS
+(some layers on CPU) instead of raising, while an explicit -g is always honoured
+verbatim.
 """
 
 import json
@@ -24,9 +24,8 @@ GB = 1024 ** 3
 
 def _model(tmp_path, size_bytes, *, n_gpu_layers=99, auto=True, n_ctx=4096):
     # A tiny REAL file (so is_file() and the model_meta stat key work), with the
-    # multi-GB "on disk" size faked via _model_bytes. NEVER truncate() to GB sizes
-    # here: Windows truncate() is not sparse and allocates real disk (memory:
-    # windows-truncate-not-sparse), which fills the drive.
+    # multi-GB on-disk size faked via _model_bytes. NEVER truncate() to GB sizes
+    # here: Windows truncate() is not sparse and allocates real disk.
     f = tmp_path / "model.gguf"
     f.write_bytes(b"\0" * 4096)
     b = GgufBackend(str(f), n_gpu_layers=n_gpu_layers,
@@ -44,19 +43,15 @@ def _vram(free, total):
     daemon) when torch cannot answer - on a box with a real GPU and a
     provisioned native runtime, that fallback can succeed for real and return
     genuine driver numbers, defeating a test that wants "VRAM is totally
-    unmeasurable" (free=None). Both paths must be patched together, not just
-    the torch one, or `_vram(None, None)` is not actually unmeasurable on a
-    GPU-equipped dev machine.
+    unmeasurable" (free=None). Both paths must be patched together, or
+    `_vram(None, None)` is not actually unmeasurable on a GPU-equipped machine.
 
-    Since #706 there is a THIRD path with the same trap: ``_free_vram_bytes``
-    applies a device-global correction (``_device_global_free_bytes``) on a
-    Windows + ROCm/HIP box, reading the box's REAL adapter usage via ADL/PDH
-    and replacing the faked ``free`` with ``total - real_used`` - which
-    silently defeats both fakes above on exactly that hardware (measured live:
-    a faked 6/16 GB partial-fit scenario came back as ~15 GB free, so
-    _auto_gpu_layers returned 99 and six partial-offload tests went red).
-    Patched to None so the correction reports "not applicable" and the faked
-    reading stands deterministically on every box."""
+    A THIRD path has the same trap: ``_free_vram_bytes`` applies a device-global
+    correction (``_device_global_free_bytes``) on a Windows + ROCm/HIP box,
+    reading the box's REAL adapter usage via ADL/PDH and replacing the faked
+    ``free`` with ``total - real_used``, which defeats both fakes above on
+    exactly that hardware. Patched to None so the correction reports "not
+    applicable" and the faked reading stands deterministically on every box."""
     from contextlib import ExitStack
     from localm.inference.backends.llamacpp import _loader
 
@@ -128,8 +123,7 @@ class TestAutoGpuLayers:
 
 class TestEffectiveGpuLayers:
     def test_defers_to_explicit_gpu_layers(self, tmp_path, capsys):
-        # A user who set -g 24 must get 24, even with auto on and a partial fit -
-        # never silently overridden (hard-won-rules).
+        # A user who set -g 24 gets 24, even with auto on and a partial fit.
         b = _model(tmp_path, 8 * GB, n_gpu_layers=24, auto=True)
         with _vram(6 * GB, 16 * GB):
             assert b._effective_gpu_layers() == 24
@@ -156,8 +150,8 @@ class TestEffectiveGpuLayers:
 
     def test_unmeasurable_falls_back_quietly(self, tmp_path, capsys):
         # When neither VRAM path can answer (see _vram(None, None) above), full
-        # offload via the display driver is the working default - so the
-        # fallback must NOT spam a per-load console notice (it goes to debug).
+        # offload via the display driver is the working default, and the
+        # fallback prints no per-load console notice (it goes to debug).
         b = _model(tmp_path, 8 * GB, n_gpu_layers=99, auto=True)
         with _vram(None, None):
             assert b._effective_gpu_layers() == 99   # attempts the configured value
@@ -167,13 +161,13 @@ class TestEffectiveGpuLayers:
 
 
 # --------------------------------------------------------------------------- #
-#  _check_vram partial-awareness (the 0<g<99 path, previously untested)        #
+#  _check_vram partial-awareness (the 0<g<99 path)                             #
 # --------------------------------------------------------------------------- #
 
 class TestCheckVramPartial:
     def test_auto_partial_that_fits_does_not_raise(self, tmp_path, capsys):
-        # The whole point: an auto-sized partial load must PASS the preflight
-        # (charge only the offloaded fraction) instead of "cannot fit regardless".
+        # An auto-sized partial load PASSES the preflight: only the offloaded
+        # fraction is charged.
         b = _model(tmp_path, 12 * GB, n_gpu_layers=99, auto=True)
         with _vram(8 * GB, 16 * GB):
             b.effective_gpu_layers = b._effective_gpu_layers()   # resolves partial
@@ -182,8 +176,8 @@ class TestCheckVramPartial:
         assert "Low VRAM" not in capsys.readouterr().out
 
     def test_explicit_partial_charges_only_fraction(self, tmp_path):
-        # -g 16 on a 20GB model: charging the FULL weight (old behaviour) would
-        # exceed 16GB total and raise; charging half (16/32) fits and must not.
+        # -g 16 on a 20GB model: charging the FULL weight would exceed 16GB
+        # total and raise; charging half (16/32) fits and must not.
         b = _model(tmp_path, 20 * GB, n_gpu_layers=16, auto=False)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=15 * GB), \
              patch.object(GgufBackend, "_total_vram_bytes", return_value=16 * GB):
@@ -199,8 +193,7 @@ class TestCheckVramPartial:
                 b._check_vram()
 
     def test_pinned_full_that_cannot_fit_still_raises(self, tmp_path):
-        # auto OFF, full offload (99), model bigger than the card: the clear,
-        # actionable refusal is preserved for an explicit full-offload choice.
+        # auto OFF, full offload (99), model bigger than the card: refused.
         b = _model(tmp_path, 20 * GB, n_gpu_layers=99, auto=False)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=15 * GB), \
              patch.object(GgufBackend, "_total_vram_bytes", return_value=16 * GB):
@@ -222,18 +215,17 @@ class TestCheckVramPartial:
 
 class TestCheckContextFitAutoAware:
     def test_auto_resolved_cpu_load_does_not_act_on_grow(self, tmp_path):
-        # The MAJOR regression: an auto-sized CPU-only load (effective 0) still
-        # carries n_gpu_layers==99, so a grow check gated on n_gpu_layers would
-        # act even though NOTHING is on the GPU. It must gate on
-        # effective_gpu_layers and early-return None (leave the target as-is).
+        # An auto-sized CPU-only load (effective 0) still carries
+        # n_gpu_layers==99, so the grow check gates on effective_gpu_layers and
+        # early-returns None, leaving the target as-is.
         b = _model(tmp_path, 12 * GB, n_gpu_layers=99, auto=True)
         b.effective_gpu_layers = 0                     # what load() resolves to
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=100 * 1024 ** 2):
             assert b._check_context_fit(8192, current_ctx=4096) is None   # CPU-only
 
     def test_partial_offload_charges_only_kv_fraction_on_grow(self, tmp_path):
-        # A partial offload keeps only its layers' KV in VRAM. Charging the WHOLE
-        # KV delta would wrongly send to RAM a grow that fits the GPU fraction.
+        # A partial offload keeps only its layers' KV in VRAM, so only that
+        # fraction of the KV delta is charged.
         b = _model(tmp_path, 20 * GB, n_gpu_layers=99, auto=True)
         b.effective_gpu_layers = 16                    # 16/32 assumed -> half KV
         bpt = GgufBackend._bytes_per_token(20 * GB)
@@ -273,15 +265,15 @@ class TestLoadResolvesGpuLayers:
 
 
 # --------------------------------------------------------------------------- #
-#  Post-load layer-count cache write (A4)                                      #
+#  Post-load layer-count cache write                                           #
 # --------------------------------------------------------------------------- #
 
 class TestPostLoadLayerCountCache:
     def test_load_native_caches_true_layer_count(self, tmp_path, monkeypatch):
-        """The real load now happens in the isolated worker (see
-        llamacpp/_runner.py) - it reports n_layers back in the load response,
-        and GgufBackend._load_native persists it exactly as before (this
-        disk write itself stays parent-side)."""
+        """The real load happens in the isolated worker (see
+        llamacpp/_runner.py): it reports n_layers back in the load response and
+        GgufBackend._load_native persists it, with the disk write staying
+        parent-side."""
         import localm.config as cfg
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
 
@@ -397,10 +389,9 @@ class TestVramOverheadConfigResolution:
             self, tmp_path, monkeypatch):
         """End-to-end: a malformed value that only a hand-edited config.json
         (never the validated PATCH/CLI paths) could produce must not brick
-        create_backend() - the exact crash a review caught during this fix's
-        own development (ValueError/TypeError propagating uncaught from
-        engine.py, before switch_engine's own RuntimeError->503 handling
-        even runs, since this isn't a RuntimeError and fires earlier)."""
+        create_backend(). A ValueError/TypeError propagates uncaught from
+        engine.py before switch_engine's own RuntimeError->503 handling runs,
+        since it is not a RuntimeError and fires earlier."""
         from localm.inference.engine import create_backend
         model = tmp_path / "model.gguf"
         model.write_bytes(b"x")
@@ -421,13 +412,13 @@ class TestVramOverheadConfigResolution:
 class TestAutoCtxEmbedderReservation:
     """_auto_ctx_max must hold back room for the CONFIGURED embedder so the
     context window sized at chat-load time does not claim the VRAM the embedder
-    needs when it loads later (first memory/RAG use) - the oversubscription
-    that collapsed generation from ~34 to 5.0 tok/s on a real 16 GB card
-    (WDDM pages the overcommit to system RAM; measured live 2026-07-18).
+    needs when it loads later (first memory/RAG use). Oversubscribing collapses
+    generation on a real 16 GB card, because WDDM pages the overcommit to system
+    RAM.
 
-    _auto_gpu_layers is deliberately NOT reservation-aware: chat weights keep
-    VRAM priority (a partial chat offload to protect the embedder would slow
-    the primary workload); the context window is the flexible resource."""
+    _auto_gpu_layers is NOT reservation-aware: chat weights keep VRAM priority
+    (a partial chat offload to protect the embedder would slow the primary
+    workload); the context window is the flexible resource."""
 
     def test_reservation_shrinks_the_auto_ctx_ceiling(self, tmp_path, monkeypatch):
         from localm.inference.backends.llamacpp import _sizing

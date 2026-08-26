@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RAG-VISION-1's chatml-fallback warning (llama.py's _warn_chatml_fallback,
-added by PR #705 specifically to satisfy AGENTS.md rule 5) used to reach only
-debuglog.logger, which is invisible without --debug - so a fix whose entire
-point was "surfacing this" never actually surfaced anything a normal user
-would see. See llama.py's _apply_model_template (returns the fallback reason
-instead of only logging it) and gguf.py's chat_stream (reads it from the
-worker's "done" envelope and console.print's it once per loaded model,
-mirroring the existing _grammar_unsupported pattern) for the fix.
+"""llama.py's chatml-fallback warning (_warn_chatml_fallback) must reach a normal
+user, not only debuglog.logger, which is invisible without --debug. See
+llama.py's _apply_model_template (returns the fallback reason instead of only
+logging it) and gguf.py's chat_stream (reads it from the worker's "done" envelope
+and console.print's it once per loaded model, mirroring the existing
+_grammar_unsupported pattern).
 
-These tests assert visibility WITHOUT --debug - that is the exact condition
-the bug lived in. A test that turned debug on and checked the log record
-would pass today and prove nothing (see .claude/rules/diff-review-discipline.md
-item 19)."""
+These tests assert visibility WITHOUT --debug, which is the exact condition the
+gap lives in. A test that turned debug on and checked the log record would pass
+regardless and prove nothing."""
 
 from __future__ import annotations
 

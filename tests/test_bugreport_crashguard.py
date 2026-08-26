@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SRV-3: the bug reporter must fire for the crashes the excepthooks miss - an
+"""The bug reporter must fire for the crashes the excepthooks miss - an
 uncaught asyncio task exception, and a NATIVE/hard process death (caught on the
 next start via a crash marker)."""
 
@@ -14,12 +14,9 @@ def test_crash_marker_arm_check_disarm(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(bugreport, "report_failure",
                         lambda **k: calls.append(k) or str(tmp_path / "r.md"))
-    # arm_crash_guard() always records THIS (very much alive) test process's
-    # own real pid, so the pid-liveness check would otherwise correctly treat
-    # it as "a sibling still running" and skip reporting it - simulate the
-    # marker belonging to a now-dead process instead, the same way
-    # test_bugreport_hang_trace.py mocks instances.pid_alive rather than
-    # relying on real pid values.
+    # arm_crash_guard() records this (live) test process's own pid, which the
+    # pid-liveness check would treat as a sibling still running - so make the
+    # marker look like it belongs to a dead process.
     monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
     home = str(tmp_path)
     marker = tmp_path / "run" / "server-crash.marker"
@@ -48,11 +45,7 @@ def test_crash_marker_arm_check_disarm(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  NEW-CRASH-NOTICE-USELESS (A, part 1): a faulthandler attach failure must   #
-#  never be a silent `except Exception: pass` - every native-trace file on    #
-#  the maintainer's box was 0 bytes across 4 crashes with no clue why, and    #
-#  the old code could not have told the difference between "no fault           #
-#  occurred" and "faulthandler never attached in the first place" (rule 5).   #
+#  A faulthandler attach failure is surfaced, never silently swallowed.        #
 # --------------------------------------------------------------------------- #
 
 def test_faulthandler_enable_exception_is_logged_not_silent(tmp_path, monkeypatch, caplog):
@@ -65,8 +58,7 @@ def test_faulthandler_enable_exception_is_logged_not_silent(tmp_path, monkeypatc
     home = str(tmp_path)
 
     with caplog.at_level(logging.WARNING, logger="localm"):
-        # Arming must still succeed (the marker is what matters for crash
-        # detection) even though the trace mechanism itself failed to attach.
+        # Arming still succeeds even though the trace mechanism failed to attach.
         assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
 
     assert (tmp_path / "run" / "server-crash.marker").exists()
@@ -107,13 +99,8 @@ def test_faulthandler_successful_attach_logs_no_warning(tmp_path, caplog):
 
 
 # --------------------------------------------------------------------------- #
-#  Per-instance scoping: running more than one localm server against the SAME #
-#  LOCALM_HOME is a first-class scenario (`localm ps`, `serve --project`, the #
-#  coder plugin self-starting its own backing server). Confirmed live: a      #
-#  second instance found the first, still-healthy instance's marker, filed a  #
-#  spurious "crashed" bug report, then its own clean-exit disarm deleted      #
-#  whatever marker existed - masking a later genuine crash of a third,        #
-#  still-live instance.                                                       #
+#  Per-instance scoping: several localm servers can run against the SAME       #
+#  LOCALM_HOME, so each keeps its own marker.                                  #
 # --------------------------------------------------------------------------- #
 
 def _write_marker(run_dir, instance_id, pid):
@@ -124,12 +111,9 @@ def _write_marker(run_dir, instance_id, pid):
 
 def test_check_skips_a_marker_whose_recorded_pid_is_genuinely_still_alive(
         tmp_path, monkeypatch):
-    """Direct reproduction of the reported bug with NO liveness mock at all:
-    arm_crash_guard() records THIS test process's own real, still-running
-    pid. The OLD code had no liveness check, so ANY marker present on the next
-    start was reported as a crash - exactly what let a second instance
-    misreport a first, healthy instance. The fix must skip a marker whose
-    pid is confirmed alive."""
+    """NO liveness mock at all: arm_crash_guard() records THIS test process's
+    own real, still-running pid. A marker whose pid is confirmed alive must be
+    skipped, never reported as a crash."""
     calls = []
     monkeypatch.setattr(bugreport, "report_failure",
                         lambda **k: calls.append(k) or str(tmp_path / "r.md"))
@@ -139,8 +123,8 @@ def test_check_skips_a_marker_whose_recorded_pid_is_genuinely_still_alive(
     assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
     assert marker.exists()
 
-    # This process's own pid is recorded and genuinely still running - not a
-    # crash. Must be left completely alone: not reported, not deleted.
+    # This process's own pid is recorded and still running: not reported, not
+    # deleted.
     assert bugreport.check_and_report_prior_crash(home=home) is None
     assert calls == []
     assert marker.exists()
@@ -162,8 +146,8 @@ def test_second_instance_does_not_report_a_live_first_instance_as_crashed(
     monkeypatch.setattr(bugreport, "report_failure",
                         lambda **k: calls.append(k) or str(tmp_path / "r.md"))
 
-    # A second instance starting against the same home must NOT report the
-    # still-running first instance as crashed (the negative case).
+    # A second instance must not report the still-running first instance as
+    # crashed.
     assert bugreport.check_and_report_prior_crash(home=home) is None
     assert calls == []
     # ...and must leave its marker completely untouched - still armed.
@@ -180,9 +164,7 @@ def test_disarm_only_clears_its_own_marker_never_a_siblings(tmp_path):
     bugreport.disarm_crash_guard(home=home, instance_id="instance-b")
 
     assert not (run / "server-crash.instance-b.marker").exists()
-    # instance-a's marker (a DIFFERENT, still-running instance) must survive -
-    # this is the exact bug: a shared marker meant this disarm would have
-    # deleted whatever marker existed, silencing a later genuine crash of A.
+    # instance-a's marker (a different, still-running instance) survives.
     assert (run / "server-crash.instance-a.marker").exists()
 
 
@@ -201,8 +183,7 @@ def test_genuine_crash_still_detected_while_a_sibling_stays_alive(
 
     result = bugreport.check_and_report_prior_crash(home=home)
 
-    # The fires-control: instance-b genuinely crashed (dead pid) and must
-    # still be reported and cleared...
+    # instance-b genuinely crashed (dead pid) and is reported and cleared...
     assert result is not None
     assert len(calls) == 1
     assert not (run / "server-crash.instance-b.marker").exists()
@@ -211,11 +192,7 @@ def test_genuine_crash_still_detected_while_a_sibling_stays_alive(
 
 
 # --------------------------------------------------------------------------- #
-#  NEW-CRASH-NOTICE-USELESS (D): the trace file must not outlive its marker.  #
-#  _report_one_crash_marker used to unlink only the marker, never the         #
-#  companion server-crash-trace.<instance_id>.txt it reads - so run/          #
-#  accumulated one such file per instance that had EVER armed, forever (4     #
-#  already present on the maintainer's box, all 0 bytes).                     #
+#  The companion server-crash-trace file is unlinked with its marker.          #
 # --------------------------------------------------------------------------- #
 
 def test_report_one_crash_marker_deletes_the_trace_file_too(tmp_path, monkeypatch):
@@ -233,8 +210,7 @@ def test_report_one_crash_marker_deletes_the_trace_file_too(tmp_path, monkeypatc
     result = bugreport.check_and_report_prior_crash(home=home)
 
     assert result is not None
-    # The trace's content reached the report before being deleted - cleanup
-    # must not cost the diagnostic value it exists to preserve.
+    # The trace's content reached the report before the file was deleted.
     assert "SIGSEGV in ggml" in captured["context"].get("native_trace", "")
     assert not (run / "server-crash.inst-x.marker").exists()
     assert not trace.exists(), "the trace file must be deleted with its marker"
@@ -261,9 +237,9 @@ def test_report_one_crash_marker_survives_a_missing_trace_file(tmp_path, monkeyp
 
 
 def test_a_live_siblings_trace_file_is_left_untouched(tmp_path, monkeypatch):
-    """A marker whose pid is genuinely still alive is skipped entirely (an
-    existing invariant) - its trace file, still in active use by that live
-    process's faulthandler, must not be touched either."""
+    """A marker whose pid is genuinely still alive is skipped entirely, and its
+    trace file - still in active use by that live process's faulthandler - must
+    not be touched either."""
     home = str(tmp_path)
     run = tmp_path / "run"
     _write_marker(run, "inst-z", 6464)

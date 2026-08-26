@@ -237,9 +237,8 @@ def _schema_to_params(schema: dict) -> dict:
     params = {}
     for pname, meta in props.items():
         # Param names and descriptions are server-controlled and land in the
-        # system prompt; neutralise() them so a hostile server cannot smuggle a
-        # chat-template control token into the model's highest-trust context.
-        # (membership in *required* is checked on the original name.)
+        # system prompt, so neutralise() them. Membership in *required* is
+        # checked on the original name.
         params[neutralise(str(pname))] = {
             "type": _JSON_TO_PARAM_TYPE.get(meta.get("type", "string"), "string"),
             "description": neutralise(str(meta.get("description", ""))),
@@ -310,13 +309,11 @@ def register_mcp_tools(cwd: Path) -> tuple[List[str], List[str]]:
             tool_name = tool.get("name", "")
             if not tool_name:
                 continue
-            # The server fully controls its tool names and descriptions; both end
-            # up in the system prompt (the model's highest-trust context). Defang
-            # any chat-template control token / frame marker in them so a hostile
-            # or compromised server cannot forge a role boundary at the top of
-            # context. The registered name uses the neutralised form (a no-op for
-            # ordinary names); the ACTUAL call keeps the original tool_name via
-            # the closure, so legitimate servers are unaffected.
+            # The server fully controls its tool names and descriptions, and
+            # both end up in the system prompt. Defang any chat-template control
+            # token / frame marker in them. The registered name uses the
+            # neutralised form (a no-op for ordinary names); the ACTUAL call
+            # keeps the original tool_name via the closure.
             reg_name = f"mcp_{name}_{neutralise(tool_name)}"
             register_foreign_tool(
                 reg_name,

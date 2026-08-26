@@ -2,10 +2,9 @@
 """Hang-capture instrumentation: the event-loop stall watchdog and the
 loopback-only GET /debug/stacks endpoint.
 
-The watchdog is the load-bearing tool for the diagnosed intermittent server
-hang: it runs OFF the event loop and dumps every thread's stack to a file when
-the loop stops ticking, so a freeze that would otherwise be lost is captured.
-/debug/stacks is the on-demand complement (usable while the loop is still alive).
+The watchdog runs OFF the event loop and dumps every thread's stack to a file
+when the loop stops ticking. /debug/stacks is the on-demand complement, usable
+while the loop is still alive.
 """
 
 import asyncio
@@ -19,8 +18,8 @@ from localm.inference.http_server import create_app
 
 
 def test_hang_watchdog_env_semantics(monkeypatch):
-    """On by default (so a tester needs no setup); 0/false/off opts out; 1/true/on
-    also turns on the verbose extras."""
+    """On by default; 0/false/off opts out; 1/true/on also turns on the verbose
+    extras."""
     from localm import debuglog
 
     monkeypatch.delenv("LOCALM_HANG_WATCHDOG", raising=False)
@@ -100,9 +99,8 @@ def test_watchdog_dumps_stacks_on_stall(tmp_path, monkeypatch):
 
 
 def test_watchdog_quiet_while_loop_ticks(tmp_path, monkeypatch):
-    """No stall -> no dump, and (lazy file) NO trace file created at all. A healthy
-    run - the common case, since the watchdog is on by default - must leave nothing
-    behind."""
+    """No stall -> no dump, and no trace file created at all: a healthy run
+    leaves nothing behind."""
     from localm.inference import http_server as hs
     trace = tmp_path / "hang.log"
     monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())
@@ -121,9 +119,9 @@ def test_watchdog_quiet_while_loop_ticks(tmp_path, monkeypatch):
 
 @pytest.mark.anyio
 async def test_watchdog_catches_a_real_event_loop_block(tmp_path, monkeypatch):
-    """End-to-end: the REAL 1s heartbeat coroutine + the off-loop watchdog must
-    catch a genuine event-loop block (a synchronous call that stalls the loop -
-    exactly the diagnosed hang), not just a manually-staled heartbeat."""
+    """End-to-end: the REAL 1s heartbeat coroutine plus the off-loop watchdog
+    catch a genuine event-loop block (a synchronous call that stalls the loop),
+    not just a manually-staled heartbeat."""
     from localm.inference import http_server as hs
     trace = tmp_path / "hang.log"
     hb = asyncio.create_task(hs._hang_heartbeat_loop())
@@ -147,32 +145,18 @@ async def test_watchdog_catches_a_real_event_loop_block(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------- #
 # Cold start: _hb_monotonic is None until the heartbeat task's own first tick
-# (deliberately NOT seeded at module-import time). A request answered before
-# that first tick used to report loop_lag as elapsed-since-import - a number
-# that GROWS WITH WALL-CLOCK TIME regardless of what the loop is doing,
-# surviving in the one window the #955/#950 fix below never exercised (a
-# fresh, never-yet-ticked heartbeat). Measured live during a real model load:
-# a /health check read loop_lag=13.50s, and a later request in that same
-# still-cold-started run read 71.11s - see dev-notes/restart-loop-lag-
-# investigation-2026-08-04.md for the full trace.
-#
-# ADR-0008 U6: the fix above landed 0.0 as the cold-start reading, which
-# closed the growing-number defect but reopened a narrower version of the
-# SAME shape one level up - 0.0 is also exactly what a healthy loop reports,
-# so a reader still could not tell "no reading yet" from "measured and
-# fine". _loop_lag_seconds() now returns None for cold start; every caller
-# must render that explicitly (see the debug-log and /debug/stacks tests
-# below), never reuse the 0.0 float path for a state that has no reading.
+# (it is not seeded at module-import time). _loop_lag_seconds() returns None for
+# that state, which is distinct from the 0.0 a healthy loop reports, and every
+# caller must render it explicitly rather than reusing the 0.0 float path.
 # --------------------------------------------------------------------------- #
 
 def test_loop_lag_seconds_is_none_before_the_first_heartbeat_tick(monkeypatch):
     from localm.inference import http_server as hs
 
     monkeypatch.setattr(hs, "_hb_monotonic", None)
-    # Even with a lot of wall-clock time notionally "elapsed" (no seed to
-    # measure against), the cold-start reading must stay None - never a
-    # number that grows just because time.monotonic() advances, and never
-    # the SAME 0.0 a healthy loop would report.
+    # With a lot of wall-clock time elapsed and no seed to measure against, the
+    # cold-start reading stays None - never a number that grows as
+    # time.monotonic() advances, and never the 0.0 a healthy loop reports.
     for now in (0.0, 1_000_000.0, 1_000_071.11):
         monkeypatch.setattr(hs.time, "monotonic", lambda now=now: now)
         assert hs._loop_lag_seconds() is None
@@ -197,8 +181,8 @@ def test_watchdog_skips_the_check_before_the_first_heartbeat_tick(tmp_path, monk
 
 def test_watchdog_resumes_normal_checking_once_ticked_after_a_cold_start(tmp_path, monkeypatch):
     """Once _hb_monotonic transitions from None to a real value (the
-    heartbeat's first tick), the watchdog must go back to detecting a
-    genuine stall normally - the cold-start skip must not become permanent."""
+    heartbeat's first tick), the watchdog detects a genuine stall again: the
+    cold-start skip is not permanent."""
     from localm.inference import http_server as hs
     trace = tmp_path / "hang.log"
     monkeypatch.setattr(hs, "_hb_monotonic", None)
@@ -206,8 +190,7 @@ def test_watchdog_resumes_normal_checking_once_ticked_after_a_cold_start(tmp_pat
         threshold=0.1, trace_path=trace, poll=0.05)
     try:
         time.sleep(0.2)   # cold, skipped
-        # The heartbeat's first tick lands, then immediately goes stale -
-        # the exact shape of a real stall right after startup.
+        # The heartbeat's first tick lands, then immediately goes stale.
         monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic() - 1.0)
         time.sleep(0.3)
     finally:
@@ -219,13 +202,11 @@ def test_watchdog_resumes_normal_checking_once_ticked_after_a_cold_start(tmp_pat
 
 @pytest.mark.anyio
 async def test_real_heartbeat_transitions_from_cold_start_to_a_real_reading(monkeypatch):
-    """End-to-end with the REAL heartbeat coroutine (not a manually-set
-    value): force a genuinely cold _hb_monotonic (simulating a fresh module
-    import, since the module-level global otherwise persists real values
-    across earlier tests in this same process), confirm loop_lag reads None
-    while cold, then confirm it goes back to reporting real scheduling delay
-    once the coroutine's first tick lands - the cold-start handling must not
-    leak into or replace the steady-state behavior #955/#950 already fixed."""
+    """End-to-end with the REAL heartbeat coroutine, not a manually-set value:
+    force a genuinely cold _hb_monotonic (the module-level global otherwise
+    persists real values across earlier tests in this process), confirm
+    loop_lag reads None while cold, then confirm it reports real scheduling
+    delay again once the coroutine's first tick lands."""
     from localm.inference import http_server as hs
 
     monkeypatch.setattr(hs, "_hb_monotonic", None)
@@ -248,30 +229,19 @@ async def test_real_heartbeat_transitions_from_cold_start_to_a_real_reading(monk
 
 
 # --------------------------------------------------------------------------- #
-# loop_lag privacy/watchdog-off facade: the heartbeat TASK that feeds
-# _loop_lag_seconds() used to be started behind the SAME combined gate as the
-# watchdog THREAD's own privacy/env check ((_hw_active() and (_hw_verbose() or
-# _diagnostics_allowed()))). The debug request log and GET /debug/stacks are
-# reachable under a DIFFERENT, unrelated gate (debug_enabled() / a loopback +
-# token check), so whenever the watchdog gate was closed but one of those was
-# open, _hb_monotonic stayed None for the whole process and
-# _loop_lag_seconds() reported a permanent, healthy-looking 0.00 - verified
-# live against a real, measured 2.0s event-loop stall in both configs below.
-# A privacy-conscious user's bug report is exactly the config most likely to
-# hit this (GitHub #958: reports carrying no useful data - this made it worse,
-# confidently WRONG data). The fix decouples the heartbeat's own startup from
-# the watchdog thread's gate, leaving only "pytest" not in sys.modules.
+# The heartbeat TASK that feeds _loop_lag_seconds() starts independently of the
+# watchdog THREAD's privacy/env gate; only pytest not being in sys.modules gates
+# it. The debug request log and GET /debug/stacks are reachable under a
+# different gate, and both must still get a real reading.
 # --------------------------------------------------------------------------- #
 
 def _heartbeat_starts_with_watchdog_thread_disabled(tmp_path, monkeypatch, *, config_json):
-    """Shared drive for both configs below: builds a real app in a throwaway
-    LOCALM_HOME, temporarily lifts the "pytest" not in sys.modules guard for
-    exactly this one lifespan run (restored by monkeypatch on teardown - see
-    the module-level comment above _hb_monotonic for why this guard exists
-    and why bypassing it here is safe: no production code imports pytest, and
-    TestClient's own shutdown path already cancels hb_task / stops the
-    watchdog thread on context exit), and returns
-    (hb_monotonic_after_startup, watchdog_thread_start_call_count)."""
+    """Shared driver for both configs below: builds a real app in a throwaway
+    LOCALM_HOME, temporarily lifts the ``"pytest" not in sys.modules`` guard
+    for exactly this one lifespan run (restored by monkeypatch on teardown;
+    TestClient's own shutdown path cancels hb_task and stops the watchdog
+    thread on context exit), and returns (hb_monotonic_after_startup,
+    watchdog_thread_start_call_count)."""
     from localm.inference import http_server as hs
 
     home = tmp_path / ".localm"
@@ -322,11 +292,10 @@ def test_heartbeat_starts_when_watchdog_env_disabled(tmp_path, monkeypatch):
 
 def test_heartbeat_starts_in_privacy_mode_on_default_config(tmp_path, monkeypatch):
     """Config B: privacy mode, keep_diagnostics left at its default (False) -
-    the documented, supported "privacy mode, debug log on" combination
-    (debuglog.py's debug_content_enabled docstring: operational lines stay on
-    debug_enabled() even in privacy mode). The watchdog THREAD must stay off
-    (no automatic disk trace in privacy mode), but the heartbeat TASK must
-    still start so the debug log's loop_lag is real, not fabricated."""
+    the "privacy mode, debug log on" combination, where operational lines stay
+    on debug_enabled(). The watchdog THREAD stays off (no automatic disk trace
+    in privacy mode), while the heartbeat TASK still starts so the debug log's
+    loop_lag is real, not fabricated."""
     monkeypatch.delenv("LOCALM_HANG_WATCHDOG", raising=False)
     hb_after, watchdog_calls = _heartbeat_starts_with_watchdog_thread_disabled(
         tmp_path, monkeypatch, config_json='{"mode": "privacy"}')
@@ -341,17 +310,15 @@ def test_heartbeat_starts_in_privacy_mode_on_default_config(tmp_path, monkeypatc
 
 
 # --------------------------------------------------------------------------- #
-# GitHub #955/#950: loop_lag telemetry was not lag - it was time-since-last-
-# heartbeat-tick, which saws 0..1s on a perfectly healthy loop for no reason
-# other than where "now" falls in the heartbeat's own cycle. _loop_lag_seconds()
-# replaces the raw gap with a real scheduling-delay figure.
+# _loop_lag_seconds() reports a scheduling-delay figure, not the raw time since
+# the last heartbeat tick (which saws 0..1s on a healthy loop depending on where
+# now falls in the heartbeat's cycle).
 # --------------------------------------------------------------------------- #
 
 def test_loop_lag_seconds_is_real_scheduling_delay_not_time_since_tick(monkeypatch):
-    """Deterministic formula check: ~0 at every point in a healthy cycle -
-    including right at the next tick boundary, the worst case for the raw
-    (unfixed) formula - and the real overshoot only when a tick was genuinely
-    late (the loop was actually blocked)."""
+    """Deterministic formula check: 0.0 at every point in a healthy cycle,
+    including right at the next tick boundary, and the real overshoot only when
+    a tick was genuinely late."""
     from localm.inference import http_server as hs
 
     monkeypatch.setattr(hs, "_hb_monotonic", 100.0)
@@ -375,21 +342,15 @@ def test_loop_lag_seconds_is_real_scheduling_delay_not_time_since_tick(monkeypat
 
 @pytest.mark.anyio
 async def test_loop_lag_seconds_stays_at_floor_within_a_measured_safe_window():
-    """End-to-end proof, driving the REAL heartbeat coroutine (not a manually
-    staled _hb_monotonic): every sample taken while LESS than one full
-    interval has MEASURABLY elapsed since a confirmed real tick must read
-    exactly 0.0 - the pre-fix formula would show up to ~1s of fake "lag" here
-    purely from sampling mid-cycle (#955/#950).
+    """End-to-end, driving the REAL heartbeat coroutine rather than a manually
+    staled _hb_monotonic: every sample taken while LESS than one full interval
+    has MEASURABLY elapsed since a confirmed real tick reads exactly 0.0.
 
-    Deliberately NOT a wall-clock threshold like `max(samples) < 0.5`: this
-    box runs many concurrent sessions, and a fixed bound would eventually
-    flake on real contention that delays this test's own sampling loop
-    without the fix being wrong (this repo's own load-flake register is full
-    of exactly that shape). Instead each sample is gated on MEASURED elapsed
-    time since the last confirmed tick, so the assertion is mathematically
-    guaranteed by _loop_lag_seconds' own floor(0, gap - interval) formula
-    regardless of how much real scheduling jitter slows this loop down - a
-    slow box just yields fewer safe samples, never a false failure."""
+    NOT a wall-clock threshold like `max(samples) < 0.5`, which would flake
+    under load. Each sample is gated on MEASURED elapsed time since the last
+    confirmed tick, so the assertion follows from _loop_lag_seconds' own
+    floor(0, gap - interval) formula whatever the scheduling jitter; a slow box
+    yields fewer safe samples, never a false failure."""
     from localm.inference import http_server as hs
 
     hb = asyncio.create_task(hs._hang_heartbeat_loop())
@@ -403,8 +364,8 @@ async def test_loop_lag_seconds_stays_at_floor_within_a_measured_safe_window():
         assert hs._hb_monotonic != before, "heartbeat task never ticked"
         tick_at = hs._hb_monotonic
 
-        # Only samples PROVABLY within one interval of that confirmed tick are
-        # asserted on - safe_until is a hard, measured bound, not a guess.
+        # Only samples provably within one interval of that confirmed tick are
+        # asserted on; safe_until is a measured bound.
         safe_until = tick_at + hs._HEARTBEAT_INTERVAL_S * 0.9
         checked = 0
         while time.monotonic() < safe_until:
@@ -431,13 +392,11 @@ async def test_loop_lag_seconds_stays_at_floor_within_a_measured_safe_window():
 
 @pytest.mark.anyio
 async def test_loop_lag_seconds_is_clearly_positive_after_a_real_stall():
-    """The other half of the property: _loop_lag_seconds() must not just
-    unconditionally read 0.0 - a genuine event-loop block (not mid-cycle
-    sampling) must produce a clearly positive value. time.sleep() blocks the
-    real OS thread regardless of asyncio contention, so under real box load
-    this block can only run LONGER than requested, never shorter - the
-    generous margin (interval + 0.8s block, asserting only > 0.3s of
-    reported lag) stays true even then."""
+    """The other half of the property: a genuine event-loop block (not
+    mid-cycle sampling) produces a clearly positive value. time.sleep() blocks
+    the real OS thread regardless of asyncio contention, so the block can only
+    run LONGER than requested, never shorter, and the margin (interval + 0.8s
+    block, asserting only > 0.3s of reported lag) holds under load."""
     from localm.inference import http_server as hs
 
     hb = asyncio.create_task(hs._hang_heartbeat_loop())
@@ -459,22 +418,16 @@ async def test_loop_lag_seconds_is_clearly_positive_after_a_real_stall():
 
 
 # --------------------------------------------------------------------------- #
-# ADR-0008 U6: _loop_lag_seconds() now returns None (not 0.0) for "no reading
-# yet" - these prove the two real consumers render that explicitly rather
-# than crashing on a format spec that expects a float, or silently reusing
-# the "0.00s" healthy string. The hang watchdog thread is a THIRD reader of
-# the cold-start state but never calls _loop_lag_seconds() (it reads
-# _hb_monotonic directly - see test_watchdog_skips_the_check_before_the_
-# first_heartbeat_tick above), so it is unaffected by this change and is
-# deliberately not touched or re-tested here.
+# _loop_lag_seconds() returns None (not 0.0) for no-reading-yet; these prove the
+# two real consumers render that explicitly rather than crashing on a format
+# spec expecting a float or reusing the healthy 0.00s string. The hang watchdog
+# thread reads _hb_monotonic directly and is not a consumer.
 # --------------------------------------------------------------------------- #
 
 def test_debug_request_log_renders_cold_start_as_na_not_zero(caplog, monkeypatch):
-    """Before this fix, a request served before the heartbeat's first tick
-    logged "loop_lag=0.00s" - identical to a genuinely healthy reading,
-    because the producer hid "no reading yet" behind the same float a
-    healthy loop reports. Now renders "n/a", and the old numeric format for
-    this exact case is asserted ABSENT, not just the new one present."""
+    """A request served before the heartbeat's first tick renders "n/a", not
+    "loop_lag=0.00s", which is what a genuinely healthy loop reports. The
+    numeric format for this case is asserted ABSENT, not just "n/a" present."""
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     from localm.inference import http_server as hs
     monkeypatch.setattr(hs, "_hb_monotonic", None)
@@ -482,11 +435,9 @@ def test_debug_request_log_renders_cold_start_as_na_not_zero(caplog, monkeypatch
     with caplog.at_level("DEBUG", logger="localm"):
         with TestClient(app) as c:
             r = c.get("/health")
-    # create_app(None, ...) has no engine, so /health itself legitimately
-    # 503s ("No engine initialised") - the logging middleware wraps every
-    # response regardless of status, so the log line is captured either way;
-    # this assertion is about that route's own unrelated contract, not this
-    # fix, so pin it explicitly rather than assume 200.
+    # create_app(None, ...) has no engine, so /health itself 503s. The logging
+    # middleware wraps every response regardless of status, so the log line is
+    # captured either way.
     assert r.status_code == 503
     lines = [rec.getMessage() for rec in caplog.records if "loop_lag=" in rec.getMessage()]
     assert lines, "no request log line carrying loop_lag was captured"
@@ -495,8 +446,8 @@ def test_debug_request_log_renders_cold_start_as_na_not_zero(caplog, monkeypatch
 
 
 def test_debug_request_log_renders_a_real_reading_as_before(caplog, monkeypatch):
-    """The other half: once there IS a real reading, the log format is
-    unchanged from before this fix (%.2fs), never "n/a"."""
+    """The other half: once there IS a real reading, the log format is the
+    numeric one (%.2fs), never "n/a"."""
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     from localm.inference import http_server as hs
     monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())   # "just ticked"
@@ -512,12 +463,12 @@ def test_debug_request_log_renders_a_real_reading_as_before(caplog, monkeypatch)
 
 
 def test_debug_stacks_renders_cold_start_as_json_null_not_zero(app, monkeypatch):
-    """/debug/stacks' loop_lag_s field must be JSON null for a cold-start
-    reading, never 0.0 - the same "no reading yet" vs "healthy" collision
-    ADR-0008 U6 fixes at the debug-log site, checked here for the OTHER
-    consumer so a fix to one call site cannot leave the other one wrong.
-    Uses the `app` fixture defined below - pytest resolves fixtures by name
-    across the whole module, so the physical order here does not matter."""
+    """/debug/stacks' loop_lag_s field is JSON null for a cold-start reading,
+    never 0.0 - the same "no reading yet" vs "healthy" distinction the
+    debug-log site makes, checked here for the OTHER consumer.
+
+    Uses the `app` fixture defined below; pytest resolves fixtures by name
+    across the whole module, so the physical order does not matter."""
     from localm.inference import http_server as hs
     monkeypatch.setattr(hs, "_hb_monotonic", None)
     app.state.bind_host = "127.0.0.1"
@@ -555,11 +506,8 @@ def app(tmp_path, monkeypatch):
 
 
 def test_debug_stacks_open_mode_loopback(app):
-    # Open mode (no key configured) + loopback bind -> require_fs_host passes,
-    # but the open-mode SHELL TOKEN is now also required (CodeQL 97): keyless
-    # effective_fs_access returns "host" for everyone, so require_fs_host alone
-    # left this fully unauthenticated. See tests/test_disclosure.py for the
-    # refusal side; this asserts the diagnostic still works for the GUI shell.
+    # Open mode (no key configured) + loopback bind: require_fs_host passes, and
+    # the open-mode SHELL TOKEN is required as well.
     app.state.bind_host = "127.0.0.1"
     c = TestClient(app)
     r = c.get("/debug/stacks",
@@ -571,16 +519,15 @@ def test_debug_stacks_open_mode_loopback(app):
 
 
 def test_debug_stacks_open_mode_needs_shell_token(app):
-    # The other half of the change above: no token -> refused, where it used to
-    # return every thread's stack to any local caller.
+    # No token: refused.
     app.state.bind_host = "127.0.0.1"
     assert TestClient(app).get("/debug/stacks").status_code in (401, 403)
 
 
 def test_debug_stacks_hidden_on_network_bind(app):
     # Still 404 (not 403) with NO credential: the shell-token gate is applied
-    # only on a loopback bind precisely so this stays "hidden" rather than
-    # becoming "exists but needs auth".
+    # only on a loopback bind, so the route stays hidden rather than
+    # exists-but-needs-auth.
     for host in ("0.0.0.0", "192.168.1.50", "10.0.0.7"):
         app.state.bind_host = host
         r = TestClient(app).get("/debug/stacks")

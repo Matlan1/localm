@@ -147,8 +147,8 @@ def test_run_job_memory_kind(memhome):
 
 
 def test_run_job_memory_surfaces_pending_corrections(memhome):
-    # A background memory job must TELL the user when a saved fact has a pending
-    # supersede suggestion (rule 5: do not hide), reporting the total outstanding.
+    # A background memory job tells the user when a saved fact has a pending
+    # supersede suggestion, reporting the total outstanding.
     from localm.plugins.builtin.jobs import runner
     from localm.plugins.builtin.jobs.store import Job
 
@@ -174,7 +174,7 @@ def test_run_job_memory_surfaces_pending_corrections(memhome):
               schedule_kind="interval", schedule=3600)
     res = runner.run_job(job, engine=FakeEng())
     assert res["status"] == "ok"
-    assert "await review" in res["output"], res["output"]     # rule-5 surfacing
+    assert "await review" in res["output"], res["output"]     # the surfacing
     # the trusted fact is untouched and the correction is pending, not applied
     assert any("Berlin" in r.text for r in plug._chat_store().all())
     assert len(plug._chat_store().corrections()) == 1

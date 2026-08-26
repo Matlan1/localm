@@ -22,14 +22,13 @@ class TestFluxImageTool(unittest.TestCase):
         if self.abs_output_path.exists():
             self.abs_output_path.unlink()
 
-    # Preflight queries /object_info; stub it out so this test's strict positional
-    # urlopen sequence (system_stats -> prompt -> history -> view) is unaffected.
-    # preflight_models lives in the shared client and calls comfy_object_info as a
-    # bare global there, so the stub must target comfy_client (the symbol's home).
+    # Stub the /object_info preflight query so the positional urlopen sequence
+    # below (system_stats -> prompt -> history -> view) is unaffected.
+    # preflight_models calls comfy_object_info as a bare global in comfy_client,
+    # so the stub targets comfy_client.
     @patch("localm.media.comfy_client.comfy_object_info", return_value=None)
-    # comfy_client routes ComfyUI calls through its own _comfy_urlopen
-    # (CHK-COMFY-REDIRECT), which builds its own opener and never calls the
-    # top-level urllib.request.urlopen - that is the seam to patch.
+    # comfy_client routes ComfyUI calls through its own _comfy_urlopen, never
+    # the top-level urllib.request.urlopen; that is the seam to patch.
     @patch("localm.media.comfy_client._comfy_urlopen")
     @patch("urllib.request.Request")
     def test_generate_image_success(self, mock_request_cls, mock_urlopen, mock_obj_info):
@@ -89,7 +88,7 @@ class TestFluxImageTool(unittest.TestCase):
 
     @patch("localm.image_gen.comfy.generate_image")
     def test_privacy_mode_suppresses_sidecar(self, mock_gen):
-        """BUG-10: in privacy mode the prompt sidecar must not be written."""
+        """In privacy mode the prompt sidecar must not be written."""
         mock_gen.return_value = (True, "Image saved to x")
         tool_generate_image(self.cwd, "p", self.output_path, _privacy=True)
         _, kwargs = mock_gen.call_args
@@ -97,9 +96,9 @@ class TestFluxImageTool(unittest.TestCase):
 
     @patch("localm.image_gen.comfy.generate_image")
     def test_privacy_mode_deletes_comfy_output_copy(self, mock_gen):
-        """Privacy mode must also delete ComfyUI's own on-disk output copy
-        (it embeds the full prompt/workflow as PNG metadata) - not just
-        suppress the sidecar. See CONSOLIDATED-FINDINGS item 2."""
+        """Privacy mode also deletes ComfyUI's own on-disk output copy, which
+        embeds the full prompt/workflow as PNG metadata, not just the
+        sidecar."""
         mock_gen.return_value = (True, "Image saved to x")
         tool_generate_image(self.cwd, "p", self.output_path, _privacy=True)
         _, kwargs = mock_gen.call_args
@@ -107,15 +106,10 @@ class TestFluxImageTool(unittest.TestCase):
 
     @patch("localm.image_gen.comfy.generate_image")
     def test_uses_default_api_url_not_a_hardcoded_default(self, mock_gen):
-        """This tool used to hardcode
-        os.environ.get("FLUX_API_URL", "http://127.0.0.1:8188"), bypassing
-        default_api_url()'s localm-managed-instance routing entirely - so the
-        coder agent's image tool never routed to a managed ComfyUI, managed-
-        active or not (same bug family as
-        NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). Confirms it
-        now calls through default_api_url() by mocking IT to a distinct URL
-        and asserting that value - not the old hardcoded loopback default -
-        reaches generate_image()."""
+        """The tool resolves its target through default_api_url(), which carries
+        the localm-managed-instance routing, rather than reading FLUX_API_URL
+        with a hardcoded loopback fallback. default_api_url is mocked to a
+        distinct URL and that value is asserted to reach generate_image()."""
         mock_gen.return_value = (True, "Image saved to x")
         with patch("localm.media.comfy_client.default_api_url",
                    return_value="http://127.0.0.1:8189"):
@@ -139,13 +133,12 @@ class TestFluxImageTool(unittest.TestCase):
 
     @patch("localm.image_gen.comfy.ensure_comfy", return_value=(True, "up"))
     def test_lora_name_traversal_rejected(self, mock_ensure):
-        """This tool calls localm.image_gen.comfy.generate_image DIRECTLY - it
-        never goes through the HTTP image route's plug.py._validate_lora_name
-        (that guard only covers browser-originated requests), so a malicious
-        lora_name reaching this tool must be caught by the SAME check inside
-        _build_image_workflow itself (comfy.is_safe_lora_name). ensure_comfy is
-        stubbed only to reach that check; everything past it (preflight,
-        submit) must never run, which the absence of the output file confirms."""
+        """This tool calls localm.image_gen.comfy.generate_image DIRECTLY and
+        never goes through the HTTP image route's plug.py._validate_lora_name,
+        so a malicious lora_name is caught by the same check inside
+        _build_image_workflow (comfy.is_safe_lora_name). ensure_comfy is stubbed
+        only to reach that check; nothing past it (preflight, submit) runs, which
+        the absence of the output file confirms."""
         result = tool_generate_image(
             self.cwd, "a photorealistic cat", self.output_path,
             lora_name="../../secrets.safetensors")
@@ -155,7 +148,7 @@ class TestFluxImageTool(unittest.TestCase):
 
     @patch("localm.media.comfy_client._comfy_urlopen")
     def test_generate_image_connection_failure(self, mock_urlopen):
-        # Force a connection refusal - the fail-fast probe catches it now
+        # Force a connection refusal
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
 
         # Execute the tool
@@ -168,8 +161,8 @@ class TestFluxImageTool(unittest.TestCase):
         self.assertFalse(self.abs_output_path.exists())
 
 def test_agent_injects_privacy_for_generate_image(tmp_path):
-    """BUG-10: the coder agent must inject _privacy=True for generate_image in
-    privacy mode, so the tool suppresses the prompt sidecar."""
+    """The coder agent injects _privacy=True for generate_image in privacy
+    mode, so the tool suppresses the prompt sidecar."""
     from localm.plugins.coder.agent import Agent
     from localm.audit import SessionMode, NullAuditLog
     from localm.plugins.coder.parser import ToolCall
@@ -197,8 +190,8 @@ def test_agent_injects_privacy_for_generate_image(tmp_path):
 
 
 def test_repl_generate_image_privacy_no_sidecar(tmp_path, monkeypatch):
-    """BUG-9: REPL /generate-image must suppress the sidecar in privacy mode and
-    pass the resolved api_url (not the hardcoded 8188 default)."""
+    """REPL /generate-image suppresses the sidecar in privacy mode and passes
+    the resolved api_url, not the 8188 default."""
     from localm import cli
     from localm.audit import SessionMode
 
@@ -219,8 +212,7 @@ def test_repl_generate_image_privacy_no_sidecar(tmp_path, monkeypatch):
 
     assert calls.get("write_sidecar") is False
     assert calls.get("api_url") == "http://127.0.0.1:9999"
-    # Privacy mode must also delete ComfyUI's own on-disk output copy (it
-    # embeds the full prompt/workflow as PNG metadata), not just the sidecar.
+    # Privacy mode deletes ComfyUI's own on-disk output copy, not just the sidecar.
     assert calls.get("delete_outputs") is True
 
 

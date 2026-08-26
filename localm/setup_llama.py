@@ -58,8 +58,8 @@ Which BUILD, as distinct from which backend:
     ``localm update``'s re-provision keep it. ``--tag latest`` opts IN to
     upstream's newest release, which localm has not confirmed; ``--tag default``
     returns to the shipped pin. All three live in one config key
-    (``llama_runtime_pin``) read by ``_tag_for``, which is why the updater
-    inherits the choice without knowing it exists.
+    (``llama_runtime_pin``) read by ``_tag_for``, so the updater inherits the
+    choice without knowing it exists.
   * ``--rollback`` returns to the previous build recorded for this backend.
     This exists because upstream can ship a release that is broken on a given
     machine - the ``llama_context_params`` ABI shift, an asset rename, a
@@ -136,43 +136,33 @@ _UPSTREAM_REPO = "ggml-org/llama.cpp"
 # THE BUILD localm INSTALLS. One constant, decided here, never computed while a
 # user is running setup.
 #
-# This used to resolve upstream's newest release with uploaded assets at RUNTIME,
-# on every install, released builds included. So a third party publishing a
-# release could break every fresh and updating install with no localm change at
-# all - which is not hypothetical: b10373 shipped a new default
-# LLAMA_LOAD_MODE_AUTO, localm's own ABI gate refused it, and a fresh
-# `setup-llama` was dead on arrival until localm was changed. Nothing about that
-# release was broken. It was simply never tested against this code, because
-# nothing tested anything before installing it.
+# Resolving upstream's newest release with uploaded assets at RUNTIME would let
+# a third party's publish break every fresh and updating install with no localm
+# change at all, so the tag is a constant instead.
 #
-# WHAT "CONFIRMED" MEANS HERE, and it is deliberately not "it loads": the build
-# was downloaded, loaded through localm's real loader, and made to GENERATE
-# TOKENS with a real model. "It loads so it will be fine" is what produced the
-# outage above. scripts/confirm_llama_runtime.py is that check, and the per-
-# backend record of what each pin actually rests on is _PIN_CONFIRMATION below.
+# "CONFIRMED" here means the build was downloaded, loaded through localm's real
+# loader, and made to GENERATE TOKENS with a real model - not merely that it
+# loads. scripts/confirm_llama_runtime.py is that check, and the per-backend
+# record of what each pin rests on is _PIN_CONFIRMATION below.
 #
-# ONE CONSTANT, NOT ONE PER BACKEND, and the reason is structural rather than a
-# simplification: upstream ships ONE llama.dll for every backend of a given tag
-# (the backend lives in the separate ggml-* plugin libraries), so the struct
-# layout this gate cares about cannot differ between them. Measured, not
-# inferred - byte-identical across cpu/vulkan/cuda at b10361 (4a587d89) and at
-# b10373 (f2021c86), and re-measured at each new pin by the confirm script
-# rather than inherited. GENERATION is the part that IS backend-specific, which
-# is exactly what _PIN_CONFIRMATION records.
+# ONE CONSTANT, NOT ONE PER BACKEND: upstream ships ONE llama.dll for every
+# backend of a given tag (the backend lives in the separate ggml-* plugin
+# libraries), so the struct layout this gate cares about cannot differ between
+# them, and the confirm script re-checks that byte-identity at each new pin.
+# GENERATION is the part that IS backend-specific, which is what
+# _PIN_CONFIRMATION records.
 #
-# STAYING CLOSE TO UPSTREAM IS PART OF THE REQUIREMENT, not an afterthought: a
-# pin nobody advances fails a user as surely as tracking latest does, just more
-# slowly. scripts/check_llama_pin.py reports how far behind this constant has
-# fallen (the same shape as the ComfyUI pin's own currency check), and
-# `--tag latest` is the escape hatch for a user who needs an upstream fix today.
+# STAYING CLOSE TO UPSTREAM IS PART OF THE REQUIREMENT: a pin nobody advances
+# fails a user as surely as tracking latest does. scripts/check_llama_pin.py
+# reports how far behind this constant has fallen, and `--tag latest` is the
+# escape hatch for a user who needs an upstream fix today.
 _PINNED_TAG = "b10375"
 
-# WHAT THE PIN RESTS ON, PER BACKEND. Deliberately not a boolean and deliberately
-# not a single "confirmed" flag: a confirmation job that is green because it
-# SILENTLY SKIPPED the backends it could not test would be worse than no job,
-# because it would carry the word "confirmed".
+# WHAT THE PIN RESTS ON, PER BACKEND. Not a boolean and not a single "confirmed"
+# flag: a confirmation job that is green because it SILENTLY SKIPPED the backends
+# it could not test would carry the word "confirmed" without the evidence.
 #
-# The asymmetry is hardware, and it is not going away: a GitHub runner has no
+# The asymmetry is hardware: a GitHub runner has no
 # GPU, so CI can honestly generate on cpu only. vulkan is confirmed on the
 # maintainer's box. cuda, sycl, hip and metal need hardware nobody here has.
 #
@@ -192,9 +182,7 @@ _PIN_CONFIRMATION = {
     "hip": "ABI only (shared llama library); generation NOT measured - needs a system ROCm toolkit",
     "metal": "ABI only (shared llama library); generation NOT measured - no Apple Silicon",
     # Not an upstream tag at all: the lemonade-sdk build, pinned separately by
-    # _ROCM_TAG, so this table's subject (_PINNED_TAG) does not describe it and
-    # nothing here was measured against it. Stated rather than omitted, because
-    # an absent row reads as "covered like the others".
+    # _ROCM_TAG, so this table's subject (_PINNED_TAG) does not describe it.
     "amd-rocm": "out of scope for _PINNED_TAG - pinned separately as _ROCM_TAG, "
                 "whose generation was NOT measured by this pin's confirmation",
 }
@@ -204,8 +192,8 @@ _PIN_CONFIRMATION = {
 # because empty now means the shipped pin, which is the safe default; a user who
 # wants upstream's newest has to say so, and it stays visible in their config.
 #
-# Kept OUT of pinned_tag()'s return value on purpose. Every existing caller of
-# that function treats what it returns as an exact release tag and interpolates
+# Kept OUT of pinned_tag()'s return value. Every existing caller of that
+# function treats what it returns as an exact release tag and interpolates
 # it into a URL path segment, so letting the sentinel through would produce a
 # confident request for a release literally named "latest". tracks_latest() is
 # the second accessor instead, and _tag_for() is the only place that consults
@@ -213,23 +201,17 @@ _PIN_CONFIRMATION = {
 _TRACK_LATEST = "latest"
 
 # The documented word for "go back to the build localm ships and confirmed".
-# Needed because `--tag latest` no longer means that: before the pin existed,
-# clearing the pin WAS how you got the default, and the default was upstream's
-# newest. Those are now two different destinations and each needs its own word.
+# Distinct from `--tag latest`: those are two different destinations, so each
+# has its own word.
 _TRACK_DEFAULT = "default"
 
-# Third-party Linux CUDA prebuilt (see dev-notes/ADR-0010): upstream publishes
-# no bare Linux CUDA binary itself (verified live against their releases), so
-# this fetches from an actively-maintained third party instead - the same
-# shape as the amd-rocm backend's own dependency on lemonade-sdk/
-# llamacpp-rocm, just below. hybridgroup/llama-cpp-builder tracks upstream's
-# bNNNNN tag numbering 1:1 and publishes the same asset-name convention
-# upstream itself uses for every other Linux backend - verified live before
-# wiring this in: a real asset downloaded, its ELF NEEDED list and glibc
-# floor parsed (dev-notes/ADR-0010). Deliberately NOT a localm-built/-hosted
-# binary - see the ADR for why self-building was considered and rejected. A
-# public repo slug in a URL is not personal disclosure (AGENTS.md rule 2's
-# own documented carve-out), same as every other GitHub URL in this file.
+# Third-party Linux CUDA prebuilt: upstream publishes no bare Linux CUDA binary
+# itself, so this fetches from an actively-maintained third party instead - the
+# same shape as the amd-rocm backend's own dependency on
+# lemonade-sdk/llamacpp-rocm, just below. hybridgroup/llama-cpp-builder tracks
+# upstream's bNNNNN tag numbering 1:1 and publishes the same asset-name
+# convention upstream itself uses for every other Linux backend. NOT a
+# localm-built or localm-hosted binary.
 _CUDA_LINUX_REPO = "hybridgroup/llama-cpp-builder"
 
 # Offline checksums for the assets of the pinned builds. Only consulted when the
@@ -244,23 +226,13 @@ _CUDA_LINUX_REPO = "hybridgroup/llama-cpp-builder"
 # in exactly the situation the pin exists to be reliable in. So the pin and its
 # digests move together: bump one, bump the other.
 #
-# THE TABLE HOLDS EXACTLY THE TAGS THIS FILE PINS, and a test enforces that. It
-# used to also carry the whole asset list of b9870, the old dynamic-resolution
-# fallback. Those entries went with _FALLBACK_TAG: nothing resolved to that tag
-# any more, nobody had ever confirmed it loads or generates under the current
-# binding, and an explicit `--tag b9870` is not special enough to deserve offline
-# checksums that `--tag <any other release>` does not get. Keeping them would
-# have been a stale pin reading as coverage, which is the exact thing
-# test_every_pinned_asset_belongs_to_a_pinned_tag exists to catch.
+# THE TABLE HOLDS EXACTLY THE TAGS THIS FILE PINS, and a test enforces that: an
+# entry for a tag nothing resolves to is a stale pin that reads as coverage.
 #
-# The values are the API's own `digest` fields. That is not taken on trust: the
-# b1307 gfx103X asset was downloaded and hashed locally on 2026-08-05 and came
-# out byte-identical to the digest GitHub reports, which is what makes the rest
-# usable without pulling several GB.
+# The values are the API's own `digest` fields.
 _PINNED_FALLBACK_SHA256 = {
     # tag b10375 upstream assets (_PINNED_TAG). The three cudart bundles carry no
-    # tag in their names and upstream re-uploads the same file each release -
-    # verified: byte-identical digests for 12.4 and 13.3 at b9870 and at b10375.
+    # tag in their names and upstream re-uploads the same file each release.
     "cudart-llama-bin-win-cuda-12.4-x64.zip": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
     "cudart-llama-bin-win-cuda-13.3-x64.zip": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
     "cudart-llama-bin-win-cuda-13.4-arm64.zip": "5a40dc7c5fa3d0a80ceeba4f16f9e8d25d87bcf1399c9233588953c43436c33c",
@@ -321,21 +293,15 @@ _ASSET_MATCH = {
             "cuda-13": ["bin-win-cuda-13.3-x64", "bin-win-cuda-13"],
         },
         "sycl":   ["bin-win-sycl-x64"],
-        # Upstream renamed the Windows ROCm/HIP asset at b10356 (2026-08-11,
-        # PR 25775 "Add CI targets for ROCm 7.14"): "bin-win-hip-radeon-x64"
-        # -> "bin-win-rocm-<version>-x64" (e.g. bin-win-rocm-7.14-x64), the
-        # same shape as the Linux asset's own versioned name. Without a fragment
-        # matching the new name this backend silently guessed a URL for a
-        # filename that no longer exists and 404'd - caught 2026-08-11 while
-        # building the AMD ROCm-detection escalation
-        # (dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5).
+        # Upstream renamed the Windows ROCm/HIP asset at b10356:
+        # "bin-win-hip-radeon-x64" -> "bin-win-rocm-<version>-x64" (e.g.
+        # bin-win-rocm-7.14-x64), the same shape as the Linux asset's own
+        # versioned name. Without a fragment matching the new name this backend
+        # guesses a URL for a filename that does not exist and 404s.
         #
         # ORDER: newest naming first, mirroring the Linux entry's "specific, then
-        # generic" shape below. The OLD name used to be first because the frozen
-        # b9870 fallback tag's pinned assets were genuinely still named that way;
-        # that tag and its entries are gone with _FALLBACK_TAG, so leading with a
-        # name upstream no longer publishes would only ever mis-resolve. It stays
-        # LAST so an explicit --tag on a pre-rename release still works.
+        # generic" shape below. The OLD name is LAST so an explicit --tag on a
+        # pre-rename release still resolves.
         "hip":    ["bin-win-rocm-7.14-x64", "bin-win-rocm", "bin-win-hip-radeon-x64"],
     },
     "linux": {
@@ -357,7 +323,7 @@ _ASSET_MATCH = {
 # the self-contained "amd-rocm").
 _UPSTREAM_BACKENDS = ("vulkan", "cuda", "sycl", "hip", "cpu", "metal")
 
-# SEC-8: a prebuilt llama runtime archive is many megabytes. Anything below this
+# A prebuilt llama runtime archive is many megabytes. Anything below this
 # floor is almost certainly an error page, a redirect stub, or a truncated
 # transfer, never the real artifact. This is the always-on lower bound; the
 # valid-archive structural check below is the second always-on guard. A pinned
@@ -412,7 +378,7 @@ def _lib_name() -> str:
 # A tiny marker file recording WHICH backend currently occupies the runtime lib
 # dir. It exists so the "already provisioned" guard can be backend-aware: a later
 # `setup-llama --backend cuda` on a box that already has a vulkan/cpu build must
-# still fetch CUDA (R23), instead of short-circuiting on the mere presence of a
+# still fetch CUDA, instead of short-circuiting on the mere presence of a
 # library. A dotfile, like the venv's .localm-venv marker; never loaded as code.
 _BACKEND_MARKER = ".localm-backend"
 
@@ -500,11 +466,9 @@ def installed_build() -> "Optional[str]":
     """The llama.cpp release tag actually provisioned on this box right now, or
     None when nothing is provisioned or the marker predates tag recording.
 
-    Public, read-only, and deliberately the exact shape of installed_backend()
-    above (PR #1236's pattern) rather than a second mechanism: doctor and the
-    bug reporter need "which build is on disk", and inferring it from library
-    filenames - which is what triage had to do for the b10360/b10361 question -
-    is a guess, not a lookup.
+    Public, read-only, and the exact shape of installed_backend() above rather
+    than a second mechanism: doctor and the bug reporter need "which build is on
+    disk", and inferring it from library filenames is a guess, not a lookup.
 
     None is NORMAL and every caller must render it as "not recorded" rather than
     guessing a version. See _provisioned_build."""
@@ -532,17 +496,14 @@ BACKENDS: "tuple[str, ...]" = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
 # A release tag is interpolated straight into a GitHub API path and a download
 # URL, so it is validated as a PATH SEGMENT, not merely as "looks like a tag": a
 # value carrying '/', '..', '?' or '#' would silently retarget the request at a
-# different endpoint. Deliberately broader than upstream's own bNNNNN shape so a
-# future tag scheme is not refused by a cosmetic rule - the check is about what
-# is safe in a URL, which is the part that must never be relaxed.
+# different endpoint. Broader than upstream's own bNNNNN shape: the check is
+# about what is safe in a URL, which is the part that must never be relaxed.
 _TAG_SAFE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 # What a usable tag looks like, in one sentence, for whoever has to REFUSE one.
-# Shared for the same reason is_safe_tag is: the CLI raises a ClickException and
-# the GUI route raises a 400, and a user who reads one and then the other must
-# not be told two different rules (diff-review-discipline.md item 28 - a fact
-# stated in more than one place diverges exactly where it costs most).
+# Shared by the CLI (which raises a ClickException) and the GUI route (which
+# raises a 400), so both state the same rule.
 TAG_HELP = ("Use a tag as upstream publishes it, for example 'b10355' (letters, "
             "digits, dot, dash and underscore only), or "
             f"{_TRACK_DEFAULT!r} for the build localm ships and confirmed, or "
@@ -552,11 +513,10 @@ TAG_HELP = ("Use a tag as upstream publishes it, for example 'b10355' (letters, 
 def is_safe_tag(tag: "Optional[str]") -> bool:
     """Whether *tag* is safe to interpolate into a release URL path segment.
 
-    PUBLIC because it is no longer only this module's business: the GUI's
-    runtime route accepts a caller-supplied tag and must refuse a bad one with
-    a 400 BEFORE dispatching a job, and it has to refuse EXACTLY what the CLI
-    refuses. One predicate, one answer, whichever surface asks - the same
-    reason _validated_tag delegates here rather than carrying its own regex."""
+    PUBLIC: the GUI's runtime route accepts a caller-supplied tag and must
+    refuse a bad one with a 400 BEFORE dispatching a job, and it has to refuse
+    EXACTLY what the CLI refuses. One predicate, one answer, whichever surface
+    asks; _validated_tag delegates here rather than carrying its own regex."""
     tag = (tag or "").strip()
     return bool(_TAG_SAFE_RE.match(tag)) and ".." not in tag
 
@@ -565,11 +525,9 @@ def tracks_latest() -> bool:
     """Whether this install has opted IN to upstream's newest release rather than
     the confirmed build localm ships (``setup-llama --tag latest``).
 
-    Deliberately a SEPARATE accessor from pinned_tag() rather than a third
-    possible return value from it. Every caller of pinned_tag() interpolates what
-    it gets into a release URL path segment, so a sentinel leaking through there
-    would produce a confident request for a release named "latest"; keeping the
-    two apart makes that unrepresentable rather than merely unlikely.
+    A SEPARATE accessor from pinned_tag() rather than a third possible return
+    value from it: every caller of pinned_tag() interpolates what it gets into a
+    release URL path segment, so the sentinel must never leak through there.
 
     Never raises, same contract as pinned_tag(): an unreadable config degrades to
     "not tracking", which is the conservative answer - it means the shipped,
@@ -722,11 +680,11 @@ def check_runtime_update() -> dict:
     shipped ``_PINNED_TAG``. ``amd-rocm`` compares against its fixed
     ``_ROCM_TAG``, since that build is never resolved from an upstream tag at all.
 
-    ONLY THE TRACKING CASE MAKES A NETWORK CALL NOW. The default path answers
-    from a constant, so the GUI's runtime-update card no longer reaches GitHub on
-    every check. The offload in localm/plugins/gui/routes/runtime.py stays right
-    regardless: a tracking install still needs it, and a route cannot know which
-    kind of install it is serving.
+    ONLY THE TRACKING CASE MAKES A NETWORK CALL. The default path answers from a
+    constant, so the GUI's runtime-update card does not reach GitHub on every
+    check. The offload in localm/plugins/gui/routes/runtime.py still applies: a
+    tracking install needs it, and a route cannot know which kind of install it
+    is serving.
 
     This target is a CANDIDATE, not a proof that it loads on THIS machine: that
     is only established by attempting the provision, which is what
@@ -792,9 +750,8 @@ def _tag_for(backend: str) -> str:
 
 def _pin_note_for_backend(backend: str) -> None:
     """Say plainly when a pin the user set does not apply to the backend being
-    provisioned, instead of dropping it silently (AGENTS.md rule 5). Only
-    amd-rocm is in that position today: its tag is lemonade-sdk's, not
-    upstream's."""
+    provisioned, instead of dropping it silently. Only amd-rocm is in that
+    position today: its tag is lemonade-sdk's, not upstream's."""
     if backend != "amd-rocm":
         return
     pin = pinned_tag()
@@ -840,8 +797,8 @@ def _is_wanted(f: Path) -> bool:
     lone outlier. Dropping .exe makes it agree with the platforms that already
     demonstrate the product does not need them.
 
-    Libraries are kept WHOLESALE and deliberately - a .dll may be an OS-resolved
-    link dependency of ggml-hip/llama rather than something localm opens by name
+    Libraries are kept WHOLESALE - a .dll may be an OS-resolved link dependency
+    of ggml-hip/llama rather than something localm opens by name
     (amd_comgr, rocblas, hipblaslt, rocsolver, origami, rocm_kpack all are), so
     proving one unused would need a link-graph walk. Unproven means keep: a
     retained stray file costs disk, a removed dependency costs a broken install
@@ -851,8 +808,7 @@ def _is_wanted(f: Path) -> bool:
     unauthenticated-RCE advisory in its own component (CVE-2026-34159, fixed in
     the build we ship). localm never ran it, so this is not a vulnerability fix -
     but an unnecessary network daemon has no business in the install directory of
-    an offline-first app. See dev-notes/SECURITY-llamacpp-parser-memory-safety-
-    2026-08-05.md.
+    an offline-first app.
     """
     n = f.name.lower()
     if sys.platform == "win32":
@@ -876,31 +832,26 @@ def _is_wanted(f: Path) -> bool:
 # through Tensile (the embedder's non-causal batch encode) hit it: rocBLAS
 # fails to init its Tensile host and hard-crashes the native process outright
 # (uncatchable from Python - the whole reason the embedder load/embed calls run
-# in an isolated child, see inference/embedder.py). Confirmed 2026-07-17: the
-# lemonade-sdk b1288 gfx103X archive DOES ship a complete rocblas/library/ (410
-# files, including gfx1030 kernels) and hipblaslt/library/ - the data was always
-# there, just always dropped on the way in.
+# in an isolated child, see inference/embedder.py). The lemonade-sdk gfx103X
+# archives ship a complete rocblas/library/ including gfx1030 kernels; the data
+# was always in the archive, just dropped on the way in.
 #
-# Re-measured 2026-08-05 on the lemonade b1307 gfx103X archive: rocblas/library/ is still
-# there and now carries 142 gfx1030 kernel files (up from 88), while
-# hipblaslt/library/ is GONE. That is not a regression to chase - lemonade b1288's
-# hipblaslt data contained gfx1100 kernels ONLY, zero gfx1030, so it was never
-# usable by the gfx103X target this archive is built for. Both names stay listed
-# because the same code provisions the gfx110X/gfx120X archives too, and a
-# missing directory is already a no-op here.
+# The current gfx103X archive carries no hipblaslt/library/ at all, and that is
+# not a regression to chase: the hipblaslt data an earlier archive carried held
+# gfx1100 kernels only, so this target never had usable data. Both names stay
+# listed because the same code provisions the gfx110X/gfx120X archives too, and
+# a missing directory is already a no-op here.
 _BLAS_LIBRARY_DIRS = ("rocblas", "hipblaslt")
 
 # Of those, the ones whose kernel data is genuinely REQUIRED by an install that
-# ships the matching vendor library. Only rocblas, and the asymmetry is measured,
-# not assumed:
+# ships the matching vendor library. Only rocblas:
 #   * rocblas WITHOUT its Tensile data hard-crashes the native process on the
 #     first GEMM dispatched through it (the embedder's batch encode) - the
 #     uncatchable crash documented above.
-#   * hipblaslt is present as a library and has NO kernel directory at all on the
-#     b1307 gfx103X archive we ship, and that install is healthy (verified
-#     2026-08-05: a real model generating and the embedder producing correct
-#     cosines). Its b1288 data held gfx1100 kernels only, zero gfx1030, so this
-#     target never had usable data to lose.
+#   * hipblaslt is present as a library and has NO kernel directory at all on
+#     the shipped gfx103X archive, and that install is healthy. The hipblaslt
+#     data an earlier archive carried held gfx1100 kernels only, so this target
+#     never had usable data to lose.
 # So requiring a hipblaslt directory would fire on every healthy gfx103X install:
 # a check that cries wolf on the normal case is worse than no check, because it
 # trains people to ignore it. If a gfx110X/gfx120X user ever reports a hipblaslt
@@ -935,7 +886,7 @@ def blas_kernel_problems(target: Path) -> "list[str]":
     last during a provision, so a half-finished install can be missing it exactly
     when this check matters most.
 
-    Scope, deliberately: this catches "the library is installed but its runtime
+    Scope: this catches "the library is installed but its runtime
     kernel data is not", which is the SILENT failure - provisioning succeeds, chat
     works, and the crash arrives later on the first Tensile GEMM. It does not try
     to catch a missing library, because that one already fails loudly at load."""
@@ -998,8 +949,8 @@ def _repo_runtime_lib() -> Path:
         # the repo-relative fallback is correct then - do NOT hard-fail. But a
         # BROKEN install (import error other than not-found) would otherwise be
         # invisible and lead to loading stale binaries, so surface it at debug
-        # level (rule 5: do not silence) without breaking the not-yet-installed
-        # path. Mirrors the visible-fallback pattern in _auto_backend below.
+        # level, without breaking the not-yet-installed path. Mirrors the
+        # visible-fallback pattern in _auto_backend below.
         logger.debug("localm_llama_runtime import failed (%s); "
                      "using the repo-relative runtime lib dir", e)
         repo_root = Path(__file__).resolve().parent.parent
@@ -1042,23 +993,23 @@ def _latest_tag() -> str:
     assets uploaded, or _PINNED_TAG if no such release can be found (offline,
     rate-limited, etc.).
 
-    ONLY REACHED WHEN THE USER OPTED IN with ``--tag latest``. It is no longer
-    the default: see _tag_for. What it returns is by construction a build nobody
-    here has run, which is the trade that flag exists to offer.
+    ONLY REACHED WHEN THE USER OPTED IN with ``--tag latest``; it is not the
+    default (see _tag_for). What it returns is by construction a build nobody
+    here has run.
 
     The unavailable case falls back to _PINNED_TAG and not to some older release,
-    because the alternative is handing a user a build that is BOTH unconfirmed
-    and not what they asked for. The confirmed pin is the one thing we can offer
-    honestly when the lookup fails, and the message below says which they got.
+    so a failed lookup yields the confirmed pin rather than a build that is BOTH
+    unconfirmed and not what was asked for; the message below says which they
+    got.
 
     Upstream publishes a release (tag + notes) as soon as it is cut, then its CI
     matrix uploads the ~25 platform archives afterwards - which can take a while.
     Right after publish, ``/releases/latest`` can point at a tag whose ``assets``
     array is still genuinely empty even though the release body already lists
-    the (soon-to-exist) download URLs. Resolving to that tag anyway used to
-    produce a confident-looking match that 404s, because the linked file simply
-    is not there yet. So we scan recent releases newest-first and use the first
-    one that already has assets, skipping any still-uploading release."""
+    the (soon-to-exist) download URLs, and resolving to that tag produces a
+    confident-looking match that 404s. So this scans recent releases
+    newest-first and uses the first one that already has assets, skipping any
+    still-uploading release."""
     tags = _recent_tags()
     if tags:
         return tags[0]
@@ -1103,9 +1054,8 @@ def _recent_tags(limit: int = 10) -> list:
         # Best-effort like its two siblings (_release_assets, _pypi_wheel_url_
         # and_sha), and logged like them: every caller has a pinned fallback, so
         # this must not raise, but "the lookup was unavailable" must stay
-        # discoverable (rule 5). It was the ONE verified_urlopen call site that
-        # swallowed with no trace at all, which meant a refused downgrade
-        # redirect here would have been the only one nothing recorded.
+        # discoverable - a refused downgrade redirect here would otherwise leave
+        # no trace at all.
         logger.debug("release tag listing failed for %s (%s)", api, e)
         return []
     return out
@@ -1132,13 +1082,11 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
     than resolve a second time. When omitted this resolves its own through
     _tag_for - pin, else upstream's newest.
 
-    THE THIRD ELEMENT IS WHY THIS RETURNS A TRIPLE: the tag is what the marker
-    has to record, and this is the function that decides it. Returning it is
-    what lets the caller record the installed build with NO extra lookup. The
-    two alternatives are both worse - re-resolving in the caller doubles the
-    network call this whole design exists to avoid, and parsing the tag back
-    out of the returned URL is a second derivation of a value already in hand
-    that would diverge on the templated-guess path below, where the URL is
+    THE THIRD ELEMENT IS THE TAG: this is the function that decides it, and the
+    marker has to record it, so returning it lets the caller record the
+    installed build with NO extra lookup. Re-resolving in the caller doubles the
+    network call, and parsing the tag back out of the returned URL is a second
+    derivation that diverges on the templated-guess path below, where the URL is
     CONSTRUCTED rather than read from the release listing.
 
     It is None for amd-rocm, whose build comes from lemonade-sdk's own release
@@ -1191,8 +1139,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
 
     if backend == "cuda" and _platform_key() == "linux":
         # Upstream (ggml-org/llama.cpp) publishes no bare Linux CUDA binary at
-        # all - verified live against their releases, see dev-notes/ADR-0010 -
-        # so the generic _ASSET_MATCH path below would only ever construct a
+        # all, so the generic _ASSET_MATCH path below would only ever construct a
         # guessed URL that 404s. Resolve against hybridgroup/llama-cpp-builder
         # instead, the same shape as the amd-rocm -> lemonade-sdk branch just
         # above: they track upstream's own tag numbering 1:1 and publish
@@ -1201,8 +1148,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
         #
         # cuda_line-aware, like the win32 cuda branch below: hybridgroup
         # publishes both a cuda-12 asset ("...-cuda-x64.tar.gz") and a
-        # cuda-13 one ("...-cuda-13-x64.tar.gz") - verified live, real bytes
-        # downloaded for the cuda-12 one (dev-notes/ADR-0010).
+        # cuda-13 one ("...-cuda-13-x64.tar.gz").
         suffix = "-cuda-13-x64.tar.gz" if cuda_line == "cuda-13" else "-cuda-x64.tar.gz"
         tag = tag or _tag_for(backend)
         assets = _release_assets(tag, repo=_CUDA_LINUX_REPO)
@@ -1214,15 +1160,12 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
                 sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
                 return url, sha, tag
         # Genuinely unresolvable (hybridgroup has not built that exact
-        # upstream tag yet - a real, occasionally-expected lag for a third
-        # party, not an error to paper over): raise click.ClickException,
-        # which _provision_with_fallback's caller already catches and turns
-        # into the same offer/force-vulkan-fallback path every other
-        # provisioning failure in this file uses - reusing that existing,
-        # already-tested mechanism rather than inventing a new one. Never
-        # construct a guessed URL here the way the generic path below does;
-        # a guessed URL against a third party's repo is even less trustworthy
-        # than one against upstream itself.
+        # upstream tag yet): raise click.ClickException, which
+        # _provision_with_fallback's caller already catches and turns into the
+        # same offer/force-vulkan-fallback path every other provisioning
+        # failure in this file uses. Never construct a guessed URL here the way
+        # the generic path below does: a guessed URL against a third party's
+        # repo is even less trustworthy than one against upstream itself.
         raise click.ClickException(
             f"no Linux CUDA build found for llama.cpp tag {tag!r} on "
             f"{_CUDA_LINUX_REPO} - falling back to vulkan.")
@@ -1376,8 +1319,8 @@ def _download(url: str, dest: Path) -> _DownloadResult:
         # (RedirectDowngradeRefused is a URLError, and URLError is an OSError):
         # that clause tells the user this "looks like a dropped or flaky
         # connection" and to retry. Retrying an attempt to hand us a native DLL
-        # over cleartext is the opposite of the right advice, and collapsing the
-        # two into one message is exactly the failure rule 5 forbids.
+        # over cleartext is the opposite of the right advice, so the two are
+        # never collapsed into one message.
         raise ArtifactError(
             f"refused to follow this download off HTTPS ({e}) - the archive "
             "would have arrived in cleartext, where anything on the network "
@@ -1475,8 +1418,7 @@ def _diagnose_bad_artifact(path: Path, dl: Optional["_DownloadResult"]) -> str:
     """Turn what the bytes on disk actually look like - plus, when available,
     what the response claimed (:func:`_download`'s result for this same file) -
     into ONE specific, evidence-backed explanation. Never states a cause the
-    evidence does not actually support: AGENTS.md rule 5 - a confident wrong
-    guess is worse than an honest 'not clear', so the fallback case says so
+    evidence does not actually support: the fallback case says 'not clear'
     plainly instead of picking the most likely-sounding story."""
     kind = _sniff_content_kind(path)
     try:
@@ -1520,7 +1462,7 @@ def _validate_archive(
     min_size: int = _MIN_ARTIFACT_BYTES,
     dl: Optional[_DownloadResult] = None,
 ) -> None:
-    """SEC-8: validate a downloaded artifact BEFORE it is extracted or installed.
+    """Validate a downloaded artifact BEFORE it is extracted or installed.
     Raises :class:`ArtifactError` on any failure.
 
     Three checks, in cheapest-first order:
@@ -1880,13 +1822,12 @@ def _release_assets(tag: str, repo: str = _UPSTREAM_REPO) -> list:
     """The REAL uploaded asset list for a release tag, or [] if the API is
     unavailable or the release has none (yet).
 
-    Deliberately does NOT fall back to scraping download links out of the
-    release body: those links describe files upstream's CI intends to upload,
-    not files that necessarily exist yet (see ``_latest_tag``), so trusting them
-    produces a plausible-looking match that 404s instead of a caught "no
-    assets" case. ``_latest_tag`` already skips a release in that state; a tag
-    passed in explicitly by the caller (--url, --force, etc.) should get an
-    honest empty list rather than a guess."""
+    Does NOT fall back to scraping download links out of the release body: those
+    links describe files upstream's CI intends to upload, not files that
+    necessarily exist yet (see ``_latest_tag``), so a match built from them 404s
+    instead of surfacing as a caught "no assets" case. ``_latest_tag`` already
+    skips a release in that state; a tag passed in explicitly by the caller
+    (--url, --force, etc.) gets an empty list rather than a guess."""
     api = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
@@ -1897,7 +1838,7 @@ def _release_assets(tag: str, repo: str = _UPSTREAM_REPO) -> list:
     except Exception as e:
         # Best-effort probe: every caller has a pinned fallback for exactly
         # this case (offline, rate-limited, API down), so this must not raise -
-        # but the cause should stay discoverable (rule 5) instead of vanishing.
+        # but the cause stays discoverable instead of vanishing.
         logger.debug("release asset lookup failed for %s (%s)", api, e)
         return []
 
@@ -1924,7 +1865,7 @@ def _resolve_cuda_pair(tag: str, line: str = _CUDA_LINE) -> tuple:
     the runtime is often listed FIRST, so the build matcher MUST exclude
     "cudart" - otherwise build resolves to the runtime-only zip (CUDA DLLs, no
     llama.dll) and provisioning aborts with "the archive did not contain
-    llama.dll" (NEW-CUDADLL)."""
+    llama.dll"."""
     assets = _release_assets(tag)
     build = _pick_asset(assets, "bin-win-" + line, exclude=("cudart",))
     cudart = _pick_asset(assets, "cudart", "win-" + line)
@@ -1946,7 +1887,7 @@ def _fetch_and_place(url: str, target: Path, sha256: Optional[str] = None) -> in
         suffix = ".zip" if url.lower().endswith(".zip") else ".tar.gz"
         arc = Path(tmp) / f"llama-prebuilt{suffix}"
         dl = _download(url, arc)
-        _validate_archive(arc, expected_sha256=sha256, dl=dl)   # SEC-8 gate, pre-extract
+        _validate_archive(arc, expected_sha256=sha256, dl=dl)   # validation gate, pre-extract
         ex = Path(tmp) / "x"
         _extract_archive(arc, ex)
         return _copy_binaries(ex, target)
@@ -1955,22 +1896,21 @@ def _fetch_and_place(url: str, target: Path, sha256: Optional[str] = None) -> in
 # Tracked git sentinel files living in the runtime lib dir (see
 # runtime/localm_llama_runtime/lib/.gitignore, which keeps the downloaded
 # native binaries out of version control). Unlike _BACKEND_MARKER, which
-# _clear_target deliberately wipes and _record_provisioned_backend rewrites
-# after every provision, these two are never regenerated by setup-llama:
-# deleting them empties the .gitignore, so a later `git add -A`/`git add .`
-# touching this directory would stage the freshly-downloaded DLLs straight
-# into git - the exact thing the file exists to prevent (AGENTS.md rule 1).
+# _clear_target wipes and _record_provisioned_backend rewrites after every
+# provision, these two are never regenerated by setup-llama: deleting them
+# empties the .gitignore, so a later `git add -A`/`git add .` touching this
+# directory would stage the freshly-downloaded DLLs straight into git.
 _PRESERVED_TARGET_FILES = (".gitignore", ".gitkeep")
 
 
 class RuntimeInUseError(Exception):
     """Something has the installed runtime open, so it cannot be replaced.
 
-    Deliberately NOT an ArtifactError and not a load failure. Those two mean a
-    build is bad; this one means both builds are fine and a process is merely
-    holding the files. That difference decides the response: a build that will
-    not load earns the Vulkan fallback, this earns "close it and retry" with the
-    existing install left completely intact."""
+    NOT an ArtifactError and not a load failure. Those two mean a build is bad;
+    this one means both builds are fine and a process is merely holding the
+    files, so the response differs: a build that will not load earns the Vulkan
+    fallback, this earns "close it and retry" with the existing install left
+    completely intact."""
 
     def __init__(self, locked: "list[Path]", partial: bool = False):
         self.locked = list(locked)
@@ -2004,11 +1944,10 @@ def _files_in_use(target: Path) -> "list[Path]":
     """Of the files a provision would delete, those that cannot be replaced now.
 
     Probed with ``open(..., "r+b")``: it writes no bytes and creates nothing, and
-    it asks the OS the exact question deletion asks. MEASURED on this codebase's
-    own runtime: a DLL reports WRITABLE before ``ctypes.CDLL`` and PermissionError
-    errno 13 after, which is the IDENTICAL error ``unlink()`` raises on the same
-    handle - so the probe predicts the deletion rather than merely correlating
-    with it.
+    it asks the OS the exact question deletion asks. A DLL reports WRITABLE
+    before ``ctypes.CDLL`` and PermissionError errno 13 after, the IDENTICAL
+    error ``unlink()`` raises on the same handle, so the probe predicts the
+    deletion rather than merely correlating with it.
 
     Naturally platform-correct with no platform test. Windows maps a loaded DLL
     without FILE_SHARE_WRITE/DELETE, so the probe refuses exactly when deletion
@@ -2034,19 +1973,17 @@ def _files_in_use(target: Path) -> "list[Path]":
 
 
 def _clear_target(target: Path) -> "list[Path]":
-    """Remove previously provisioned library files so a re-provision (or a
-    fallback to a different backend) never mixes DLLs from two builds. Only
+    """Remove library files left by an earlier provision so a re-provision (or
+    a fallback to a different backend) never mixes DLLs from two builds. Only
     touches files in the dir, plus the _BLAS_LIBRARY_DIRS subdirectories
     _copy_blas_library_dirs may have created (never any OTHER subdirectory) -
     and never _PRESERVED_TARGET_FILES, the tracked git sentinels.
 
     RETURNS THE FILES IT COULD NOT REMOVE, and the return value is load-bearing:
-    every caller must treat a non-empty result as a failed provision. This
-    function used to swallow every OSError and return None, so a locked file left
-    it silently reporting success on a directory it had only half cleared - the
-    caller then copied a new build over the survivors and produced exactly the
-    mixed-build state this docstring promises to prevent (AGENTS.md rule 5: a
-    step that fails must never report success)."""
+    every caller must treat a non-empty result as a failed provision. Swallowing
+    the OSError instead would report success on a half-cleared directory, and
+    the caller would then copy a new build over the survivors and produce the
+    mixed-build state this function exists to prevent."""
     left: "list[Path]" = []
     try:
         for f in target.iterdir():
@@ -2122,8 +2059,8 @@ def _exit_runtime_in_use(e: RuntimeInUseError) -> None:
 # SAME directory is not merely slow, it is a corrupted install: both clear and
 # refill it, so one process's half-written file can be read - or deleted - by
 # the other's _clear_target/_copy_binaries. Same hazard, same fix shape, as
-# managed_comfy_update.py's update lock (diff-review-discipline.md item 26):
-# do NOT copy managed_comfy._remove_lock (a threading.Lock) here either - the
+# managed_comfy_update.py's update lock: do NOT copy
+# managed_comfy._remove_lock (a threading.Lock) here either - the
 # GUI route spawns `setup-llama` as a CHILD PROCESS, so the contenders are
 # separate interpreters and a threading.Lock would guard nothing. mkdir is
 # atomic; stat-then-create is not.
@@ -2236,11 +2173,9 @@ def _exit_provisioning_busy(e: ProvisioningBusyError) -> None:
 
 def _fetch_verified(url: str, target: Path, sha: Optional[str], what: str = "release asset") -> None:
     """Fetch + place an archive, WARNING honestly when no checksum is available
-    to verify it. A security step that silently does not run is a hidden problem
-    (AGENTS.md rule 5): a GitHub asset can publish no `digest`, and the offline
-    hash table only covers the tags this file pins, so the provenance check would
-    otherwise be skipped in complete silence - while the CHANGELOG tells the user
-    downloads are checksum-verified by default (AUDIT-MED-19). Size +
+    to verify it. A GitHub asset can publish no `digest`, and the offline hash
+    table only covers the tags this file pins, so the provenance check can be
+    skipped - and when it is, it is never skipped in silence. Size +
     archive-shape checks still apply either way.
 
     Which path is exposed changed with the pin: _PINNED_TAG's own assets ARE in
@@ -2263,14 +2198,11 @@ def _fetch_verified(url: str, target: Path, sha: Optional[str], what: str = "rel
 # bare nvidia-cublas) - both lines are listed explicitly so neither naming
 # scheme is guessed at.
 #
-# NCCL deliberately NOT included: the actual binary this fetches alongside
-# (hybridgroup/llama-cpp-builder's Linux CUDA build, see _CUDA_LINUX_REPO)
-# was checked directly - every one of its 26 shared libraries' raw bytes
-# grepped for "libnccl", none found - so it does not link against it at all.
-# An earlier prototype (extracting from ggml-org's own CUDA Docker image,
-# see dev-notes/ADR-0010) DID need it; that image is not what ships here, so
-# do not re-add nccl from that earlier finding without re-checking the
-# binary actually in use at the time.
+# NCCL is NOT included: the binary this fetches alongside
+# (hybridgroup/llama-cpp-builder's Linux CUDA build, see _CUDA_LINUX_REPO) does
+# not link against it - none of its shared libraries reference "libnccl". A
+# different CUDA build may, so re-check the binary actually in use before
+# adding nccl back.
 _CUDA_RUNTIME_PYPI_PACKAGES = {
     "cuda-12": ("nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12"),
     "cuda-13": ("nvidia-cuda-runtime", "nvidia-cublas"),
@@ -2309,13 +2241,10 @@ def _fetch_pypi_runtime_lib(package: str, target: Path) -> int:
     contract as :func:`_fetch_and_place`, so callers decide fatal-vs-fallback
     identically for either artifact source.
 
-    NEVER reads from any OTHER environment already on the user's machine
-    (AGENTS.md rule 4: self-contained, no sibling folder on disk) - this
+    NEVER reads from any OTHER environment already on the user's machine: this
     always fetches and places a PRIVATE copy into *target*, exactly like the
-    Windows cudart bundle is never "detected" on the user's system, only ever
-    fetched fresh. An earlier draft of this design considered scanning an
-    existing venv for an already-usable runtime; that was rejected for
-    exactly this reason before any code was written."""
+    Windows cudart bundle, which is never "detected" on the user's system, only
+    ever fetched fresh."""
     url, sha = _pypi_wheel_url_and_sha(package)
     if url is None:
         raise ArtifactError(f"could not resolve a PyPI Linux wheel for {package!r}")
@@ -2372,8 +2301,8 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
 
     *tag* pins this ONE provision to a specific upstream release, overriding
     the pin/newest resolution. It exists for the ABI walk-back, which retries
-    the SAME backend against an older release; it deliberately does NOT touch
-    the stored pin, so a walk-back is a recovery rather than a silent change
+    the SAME backend against an older release; it does NOT touch the stored
+    pin, so a walk-back is a recovery rather than a silent change
     to what the user asked for. Ignored for amd-rocm, which has no upstream
     tag."""
     if chosen == "cuda" and with_cudart and sys.platform == "win32":
@@ -2428,13 +2357,12 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         # _platform_key alone and still hit the win32 branch on a real
         # Windows test box, since sys.platform itself never moved.
         #
-        # Self-contained Linux CUDA (dev-notes/ADR-0010): the binary comes
-        # from a third-party prebuilt, hybridgroup/llama-cpp-builder
-        # (_resolve_backend_asset's linux-cuda special case, above -
-        # deliberately NOT a localm-built binary, see the ADR), the runtime
-        # libraries (cudart/cublas) from PyPI wheels (_fetch_cuda_runtime_libs,
-        # Unit 1) - never from scanning anything already on the user's
-        # machine (AGENTS.md rule 4). If _resolve_backend_asset raises (no
+        # Self-contained Linux CUDA: the binary comes from a third-party
+        # prebuilt, hybridgroup/llama-cpp-builder (_resolve_backend_asset's
+        # linux-cuda special case above, NOT a localm-built binary), and the
+        # runtime libraries (cudart/cublas) from PyPI wheels
+        # (_fetch_cuda_runtime_libs) - never from scanning anything already on
+        # the user's machine. If _resolve_backend_asset raises (no
         # matching build exists yet for this exact upstream tag on
         # hybridgroup's repo), that propagates to _provision_with_fallback's
         # caller exactly like every other provisioning failure, which
@@ -2474,7 +2402,7 @@ def _informative_error_line(text: str) -> str:
     re-provision hint lines; a blind ``splitlines()[-1]`` returns the last hint
     (``localm setup-llama --backend amd-rocm --force  (AMD RX 6000)``) and throws
     the actual cause away, so setup reports a nonsensical "still failed to load
-    (<a command>)" reason (issue #451, AGENTS.md rule 5: do not hide the problem).
+    (<a command>)" reason.
 
     Prefer the exception HEADER line (``SomeError: <cause>``), which carries the
     real error even when the message spans several lines; fall back to the last
@@ -2533,8 +2461,8 @@ def _native_loads_ok() -> tuple:
     """Load-test the provisioned native library in a FRESH interpreter, exactly
     as ``localm run`` will, AND confirm it registered a compute backend. A build
     can load cleanly yet register ZERO backends ("no backends are loaded"), which
-    must count as a FAILED provision, not a silent success (AGENTS.md rule 5) -
-    otherwise _provision_with_fallback's "prove it loads" guarantee holds only for
+    must count as a FAILED provision, not a silent success - otherwise
+    _provision_with_fallback's "prove it loads" guarantee holds only for
     self-registering builds and a broken runtime slips through, failing only at
     the first model load with the real cause already lost. A subprocess keeps the
     setup process clean (the loader mutates the DLL/lib search path) and matches
@@ -2839,10 +2767,10 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
 
     Returns ``(backend, tag)``: the backend that ended up working AND the release
     tag it was provisioned from (None when that backend has no upstream tag).
-    The tag belongs to the attempt that SUCCEEDED, which is why it is returned
-    from here and not recomputed by the caller - on a cuda-to-vulkan fallback
-    the installed build is vulkan's, and a caller re-deriving it would record
-    the tag of the backend that failed.
+    The tag belongs to the attempt that SUCCEEDED, so it is returned from here
+    rather than recomputed by the caller: on a cuda-to-vulkan fallback the
+    installed build is vulkan's, and a caller re-deriving it would record the
+    tag of the backend that failed.
 
     *cuda_line* is the CUDA asset line to fetch when *chosen* is 'cuda' (see
     NvidiaInfo.cuda_line); irrelevant otherwise.
@@ -2922,13 +2850,13 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     # will not load, the driver is too old" is about this MACHINE and a different
     # release cannot fix it, so that case must still reach the vulkan fallback.
     #
-    # NOT written as "avoid a known-bad tag", and deliberately so. The property
-    # is "never ship a runtime our gate rejects", whichever tag and whatever the
-    # cause; a hard-coded bad tag would be wrong the moment the binding is fixed.
-    # With the pin in place this should now be unreachable on a default install:
-    # the pinned build is one we loaded and generated with. If it fires there
-    # anyway, that is a finding about the pin, and _floor_at_pinned_tag says so
-    # rather than quietly installing something else.
+    # NOT written as "avoid a known-bad tag": the property is "never ship a
+    # runtime the gate rejects", whichever tag and whatever the cause, and a
+    # hard-coded bad tag would be wrong the moment the binding is fixed. With
+    # the pin in place this is unreachable on a default install, since the
+    # pinned build is one that loaded and generated; if it fires there anyway,
+    # _floor_at_pinned_tag says so rather than quietly installing something
+    # else.
     if _is_abi_rejection(detail) and used_tag[0]:
         floored, floor_tag = _floor_at_pinned_tag(chosen, with_cudart, used_tag[0],
                                                   _try, detail)
@@ -2975,7 +2903,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     # chosen needs a runtime and did not load HERE. Honour the user's pick: never
     # swap it silently. INFORM why, then OFFER the universal build (interactive)
     # or fall back with a LOUD warning (non-interactive), and always say how to
-    # retry the real pick once the cause is fixed (R20 / never-override-user-selection).
+    # retry the real pick once the cause is fixed.
     why = detail
     # Every attempt's own cause, chosen backend first - NOT just the last one
     # tried. The final LocalmError's *reason* is the only thing that survives
@@ -3053,7 +2981,7 @@ def _apply_version_request(tag: Optional[str], rollback: bool, backend: str,
     Anything this cannot honour is REFUSED with a reason rather than ignored: a
     silently-dropped --tag would leave the user believing a build is pinned when
     it is not, which is worse than the drift the pin exists to stop."""
-    # `tag is None` (the flag was not passed) is deliberately distinguished from
+    # `tag is None` (the flag was not passed) is distinguished from
     # `tag == ""` (it was passed empty, e.g. a shell variable that expanded to
     # nothing). Treating the empty string as "no request" would DROP a request
     # the user made, which is the exact failure this function exists to prevent;
@@ -3222,7 +3150,7 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
 
     already = (target / lib_name).exists()
     if already and not force:
-        # Backend-aware guard (R23): 'auto' means "give me something that works",
+        # Backend-aware guard: 'auto' means "give me something that works",
         # and something already does, so do not re-download. An EXPLICIT backend
         # is honoured - short-circuit only when we can confirm THAT backend is the
         # one on disk; otherwise (a different recorded backend, or none recorded)
@@ -3232,10 +3160,9 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         want = backend.lower()
         have = _provisioned_backend(target)
         if want == "auto" or (have is not None and have == want):
-            # Name the BUILD as well as the backend when it is recorded: "which
-            # llama.cpp is on this box" was previously unanswerable without
-            # inspecting library filenames, which is exactly how a field report
-            # ended up guessing between two candidate builds.
+            # Name the BUILD as well as the backend when it is recorded, so
+            # "which llama.cpp is on this box" is answerable without inspecting
+            # library filenames.
             build = _provisioned_build(target) if have else None
             label = f" ({have} {build})" if build else (f" ({have})" if have else "")
             console.print(f"[green]Already provisioned[/green]{label} at {target}")
@@ -3245,27 +3172,23 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             else:
                 _ensure_importable()
                 return
-        # Four distinct situations, and the two that reach here via the confirm
-        # above used to read as nonsense: "Replacing amd-rocm build with
-        # amd-rocm" (a re-download, not a replacement) and "Replacing amd-rocm
-        # build with auto" (auto is not a backend, it is how one gets chosen).
-        # The two genuinely-wrong cases are fixed; the other two keep their exact
-        # existing wording, which is already correct and is asserted elsewhere.
-        # Restyling a correct message would only churn the tests that pin it.
+        # Four distinct situations. Two of them need their own wording: the
+        # same backend is a RE-DOWNLOAD, not a replacement, and "auto" is not a
+        # backend but how one gets chosen.
         if not have:
             console.print(f"[yellow]Replacing unrecorded build with {want}.[/yellow]")
         elif want == "auto":
             console.print(f"[yellow]Replacing {have} build with the "
                           f"auto-detected backend.[/yellow]")
         elif have == want:
-            # Three genuinely different events that all used to print as
-            # "Re-downloading", which reads as a no-op even when it is an
-            # upgrade. The marker now carries the installed build tag when it is
-            # known (see _provisioned_build), so a real b1288 -> b1307 upgrade
-            # can finally say so.
+            # Three genuinely different events, distinguished rather than all
+            # printed as "Re-downloading", which reads as a no-op even when it
+            # is an upgrade. The marker carries the installed build tag when it
+            # is known (see _provisioned_build), so a real tag-to-tag upgrade
+            # says so.
             #
-            # The INSTALLED build is now recorded for every tag-based backend,
-            # not only amd-rocm, so naming it here no longer needs a network
+            # The INSTALLED build is recorded for every tag-based backend, not
+            # only amd-rocm, so naming it here needs no network
             # call - it is read from the marker. What still cannot be named for
             # free is the build we are about to install: only amd-rocm knows
             # that without a lookup (_ROCM_TAG is a constant), so only amd-rocm
@@ -3291,10 +3214,9 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
 
     # Everything below actually MUTATES target (clear + refill), so it is guarded
-    # by the cross-process provisioning lock - see _provisioning_lock's docstring
-    # for why this needs to be atomic across separate processes rather than a
-    # threading.Lock. Nothing above this point (the "already provisioned" read
-    # and its short-circuit) touches disk, so it deliberately runs unlocked.
+    # by the cross-process provisioning lock: two processes provisioning the same
+    # target must not interleave. Nothing above this point (the "already
+    # provisioned" read and its short-circuit) touches disk, so it runs unlocked.
     try:
         with _provisioning_lock(target):
             if from_dir:
@@ -3383,9 +3305,9 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
                 # provisioning.py) without this call site being revisited, so a real
                 # Blackwell (or any cuda-13-line) GPU on Linux silently got the cuda-12
                 # line - a build with no kernels for it - and no PyPI cudart runtime
-                # fetch, producing a runtime that LOADS (passes the ABI check) but
-                # registers zero usable GPU devices (found live, 2026-08-11, on a
-                # 3x-Blackwell Linux box: 'GPU: none in the loaded runtime (cuda)').
+                # fetch, producing a runtime that LOADS (passes the ABI check)
+                # but registers zero usable GPU devices ('GPU: none in the
+                # loaded runtime (cuda)').
                 # Only darwin is excluded - CUDA is not a real path on Apple Silicon.
                 if chosen == "cuda" and sys.platform != "darwin":
                     # Preflight ONCE and reuse it for both the dialogue and the asset

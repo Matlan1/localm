@@ -129,28 +129,26 @@ def test_use_skill_confines_to_folder(tmp_path):
     _make_skill(tmp_path / ".localcoder" / "skills", "alpha")
     (tmp_path / "secret.txt").write_text("nope", encoding="utf-8")
     out = S.tool_use_skill(tmp_path, name="alpha", file="../../../secret.txt")
-    # Message comes from pathsafe.confined_under now (traversal-specific,
-    # not the old hand-rolled "escapes" wording) - what matters is that it
-    # is refused and the secret is never read, not the exact phrasing.
+    # The refusal message comes from pathsafe.confined_under; the assertions
+    # check that it is refused and the secret never read, not the phrasing.
     assert (not out.ok) and "traversal" in out.output
     assert "nope" not in out.output
 
 
 def test_use_skill_rejects_reserved_characters(tmp_path):
-    """Same class #1068 fixed for model filenames: a colon opens an NTFS
-    Alternate Data Stream rather than failing the read, so a naive
-    'no separators' check would pass 'ref.txt:hidden' straight through. The
-    OLD hand-rolled _confine_skill_file had no such check at all."""
+    """A colon opens an NTFS Alternate Data Stream rather than failing the read,
+    so a naive 'no separators' check would pass 'ref.txt:hidden' straight
+    through."""
     _make_skill(tmp_path / ".localcoder" / "skills", "alpha", files={"ref.txt": "REFDATA"})
     out = S.tool_use_skill(tmp_path, name="alpha", file="ref.txt:hidden")
     assert not out.ok
 
 
 def test_use_skill_alias_leaf_does_not_read_a_different_file(tmp_path, monkeypatch):
-    """An OS-level short-name alias resolving 'file' to a DIFFERENT, real
-    sibling inside the same skill folder stays strictly under the folder -
-    containment alone would not catch it. Deterministic simulation, no real
-    8.3-enabled volume needed (same technique as test_pathsafe_confined_under.py)."""
+    """An OS-level short-name alias resolving 'file' to a DIFFERENT, real sibling
+    inside the same skill folder stays strictly under the folder - containment
+    alone would not catch it. Deterministic simulation, no real 8.3-enabled
+    volume needed."""
     d = _make_skill(tmp_path / ".localcoder" / "skills", "alpha",
                     files={"LongReferenceFileName.md": "SECRET REFERENCE DATA"})
     victim = d / "LongReferenceFileName.md"
@@ -205,15 +203,11 @@ def test_agent_registers_skill_tools_on_init(tmp_path, clean_registry):
     assert "AGENT SKILLS" in agent._system_prompt
 
 
-# --- allowed-tools is HARD-ENFORCED (REC-SKILL-TOOLS) ------------------------ #
+# --- allowed-tools is hard-enforced ----------------------------------------- #
 #
 # Every test here drives the REAL dispatch path, agent._execute_tool(ToolCall(...)),
-# not the tool functions directly: the gate lives in the dispatcher, so calling
-# tool_use_skill() by hand would prove nothing about what a model can actually
-# reach. Denials are asserted from OUTSIDE with a counting mock plus
-# assert_not_called() - never a raising side_effect, because _execute_tool wraps
-# tool_def.fn in `except Exception` and would absorb an AssertionError as an
-# ordinary tool failure, passing the test in both directions.
+# not the tool functions directly, and asserts denials from OUTSIDE with a
+# counting mock plus assert_not_called().
 
 def _tool_call(_tool: str, /, **args):
     # positional-only: use_skill's own argument is called "name" too
@@ -241,8 +235,8 @@ def skill_agent(tmp_path, clean_registry):
     _make_skill(root, "open", frontmatter="name: open\ndescription: d\n")
     from localm.plugins.coder.agent import Agent
     agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
-    # A user request is what starts a turn; the restriction is retired by the NEXT
-    # one, so every test needs to be inside one to be testing the real lifetime.
+    # A user request starts a turn and the restriction is retired by the NEXT
+    # one, so each test sets one to exercise the real lifetime.
     agent._last_user_request = "do the thing"
     return agent
 
@@ -261,7 +255,7 @@ def test_skill_gate_denies_a_tool_outside_allowed_tools(skill_agent):
         _tool_call("write_file", path="x.txt", content="hi"), interactive=False)
     assert not res.ok
     assert "narrow" in res.output and "read_file" in res.output
-    # The load-bearing assertion: refused, not merely reported as refused.
+    # Refused, not merely reported as refused.
     write.assert_not_called()
 
 
@@ -287,7 +281,7 @@ def test_skill_restriction_is_retired_by_the_next_user_request(skill_agent):
         _tool_call("write_file", path="x.txt"), interactive=False).ok
     write.assert_not_called()
 
-    skill_agent._last_user_request = "do the thing"      # byte-identical on purpose
+    skill_agent._last_user_request = "do the thing"      # the same request text again
     res = skill_agent._execute_tool(_tool_call("write_file", path="x.txt"),
                                     interactive=False)
     assert res.ok
@@ -340,14 +334,13 @@ def test_two_restricted_skills_intersect(tmp_path, clean_registry):
     """Two declarations compose to their INTERSECTION, not their union.
 
     The second skill declares a tool the first did NOT, which is the only shape
-    that tells intersect apart from last-one-wins. Chosen deliberately after a
-    fires-control: an earlier version made the second set a SUBSET of the first,
-    where both implementations give the identical answer, so the test passed with
-    the intersection replaced by a plain assignment.
+    that tells intersect apart from last-one-wins: with the second set a SUBSET
+    of the first, both implementations give the identical answer and the test
+    would pass with the intersection replaced by a plain assignment.
 
-    That distinction is the security property, not a nicety. Last-one-wins is a
-    one-line bypass of the entire gate, because a skill body is untrusted content
-    and can simply tell the model to load a second, more permissive skill.
+    That distinction is the security property. Last-one-wins is a one-line bypass
+    of the entire gate, because a skill body is untrusted content and can tell
+    the model to load a second, more permissive skill.
     """
     root = tmp_path / ".localcoder" / "skills"
     _make_skill(root, "reader",
@@ -362,8 +355,8 @@ def test_two_restricted_skills_intersect(tmp_path, clean_registry):
     grep = _counting_tool(TOOL_REGISTRY, "grep")
     _use(agent, "reader")
     _use(agent, "writer")
-    # write_file is in the SECOND skill's list and not the first: under
-    # last-one-wins it would now be permitted. It must not be.
+    # write_file is in the SECOND skill's list and not the first, so the
+    # intersection drops it.
     assert not agent._execute_tool(_tool_call("write_file", path="x"),
                                    interactive=False).ok
     write.assert_not_called()
@@ -371,8 +364,7 @@ def test_two_restricted_skills_intersect(tmp_path, clean_registry):
     assert not agent._execute_tool(_tool_call("read_file", path="x"),
                                    interactive=False).ok
     read.assert_not_called()
-    # grep is in BOTH, so it survives - proving the intersection is not simply
-    # emptying the set, which would satisfy the two assertions above on its own.
+    # grep is in BOTH, so it survives: the intersection is not simply emptied.
     assert agent._execute_tool(_tool_call("grep", pattern="x"), interactive=False).ok
     grep.assert_called_once()
 
@@ -414,19 +406,17 @@ def test_spawned_child_inherits_the_active_skill_restriction(skill_agent):
     assert "use_skill" not in child.disabled_tools  # bundled files stay reachable
 
 
-# --- the arming call must not run BESIDE the calls it restricts -------------- #
+# --- the arming call must not run BESIDE the calls it restricts ------------- #
 #
-# These two drive _execute_tools (PLURAL), the real batching path. Dispatching
-# one call at a time through _execute_tool cannot see this defect at all: the
-# gate itself was always correct, it was its ARMING that raced.
+# These two drive _execute_tools (PLURAL), the real batching path.
 
 def _slow_arming(registry, gate):
     """Hold ``use_skill``'s real work open until *gate* is set (bounded).
 
-    Makes the unfixed failure deterministic instead of a timing coin flip: the
-    arming call cannot finish until the sibling has actually run. Under the fix
-    the sibling is in a LATER segment and never starts, so the wait always
-    reaches its bound - one short pause, paid once.
+    The arming call cannot finish until the sibling has actually run, which makes
+    an unguarded race deterministic instead of a timing coin flip. With the
+    sibling in a LATER segment it never starts, so the wait always reaches its
+    bound - one short pause, paid once.
     """
     import dataclasses
     real = registry["use_skill"].fn
@@ -441,12 +431,12 @@ def _slow_arming(registry, gate):
 def test_a_batch_sibling_cannot_outrun_the_skill_restriction(skill_agent):
     """THE RACE: use_skill plus a tool its skill forbids, in ONE model reply.
 
-    _execute_tools groups CONSECUTIVE NON-DESTRUCTIVE calls and runs the group
-    in parallel, and use_skill is non-destructive, so before the fix a sibling
-    could clear the dispatch gate before _activate_skill had armed it and run
-    completely unrestricted. read_env is the sibling because it is exactly what
-    a declaration of `allowed-tools: read_file` is meant to keep out: the
-    process environment, api keys and tokens included.
+    _execute_tools groups CONSECUTIVE NON-DESTRUCTIVE calls and runs the group in
+    parallel, and use_skill is non-destructive, so a sibling could clear the
+    dispatch gate before _activate_skill had armed it and run completely
+    unrestricted. read_env is the sibling because it is exactly what a
+    declaration of `allowed-tools: read_file` is meant to keep out: the process
+    environment, api keys and tokens included.
     """
     from unittest.mock import MagicMock
     import threading
@@ -462,8 +452,7 @@ def test_a_batch_sibling_cannot_outrun_the_skill_restriction(skill_agent):
     env.side_effect = _mark
     _slow_arming(TOOL_REGISTRY, sibling_ran)
 
-    # Preconditions, so a pass cannot come from the sibling being unreachable
-    # for some unrelated reason (item 24: prove the injection took).
+    # Preconditions: the sibling really is reachable.
     assert "read_env" not in skill_agent.disabled_tools
     assert skill_agent.active_skill_tools() is None
     assert isinstance(env, MagicMock)
@@ -472,23 +461,19 @@ def test_a_batch_sibling_cannot_outrun_the_skill_restriction(skill_agent):
         [_tool_call("use_skill", name="narrow"), _tool_call("read_env")],
         interactive=False)
 
-    # FIRST, and load-bearing: the forbidden tool did not execute. Asserted from
-    # OUTSIDE the call, never by raising from a side_effect, which the dispatcher
-    # would absorb as an ordinary tool failure.
+    # The forbidden tool did not execute, asserted from OUTSIDE the call.
     env.assert_not_called()
-    # ... and the restriction really was armed, so the line above is a refusal
-    # rather than use_skill having quietly failed.
+    # ... and the restriction really was armed.
     assert skill_agent.active_skill_tools() == frozenset({"read_file"})
     assert len(blocks) == 2
     assert "narrow" in blocks[1] and "read_env" in blocks[1]
 
 
 def test_a_batch_sibling_before_the_arming_call_still_runs(skill_agent):
-    """The boundary narrows FORWARD only, and this is a scope guard, not the
-    regression guard above: it passes on the unfixed code too. It exists so a
-    later, broader fix (arming at parse time, or restricting the whole batch)
-    cannot pass unnoticed - a call the model emitted BEFORE any skill was loaded
-    must not be refused retroactively.
+    """The boundary narrows FORWARD only. A scope guard rather than a regression
+    guard: it exists so a later, broader change (arming at parse time, or
+    restricting the whole batch) cannot pass unnoticed - a call the model emitted
+    BEFORE any skill was loaded must not be refused retroactively.
     """
     env = _counting_tool(TOOL_REGISTRY, "read_env")
     blocks = skill_agent._execute_tools(

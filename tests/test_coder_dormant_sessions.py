@@ -16,8 +16,7 @@ from fastapi.testclient import TestClient
 
 
 def _coder_app(tmp_path, monkeypatch, *, api_key):
-    """Same shape as test_coder_resume.py's builder: a real app, real routes,
-    real Agent, real checkpoint files on disk."""
+    """A real app, real routes, real Agent, real checkpoint files on disk."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setenv("LOCALM_API_KEY", api_key)
@@ -108,9 +107,8 @@ class TestResumingOneParticularSession:
                                   "resume_checkpoint_id": old_id})
             restored = app.state.coder_sessions.get(r.json()["id"]).agent._messages
 
-        # THE DATA FIRST. `resumed: true` is satisfied by a fallback to the
-        # newest checkpoint, which is a different conversation entirely - so it
-        # cannot be the assertion that guards this.
+        # Assert on the conversation content first: `resumed: true` on its own is
+        # also satisfied by a fallback to the newest checkpoint.
         assert restored == older, (
             "resumed the wrong conversation: asked for the calculator session "
             "and got " + repr(restored[:1]))
@@ -131,9 +129,8 @@ class TestResumingOneParticularSession:
                                   "resume_checkpoint_id": "deadbeefdeadbeef"})
             restored = app.state.coder_sessions.get(r.json()["id"]).agent._messages
 
-        # A stale id (the row was deleted, or the link is old) must start fresh
-        # and SAY so, not quietly hand back a conversation the user did not ask
-        # for. Falling back would be indistinguishable from a working resume.
+        # A stale id starts fresh and says so, rather than handing back a
+        # conversation the caller did not ask for.
         assert restored == [], "an unknown id must not restore another session"
         assert r.json()["resumed"] is False
 
@@ -173,9 +170,7 @@ class TestTheListing:
                             json={"cwd": str(two), "mode": "log"})
             _seed(app, b.json()["id"], [{"role": "user", "content": "in two"}], "in two")
 
-            # Asking WITH one project selected still surfaces the other - the
-            # whole point: a past session must be reachable without first
-            # typing its project path back into the form.
+            # Asking with one project selected still surfaces the other.
             got = client.get("/api/coder/dormant", headers=OWNER,
                              params={"cwd": str(one)}).json()
 
@@ -202,9 +197,8 @@ class TestTheListing:
             got = client.get("/api/coder/dormant", headers=OWNER).json()
 
         row = next(p for p in got["projects"] if p["name"] == "gone")
-        # Checkpoints live in the data dir, keyed by a digest of the path, so
-        # they OUTLIVE the directory - which is exactly when someone most wants
-        # the conversation back. Reported unavailable, never silently dropped.
+        # Checkpoints live in the data dir, keyed by a digest of the path, so they
+        # outlive the directory. Reported unavailable, never silently dropped.
         assert row["available"] is False
         assert [s["title"] for s in row["sessions"]] == ["work"]
 
@@ -221,10 +215,7 @@ class TestTheListing:
             full = client.get("/api/coder/dormant", headers=OWNER,
                               params={"cwd": str(proj)}).json()
 
-        # Present on BOTH. A note shown only when the list happens to be empty
-        # reads as an excuse for a short list; the list is incomplete by
-        # construction for any privacy-mode user, and that is a property of the
-        # feature (rule 5).
+        # Present on both the empty and the non-empty listing.
         assert empty["privacy_note"] and full["privacy_note"]
         assert empty["privacy_note"] == full["privacy_note"]
         assert full["projects"], "this arm must be the NON-empty one"
@@ -264,11 +255,9 @@ class TestTheListing:
             r = client.get("/api/coder/dormant", headers=scoped_h,
                            params={"cwd": str(proj)})
 
-        # A session title is the user's own description of their own work, so a
-        # scoped or shared key is never shown one - same gate as /resumable.
-        # A VALID scoped key, deliberately: an invalid one is refused at the
-        # auth layer with a 401 and never reaches this route, so it would prove
-        # nothing about the route's own gate.
+        # A scoped or shared key is never shown a session title, same gate as
+        # /resumable. The key used here is valid: an invalid one is refused at
+        # the auth layer with a 401 and never reaches this route.
         assert r.status_code == 200
         assert r.json()["projects"] == []
         assert r.json()["privacy_note"], "the note is not owner-gated"

@@ -2,42 +2,32 @@
 """
 Pick ONE CPU-tier ggml backend for this machine and hide every other one.
 
-WHY THIS EXISTS: localm's native runtime ships one ``libggml-cpu-<tier>.so`` per
-x86 microarchitecture (alderlake, haswell, zen4, ...). Both localm's own loader
+localm's native runtime ships one ``libggml-cpu-<tier>.so`` per x86
+microarchitecture (alderlake, haswell, zen4, ...). Both localm's own loader
 (``llamacpp/_loader.py``'s ``_preload()``) and ggml's native
-``ggml_backend_load_all()`` dlopen EVERY tier present in the runtime directory -
-that is how ggml discovers which one is usable. Every tier's ``.so`` exports
-IDENTICALLY-NAMED global C symbols (``llamafile_sgemm``, ``ggml_backend_cpu_init``,
-etc - independently compiled copies at different addresses, confirmed via
-``nm -D``), and a rejected tier is never actually unmapped from the process
-(confirmed live via gdb's ``info sharedlibrary`` at a real crash). With multiple
-tiers simultaneously mapped and globally visible, the dynamic linker can resolve
-a call meant for the compatible tier into an incompatible one's copy of the same
-function - which is exactly what a live reproduction showed: a real ``embed()``
-call on an AMD Zen 3 CPU (no AVX-512) crashed with SIGILL inside a matmul kernel
-that gdb attributed to ``libggml-cpu-alderlake.so``, the tier ggml's own
-``ggml_backend_score()`` had explicitly rejected as "not supported on this
-system" earlier in the same run.
+``ggml_backend_load_all()`` dlopen EVERY tier present in the runtime directory,
+which is how ggml discovers which one is usable. Every tier's ``.so`` exports
+IDENTICALLY-NAMED global C symbols (``llamafile_sgemm``,
+``ggml_backend_cpu_init``, etc) as independently compiled copies at different
+addresses, and a rejected tier is never actually unmapped from the process. With
+multiple tiers simultaneously mapped and globally visible, the dynamic linker
+can resolve a call meant for the compatible tier into an incompatible one's copy
+of the same function: on an AMD Zen 3 CPU with no AVX-512, a real ``embed()``
+call crashes with SIGILL inside a matmul kernel belonging to
+``libggml-cpu-alderlake.so``, the tier ggml's own ``ggml_backend_score()``
+rejected as "not supported on this system" earlier in the same run.
 
-The fix is structural, not a smarter selection algorithm: once only ONE tier's
-``.so`` is ever present under the ``libggml-cpu-*.so`` name ggml's directory scan
-looks for, there is nothing left for a symbol collision to happen WITH, no
-matter what ggml's own loading code does internally.
+Once only ONE tier's ``.so`` is present under the ``libggml-cpu-*.so`` name
+ggml's directory scan looks for, there is nothing left for a symbol collision to
+happen WITH, whatever ggml's own loading code does internally.
 
-HOW A TIER IS JUDGED SAFE: each candidate's own exported ``ggml_backend_score()``
-is called, in an ISOLATED subprocess per candidate (one ``.so`` loaded, no
-siblings present in that process, so a probe itself cannot exhibit this same
-collision). This reuses ggml's own authoritative compatibility check rather than
-reimplementing CPU-feature/CPUID detection in Python - there is no such detection
-anywhere else in localm. ``ggml_backend_score()`` was measured, live, to
-correctly reject every AVX-512-only tier and accept every AVX2-and-below tier on
-a real Zen 3 box; the bug was never that this check gives wrong answers, only
-that multiple compatible-and-incompatible tiers were simultaneously loadable.
-NOTE ON SCOPE: this module verifies compatibility via ``ggml_backend_score()``
-only, not by driving a real quantized matmul through the winning tier - that
-deeper, model-level confirmation happens separately (see
-``tests/test_embedder_runner_isolation.py``-style real-model reproduction used
-to verify this fix itself), not as an automated step on every install.
+HOW A TIER IS JUDGED SAFE: each candidate's own exported
+``ggml_backend_score()`` is called, in an ISOLATED subprocess per candidate (one
+``.so`` loaded, no siblings present in that process, so a probe itself cannot
+exhibit this same collision). That is ggml's own authoritative compatibility
+check; localm has no CPU-feature or CPUID detection of its own. SCOPE:
+compatibility is verified via ``ggml_backend_score()`` only, not by driving a
+real quantized matmul through the winning tier.
 
 NON-DESTRUCTIVE AND REVERSIBLE: rejected tiers are renamed in place (prefixed
 with ``_unused-``), never deleted and never moved to a subdirectory. A
@@ -46,13 +36,12 @@ subdirectory would be invisible to ``setup_llama.py``'s ``_clear_target()``
 ``install_manifest.py``'s ``_bin_files()`` (a non-recursive directory listing),
 so files placed there would survive a re-provision as stale leftovers and leak
 past uninstall tracking forever. Renamed-in-place files stay flat and
-``.so``-suffixed, so both of those existing mechanisms keep handling them
-correctly with no changes to either.
+``.so``-suffixed, so both of those mechanisms keep handling them correctly.
 
 SCOPE: POSIX only. ``_loader.py``'s Windows preload path uses plain
-``ctypes.CDLL`` with no ``RTLD_GLOBAL``-equivalent - PE/DLL symbol resolution is
-per-import-table, not a flat global table, so this specific collision mechanism
-does not apply there by construction. Do not call this on Windows.
+``ctypes.CDLL`` with no ``RTLD_GLOBAL`` equivalent - PE/DLL symbol resolution is
+per-import-table, not a flat global table, so this collision mechanism does not
+apply there by construction. Do not call this on Windows.
 """
 
 from __future__ import annotations
@@ -69,15 +58,13 @@ from typing import List, Optional
 
 from localm.debuglog import logger
 
-# The marker recording a completed selection. Same sibling-dotfile convention as
-# setup_llama.py's ".localm-backend" (_BACKEND_MARKER) - a tiny JSON file, never
-# loaded as code, read back cheaply on every load_lib() call.
+# Marker recording a completed selection: a small JSON file, never loaded as
+# code, read on every load_lib() call.
 _MARKER_NAME = ".localm-cpu-tier"
 _MARKER_SCHEMA = 1
 
-# Rejected tiers are renamed with this prefix. Deliberately does NOT start with
-# "libggml", so it falls outside both this module's own candidate glob AND
-# _loader.py's _ggml_glob() ("libggml*.so*") - neither will ever find it again.
+# Prefix for a rejected tier. It does not start with "libggml", so it falls
+# outside this module's candidate glob and _loader.py's _ggml_glob().
 _UNUSED_PREFIX = "_unused-"
 
 _CANDIDATE_GLOB = "libggml-cpu-*.so"
@@ -87,10 +74,9 @@ _LOCK_OWNER_FILE = "owner.json"
 _LOCK_WAIT_SECONDS = 45.0
 _LOCK_POLL_SECONDS = 0.5
 
-# Isolated per-candidate probe: loads exactly ONE .so (no siblings visible to
-# THIS process), calls its own ggml_backend_score(), reports the result. Mirrors
-# scripts/confirm_llama_runtime.py's _run_probe shape (env-var-driven target,
-# a "@@VERDICT@@<json>" last-line convention) rather than inventing a new one.
+# Isolated per-candidate probe: loads exactly one .so with no siblings visible in
+# that process, calls its ggml_backend_score(), and reports the result on a
+# "@@VERDICT@@<json>" last line.
 _SCORE_PROBE = r'''
 import ctypes, json, os, sys
 
@@ -199,10 +185,9 @@ def _marker_is_current(lib_dir: Path) -> bool:
         return False
     if data.get("fingerprint") != _cpu_fingerprint():
         return False
-    # A marker is only trustworthy if nothing OTHER than the recorded winner
-    # still matches the un-pruned candidate glob - otherwise a partially
-    # completed prior prune (e.g. interrupted mid-run) would read as "done"
-    # while the actual collision hazard is still present on disk.
+    # A marker is trustworthy only when nothing other than the recorded winner
+    # still matches the candidate glob; a partially completed prune would
+    # otherwise read as done.
     remaining = _candidates(lib_dir)
     return remaining == [lib_dir / tier]
 
@@ -211,11 +196,9 @@ def _marker_is_current(lib_dir: Path) -> bool:
 def _lock(lib_dir: Path):
     """Cross-process mkdir-based lock, mirroring setup_llama.py's
     _provisioning_lock idiom (atomic os.mkdir, PID-liveness staleness via
-    localm.instances.pid_alive - never elapsed time). Deliberately NOT that same
-    function: _provisioning_lock fails fast, which is right for a
-    multi-minute download a GUI button is blocked on, but selection here is a
-    handful of small subprocess probes - a bounded WAIT is more useful than an
-    immediate refusal, since the alternative is proceeding on an unpruned,
+    localm.instances.pid_alive - never elapsed time). Waits, bounded, rather
+    than failing fast: selection here is a handful of small subprocess probes,
+    and the alternative to waiting is proceeding on an unpruned,
     still-colliding directory."""
     from localm.instances import pid_alive
 
@@ -244,10 +227,8 @@ def _lock(lib_dir: Path):
         except OSError:
             break
     if not acquired:
-        # Timed out or could not take the lock at all. Proceed unlocked rather
-        # than fail the load outright - worst case this run races another
-        # selection and a later load_lib() call redoes/corrects it; that is a
-        # smaller risk than refusing to load a model because a lock was busy.
+        # Timed out or could not take the lock: proceed unlocked rather than fail
+        # the load. A later load_lib() call redoes the selection.
         logger.warning(
             "could not take the CPU-tier selection lock in %s; proceeding "
             "without it", lib_dir)
@@ -307,9 +288,8 @@ def ensure_cpu_tier_selected(lib_dir: Path) -> Optional[str]:
 
     with _lock(lib_dir) as did_acquire:
         if not did_acquire:
-            # Either another process just finished (marker now current) or we
-            # are proceeding unlocked as a last resort - either way, re-check
-            # once more before doing any work, to avoid a redundant prune.
+            # Another process may have finished, or we are unlocked: re-check
+            # before doing any work.
             if _marker_is_current(lib_dir):
                 data = _read_marker(lib_dir)
                 return data["tier"] if data else None

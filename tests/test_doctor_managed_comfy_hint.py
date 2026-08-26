@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """S5 slice: the localm-managed ComfyUI DISCOVERY HINT in `localm doctor`.
 
-Design decision 8 (dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md): the
-managed-ComfyUI feature is opt-in and off by default, surfaced for discovery as
-a NON-INSTALLING hint in `localm doctor`. This proves the hint is:
+The managed-ComfyUI feature is opt-in and off by default, surfaced for discovery
+as a NON-INSTALLING hint in `localm doctor`. This proves the hint is:
   - shown only when NO managed ComfyUI is installed;
   - replaced by an installed-status line (with the managed root path) when one
     IS installed;
@@ -12,7 +11,7 @@ a NON-INSTALLING hint in `localm doctor`. This proves the hint is:
 Drives the real click doctor command through the ``cli_runner`` fixture (which
 pins a throwaway LOCALM_HOME) and stubs the llama-lib / smi / torch probes so the
 only variable under test is the managed-ComfyUI state - it never touches real GPU
-state (mirrors test_doctor_cli_phase3.py).
+state.
 """
 
 import importlib
@@ -37,8 +36,7 @@ def _fake_torch_no_gpu():
     mod = types.ModuleType("torch")
     # transformers (probed by doctor's package check) calls
     # importlib.util.find_spec("torch"), which raises if torch.__spec__ is None.
-    # A bare ModuleType has no spec, so give the stub a real one - this makes the
-    # test order-independent (it does not rely on transformers being cached).
+    # A bare ModuleType has no spec, so the stub is given a real one.
     mod.__spec__ = importlib.machinery.ModuleSpec("torch", loader=None)
 
     class _Cuda:
@@ -65,15 +63,13 @@ def _stub_probes(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _raise)
     monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
     monkeypatch.setitem(sys.modules, "torch", _fake_torch_no_gpu())
-    # This fake torch stub lacks the real internals transformers needs, so if
-    # the REAL transformers is installed in this venv, its lazy AutoTokenizer/
-    # AutoProcessor/AutoModelForCausalLM resolution would genuinely fail against
-    # it - a false "HF backend UNUSABLE" unrelated to what this test is about.
+    # The fake torch stub lacks the internals transformers needs, so a real
+    # transformers in this venv would fail its lazy AutoTokenizer/AutoProcessor/
+    # AutoModelForCausalLM resolution against it.
     monkeypatch.setattr(doctor_mod, "_check_hf_backend_usable", lambda *a, **k: None)
     # rich soft-wraps at the console width, which defaults to 80 cols under the
-    # non-tty CliRunner capture and would split a long hint/path line mid-string.
-    # Render wide so substring assertions see the unbroken line (a real terminal
-    # is typically wide, and rich wraps gracefully when it is not).
+    # non-tty CliRunner capture. Render wide so substring assertions see the
+    # unbroken line.
     monkeypatch.setenv("COLUMNS", "400")
 
 
@@ -81,8 +77,8 @@ def _install_managed():
     """Create the S1 on-disk layout that makes is_managed_comfy_installed() true,
     under whatever LOCALM_HOME the cli_runner fixture pinned. Uses the module's
     own path accessors so it is platform-agnostic (venv interpreter path differs
-    on Windows vs POSIX). Includes the completion marker (#621 follow-up -
-    main.py + venv alone means "still installing")."""
+    on Windows vs POSIX). Includes the completion marker: main.py + venv alone
+    means "still installing"."""
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)

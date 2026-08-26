@@ -1,24 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
 The memory WRITE path: extract durable facts, then consolidate them into the
-store with an ADD / UPDATE / DELETE / NO_OP loop (the Mem0-style loop the research
-names as what keeps a store from drifting and bloating).
+store with an ADD / UPDATE / DELETE / NO_OP loop.
 
 This runs OUT OF BAND (a jobs task / an explicit route), never in the per-turn
-chat hot path: an LLM extraction + per-candidate decision is far too heavy to sit
-in a chat turn. Both LLM steps take an injected ``complete(prompt) -> str`` (the
-caller binds it to the model; tests pass a deterministic fake), so the logic here
-is unit-testable without a model.
+chat hot path: an LLM extraction plus a per-candidate decision is far too heavy to
+sit in a chat turn. Both LLM steps take an injected ``complete(prompt) -> str``
+(the caller binds it to the model; tests pass a deterministic fake), so the logic
+here is unit-testable without a model.
 
-Guardrails, because localm runs small local models that hallucinate and confuse
-synonyms, and because session text is UNTRUSTED (a message can try to launder an
-instruction into memory):
+Guardrails - localm runs small local models, and session text is UNTRUSTED (a
+message can try to launder an instruction into memory):
   - hardened prompts: session text is DATA, never instructions to follow.
   - a synth candidate may NEVER overwrite or delete a user-typed ("source=user")
-    memory  -> downgraded to NO_OP (RULE: never let untrusted content rewrite a
-    high-trust fact unchecked).
-  - prefer ADD over UPDATE when the model is unsure (confidence < 0.7): keeping
-    both is safe; a wrong UPDATE silently loses a true fact.
+    memory  -> downgraded to NO_OP.
+  - prefer ADD over UPDATE when the model is unsure (confidence < 0.7).
   - synth importance is capped (SYNTH_IMP_CAP); only user-confirmed facts reach 1.0.
   - near-duplicates short-circuit to NO_OP deterministically (no LLM call).
   - idempotent: same input + deterministic ``complete`` (temperature 0) -> same
@@ -51,24 +47,22 @@ NEAR_DUP_RATIO = 0.90       # candidate ~= existing -> NO_OP without an LLM call
 # Textual similarity (difflib ratio) below this -> treat as a new fact (ADD),
 # above -> ask the model ADD/UPDATE/DELETE/NO_OP. Set at 0.7, not lower: short
 # facts share a "User ..." stem that inflates the ratio, so a lower gate sends
-# genuinely-distinct facts to the LLM (extra calls + a weak model may wrongly
-# NO_OP them). True updates/dups overlap well above 0.7 lexically anyway.
+# genuinely-distinct facts to the LLM. True updates and dups overlap well above
+# 0.7 lexically anyway.
 MATCH_THRESHOLD = 0.7
 UPDATE_MIN_CONF = 0.7       # below this, an UPDATE is downgraded to ADD (keep both)
-# A synth candidate may never silently rewrite a TRUSTED (user/import) fact, but
-# dropping a high-confidence contradiction to a silent NO_OP left a stale user fact
-# permanently uncorrectable (memory-audit 2026-07-02 [9]). At or above this decide
-# confidence, the contradiction is surfaced as a PENDING CORRECTION for the user to
-# accept/reject instead; below it, it is ignored (a weak contradiction does not nag).
+# A synth candidate may never silently rewrite a TRUSTED (user/import) fact. At or
+# above this decide confidence, the contradiction is surfaced as a PENDING
+# CORRECTION for the user to accept/reject instead of being dropped to a silent
+# NO_OP; below it, it is ignored.
 SUPERSEDE_MIN_CONF = 0.7
 SYNTH_IMP_CAP = 0.85        # synth memories never reach user-confirmed importance
 # Semantic-match gate: when the lexical ratio is below MATCH_THRESHOLD but
 # an embedder is present, a candidate whose cosine to an existing record clears
 # this still goes to the ADD/UPDATE/DELETE decision, so a PARAPHRASED
 # contradiction ('lives in Berlin' vs 'moved to Munich') is resolved instead of
-# accumulating. Set high enough that only genuinely related facts reach the LLM
-# (an unrelated fact scores well below this), mirroring the coder episode recall
-# cosine floor.
+# accumulating. Set high enough that only genuinely related facts reach the LLM;
+# an unrelated fact scores well below it.
 SEMANTIC_MATCH_THRESHOLD = 0.60
 
 _EXTRACT_PROMPT = (
@@ -108,10 +102,9 @@ def _parse_json_object(raw: str) -> dict:
     prose or a ``` fence. Returns {} when nothing parseable is found (mirrors the
     coder's episodes._extract_json - small models are not airtight even under a
     grammar)."""
-    # Reasoning channels are stripped by the callers before parsing, but strip
-    # again here so no future caller can regress the C1 store-poisoning bug (a
-    # brace inside a <think> block broke the first-{-to-last-} scavenge below,
-    # and scratchpad text ended up stored as memory). Idempotent.
+    # Reasoning channels are stripped by the callers before parsing, and stripped
+    # again here so a brace inside a <think> block cannot break the
+    # first-{-to-last-} scavenge below. Idempotent.
     text = strip_think(raw).strip()
     if text.startswith("```"):
         text = text[3:]
@@ -181,7 +174,7 @@ def extract(complete: Complete, session_text: str, *,
     except Exception:
         return []
     # Thinking models emit a <think> scratchpad before the JSON; stored raw it
-    # poisoned the store and broke parsing (audit C1). Strip it first.
+    # poisons the store and breaks parsing. Strip it first.
     obj = _parse_json_object(strip_think(raw))
     facts = obj.get("facts") if isinstance(obj, dict) else None
     if not isinstance(facts, list):
@@ -224,12 +217,11 @@ _EPISODE_PROMPT = (
 
 
 # Openers that mean the model echoed the instruction or narrated itself instead
-# of summarising: the audit's non-thinking baseline stored a verbatim prompt echo
-# and an "As an AI..." line as durable episodes. Rejecting these keeps garbage out
-# of episodic recall (memory-audit 2026-07-02, F5). Kept NARROW so a natural
-# summary is not dropped: e.g. "The conversation focused on X." is a legitimate
-# summary, so only the echo-specific "the conversation below/above/is data"
-# forms are rejected, not the bare "the conversation" prefix (F5 grader note).
+# of summarising. Rejecting these keeps a verbatim prompt echo or an "As an AI..."
+# line out of episodic recall. Kept NARROW so a natural summary is not dropped:
+# "The conversation focused on X." is a legitimate summary, so only the
+# echo-specific "the conversation below/above/is data" forms are rejected, not the
+# bare "the conversation" prefix.
 _EPISODE_BAD_PREFIXES = (
     "summarise ", "summarize ", "you are ", "as an ai", "as a language model",
     "sure, here", "sure! here", "here is the", "here's the", "i cannot ",
@@ -251,8 +243,7 @@ def summarize_session(complete: Complete, session_text: str) -> str:
     except Exception:
         return ""
     # Strip the reasoning channel BEFORE picking the first line: on a thinking
-    # model the first line of the raw reply is the <think> opener, and the audit
-    # caught exactly that stored as a durable episodic record (C1).
+    # model the first line of the raw reply is the <think> opener.
     raw = strip_think(str(raw))
     for line in raw.strip().splitlines():
         line = line.strip().lstrip("-*#> ").strip().strip('"').strip()
@@ -288,12 +279,12 @@ def _is_usable_summary(line: str) -> bool:
 def _nearest(candidate: str, records: list[MemoryRecord]) -> tuple:
     """(index, ratio) of the most textually-similar existing record, or (-1, 0).
 
-    Uses an ABSOLUTE difflib ratio (not normalized BM25): a normalized score is
-    meaningless on a tiny store (a single existing record always normalizes to
-    1.0 and would spuriously "match" every candidate). Ratio is size-independent
-    and directly meaningful, which is what the ADD-vs-decide gate needs. Texts are
-    short (<= MAX_TEXT_LEN) and the store is capped, so O(n) ratios per candidate
-    is cheap for an out-of-band job."""
+    Uses an ABSOLUTE difflib ratio, not a normalized BM25 score: a normalized
+    score is meaningless on a tiny store (a single existing record always
+    normalizes to 1.0 and would match every candidate), while the ratio is
+    size-independent, which is what the ADD-vs-decide gate compares against. Texts
+    are short (<= MAX_TEXT_LEN) and the store is capped, so the O(n) scan per
+    candidate is cheap for an out-of-band job."""
     lo = candidate.lower()
     best_i, best_r = -1, 0.0
     for i, r in enumerate(records):
@@ -339,19 +330,14 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     never called and nothing is written. Applies all decisions in ONE atomic batch.
     Returns ``{status, added, updated, deleted, noop, [reason]}``.
 
-    CHK-MEM-LOCK: the ADD/UPDATE/DELETE decision loop below reads a SNAPSHOT
-    (``store.all()``) and then makes potentially many slow LLM calls
-    (``_decide()`` per candidate) before the final ``store.replace()`` overwrites
-    the whole namespace with that snapshot's outcome. A per-call lock inside
-    ``replace()`` alone cannot protect this: it would still silently discard
-    anything a concurrent add/update/delete committed during the decide loop, the
-    exact data loss CHK-MEM-LOCK exists to prevent (the debounced auto-consolidate
-    background pass and the manual POST /api/memory/consolidate route can race
-    each other, and either can race a plain memory_append/memory_delete request).
-    So the WHOLE read-decide-write sequence holds the namespace lock: a
-    concurrent writer blocks until this consolidation finishes and then runs
-    against the fresh post-consolidation state, rather than racing it and losing
-    its write."""
+    The ADD/UPDATE/DELETE decision loop makes potentially many slow LLM calls
+    (``_decide()`` per candidate), so it does NOT hold the namespace lock: a
+    snapshot of ``store.all()`` is taken under a brief lock, decided against
+    off-lock (``_decide_changeset``), and the resulting deltas are merged by record
+    id onto a fresh under-lock reload (``_merge_changeset``) before the final
+    ``store.replace()``. A write another thread committed during the lock-free
+    decide window therefore survives, instead of being discarded by a
+    stale-snapshot whole-namespace replace."""
     counts = {"status": "ok", "added": 0, "updated": 0, "deleted": 0, "noop": 0,
               "proposed": 0}
     if not writes_allowed(surface):
@@ -360,20 +346,20 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     candidates = extract(complete, session_text, max_candidates=max_candidates)
     if not candidates:
         # No new facts, but STILL prune: decay-based forgetting and the size cap
-        # used to be reachable only through a fact-producing run, so a store that
-        # kept extracting nothing never forgot anything (memory-audit 2026-07-02
-        # F8). Prune is a no-op when nothing is decayed, so this is cheap (prune()
-        # locks itself, atomically).
+        # must not depend on a fact-producing run, or a store that keeps extracting
+        # nothing never forgets anything. Prune is a no-op when nothing is decayed,
+        # and prune() locks itself atomically.
         store.prune(now=now)
         return _with_eviction_note(counts, store)
 
-    # DECIDE OFF-LOCK (REG-520): the per-candidate _decide() LLM calls (seconds to
-    # minutes on a local model) must NOT run while holding the per-namespace RLock.
+    # DECIDE OFF-LOCK: the per-candidate _decide() LLM calls (seconds to minutes on
+    # a local model) must NOT run while holding the per-namespace RLock.
     # recall(reinforce=True) is the chat inlet, which runs ON the asyncio event-loop
     # thread and both CONSTRUCTS a store (MemoryStore.__init__ locks) and recall()s
-    # (locks again); holding this lock across the slow decide loop froze the whole
-    # event loop for the consolidation's duration. Snapshot under a brief lock, then
-    # decide against that snapshot with NO lock held, recording deltas by record id.
+    # (locks again), so holding this lock across the slow decide loop freezes the
+    # whole event loop for the consolidation's duration. Snapshot under a brief
+    # lock, then decide against that snapshot with NO lock held, recording deltas
+    # by record id.
     with store.lock():
         store._load()
         snapshot = store.all()
@@ -383,27 +369,27 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
         counts=counts)
     # APPLY UNDER LOCK (brief, no LLM): reload fresh and MERGE the decided deltas by
     # id onto the CURRENT on-disk state, so a write another thread committed during
-    # the lock-free decide window survives (CHK-MEM-LOCK) instead of being clobbered
-    # by a stale-snapshot whole-namespace replace(). The lock is held only for the
-    # fast reload + merge + save, never across an LLM call.
+    # the lock-free decide window survives instead of being clobbered by a
+    # stale-snapshot whole-namespace replace(). The lock is held only for the fast
+    # reload + merge + save, never across an LLM call.
     with store.lock():
         store._load()
         merged, invalidate = _merge_changeset(
             store.all(), working, snapshot_ids, updated_ids, now)
         # replace() re-embeds only ids WITHOUT a vector, so an UPDATEd record would
-        # keep its old text's vector forever (memory-audit 2026-07-02 F3); the
-        # merge collects those ids in *invalidate* so replace() re-embeds the new
-        # text (applied AFTER replace()'s own reload, or the reload would restore
-        # the stale vector from disk).
+        # otherwise keep its old text's vector forever; the merge collects those ids
+        # in *invalidate* so replace() re-embeds the new text (applied AFTER
+        # replace()'s own reload, or the reload would restore the stale vector from
+        # disk).
         store.replace(merged, embed_fn=embed_fn, invalidate_ids=invalidate)
         store.prune(now=now)
         # Persist proposed supersessions of trusted facts (deduped vs pending +
         # already rejected) and surface the count so a contradiction is never
-        # silently swallowed ([9]). Persist AFTER prune and only for targets that
+        # silently swallowed. Persist AFTER prune and only for targets that
         # SURVIVED it: prune's size cap can evict an old low-value trusted record,
         # and a proposal against an evicted target would report a false `proposed`
-        # count and then be silently dropped by corrections(). A target lost to the
-        # cap is already surfaced via prune's user-eviction warning.
+        # count and then be dropped by corrections(). A target lost to the cap is
+        # already surfaced via prune's user-eviction warning.
         if proposals:
             live_ids = {r.id for r in store.all()}
             survivors = [p for p in proposals if p.target_id in live_ids]
@@ -414,10 +400,10 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
 def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
                       complete: Complete, *, embed_fn: Optional[EmbedFn], now: float,
                       counts: dict) -> tuple:
-    """The DECIDE half of run_consolidation (REG-520), run OFF the namespace lock
-    against *snapshot* (= a lock-snapshot of store.all()). Holds NO lock and makes
-    NO store write; only reads store._vectors (via semantic_nearest) and mutates its
-    OWN snapshot copies.
+    """The DECIDE half of run_consolidation, run OFF the namespace lock against
+    *snapshot* (= a lock-snapshot of store.all()). Holds NO lock and makes NO store
+    write; only reads store._vectors (via semantic_nearest) and mutates its OWN
+    snapshot copies.
 
     Returns ``(working, updated_ids, proposals)``: *working* is the intended
     post-consolidation record set derived from the snapshot (kept/NO_OP snapshot
@@ -457,12 +443,11 @@ def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
         else:
             decision, conf2 = _decide(complete, text, matched.text)
             # A synth candidate may never SILENTLY rewrite/delete a TRUSTED
-            # (user/import) fact. But a high-confidence contradiction is no longer
-            # dropped to a silent NO_OP (which left a stale user fact permanently
-            # uncorrectable, memory-audit [9]): surface it as a PENDING CORRECTION
-            # for the user to accept/reject. The record itself stays untouched
-            # (decision NO_OP); the proposal carries the new info, so nothing is
-            # silently lost. A low-confidence contradiction is still just ignored.
+            # (user/import) fact. A high-confidence contradiction is surfaced as a
+            # PENDING CORRECTION for the user to accept/reject: the record itself
+            # stays untouched (decision NO_OP) and the proposal carries the new
+            # info, so nothing is silently lost. A low-confidence contradiction is
+            # ignored.
             if matched.source in TRUSTED_SOURCES and decision in ("UPDATE", "DELETE"):
                 if conf2 >= SUPERSEDE_MIN_CONF:
                     proposals.append(PendingCorrection(
@@ -501,8 +486,7 @@ def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
 def _merge_changeset(fresh: list, working: list, snapshot_ids: set,
                      updated_ids: set, now: float) -> tuple:
     """MERGE the decided changeset (from _decide_changeset, computed OFF the lock
-    against a snapshot) onto the FRESH under-lock state, keyed by record id
-    (REG-520 / CHK-MEM-LOCK).
+    against a snapshot) onto the FRESH under-lock state, keyed by record id.
 
     Every FRESH record survives by DEFAULT, so a write another thread committed
     during the lock-free decide window - a concurrent add, OR a last_used/uses
@@ -539,10 +523,9 @@ def _merge_changeset(fresh: list, working: list, snapshot_ids: set,
 
 def _with_eviction_note(counts: dict, store: MemoryStore) -> dict:
     """Fold any user-typed facts the last prune evicted (size cap) into the
-    result. Silently hard-deleting a fact the user themselves entered is exactly
-    the data loss the audit flagged (rule 5); they are archived to
-    .forgotten.jsonl and reported here. Runs for BOTH the fact-producing and the
-    no-fact prune paths (F8 decoupling)."""
+    result. They are archived to .forgotten.jsonl and reported here rather than
+    hard-deleted silently. Runs for BOTH the fact-producing and the no-fact prune
+    paths."""
     evicted_user = getattr(store, "last_evicted_user", [])
     if evicted_user:
         counts["evicted_user"] = len(evicted_user)

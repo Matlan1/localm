@@ -1,21 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression pin for #621 (the "ComfyUI setup did not finish" report): creating
-the managed ComfyUI's own fresh venv must not fail when running under the branded
-LocaLM.exe launcher.
+"""Creating the managed ComfyUI's own fresh venv must not fail when running
+under the branded LocaLM.exe launcher.
 
-Root cause: ``managed_comfy_fresh.py`` used to pass ``sys.executable`` straight to
-``-m venv``. When the running process IS the branded LocaLM.exe copy (a raw byte
-copy of the base interpreter renamed by applaunch.py's ``make_windows_launcher``),
-CPython's own stdlib ``venv.EnvBuilder`` matches file names on the RUNNING
-executable's basename (``LocaLM.exe``) to decide what to copy into the new venv's
-``Scripts/`` dir - a file that was never copied there in the first place, so it is
-silently skipped. The new venv then has no launcher of its own, and venv's
-mandatory ensurepip bootstrap (``_setup_pip``) tries to invoke that nonexistent
-file, failing with ``FileNotFoundError: [WinError 2] The system cannot find the
-file specified`` - reproduced live via GitHub issue #621, byte-for-byte matching
-the user's own report. See localm/_mp_spawn.py's ``real_base_python()`` (the fix:
-always hand a subprocess the real, never-renamed base interpreter, not whatever
-``sys.executable`` happens to currently be named).
+When the running process IS the branded LocaLM.exe copy (a raw byte copy of the
+base interpreter renamed by applaunch.py's ``make_windows_launcher``), CPython's
+stdlib ``venv.EnvBuilder`` matches file names on the RUNNING executable's
+basename to decide what to copy into the new venv's ``Scripts/`` dir - a file
+that was never copied there, so it is skipped. The new venv then has no launcher
+of its own, and venv's mandatory ensurepip bootstrap (``_setup_pip``) invokes
+that nonexistent file, failing with ``FileNotFoundError: [WinError 2]``. So
+``managed_comfy_fresh.py`` hands ``-m venv`` the result of
+``localm/_mp_spawn.py``'s ``real_base_python()``, the real never-renamed base
+interpreter, rather than ``sys.executable``.
 """
 
 from __future__ import annotations
@@ -34,11 +30,11 @@ from localm.media import managed_comfy_fresh as fresh
 
 
 def test_provision_fresh_uses_real_base_python_not_sys_executable(monkeypatch, tmp_path):
-    """Drives the REAL provision_fresh() (not a strawman) - mocks only the clone (no
-    network/git needed) and stops it right after the venv-creation step (the fake
-    venv_python path is never created, matching a real broken run) so the ONE _run
-    call this test cares about is captured with no other side effects. Must never
-    blindly pass sys.executable - it must ask real_base_python() first."""
+    """Drives the REAL provision_fresh(), mocking only the clone (no network or
+    git needed) and stopping right after the venv-creation step - the fake
+    venv_python path is never created, matching a real broken run - so the one
+    _run call under test is captured with no other side effects. The venv call
+    must use real_base_python(), never sys.executable."""
     calls = []
 
     def _fake_run(cmd, **kwargs):
@@ -48,9 +44,8 @@ def test_provision_fresh_uses_real_base_python_not_sys_executable(monkeypatch, t
     monkeypatch.setattr(fresh, "_run", _fake_run)
     monkeypatch.setattr(fresh, "_clone_at_commit", lambda *a, **k: (True, ""))
     # provision_fresh computes comfy_torch_spec() regardless of install_torch,
-    # which on a real NVIDIA box would otherwise shell out to nvidia-smi via
-    # the Blackwell detection - deterministic regardless of the test-running
-    # machine's own hardware.
+    # which on an NVIDIA box would shell out to nvidia-smi via the Blackwell
+    # detection; stubbed so the result does not depend on the host hardware.
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
 
     fake_root = tmp_path / "comfyui"
@@ -63,8 +58,8 @@ def test_provision_fresh_uses_real_base_python_not_sys_executable(monkeypatch, t
     )
     monkeypatch.setattr(fresh.mc, "managed_comfy_paths", lambda: fake_paths)
 
-    # Force sys.executable to a value that would be WRONG to use directly (mimics
-    # running as the branded, renamed copy) and confirm the resolved real base
+    # Force sys.executable to a value that would be WRONG to use directly (as
+    # when running the branded, renamed copy) and confirm the resolved real base
     # python is used instead.
     fake_renamed = tmp_path / "LocaLM.exe"
     fake_renamed.write_bytes(b"")
@@ -77,9 +72,9 @@ def test_provision_fresh_uses_real_base_python_not_sys_executable(monkeypatch, t
         cfg={}, comfyui_repo="https://example/repo.git", comfyui_commit="deadbeef",
         custom_nodes=[], install_torch=False)
 
-    # The venv was never actually created (fake_run is a no-op), so provision_fresh
-    # correctly reports failure at the post-venv verification check - that's expected
-    # and irrelevant here; what matters is HOW it tried to create the venv.
+    # The venv is never actually created (fake_run is a no-op), so
+    # provision_fresh reports failure at the post-venv verification check. What
+    # is asserted here is HOW it tried to create the venv.
     assert result.ok is False
     venv_calls = [c for c in calls if "venv" in c]
     assert len(venv_calls) == 1, f"expected exactly one venv-creation call, got: {calls}"
@@ -88,17 +83,13 @@ def test_provision_fresh_uses_real_base_python_not_sys_executable(monkeypatch, t
 
 
 def test_provision_fresh_fails_loudly_when_venv_has_no_pip(monkeypatch, tmp_path):
-    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: `-m venv` can report success (return
-    code 0, the interpreter file present) while its own mandatory ensurepip
-    bootstrap silently failed. Without a probe right after creation, that surfaces
-    two steps later as an opaque "Installing PyTorch (...) failed: ... No module
-    named pip" - this pins that provision_fresh() instead fails IMMEDIATELY after
-    venv creation, naming the real cause, before ever attempting the torch install.
+    """`-m venv` can report success (return code 0, the interpreter file
+    present) while its own mandatory ensurepip bootstrap silently failed.
+    provision_fresh() probes right after creation and fails there, naming the
+    cause, before attempting the torch install.
 
-    install_torch is left at its default (True) deliberately: if the probe were
-    missing, the fake _run below would receive the subsequent torch `pip install`
-    call and raise - that is what makes this a real fires-control rather than a
-    test that would pass with or without the fix."""
+    install_torch is left at its default (True): without the probe the fake _run
+    below would receive the subsequent torch `pip install` call and raise."""
     calls = []
     fake_root = tmp_path / "comfyui"
     venv_python = fake_root / "venv" / "Scripts" / "python.exe"
@@ -107,11 +98,9 @@ def test_provision_fresh_fails_loudly_when_venv_has_no_pip(monkeypatch, tmp_path
         calls.append(cmd)
         if "venv" in cmd:
             # Must not pre-exist BEFORE this call: provision_fresh() refuses to
-            # run at all when root already exists ("already exists" guard, checked
-            # before cloning anything), so creating it up front would make the
-            # test fail for the wrong reason. Create it here instead, the moment
-            # the (fake) venv-creation step "succeeds" - a real broken run leaves
-            # exactly this: the interpreter file present, pip missing.
+            # run when root already exists, so it is created here instead, at
+            # the moment the fake venv-creation step succeeds - interpreter file
+            # present, pip missing.
             venv_python.parent.mkdir(parents=True, exist_ok=True)
             venv_python.write_bytes(b"")
             return True, ""
@@ -145,11 +134,10 @@ def test_provision_fresh_fails_loudly_when_venv_has_no_pip(monkeypatch, tmp_path
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only bug (#621)")
 class TestRealRenamedLauncherEndToEnd:
-    """Builds an ACTUAL renamed-copy launcher (mirroring applaunch.py's
-    make_windows_launcher construction byte-for-byte, same helper shape as
-    test_mp_spawn_fix.py's TestRealRenamedLauncherEndToEnd) and drives a REAL
-    `-m venv` invocation through it - no model needed, no mocking of the actual
-    bug mechanism."""
+    """Builds an ACTUAL renamed-copy launcher, mirroring applaunch.py's
+    make_windows_launcher construction byte-for-byte, and drives a REAL `-m venv`
+    invocation through it: no model needed, and the mechanism itself is not
+    mocked."""
 
     @staticmethod
     def _build_fake_launcher(tmp_path: Path) -> Path:
@@ -168,10 +156,8 @@ class TestRealRenamedLauncherEndToEnd:
         return fake_launcher
 
     def test_renamed_launcher_reproduces_winerror2_directly(self, tmp_path):
-        """Pin the BROKEN behavior: invoking `-m venv` via the renamed copy itself
-        (what the old code effectively did by passing sys.executable) must still
-        fail exactly like the live #621 report - proves this test's repro is real,
-        not a strawman."""
+        """Invoking `-m venv` via the renamed copy itself - what passing
+        sys.executable amounts to - fails with WinError 2."""
         fake_launcher = self._build_fake_launcher(tmp_path)
         result = subprocess.run(
             [str(fake_launcher), "-m", "venv", str(tmp_path / "broken_venv")],
@@ -180,10 +166,9 @@ class TestRealRenamedLauncherEndToEnd:
         assert "WinError 2" in (result.stdout + result.stderr)
 
     def test_real_base_python_resolves_and_creates_a_working_venv(self, tmp_path):
-        """The fix: running FROM INSIDE the renamed launcher, real_base_python()
-        must resolve to the true (never-renamed) interpreter, and using THAT to
-        create the venv must fully succeed - a real, runnable nested venv, not
-        just a spawn-succeeded check."""
+        """Running FROM INSIDE the renamed launcher, real_base_python() resolves
+        to the true (never-renamed) interpreter, and using THAT to create the
+        venv produces a real, runnable nested venv."""
         fake_launcher = self._build_fake_launcher(tmp_path)
         repo_root = Path(__file__).resolve().parents[1]
         dest = tmp_path / "fixed_venv"

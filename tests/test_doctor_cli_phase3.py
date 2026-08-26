@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""M2 Phase 3 tests for `localm doctor` and the REPL `_handle_command`.
+"""Tests for `localm doctor` and the REPL `_handle_command`.
 
 Covers:
-  BUG-1  doctor must check llama lib *integrity* (size>0), not mere existence.
-  BUG-2  doctor must not print "CPU mode only" when torch reports a GPU.
-  FAC-4  doctor must show a real version for 'rich' (importlib.metadata).
-  GAP-CLI-3  /temp and /tokens must clamp absurd/negative/zero values.
-  SEC-9  /save must be confined to the cwd (reject traversal/absolute escapes).
+  - doctor must check the llama lib's *integrity* (size>0), not mere existence.
+  - doctor must not print "CPU mode only" when torch reports a GPU.
+  - doctor must show a real version for 'rich' (importlib.metadata).
+  - /temp and /tokens must clamp absurd/negative/zero values.
+  - /save must be confined to the cwd (reject traversal/absolute escapes).
 
 The doctor tests drive the real click command through the ``cli_runner``
 fixture and monkeypatch the smi/torch/rich probes. The REPL tests unit-call
@@ -22,34 +22,26 @@ import pytest
 import localm.cli as cli
 
 # localm.cli re-exports `doctor` as the click Command itself, shadowing the
-# submodule name - go through importlib for the module (same as
-# test_doctor_gpu_verdict.py / test_doctor_worker_spawn.py).
+# submodule name - go through importlib for the module.
 doctor_mod = importlib.import_module("localm.cli.doctor")
 
 
 @pytest.fixture(autouse=True)
 def _neutralise_native_lib_loaded():
-    """_loader.native_lib_loaded() (added by #754) is True for the rest of ANY
-    xdist worker in which a real_gguf-gated test has RUN (conftest.py's lazy
-    resource gate - or the test itself - calls load_lib() at that test's setup,
-    and _loaded_lib is deliberately never reset). Once True, doctor.py's own
-    _check_vram_torch() skips the torch attempt ENTIRELY (see its docstring -
-    the same known-doomed DLL-identity conflict), so
-    test_doctor_no_cpu_only_warning_when_torch_sees_gpu's fake "RTX 4090" torch
-    never gets read at all - confirmed by reproduction: forcing
-    _loader._loaded_lib truthy before this test, standalone, reproduces the
-    exact "RTX 4090" missing from output failure a full-suite run hits when a
-    real_gguf-gated file (e.g. test_kv_bytes_offload.py) loads the native
-    runtime first in the same worker.
+    """_loader.native_lib_loaded() is True for the rest of ANY xdist worker in
+    which a real_gguf-gated test has RUN (conftest.py's lazy resource gate - or
+    the test itself - calls load_lib() at that test's setup, and _loaded_lib is
+    never reset). Once True, doctor.py's own _check_vram_torch() skips the torch
+    attempt ENTIRELY (see its docstring - the same known-doomed DLL-identity
+    conflict), so test_doctor_no_cpu_only_warning_when_torch_sees_gpu's fake
+    "RTX 4090" torch never gets read at all.
 
-    Same pattern as test_vram_preflight.py's own _neutralise_native_lib_loaded
-    (copied rather than shared via conftest.py - see that fixture's docstring
-    for why this stays an opt-in, module-scoped fixture rather than a global
-    one: tests/test_native_dll_conflict_guard.py unit-tests
-    native_lib_loaded() itself, and a global override would silently defeat
-    that test's own mock instead of guarding against the real cross-worker
-    pollution). Patches the FUNCTION, not the underlying _loaded_lib variable
-    (there is no separate cache variable here) - restored after every test."""
+    Stays an opt-in, module-scoped fixture rather than a global one: another
+    test module unit-tests native_lib_loaded() itself, and a global override
+    would silently defeat that test's own mock instead of guarding against the
+    real cross-worker pollution. Patches the FUNCTION, not the underlying
+    _loaded_lib variable (there is no separate cache variable here) - restored
+    after every test."""
     from localm.inference.backends.llamacpp import _loader
     saved = _loader.native_lib_loaded
     _loader.native_lib_loaded = lambda: False
@@ -103,17 +95,13 @@ def _no_smi(monkeypatch):
 
 def _install_torch(monkeypatch, gpu_names):
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(gpu_names))
-    # This fake torch stub lacks the real internals transformers needs (it is
-    # only a `.cuda` stand-in), so if the REAL transformers is installed in this
-    # venv, its lazy AutoTokenizer/AutoProcessor/AutoModelForCausalLM resolution
-    # would genuinely fail against it - a false "HF backend UNUSABLE" that has
-    # nothing to do with what these hardware-probe tests are about. Neutralize
-    # it here, the same way the ABI/GPU-device probes are neutralized elsewhere.
+    # The stub is only a `.cuda` stand-in, so a real installed transformers
+    # would fail its lazy Auto* resolution against it. Skip that check here.
     monkeypatch.setattr(doctor_mod, "_check_hf_backend_usable", lambda *a, **k: None)
 
 
 # --------------------------------------------------------------------------- #
-#  BUG-1 - llama lib integrity (size>0)                                        #
+#  llama lib integrity (size>0)                                                #
 # --------------------------------------------------------------------------- #
 
 def test_doctor_flags_zero_byte_llama_lib(cli_runner, tmp_path, monkeypatch):
@@ -164,7 +152,7 @@ def test_doctor_accepts_plausible_llama_lib(cli_runner, tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  BUG-2 - no self-contradiction (CPU-only + torch GPU in same run)            #
+#  No self-contradiction (CPU-only + torch GPU in same run)                    #
 # --------------------------------------------------------------------------- #
 
 def test_doctor_no_cpu_only_warning_when_torch_sees_gpu(cli_runner, monkeypatch):
@@ -204,11 +192,9 @@ def test_doctor_cpu_only_warning_when_torch_missing(cli_runner, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  VRAM-1 - the torch VRAM probe must OMIT an untrusted free reading, not      #
-#  print it with a caveat beside it (AGENTS.md rule 5). Covers both           #
-#  dimensions: free_scope (was already checked) and probe freshness (a gap    #
-#  this fix closed - list_gpus() without return_status=True can still         #
-#  silently serve a stale last-known-good list).                              #
+#  The torch VRAM probe OMITS an untrusted free reading rather than printing   #
+#  it with a caveat. Covers both dimensions: free_scope and probe freshness    #
+#  (list_gpus() without return_status=True can serve a stale list).            #
 # --------------------------------------------------------------------------- #
 
 def _corrected_gpus(monkeypatch, gpus, status):
@@ -258,10 +244,9 @@ class TestDoctorVramReadingHonesty:
     ):
         """A served last-known-good list (TIMEOUT/BUSY/INCONCLUSIVE) is not a
         current measurement even when it carries a FREE_SCOPE_DEVICE tag from
-        the earlier successful probe that produced it - this is the gap that
-        was open before this fix: list_gpus() was called without
-        return_status=True, so a stale-but-tagged-device correction was
-        substituted in and printed as fact."""
+        the earlier successful probe that produced it. Calling list_gpus()
+        without return_status=True substitutes a stale-but-tagged-device
+        correction and prints it as fact."""
         from localm import discover
         monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
         _no_smi(monkeypatch)
@@ -315,7 +300,7 @@ class TestDoctorVramReadingHonesty:
 
 
 # --------------------------------------------------------------------------- #
-#  FAC-4 - rich version via importlib.metadata                                 #
+#  rich version via importlib.metadata                                         #
 # --------------------------------------------------------------------------- #
 
 def test_doctor_shows_rich_version(cli_runner, monkeypatch):
@@ -326,21 +311,20 @@ def test_doctor_shows_rich_version(cli_runner, monkeypatch):
 
     monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
     _no_smi(monkeypatch)
-    # Stub torch so the doctor's GPU probe does not import the heavy real torch
-    # (keeps this test about the package-version report, not the GPU section).
+    # Stub torch so the doctor's GPU probe does not import the real torch.
     _install_torch(monkeypatch, [])
 
     result = cli_runner.invoke(cli.doctor, [])
     out = result.output
     # The rich line must carry its actual installed version, not a blank.
     assert rich_ver in out
-    # Sanity: rich genuinely lacks __version__, which is why the old code blanked.
+    # rich genuinely lacks __version__.
     import rich
     assert getattr(rich, "__version__", None) is None
 
 
 # --------------------------------------------------------------------------- #
-#  GAP-CLI-3 - /temp and /tokens clamping                                      #
+#  /temp and /tokens clamping                                                  #
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("raw,expected", [
@@ -382,7 +366,7 @@ def test_tokens_normal_value_passes_through():
 
 
 # --------------------------------------------------------------------------- #
-#  SEC-9 - /save confined to cwd                                              #
+#  /save confined to cwd                                                      #
 # --------------------------------------------------------------------------- #
 
 def test_save_rejects_parent_traversal(tmp_path, monkeypatch):

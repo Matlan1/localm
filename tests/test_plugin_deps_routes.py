@@ -29,8 +29,8 @@ def app_mgr(tmp_path, monkeypatch):
     from localm.plugins.engine import attach_engine
     app = FastAPI()
     mgr = attach_engine(app)
-    # Default to a loopback bind (the `localm gui` default), i.e. every client is
-    # truly on this host, so the pip path is allowed. Network-bind tests override.
+    # Default to a loopback bind (the `localm gui` default), so every client is
+    # truly on this host and the pip path is allowed. Network-bind tests override.
     app.state.bind_host = "127.0.0.1"
     return app, mgr
 
@@ -72,10 +72,10 @@ def test_events_remote_is_forbidden(app_mgr, monkeypatch):
 
 
 def test_network_bind_denies_even_from_loopback_peer(app_mgr, monkeypatch):
-    """REGRESSION: the GUI runs behind portmux, so request.client.host is always
-    127.0.0.1 (a loopback peer) even for a genuinely remote client. The gate MUST
-    key off the bind host, not the peer - a network bind is refused regardless of
-    the (loopback-looking) peer the TestClient presents."""
+    """The GUI runs behind portmux, so request.client.host is always 127.0.0.1
+    (a loopback peer) even for a genuinely remote client. The gate MUST key off
+    the bind host, not the peer - a network bind is refused regardless of the
+    (loopback-looking) peer the TestClient presents."""
     app, mgr = app_mgr
     _set_bind(app, "0.0.0.0")                    # network bind; TestClient peer is loopback
     _fake_install(monkeypatch)                  # would run if the gate were wrong
@@ -154,8 +154,8 @@ class _App:
     (None, False), ("__unset__", False),          # unknown -> fail closed
 ])
 def test_host_pip_allowed(bind, allowed):
-    # Fail-closed on a network or unknown bind: the pip path is host-only and the
-    # portmux relay makes the peer useless, so only a loopback bind may allow it.
+    # Fail closed on a network or unknown bind: only a loopback bind may allow
+    # the host-only pip path, since the portmux relay makes the peer useless.
     assert deps_task.host_pip_allowed(_App(bind)) is allowed
 
 
@@ -200,20 +200,10 @@ def test_start_dep_install_idempotent_while_running(app_mgr, monkeypatch):
     assert t1 is t2                         # no second pip launched
     gate.set()
 
-    # WAIT for the worker before returning. This is not tidiness: monkeypatch
-    # undoes the `blocking` stub at teardown, and run_dep_install resolves
-    # deps.install_plugin_extras at CALL time - so a thread still in flight when
-    # the stub is removed calls the REAL installer, i.e.
-    # `uv pip install --python <the venv running the suite> faster-whisper>=1.2.1`.
-    #
-    # Caught by the installer guard in conftest, which reported it against a
-    # LATER, unrelated test (test_plugin_config_is_confined_to_own_block) because
-    # the spawn landed after this test had already finished. That misattribution
-    # is inherent to a background thread and is exactly why the hit report names
-    # the thread and the call path as well as the current nodeid.
-    #
-    # start_dep_install keeps the TASK, not the thread, so there is no handle to
-    # join - poll the task's own status instead.
+    # WAIT for the worker before returning: monkeypatch undoes the `blocking`
+    # stub at teardown, and run_dep_install resolves deps.install_plugin_extras
+    # at CALL time, so a thread still in flight would reach the real installer.
+    # start_dep_install keeps the TASK, not the thread, so poll the task's status.
     deadline = time.time() + 10
     while t1.status == "running" and time.time() < deadline:
         time.sleep(0.01)

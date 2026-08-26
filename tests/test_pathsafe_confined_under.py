@@ -3,9 +3,8 @@
 
 These are consumed across the codebase (media containment, the model puller, the
 GUI admin routes), so they get their own truth-table tests rather than being
-covered only through a caller. A security primitive with four divergent copies is
-worse than any single unfixed bug, so there is exactly one implementation and this
-file pins its contract.
+covered only through a caller. There is exactly one implementation and this file
+pins its contract.
 
 Companion to test_pathsafe_confined_name.py, which covers the flat-basename,
 HTTPException-raising variant.
@@ -78,20 +77,20 @@ class TestConfinedUnder:
         "a/C:evil", "a/b/C:evil", "a/D:evil", "a/b/Q:z",
     ])
     def test_drive_on_a_NESTED_component_is_rejected(self, base, bad):
-        """REGRESSION. The original check tested position 1 of the WHOLE string,
-        so it only saw a drive on the FIRST component and ``a/C:evil`` passed.
+        """REGRESSION. A check that tests position 1 of the WHOLE string only
+        sees a drive on the FIRST component, so ``a/C:evil`` passes it.
 
         That is not a harmless miss. pathlib joins a drive-relative component
         against a SAME-DRIVE base by silently DROPPING the drive:
-        base.joinpath("a", "C:evil") -> base/a/evil (measured on 3.12). The result
-        stays strictly under base, so the resolved-containment check cannot see
-        it - it is not an escape, it is a SILENT RENAME. At the ComfyUI delete
-        call site that means unlink()ing a real file that is NOT the one ComfyUI
-        named, while reporting containment succeeded.
+        base.joinpath("a", "C:evil") -> base/a/evil. The result stays strictly
+        under base, so the resolved-containment check cannot see it - it is not
+        an escape, it is a SILENT RENAME. At the ComfyUI delete call site that
+        means unlink()ing a real file that is NOT the one ComfyUI named, while
+        reporting containment succeeded.
 
         It also only reproduces when base is on the same drive as the injected
-        letter, so it would present as "works on my D: install, deletes the wrong
-        file on a C: one". Found by the WS2 lane."""
+        letter, so it presents as "works on my D: install, deletes the wrong file
+        on a C: one"."""
         with pytest.raises(ValueError):
             confined_under(base, bad)
 
@@ -112,9 +111,9 @@ class TestConfinedUnder:
             confined_under(base, "Q:evil")
 
     def test_symlink_out_of_base_is_rejected(self, base, tmp_path):
-        """Lexical checks are not sufficient: a symlink INSIDE base pointing out of
-        it turns a well-formed name into an escape, which is why the check is on
-        the RESOLVED location."""
+        """Lexical checks are not sufficient: a symlink INSIDE base pointing out
+        of it turns a well-formed name into an escape, so the check is on the
+        RESOLVED location."""
         outside = tmp_path / "outside"
         outside.mkdir()
         (outside / "victim.txt").write_text("x", encoding="utf-8")
@@ -144,13 +143,9 @@ class TestConfinedUnder:
         """ORDER, not verdict: a rejected input must be refused BEFORE any
         syscall, not after one.
 
-        A correct check paid for too late is worthless. The WS8 lane shipped
-        exactly that: its confined_input_image called
-        Path(raw).expanduser().resolve() FIRST and consulted its allowlist
-        after, so a UNC input was properly refused - but only once the SMB dial
-        had already happened, and their probe hung past 120 seconds proving it.
-        Same defect class as this unit's own admin.py finding, reached from the
-        opposite direction.
+        A correct check paid for too late is worthless: a caller that calls
+        Path(raw).expanduser().resolve() FIRST and consults its allowlist after
+        does refuse a UNC input, but only once the SMB dial has already happened.
 
         confined_under does every lexical rejection before it touches
         joinpath().resolve(), and this pins that ordering so a future
@@ -184,13 +179,11 @@ class TestConfinedUnder:
         "ev\x00il.txt",
     ])
     def test_reserved_characters_are_rejected(self, base, bad):
-        """Same NTFS Alternate Data Stream class #1068 fixed in
-        model_manager/gguf.py's _safe_models_filename, and confined_name
-        above - unfixed here until now. Live-confirmed against this exact
-        function before this check existed: confined_under(base,
-        "sub/somefile.exe:hidden.gguf") was accepted and a write through the
-        returned path succeeded, landing an invisible stream behind a
-        visible, apparently-empty sibling."""
+        """NTFS Alternate Data Stream syntax must be rejected, the same class
+        model_manager/gguf.py's _safe_models_filename and confined_name reject.
+        Without this check confined_under(base, "sub/somefile.exe:hidden.gguf")
+        is accepted and a write through the returned path succeeds, landing an
+        invisible stream behind a visible, apparently-empty sibling."""
         with pytest.raises(ValueError):
             confined_under(base, bad)
 
@@ -206,9 +199,7 @@ class TestConfinedUnder:
         assert out.name == good.rsplit("/", 1)[-1]
 
     # ----------------------------------------------------------------------- #
-    #  Short-name alias substitution - same class #1068 fixed for             #
-    #  confined_name; confined_under never got the equivalent until now,      #
-    #  even though its own docstring names the ComfyUI delete call site.      #
+    #  Short-name alias substitution                                          #
     # ----------------------------------------------------------------------- #
 
     @staticmethod
@@ -218,16 +209,11 @@ class TestConfinedUnder:
         that component with *real_name* before resolving for real.
 
         Path.resolve() is ONE call on the whole joined path (there is no
-        per-component resolve() a monkeypatch could see individually), so a
-        mock keyed only on the final component's name cannot model an alias in
-        an earlier (subfolder) position - it has to inspect .parts. This is
-        what caught its own bug: an earlier version of this helper checked
-        only ``self.name`` and silently never fired for
-        test_alias_intermediate_component_is_rejected below (DID NOT RAISE),
-        because the resolved object's .name is the LEAF ("output.png"), not
-        the aliased subfolder segment. Deterministic, no real 8.3-enabled
-        volume needed - same substitution idea as test_upload.py's alias
-        tests, generalised to nested paths."""
+        per-component resolve() a monkeypatch could see individually), so a mock
+        keyed only on the final component's name cannot model an alias in an
+        earlier (subfolder) position - it has to inspect .parts. A resolved
+        object's .name is the LEAF ("output.png"), not the aliased subfolder
+        segment. Deterministic, no real 8.3-enabled volume needed."""
         real_resolve = Path.resolve
 
         def fake_resolve(self, *a, **k):
@@ -404,13 +390,9 @@ class TestIsUncOrDevicePath:
         r"\\.\PhysicalDrive0",
         r"\\?\Q:\dir",
         "//192.0.2.1/share",
-        # REGRESSION: mixed separators. Windows treats "\" and "/"
+        # Mixed separators. Windows treats a backslash and a forward slash
         # interchangeably in the UNC prefix, so all four of these are UNC to the
-        # OS - PureWindowsPath(...).drive reports "\\host\share" for every one.
-        # The original predicate tested startswith("\\\\") or startswith("//")
-        # and returned False for the two mixed spellings: a live bypass in
-        # exactly the position this predicate guards, since its documented use is
-        # REMOTE-supplied values. Found by the WS7 lane, confirmed by WS2.
+        # OS: PureWindowsPath(...).drive reports the same for every one.
         "\\/192.0.2.1\\share",
         "/\\192.0.2.1/share",
         "\\/.\\PhysicalDrive0",
@@ -459,20 +441,17 @@ class TestIsUncOrDevicePath:
     def test_whitespace_prefixed_is_NOT_unc_and_must_not_be_stripped(self, raw):
         """A padded UNC-looking string is NOT UNC, and this must stay False.
 
-        Counter-intuitive, so it is pinned with the mechanism: Windows does not
-        strip leading whitespace to reveal a UNC prefix. ``ntpath.normpath`` on
-        "  \\\\\\\\host\\\\share\\\\x" yields "  \\\\host\\\\share\\\\x" - the DOUBLED separator
-        collapses to a single one and the spaces are kept - so ``abspath`` resolves
-        it RELATIVE to the process cwd, under a directory literally named "  ".
-        There is no share, no dial, and nothing to guard against.
+        Windows does not strip leading whitespace to reveal a UNC prefix.
+        ``ntpath.normpath`` on a space-padded double-backslash path collapses the
+        DOUBLED separator to a single one and keeps the spaces, so ``abspath``
+        resolves it RELATIVE to the process cwd, under a directory literally
+        named "  ". There is no share, no dial, and nothing to guard against.
 
-        This exists because a proposed alternative implementation normalised with
-        ``.strip()`` before testing the prefix. That would return True here and
-        REFUSE a path Windows treats as an ordinary relative one - a false
-        positive in a security predicate, which is how a guard starts breaking
-        legitimate input and gets weakened later to compensate.
+        An implementation that normalised with ``.strip()`` before testing the
+        prefix would return True here and REFUSE a path Windows treats as an
+        ordinary relative one - a false positive in a security predicate.
 
-        Both authoritative Windows parsers agree with us: PureWindowsPath(...).drive
+        Both authoritative Windows parsers agree: PureWindowsPath(...).drive
         and ntpath.splitdrive both return "" for every string here."""
         assert not is_unc_or_device_path(raw)
         assert not PureWindowsPath(raw).drive, "corpus error: Windows sees a drive"
@@ -488,13 +467,13 @@ class TestIsUncOrDevicePath:
         pathsafe answers "given that this IS a path, is it confined / is it UNC".
         Whether a string is a path at all or a URL is CALLER policy: the rules
         differ per call site (an embedding spec, a model ref, a media source), and
-        a scheme check smuggled in here would be a second concern inside a
-        security primitive that the next caller would either bend or fork.
+        a scheme check inside a security primitive would be a second concern the
+        next caller would either bend or fork.
 
-        The WS7 lane composes its own scheme check locally, using
+        A caller composing its own scheme check locally uses
         ``^[A-Za-z][A-Za-z0-9+.-]+://`` - note the ``+`` rather than ``*``, which
         makes a single-letter drive unmatchable so ``C://models/x.gguf`` stays a
-        path (verified: PureWindowsPath('C://models/x.gguf').drive == 'C:')."""
+        path (PureWindowsPath('C://models/x.gguf').drive == 'C:')."""
         assert not is_unc_or_device_path(raw)
 
 
@@ -520,10 +499,9 @@ class TestRejectUnsafePathString:
     @pytest.mark.parametrize("raw", ["//192.0.2.1/share", "/\\192.0.2.1/share"])
     def test_slash_led_unc_rejected_on_windows(self, raw):
         """REGRESSION. These reach the filesystem as UNC on Windows and dial SMB,
-        so on nt they must be refused - including the mixed "/\\" spelling, which
-        an earlier revision let through. On POSIX they are ordinary local paths
-        and must NOT be refused, which is why this is platform-split rather than
-        unconditional."""
+        so on nt they must be refused - including the mixed spelling that combines
+        a forward slash with a backslash. On POSIX they are ordinary local paths
+        and must NOT be refused, so this is platform-split, not unconditional."""
         if os.name == "nt":
             with pytest.raises(ValueError):
                 reject_unsafe_path_string(raw)
@@ -571,10 +549,9 @@ class TestRejectUnsafePathString:
 
 
 # --------------------------------------------------------------------------- #
-#  is_mapped_network_drive - the S9 classification gap                       #
-#  (is_unc_or_device_path correctly returns False for "Z:", the local-drive  #
-#  form - this is the separate, real-machine-state question of whether that  #
-#  drive letter is actually MAPPED to a network share.)                      #
+#  is_mapped_network_drive - whether a drive letter is actually MAPPED to a   #
+#  network share. is_unc_or_device_path returns False for the local-drive     #
+#  form "Z:", which is a different, syntax-only question.                     #
 # --------------------------------------------------------------------------- #
 
 class TestIsMappedNetworkDrive:
@@ -672,11 +649,11 @@ class TestIsMappedNetworkDrive:
         assert not is_mapped_network_drive(str(tmp_path))
 
     def test_classification_gap_is_real(self, monkeypatch):
-        """Pins the S9 finding itself: is_unc_or_device_path's own docstring
-        says "Z:" is the ordinary local-drive form, and it must keep saying
-        so (this predicate's contract does not change) - is_mapped_network_drive
-        is what tells a REMOTE "Z:" apart from a local one, which
-        is_unc_or_device_path was never designed to answer."""
+        """is_unc_or_device_path's own docstring says "Z:" is the ordinary
+        local-drive form, and it must keep saying so - that predicate's contract
+        does not change. is_mapped_network_drive is what tells a REMOTE "Z:"
+        apart from a local one, which is_unc_or_device_path was never designed to
+        answer."""
         raw = r"Z:\shared\docs"
         assert not is_unc_or_device_path(raw)
         if os.name == "nt":

@@ -127,7 +127,7 @@ def _try_create_native_awq_quantizer_cls():
             super().__init__(quantization_config, **kwargs)
 
         def validate_environment(self, *args, **kwargs):
-            # Self-contained: requires no external compiled packages (gptqmodel/autoawq)
+            # No external compiled packages (gptqmodel/autoawq) are required.
             pass
 
         def update_dtype(self, dtype):

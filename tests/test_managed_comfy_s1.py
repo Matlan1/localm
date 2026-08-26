@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """STAGE S1 (scaffolding) for the localm-managed ComfyUI feature.
 
-Covers the OFF-by-default no-op contract, the coexistence resolver
-(decision 6), the extra_model_paths.yaml generator (decision 9), and the
-`localm comfy status/remove` CLI - all WITHOUT provisioning anything (S1 is
-scaffolding; S2/S3 provision). The cardinal rule tested here: with the flag
-off and nothing installed, ComfyUI targeting is byte-identical to today and no
-managed directory is ever created.
-
-Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
+Covers the OFF-by-default no-op contract, the coexistence resolver, the
+extra_model_paths.yaml generator, and the `localm comfy status/remove` CLI -
+all WITHOUT provisioning anything (S1 is scaffolding; S2/S3 provision). The
+cardinal rule tested here: with the flag off and nothing installed, ComfyUI
+targeting is byte-identical to an install that has never heard of this feature,
+and no managed directory is ever created.
 """
 
 from __future__ import annotations
@@ -25,9 +23,8 @@ from localm.media import managed_comfy as mc
 # --------------------------------------------------------------------------- #
 #  Isolation: a throwaway LOCALM_HOME wired through both the lazy home_dir()   #
 #  AND the import-frozen config.CONFIG_FILE, so load_config/save_config and    #
-#  managed_comfy path resolution agree on the same tmp dir (see the memory     #
-#  note "Test home isolation (import-time)"). FLUX_API_URL is cleared so the   #
-#  "byte-identical when off" baseline is deterministic.                        #
+#  managed_comfy path resolution agree on the same tmp dir. FLUX_API_URL is    #
+#  cleared so the off baseline is deterministic.                               #
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def home(tmp_path, monkeypatch):
@@ -46,8 +43,8 @@ def _install_managed(home_dir: Path) -> mc.ManagedComfyPaths:
     """Create the minimal on-disk layout that makes is_managed_comfy_installed()
     true, using the module's OWN path accessors so the test is platform-agnostic
     (venv interpreter path differs on Windows vs POSIX). Includes the completion
-    marker (#621 follow-up: main.py + venv alone means "install still running",
-    not "installed" - see is_managed_comfy_installed()'s docstring)."""
+    marker: main.py + venv alone means "install still running", not "installed"
+    - see is_managed_comfy_installed()'s docstring."""
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)
@@ -65,7 +62,7 @@ def _install_managed(home_dir: Path) -> mc.ManagedComfyPaths:
 
 def test_defaults_are_off(home):
     c = cfg.load_config()
-    assert c["comfy_target"] == "own"          # decision 6: prefer own WHEN one exists
+    assert c["comfy_target"] == "own"          # prefer own when one exists
 
 
 def test_off_by_default_is_not_installed(home):
@@ -74,18 +71,17 @@ def test_off_by_default_is_not_installed(home):
 
 
 # --------------------------------------------------------------------------- #
-#  #621 follow-up: a still-installing instance must NOT read as "installed".  #
+#  A still-installing instance must NOT read as installed.                    #
 # --------------------------------------------------------------------------- #
 
 def test_main_py_and_venv_alone_are_not_installed(home):
-    """Regression pin: the on-disk state right after `git clone` + `python -m
-    venv` (steps 1-2 of an 7-8 step pipeline) - main.py and the venv
-    interpreter exist, but torch/requirements/custom-nodes/the completion
-    marker have not run yet - must read as NOT installed. Reproduced live: a
-    real install takes minutes past this point, during which the Settings
-    pill, `localm comfy status`, and the actual Generate-button routing
-    (managed_comfy_active() calls this) all used to claim the instance was
-    ready and would route to it."""
+    """The on-disk state right after `git clone` + `python -m venv` (steps 1-2
+    of a 7-8 step pipeline) - main.py and the venv interpreter exist, but
+    torch/requirements/custom-nodes/the completion marker have not run yet -
+    must read as NOT installed. A real install takes minutes past this point,
+    during which the Settings pill, `localm comfy status`, and the actual
+    Generate-button routing (managed_comfy_active() calls this) would otherwise
+    claim the instance is ready and route to it."""
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)
     paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
@@ -143,7 +139,7 @@ def test_off_does_not_create_managed_dirs(home):
 
 
 # --------------------------------------------------------------------------- #
-#  Coexistence routing (decision 6).                                          #
+#  Coexistence routing.                                                       #
 # --------------------------------------------------------------------------- #
 
 def test_installed_and_own_targets_managed(home):
@@ -155,8 +151,8 @@ def test_installed_and_own_targets_managed(home):
     assert t.api_url == mc.managed_comfy_api_url()
     assert t.api_url == mc.MANAGED_COMFY_API_URL
     assert t.workdir == str(paths.root)
-    # The wiring: every existing caller of default_api_url() now hits the
-    # managed instance without touching the launch/spawn path.
+    # Every caller of default_api_url() hits the managed instance without
+    # touching the launch/spawn path.
     assert comfy_client.default_api_url() == mc.MANAGED_COMFY_API_URL
 
 
@@ -188,7 +184,7 @@ def test_flux_env_still_overrides_when_managed_off(home):
 
 
 # --------------------------------------------------------------------------- #
-#  extra_model_paths.yaml generator (decision 9).                             #
+#  extra_model_paths.yaml generator.                                          #
 # --------------------------------------------------------------------------- #
 
 def test_extra_model_paths_includes_both_dirs(home, tmp_path):
@@ -280,10 +276,10 @@ def test_cli_remove_nothing_installed(cli_runner):
 
 
 def test_cli_setup_is_honest_on_failure(cli_runner, monkeypatch):
-    """`localm comfy setup` is a REAL feature now (S2 copy + S3 fresh), not a facade.
-    It is also HONEST about failure (AGENTS.md rule 5): when provisioning fails it
-    exits non-zero and leaves nothing installed. The heavy provisioning is mocked so
-    the test stays inert (no multi-GB clone / torch download)."""
+    """`localm comfy setup` is a REAL feature (S2 copy + S3 fresh), not a facade.
+    It is also HONEST about failure: when provisioning fails it exits non-zero and
+    leaves nothing installed. The heavy provisioning is mocked so the test stays
+    inert (no multi-GB clone / torch download)."""
     from localm.cli import main
     from localm.media import managed_comfy_fresh as fresh
     from localm.media import managed_comfy_provision as prov

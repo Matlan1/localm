@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// NEW-MODELSWITCH-INDICATOR: the Models-page "use" button calls the SAME
-// switchModel() the sidebar dropdown uses (models-sidebar.js), which already
-// drives the sidebar's #status-text pill for the real load duration -
-// but that status line lives inside the off-canvas #sidebar (invisible on
-// mobile, easy to miss on desktop) and the button itself gave no feedback of
-// its own beyond `disabled`. These tests drive the REAL button click ->
-// switchModel() wiring (not a helper in isolation) so a regression in the
-// wiring, not just the label-swap logic, would be caught. Same
-// harness/fetch-mock style as models-degraded-load-toast.test.mjs.
+// Drives the Models-page "use" button click through to switchModel().
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,9 +10,8 @@ const MODELS_PAYLOAD = {
   active: "current-model",
 };
 
-/** A controllable load response: resolves only when the test calls
- *  `resolveLoad()`, so the test can inspect the button WHILE the real fetch
- *  promise switchModel() awaits is still in flight - not just before/after. */
+/** A controllable load response: the /api/models/load call resolves only when
+ *  the test calls `resolveLoad()`. */
 function makeFetch({ loadBody = { status: "loaded", model: "other-model" } } = {}) {
   let resolveLoad;
   const loadPromise = new Promise((r) => { resolveLoad = r; });
@@ -62,9 +53,8 @@ test("use button: shows 'loading…' and stays disabled WHILE the switch is in f
   resolveLoad();
   await clickPromise;
   await tick(3);
-  // A successful switch re-renders the whole table (refreshModelsPage), so the
-  // ORIGINAL button node is gone - not asserting on it further here (covered
-  // by the row disappearing since the model is now active, tested below).
+  // a successful switch re-renders the whole table, so the original button node
+  // is gone and is not asserted on further here
 });
 
 test("use button: label restores on a FAILED load, not stuck at 'loading…'", async () => {

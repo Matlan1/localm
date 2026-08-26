@@ -2,37 +2,24 @@
 """A stop or restart must not abandon a background job's child process.
 
 ``JobManager.start_cli`` runs ``python -m localm <cmd>`` as a real subprocess - a
-model pull, a llama.cpp runtime provision, a ComfyUI setup. Three facts combined to
-leave that child running after the server went away:
+model pull, a llama.cpp runtime provision, a ComfyUI setup. Nothing else reaps
+that child:
 
   * ``_do_shutdown`` ends at ``os._exit(0)`` and ``_do_restart`` at ``os.execv``.
     Both bypass atexit.
   * the job's worker thread is a daemon, so its ``finally`` may never run.
-  * the ``Popen`` carries no ``creationflags`` and no ``start_new_session``, and
-    nothing anywhere in either exit path referenced a job.
+  * the ``Popen`` carries no ``creationflags`` and no ``start_new_session``.
 
-ADR-0008 inferred exactly this from the code shape, recorded that it was "inferred
-from code shape and was not measured", and made measuring it the follow-up that
-would decide its option E.
+An abandoned child that writes NOTHING to stdout keeps running untracked, while
+one that writes and flushes dies at its next write on the broken pipe, mid
+operation with no cleanup and no record. Terminating deliberately leaves one
+known state for the next start to report as "interrupted".
 
-IT IS MEASURED NOW, AND THE ANSWER HAS TWO HALVES. On Windows, with both children
-spawned exactly as start_cli does and then abandoned by an os._exit(0): a child
-that writes NOTHING to stdout survived and kept working (heartbeat advancing after
-the parent was gone), while a child that writes and flushes DIED at its next write
-on the broken pipe. So a quiet child (a git clone, a pip install, a long write
-between progress emissions) becomes untracked work, and a chatty one (a pull
-flushes constantly) is instead torn down mid-operation with no cleanup and no
-record. Both are unacceptable and both are fixed by terminating deliberately, which
-leaves one known state for the next start to report as "interrupted". Evidence:
-``dev-notes/O3-job-durability-and-child-fate-2026-08-19.md``.
-
-WHY THE REAL-PROCESS TEST IS THE LOAD-BEARING ONE. Asserting that a recording
-double's ``terminate`` was CALLED would pass just as happily against a kill that
-does not actually reach the process (the wrong pid, a signal the child ignores, a
-tree that survives its root). So the first test here spawns a genuine child and
-asserts on genuine process liveness, exactly as
-``test_embedder_worker_reaped_on_exit.py`` does for the embedder worker; the
-double-based tests below only cover which exit paths CALL it.
+The first test here spawns a genuine child and asserts on genuine process
+liveness, since a recording double's ``terminate`` being CALLED would also pass
+against a kill that never reaches the process (the wrong pid, a signal the child
+ignores, a tree that survives its root). The double-based tests below only cover
+which exit paths CALL it.
 """
 
 from __future__ import annotations
@@ -72,11 +59,9 @@ def _spawn_sleeper(seconds: int = 120) -> subprocess.Popen:
 def _running_cli_job(manager, proc, *, kind="pull", label="Pull tiny/model.gguf"):
     """Register a job in *manager* the way start_cli does, wrapping *proc*.
 
-    Built directly rather than by calling start_cli with a real localm command:
-    the property under test is what the EXIT PATH does to a running job's child,
-    and every localm subcommand that runs long enough to observe also downloads
-    something or provisions a runtime. Nothing here fakes the child - it is a real
-    process, which is the part that matters."""
+    Built directly rather than by calling start_cli with a real localm command,
+    every one of which would download something or provision a runtime. The
+    child itself is not faked."""
     job = J.Job(id=f"{len(manager._jobs):012d}", kind=kind, argv=[], label=label)
     job._proc = proc
     manager._register(job)
@@ -183,9 +168,9 @@ class TestRealChildIsKilled:
                     pass
 
     def test_the_registry_still_says_running_afterwards(self):
-        """Deliberate: the next start reconciles a "running" row to "interrupted",
-        which is the honest word for a server that stopped mid-operation. Marking
-        it "cancelled" here would claim the USER asked to stop it (ADR-0008 R3)."""
+        """The row stays "running", and the next start reconciles it to
+        "interrupted". Marking it "cancelled" here would claim the USER asked to
+        stop it."""
         m = J.JobManager()
         proc = _spawn_sleeper()
         try:
@@ -232,9 +217,8 @@ class TestSelection:
         assert J.terminate_children_for_exit() == 3
 
     def test_managers_are_reached_through_module_state(self):
-        """The exit paths take no app and hold no manager, so a module-level
-        registry is the only way they can reach one - the same shape as
-        embedder.release_for_exit."""
+        """The exit paths take no app and hold no manager, so they reach every
+        manager through the module-level registry."""
         a, b = J.JobManager(), J.JobManager()
         _running_cli_job(a, _FakeProc(pid=1))
         _running_cli_job(b, _FakeProc(pid=2))

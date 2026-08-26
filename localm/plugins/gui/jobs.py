@@ -3,10 +3,9 @@
 Background jobs for the GUI: model pulls and image generation.
 
 A job wraps a ``localm`` CLI subprocess. Its stdout/stderr lines are pushed
-onto a queue that the web layer streams to the browser as SSE, so the GUI
-reuses the exact CLI logic (progress bars, dedup checks, split GGUF handling)
-without duplicating any of it. Subprocesses run without a TTY, which makes
-all interactive prompts fall back to their safe non-interactive defaults.
+onto a queue that the web layer streams to the browser as SSE. Subprocesses
+run without a TTY, so interactive prompts fall back to their non-interactive
+defaults.
 """
 
 from __future__ import annotations
@@ -28,18 +27,12 @@ from typing import Callable, Optional
 
 from localm.model_manager import PROGRESS_SENTINEL
 
-# Bound on both the replay backlog and each subscriber's queue, mirroring the
-# old single-queue's maxsize so a very long-lived job cannot grow unbounded.
+# Bound on the replay backlog and on each subscriber's queue.
 _HISTORY_MAX = 10_000
 
-# Every status a job can hold. "interrupted" is the one that needs explaining:
-# it means THIS SERVER STOPPED while the operation was in flight, so its outcome
-# is unknown - not that the work failed, and not that anyone cancelled it. Those
-# are three different claims and ADR-0008 R3 forbids them sharing a word ("I lost
-# the connection" and "the work failed" are different claims; see #1065's
-# disconnected-vs-failed split for the same rule applied to the SSE channel).
-# Reporting a restart-orphaned pull as "failed" would assert something nobody
-# measured: the download may well have completed on disk.
+# Every status a job can hold. "interrupted" means the server stopped while the
+# operation was in flight, so its outcome is unknown; "failed" means the work
+# itself failed; "cancelled" means someone stopped it.
 _JOB_STATUSES = ("running", "done", "failed", "cancelled", "interrupted")
 
 
@@ -69,81 +62,52 @@ class Job:
     returncode: Optional[int] = None
     result: Optional[str] = None   # kind-specific payload (e.g. output image path)
     created_at: float = field(default_factory=time.time)
-    # When the worker thread left, i.e. when this job stopped being in flight.
-    # None while it is still running. Deliberately SEPARATE from created_at,
-    # because the TTL sweep keys on this one: a two-hour job that finished a
-    # second ago must survive, and keying the sweep on created_at evicted
-    # exactly that job (it was already past the cutoff the moment it finished).
+    # When the worker thread left. None while the job is still running. The TTL
+    # sweep keys on this field.
     finished_at: Optional[float] = None
-    # Human-readable name for this operation, in the same words the host console
-    # already uses (start_cli's host_label), so a listing can describe a job
-    # without re-deriving a label from argv.
+    # Human-readable name for this operation (start_cli's host_label).
     label: Optional[str] = None
-    # Stable id (keystore hash) of the key that created this job, or None when NO
+    # Stable id (keystore hash) of the key that created this job, or None when no
     # key is configured at all or no token was presented. The events/cancel routes
-    # accept the creator or an admin/owner only (KEY-SCOPE-2), so a leaked job id
-    # is not enough to touch another key's job.
-    #
-    # READ THE OPEN-MODE CASE CAREFULLY, because it is the DEFAULT and an earlier
-    # version of this comment had it backwards: principal_id() returns None
-    # whenever no owner key and no keystore are configured, and the loopback GUI's
-    # shell token is NEITHER of those - so in the default configuration jobs are
-    # UNOWNED, and job_owner_ok() then admits any authenticated caller. Ownership
-    # discriminates in KEYED mode only. Anything built on this field must be
-    # correct in both modes and must not be described as if ownership were always
-    # enforced.
+    # accept the creator or an admin/owner only. In the default configuration
+    # principal_id() is None, so jobs are unowned and job_owner_ok() admits any
+    # authenticated caller; ownership discriminates in keyed mode only.
     owner: Optional[str] = None
     _proc: Optional[subprocess.Popen] = None
-    # Set by cancel(); in-thread jobs (start_fn, e.g. media gen) poll this to
-    # stop cooperatively since there is no subprocess to terminate.
+    # Set by cancel(); in-thread jobs (start_fn) poll this to stop cooperatively,
+    # having no subprocess to terminate.
     cancel_event: threading.Event = field(default_factory=threading.Event)
-    # Every event ever pushed (bounded, oldest evicted first) so a viewer that
-    # subscribes mid-job still sees the full stream from the start. Each SSE
-    # connection then gets its OWN asyncio.Queue in _subscribers, fed live by
-    # push() - a plain queue.Queue is single-consumer, so two concurrent viewers
-    # used to split a job's events between them instead of each seeing all of them.
+    # Every event ever pushed (bounded, oldest evicted first). Each SSE connection
+    # gets its OWN asyncio.Queue in _subscribers, fed live by push().
     _history: collections.deque = field(
         default_factory=lambda: collections.deque(maxlen=_HISTORY_MAX))
     _subscribers: list = field(default_factory=list)
     _sub_lock: threading.Lock = field(default_factory=threading.Lock)
-    # The most recent {"type": "progress", ...} event, so a listing can report
-    # pct/phase without replaying the whole history. Written under _sub_lock in
+    # The most recent {"type": "progress", ...} event. Written under _sub_lock in
     # push(), alongside the history append it is derived from.
     _last_progress: Optional[dict] = None
-    # Set by mark_outcome() - see that method's docstring. None (never marked)
-    # and "failed" both fall through to start_fn's unchanged except-branch
-    # behavior; only "done" ever overrides it. Read/written from the single
-    # worker thread running this job's callback, same as status/result/
-    # returncode above - no lock needed, unlike _history/_subscribers which
-    # are also read cross-thread by SSE subscribers.
+    # Set by mark_outcome(). None (never marked) and "failed" both fall through to
+    # start_fn's except-branch behavior; only "done" overrides it. Read and written
+    # from the single worker thread running this job's callback, so it needs no
+    # lock, unlike _history and _subscribers.
     _outcome: Optional[str] = None
     # Called (best-effort, never allowed to raise into the job) whenever this
-    # job's DURABLE state changes: a cancel, and the one-time finished stamp.
-    # Set by JobManager when it registers the job, so the manager can persist
-    # without Job needing to know what a store is - the same shape as _proc,
-    # which Job holds without knowing anything about subprocess management.
-    # Progress deliberately does NOT notify: a per-second tick would rewrite
-    # the whole store file, which is exactly the objection ADR-0008 raised
-    # against reusing the scheduled-jobs store for this.
+    # job's DURABLE state changes: a cancel, and the one-time finished stamp. Set
+    # by JobManager when it registers the job. Progress does NOT notify.
     _notify: Optional[Callable[[], None]] = None
     # For a job REBUILT from a persisted row (see from_record): the pid its child
-    # process had in the previous run, or None. Never used to signal anything -
-    # that pid may have been recycled by an unrelated process - only to report
-    # that an orphan may still be running. Absent on a live job, which has _proc.
+    # process had in the previous run, or None. Only ever reported, never
+    # signalled. Absent on a live job, which has _proc.
     restored_child_pid: Optional[int] = None
 
     # ---- durable record -------------------------------------------------- #
-    # A row carries only what a LISTING and an ownership check need. Notably NOT
-    # argv, which summary() already withholds from clients because it carries the
-    # resolved model spec and any host path the caller passed; there is no reason
-    # for a durable file to hold what the API refuses to hand out. Progress is
-    # not persisted either (see _notify above), so a recovered row reports an
-    # UNKNOWN percentage rather than a stale one.
+    # A row carries only what a listing and an ownership check need: no argv and
+    # no progress, so a recovered row reports an unknown percentage.
 
     def to_record(self) -> dict:
         """This job as a persistable row. Reads plain fields only, never the
         _sub_lock-guarded history/subscribers, so it is safe to call under the
-        manager's own lock without adding a lock edge."""
+        manager's own lock."""
         pid = self.restored_child_pid
         proc = self._proc
         if proc is not None:
@@ -167,14 +131,10 @@ class Job:
     @classmethod
     def from_record(cls, data: dict) -> "Job":
         """Rebuild a job from a persisted row, or raise ValueError on a row this
-        build cannot make sense of (the caller skips it and counts it, matching
-        the scheduled-jobs store's per-entry posture).
+        build cannot make sense of.
 
-        The result is a RECORD, not a live job: argv is empty and _proc is None,
-        the same shape a start_fn job already has. created_at is required and
-        must be a real number, because snapshot() sorts on it - a None there
-        would raise inside the listing route rather than at load time, which is
-        the wrong place to find out."""
+        The result is a RECORD, not a live job: argv is empty and _proc is None.
+        created_at is required and must be a real number."""
         jid = data.get("id")
         if not isinstance(jid, str) or not jid.strip():
             raise ValueError("row has no id")
@@ -234,42 +194,21 @@ class Job:
                  unit: Optional[str] = None, **extra) -> None:
         """Report structured progress from an IN-PROCESS (``start_fn``) job.
 
-        Only ``start_cli``'s stdout reader ever PRODUCED a
-        ``{"type": "progress"}`` event, keyed on PROGRESS_SENTINEL, so no
-        in-thread job ever reported a percentage - not the three RAG kinds, the
-        three media kinds, embed-setup or embedding-warmup. ``rag-reembed``
-        computes a true ``n/total`` and could only ever print it as prose.
-
-        ``push`` itself was never the obstacle: it is public and latches any
-        progress-typed dict, so a hand-rolled one always reached ``summary()``.
-        What was missing is this affordance, and that matters because
-        ``done * 100 / total`` with no total either raises or - after the guard
-        most people reach for - reports a fabricated 0%. Deriving it in ONE
-        place is the point; four call sites deriving it independently is four
-        chances to reintroduce exactly the defect ADR-0008 removed.
-
-        ``pct`` is derived here rather than accepted from the caller so the two
-        producers cannot drift: it is computed exactly as
+        ``pct`` is derived here, computed exactly as
         ``model_manager.pull._emit_progress`` does, and is **null whenever there
-        is no total**. An operation that has not established a denominator is at
-        an UNKNOWN percentage, never at 0% (ADR-0008 R1). Pass ``done`` without
-        ``total`` for an honest indeterminate count.
+        is no total**. Pass ``done`` without ``total`` for an indeterminate
+        count.
 
         ``unit`` names what ``done``/``total`` are counted in ("bytes",
-        "files", "chunks") so a surface can render "412 MB of 1.9 GB" or
-        "37 of 128 files" rather than a bare percentage. ``done``, ``total`` and
-        ``unit`` are OMITTED when unknown rather than sent as zero.
+        "files", "chunks"). ``done``, ``total`` and ``unit`` are OMITTED when
+        unknown, never sent as zero.
         """
         pct = None
         if total and done is not None:
             pct = round(done * 100 / total, 1)
             if done > total:
-                # Not clamped: a numerator past its denominator is a bug in the
-                # CALLER, and silently pinning it to 100% would hide the bug
-                # while also making a false completion claim (AGENTS.md rule 5).
-                # Surfaced here so it is attributable, and left visible upstream.
-                # Local import matching _HostAnnouncer._say below: debuglog is
-                # imported inside the call site throughout this module.
+                # Not clamped: an over-100% value is logged and left visible
+                # upstream.
                 try:
                     from localm.debuglog import logger
                     logger.debug("job %s reported %s of %s %s (over 100%%)",
@@ -290,9 +229,8 @@ class Job:
 
     def subscribe(self) -> asyncio.Queue:
         """Register an independent event stream for one SSE connection: an
-        asyncio.Queue pre-loaded with every event pushed so far (so a viewer
-        that connects mid-job, or reconnects, still gets the full history) plus
-        every event push() fans out from here on. Call unsubscribe() when the
+        asyncio.Queue pre-loaded with every event pushed so far, plus every
+        event push() fans out from here on. Call unsubscribe() when the
         connection closes, or the subscriber leaks for the job's lifetime."""
         loop = asyncio.get_running_loop()
         q: asyncio.Queue = asyncio.Queue(maxsize=_HISTORY_MAX)
@@ -320,21 +258,18 @@ class Job:
         self._fire_notify()
 
     def mark_finished(self) -> None:
-        """Stamp finished_at once, when the worker thread leaves. Idempotent so
-        a second call (or a cancel that raced the thread's own exit) cannot move
-        the timestamp forward and give the job a second lease on the TTL."""
+        """Stamp finished_at once, when the worker thread leaves. Idempotent: a
+        second call cannot move the timestamp forward."""
         if self.finished_at is None:
             self.finished_at = time.time()
-            # Inside the idempotence guard on purpose: the notify exists to
-            # persist the terminal state ONCE, and a second call has nothing new
-            # to record.
+            # Inside the idempotence guard: the notify persists the terminal state
+            # once.
             self._fire_notify()
 
     def _fire_notify(self) -> None:
-        """Tell the owning manager this job's durable state moved. Best-effort by
-        contract: persistence is a convenience layered on top of a job, and a
-        store problem must never propagate into the job's own control flow
-        (rule 5 keeps it visible - the manager's own handler logs it)."""
+        """Tell the owning manager this job's durable state moved. Best-effort: a
+        store problem never propagates into the job's own control flow, and the
+        failure is logged."""
         cb = self._notify
         if cb is None:
             return
@@ -354,13 +289,11 @@ class Job:
         VRAM handover, a bookkeeping call) that could still raise.
 
         start_fn's worker trusts this over inferring the outcome from an
-        exception, but ONLY for an exception that happens AFTER this was
-        called - a callback that never calls it keeps today's rule unchanged
-        (an exception anywhere in ``fn`` means failed). Mirrors start_cli's
-        own ``{"type": "outcome"}`` sentinel-frame contract (#1126) for the
-        in-process job path, which has no subprocess/stdout boundary to carry
-        a sentinel frame across, so the signal has to be an ordinary method
-        call on the same in-memory object instead."""
+        exception, but ONLY for an exception raised AFTER this was called. A
+        callback that never calls it keeps the default rule: an exception
+        anywhere in ``fn`` means failed.
+
+        Raises ValueError unless *status* is "done" or "failed"."""
         if status not in ("done", "failed"):
             raise ValueError(
                 f"mark_outcome status must be 'done' or 'failed', got {status!r}")
@@ -368,14 +301,10 @@ class Job:
 
     def summary(self) -> dict:
         """This job as a listing row: enough for a client to render and then
-        attach to it, without exposing argv (which carries the resolved model
-        spec and any host path the caller passed) or the owner id.
+        attach to it. Does not carry argv or the owner id.
 
-        pct/phase come from the last progress event rather than from history, so
-        a caller never has to replay 10,000 events to learn how far along a
-        download is. Both are absent, not zero, when the job has not reported
-        progress - a pull that has not yet read a byte-count is at an UNKNOWN
-        percentage, not at 0%."""
+        pct/phase come from the last progress event. Both are absent, not zero,
+        when the job has not reported progress."""
         with self._sub_lock:
             progress = self._last_progress
         out = {
@@ -399,21 +328,13 @@ class Job:
 
 class _HostAnnouncer:
     """Mirror a background job's lifecycle to the HOST - the person running
-    ``localm gui`` - not only to the requesting client (G2).
+    ``localm gui`` - not only to the requesting client.
 
-    A model pull started from a phone/PWA ran silently as far as the host was
-    concerned: its output went only to the per-job event queue the browser reads.
-    Now the host also sees a start line, throttled progress (10% steps so it does
-    not spam), and the end status. Output is ephemeral (host stdout + the debug
-    log), never a privacy-mode disk trace - the model spec is operational, not
-    session content. ``line()`` is pure so the throttling is unit-testable."""
+    The host sees a start line, throttled progress (10% steps) and the end
+    status. Output is ephemeral: host stdout plus the debug log, never a
+    privacy-mode disk trace. ``line()`` is pure."""
 
-    # A job's per-line CLI output (record_line) used to reach ONLY the
-    # ephemeral per-job SSE history a browser tab happened to have open - never
-    # the debug log or a bug report, even though it carries the actual reason
-    # a job failed (a git/pip/native error). #621: a ComfyUI setup failure
-    # left nothing more informative than "ComfyUI setup failed" anywhere a bug
-    # report could read from. Keep a bounded tail so a failure can log it.
+    # How many raw output lines to keep, so a failure can log its tail.
     _TAIL_LINES = 20
 
     def __init__(self, label: str) -> None:
@@ -445,8 +366,7 @@ class _HostAnnouncer:
         except Exception:
             pass
         try:
-            # The GUI server's stdout is the host terminal, so a plain print is the
-            # one channel guaranteed to surface this to the host.
+            # The GUI server's stdout is the host terminal.
             print(msg, flush=True)
         except Exception:
             pass
@@ -455,14 +375,13 @@ class _HostAnnouncer:
         self._say(f"{self.label} started (requested from a connected client)")
 
     def record_line(self, text: str) -> None:
-        """Buffer a raw output line (not a progress/end event) so a later
-        failure can log its actual tail - see class docstring."""
+        """Buffer a raw output line (not a progress/end event) for a later
+        failure to log."""
         self._recent_lines.append(text)
 
     def announce_failure_detail(self) -> None:
-        """Log the job's last few output lines at ERROR level so a debug-log
-        digest or a bug report carries the real reason it failed, not just
-        the bare "<label> failed" summary. No-op if nothing was buffered."""
+        """Log the job's last few buffered output lines at ERROR level. No-op if
+        nothing was buffered."""
         if not self._recent_lines:
             return
         try:
@@ -481,112 +400,57 @@ class _HostAnnouncer:
 # --------------------------------------------------------------------------- #
 #  Durable record of in-flight operations                                     #
 # --------------------------------------------------------------------------- #
-# ADR-0008 chose the in-memory registry and DEFERRED durability as its option E,
-# naming the consequence in its own limits section: "a server restart still loses
-# the record while a pull may continue". This closes that.
-#
-# WHY NOT REUSE THE SCHEDULED-JOBS STORE (localm/plugins/builtin/jobs/store.py):
-# ADR-0008 rejected it on four grounds that all still hold - its Job is a
-# recurring TASK DEFINITION with no concept of an in-flight instance, it rewrites
-# the whole file under one process-wide lock on every mutation, it has no startup
-# reconciliation, and the plugin is OPTIONAL and not preinstalled while this
-# registry is kernel and always present. That last one is also why the quarantine
-# helpers below are a local implementation rather than an import: kernel code must
-# not depend on a plugin that may not be installed. The POSTURE is deliberately
-# copied though (atomic temp+replace, owner-restricted, corrupt-file quarantine,
-# per-row skip on a bad entry), because that posture was earned - see issue #859
-# and audit F4 in that file's own comments.
-#
 # ONE FILE PER WRITER, named <pid>-<run>.json under <data dir>/activity/. The pid
 # half is what a later run reads to decide whether the writer is GONE; the run
-# half is a nonce minted per store instance, and it is not decoration - MEASURED
-# 2026-08-19, with a pid-only name and two managers alive in one process (which
-# gui/web.py's fallback can legitimately create), 37 of 40 terminal writes were
-# LOST: both managers wrote the same path through config.atomic_write_private's
-# FIXED "<name>.tmp" temp, so one writer's os.replace moved the temp out from
-# under the other and failed with WinError 2, leaving the file claiming "running"
-# for a job that had finished. A per-manager lock cannot fix that, which is
-# exactly what the sibling store's own _STORE_LOCK comment says about several
-# instances pointing at one file. So: a path unique per (process, store) removes
-# the collision, and _STORE_LOCK below serialises whatever remains in-process.
-# Two further consequences, both wanted:
-#   * Several localm servers can share one data dir (ADR-0002), and none of them
-#     can clobber another's record, because no writer ever touches another
-#     writer's file.
-#   * The sibling store RAISES on an unreadable file specifically so that a
-#     failed read cannot be followed by a write that erases intact data (its
-#     audit F4). That hazard is structurally absent here rather than ignored: the
-#     only file this process ever WRITES is its own, so a file it could not READ
-#     is never a file it is about to overwrite.
-# The pid, not the instance_id, is what liveness is checked against, because a
-# restart re-execs and re-advertises with a FRESH instance_id (see
-# http_server._do_restart) - an id-keyed file could never be recognised again by
-# the server that wrote it. Pid REUSE is handled by the run nonce plus the
-# in-process registry rather than by trusting the pid: see _ActivityStore.reap.
+# half is a nonce minted per store instance, so two managers alive in one process
+# never write the same path. Liveness is checked against the PID, not the
+# instance_id; pid reuse is handled by the run nonce plus the in-process
+# registry, see _ActivityStore.reap.
 #
-# PRIVACY. This is written in every session mode, including the privacy default,
-# and that is a considered position rather than an oversight. Privacy mode is
-# about automatic traces of SESSION CONTENT (audit trails, transcripts,
-# checkpoints, generation sidecars - see localm/audit.py). An in-flight operation
-# record is operational runtime state, the same class as the instance registry
-# (localm/instances.py, which writes pid/port/root_dir/token) and the GPU
-# coordination registry (localm/gpu_registry.py, which writes the loaded MODEL
-# NAME) - neither consults effective_mode, both write 0600 into the data dir. The
-# row deliberately holds no session content, no prompts and no argv, and the TTL
-# sweep drops it an hour after the operation finishes.
+# Posture: atomic temp+replace, owner-restricted, corrupt-file quarantine, and a
+# per-row skip on a bad entry. This process only ever WRITES its own file, so
+# several localm servers can share one data dir.
+#
+# The row holds no session content, no prompts and no argv, and the TTL sweep
+# drops it an hour after the operation finishes. It is written in every session
+# mode, privacy included.
 _ACTIVITY_VERSION = 1
 
-# Serialises every activity-store operation IN THIS PROCESS. Not an instance lock
-# and not the manager's lock, for the reason measured above: two JobManagers can
-# coexist in one process, each with its own lock, and reconciliation additionally
-# reads and DELETES files a sibling manager may be reaping at the same moment.
-# Home-scale data, so one coarse lock is fine - the same call the sibling
-# scheduled-jobs store makes. Lock order in this module is always
-# JobManager._lock OUTER, _STORE_LOCK INNER (persisting happens under the
-# manager's lock); nothing here ever reaches back for the manager's lock, so that
-# order cannot invert.
+# Serialises every activity-store operation IN THIS PROCESS. Lock order in this
+# module is always JobManager._lock OUTER, _STORE_LOCK INNER; nothing here ever
+# reaches back for the manager's lock.
 _STORE_LOCK = threading.RLock()
 
-# How many corrupt-copies to keep across the whole activity dir. Per-pid file
-# names mean each pid would otherwise start its own unbounded series, so unlike
-# the sibling store this prunes across the DIRECTORY, not per file name.
+# How many corrupt-copies to keep across the whole activity DIRECTORY, not per
+# file name.
 _QUARANTINE_KEEP = 3
 
-# `owner` holds the sha256 of the creating key - the same digest the keystore
-# stores (http_server.principal_id returns key_hash). A quarantine copy is made
-# from a file that FAILED to parse, so it cannot be re-serialised through json:
-# the redaction has to work on raw text. Matches the digest SHAPE (64 hex) so a
-# mangled value is left alone rather than replaced blind. Same regex as the
-# scheduled-jobs store's, for the same field, for the same reason (issue #859).
+# Matches the `owner` field's sha256 digest SHAPE (64 hex) in raw text, so a
+# mangled value is left alone.
 _OWNER_DIGEST_RE = re.compile(r'("owner"\s*:\s*)"[0-9a-fA-F]{64}"')
 
-# What the digest is replaced WITH, and this is the load-bearing detail:
-# job_owner_ok (inference/http_server.py) treats owner=None as "unowned, so
-# unrestricted". Dropping or nulling the field would therefore turn every
-# recovered row into one ANY caller may stream and cancel - trading a digest that
-# is already owner-only on disk for an open ACL. A non-null, non-hex sentinel can
-# never equal a principal_id() (always 64 hex), so a recovered row resolves to
-# NOBODY and fails CLOSED: unreachable to a scoped key, still reachable to an
+# What the digest is replaced WITH: a non-null, non-hex sentinel. The field is
+# neither dropped nor nulled, because owner=None means unowned and therefore
+# unrestricted. It can never equal a principal_id(), so a recovered row resolves
+# to NOBODY and fails CLOSED: unreachable to a scoped key, still reachable to an
 # admin/owner key.
 _REDACTED_OWNER = "redacted-on-quarantine"
 
 
 def activity_dir() -> Path:
     """The in-flight operation record dir (``<data dir>/activity``), resolved at
-    CALL time so a test that repoints LOCALM_HOME is honoured (home_dir() is
-    itself lazy). Deliberately NOT ``<data dir>/run``: the instance reaper globs
-    ``*.json`` there and would try to parse these as instance entries."""
+    CALL time so a repointed LOCALM_HOME is honoured. Not ``<data dir>/run``,
+    where the instance reaper globs ``*.json`` and would try to parse these as
+    instance entries."""
     from localm.config import home_dir
     return (home_dir() / "activity").resolve()
 
 
 def _redact_owner_digests(raw: str) -> str:
     """Strip owner key digests out of a corrupt record file before it is copied
-    aside, keeping everything else the copy exists to preserve.
+    aside, keeping everything else.
 
-    Reports at warning when a digest-shaped value survives: a partially corrupt
-    file can hold one in a position this cannot match, and a redaction that
-    silently half-happened must not look like one that fully did (rule 5)."""
+    Warns when a digest-shaped value survives the substitution."""
     if not raw:
         return raw
     out, n = _OWNER_DIGEST_RE.subn(rf'\1"{_REDACTED_OWNER}"', raw)
@@ -605,10 +469,8 @@ def _redact_owner_digests(raw: str) -> str:
 class _ActivityStore:
     """Reads and writes this process's in-flight operation record.
 
-    Every method is BEST-EFFORT for the caller's purposes: ``write`` returns
-    False rather than raising, and ``reap`` returns whatever it could read. A
-    persistence problem must never break the operation being recorded, and must
-    never be silent either - each failure logs (rule 5)."""
+    Every method is BEST-EFFORT: ``write`` returns False instead of raising, and
+    ``reap`` returns whatever it could read. Each failure logs."""
 
     def __init__(self, root: Optional[Path] = None, *,
                  pid: Optional[int] = None, run: Optional[str] = None) -> None:
@@ -641,17 +503,13 @@ class _ActivityStore:
             try:
                 os.chmod(d, 0o700)
             except OSError:
-                pass          # POSIX-only nicety; the FILE ACL is what matters
+                pass          # POSIX only; the file ACL is set below
             payload = {"version": _ACTIVITY_VERSION, "pid": self._pid,
                        "operations": rows}
-            # The shared temp+restrict+replace primitive, not a sixth private
-            # variant of the same dance: rows carry the owner key digest, so the
-            # file must be owner-only from the moment the bytes first exist, on
-            # Windows as well as POSIX. Its FIXED "<name>.tmp" temp name is safe
-            # here only because two things hold together - the destination path is
-            # unique per (process, store), and _STORE_LOCK serialises every writer
-            # in this process. Break either and the measured 37-of-40 lost-write
-            # race in the module note above comes straight back.
+            # Writes owner-only from the moment the bytes first exist, on Windows
+            # as well as POSIX. Its FIXED "<name>.tmp" temp name requires the
+            # destination path to stay unique per (process, store), with
+            # _STORE_LOCK serialising every writer in this process.
             from localm.config import atomic_write_private
             atomic_write_private(
                 self.path, json.dumps(payload, indent=2, ensure_ascii=False))
@@ -669,15 +527,13 @@ class _ActivityStore:
 
     def clear(self) -> None:
         """Remove this process's record file, for when there is nothing left to
-        record - so a data dir does not accumulate empty files."""
+        record."""
         with _STORE_LOCK:
             self._clear()
 
     def _clear(self) -> None:
-        # Broad, like write(): the contract this class documents is that no
-        # caller's control flow ever changes because of a store problem, and the
-        # path itself is resolved lazily (home_dir()) so even computing it can
-        # fail. A narrower except here would let that reach a job.
+        # Broad, like write(): no caller's control flow changes because of a store
+        # problem, and even computing the path can fail (home_dir() is lazy).
         try:
             self.path.unlink()
         except FileNotFoundError:
@@ -696,15 +552,12 @@ class _ActivityStore:
         process's record.
 
         *skip* is the set of paths owned by managers alive IN THIS PROCESS
-        (including the caller's own). It exists because pid liveness cannot answer
-        the same-process question: this process is obviously alive, so a file
-        bearing our pid is either our own live record or a leftover from a
-        DIFFERENT process that held this pid before us, and only the in-process
-        registry can tell those apart.
+        (including the caller's own). Pid liveness cannot answer the same-process
+        question, so only the in-process registry tells our own live record apart
+        from a leftover of a process that held this pid before us.
 
-        A live foreign writer's file is left completely alone - not read, not
-        adopted, not deleted - so two servers sharing a data dir never take each
-        other's operations."""
+        A live foreign writer's file is left completely alone: not read, not
+        adopted, not deleted."""
         with _STORE_LOCK:
             return self._reap(skip=skip)
 
@@ -736,10 +589,8 @@ class _ActivityStore:
             try:
                 f.unlink()
             except OSError as e:
-                # The rows are now held by this process, so leaving the file
-                # behind risks a THIRD process adopting them again and reporting
-                # them twice. Report it rather than pretending the handover was
-                # clean (rule 5).
+                # A file left behind can be adopted again by a third process, so
+                # its rows may be reported twice.
                 try:
                     from localm.debuglog import logger
                     logger.warning(
@@ -753,12 +604,10 @@ class _ActivityStore:
     @staticmethod
     def _pid_of(path: Path) -> Optional[int]:
         """The writer pid a record filename encodes, or None when the name does
-        not follow the scheme (a hand-dropped file: read it, do not guess).
+        not follow the scheme.
 
         Only the pid half is parsed. The run nonce after it is never compared to
-        anything: a file bearing OUR pid but a different nonce is a leftover from
-        a process that held this pid before us, and _live_store_paths - not the
-        nonce - is what identifies our own live files."""
+        anything; _live_store_paths identifies our own live files."""
         try:
             return int(path.stem.split("-", 1)[0])
         except (TypeError, ValueError, IndexError):
@@ -771,10 +620,7 @@ class _ActivityStore:
             raw = path.read_text(encoding="utf-8")
             data = json.loads(raw)
         except OSError as e:
-            # Not collapsed to an empty list, and not raised either: this process
-            # never writes another writer's file, so there is nothing here to
-            # erase (see the module note above). Reported, then left in place for
-            # a later run, or for the user to look at.
+            # Reported, then left in place for a later run.
             try:
                 from localm.debuglog import logger
                 logger.warning("activity store: %s is unreadable (%s); the "
@@ -793,10 +639,9 @@ class _ActivityStore:
         return [r for r in ops if isinstance(r, dict)]
 
     def _quarantine(self, path: Path, raw, err) -> None:
-        """Copy a corrupt record file aside before anything removes it, and warn
-        (rule 5: a data-loss risk must be visible, never silent). Redacted and
-        pruned - see _redact_owner_digests and _prune_quarantine for why each is
-        needed and why neither replaces the other."""
+        """Copy a corrupt record file aside before anything removes it, and warn.
+        The copy is redacted (_redact_owner_digests) and the set of copies is
+        pruned (_prune_quarantine)."""
         try:
             from localm.debuglog import logger
         except Exception:
@@ -805,10 +650,8 @@ class _ActivityStore:
             backup = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
             if raw is not None:
                 backup.write_text(_redact_owner_digests(raw), encoding="utf-8")
-                # The copy still describes the user's operations and may carry a
-                # residual digest, so restrict it the way the live file is: the
-                # ACL and the redaction address different halves and neither makes
-                # the other unnecessary. Check-and-retry like atomic_write_private.
+                # Restricted the way the live file is, check-and-retry like
+                # atomic_write_private.
                 from localm.config import restrict_file_perms
                 if not restrict_file_perms(backup):
                     restrict_file_perms(backup)
@@ -820,9 +663,6 @@ class _ActivityStore:
             self._prune_quarantine()
         except OSError as e:
             if logger is not None:
-                # No refusal actually happens: the caller carries on with no rows
-                # from this file either way, so say what really occurs rather than
-                # claiming a refusal that never fires.
                 logger.warning("activity store: corrupt record file %s could not "
                                "be backed up (%s); its content may be lost",
                                path.name, e)
@@ -830,13 +670,11 @@ class _ActivityStore:
     def _prune_quarantine(self) -> None:
         """Keep only the newest _QUARANTINE_KEEP corrupt-copies in the dir.
 
-        Bounded across the whole DIRECTORY rather than per file name, because
-        per-pid names would otherwise give every pid its own unbounded series.
-        Sorted by the timestamp SUFFIX, not lexically: the pid prefix sorts first,
-        so a lexical order would prune by pid instead of by age.
+        Bounded across the whole DIRECTORY, not per file name. Sorted by the
+        timestamp SUFFIX, not lexically.
 
-        Best-effort by design: failing to delete an old backup must never break
-        the recovery path that just successfully wrote a new one."""
+        Best-effort: failing to delete an old backup never breaks the recovery
+        path that just wrote a new one."""
         try:
             from localm.debuglog import logger
         except Exception:
@@ -868,23 +706,15 @@ class _ActivityStore:
 # --------------------------------------------------------------------------- #
 #  Child-process termination on process exit                                  #
 # --------------------------------------------------------------------------- #
-# Every live JobManager in this process. os._exit / os.execv (http_server's
-# _do_shutdown / _do_restart) bypass atexit and never touch a start_cli CHILD, so
-# something at module scope has to be reachable from those functions - they take
-# no app and hold no manager. Exactly the shape of embedder.release_for_exit(),
-# which those same two functions already call for the same reason.
-#
-# A WeakSet, so a manager built by a test (or by an app that is torn down) does
-# not keep itself alive here.
+# Every live JobManager in this process, reachable at module scope. A WeakSet, so
+# a manager built by a test (or by an app that is torn down) is not kept alive
+# here.
 _MANAGERS: "weakref.WeakSet" = weakref.WeakSet()
 
 def _live_store_paths() -> set:
-    """The record-file paths owned by managers that are ALIVE in this process.
-
-    Reconciliation needs this because pid liveness cannot answer the same-process
-    question - see _ActivityStore.reap. Reading the private _store attribute of a
-    sibling manager is deliberate: the set is meaningless to anyone outside this
-    module, so exposing it as API would invite a caller to act on it."""
+    """The record-file paths owned by managers that are ALIVE in this process,
+    which is what reconciliation needs (see _ActivityStore.reap). Reads the
+    private _store attribute of sibling managers."""
     out = set()
     for manager in list(_MANAGERS):
         try:
@@ -895,8 +725,6 @@ def _live_store_paths() -> set:
 
 
 # How long a child gets to exit after a graceful signal before it is killed.
-# Short on purpose: this runs on the way out of the process, and a stop the user
-# asked for must not stall behind a child that is ignoring its signal.
 _CHILD_GRACE_S = 3.0
 
 
@@ -904,22 +732,16 @@ def _terminate_process_tree(proc, *, grace: float = _CHILD_GRACE_S) -> None:
     """Terminate *proc* and, where the platform allows it, its descendants.
 
     A start_cli child is ``python -m localm <cmd>``, and several of those commands
-    spawn their OWN children (comfy setup runs git and pip - see
-    media/managed_comfy_provision.py, which notes it sits one process-hop inside
-    this one). Killing only the direct child strands those.
+    spawn their OWN children (comfy setup runs git and pip).
 
-    The tree half is BEST-EFFORT and says so rather than overclaiming:
+    The tree half is BEST-EFFORT:
 
-    * Windows uses ``taskkill /F /T``, which walks the child tree. There is no
-      graceful tree-wide signal on Windows, and Popen.terminate() is itself
-      TerminateProcess, so nothing is lost by going straight to it here.
-    * POSIX walks the tree with psutil, which is an OPTIONAL dependency (pyproject
-      declares it under gpu/monitor/dev, not core). Without it only the direct
-      child is reached, and that limit is LOGGED rather than glossed.
+    * Windows uses ``taskkill /F /T``, which walks the child tree.
+    * POSIX walks the tree with psutil, which is an OPTIONAL dependency. Without
+      it only the direct child is reached, and that limit is LOGGED.
 
-    Deliberately no start_new_session/creationflags change to the Popen itself:
-    that would alter signal delivery for every existing job (a host Ctrl+C would
-    stop reaching a pull), which is a separate decision from this one."""
+    Sets no start_new_session/creationflags on the Popen itself, so signal
+    delivery for existing jobs is unchanged."""
     try:
         from localm.debuglog import logger
     except Exception:
@@ -936,9 +758,7 @@ def _terminate_process_tree(proc, *, grace: float = _CHILD_GRACE_S) -> None:
                 return
             if logger is not None:
                 # taskkill reports its ordinary failures by exit code, not by
-                # raising: "not found" when the child exited between our poll and
-                # this call, or access-denied. Returning unconditionally would
-                # claim a tree kill that never ran and skip the fallback below.
+                # raising. Falls through to the handle fallback below.
                 logger.debug("taskkill exited %s for job child %s; falling back "
                              "to the process handle", done.returncode, pid)
         except (OSError, subprocess.SubprocessError) as e:
@@ -983,8 +803,8 @@ def _terminate_process_tree(proc, *, grace: float = _CHILD_GRACE_S) -> None:
 
 
 def _kill_handle(proc) -> None:
-    """Force-kill via the Popen handle - bound to the object we launched, so it can
-    never hit a recycled pid."""
+    """Force-kill via the Popen handle, which is bound to the launched object and
+    can never hit a recycled pid."""
     try:
         proc.kill()
     except Exception:
@@ -1001,26 +821,10 @@ def terminate_children_for_exit(*, grace: float = _CHILD_GRACE_S) -> int:
 
     Called from http_server._do_shutdown and _do_restart. Both end in a call that
     bypasses atexit (os._exit / os.execv), the job worker threads are daemons so
-    their ``finally`` may never run, and the Popen carries no creationflags - so
-    without this a stop or restart simply ABANDONS the child.
+    their ``finally`` may never run, and the Popen carries no creationflags.
 
-    ADR-0008 inferred that from the code shape and recorded that it was NOT
-    measured. It is measured now, and the answer has two halves rather than the
-    one the inference expected. MEASURED 2026-08-19 on Windows, both children
-    spawned exactly as start_cli does and then abandoned by an os._exit(0):
-
-        writes NOTHING to stdout    SURVIVED, and kept working (its heartbeat
-                                    advanced after the parent was gone)
-        writes and FLUSHES          DIED at its next write, on the broken pipe
-
-    Neither outcome is acceptable, which is why this is unconditional. A quiet
-    child (a git clone, a pip install, a long file write between progress
-    emissions) keeps running untracked, holding VRAM in the media case and still
-    writing into the shared data dir. A chatty child - a pull flushes a progress
-    line constantly - is instead torn down at an arbitrary instant with no cleanup
-    and no record, which is not a graceful stop but a crash that happens to look
-    like nothing occurred. Terminating deliberately replaces both with one known
-    state, which the next start then reports as "interrupted"."""
+    Termination is unconditional, so every child ends in one known state, which
+    the next start reports as "interrupted"."""
     total = 0
     for manager in list(_MANAGERS):
         try:
@@ -1038,28 +842,23 @@ def terminate_children_for_exit(*, grace: float = _CHILD_GRACE_S) -> int:
 class JobManager:
     """Registry of background jobs. Finished jobs stay queryable for an hour.
 
-    DURABLE since 2026-08-19 (ADR-0008's option E). The registry is still the
-    in-memory dict below - that is what SSE subscribers, progress and cancellation
-    all attach to - with a small record of each operation's LIFECYCLE mirrored to
-    ``<data dir>/activity/<pid>.json`` so a restart can still say what was running.
-    Progress is not mirrored, deliberately: see _ActivityStore's module comment.
+    The registry is the in-memory dict below - what SSE subscribers, progress and
+    cancellation all attach to - with a small record of each operation's LIFECYCLE
+    mirrored to ``<data dir>/activity/<pid>-<run>.json``. Progress is not
+    mirrored.
 
     On construction it RECONCILES: records left by a writer process that is gone
-    are adopted, and any of them still marked ``running`` become ``interrupted``,
-    because nobody measured whether that work succeeded (see _JOB_STATUSES)."""
+    are adopted, and any of them still marked ``running`` become ``interrupted``
+    (see _JOB_STATUSES)."""
 
     _TTL_S = 3600
 
     def __init__(self, *, store: Optional["_ActivityStore"] = None,
                  reconcile: bool = True) -> None:
         self._jobs: dict[str, Job] = {}
-        # An RLock, not a Lock: persisting happens while holding it (so the file
-        # can never be written out of order relative to the dict it mirrors), and
-        # the persist path is reached both directly and through Job._notify.
-        # Lock order in this module is _lock OUTER, Job._sub_lock INNER - the order
-        # snapshot() -> summary() already establishes. Nothing here takes _sub_lock
-        # while holding _lock except that path, and to_record deliberately reads
-        # plain fields only so persisting adds no new lock edge.
+        # An RLock: persisting happens while holding it, and the persist path is
+        # reached both directly and through Job._notify. Lock order in this module
+        # is _lock OUTER, Job._sub_lock INNER.
         self._lock = threading.RLock()
         self._store = store if store is not None else _ActivityStore()
         _MANAGERS.add(self)
@@ -1073,7 +872,7 @@ class JobManager:
         job._notify = self._persist
         with self._lock:
             # _gc() runs here and nowhere else, so this one write also carries any
-            # eviction it just made; there is no separate persist for the sweep.
+            # eviction it just made.
             self._gc()
             self._jobs[job.id] = job
             self._persist_locked()
@@ -1085,10 +884,9 @@ class JobManager:
     def _persist_locked(self) -> None:
         """Mirror the registry to disk. Caller holds _lock.
 
-        Best-effort by contract: _ActivityStore.write reports its own failures and
-        returns False rather than raising, so a full disk cannot fail a model pull.
-        An EMPTY registry removes the file instead of writing an empty one, so a
-        data dir does not accumulate one file per process that ever started."""
+        Best-effort: _ActivityStore.write reports its own failures and returns
+        False instead of raising. An EMPTY registry removes the file instead of
+        writing an empty one."""
         rows = [j.to_record() for j in self._jobs.values()]
         if rows:
             self._store.write(rows)
@@ -1099,17 +897,12 @@ class JobManager:
         """Adopt the operation records of writer processes that are gone.
 
         A row still marked ``running`` is reported as ``interrupted``: this server
-        stopped while it was in flight, so its outcome is genuinely unknown. It is
-        NOT reported as ``failed`` - ADR-0008 R3 - because a pull that was 99% done
-        may well have finished, and claiming otherwise would be a fabrication in
-        the one direction a user cannot check.
+        stopped while it was in flight, so its outcome is unknown. It is never
+        reported as ``failed``.
 
-        ``finished_at`` is stamped at DETECTION rather than derived from the file's
-        mtime, and that is load-bearing rather than lazy: _gc() sweeps on
-        finished_at, so a timestamp from before the crash would put the row past
-        the TTL cutoff the instant it was recovered - evicting it before the user
-        who just restarted the server could ever see it. That is the exact defect
-        _gc()'s own docstring records for created_at."""
+        ``finished_at`` is stamped at DETECTION, never derived from the file's
+        mtime: _gc() sweeps on finished_at, and a pre-crash timestamp would put
+        the row past the TTL cutoff the instant it was recovered."""
         try:
             rows = self._store.reap(skip=_live_store_paths())
         except Exception:
@@ -1146,8 +939,8 @@ class JobManager:
                     except Exception:
                         pass
             elif job.finished_at is None:
-                # A terminal row with no stamp cannot be swept, so it would sit in
-                # the listing forever. Give it the same detection stamp.
+                # A terminal row with no stamp cannot be swept: give it the same
+                # detection stamp.
                 job.finished_at = now
             self._seed_recovered_history(job)
             recovered.append(job)
@@ -1166,10 +959,7 @@ class JobManager:
                 logger.warning("activity store: skipped %d unreadable operation "
                                "record(s)", skipped)
             if orphan_pids:
-                # Adoption of an orphan (re-attaching to its output, or killing
-                # it) is explicitly out of scope per ADR-0008, and killing it
-                # would be the destructive choice for a download that may be
-                # nearly done. Reported so it is not invisible.
+                # An orphan is neither adopted nor killed, only reported.
                 logger.warning(
                     "a previous run left child process(es) %s still running; they "
                     "are no longer tracked and their output goes nowhere",
@@ -1179,13 +969,9 @@ class JobManager:
 
     @staticmethod
     def _seed_recovered_history(job: Job) -> None:
-        """Give a recovered job a terminal event stream.
-
-        Without this, a client that reattaches to a recovered id over
-        ``GET /api/jobs/{id}/events`` gets an empty history and then keepalives
-        forever, because the worker thread that would have pushed the ``end``
-        frame died with the previous process. The stream has to be able to say
-        "this is over" for the same reason the status has to."""
+        """Give a recovered job a terminal event stream, so a client that
+        reattaches over ``GET /api/jobs/{id}/events`` gets a history and an
+        ``end`` frame instead of keepalives forever."""
         if job.status == "interrupted":
             job.push({"type": "line",
                       "text": "The server stopped while this operation was in "
@@ -1201,17 +987,13 @@ class JobManager:
     # ---- exit ------------------------------------------------------------- #
     def terminate_children_for_exit(self, *, grace: float = _CHILD_GRACE_S) -> int:
         """Terminate the child process of every still-running start_cli job, and
-        return how many were signalled. See the module-level function of the same
-        name for why this exists at all.
+        return how many were signalled.
 
-        Enumerates under the lock and kills OUTSIDE it: a tree kill runs a
-        subprocess with its own timeout, and holding a lock other threads need
-        across that would stall them for the duration.
+        Enumerates under the lock and kills OUTSIDE it.
 
-        Deliberately does NOT go through Job.cancel(): cancel means "the user asked
-        to stop this", and a shutdown is not that. The registry is left saying
-        ``running``, which is what makes the next start reconcile these rows to
-        ``interrupted`` - the honest word for what actually happened to them."""
+        Does NOT go through Job.cancel(). The registry is left saying ``running``,
+        which is what makes the next start reconcile these rows to
+        ``interrupted``."""
         with self._lock:
             live = [(j.id, j._proc) for j in self._jobs.values()
                     if j.status == "running" and j._proc is not None]
@@ -1244,9 +1026,8 @@ class JobManager:
         artifact (e.g. the image file an imagine job writes). extra_env adds
         environment variables for the subprocess (e.g. progress reporting).
         host_label, when given, mirrors the job's start/progress/end to the host
-        console + debug log (G2) so a client-initiated pull is visible there.
-        owner, when given, is the creating key's principal id - only that key (or
-        an admin/owner) may later stream or cancel the job (KEY-SCOPE-2).
+        console + debug log. owner, when given, is the creating key's principal
+        id - only that key (or an admin/owner) may later stream or cancel the job.
         """
         job = Job(
             id=uuid.uuid4().hex[:12],
@@ -1262,12 +1043,9 @@ class JobManager:
             announcer = _HostAnnouncer(host_label) if host_label else None
             if announcer:
                 announcer.announce_start()
-            # An explicit {"type": "outcome"} sentinel frame (_shared._emit_outcome)
-            # overrides the exit-code guess below. None means no such frame arrived
-            # - an older CLI build, a job kind that never emits one, or a crash
-            # before it could be sent - and the exit-code rule is then EXACTLY
-            # today's behavior: this can only ever correct a misleading exit code,
-            # never invent a "done" out of silence.
+            # An explicit {"type": "outcome"} sentinel frame overrides the
+            # exit-code guess below. None means no such frame arrived, and the
+            # exit-code rule then applies.
             reported_outcome = None
             try:
                 env = None
@@ -1276,10 +1054,8 @@ class JobManager:
                     env.update(extra_env)
                 job._proc = subprocess.Popen(
                     job.argv,
-                    stdin=subprocess.DEVNULL,   # no inherited TTY: interactive
-                    # dedup/overwrite prompts (pull, imagine) must take their
-                    # safe non-interactive default (skip), never click.Abort on
-                    # an unfed terminal stdin and fail the job with "Aborted!".
+                    stdin=subprocess.DEVNULL,   # no inherited TTY, so interactive
+                    # dedup/overwrite prompts take their non-interactive default.
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -1288,10 +1064,8 @@ class JobManager:
                     bufsize=1,
                     env=env,
                 )
-                # Re-persist now that the child EXISTS: the create-time write
-                # happened before this Popen, so it recorded no pid. That pid is
-                # the only thing that lets a later run report "a previous run left
-                # this child running" instead of staying silent about an orphan.
+                # Re-persist now that the child EXISTS, so the record carries its
+                # pid; the create-time write ran ahead of the Popen.
                 self._persist()
                 for line in job._proc.stdout:
                     line = line.rstrip()
@@ -1305,16 +1079,13 @@ class JobManager:
                             data = json.loads(payload)
                         except ValueError:
                             continue
-                        # popped, not merely read: **data below must never carry
-                        # its own "type" key, or a dict literal's later-key-wins
-                        # rule would let a payload override the "progress" label
-                        # this reader assigns everything else on this channel.
+                        # Popped, not merely read: **data below must never carry
+                        # its own "type" key.
                         etype = data.pop("type", "progress")
                         if etype == "outcome":
-                            # An internal producer -> job-runner signal (see
-                            # _shared._emit_outcome), never forwarded to
-                            # subscribers - it exists solely to correct the
-                            # status decision below, not to be rendered.
+                            # An internal producer -> job-runner signal, never
+                            # forwarded to subscribers; it only corrects the
+                            # status decision below.
                             status = data.get("status")
                             if status in ("done", "failed"):
                                 reported_outcome = status
@@ -1339,9 +1110,8 @@ class JobManager:
                 if announcer:
                     announcer.record_line(f"job error: {e}")
             finally:
-                # Stamp BEFORE the end event goes out: a subscriber that reacts
-                # to "end" by listing jobs must not see this one still claiming
-                # to be in flight.
+                # Stamp BEFORE the end event goes out, so a subscriber that lists
+                # jobs on "end" never sees this one still in flight.
                 job.mark_finished()
                 if announcer:
                     if job.status == "failed":
@@ -1365,18 +1135,16 @@ class JobManager:
         ``fn`` receives the job and should return True on success. It may call
         ``job.push({"type": "line", ...})`` for log output, ``job.progress(...)``
         for a structured percentage or count that a listing can render without
-        replaying the stream, and may update ``job.result``. Prefer
-        ``job.progress`` over formatting numbers into a line: a fraction that
-        only exists inside prose is invisible to ``/api/activity``, to the CLI
-        and to MCP. If ``fn``'s own real work is done but it still runs risky
-        tail cleanup afterward (a VRAM handover, a bookkeeping call), call
-        ``job.mark_outcome("done")`` first - see that method's docstring - so a
-        later exception in the tail cannot misreport a completed operation as
-        failed. owner, when given, binds the job to the creating key's
-        principal id so only that key (or an admin/owner) may stream/cancel it.
-        label, when given, is the human-readable operation name a listing shows
-        (the start_cli equivalent is host_label, which doubles as the host
-        console prefix; there is no console mirroring for in-thread jobs).
+        replaying the stream, and may update ``job.result``. A fraction
+        formatted into a line is invisible to ``/api/activity``, to the CLI and
+        to MCP. If ``fn``'s own real work is done but it still runs risky tail
+        cleanup afterward (a VRAM handover, a bookkeeping call), call
+        ``job.mark_outcome("done")`` first, so a later exception in the tail
+        cannot misreport a completed operation as failed. owner, when given,
+        binds the job to the creating key's principal id so only that key (or an
+        admin/owner) may stream/cancel it. label, when given, is the
+        human-readable operation name a listing shows; there is no console
+        mirroring for in-thread jobs.
         """
         job = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=[], result=result_path,
                   owner=owner, label=label)
@@ -1389,15 +1157,9 @@ class JobManager:
                     job.status = "done" if ok else "failed"
             except Exception as e:
                 if job._outcome == "done":
-                    # The callback already called mark_outcome("done") before
-                    # this raised, so its real deliverable is verifiably
-                    # complete - this exception happened in tail cleanup, not
-                    # in the work itself. Trust the mark over the blind
-                    # except, exactly as start_cli's outcome-sentinel does
-                    # (#1126). None (never marked) and "failed" both fall
-                    # through to the else branch below, byte-identical to
-                    # before this existed - never a new way to invent success
-                    # out of silence.
+                    # mark_outcome("done") was called ahead of the exception, so
+                    # the mark wins. None and "failed" both fall through to the
+                    # else branch below.
                     job.status = "done"
                     job.push({"type": "line",
                               "text": f"(cleanup after success failed: {e})"})
@@ -1405,7 +1167,7 @@ class JobManager:
                     job.status = "failed"
                     job.push({"type": "line", "text": f"job error: {e}"})
             finally:
-                # See the start_cli equivalent: stamp before "end" is emitted.
+                # Stamp before "end" is emitted, as in start_cli.
                 job.mark_finished()
                 job.push({
                     "type": "end",
@@ -1421,16 +1183,11 @@ class JobManager:
         """Every tracked job as a listing row, newest first.
 
         *visible*, when given, is called with each job's ``owner`` and decides
-        whether that job appears. It takes a PREDICATE rather than a principal
-        id so the owner never has to leave this class: the caller supplies the
-        policy (``job_owner_ok`` needs the request to evaluate it), the manager
-        keeps the identity, and ``summary()`` still never carries it.
+        whether that job appears. It takes a PREDICATE, not a principal id, so
+        the owner never leaves this class and ``summary()`` never carries it.
 
         This is the ONLY way to learn a job exists without already holding its
-        id. Until it existed, a job id was handed out exactly once - in the body
-        of the POST that started the job - so a second client, or the same tab
-        after a reload, had no way to ask what was running even though the
-        server knew (ADR-0008).
+        id.
 
         Returns summaries, never Job objects: callers must not reach into the
         live object's history/subscribers outside the lock. Ownership is NOT
@@ -1450,11 +1207,9 @@ class JobManager:
             return self._jobs.get(job_id)
 
     def has_running(self, kind: str) -> bool:
-        """Whether a job of *kind* is currently running - so a caller can tell
+        """Whether a job of *kind* is currently running, so a caller can tell
         "still actively installing" apart from "abandoned mid-install" without
-        its own job-tracking state (e.g. the managed-ComfyUI status check,
-        which must not call a stalled/incomplete install "corrupt" while its
-        own setup job is genuinely still in flight)."""
+        its own job-tracking state."""
         with self._lock:
             return any(j.kind == kind and j.status == "running"
                       for j in self._jobs.values())
@@ -1462,19 +1217,11 @@ class JobManager:
     def _gc(self) -> None:
         """Drop jobs that finished more than _TTL_S ago.
 
-        Keyed on finished_at, NOT created_at. The class docstring has always
-        promised "finished jobs stay queryable for an hour"; keying the sweep on
-        created_at did not deliver that, because a job that RAN for longer than
-        the TTL was already past the cutoff the moment it finished, so a
-        two-hour pull became unqueryable the instant it succeeded. finished_at
-        makes the code match the promise.
+        Keyed on finished_at, NOT created_at: a job that RAN for longer than the
+        TTL would otherwise be past the cutoff the moment it finished.
 
-        A still-running job is never swept at any age, and that is deliberate
-        rather than an oversight: evicting a live job would strand its SSE
-        subscribers and lose the record while the work carries on. An operation
-        that has legitimately been running for hours is reported as running,
-        which is true; created_at travels in the summary so a client can tell a
-        six-second job from a six-hour one instead of being told only "running".
+        A still-running job is never swept at any age. created_at travels in the
+        summary, so a client can tell a six-second job from a six-hour one.
         """
         cutoff = time.time() - self._TTL_S
         stale = [

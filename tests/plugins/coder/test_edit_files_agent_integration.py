@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""edit_files must be wired into the agent like every other write tool.
+"""edit_files is wired into the agent like every other write tool.
 
-A multi-file tool is the easy one to half-integrate, because every path-consuming
-site in the agent (scope check, undo snapshot, changed-file tracker, project-map
-refresh, patch-mode intercept) was written against a single top-level `path` arg.
-edit_files has none - its paths live inside `edits=[{path, ...}]` - so each site
-resolves them through the shared _call_target_paths() helper.
+Every path-consuming site in the agent (scope check, undo snapshot, changed-file
+tracker, project-map refresh, patch-mode intercept) reads a single top-level
+`path` arg. edit_files has none - its paths live inside `edits=[{path, ...}]` -
+so each site resolves them through the shared _call_target_paths() helper.
 
-The scope case is the one that MUST NOT regress: a tool in _SCOPED_TOOLS whose
-paths the checker cannot see passes the check by having nothing to check, which
-is a silent fail-OPEN. That is the opposite of the default-deny the set exists
-to provide, so it is tested directly, on disk.
+The scope case is checked directly, on disk: a tool in _SCOPED_TOOLS whose paths
+the checker cannot see would pass the check by having nothing to check, which is
+a silent fail-OPEN rather than the set's default-deny.
 """
 
 from pathlib import Path
@@ -34,10 +32,8 @@ def _make_agent(tmp_path: Path, scope: str | None = None,
         MockPM.build.return_value.file_count.return_value = 0
         agent = Agent(backend=backend, cwd=tmp_path, scope=scope,
                       auto_approve=True, **kw)
-    # patch_mode is NOT a constructor arg - the CLI sets the attribute directly
-    # (cli/_main.py). Passing it to Agent() would be swallowed by **gen_kwargs
-    # and silently do nothing, so every patch-mode test would pass while
-    # testing the normal write path.
+    # patch_mode is not a constructor arg - the CLI sets the attribute directly
+    # (cli/_main.py). Passing it to Agent() is swallowed by **gen_kwargs.
     agent.patch_mode = patch_mode
     return agent
 
@@ -74,7 +70,7 @@ class TestTargetPathResolution:
     @pytest.mark.parametrize("edits", ["garbage", None, [{}], ["x"], [{"path": ""}]])
     def test_malformed_edits_resolve_to_no_paths(self, edits):
         # No paths means the scope check has nothing to allow; the tool itself
-        # rejects the malformed call. This must not raise.
+        # rejects the malformed call. Resolution does not raise.
         assert _call_target_paths("edit_files", {"edits": edits}) == []
 
 
@@ -89,7 +85,7 @@ class TestScopeConfinement:
         assert (project / "secrets.txt").read_bytes() == before
 
     def test_one_out_of_scope_path_rejects_the_whole_batch(self, project):
-        """The in-scope file must not be edited either - the call never runs."""
+        """The in-scope file is not edited either: the call never runs."""
         agent = _make_agent(project, scope="src/**")
         before_in = (project / "src" / "main.py").read_bytes()
         before_out = (project / "secrets.txt").read_bytes()
@@ -122,10 +118,8 @@ class TestUndoAndTracking:
         assert sorted(undone) == ["main.py", "secrets.txt"]
 
     def test_undo_snapshots_hold_the_pre_edit_bytes(self, project):
-        # Compare against the bytes actually on disk, not a hardcoded literal:
-        # write_text translates \n to the platform line ending, so a literal
-        # would assert LF on a file that is CRLF on Windows and test the
-        # fixture's encoding rather than the snapshot's fidelity.
+        # Compare against the bytes actually on disk: write_text translates the
+        # newline to the platform line ending.
         before = (project / "src" / "main.py").read_bytes()
         agent = _make_agent(project)
         agent._execute_tool(_call("edit_files", edits=[_swap("src/main.py")]),
@@ -146,10 +140,8 @@ class TestUndoAndTracking:
         assert "edit_files" in _MUTATING_TOOLS
 
     def test_undo_reverts_the_WHOLE_batch_not_just_one_file(self, project):
-        """A multi-file call pushes one entry per file but is ONE operation.
-        Undoing a single entry would leave the other files edited while
-        reporting the operation undone - a half-undone state the caller was
-        told does not exist."""
+        """A multi-file call pushes one entry per file but is ONE operation, so
+        a single /undo restores every file in the batch."""
         agent = _make_agent(project)
         before = {n: (project / n).read_bytes()
                   for n in ("src/main.py", "secrets.txt")}
@@ -165,7 +157,7 @@ class TestUndoAndTracking:
         assert "2 of 2" in msg
 
     def test_undo_of_a_single_file_tool_is_unchanged(self, project):
-        """Grouping must not change one-entry-per-call tools."""
+        """A one-entry-per-call tool undoes exactly its own entry."""
         agent = _make_agent(project)
         before = (project / "src" / "main.py").read_bytes()
         agent._execute_tool(
@@ -211,8 +203,8 @@ class TestUndoAndTracking:
 
 class TestPatchMode:
     def test_patch_mode_writes_nothing_to_disk(self, project):
-        """patch_mode promises no changes. A write tool the interceptor cannot
-        express as a diff would fall through to a REAL write."""
+        """Under patch_mode the interceptor captures the batch as a diff and
+        nothing reaches disk."""
         agent = _make_agent(project, patch_mode=True)
         before = (project / "src" / "main.py").read_bytes()
         result = agent._execute_tool(
@@ -252,7 +244,7 @@ class TestPatchMode:
 
     def test_diff_composes_across_equivalent_spellings_of_one_path(self, project):
         """"a.py" and "./a.py" are the same file to the tool (it resolves), so
-        the preview must compose them, not emit two contradictory hunks."""
+        the preview composes them into one hunk."""
         from localm.plugins.coder.diffutil import compute_multifile_diff
         diff = compute_multifile_diff(project, [
             {"path": "src/main.py", "old": "import old", "new": "import mid"},
@@ -262,8 +254,8 @@ class TestPatchMode:
         assert diff.count("--- a/") == 1
 
     def test_a_batch_the_tool_would_reject_produces_no_diff(self, project):
-        """patch mode must not report success for a change edit_files refuses.
-        A partial diff would be a plan the real tool would never apply."""
+        """A batch edit_files would refuse produces no diff at all, rather than
+        a partial one."""
         from localm.plugins.coder.diffutil import compute_multifile_diff
         assert compute_multifile_diff(project, [
             {"path": "src/main.py", "old": "import old", "new": "import new"},

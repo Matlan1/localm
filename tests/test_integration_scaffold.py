@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""V2: integration-test scaffold. Beyond the coarse `integration` marker, real
+"""Integration-test scaffold. Beyond the coarse `integration` marker, real
 end-to-end paths are tagged with a resource-specific marker - `real_gguf`,
 `real_comfy`, `real_browser` - that conftest gates: a test carrying one is
-skipped (not failed) unless its resource is actually available, so the suite
-documents the real path and runs it the moment the resource is present.
+skipped (not failed) unless its resource is actually available.
 
 This module holds the always-runnable oracle (the markers are registered) plus
 gated skeletons for the comfy and browser paths; the gguf path is the existing

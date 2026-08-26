@@ -21,16 +21,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# urllib.request is no longer used directly here (the transport moved to
-# localm.media.comfy_client), but tests patch it as a module attribute -
-# patch.object(comfy.urllib.request, "urlopen", ...) - and resolving
-# comfy.urllib.request needs the name bound in this namespace. The shared client
-# calls the SAME (global) module object, so the patch still bites.
+# Bound in this namespace so patch.object(comfy.urllib.request, "urlopen", ...)
+# resolves; the shared client calls the SAME (global) module object.
 import urllib.request  # noqa: F401
 
-# Shared ComfyUI plumbing lives in localm.media.comfy_client - one server, one
-# set of helpers. Imported as bare module globals so a test patching
-# localm.music_gen.comfy.<name> still rebinds what generate_music calls.
+# Shared ComfyUI plumbing from localm.media.comfy_client, imported as bare
+# module globals so a test patching localm.music_gen.comfy.<name> still rebinds
+# what generate_music calls.
 from localm.media.comfy_client import (
     _localm_unload,
     _with_warning,
@@ -60,8 +57,8 @@ from localm.media.comfy_client import (
 )
 
 # ace_workflow.json is the committed generic template (public ACE-Step
-# checkpoint).  Drop an ace_workflow_local.json next to it (gitignored) to
-# use your own checkpoint/graph without publishing which models you run.
+# checkpoint).  An ace_workflow_local.json next to it (gitignored) overrides it
+# with your own checkpoint/graph.
 _WORKFLOW_PATH = Path(__file__).parent / "ace_workflow.json"
 _WORKFLOW_LOCAL_PATH = Path(__file__).parent / "ace_workflow_local.json"
 
@@ -104,7 +101,7 @@ def _build_music_workflow(
     has no sampler / prompt / latent node localm can drive."""
     # Resolve the nodes we drive by ROLE (sampler by class_type, then the ACE-Step
     # prompt and latent by following its graph edges) instead of hardcoded ids, so
-    # a user's own exported ACE-Step graph works without renumbering (MEDIA-1).
+    # a user's own exported ACE-Step graph works without renumbering.
     roles = resolve_sampler_roles(workflow)
     _, sampler = roles["sampler"]
     _, positive = roles["positive"]
@@ -138,7 +135,7 @@ def _build_music_workflow(
         sampler["inputs"]["scheduler"] = scheduler
     # Shift lives on the ModelSamplingSD3 node feeding the sampler, not on the
     # sampler node itself - found by class_type (same idiom as ckpt_loader below)
-    # so a user's own exported graph works without renumbering (MEDIA-1).
+    # so a user's own exported graph works without renumbering.
     if shift is not None:
         _, model_sampling = find_node_by_class(workflow, "ModelSamplingSD3")
         if model_sampling is not None and "shift" in model_sampling.get("inputs", {}):
@@ -260,16 +257,16 @@ def generate_music(
     if duration_seconds <= 0:
         return False, "Duration must be positive."
 
-    # Make sure ComfyUI is up (auto-launching when configured) - before
-    # costing the user an LLM unload
+    # Make sure ComfyUI is up (auto-launching when configured), before the
+    # LLM unload
     ok, msg = ensure_comfy(api_url, on_progress=_say,
                            launch_cmd=launch_cmd, workdir=workdir)
     if not ok:
         return False, msg
 
-    # The LLM unload (the expensive VRAM handoff) is deferred to AFTER the workflow
-    # is built and the model preflight passes, so a missing checkpoint fails before
-    # it costs the user a pointless unload + reload.
+    # The LLM unload (the VRAM handoff) is deferred to AFTER the workflow is
+    # built and the model preflight passes, so a missing checkpoint fails
+    # before the unload.
 
     try:
         workflow = json.loads(workflow_path().read_text(encoding="utf-8"))
@@ -312,7 +309,7 @@ def generate_music(
 
     # Per-component GPU placement (opt-in, multi-GPU only): inject the core Select*Device
     # nodes per the plan resolve_media_placement() decided. A component whose loader is
-    # absent from this graph is surfaced to the user, never silently dropped (rule 5); the
+    # absent from this graph is surfaced to the user, never silently dropped; the
     # happy-path summary already went out via the placement notice.
     if placement:
         for _note in inject_device_placement(workflow, placement):
@@ -321,10 +318,10 @@ def generate_music(
 
     # Queue. Mark 'now' in ComfyUI's own console log FIRST (comfy_console_tail_start),
     # so any silent partial-apply warning it prints while running THIS prompt (a
-    # mismatched checkpoint's UNet/CLIP/VAE keys, ...) can be attributed to this
-    # generation and not an earlier one - see NEW-COMFY-SILENT-PARTIAL-APPLY in
-    # image_gen/comfy.py (#1033). None when localm did not launch this ComfyUI
-    # itself; comfy_console_warnings_since() then always reports checked=False.
+    # mismatched checkpoint's UNet/CLIP/VAE keys, ...) is attributed to this
+    # generation and not an earlier one. None when localm did not launch this
+    # ComfyUI itself; comfy_console_warnings_since() then always reports
+    # checked=False.
     console_tail_start = comfy_console_tail_start(api_url)
     kind, value = comfy_submit_prompt(api_url, workflow)
     if kind == SUBMIT_NO_ID:
@@ -350,8 +347,8 @@ def generate_music(
     prompt_id = value
 
     # Poll history until the track is rendered. Throttle the "Rendering…" line to
-    # once every 15s (the same cadence as before). start_time is taken here (as
-    # the original did) so the sidecar's elapsed_seconds covers poll + download.
+    # once every 15s. start_time is taken here so the sidecar's elapsed_seconds
+    # covers poll + download.
     start_time = time.time()
     last_said = [0.0]
 
@@ -385,10 +382,10 @@ def generate_music(
     # node whose weights only partly matched (a mismatched checkpoint's UNet/CLIP
     # keys, ...) is not an execution_error to ComfyUI, only a console warning, and
     # the run still "succeeds" with that component silently under-applied. Check
-    # for any KNOWN warning of that shape printed while THIS prompt ran (see
-    # NEW-COMFY-SILENT-PARTIAL-APPLY in image_gen/comfy.py). console_checked
-    # reflects whether a real read actually happened just now, not whether
-    # console_tail_start found a process before the prompt was even submitted.
+    # for any KNOWN warning of that shape printed while THIS prompt ran.
+    # console_checked reflects whether a real read actually happened just now,
+    # not whether console_tail_start found a process before the prompt was even
+    # submitted.
     console_checked, comfy_console_warnings = comfy_console_warnings_since(
         api_url, console_tail_start)
     comfy_console_warning_text = ("; ".join(comfy_console_warnings)
@@ -400,8 +397,8 @@ def generate_music(
           "may not have fully applied - see comfy-launch.log."
     ) if comfy_console_warning_text else ""
 
-    # status == POLL_FINISHED: find the rendered track (presence-based, matching
-    # the original loop - the first node carrying an "audio" entry wins).
+    # status == POLL_FINISHED: find the rendered track (presence-based - the
+    # first node carrying an "audio" entry wins).
     audio_info = None
     for node_output in payload.get("outputs", {}).values():
         if "audio" in node_output:
@@ -425,8 +422,7 @@ def generate_music(
     # own copy of the track ONLY when delete_outputs is set (user opted in, or
     # privacy mode forces no-trace). ACE-Step's SaveAudio node writes into
     # ComfyUI's output dir and records the job in /history, both of which its
-    # output browser surfaces - so when the user wants no second copy, that copy
-    # must be the one localm saved. Default keeps ComfyUI's own copies.
+    # output browser surfaces. The default keeps ComfyUI's own copies.
     contain_warning = contain_comfy_artifacts(
         api_url, prompt_id,
         {"filename": audio_info.get("filename"),
@@ -436,10 +432,9 @@ def generate_music(
     )
 
     # Sidecar JSON - everything needed to reproduce or tweak the track.
-    # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
-    # and lyrics never touch disk. The console warning (a real quality issue
-    # with THIS track) is still reported in the message either way - only the
-    # sidecar's record of it is what privacy mode suppresses.
+    # Skipped entirely in privacy mode (write_sidecar=False), so the prompt and
+    # lyrics never touch disk. The console warning is still reported in the
+    # message either way; only the sidecar's record of it is suppressed.
     if not write_sidecar:
         return True, _with_warning(
             _with_warning(
@@ -466,8 +461,8 @@ def generate_music(
             encoding="utf-8",
         )
     except OSError as e:
-        # Surface, don't silence: the track is the deliverable and is already
-        # saved, so note the sidecar miss in the message instead of failing.
+        # Note the sidecar miss in the message instead of failing; the track
+        # itself is already saved.
         contain_warning = _with_warning(
             "the reproducibility sidecar could not be saved "
             f"({e}); the track itself was saved.", contain_warning)

@@ -26,9 +26,7 @@ arms a dispatch-time restriction on the agent (``Agent._activate_skill``, checke
 in ``Agent._execute_tool``) so a skill declaring ``read_file`` cannot reach
 ``run_shell`` or ``write_file``. The restriction only ever NARROWS - it intersects
 with whatever the session already forbids and with any skill already active - and
-is retired by the user's NEXT request, never by anything the model can call. See
-``Agent._activate_skill`` for why a model-reachable release would defeat the whole
-gate given that a SKILL.md body is untrusted.
+is retired by the user's NEXT request, never by anything the model can call.
 """
 
 from __future__ import annotations
@@ -146,15 +144,12 @@ def discover_skills(cwd: Path) -> List[Skill]:
 def _confine_skill_file(skill: Skill, rel: str) -> Path:
     """Resolve *rel* within the skill folder, refusing traversal outside it.
 
-    A SKILL.md is documented as UNTRUSTED content (module docstring), so a
-    hostile skill's own instructions could steer the model into requesting an
-    unexpected `file=`. Delegates to pathsafe.confined_under - the shared
-    nested-path confinement primitive - instead of re-implementing
-    resolve()+is_relative_to() here: that closes an NTFS Alternate Data
-    Stream / short-name-alias gap this function never had (a hand-rolled
-    check duplicated the escape logic but not the character/alias hardening
-    #1068 and later fixes added), at the cost of translating ValueError to
-    the PermissionError this module's own caller already expects."""
+    A SKILL.md is UNTRUSTED content (module docstring), so a hostile skill's own
+    instructions can steer the model into requesting an unexpected `file=`.
+    Delegates to pathsafe.confined_under, the shared nested-path confinement
+    primitive, instead of re-implementing resolve()+is_relative_to() here: that
+    carries the NTFS Alternate Data Stream / short-name-alias hardening too.
+    Translates ValueError to the PermissionError this module's caller expects."""
     try:
         return pathsafe.confined_under(skill.path, rel)
     except ValueError as e:
@@ -184,9 +179,8 @@ def tool_use_skill(cwd: Path, name: Optional[str] = None,
     agent/constants.py). Loading the BODY arms the skill's ``allowed-tools``
     restriction on that session; a ``file=`` read does not. The body is the act
     that puts untrusted instructions into context, so that is what the gate keys
-    on - and it keeps a bundled-file read from silently arming a skill whose
-    instructions the model never loaded. Called without a session (directly, as
-    the unit tests do) it simply reads, exactly as before.
+    on, and a bundled-file read never arms a skill whose instructions the model
+    never loaded. Called without a session it simply reads.
     """
     if not name:
         return ToolResult.error("use_skill requires a skill 'name'")

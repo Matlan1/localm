@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F1: permission-gated, NON-PERSISTENT network-policy override for the two
+"""Permission-gated, NON-PERSISTENT network-policy override for the two
 prerequisite model downloads (the embedding model and the Whisper STT model).
 
 The properties pinned here, most important first:
@@ -11,7 +11,7 @@ The properties pinned here, most important first:
 2. The one-time authorization cannot persist BY CONSTRUCTION: the whole
    download flow leaves config.json byte-identical and never calls
    update_config. Asserted on the DATA (the file, the spy) before any status
-   code, per diff-review item 24.
+   code.
 3. bypass-ask: allow_download=True downloads under net_mode=ask, while the
    IMPLICIT paths do not - the transcribe worker is dispatched with
    local_files_only=True whenever the policy did not authorize a download, so
@@ -120,7 +120,7 @@ class TestPrefetchPolicy:
         assert len(calls) == 1
         repo, kwargs = calls[0]
         assert repo == "Systran/faster-whisper-base"
-        # rule 4 containment: the download lands in localm's own cache dir.
+        # containment: the download lands in localm's own cache dir.
         assert kwargs.get("cache_dir") == str(voice.stt_cache_dir())
         assert (ok, reason) == (True, "")
         assert voice.stt_model_cached() == (True, "base")
@@ -430,9 +430,7 @@ class TestVoiceRoutes:
         # appears as a literal key.
         from localm.config import load_config
         assert load_config()["net_mode"] == "ask"
-        # The stubbed prefetch reports failure, so the job must too - honesty
-        # is part of the surface, and status "failed" proves the job consumed
-        # the prefetch result rather than assuming success.
+        # The stubbed prefetch reports failure, so the job status is "failed".
         assert job.status == "failed"
 
     def test_download_route_short_circuits_when_cached(self, voice_client,
@@ -535,8 +533,7 @@ class TestEmbeddingRoutes:
         cfg_file = rag_client.home / "config.json"
         before = cfg_file.read_bytes()
 
-        # The lazy path really is blocked under ask (the property the explicit
-        # route exists to get past):
+        # The lazy path really is blocked under ask:
         from localm.inference.embedder import resolve_embedding_model_path
         assert resolve_embedding_model_path() is None
         assert fetched == []

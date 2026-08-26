@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// REG-562: the Models page "alias" control must report the name the server
-// ACTUALLY stored. Aliases are sanitized server-side ("daily driver" is stored as
-// "daily-driver"), so toasting the raw text the user typed tells them a name that
-// does not exist in the registry and cannot be used.
+// The Models page "alias" control toasts the name the server stored. Aliases
+// are sanitized server-side, so "daily driver" comes back as "daily-driver".
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

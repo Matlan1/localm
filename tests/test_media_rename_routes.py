@@ -1,21 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Rename routes for the music and video galleries.
 
-Image has had ``/api/imagine/file/{name}/rename`` since the gallery was built;
-music and video did not, so the Studio detail view could not offer the action
-without a backend half. These routes mirror image's exactly, which means they
-inherit its two guards, and BOTH are asserted here rather than assumed from the
-shared shape:
+``/api/music/file/{name}/rename`` and ``/api/video/file/{name}/rename`` mirror
+the image gallery's rename route, including its two guards, both asserted here:
 
   * ``gallery.require_owner`` on the SOURCE - another principal gets 404, the
     same code a missing file returns (no existence oracle).
-  * ``confined_name`` on the CALLER-SUPPLIED DESTINATION - owning the source
-    proves nothing about where it may be written, so traversal is rejected.
+  * ``confined_name`` on the CALLER-SUPPLIED DESTINATION - a traversing
+    destination is rejected even when the caller owns the source.
 
-Every assertion reads the FILESYSTEM before the status code. A rename bug's
-symptom is a file in the wrong place or gone; the status code is a proxy, and
-leading with the proxy is how "409 != 200" gets "fixed" by editing the
-assertion instead of the code.
+Every assertion reads the FILESYSTEM before the status code.
 """
 
 import json
@@ -82,7 +76,7 @@ class TestMediaRename:
             r = c.post(api + "/file/original" + ext + "/rename",
                        json={"new_name": "renamed" + ext})
 
-            # THE FILESYSTEM FIRST - this is the property; the code is a proxy.
+            # The filesystem state.
             new = old.with_name("renamed" + ext)
             assert new.is_file(), "renamed file missing (HTTP %s)" % r.status_code
             assert not old.exists(), "the original was left behind"
@@ -114,20 +108,14 @@ class TestMediaRename:
             api, ext = MEDIA[kind]["api"], MEDIA[kind]["ext"]
             gallery_dir = old.parent
 
-            # NOTE ON THIS TEST'S OWN CONTROL: the >= 400 bound below is
-            # deliberately loose, so this test alone CANNOT tell a working
-            # guard from a missing route (deleting the route yields 405, which
-            # also satisfies it). Its real control is replacing confined_name
-            # with a naive `dir / new_name` join, which turns the
-            # "moved the source" assertion red. Measured, both directions.
             for attempt in ("../escaped" + ext,
                             "../../escaped" + ext,
                             "sub/escaped" + ext):
                 r = c.post(api + "/file/victim" + ext + "/rename",
                            json={"new_name": attempt})
 
-                # THE FILE IS THE PROPERTY: the source must still be where it
-                # was, and nothing may appear outside the gallery dir.
+                # The source must still be where it was, and nothing may appear
+                # outside the gallery dir.
                 assert old.is_file(), \
                     "%s moved the source (HTTP %s)" % (attempt, r.status_code)
                 escaped = gallery_dir / attempt

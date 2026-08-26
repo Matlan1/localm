@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F9: jobs/runner.py's _run_memory and _run_chat must wrap their generation
-calls in http_server.driving_engine, or a scheduled job running on a quiet
-server (no concurrent HTTP traffic) leaves nothing marking the model as
-in-use - idle-unload can unload it mid-run. See
-dev-notes/idle-unload-plugin-activity-gap-2026-08-04.md.
+"""jobs/runner.py's _run_memory and _run_chat must wrap their generation calls in
+http_server.driving_engine, or a scheduled job running on a quiet server (no
+concurrent HTTP traffic) leaves nothing marking the model as in-use and idle-unload
+can unload it mid-run.
 
-Checked from OUTSIDE the wrap, at the point the underlying call actually runs,
-so a forgotten or misplaced `with driving_engine(...)` fails these regardless
-of implementation detail - matching tests/test_memory_consolidate_off_loop.py's
-equivalent check for the memory plugin's two call sites.
+Checked from OUTSIDE the wrap, at the point the underlying call actually runs, so
+a forgotten or misplaced `with driving_engine(...)` fails these regardless of
+implementation detail.
 """
 
 from __future__ import annotations
@@ -60,8 +58,8 @@ def test_run_memory_pins_the_engine_busy_for_the_whole_synthesis_pass(monkeypatc
 
     def fake_synthesize_memory(complete, **kw):
         # synthesize_memory can call complete() several times (one per
-        # candidate) - the pin must cover the whole pass, so check it here,
-        # from OUTSIDE any individual chat_stream call.
+        # candidate), so the pin is checked here, from OUTSIDE any individual
+        # chat_stream call.
         calls.append(eng.active_requests)
         complete("dummy prompt")
         return {"status": "ok", "added": 0}

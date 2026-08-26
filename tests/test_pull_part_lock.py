@@ -10,17 +10,15 @@ as a working model that is not one.
 
 THE CONTENDERS ARE PROCESSES, NOT THREADS. The GUI starts a pull by spawning
 ``localm pull`` as a child, and a user can run the same command in a terminal
-at the same time. So a ``threading.Lock`` would serialise nothing here while
-looking, in review, exactly like a correct fix - which is why the central test
-in this file drives TWO REAL INTERPRETERS. A test that monkeypatched the
-liveness check could not demonstrate atomicity across processes, and atomicity
-across processes is the entire claim.
+at the same time, so a ``threading.Lock`` would serialise nothing. The central
+test here therefore drives TWO REAL INTERPRETERS: a monkeypatched liveness
+check cannot demonstrate atomicity across processes, which is the whole claim.
 
 STALENESS IS DECIDED BY PID LIVENESS, NEVER BY ELAPSED TIME. Any fixed timeout
-eventually reclaims a live holder's lock and recreates the corruption, and a
-large model on a slow link is exactly the download that outlives a generous
-one. Every uncertainty therefore KEEPS the lock, and the tests below pin both
-directions: a live holder is never evicted, a proven-dead one always is.
+eventually reclaims a live holder's lock, and a large model on a slow link is
+exactly the download that outlives a generous one. Every uncertainty KEEPS the
+lock, and the tests below pin both directions: a live holder is never evicted,
+a proven-dead one always is.
 """
 
 from __future__ import annotations
@@ -60,9 +58,9 @@ def _worktree_root() -> str:
     """The checkout THIS test is running from.
 
     A child started with ``python -c`` resolves ``localm`` through the venv's
-    editable-install .pth, which points at the main checkout - so without this
+    editable-install .pth, which points at the main checkout, so without this
     the subprocesses below would exercise a different tree than the one under
-    test and pass or fail for reasons unrelated to this diff.
+    test.
     """
     import localm
     return str(Path(localm.__file__).resolve().parent.parent)
@@ -108,8 +106,8 @@ def _spawn(script: str, home_dir, *args):
 def test_two_real_interpreters_cannot_both_hold_the_lock(home):
     """Exactly one of two real processes may write the .part.
 
-    This is the test the fix exists to pass. It uses no mocks and no patched
-    liveness: two OS processes race for the same lock and the OS decides.
+    No mocks and no patched liveness: two OS processes race for the same lock
+    and the OS decides.
     """
     a = _spawn(CONTEND, home, "m.gguf", 2.0)
     b = _spawn(CONTEND, home, "m.gguf", 2.0)
@@ -125,10 +123,8 @@ def test_two_real_interpreters_cannot_both_hold_the_lock(home):
 
 
 def test_two_real_interpreters_on_different_files_both_proceed(home):
-    """The lock is per DESTINATION, not global.
-
-    Without this, a lock that simply refused everything would pass the test
-    above while making concurrent downloads of unrelated models impossible.
+    """The lock is per DESTINATION, not global: concurrent downloads of
+    unrelated models both proceed.
     """
     a = _spawn(CONTEND, home, "one.gguf", 0.2)
     b = _spawn(CONTEND, home, "two.gguf", 0.2)
@@ -155,8 +151,8 @@ def test_the_lock_is_released_when_the_holder_exits(home):
 # --------------------------------------------------------------------------
 
 def test_a_live_holders_lock_is_never_reclaimed(home):
-    """The direction that matters. A timeout-based rule eventually evicts a
-    slow-but-healthy download; this must not, however long it runs."""
+    """A slow-but-healthy download keeps its lock however long it runs, where a
+    timeout-based rule would eventually evict it."""
     holder = subprocess.Popen([sys.executable, "-c",
                                "import time; time.sleep(30)"])
     try:
@@ -166,8 +162,8 @@ def test_a_live_holders_lock_is_never_reclaimed(home):
             json.dumps({"pid": holder.pid, "filename": "m.gguf",
                         "started": 0.0}), encoding="utf-8")
         # The injection took: a REAL live process owns this lock, and its
-        # recorded start time is the epoch - so any elapsed-time rule would
-        # call it stale immediately.
+        # recorded start time is the epoch, so any elapsed-time rule would call
+        # it stale immediately.
         assert holder.poll() is None, "the holder process died before the test"
 
         with pytest.raises(PullInFlight) as e:
@@ -182,7 +178,7 @@ def test_a_live_holders_lock_is_never_reclaimed(home):
 
 
 def test_a_dead_holders_lock_is_reclaimed(home):
-    """The permissive direction. A crashed download must not wedge the
+    """A crashed download's lock is reclaimed rather than wedging the
     destination forever."""
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait(timeout=30)
@@ -209,9 +205,7 @@ def test_an_unidentifiable_holder_keeps_the_lock(home, body):
     """Uncertainty KEEPS the lock.
 
     An owner record that cannot be read is not evidence its owner died. The
-    refusal names the directory, so a user who is certain can clear it - which
-    is the recoverable direction; silently stealing a lock from a live download
-    is not.
+    refusal names the directory, so a user who is certain can clear it by hand.
     """
     d = _part_lock_dir("m.gguf")
     d.mkdir(parents=True)
@@ -239,9 +233,9 @@ def test_the_lock_is_dropped_even_when_the_download_raises(home):
 # --------------------------------------------------------------------------
 
 def test_the_lock_lives_beside_the_models_dir_not_inside_it(home):
-    """A lock under models/ would sit in the path of the thing it guards:
-    sync_models_dir walks that tree, and a tidy-up of stray files there would
-    be free to delete a live lock."""
+    """The lock directory sits beside models/, not inside it: sync_models_dir
+    walks that tree, and a tidy-up of stray files there would be free to delete
+    a live lock."""
     d = _part_lock_dir("m.gguf")
     models = home / "models"
     assert models not in d.parents, f"{d} is inside the models dir"
@@ -249,10 +243,8 @@ def test_the_lock_lives_beside_the_models_dir_not_inside_it(home):
 
 
 def test_pull_url_refuses_and_leaves_the_part_file_untouched(home):
-    """The wiring, and a data-first assertion.
-
-    Holding the lock, a second _pull_url must not open the .part at all. The
-    bytes are the property; the return value is a proxy for it.
+    """With the lock held, a second _pull_url does not open the .part at all.
+    The bytes are asserted first, before the return value.
     """
     from unittest.mock import MagicMock
 
@@ -263,9 +255,9 @@ def test_pull_url_refuses_and_leaves_the_part_file_untouched(home):
     before = part.read_bytes()
 
     # Asserted from OUTSIDE the call, never by raising from a stub: _pull_url
-    # catches NetworkPolicyError around exactly this region, and an assertion
-    # raised inside code that catches is an input to that code rather than a
-    # failure the runner sees.
+    # catches NetworkPolicyError around exactly this region, so an assertion
+    # raised inside it would be an input to that code rather than a failure the
+    # runner sees.
     reached_network = MagicMock(side_effect=RuntimeError("unreachable"))
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(_pull, "_ssrf_resolve_final_url", reached_network)

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#617 follow-up: `localm doctor` must actually verify the isolated worker
-spawn (multiprocessing.get_context("spawn")) that every GGUF model load and
-the voice/STT engine depend on - not just that a plain subprocess can run the
-native library. The reporter's own `doctor` run showed everything green while
-every model load failed with "[WinError 2]": the ABI/GPU probes use a plain
-subprocess.Popen, a different code path from the one that actually broke.
+"""`localm doctor` must verify the isolated worker spawn
+(multiprocessing.get_context("spawn")) that every GGUF model load and the
+voice/STT engine depend on, not just that a plain subprocess can run the native
+library. The ABI/GPU probes use a plain subprocess.Popen, a different code path,
+so they report everything green while every model load fails with "[WinError 2]".
 """
 
 from __future__ import annotations
@@ -27,19 +26,17 @@ def test_worker_spawn_check_passes_for_a_real_spawn(cli_runner):
 
 
 def test_worker_spawn_check_reports_failure_when_spawn_is_broken(monkeypatch):
-    """Simulates the #617 failure mode (the child process can never start) and
-    confirms doctor surfaces it as a FAILED check with actionable guidance,
-    rather than silently passing like the existing ABI/GPU probes did."""
+    """Simulates a child process that can never start and confirms doctor surfaces
+    it as a FAILED check with actionable guidance, rather than passing silently
+    the way the ABI/GPU probes do."""
     # localm.cli.__init__ re-exports `doctor` as the click Command itself
     # (`doctor = _doctor.doctor`), shadowing the submodule name - go through
     # importlib to get the actual module, not that Command object.
     import importlib
     doctor_mod = importlib.import_module("localm.cli.doctor")
-    # The spawn itself lives in localm.diagnostics now (doctor's
-    # _check_worker_spawn is a renderer over diagnostics.check_worker_spawn), so
-    # that is where `mp` has to be broken. The assertion below still reads
-    # doctor's RENDERED line: a spawn failure the terminal fails to name is the
-    # regression, not a return value.
+    # The spawn lives in localm.diagnostics (doctor's _check_worker_spawn is a
+    # renderer over diagnostics.check_worker_spawn), so that is where `mp` has to
+    # be broken. The assertion below reads doctor's RENDERED line.
     diagnostics_mod = importlib.import_module("localm.diagnostics")
 
     class _BrokenProcess:

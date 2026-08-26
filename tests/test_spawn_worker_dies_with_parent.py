@@ -3,24 +3,20 @@
 parent died, including an uncatchable HARD kill (Windows TerminateProcess / Task
 Manager "End Task", POSIX SIGKILL) where NO parent-side code runs.
 
-Reproduced in the real product 2026-07-16: End Task on ``localm serve`` left its
-isolated GGUF model worker alive, holding 6.84 GB in VRAM indefinitely; the next
-start detected the unclean exit and spawned a SECOND worker beside the orphan.
-
-Root cause: every isolated worker is spawned ``daemon=True``, and multiprocessing's
-daemon-child reclamation is an atexit hook (``multiprocessing.util._exit_function``)
-- atexit never runs under a hard kill, so the daemon flag does not save the worker.
-The graceful paths (``ModelRunner.shutdown()`` / ``release_for_exit()``) only run
-when parent-side code runs, which by definition it does not here.
+Every isolated worker is spawned ``daemon=True``, and multiprocessing's
+daemon-child reclamation is an atexit hook
+(``multiprocessing.util._exit_function``), which never runs under a hard kill, so
+the daemon flag does not save the worker. The graceful paths
+(``ModelRunner.shutdown()`` / ``release_for_exit()``) only run when parent-side
+code runs, which here it does not.
 
 This test drives the REAL failure mode: a REAL worker under a REAL subprocess
 parent, hard-killed via ``Popen.kill()`` (TerminateProcess on Windows, SIGKILL on
-POSIX). It does NOT mock the worker, the spawn, or the kill. Idle workers only (no
-model load), so it needs no model, GPU, or native runtime - the orphaned-worker
-property is about process lifecycle, not inference.
+POSIX). It does NOT mock the worker, the spawn, or the kill. Idle workers only
+(no model load), so it needs no model, GPU, or native runtime.
 
-The fix under test: ``install_parent_death_watchdog()`` (localm/_mp_spawn.py),
-installed at the top of each worker main, blocks on multiprocessing's already-open
+Under test: ``install_parent_death_watchdog()`` (localm/_mp_spawn.py), installed
+at the top of each worker main, which blocks on multiprocessing's already-open
 parent sentinel and ``os._exit(0)``s the instant the parent dies.
 """
 
@@ -87,9 +83,8 @@ def test_spawn_worker_dies_when_parent_is_hard_killed(kind: str) -> None:
         wpid = _read_worker_pid(parent)
         worker = psutil.Process(wpid)
 
-        # Sanity/negative guard: the worker is genuinely alive BEFORE we touch the
-        # parent, so a later "gone" can only be caused by the parent's death (not by
-        # a worker that never started or self-destructed).
+        # The worker is genuinely alive BEFORE the parent is touched, so a later
+        # disappearance can only come from the parent's death.
         time.sleep(1.0)
         assert not _is_gone(worker), (
             f"{kind} worker was not alive before the kill; nothing to prove")

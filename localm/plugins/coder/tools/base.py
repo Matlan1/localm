@@ -24,11 +24,10 @@ class ToolResult:
     # `path` arg to read ahead of time), the (relative_path, old_bytes,
     # new_text) of every file it touched - or would touch, when called with
     # its own dry_run=True. None for every other tool, and None here too
-    # when nothing matched. The single source both a caller that must NOT
-    # touch disk (patch mode, previewing via dry_run) and a caller recording
-    # what a REAL write just changed (the changed-files/undo tracker) read
-    # from - the same matching pass feeds both, so preview and apply can
-    # never diverge the way two separate implementations would.
+    # when nothing matched. Both a caller that must NOT touch disk (patch
+    # mode, previewing via dry_run) and a caller recording what a REAL write
+    # just changed (the changed-files/undo tracker) read this one field, fed
+    # by the same matching pass.
     changes: "list[tuple[str, bytes, str]] | None" = None
 
     @classmethod
@@ -47,9 +46,9 @@ class ToolResult:
         if len(head) > 200:
             head = head[:200] + "..."
         # changes: a PARTIAL apply (some files written before a mid-batch
-        # failure) still needs those files tracked/undoable - the ones that
-        # succeeded really did change on disk, and reporting the call as an
-        # error must not make that real mutation invisible (rule 5).
+        # failure) still tracks those files as changed/undoable - they really
+        # did change on disk, and reporting the call as an error must not make
+        # that mutation invisible.
         return cls(ok=False, output=message, summary=f"ERROR: {head}", changes=changes)
 
     def to_xml(self, tool_name: str) -> str:
@@ -79,10 +78,9 @@ def _partial_on_timeout(exc) -> str:
     """Format any output a timed-out subprocess produced before it was killed.
 
     ``subprocess.TimeoutExpired`` carries the stdout/stderr captured up to the
-    kill; dropping it hides exactly the diagnostics the model needs (the test
-    progress or last log line before the hang). On POSIX the attributes can be
-    bytes even in text mode (a CPython quirk), so decode defensively. Returns
-    '' when nothing was captured.
+    kill - the test progress or last log line before the hang. On POSIX the
+    attributes can be bytes even in text mode (a CPython quirk), so they are
+    decoded defensively. Returns '' when nothing was captured.
     """
     parts = []
     for label, data in (("", getattr(exc, "stdout", None)),
@@ -108,24 +106,17 @@ def _confine(cwd: Path, path: str) -> Path:
     escapes the working directory (path traversal attempt or accidental
     absolute path outside the project root).
 
-    Delegates to ``pathsafe.confined_absolute_or_under`` - the shared
-    absolute-or-relative confinement primitive - instead of re-implementing
-    resolve()+is_relative_to() here. That closes two gaps this hand-rolled
-    check never had: a UNC/device *path* used to reach ``Path(path).resolve()``
-    with no guard at all (the syscall dials SMB and can hang for minutes -
-    the exact danger ``reject_unsafe_path_string`` documents, on a sink this
-    function shares with it), and an NTFS Alternate Data Stream / short-name
-    alias in *path* was accepted with no character or identity check - these
-    are a coding agent's own file-editing tools, so a hostile instruction
-    embedded in a file the agent reads could steer a subsequent tool call's
-    ``path`` argument the same way a SKILL.md's body can.
+    Delegates to ``pathsafe.confined_absolute_or_under``, the shared
+    absolute-or-relative confinement primitive. That refuses a UNC/device
+    *path* before it can reach ``Path(path).resolve()`` (the syscall dials SMB
+    and can hang for minutes), and rejects an NTFS Alternate Data Stream or
+    short-name alias in *path* on a character and identity check.
 
-    ``"."``/``""`` naming *cwd* itself is an existing, tested contract this
-    function keeps (a tool listing "the project root" is a legitimate
-    request); the shared primitive treats a self-referential result as
-    invalid (matching its delete-oriented callers, for whom "collapses to
-    the confined root" must never mean "the root itself"), so that one case
-    is handled here instead of relaxing the primitive for every caller.
+    ``"."``/``""`` naming *cwd* itself is a supported contract here (a tool
+    listing "the project root" is a legitimate request). The shared primitive
+    treats a self-referential result as invalid, matching its delete-oriented
+    callers, so that one case is handled in this function rather than by
+    relaxing the primitive for every caller.
     """
     if path in (".", ""):
         return cwd.resolve()
@@ -171,15 +162,13 @@ def platform_shell(command: str) -> Union[list, str]:
 
     On Windows it must NOT be ``["cmd", "/C", command]``. ``subprocess`` renders
     an argv list with :func:`subprocess.list2cmdline`, which escapes every
-    embedded quote MSVCRT-style as ``\\"`` - syntax ``cmd.exe`` does not speak.
-    So a quoted path, the normal way to pass a path containing spaces, reached
-    cmd mangled and could not be opened (measured: ``type "<dir with spaces>"``
-    returned "The filename, directory name, or volume label syntax is
-    incorrect"). Pre-compensating is not possible: list2cmdline turns EVERY
-    quote into ``\\"``, so no list element can put a bare quote on the command
-    line. A command STRING is passed to ``CreateProcess`` verbatim instead, so
-    cmd applies its own quoting rules to exactly what was written - which is
-    what routing to a shell means in the first place.
+    embedded quote MSVCRT-style as ``\\"`` - syntax ``cmd.exe`` does not speak -
+    so a quoted path, the normal way to pass a path containing spaces, reaches
+    cmd mangled and cannot be opened. Pre-compensating is not possible:
+    list2cmdline turns EVERY quote into ``\\"``, so no list element can put a
+    bare quote on the command line. A command STRING is passed to
+    ``CreateProcess`` verbatim instead, so cmd applies its own quoting rules to
+    exactly what was written.
     """
     if sys.platform == "win32":
         return "cmd /C " + command
@@ -207,10 +196,7 @@ def run_subprocess(
     On a timeout, the process's captured stdout/stderr up to the kill is
     preserved on the result, not dropped - format it for display with
     :func:`_partial_on_timeout`. This is the canonical subprocess-execution
-    primitive for the coder's tools/shell.py, tools/git.py, and cli/goal.py
-    (CODER-2) - previously four independent copies of this run+capture+timeout
-    sequence, with only shell.py's own callers getting partial-output-on-timeout
-    and git.py/goal.py silently dropping it.
+    primitive for the coder's tools/shell.py, tools/git.py, and cli/goal.py.
     """
     argv = platform_shell(argv_or_cmd) if shell_wrap else argv_or_cmd
 

@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F3 regression suite (memory-audit 2026-07-02): a consolidation UPDATE must
-re-embed the record's NEW text. Pre-fix, run_consolidation mutated the text in
-place and store.replace re-embedded only vectorless ids, so the updated record
-kept the OLD text's vector forever and semantic recall pointed at the
-contradicted content."""
+"""A consolidation UPDATE must re-embed the record's NEW text. A run_consolidation
+that mutates the text in place while store.replace re-embeds only vectorless
+ids leaves the updated record on the OLD text's vector, so semantic recall
+points at the contradicted content."""
 
 from __future__ import annotations
 

@@ -94,13 +94,10 @@ def job_add(name, prompt, cron, every, coder, memory, rag, collection, cwd,
     """Add a new scheduled job."""
     from localm.plugins.builtin.jobs.store import Job, cwd_unc_error
 
-    # The THIRD write path into `model`, after POST and PUT /api/jobs. The runner
-    # re-checks at run time, so an unregistered name here was not a security hole -
-    # it was worse ergonomics than a hole: the job saved fine and then failed on
-    # every scheduled tick, unattended, with nothing at creation time saying why.
-    # Checking at the write keeps _check_model_name's promise ("a poisoned row
-    # never reaches disk") true for every writer, and turns a silent repeating
-    # failure into one immediate, actionable error.
+    # The THIRD write path into `model`, after POST and PUT /api/jobs. Checking
+    # at the write keeps _check_model_name's promise ("a poisoned row never
+    # reaches disk") true for every writer, and turns an unregistered name from a
+    # silent repeating failure on every scheduled tick into one immediate error.
     from localm.model_manager import unregistered_model_error
     _bad = unregistered_model_error(model)
     if _bad:
@@ -108,10 +105,9 @@ def job_add(name, prompt, cron, every, coder, memory, rag, collection, cwd,
         sys.exit(1)
 
     # THIRD write path into `cwd`, after POST and PUT /api/jobs (plug.py's
-    # _check_cwd) - same reasoning as the model-name check just above: a
-    # poisoned row must never reach disk regardless of which writer created
-    # it. Shares cwd_unc_error's wording with plug.py and the runner's
-    # run-time re-check, so all three never drift apart.
+    # _check_cwd): a poisoned row must never reach disk regardless of which
+    # writer created it. Shares cwd_unc_error's wording with plug.py and the
+    # runner's run-time re-check, so all three never drift apart.
     _bad_cwd = cwd_unc_error(cwd)
     if _bad_cwd:
         click.echo(f"Invalid job: {_bad_cwd}", err=True)
@@ -183,10 +179,9 @@ def job_show(job_id):
         click.echo(f"No such job: {job_id}", err=True)
         sys.exit(1)
 
-    # Reuse the API's own redaction rather than re-deriving it: `_job_dict`
-    # strips `owner`/`owner_is_owner_key` (internal principal bindings never
-    # meant to reach a client), so this shows exactly what `GET /api/jobs/{id}`
-    # would - the same fields the docstring above promises, no more, no less.
+    # Reuse the API's own redaction: `_job_dict` strips
+    # `owner`/`owner_is_owner_key` (internal principal bindings never meant to
+    # reach a client), so this shows exactly what `GET /api/jobs/{id}` would.
     from localm.plugins.builtin.jobs.plug import _job_dict
     d = _job_dict(job)
 
@@ -196,10 +191,9 @@ def job_show(job_id):
     click.echo(f"  schedule:    {_fmt_schedule(d['schedule_kind'], d['schedule'])}")
     click.echo(f"  model:       {d['model'] or '(default)'}")
     # Printed unconditionally rather than only for task_kind == 'coder'/'rag':
-    # this command exists so an operator can AUDIT a job, and hiding a field
-    # because it looks irrelevant to the current task_kind would hide the one
-    # case worth seeing - a stale/oddly-edited job carrying a value that no
-    # longer matches its kind.
+    # this command exists so an operator can AUDIT a job, and a stale or
+    # oddly-edited job carrying a value that no longer matches its kind is the
+    # case worth seeing.
     click.echo(f"  cwd:         {d['cwd'] or '-'}")
     click.echo(f"  scope:       {d['scope'] or '-'}")
     click.echo(f"  collection:  {d['collection'] or '-'}")
@@ -244,9 +238,8 @@ def job_results(job_id, limit, offset):
     store = _store()
     if store.get(job_id) is None:
         # Checked explicitly rather than trusting an empty result list: without
-        # this, "no such job" and "this job has never run" print identically,
-        # and only one of those means the id was wrong (diff-review-discipline
-        # item 3 - two outcomes that need different handling collapsed into one).
+        # this, "no such job" and "this job has never run" print identically, and
+        # only one of those means an unknown id.
         click.echo(f"No such job: {job_id}", err=True)
         sys.exit(1)
     results = store.list_results(job_id, limit=limit, offset=offset)

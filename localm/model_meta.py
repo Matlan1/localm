@@ -13,8 +13,7 @@ class of data as ``registry.json`` already keeps - NOT chat or session content -
 so it is ordinary data-home state and is NOT gated by privacy mode. It lives at
 ``<LOCALM_HOME>/model_meta.json``. Writes are best-effort: a failure only means a
 later load re-estimates the layer count (correct, just less precise), so it is
-logged at debug level rather than raised (AGENTS.md rule 5: surface, don't hide,
-but at the right altitude - a metadata-cache miss is not a hard failure).
+logged at debug level and never raised.
 """
 
 from __future__ import annotations
@@ -27,8 +26,7 @@ from typing import Optional
 from .debuglog import logger
 
 _META_FILENAME = "model_meta.json"
-# Cap the number of remembered models so the file cannot grow without bound over
-# a machine's lifetime; oldest entries are dropped first (dict insertion order).
+# Cap on remembered models; oldest entries are dropped first.
 _MAX_ENTRIES = 256
 
 
@@ -79,8 +77,8 @@ def cached_n_layers(model_path: str) -> Optional[int]:
 
 
 def store_n_layers(model_path: str, n_layers: int) -> None:
-    """Remember *n_layers* for *model_path*. Best-effort: on any failure the next
-    load just re-estimates, so log at debug rather than raising."""
+    """Remember *n_layers* for *model_path*. Best-effort: any failure is logged at
+    debug and never raised; the next load re-estimates."""
     if not isinstance(n_layers, int) or n_layers <= 0:
         return
     key = _model_key(model_path)
@@ -97,8 +95,7 @@ def store_n_layers(model_path: str, n_layers: int) -> None:
             data.pop(next(iter(data)))
         path = _meta_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Per-process temp name so two localm instances sharing a LOCALM_HOME and
-        # loading the same model at once cannot interleave on one temp file.
+        # Per-process temp name, so two instances cannot share one temp file.
         tmp = path.with_suffix(f".json.tmp.{os.getpid()}")
         tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, path)   # atomic: a torn write can never corrupt the cache

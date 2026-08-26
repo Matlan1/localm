@@ -26,10 +26,9 @@ def test_detect_returns_valid_shape():
 
 def test_recommended_install_backend_policy(monkeypatch):
     """The ONE installer-backend policy both setup.bat and setup.sh share."""
-    # This table asserts the NO-SYSTEM-TOOLKIT baseline explicitly (deterministic
-    # regardless of the test-running machine's own ROCm install, if any) - the
-    # WITH-a-detected-toolkit escalation (-> hip) is covered by its own dedicated
-    # tests in test_hwdetect.py.
+    # The NO-SYSTEM-TOOLKIT baseline, deterministic regardless of the
+    # test-running machine's own ROCm install. The with-a-detected-toolkit
+    # escalation to hip has its own tests.
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
     def rec(vendors, names, platform="win32"):
         monkeypatch.setattr(hwdetect.sys, "platform", platform)
@@ -38,18 +37,16 @@ def test_recommended_install_backend_policy(monkeypatch):
     # AMD on Windows: RX 6000 / unknown keep the self-contained gfx103X ROCm build...
     assert rec(["amd"], "amd radeon rx 6900 xt") == "amd-rocm"
     assert rec(["amd"], "amd radeon graphics") == "amd-rocm"
-    # ...but a CLEARLY non-gfx103X AMD with no ROCm/HIP toolkit detected downgrades
-    # to the universal Vulkan build (hip genuinely cannot run here without one).
+    # ...but a CLEARLY non-gfx103X AMD with no ROCm/HIP toolkit detected
+    # downgrades to the universal Vulkan build.
     assert rec(["amd"], "amd radeon rx 7800 xt") == "vulkan"
     assert rec(["amd"], "amd radeon rx 9070") == "vulkan"
     assert rec(["amd"], "amd radeon rx 5700") == "vulkan"
-    # AMD on Linux with no toolkit detected is vulkan too (no self-contained
-    # bundle exists there, and hip needs the toolkit this asserts is absent).
+    # AMD on Linux with no toolkit detected is vulkan too: no self-contained
+    # bundle exists there and hip needs the toolkit this asserts is absent.
     assert rec(["amd"], "amd radeon rx 6900 xt", platform="linux") == "vulkan"
     # NVIDIA: cuda on BOTH Windows and Linux - llama.cpp ships a self-contained
-    # cudart bundle on both, and 2026-08-11 field testing confirmed CUDA works
-    # and outperforms vulkan on real NVIDIA Linux hardware (maintainer: "the best
-    # performing one is always our suggestion; vulkan is a fallback").
+    # cudart bundle on both.
     assert rec(["nvidia"], "nvidia geforce rtx 4090") == "cuda"
     assert rec(["nvidia"], "nvidia geforce rtx 4090", platform="linux") == "cuda"
     # Intel -> vulkan; no GPU -> cpu; Apple Silicon -> metal.
@@ -92,16 +89,15 @@ def test_auto_backend_nvidia_is_cuda_on_windows(monkeypatch):
 
 
 def test_auto_backend_nvidia_is_cuda_on_linux(monkeypatch):
-    # bare `setup-llama` (auto) must match the installer: NVIDIA on Linux -> cuda
-    # (both OSes ship a self-contained cudart bundle; see hwdetect's docstring).
+    # bare `setup-llama` (auto) must match the installer: NVIDIA on Linux -> cuda.
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     monkeypatch.setattr(hwdetect, "detect", _fake_detect(["nvidia"], "vulkan"))
     assert sl._auto_backend() == "cuda"
 
 
 def test_auto_backend_mixed_amd_nvidia(monkeypatch):
-    # A box with both: cuda on either OS (NVIDIA is the priority vendor and its
-    # cudart bundle is self-contained on both Windows and Linux).
+    # A box with both: cuda on either OS, since NVIDIA is the priority vendor
+    # and its cudart bundle is self-contained on both.
     monkeypatch.setattr(hwdetect, "detect", _fake_detect(["nvidia", "amd"], "vulkan"))
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     assert sl._auto_backend() == "cuda"
@@ -121,24 +117,17 @@ def test_auto_backend_amd_only_is_rocm_on_windows(monkeypatch):
 def test_every_asset_fragment_resolves_against_the_real_latest_release():
     """Every substring in _ASSET_MATCH must match at least one real asset name
     in the CURRENT live ggml-org/llama.cpp release - not a cached snapshot, not
-    a fixture. Upstream renamed the Windows ROCm/HIP asset from
-    "bin-win-hip-radeon-x64" to "bin-win-rocm-<ver>-x64" at tag b10356
-    (2026-08-11) with no announcement anywhere in this repo; the OLD fragment
-    silently stopped matching anything, and _resolve_backend_asset fell
-    through to a GUESSED url (the "could not verify release asset list"
-    branch) that 404s against the live tag. This test exists so the NEXT
-    upstream rename is caught here, not by a user's failed provision -
-    caught 2026-08-11 while building the AMD ROCm-detection escalation (see
-    dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5).
+    a fixture. An upstream rename makes the old fragment stop matching, and
+    _resolve_backend_asset then falls through to a GUESSED url (the "could not
+    verify release asset list" branch) that 404s against the live tag.
 
     Scoped to _ASSET_MATCH's own generic upstream-repo resolution. TWO
-    combinations are deliberately excluded, both already documented at their
-    OWN call sites in setup_llama.py, not newly discovered here:
-      * linux/cuda - ggml-org publishes no bare Linux CUDA binary at all
-        (dev-notes/ADR-0010); _resolve_backend_asset special-cases this
-        combination and resolves against hybridgroup/llama-cpp-builder
-        instead, BEFORE ever reaching _ASSET_MATCH, so that entry is
-        unreachable dead data rather than a real matcher.
+    combinations are excluded, both documented at their own call sites in
+    setup_llama.py:
+      * linux/cuda - ggml-org publishes no bare Linux CUDA binary at all;
+        _resolve_backend_asset special-cases this combination and resolves
+        against hybridgroup/llama-cpp-builder BEFORE reaching _ASSET_MATCH, so
+        that entry is unreachable data rather than a real matcher.
       * amd-rocm is not in _ASSET_MATCH at all - it resolves against
         lemonade-sdk/llamacpp-rocm via its own special case, checked
         separately."""
@@ -168,13 +157,12 @@ def test_every_asset_fragment_resolves_against_the_real_latest_release():
 
 
 # --------------------------- TLS verification (SSL) ----------------------- #
-# The SSL context itself is tested in tests/test_http_ssl.py (the shared helper);
-# these two lock that setup-llama's GitHub calls actually PASS a verifying context.
+# These lock that setup-llama's GitHub calls pass a verifying SSL context.
 
 def test_release_assets_passes_verifying_context(monkeypatch):
-    # Regression: the GitHub API lookups MUST present a verifying SSL context.
-    # Without one, a box whose OS cert store lacks the release-CDN CA fails every
-    # call with CERTIFICATE_VERIFY_FAILED (the reported setup-llama failure).
+    # The GitHub API lookups must present a verifying SSL context. Without one,
+    # a box whose OS cert store lacks the release-CDN CA fails every call with
+    # CERTIFICATE_VERIFY_FAILED.
     seen = {}
 
     class _Resp:
@@ -193,8 +181,7 @@ def test_release_assets_passes_verifying_context(monkeypatch):
 
 
 def test_download_passes_verifying_context(monkeypatch, tmp_path):
-    # Regression: the archive download itself must verify too (it was the raw
-    # urlretrieve call with no context that surfaced in the failure report).
+    # The archive download itself must verify too.
     seen = {"done": False}
 
     class _Resp:
@@ -274,9 +261,8 @@ def test_resolve_offline_falls_back_to_pinned_tag(monkeypatch):
 
 
 def test_release_assets_logs_the_swallowed_cause(monkeypatch, caplog):
-    """_release_assets() must not silently swallow the failure (AGENTS.md rule
-    5): the exception must be discoverable at debug level, not just an empty
-    list with no trace of why."""
+    """_release_assets() must not silently swallow the failure: the exception
+    must be discoverable at debug level, not just an empty list."""
     import logging
 
     def _boom(*a, **k):
@@ -392,16 +378,12 @@ def test_offline_resolution_names_a_real_pinned_asset_for_every_backend(
     filename the pinned table actually has - i.e. to a real asset of the pinned
     release, with a checksum.
 
-    This is the test that catches an upstream RENAME, which is not hypothetical:
-    the Windows ROCm asset went from `bin-win-hip-radeon-x64` to
-    `bin-win-rocm-7.14-x64` at b10356, and the Linux one is
-    `bin-ubuntu-rocm-7.14-x64.ZIP` - a .zip off win32, which the old templated
-    guess could not express at all. Both silently produced a 404 URL with no
-    checksum. Driven per (platform, backend) rather than for one representative,
-    because a rename hits exactly one cell of that grid.
+    Catches an upstream RENAME, which a templated guess produces a 404 URL and
+    no checksum for. Driven per (platform, backend) rather than for one
+    representative, since a rename hits exactly one cell of that grid.
 
-    linux/cuda is excluded deliberately: upstream publishes no bare Linux CUDA
-    asset, so it resolves against a third party entirely (ADR-0010)."""
+    linux/cuda is excluded: upstream publishes no bare Linux CUDA asset, so it
+    resolves against a third party entirely."""
     monkeypatch.setattr(sl, "_platform_key", lambda: plat)
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
@@ -417,18 +399,14 @@ def test_offline_resolution_names_a_real_pinned_asset_for_every_backend(
 
 def test_every_pinned_asset_belongs_to_a_pinned_tag():
     """The offline table looks assets up by FILENAME, so an entry for a tag
-    nothing installs can never be hit - while its presence reads as coverage for
-    a build that is actually unsupported. That is how the table came to carry the
-    entire asset list of b9870 long after anything resolved to it.
+    nothing installs can never be hit while its presence reads as coverage.
 
-    Enforced generally rather than for ROCm alone (the narrower version of this
-    check missed the other twenty-odd stale entries sitting beside it), so
-    bumping the pin without refreshing the digests fails here."""
+    Enforced across every backend, not for ROCm alone, so bumping the pin
+    without refreshing the digests fails here."""
     known = {sl._PINNED_TAG, sl._ROCM_TAG}
     stale = [k for k in sl._PINNED_FALLBACK_SHA256
-             # cudart bundles carry no tag in their names - upstream re-uploads
-             # the same file every release (byte-identical digests measured at
-             # b9870 and b10375), so they are legitimately tag-free.
+             # cudart bundles carry no tag in their names: upstream re-uploads
+             # the same file every release, so they are legitimately tag-free.
              if not k.startswith("cudart-")
              and not any(f"-{t}-" in k or k.startswith(f"llama-{t}-") for t in known)]
     assert not stale, (
@@ -438,8 +416,7 @@ def test_every_pinned_asset_belongs_to_a_pinned_tag():
 
 def test_resolve_amd_rocm_asset_warns_when_release_lookup_fails(monkeypatch, capsys):
     """A failed lemonade-sdk release lookup must be surfaced the same way the
-    general (non-ROCm) fallback already is, not silently skipped (AGENTS.md
-    rule 5)."""
+    general (non-ROCm) fallback is, not silently skipped."""
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: "gfx103x")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
@@ -611,18 +588,11 @@ def test_help_text_does_not_claim_nvidia_amd_default_to_vulkan_on_linux():
     assert "hip for AMD" in help_text
 
 
-# --------------------------- bad-download diagnosis (issue #827) ---------- #
+# --------------------------- bad-download diagnosis ----------------------- #
 #
-# A too-small/invalid download used to get ONE generic hedge naming every
-# possible cause ("an error page or a truncated transfer") without saying
-# which one actually happened. Confirmed live (issue #827): a corporate
-# network's content filter substituted a small response for a real 32 MB
-# llama.cpp archive, and the user had no way to tell that apart from a merely
-# flaky connection from the message alone. These tests prove _sniff_content_kind
-# and _diagnose_bad_artifact tell the different causes apart CORRECTLY from
-# real evidence (actual bytes, actual response metadata) - not a guess dressed
-# as a fact - and stay honest (no confident cause) when the evidence really is
-# ambiguous.
+# _sniff_content_kind and _diagnose_bad_artifact tell the causes of a too-small
+# or invalid download apart from real evidence (actual bytes, actual response
+# metadata), and name no confident cause when the evidence is ambiguous.
 
 import gzip
 import io
@@ -773,10 +743,9 @@ class TestValidateArchiveRichDiagnosis:
         assert "html" in msg or "webpage" in msg
 
     def test_shape_check_also_gets_rich_diagnosis(self, tmp_path):
-        # Big enough to pass the SIZE gate, but still not a real archive -
-        # the shape check's message must ALSO be evidence-based, not the old
-        # generic "may be a truncated transfer, an HTML error page ... or a
-        # tampered payload" hedge that names every cause at once.
+        # Big enough to pass the SIZE gate, but still not a real archive: the
+        # shape check's message must also be evidence-based rather than a hedge
+        # naming every possible cause at once.
         p = tmp_path / "a.zip"
         p.write_bytes(b"<!DOCTYPE html>" + b" " * sl._MIN_ARTIFACT_BYTES)
         with pytest.raises(sl.ArtifactError) as exc_info:
@@ -873,10 +842,9 @@ class TestDownloadTransportDiagnosis:
 
 
 class TestVulkanCpuTerminalGuidance:
-    """The explicit-vulkan/cpu-pick-failed exit used to be bare sys.exit(1) -
-    zero guidance beyond whatever the exception handler printed, unlike every
-    other failure path in this function. A user hitting a blocked download
-    got no hint that --from/--url exist. Confirms the guidance is now there."""
+    """The explicit-vulkan/cpu-pick-failed exit must name the --from/--url
+    escape hatches before exiting, like every other failure path in this
+    function."""
 
     def test_vulkan_not_provisioned_shows_escape_hatches_and_exits(self, monkeypatch, tmp_path, capsys):
         def fake_provision_backend(chosen, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
@@ -905,12 +873,10 @@ class TestIssue827Reproduction:
     on a network that substitutes a small response for the real archive."""
 
     def test_reproduces_and_correctly_diagnoses_the_reported_failure(self, monkeypatch, tmp_path):
-        # The reported byte counts: 196608 received where 262144 is the floor
-        # and the real archive is ~32MB - modeled here as an HTML block page,
-        # the most common real-world cause of exactly this signature. The
-        # filler must be long enough BEFORE slicing, or the slice is a no-op
-        # and the body silently ends up shorter than the exact count asserted
-        # below (measured, not assumed - this is what bit the first draft).
+        # The reported byte counts: 196608 received where 262144 is the floor and
+        # the real archive is ~32MB, modelled here as an HTML block page. The
+        # filler has to be long enough BEFORE slicing, or the slice is a no-op and
+        # the body ends up shorter than the exact count asserted below.
         prefix = b"<!DOCTYPE html><html><body>"
         filler = b"Access to this file is restricted by your organization's security policy. " * 5000
         assert len(prefix + filler) >= 196608, "sanity: filler exceeds the slice target"
@@ -937,8 +903,7 @@ class TestIssue827Reproduction:
         with pytest.raises(sl.ArtifactError) as exc_info:
             sl._fetch_and_place(url, tmp_path / "target")
         msg = str(exc_info.value).lower()
-        # Must be SPECIFIC (names the actual, correct cause) not the old generic
-        # "almost certainly an error page or a truncated transfer" hedge.
+        # Must be SPECIFIC, naming the actual cause, rather than a generic hedge.
         assert "webpage" in msg or "html" in msg
         assert "network" in msg or "proxy" in msg or "filter" in msg
         assert "196608" in msg or "196,608" in str(exc_info.value)
@@ -951,11 +916,10 @@ class TestIssue827Reproduction:
 
 def test_default_url_tag_and_pin_are_coherent():
     """DEFAULT_URL, _ROCM_TAG, DEFAULT_URL_SHA256 and the pinned table are four
-    places that name the same artifact. Bumping the build while leaving one of
-    them behind yields an offline fallback that downloads one file and verifies
-    it against another's hash - a hard failure for users with no release-API
-    access, and invisible to anyone testing online (where the digest comes off
-    the API instead). Assert they agree rather than trusting the bump."""
+    places that name the same artifact. Leaving one behind on a bump yields an
+    offline fallback that downloads one file and verifies it against another's
+    hash - a hard failure with no release-API access, and invisible online,
+    where the digest comes off the API instead. Asserts they agree."""
     fname = sl.DEFAULT_URL.rsplit("/", 1)[-1]
 
     assert f"/{sl._ROCM_TAG}/" in sl.DEFAULT_URL, (

@@ -1,22 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SSRF hardening for the web/coder/chat surface (R42 focused review pass).
+"""SSRF hardening for the web/coder/chat surface.
 
 Covers the fixes from the adversarial SSRF audit of the web plugin and the
 shared localm.netpolicy guard it delegates to:
 
   F1  CGNAT 100.64.0.0/10 (RFC 6598) and other non-globally-routable ranges
-      were allowed by _is_blocked_ip (the old explicit is_* list missed them);
-      now refused via the `not is_global` predicate. Public hosts still pass.
-  N1  Parser-differential SSRF: a backslash / control char in the authority made
-      urllib.parse read a public host while requests/urllib3 connect to loopback
-      (defeating the guard AND the net_allow allowlist). Now refused up front.
+      pass an explicit is_* list; they are refused via the `not is_global`
+      predicate instead. Public hosts still pass.
+  N1  Parser-differential SSRF: a backslash / control char in the authority makes
+      urllib.parse read a public host while requests/urllib3 connect to loopback,
+      defeating the guard AND the net_allow allowlist. Refused up front.
   6to4 The deprecated 6to4 relay anycast prefix (192.88.99.0/24, 2002::/16) is
-      is_global=True yet not an ordinary public host; now refused.
-  N3  The search backends followed redirects with no per-hop check_url; now they
-      pass allow_redirects=False and refuse any 3xx.
-  F2  Chat image_url parts fetched via a raw requests.get with no policy; now
-      routed through netpolicy.safe_fetch_bytes (check_url + per-hop redirect
-      re-validation + size cap), reachable from a baseline chat turn.
+      is_global=True yet not an ordinary public host; refused.
+  N3  The search backends must pass allow_redirects=False and refuse any 3xx,
+      rather than following redirects with no per-hop check_url.
+  F2  Chat image_url parts are routed through netpolicy.safe_fetch_bytes
+      (check_url + per-hop redirect re-validation + size cap), not a raw
+      requests.get, and are reachable from a baseline chat turn.
 
 These pin the behavior so a future refactor cannot silently re-open the holes.
 """
@@ -74,7 +74,7 @@ def _cfg(monkeypatch, **cfg):
 
 
 # --------------------------------------------------------------------------- #
-#  F1: CGNAT / non-global ranges blocked; public hosts still allowed           #
+#  CGNAT / non-global ranges blocked; public hosts still allowed               #
 # --------------------------------------------------------------------------- #
 
 class TestF1NonGlobalRanges:
@@ -112,7 +112,7 @@ class TestF1NonGlobalRanges:
     def test_deprecated_and_special_forms_still_blocked(self, url):
         """The `not is_global` union must NOT regress the forms the stdlib marks
         is_global=True but that still route internally - is_reserved/is_multicast
-        catch those. (Verifies we kept the union, not is_global alone.)"""
+        catch those, so the union is what is asserted, not is_global alone."""
         with pytest.raises(NetworkPolicyError):
             check_url(url)
 
@@ -150,7 +150,7 @@ class TestSixToFourAnycast:
 
 
 # --------------------------------------------------------------------------- #
-#  N1: parser-differential (backslash / control char in authority)            #
+#  Parser-differential (backslash / control char in authority)                #
 # --------------------------------------------------------------------------- #
 
 class TestN1ParserDifferential:
@@ -179,7 +179,7 @@ class TestN1ParserDifferential:
 
 
 # --------------------------------------------------------------------------- #
-#  N3: search backends refuse redirects (no unchecked per-hop bounce)          #
+#  Search backends refuse redirects (no unchecked per-hop bounce)             #
 # --------------------------------------------------------------------------- #
 
 class _FakeResp:
@@ -239,7 +239,7 @@ class TestN3SearchRedirects:
 
 
 # --------------------------------------------------------------------------- #
-#  F2: chat image_url fetch is policy-checked                                  #
+#  Chat image_url fetch is policy-checked                                      #
 # --------------------------------------------------------------------------- #
 
 def _png_bytes():

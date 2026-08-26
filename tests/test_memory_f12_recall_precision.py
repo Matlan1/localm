@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F12 regression suite (memory-audit 2026-07-02): recall precision.
+"""Recall precision.
 
-- [10] Absolute relevance gate: recall must inject NOTHING when no stored memory
-  relates to the query, instead of the old "always surface the top-k" behavior
-  (FLOOR=0.05 was arithmetically dead - user/import were recency-pinned at 1.0 and
-  min synth importance cleared it, so recall never fell silent). Mirrors the coder
-  episode gate: a memory is eligible only on a lexical content-word hit OR an
-  absolute cosine match.
-- [52] Injected facts render in full (up to the block budget), not hard-sliced at
-  150 chars mid-word; an over-cap line truncates at a word boundary with an ellipsis.
-- [58] The recall query windows the recent user turns, so an anaphoric follow-up
+- Absolute relevance gate: recall injects NOTHING when no stored memory relates
+  to the query, rather than always surfacing the top-k. A memory is eligible
+  only on a lexical content-word hit OR an absolute cosine match, mirroring the
+  coder episode gate.
+- Injected facts render in full (up to the block budget), not hard-sliced at
+  150 chars mid-word; an over-cap line truncates at a word boundary with an
+  ellipsis.
+- The recall query windows the recent user turns, so an anaphoric follow-up
   ("yes, do that") still carries the prior turn's topic.
 """
 
@@ -29,8 +28,8 @@ def _measure_embed(texts):
     """3-axis one-hot topic stub (measurement / editor / other), so distinct topics
     are ORTHOGONAL - a paraphrased measurement query cosine-matches a metric fact
     (no shared token) but an editor query and generic fillers do NOT (each on its
-    own axis). A real embedder spreads distinct texts likewise; a coarser 2-class
-    stub would wrongly make every non-measurement text cosine-identical."""
+    own axis). A coarser 2-class stub would make every non-measurement text
+    cosine-identical."""
     meas = ("metric", "unit", "units", "measure", "measurement", "measurements",
             "system")
     editor = ("vim", "editor", "keybinding", "keybindings", "tutorial")
@@ -46,15 +45,14 @@ def _measure_embed(texts):
     return out
 
 
-# ------------------------------------------------ [10] absolute relevance gate #
+# ----------------------------------------------------- absolute relevance gate #
 
 def test_offtopic_query_injects_nothing(tmp_path):
     s = MemoryStore("owner", "chat", root=tmp_path)
     for t in ("User prefers metric units", "User uses Vim as an editor",
               "User lives in Ghent"):
         s.add(MemoryRecord(text=t, source="user"))
-    # No shared content word, no embedder -> recall stays SILENT (pre-fix: returned
-    # the top-k regardless).
+    # No shared content word, no embedder -> recall stays SILENT.
     assert s.recall("what is the capital of France", k=6, now=NOW) == []
 
 
@@ -67,8 +65,7 @@ def test_ontopic_query_recalls_only_the_matching_fact(tmp_path):
 
 
 def test_user_fact_is_gated_not_always_injected(tmp_path):
-    # The core [10] fix: a high-importance USER fact unrelated to the query is no
-    # longer injected on every turn.
+    # A high-importance USER fact unrelated to the query is not injected.
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User was born in 1990", source="user", importance=0.9))
     assert s.recall("recommend a pasta recipe", k=6, now=NOW) == []
@@ -111,7 +108,7 @@ def test_cos_floor_constant_in_range():
     assert 0.4 <= REL_COS_MIN <= 0.6
 
 
-# ------------------------------------------------------- [52] injection render #
+# ------------------------------------------------------------ injection render #
 
 def test_long_fact_renders_in_full_not_sliced_at_150():
     long_text = (
@@ -120,7 +117,7 @@ def test_long_fact_renders_in_full_not_sliced_at_150():
         "sailing on weekends near the coast of Brittany in north-western France")
     assert len(long_text) > 150
     block = M.render_memories([MemoryRecord(text=long_text)])
-    assert long_text in block                       # rendered whole (pre-fix: cut at 150)
+    assert long_text in block                       # rendered whole
 
 
 def test_over_cap_line_truncates_at_word_boundary_with_ellipsis():
@@ -137,7 +134,7 @@ def test_over_cap_line_truncates_at_word_boundary_with_ellipsis():
     assert text[len(head)] == " "
 
 
-# ----------------------------------------------------- [58] windowed recall query #
+# ---------------------------------------------------------- windowed recall query #
 
 def test_recall_query_windows_recent_user_turns():
     from localm.plugins.builtin.memory.plug import _recall_query

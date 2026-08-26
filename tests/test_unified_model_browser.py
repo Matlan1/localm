@@ -31,14 +31,10 @@ def comfy_home(tmp_path, monkeypatch):
 
 
 class TestGetComfyWorkdirManagedAwareness:
-    """get_comfy_workdir()/get_comfy_api_url() used to have ZERO managed-
-    instance awareness - they resolved a per-plugin/global override the same
-    way regardless of whether localm's own ComfyUI was the actual active
-    target, so the GUI's "Scan for ComfyUI models" button could silently scan
-    the wrong folder (same bug family as
-    NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD, found
-    independently while auditing every comfy_workdir/comfy_api_url resolver
-    for the same class of gap)."""
+    """get_comfy_workdir()/get_comfy_api_url() must be managed-instance aware:
+    resolving a per-plugin or global override regardless of whether localm's
+    own ComfyUI is the active target makes the GUI's "Scan for ComfyUI models"
+    button scan the wrong folder."""
 
     def _install_managed(self, home_dir):
         from localm.media import managed_comfy as mc
@@ -60,9 +56,8 @@ class TestGetComfyWorkdirManagedAwareness:
         assert get_comfy_workdir() == r"D:\deliberate\video-comfy"
 
     def test_workdir_routes_to_managed_instance_ignoring_stale_plugin_value(self, comfy_home):
-        """The actual bug: managed is active AND installed, but a per-plugin
-        workdir left over from an unrelated custom install used to still win
-        because get_comfy_workdir() never checked managed routing at all."""
+        """Managed is active AND installed, so a per-plugin workdir left over
+        from an unrelated custom install must not win."""
         import localm.config as cfg
         paths = self._install_managed(comfy_home)
         cfg.save_config({**cfg.load_config(), "comfy_target": "own",
@@ -202,14 +197,10 @@ def temp_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(mm, "save_registry", _save)
     monkeypatch.setattr(mm, "update_registry", _update)
     # scan.py did `from localm.config import load_registry` at ITS OWN import
-    # time, so it holds an independent name bound to the original function -
-    # patching localm.config.load_registry (above) does not reach it (classic
-    # "patch where it's looked up, not where it's defined"). Without this, a
-    # scan-then-rescan test would see scan.py's dedup check read the real,
-    # session-frozen registry (conftest.py's autouse LOCALM_HOME) instead of
-    # this fixture's store, so it would never see a file THIS test just
-    # registered via _register_with_dedup (which writes through mm.*, not
-    # scan.load_registry) as already-registered.
+    # time, so it holds an independent name bound to the original function and
+    # patching localm.config.load_registry (above) does not reach it. Without
+    # this, scan.py's dedup check reads the real, session-frozen registry instead
+    # of this fixture's store.
     monkeypatch.setattr("localm.model_manager.scan.load_registry", _load)
     return store, models_dir, registry_file
 
@@ -296,12 +287,9 @@ def test_scan_folder_walk(tmp_path, temp_registry):
     model_file.write_bytes(b"UNET")
 
     with patch("localm.model_manager.scan.get_comfy_workdir", return_value=str(comfy_dir)):
-        # We query with ComfyUI offline. `requests.get` is NOT the real call
-        # this code path makes (it fetches /object_info via urllib, see
-        # test_scan_object_info_reconcile's note above) - patching it was a
-        # no-op that let an unmocked network call reach the real ComfyUI
-        # default port (127.0.0.1:8188), a false-premise-of-offline shape
-        # fixed the same way as test_gui.py's comfy-model-picker test.
+        # Query with ComfyUI offline. This code path fetches /object_info via
+        # comfy_object_info (urllib), not requests.get, so that is what has to be
+        # patched to keep the test off the network.
         with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
             res = scan_comfy_models(comfy_url="http://localhost:8188")
 

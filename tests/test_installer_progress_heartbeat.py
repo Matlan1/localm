@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The setup heartbeat must never run over a command that draws live progress.
 
-Reported live: during `Installing PyTorch (AMD ROCm, gfx103X) + transformers ...`
-the uv progress bars were left stranded on screen, one orphaned frame per
-heartbeat tick, with the heartbeat's own line nowhere to be seen.
-
 MECHANISM: uv draws a live byte-progress readout whenever its output goes to a
 terminal, and redraws it IN PLACE (cursor up N lines, rewrite). The heartbeat is
 a detached writer printing into that same console. Its line shifts the cursor, so
 uv's next frame lands a line low: the previous frame is stranded for good and the
-heartbeat's line is overwritten by the redraw that follows it.
+heartbeat's line is overwritten by the redraw that follows it. During
+`Installing PyTorch (AMD ROCm, gfx103X) + transformers ...` that leaves one
+orphaned progress frame per heartbeat tick and no heartbeat line at all.
 
 So the heartbeat is correct in exactly ONE situation - the command's output is
 CAPTURED (redirected to a file, or into a shell variable) and the console would
@@ -17,8 +15,7 @@ otherwise be silent for a long time. That is the venv-creation retry, and only i
 
 These tests run against the REAL shipped setup.bat / setup.sh, not a fixture, so
 they catch the heartbeat being copied back to a live-output site by anyone, in
-any future edit - which is exactly how it got to the torch install in the first
-place (a guard copied without its reason).
+any future edit.
 """
 from pathlib import Path
 

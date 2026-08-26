@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B10: `localm rag query` is lexical-only by default; `--embed` opts into
-hybrid retrieval by embedding the query via a running localm server (matching
-the GUI). We verify the wiring: --embed passes an embed_fn to Collection.query;
-the default does not.
+"""`localm rag query` is lexical-only by default; `--embed` opts into hybrid
+retrieval by embedding the query via a running localm server, the same as the
+GUI. The wiring under test: --embed passes an embed_fn to Collection.query; the
+default does not.
 """
 
 import localm.rag.store as store
@@ -18,7 +18,7 @@ def _patch_query(monkeypatch):
 
 
 def test_rag_query_embed_passes_embed_fn(cli_runner, monkeypatch):
-    # NEGATIVE: pre-fix `--embed` is an unknown option -> nonzero exit.
+    # --embed is a known option, so the invocation exits zero.
     from localm.cli import main
     captured = _patch_query(monkeypatch)
     r = cli_runner.invoke(
@@ -37,11 +37,8 @@ def test_rag_query_default_is_lexical(cli_runner, monkeypatch):
 
 
 def test_cli_embed_fn_uses_persisted_key(monkeypatch):
-    """`rag add/query --embed` must authenticate to /v1/embeddings with the
-    persisted owner key (auth.key), not the env var only. Pre-fix _cli_rag_embed_fn
-    read LOCALM_API_KEY only, so against a keyed server (localm key generate, key in
-    auth.key, not the env) every embed call 401'd and the CLI silently indexed
-    lexical-only (memory-audit 2026-07-02 cluster 19)."""
+    """`rag add/query --embed` authenticates to /v1/embeddings with the
+    persisted owner key (auth.key), not with LOCALM_API_KEY only."""
     import requests
 
     from localm import auth
@@ -90,13 +87,11 @@ def _capture_embed_post(monkeypatch):
 
 
 def test_cli_embed_fn_sends_the_configured_model_name(monkeypatch):
-    """`rag add/query --embed` must send the CONFIGURED embedding model name, the
-    same as the GUI's server-side self-embed - NOT the hardcoded sentinel
-    "localm". /v1/embeddings routes to the dedicated embedder only when the model
-    name matches the configured `embedding_model` (or a registered embedder);
-    "localm" matches neither, so with a dedicated embedder and no chat model
-    loaded every CLI --embed 503'd and silently indexed lexical-only, while the
-    GUI worked. Regression for that CLI/GUI parity gap."""
+    """`rag add/query --embed` sends the CONFIGURED embedding model name, the
+    same as the GUI's server-side self-embed, not the sentinel "localm".
+    /v1/embeddings routes to the dedicated embedder only when the model name
+    matches the configured `embedding_model` or a registered embedder, and
+    "localm" matches neither."""
     from localm.cli.rag import _cli_rag_embed_fn
     monkeypatch.setattr(
         "localm.config.load_config",
@@ -109,9 +104,9 @@ def test_cli_embed_fn_sends_the_configured_model_name(monkeypatch):
 
 
 def test_cli_embed_fn_defaults_to_the_internal_embedder_not_localm(monkeypatch):
-    """With no explicit embedding_model set, the CLI must still send the internal
-    DEFAULT embedder name (bge-small-en-v1.5), which /v1/embeddings can route -
-    never the bare "localm" sentinel that falls through to the chat path."""
+    """With no explicit embedding_model set, the CLI sends the internal DEFAULT
+    embedder name (bge-small-en-v1.5), which /v1/embeddings can route, rather
+    than the bare "localm" sentinel that falls through to the chat path."""
     from localm.cli.rag import _cli_rag_embed_fn
     from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
     monkeypatch.setattr("localm.config.load_config", lambda: {"port": 8642})

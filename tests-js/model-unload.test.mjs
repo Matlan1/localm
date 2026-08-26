@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// model-unload: the Models page's per-row Unload button and global Unload-all
-// button. A model can be loaded (resident in VRAM) without being the active
-// one - the row must show that state and offer a way to release it without
-// disturbing whichever model IS active.
+// The Models page's per-row Unload button and global Unload-all button. A model
+// can be loaded (resident in VRAM) without being the active one.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -106,22 +104,12 @@ test("model-unload: the global Unload-all button POSTs with no model field", asy
   assert.deepEqual(calls[0].body, {}, "Unload-all sends no model field, preserving unload-everything");
 });
 
-// unload_one_model() (http_server.py) answers HTTP 200 with status:"in_use"
-// when the target engine is mid-generation right now - a real, distinct,
-// non-error outcome, not a completed unload. r.ok alone cannot tell the two
-// apart, and the per-row handler used to check only r.ok (same class of bug
-// already fixed once for the sidebar's own quick-unload button, PR #1298).
+// unload_one_model() (http_server.py) answers HTTP 200 with status:"in_use" when
+// the target engine is mid-generation, which is not a completed unload.
 //
-// The GET /api/models mock below deliberately answers "model-a is still
-// loaded and active" NO MATTER what the unload call's outcome was - that is
-// what actually happened server-side (nothing was released), so it is the
-// honest mock, not a shortcut. It also means refreshModelsPage()'s own
-// reconciling fetch would make the row look "correct" (still loaded) under
-// EITHER the buggy or the fixed handler, so row/button state cannot be the
-// discriminator here (this is exactly what let the sidebar's first version of
-// this test pass against unfixed code - see dev-notes/NEW-MODEL-DROPDOWN-2026-08-13.md).
-// The one signal only the correct branch produces before any reconciling
-// refresh runs is what the handler itself said happened: the toast text.
+// The GET /api/models mock below answers "model-a is still loaded and active"
+// whatever the unload call returned, so row and button state are the same either
+// way and the toast text is the discriminating signal.
 test("model-unload: an in-use engine (HTTP 200, status 'in_use') is not reported as unloaded", async () => {
   const models = [
     { name: "model-a", active: true, loaded: true, model_type: "llm", size_bytes: 1000 },
@@ -165,12 +153,8 @@ test("model-unload: an in-use engine (HTTP 200, status 'in_use') is not reported
     `must never claim success for an unload that did not happen (got: ${toastText})`);
 });
 
-// Same gap, "Unload all" side: unload_all_models() reports any pinned
-// (mid-generation) engine in skipped_in_use rather than unloading it - it WAS
-// loaded, it just was not released. The button's toast used to look only at
-// unloaded_models/embedder_unloaded, so an all-pinned response (n === 0,
-// skipped_in_use non-empty) fell through to "Nothing was loaded" - false,
-// since something genuinely was loaded and resident.
+// unload_all_models() reports a pinned (mid-generation) engine in skipped_in_use
+// rather than unloading it.
 test("model-unload: Unload-all does not claim 'Nothing was loaded' when everything loaded is pinned in-use", async () => {
   const fetchImpl = async (url) => {
     const u = String(url);
@@ -211,8 +195,7 @@ test("model-unload: Unload-all does not claim 'Nothing was loaded' when everythi
     `should name the pinned model(s) as still generating (got: ${toastText})`);
 });
 
-// The partial case: some models unload cleanly, one is pinned. The old code
-// silently dropped the skip and reported only the successful count.
+// The partial case: some models unload cleanly, one is pinned.
 test("model-unload: Unload-all reports a partial result honestly (some unloaded, one still in use)", async () => {
   const fetchImpl = async (url) => {
     const u = String(url);

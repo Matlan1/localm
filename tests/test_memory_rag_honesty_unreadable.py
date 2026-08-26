@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Honesty-audit (AGENTS.md rule 5) regression: a present-but-UNREADABLE sidecar
-must NOT be collapsed into "absent" and then rewritten to a lesser state.
+"""A present-but-UNREADABLE sidecar must NOT be collapsed into "absent" and then
+rewritten to a lesser state.
 
-The systematic gap these guard: ``except OSError: return []`` treats a file that
-EXISTS but cannot be read (a transient Windows AV/indexer lock - see
-storekit.py) exactly like a file that is simply ABSENT. When the empty result
-then feeds a full-sidecar REWRITE, every prior entry is silently wiped while the
-caller is told it succeeded. The in-tree precedent is sessions.py:_load, which
-re-raises on an unreadable store so lookup fails CLOSED.
+``except OSError: return []`` treats a file that EXISTS but cannot be read (a
+transient Windows AV/indexer lock - see storekit.py) exactly like a file that is
+simply ABSENT. When the empty result then feeds a full-sidecar REWRITE, every
+prior entry is silently wiped while the caller is told it succeeded.
+sessions.py:_load re-raises on an unreadable store so lookup fails CLOSED.
 
 Fault is injected only at the DISK BOUNDARY (a per-path ``Path.read_text`` that
 raises, or an embedded-NUL config root that ``resolve()`` rejects) - the real
-store/rag code under test runs unmocked, so this exercises the actual behavior,
-not a stand-in for it.
+store/rag code under test runs unmocked.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from localm.rag.store import indexing_policy
 
 @pytest.fixture
 def allow_writes(monkeypatch):
-    # Mirror the F12b suite: memory writes are gated on a non-privacy mode.
+    # Memory writes are gated on a non-privacy mode.
     monkeypatch.setenv("LOCALM_MODE", "log")
 
 
@@ -61,7 +59,7 @@ def _lock_reads_of(monkeypatch, target: Path):
 
 
 # --------------------------------------------------------------------------- #
-#  #1 corrections sidecar: unreadable must not wipe pending                    #
+#  corrections sidecar: unreadable must not wipe pending                       #
 # --------------------------------------------------------------------------- #
 
 def test_absent_corrections_file_is_empty_not_crash(tmp_path, allow_writes):
@@ -113,7 +111,7 @@ def test_unreadable_corrections_file_warns(tmp_path, allow_writes, monkeypatch,
 
 
 # --------------------------------------------------------------------------- #
-#  #1 dismissed sidecar: unreadable must not wipe prior dismissals on reject   #
+#  dismissed sidecar: unreadable must not wipe prior dismissals on reject      #
 # --------------------------------------------------------------------------- #
 
 def test_unreadable_dismissed_file_does_not_wipe_on_reject(tmp_path, allow_writes,
@@ -145,7 +143,7 @@ def test_unreadable_dismissed_file_does_not_wipe_on_reject(tmp_path, allow_write
 
 
 # --------------------------------------------------------------------------- #
-#  #1 the other guards: resolve/corrections unreadable, corrupt-content split  #
+#  the other guards: resolve/corrections unreadable, corrupt-content split     #
 # --------------------------------------------------------------------------- #
 
 def test_unreadable_corrections_file_resolve_returns_none_not_500(tmp_path, allow_writes,
@@ -189,11 +187,10 @@ def test_unreadable_corrections_file_corrections_lists_none_not_500(tmp_path, al
 
 @pytest.mark.parametrize("bad", [b"{ this is not valid json", b"\xff\xfe\x00bad-bytes"])
 def test_corrupt_dismissed_content_is_empty_not_raise(tmp_path, allow_writes, caplog, bad):
-    # CORRUPT CONTENT (bad JSON, or invalid UTF-8) is distinct from an UNREADABLE file:
-    # it is unrecoverable, so it self-heals to an empty set with a warning and must NOT
-    # raise. The invalid-UTF-8 case is the regression guard - read_bytes()+decode keeps
-    # a UnicodeDecodeError (a ValueError, not OSError) from escaping past the reject
-    # route's OSError guard and 500-ing it.
+    # CORRUPT CONTENT (bad JSON, or invalid UTF-8) is distinct from an UNREADABLE
+    # file: it is unrecoverable, so it self-heals to an empty set with a warning
+    # and must NOT raise. read_bytes()+decode keeps a UnicodeDecodeError (a
+    # ValueError, not OSError) from escaping past the reject route's OSError guard.
     s = MemoryStore("owner", "chat", root=tmp_path)
     t = s.add(MemoryRecord(text="User lives in Berlin", source="user"))
     s.propose_corrections([PendingCorrection(
@@ -237,7 +234,7 @@ def test_corrupt_utf8_corrections_line_is_skipped_not_500(tmp_path, allow_writes
 
 
 # --------------------------------------------------------------------------- #
-#  #2 forgotten archive: unreadable must warn, not silently claim empty        #
+#  forgotten archive: unreadable must warn, not silently claim empty           #
 # --------------------------------------------------------------------------- #
 
 def test_unreadable_forgotten_archive_warns_and_returns_empty(tmp_path, allow_writes,
@@ -285,13 +282,14 @@ def test_corrupt_utf8_forgotten_line_is_skipped_not_500(tmp_path, allow_writes, 
 
 
 # --------------------------------------------------------------------------- #
-#  #3 rag denied root that fails to resolve must be WARNED, not silently dropped #
+#  rag denied root that fails to resolve must be WARNED, not silently dropped  #
 # --------------------------------------------------------------------------- #
 
 def test_unresolvable_denied_root_is_warned(caplog):
     # An embedded NUL makes Path().expanduser().resolve() raise ValueError, so the
-    # denied root cannot be resolved. Pre-fix it was silently dropped, fail-OPENING
-    # the deny (confine_index_path could no longer refuse a path inside it).
+    # denied root cannot be resolved. It must be warned rather than silently
+    # dropped, which would fail-OPEN the deny (confine_index_path could no longer
+    # refuse a path inside it).
     cfg = {"rag_indexing_mode": "blacklist",
            "rag_denied_roots": ["bad\x00root"],
            "rag_allowed_roots": []}

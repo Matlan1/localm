@@ -1,27 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The jobs runner must never free the live server's SHARED engine unguarded.
 
-Two pre-existing hazards in ``localm/plugins/builtin/jobs/runner.py`` (surfaced by the
-adversarial review of the eviction/pin fix, #573):
+Two properties of ``localm/plugins/builtin/jobs/runner.py``:
 
 (b) OWNERSHIP: when a chat/memory job runs with ``engine=None`` and ``_load_engine``
     REUSES the live server's shared engine (``http_server._engine``) - the job model
     matches the loaded one, or is unspecified - ``run_job``'s finally must NOT unload
-    it. Unloading a reused shared engine frees the host's live chat model out from
-    under the running server (contradicting run_job's own docstring). A genuinely
-    fresh, runner-loaded engine IS still freed (negative control).
+    it, or the host's live chat model is freed out from under the running server. A
+    genuinely fresh, runner-loaded engine IS still freed (negative control).
 
 (a) PIN-DURING-UNLOAD: the VRAM gate must not raw-``live.unload()`` the shared engine
     on the worker thread. It routes the unload through the guarded
     ``http_server.unload_one_model`` ON the server event loop, which HONORS the
     in-flight-request pin (``active_requests`` > 0 -> ``in_use``, no unload) and
-    serializes with ``get_engine`` (the loop is the mutex). The old raw path ignored
-    the pin and ran off-loop.
+    serializes with ``get_engine``, since the loop is the mutex.
 
 The eviction tests drive ``_evict_shared_engine_for_media`` exactly as production does
 - from an EXECUTOR thread while ``unload_one_model`` runs on the loop - so they
-exercise the real cross-thread path, not a mock of it. The blocking-unload harness is
-modelled on ``test_eviction_victim_race.py``.
+exercise the real cross-thread path rather than a mock of it.
 """
 
 from __future__ import annotations
@@ -37,8 +33,8 @@ import localm.inference.http_server as hs
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    """Isolated LOCALM_HOME so Job construction / any config read stays off the
-    user's real data (mirrors test_jobs_overlap.py's fixture)."""
+    """Isolated LOCALM_HOME so Job construction and any config read stay off the
+    user's real data."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
@@ -89,7 +85,7 @@ class _FakeEngine:
         self.unloaded = 0
         self._block = block
         self.started = threading.Event()   # set when unload() begins
-        self.proceed = threading.Event()   # unload() blocks until this is set
+        self.proceed = threading.Event()   # unload() waits for this when blocking
 
     @property
     def loaded(self):
@@ -98,8 +94,7 @@ class _FakeEngine:
     def unload(self):
         self.started.set()
         if self._block:
-            # Block mid-free so the test can inspect the guarded state (semaphore
-            # held, not-yet-completed) exactly like test_eviction_victim_race.py.
+            # Block mid-free so the caller can inspect the guarded state.
             assert self.proceed.wait(timeout=5), "proceed was never signalled"
         self._loaded = False
         self.unloaded += 1
@@ -115,9 +110,8 @@ class _FakeEngine:
 # --------------------------------------------------------------------------- #
 
 def test_reused_live_engine_is_not_unloaded_by_run_job(home, hsclean, monkeypatch):
-    """The exact bug: run_job(engine=None) whose _load_engine REUSES the shared
-    live engine must NOT unload it in the finally. Discriminating: the OLD code set
-    owned_engine=_live and freed it (unloaded would be 1)."""
+    """run_job(engine=None) whose _load_engine REUSES the shared live engine must
+    NOT unload it in the finally."""
     live = _FakeEngine("gemma")
     hs._engine = live                       # the live server's shared engine, loaded
     monkeypatch.setattr(
@@ -153,8 +147,8 @@ def test_fresh_runner_loaded_engine_is_unloaded(home, hsclean, monkeypatch):
 
 
 def test_passed_in_engine_never_unloaded(home, hsclean, monkeypatch):
-    """A live-server-passed engine (engine=... argument) is never owned/unloaded -
-    the existing contract, re-proven here alongside the reuse case."""
+    """A live-server-passed engine (the engine= argument) is never owned or
+    unloaded."""
     passed = _FakeEngine("passed")
     monkeypatch.setattr(
         "localm.plugins.builtin.jobs.webtool.run_chat_with_web",
@@ -177,7 +171,7 @@ def _drive_evict(live, monkeypatch, *, wait_started=False):
     monkeypatch.setattr("localm.discover.vram_capacity",
                         lambda config=None: {"free": None})
     monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
-    # Bound the worker-thread block so a routing regression fails fast, not in ~60s.
+    # Bound the worker-thread block so a routing regression fails fast.
     monkeypatch.setattr(runner, "_EVICT_TIMEOUT_S", 15.0)
 
     async def _drive():
@@ -189,9 +183,8 @@ def _drive_evict(live, monkeypatch, *, wait_started=False):
 
 
 def test_vram_gate_honors_pin_does_not_free_busy_engine(hsclean, monkeypatch):
-    """A chat is generating on the shared engine (active_requests > 0). The gate must
-    NOT free it - discriminating vs the old raw live.unload() which freed regardless
-    of the pin."""
+    """A chat is generating on the shared engine (active_requests > 0), so the
+    gate does NOT free it."""
     live = _FakeEngine("gemma", active_requests=1)
     hs._engines["gemma"] = live
     hs._engines_lru.append("gemma")
@@ -208,10 +201,9 @@ def test_vram_gate_honors_pin_does_not_free_busy_engine(hsclean, monkeypatch):
 
 
 def test_vram_gate_frees_idle_engine_through_guarded_path(hsclean, monkeypatch):
-    """An idle shared engine IS freed, and via unload_one_model (which clears the
-    active pointers + LRU). The old raw live.unload() left _engines_lru /
-    _active_model_name untouched, so asserting they are cleared proves the guarded
-    path actually ran."""
+    """An idle shared engine IS freed, and via unload_one_model, which clears the
+    active pointer and the LRU - a raw live.unload() would leave both
+    untouched."""
     live = _FakeEngine("gemma", active_requests=0)
     hs._engines["gemma"] = live
     hs._engines_lru.append("gemma")
@@ -228,10 +220,9 @@ def test_vram_gate_frees_idle_engine_through_guarded_path(hsclean, monkeypatch):
 
 
 def test_vram_gate_free_is_serialized_under_the_per_model_semaphore(hsclean, monkeypatch):
-    """Gated/blocking-unload harness (modelled on test_eviction_victim_race.py): while
-    the guarded free is in flight, unload_one_model HOLDS the per-model semaphore and
-    the engine is not yet freed - proving the free is serialized on the loop, not a
-    bare off-loop unload()."""
+    """While the guarded free is in flight, unload_one_model HOLDS the per-model
+    semaphore and the engine is not yet freed, so the free is serialized on the
+    loop rather than a bare off-loop unload()."""
     live = _FakeEngine("gemma", active_requests=0, block=True)
     hs._engines["gemma"] = live
     hs._engines_lru.append("gemma")
@@ -270,8 +261,8 @@ def test_vram_gate_free_is_serialized_under_the_per_model_semaphore(hsclean, mon
 
 def test_vram_gate_degrades_safely_when_server_loop_unreachable(hsclean, monkeypatch):
     """When the server loop is unreachable (no live server), the gate does NOT
-    raw-unload the shared engine (that reintroduces the race). It leaves the engine
-    resident and reports the degrade - never a use-after-free."""
+    raw-unload the shared engine: it leaves the engine resident and reports the
+    degrade."""
     live = _FakeEngine("gemma", active_requests=0)
     hs._engine = live
     hs._server_loop = None                  # no reachable loop

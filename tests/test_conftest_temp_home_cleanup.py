@@ -7,9 +7,9 @@ time, so that any module importing ``localm.config`` during collection already
 resolves ``HOME_DIR`` to a temp dir. Import time means once per PROCESS, which
 includes processes that never finish a pytest session: test_conftest_disk_guard
 and test_conftest_syspath_guard both exec the real conftest by path, and so does
-any script written to unit-check one of those guards. While the only cleanup was
-in ``pytest_sessionfinish``, every one of those leaked a directory permanently
-(426 had accumulated in one developer's temp dir by 2026-07-22).
+any script written to unit-check one of those guards. With cleanup only in
+``pytest_sessionfinish``, every one of those leaks a directory permanently, and
+they accumulate in hundreds.
 
 The naive fix breaks something. That per-process directory is what a run uses to
 answer "did the TMPDIR/TEMP/TMP redirect reach every xdist worker?": a worker
@@ -43,9 +43,8 @@ pytest_plugins = ["pytester"]
 
 _REAL_CONFTEST = str(Path(__file__).parent / "conftest.py").replace("\\", "/")
 
-# Loads the SHIPPED tests/conftest.py by path under its own module name - the
-# same thing the two guard test modules do, which is the leak's real-world
-# trigger - then reports the directory it made and applies one variation.
+# Loads the SHIPPED tests/conftest.py by path under its own module name, reports
+# the directory it made, and applies one variation.
 _PROBE = r'''
 import atexit, importlib.util, os, sys
 
@@ -255,8 +254,7 @@ def _with_real_conftest(pytester, *, node_hook=False):
     By path under a distinct module name, and re-exporting only the names this
     file needs: ``from conftest import *`` silently skips every underscore-
     prefixed name, so the autouse fixture would never arrive and the sub-run
-    would pass with nothing installed - green while proving nothing. (Same
-    reasoning, and the same shape, as test_conftest_syspath_guard's helper.)"""
+    would pass with nothing installed - green while proving nothing."""
     exports = (
         "pytest_configure = _m.pytest_configure\n"
         "pytest_sessionfinish = _m.pytest_sessionfinish\n"

@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The sidebar's loaded-model status shows the GPU split actually APPLIED to
-// the active model (maintainer follow-up to the auto-split feature #772):
-// per-device shares plus how they were decided - by free VRAM (auto), pinned
-// ratios, or the equal fallback. Data rides GET /api/models' existing
-// payload (active_gpu_split, recorded parent-side at load); absent = no
-// split = the line stays hidden, so a single-GPU box renders exactly as
-// before.
+// The sidebar's loaded-model status shows the GPU split applied to the active
+// model: per-device shares plus the source (auto, pinned or equal). The data
+// comes from GET /api/models' active_gpu_split; absent means no split and the
+// line stays hidden.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
@@ -65,8 +62,7 @@ test("no split keeps the line hidden (single-GPU boxes unchanged)", async () => 
 });
 
 test("a split appearing then disappearing hides the line again", async () => {
-  // Model switch: split model -> single-GPU model. A stale line would claim a
-  // distribution the new model does not have.
+  // A model switch from a split model to a single-GPU one.
   let split = { source: "auto", devices: [
     { index: 0, share: 0.5 }, { index: 1, share: 0.5 }] };
   const { window: win } = loadApp({

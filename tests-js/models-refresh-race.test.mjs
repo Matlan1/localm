@@ -1,24 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// refreshModelsPage() clears #models-table with box.replaceChildren() at its
-// very start, then only appends its freshly-built <table> ~280 lines later,
-// after an awaited /api/models fetch. Two overlapping calls (a rapid
-// double-click on a sortable header, a set-type change firing while a prior
-// refresh's fetch is still in flight, ...) each clear once at their own start
-// and then each append their own table - nothing stops both from surviving,
-// rendering the model list duplicated (phantom models). Reproduced live via a
-// rapid double-click on the Name header before this fix: two <table
-// class="data-table"> elements landed in #models-table for 3 registered
-// models. See models-remove-disconnect.test.mjs for the harness pattern this
-// borrows (win.refreshModelsPage() driven directly against a controlled
-// fetchImpl).
-//
-// NOTE: init.js fires its own one-off, unrelated fetch("/api/models") calls
-// during startup (an instance-pairing check, unrelated to #models-table) that
-// use the exact same URL as this page's own default (unfiltered) fetch. The
-// harness below only starts gating "/api/models" once told to (via
-// startRacing()), after draining enough ticks for that startup noise to
-// settle - so the two gated calls it counts are only the two
-// refreshModelsPage() invocations the test itself triggers.
+// init.js fires its own unrelated fetch("/api/models") calls during startup on
+// the same URL as this page's default fetch, so the harness below only gates
+// "/api/models" once startRacing() is called, after those ticks have drained.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
@@ -31,11 +14,8 @@ function deferred() {
 
 async function tick(n = 2) { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); }
 
-// Gates ONLY the page-level (exact "/api/models", no query - the default
-// "all types" filter) fetch, and only once startRacing() has been called.
-// Everything else (the sidebar's "/api/models?type=llm", init.js's own
-// unrelated "/api/models" startup calls, any other endpoint) resolves
-// immediately, so it never blocks reaching the gated calls under test.
+// Gates only the page-level fetch (exact "/api/models", no query), and only
+// once startRacing() has been called. Everything else resolves immediately.
 function makeRaceHarness(resultFor) {
   const gates = [deferred(), deferred()];
   let pageCallIndex = 0;
@@ -80,9 +60,7 @@ test("refreshModelsPage: two overlapping refreshes leave exactly one table (the 
   const p2 = win.refreshModelsPage();                // call B: starts while A is still in flight
   await tick();
 
-  // The classic race shape: the OLDER call's request is the slower one - B
-  // (started second) resolves first, A (started first) resolves last, well
-  // after B has already finished rendering.
+  // B (started second) resolves first; A (started first) resolves last
   harness.resolve(1);
   await tick();
   harness.resolve(0);
@@ -99,8 +77,7 @@ test("refreshModelsPage: two overlapping refreshes leave exactly one table (the 
 });
 
 test("refreshModelsPage: a stale call's error path does not overwrite a newer call's success", async () => {
-  // The error/empty branches also write into `box` - a stale error render
-  // painting over a fresh success is the same bug wearing different clothes.
+  // the error/empty branches also write into `box`
   const harness = makeRaceHarness((i) => i === 0
     ? { ok: false, status: 500, json: async () => ({}), text: async () => "" }
     : { ok: true, status: 200, json: async () => ({ models: [{ name: "model-b", model_type: "llm" }] }), text: async () => "" });

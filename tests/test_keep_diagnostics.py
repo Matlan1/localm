@@ -45,11 +45,8 @@ def test_keep_diagnostics_off_does_not_enable_debug_log(cli_runner, monkeypatch)
 
 def test_keep_diagnostics_enable_failure_warns_not_silent(cli_runner, monkeypatch):
     # The user opted into keep_diagnostics, but enable_debug() cannot open the log
-    # (e.g. an unwritable or full LOCALM_HOME). Startup must NOT abort over a
-    # diagnostics nicety, but it must NOT report success silently either
-    # (AGENTS.md rule 5): a visible warning is required so the user knows their bug
-    # reports will not include a debug log. Pre-fix the `except Exception: pass`
-    # swallowed it entirely - no message at all.
+    # (e.g. an unwritable or full LOCALM_HOME). Startup continues, and a visible
+    # warning says the debug log will be missing from bug reports.
     from localm.plugins.gui import cli as guicli
     monkeypatch.setattr("localm.winconsole.disable_quickedit", lambda: None)
     monkeypatch.setattr("localm.portmux.run_server", lambda *a, **kw: None)
@@ -60,7 +57,7 @@ def test_keep_diagnostics_enable_failure_warns_not_silent(cli_runner, monkeypatc
     monkeypatch.setattr("localm.debuglog.enable_debug", _boom)
     result = cli_runner.invoke(
         guicli.main, ["--no-model", "--no-browser", "--keep-diagnostics"])
-    assert result.exit_code == 0, result.output   # a diagnostics nicety must not abort startup
+    assert result.exit_code == 0, result.output   # startup continues past the failure
     assert "could not enable" in result.output and "keep_diagnostics" in result.output, (
         "the failed keep_diagnostics debug log must be surfaced, not silently swallowed:\n"
         + result.output)

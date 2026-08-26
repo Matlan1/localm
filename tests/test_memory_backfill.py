@@ -1,19 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Vectors must actually get written, not merely be writable.
 
-`MemoryStore.backfill_vectors` is bounded (64/call) and had exactly ONE caller:
-the consolidation pass. Its own docstring claimed "a regular background pass
-calls this so coverage climbs" - there was no such pass. On an install where
-auto-consolidation never ran, records written before an embedder existed kept no
-vector forever, `_vector_status` stayed `low_coverage`, and recall fell back to
-promoting profile facts by IMPORTANCE rather than relevance.
-
-That is what produced the 2026-08-14 report: "Greet my friend Memo" answered by
-recalling an unrelated person, with the log reading
-
-    memory recall: injected 2 record(s), degrade=low_coverage
-
-and `setup-embeddings` had told the user "Memory now retrieves semantically".
+`MemoryStore.backfill_vectors` is bounded (64/call). With only the consolidation
+pass calling it, an install where auto-consolidation never runs keeps records
+written before an embedder existed without a vector forever: `_vector_status`
+stays `low_coverage`, and recall falls back to promoting profile facts by
+IMPORTANCE rather than relevance.
 """
 
 from pathlib import Path
@@ -60,7 +52,7 @@ def test_backfill_reaches_every_namespace_including_key_scoped(tmp_path):
 
 
 def test_backfill_runs_to_completion_past_the_per_call_bound(tmp_path):
-    """backfill_vectors caps at 64 per call on purpose. The point of this module
+    """backfill_vectors caps at 64 per call. The point of this module
     is that a caller wanting COMPLETION gets it, rather than 64 and a promise."""
     root = tmp_path / "memory"
     _seed(root, "owner", 150)                       # > 2 bounded passes
@@ -100,10 +92,9 @@ def test_vectors_clear_the_low_coverage_degrade(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  An unreadable namespace must be COUNTED, never silently absorbed as a       #
-#  clean pass. Previously a namespace MemoryStore.open_file could not open    #
-#  contributed 0 to every counter - exactly what a fully embedded namespace   #
-#  also contributes.                                                          #
+#  An unreadable namespace is COUNTED, never absorbed as a clean pass: a       #
+#  namespace MemoryStore.open_file cannot open contributes to its own counter, #
+#  not zero to every counter like a fully embedded one.                        #
 # --------------------------------------------------------------------------- #
 
 def _write_unreadable_namespace(root: Path, agent: str = "chat") -> Path:

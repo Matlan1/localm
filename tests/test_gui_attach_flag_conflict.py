@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """`localm gui` must not silently discard explicit server-config flags by attaching.
 
-Release-verification defect (2026-07-17): `localm gui --port 8794` (and --mode)
-while an instance was already running for the directory attached to the running
-server and dropped the explicit flags with no mention. These tests drive the real
-`gui` command (CliRunner), stubbing only the instance-discovery seam, and assert
-that a conflicting explicit flag is refused (with the --new way out) while a
-compatible invocation still attaches.
+These tests drive the real `gui` command (CliRunner), stubbing only the
+instance-discovery seam, and assert that a conflicting explicit flag is refused
+(with the --new way out) while a compatible invocation still attaches.
 """
 
 import os
@@ -88,9 +85,8 @@ def test_gui_no_conflicting_flags_still_attaches(running):
 
 
 def test_gui_no_model_flag_is_not_a_conflict(running):
-    # --no-model only picks a STARTUP model; on an attach nothing starts, so it is
-    # moot, not a conflict. Re-running `localm gui --no-model` against a running
-    # server must attach, not refuse (real-server verification 2026-07-17).
+    # --no-model only picks a STARTUP model; on an attach nothing starts, so it
+    # is moot rather than a conflict: attach, do not refuse.
     result = CliRunner().invoke(guicli.main, ["--no-model", "--no-browser"])
     flat = _flat(result.output)
     assert result.exit_code == 0, result.output
@@ -99,9 +95,8 @@ def test_gui_no_model_flag_is_not_a_conflict(running):
 
 
 def test_gui_new_flag_bypasses_the_conflict_and_starts_fresh(running, monkeypatch):
-    # --new skips the attach path entirely: no refusal, no "Attaching"; it starts a
-    # separate server with the requested settings. Stub the serve seam so no real
-    # server runs (mirrors TestGuiNoModel).
+    # --new skips the attach path entirely and starts a separate server with the
+    # requested settings. The serve seam is stubbed so no real server runs.
     ran = {}
     monkeypatch.setattr("localm.portmux.run_server",
                         lambda *a, **k: ran.setdefault("ok", True))

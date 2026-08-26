@@ -2,47 +2,32 @@
 """Groundedness ("evidence-following") probe for the two paths that put
 retrieved text into a model's context: RAG retrieval and memory recall.
 
-THE COVERAGE GAP THIS CLOSES. tests/ has 35 RAG files and 30-odd memory files.
-They cover ingest, chunking, embeddings, dimension switches, corruption, repair,
-provenance, confinement, recall precision and namespaces. Not one of them asks
-whether the model's ANSWER actually USED the retrieved text, as opposed to
-answering from its own parametric knowledge and merely looking correct because
-retrieval happened to agree with what it already knew. Retrieval returning the
-right chunk and the answer being grounded in that chunk are different
-properties, and only the first was measured.
+WHAT IS MEASURED. Retrieval returning the right chunk and the ANSWER being
+grounded in that chunk are different properties. This file measures the second:
+does THIS model, at THIS prompt, with THESE chunks, actually use them.
 
 THE METHOD. Index (or remember) an INVENTED fact that no model can know from
 pretraining, ask about it, then INVERT the stored fact and ask again. A grounded
-answer flips with the evidence. An ungrounded one does not. The invented-fact
+answer flips with the evidence; an ungrounded one does not. The invented-fact
 framing is load-bearing: with a real-world fact a correct answer is ambiguous
-between "read the chunk" and "already knew it", and the test proves nothing.
+between "read the chunk" and "already knew it".
 
-WHERE IT COMES FROM, AND THE SCOPE CORRECTION. The construction is
-Evidence-Following Accuracy from "Do Modules Stay in Their Lane? Role Drift in
-Compound LLM Systems" (Cao et al., arXiv 2607.21627). Their RAG reader scored
-0.54 on it while its headline accuracy climbed. THEIR result comes from a
-pipeline undergoing reinforcement-learning fine-tuning, which is what INDUCES
-the drift they measure. localm does not train models; its models are frozen and
-cannot drift. So this file does NOT measure role drift and must not be described
-as if it did. What it measures is the STATIC question: does THIS model, at THIS
-prompt, with THESE chunks, actually use them. That was unmeasured, and it is the
-thing that regresses when prompt shape, chunk ordering or framing changes.
+The construction is Evidence-Following Accuracy from "Do Modules Stay in Their
+Lane? Role Drift in Compound LLM Systems" (Cao et al., arXiv 2607.21627), scoped
+to the static question above. localm does not train models, so this file does
+NOT measure role drift.
 
-WHY A REAL MODEL. The property under test IS model behaviour, so a mock cannot
-test it: a mocked model proves only that the harness passes strings around.
-Marked @integration + @real_gguf, the same precedent as
-test_memory_longitudinal_harness.py, so the default `pytest -m "not integration"`
-run is unaffected and conftest.py skips (never fails) when the native runtime is
-absent. Run it with:
+A REAL MODEL. The property under test IS model behaviour, so a mock proves only
+that the harness passes strings around. Marked @integration + @real_gguf, so the
+default `pytest -m "not integration"` run is unaffected and conftest.py skips
+(never fails) when the native runtime is absent. Run it with:
     pytest -m real_gguf tests/test_groundedness_evidence_following.py -v
 
-THE PROBE PROVES ITSELF, EVERY RUN. Each direction has a paired ABLATION test
-that asks the identical question with the evidence REMOVED and asserts neither
-invented token appears. That pairing is what keeps the probe honest, rather than
-a one-off check by hand: if grounding breaks so the model stops reading chunks,
-the follow tests go red; if the probe ever goes vacuous (the fact leaking into
-the question, say), the ablation tests go red because the answer would then be
-right without any evidence. A probe that cannot fail is worse than no probe.
+Each direction has a paired ABLATION test that asks the identical question with
+the evidence REMOVED and asserts neither invented token appears. If grounding
+breaks so the model stops reading chunks, the follow tests go red; if the probe
+goes vacuous (the fact leaking into the question, say), the ablation tests go
+red.
 """
 
 from __future__ import annotations
@@ -57,21 +42,12 @@ from localm.plugins.builtin.memory import plug
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_gguf]
 
-# Same model as test_memory_longitudinal_harness.py. Its capability for THIS task
-# shape was re-verified rather than inherited (a capability proven on one task
-# does not transfer to another): on the unambiguous case it answered "version
-# 7.3" from the original context and "version 2.9" from the inverted one, so it
-# can follow evidence and does flip. Without that check a failure here would be
-# ambiguous between "ignored the evidence" and "cannot follow an instruction".
+# The chat model these tests drive.
 _CHAT_REPO = "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
 _CHAT_FILE = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 
-# The invented fact. Non-relational ON PURPOSE: localm's retrieval scores an
-# equal blend of max-normalised BM25 and cosine, and BOTH halves are
-# order-insensitive on relational statements ("Rome is closer than Paris"), so a
-# relational fact would test that known scoring ceiling instead of grounding.
-# The codenames are unguessable, which is what makes the ablation control sound:
-# a model cannot emit them by luck, so their absence without evidence is real.
+# The invented fact. Non-relational, and the codenames are unguessable, so a
+# model cannot emit them by luck.
 _SUBJECT = "the Zelmara Project"
 _QUESTION = "What is the current release codename of the Zelmara Project?"
 _ORIGINAL = "VESPERTINE"
@@ -84,19 +60,13 @@ def _fact(codename: str) -> str:
             "It replaced the previous internal build numbering.")
 
 
-# Two different "no answer here" shapes, because they exercise different halves.
+# Two "no answer here" shapes.
 #
 # OFF_TOPIC shares no scoreable term with the question, so retrieval returns
-# NOTHING and the consumer is handed nothing rather than junk (measured, see the
-# test below). That is the easy case and localm already gets it right.
+# NOTHING and the consumer is handed nothing rather than junk.
 #
-# ON_TOPIC_NO_ANSWER is the adversarial one, and it is the case that matters: it
-# names the subject, so it DOES retrieve and it looks relevant, but it does not
-# contain the codename. A model that pattern-matches on topic rather than reading
-# for the answer will manufacture one here. The first draft of this file used the
-# off-topic text for both and the probe could not run at all (zero hits): a real
-# assertion in front of a document that could never trigger it, which is a test
-# that looks like coverage and cannot fail.
+# ON_TOPIC_NO_ANSWER names the subject, so it DOES retrieve and looks relevant,
+# but it does not contain the codename.
 _OFF_TOPIC = (
     "Cafeteria notice. The staff canteen now opens at 07:30 on weekdays. "
     "Hot food service ends at 14:00. The salad bar is unaffected by this change."
@@ -238,10 +208,10 @@ def test_rag_answer_follows_the_indexed_chunk(tmp_path, chat_backend):
 
 def test_rag_ablation_answer_is_ungrounded_without_the_retrieved_chunk(
         chat_backend):
-    """THE FIRES-CONTROL, kept permanently. Identical question, evidence
-    REMOVED. Neither invented codename can appear: they are unguessable, so if
-    one does, the fact reached the model some other way and the follow test
-    above is vacuous."""
+    """The permanent control: identical question, evidence REMOVED. Neither
+    invented codename can appear - they are unguessable, so one appearing means
+    the fact reached the model some other way and the follow test above is
+    vacuous."""
     answer = _ask(chat_backend, "").upper()
     assert _ORIGINAL not in answer and _INVERTED not in answer, \
         (f"an invented codename appeared with NO evidence supplied, so the "
@@ -253,31 +223,24 @@ def test_rag_irrelevant_passages_do_not_manufacture_the_invented_fact(
     """Retrieved passages that do not bear on the question must not produce the
     invented fact.
 
-    READ THE SCORING DIRECTION BEFORE CHANGING THIS ASSERTION. On irrelevant
-    passages the paper found the WORSE, unanchored model scored HIGHER, because
-    it guessed from parametric memory and guessing sometimes lands. So here a
-    confident, specific answer is the FAILING direction and an abstention is the
-    PASSING one. Do not "fix" this by asserting the model answers.
+    THE SCORING DIRECTION IS INVERTED HERE. On irrelevant passages a confident,
+    specific answer is the FAILING direction and an abstention is the PASSING
+    one.
 
-    The assertion is deliberately the ABSENCE of the invented tokens, not the
-    presence of a refusal. Measured on the pinned 0.5B model: given irrelevant
-    context it still emitted a fabricated version string rather than declining,
-    despite an explicit instruction to say it does not know. That is a small
-    model's instruction-following limit, NOT a localm defect (localm does not
-    build this prompt), so asserting "the model declines" would encode a flaky
-    expectation about the model instead of a property of the system."""
-    # The easy half, and it needs no model: a wholly off-topic document shares no
-    # scoreable term with the question, so retrieval hands the consumer NOTHING
-    # rather than a low-scoring irrelevant chunk. Measured, not assumed.
+    The assertion is the ABSENCE of the invented tokens, not the presence of a
+    refusal: a small model can emit a fabricated version string rather than
+    declining, which is an instruction-following limit of the model rather than
+    a property of the system under test."""
+    # A wholly off-topic document shares no scoreable term with the question, so
+    # retrieval hands the consumer NOTHING rather than a low-scoring chunk.
     off_topic = _index_and_retrieve(tmp_path / "off", _OFF_TOPIC, "kb_off_topic",
                                     require_hits=False)
     assert off_topic == "", \
         (f"a wholly off-topic document was retrieved for this question, so the "
          f"consumer would be handed irrelevant context: {off_topic!r}")
 
-    # The adversarial half: names the subject so it DOES retrieve and looks
-    # relevant, but carries no codename. This is where a model that matches on
-    # topic rather than reading for the answer invents one.
+    # Names the subject, so it DOES retrieve and looks relevant, but carries no
+    # codename.
     ctx = _index_and_retrieve(tmp_path / "irr", _ON_TOPIC_NO_ANSWER,
                               "kb_on_topic_no_answer")
     assert _ORIGINAL not in ctx and _INVERTED not in ctx, \
@@ -312,8 +275,7 @@ def test_memory_recall_answer_follows_the_injected_memory(
 
 def test_memory_ablation_answer_is_ungrounded_without_the_injected_memory(
         chat_backend):
-    """The memory path's own permanent fires-control, for the reason given on
-    the RAG one."""
+    """The memory path's own ablation control, matching the RAG one."""
     answer = _ask(chat_backend, "").upper()
     assert _ORIGINAL not in answer and _INVERTED not in answer, \
         (f"an invented codename appeared with no memory injected, so the "

@@ -13,18 +13,12 @@ this exits non-zero; a purely trailing field ADDITION is reported as a note (it
 is absorbed safely by the structs' reserved pad and the default_params round-trip,
 but is worth naming).
 
-IT ALSO CHECKS ENUM DOMAINS, AND THAT IS A SEPARATE QUESTION FROM LAYOUT. An
-offset check reads WHERE a field sits; it is structurally blind to WHICH VALUES
-are legal in it. Upstream added ``LLAMA_LOAD_MODE_AUTO = -1`` between b10361 and
-b10373 and made it the new default, so ``llama_model_default_params()`` began
-returning -1 into a field whose offset had not moved by one byte. localm's own
-``_VALID_LOAD_MODES`` did not list -1, so localm refused every build from b10373
-on. The layout gate was GREEN throughout, and it was not broken: it was answering
-an adjacent question. Hence the rule this file now enforces - "passes the ABI
-gate" is not the definition of a confirmed build.
+IT ALSO CHECKS ENUM DOMAINS, WHICH IS A SEPARATE QUESTION FROM LAYOUT. An
+offset check reads WHERE a field sits and is blind to WHICH VALUES are legal in
+it: a new enum member can become a function's default return without moving any
+field by a byte.
 
-The two enum outcomes are deliberately DISTINCT, and collapsing them would be the
-defect rather than the fix:
+The two enum outcomes are DISTINCT:
 
   * a NEW member appearing upstream is ADDITIVE. Reported loudly, exit code
     unchanged. It only becomes dangerous when it becomes the DEFAULT, which a
@@ -42,8 +36,6 @@ Usage:
     python scripts/check_llama_abi.py --header path/to/llama.h   # a local header
 
 Stdlib only (urllib + re + ctypes), so it runs anywhere without extra installs.
-A fuller cross-check with clang2py/ctypeslib2 is possible but needs libclang; for
-these few POD structs the lightweight parse here is sufficient and dependency-free.
 """
 
 from __future__ import annotations
@@ -56,25 +48,16 @@ import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
-# upstream reordered llama_model_params IN PLACE at an unchanged 72-byte size
-# (load_mode inserted, use_mmap/use_direct_io/use_mlock removed), so localm binds
-# TWO layouts and selects one per loaded library. Both must keep matching a real
-# upstream header, so the default run checks BOTH refs - a pin for the newest
-# build carrying each layout. Bump these whenever you bump a bundled build, then
-# reconcile any reported drift.
+# One upstream ref per llama_model_params layout localm binds. The default run
+# checks both.
 LLAMA_ABI_REFS = {
     "v1": "b9870",    # pre-reorder: use_mmap/use_direct_io/use_mlock, main_gpu@24
-    "v2": "b10360",   # post-reorder: load_mode@24, main_gpu@28, load_mtp. Bumped
-                       # 2026-08-11 from b10276: llama_context_params gained
-                       # n_outputs_max_per_seq (a new uint32_t inserted before
-                       # n_threads) somewhere in between, which b10276 predates
-                       # and so could not have caught. Re-verified clean at
-                       # b10360 - see the corresponding _structs.py fix.
+    "v2": "b10360",   # post-reorder: load_mode@24, main_gpu@28, load_mtp
 }
 LLAMA_ABI_REF = LLAMA_ABI_REFS["v2"]
 _REPO = "ggml-org/llama.cpp"
 
-# The structs we actually care about (passed by value / read field-by-field).
+# Structs passed by value or read field-by-field.
 _STRUCTS = ("llama_model_params", "llama_context_params", "llama_batch")
 
 
@@ -82,10 +65,8 @@ class _EnumBinding(NamedTuple):
     """One upstream enum whose DOMAIN localm binds, and where it binds it.
 
     The member VALUES are never restated here - they are read live out of the
-    localm module named below. A second copy of an upstream enumerator list is a
-    second thing to forget to update, and forgetting it once already cost a live
-    outage (see the module docstring). This registry records only WHERE localm's
-    copy lives, so the verifier reads the same constants the runtime does.
+    localm module named below. This registry records only WHERE localm's copy
+    lives, so the verifier reads the same constants the runtime does.
     """
     c_enum: str      # the enum type's name in llama.h
     module: str      # the localm module holding the bound constants
@@ -95,26 +76,9 @@ class _EnumBinding(NamedTuple):
     gate: tuple      # (struct, field) that must exist for this enum to be expected
 
 
-# Only modules that import cleanly with no side effect belong here, because this
-# script runs as a plain CI step. MEASURED 2026-08-12 under a throwaway
-# LOCALM_HOME: _structs and embedder both import in under 0.1s and create
-# nothing. localm.discover does NOT qualify - importing it resolves a data
-# directory and prints a warning - so llama_split_mode, whose only named localm
-# binding is discover's _LLAMA_SPLIT_MODE_LAYER, is deliberately NOT covered
-# here. Naming that gap rather than leaving it silent: the accept-set that would
-# want checking is _abi.py's inline (0, 1, 2, 3), which has no member names at
-# all and so cannot be diffed by name. Consolidating those constants into
-# _structs is what would extend this registry to cover it.
-#
-# MEMBERS ARE NAMED, NOT SCANNED BY PREFIX. A prefix scan looked tidier and was
-# tried first; it reported "localm binds LLAMA_POOLING_TYPE_DEFAULT" because
-# embedder has a _POOLING_DEFAULT, which is localm's own POLICY choice of MEAN
-# and not an upstream enumerator at all. A verifier that invents a binding is
-# worse than one with a narrower reach, and the scan also imposed an invisible
-# naming contract on modules whose authors would never know it existed. What
-# stops this explicit list going stale instead is the `others` cross-check in
-# _check_enum, which fails if localm defines a prefixed constant that upstream
-# also defines as a member of this enum.
+# Modules listed here must import cleanly with no side effect. Member suffixes
+# are named explicitly rather than scanned by prefix; the `others` cross-check in
+# _check_enum catches a binding this list omits.
 _ENUM_BINDINGS = (
     _EnumBinding(
         c_enum="llama_load_mode",
@@ -233,8 +197,7 @@ def _field_size(decl: str) -> int:
     # int32_t / uint32_t / float / int / unsigned / any enum -> 4
     if re.search(r"\b(int32_t|uint32_t|float|int|unsigned|enum)\b", d):
         return 4
-    # Unknown scalar type: assume pointer-width so we over-report rather than
-    # silently misalign. Flag it so a human checks.
+    # Unknown scalar type: assume pointer-width and flag it.
     print(f"  ! unknown type, assuming 8 bytes: {d!r}", file=sys.stderr)
     return 8
 
@@ -375,18 +338,14 @@ def _localm_enum_binding(binding: _EnumBinding):
     bound = {}
     for suffix in binding.members:
         val = getattr(mod, binding.prefix + suffix, None)
-        # bool is an int subclass and is never an enumerator; None means the
-        # constant this registry names is gone. Both are reported by the caller
-        # as a failure to COMPARE, which is not the same as a comparison passing.
+        # bool is an int subclass and never an enumerator; None means the named
+        # constant is gone. Neither goes into `bound`.
         if isinstance(val, bool) or not isinstance(val, int):
             continue
         bound[suffix] = val
     missing = [s for s in binding.members if s not in bound]
 
-    # Everything else under the same prefix. Not an error by itself - a policy
-    # constant may legitimately live there - so the caller only complains when
-    # one of these turns out to be a real upstream enumerator, which is exactly
-    # the case where the explicit list above has gone stale.
+    # Everything else under the same prefix.
     others = {}
     for attr in dir(mod):
         if not attr.startswith(binding.prefix):
@@ -404,13 +363,10 @@ def _localm_enum_binding(binding: _EnumBinding):
 def _check_enum(binding: _EnumBinding, header: str, additive: list) -> int:
     """Diff one bound enum's DOMAIN against *header*; return the problem count.
 
-    Additive findings are APPENDED to *additive* instead of counted, which is the
-    whole point of this function: a new upstream enumerator is safe on its own,
-    and hard-failing on it would train people to widen localm's accept-sets to
-    silence the gate - destroying the misaligned-read tripwire that reads them.
-    A changed value for a name localm already binds is counted, because that one
-    means localm is passing or accepting a number that no longer means what it
-    used to.
+    Additive findings are APPENDED to *additive* instead of counted: a new
+    upstream enumerator is safe on its own. A changed value for a name localm
+    already binds IS counted - localm would be passing or accepting a number
+    that no longer carries the meaning it binds.
     """
     gate_struct, gate_field = binding.gate
     struct_body = _extract_block_body(header, "struct", gate_struct)
@@ -419,11 +375,6 @@ def _check_enum(binding: _EnumBinding, header: str, additive: list) -> int:
     body = _extract_block_body(header, "enum", binding.c_enum)
 
     if not gated_in:
-        # Keyed on the field that USES the enum rather than on a version number,
-        # same as the layout classifiers above. This is what separates "the
-        # header predates the feature" from "the enum went missing", which a
-        # bare absence check cannot tell apart: b9870 has neither
-        # llama_model_params.load_mode nor enum llama_load_mode, and is fine.
         print(f"  skip  {binding.c_enum}: this header has no "
               f"{gate_struct}.{gate_field}, so it predates the enum")
         return 0
@@ -458,9 +409,6 @@ def _check_enum(binding: _EnumBinding, header: str, additive: list) -> int:
                   "not be read from the header (see the ! line above)")
             problems += 1
         elif cname not in upstream:
-            # NOT a failure, and this is measured rather than assumed: the pinned
-            # v2 ref b10360 legitimately predates LLAMA_LOAD_MODE_AUTO, which
-            # localm binds. Failing here would redden the default run on master.
             print(f"  NOTE  {cname}: localm binds {lm_val}, absent from this header "
                   "(it predates the member, or upstream removed it)")
         elif upstream[cname] != lm_val:
@@ -471,10 +419,8 @@ def _check_enum(binding: _EnumBinding, header: str, additive: list) -> int:
         else:
             print(f"  ok    {cname:34s} = {lm_val}")
 
-    # A constant localm defines under the same prefix that upstream ALSO defines
-    # as a member of this enum is a real binding the registry above forgot. Gated
-    # on upstream defining it so a policy constant like embedder's
-    # _POOLING_DEFAULT, which has no upstream counterpart, never trips this.
+    # A constant localm defines under the same prefix that upstream also defines
+    # as a member of this enum is a binding this registry omits.
     for suffix, lm_val in sorted(others.items(), key=lambda kv: kv[1]):
         cname = binding.c_prefix + suffix
         if cname in upstream or cname in unreadable:
@@ -498,8 +444,7 @@ def _check_enum(binding: _EnumBinding, header: str, additive: list) -> int:
 def _check(struct_name: str, header: str, model_layout: str, context_layout: str) -> int:
     body = _extract_struct_body(header, struct_name)
     upstream, up_size = _layout(_parse_fields(body))
-    # llama_batch has no layout axis at all; _localm_layout ignores the value
-    # passed for it, so which one we pick here is immaterial for that struct.
+    # _localm_layout ignores the layout argument for llama_batch.
     layout = context_layout if struct_name == "llama_context_params" else model_layout
     localm, lm_size = _localm_layout(struct_name, layout)
 
@@ -588,9 +533,7 @@ def main() -> int:
         for binding in _ENUM_BINDINGS:
             total += _check_enum(binding, header, additive)
 
-    # A run that silently exercised only ONE layout would pass while leaving the
-    # other unverified, and read exactly like a full pass. Name it. Two
-    # independent axes (see _structs' module docstring), so check both.
+    # Both layout axes must have been exercised.
     if not args.header and not args.ref and seen_layouts != {"v1", "v2"}:
         print(f"\nFAIL: expected to check both model_params layouts, only saw "
               f"{sorted(seen_layouts)} - the pinned refs in LLAMA_ABI_REFS no "
@@ -602,9 +545,6 @@ def main() -> int:
               "no longer straddle the context_params reorder.")
         total += 1
 
-    # Printed on BOTH paths and before the verdict, because it is not a verdict:
-    # an unrelated layout failure must not bury the one signal that would have
-    # caught b10373, and a pass must not read as "nothing changed upstream".
     if additive:
         print(f"\nNEW UPSTREAM ENUM MEMBER(S) localm does not bind ({len(additive)}):")
         for item in sorted(set(additive)):

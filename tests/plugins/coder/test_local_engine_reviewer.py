@@ -56,16 +56,12 @@ def test_local_backend_loads_only_once(monkeypatch):
 
 
 def test_local_backend_supports_grammar_mirrors_the_engine(monkeypatch):
-    """NEW-CODER-NO-TOOLCALL-SILENT residual: LocalEngineBackend must not
-    compute its own guess at grammar support from the backend's TYPE (the old
-    isinstance(engine._backend, GgufBackend) check) - it defers entirely to
-    Engine.supports_grammar (engine.py), which is the honest, install-derived
-    answer from the actual backend: GgufBackend always True, HFBackend since
-    #1215 True only when xgrammar is importable. A stale isinstance check
-    would deny an HF-backed reviewer model forcing even when it can genuinely
-    honour a grammar - see the constructor's own comment for the full story.
-    Both booleans are exercised so a hardcoded-False regression (the old
-    behaviour) shows up as a mismatch on the True case."""
+    """LocalEngineBackend must not compute its own guess at grammar support
+    from the backend's TYPE. It defers entirely to Engine.supports_grammar
+    (engine.py), the install-derived answer from the actual backend:
+    GgufBackend always True, HFBackend True only when xgrammar is importable.
+    Both booleans are exercised, so a hardcoded-False regression shows up as a
+    mismatch on the True case."""
     from localm.plugins.coder.backends.local_engine import LocalEngineBackend
 
     for expected in (True, False):
@@ -94,9 +90,7 @@ def _agent_backend():
 
 def test_local_reviewer_built_heterogeneous(monkeypatch):
     _cfg(monkeypatch)
-    # **kw: get_model_path now takes allow_direct_path, which reviewer.py passes
-    # (coder_reviewer_model is documented as a name OR a path, and setting it
-    # needs the privileged config:write scope).
+    # **kw absorbs the allow_direct_path argument reviewer.py passes.
     monkeypatch.setattr("localm.model_manager.get_model_path",
                         lambda n, **kw: __import__("pathlib").Path("/models/mini.gguf"))
     fake = MagicMock()
@@ -108,11 +102,8 @@ def test_local_reviewer_built_heterogeneous(monkeypatch):
 
 
 def test_local_reviewer_allowed_in_privacy_mode(monkeypatch):
-    # The CPU reviewer stays on-machine, so privacy mode must NOT downgrade it.
     _cfg(monkeypatch)
-    # **kw: get_model_path now takes allow_direct_path, which reviewer.py passes
-    # (coder_reviewer_model is documented as a name OR a path, and setting it
-    # needs the privileged config:write scope).
+    # **kw absorbs the allow_direct_path argument reviewer.py passes.
     monkeypatch.setattr("localm.model_manager.get_model_path",
                         lambda n, **kw: __import__("pathlib").Path("/models/mini.gguf"))
     fake = MagicMock()

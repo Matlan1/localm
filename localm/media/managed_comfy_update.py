@@ -1,27 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm-managed ComfyUI: STAGE S4 `localm comfy update` (design decision 7).
+"""localm-managed ComfyUI: STAGE S4 `localm comfy update`.
 
 The pin is a single CONSTANT (``COMFYUI_PINNED_COMMIT`` in managed_comfy_fresh.py).
-It advances ONLY deliberately: a maintainer bumps that constant to a new, localm-
-tested ComfyUI commit and ships it; a user then runs ``localm comfy update``, which
-moves their managed checkout to the (new) pinned commit and RE-APPLIES the localm
-patch set. It NEVER auto-advances - update only ever targets the shipped pin (or an
+It advances ONLY when a maintainer bumps that constant to a new, localm-tested
+ComfyUI commit and ships it; a user then runs ``localm comfy update``, which moves
+their managed checkout to the (new) pinned commit and RE-APPLIES the localm patch
+set. It NEVER auto-advances - update only ever targets the shipped pin (or an
 explicit ``--commit`` for an advanced/test override).
 
-Safety (AGENTS.md rule 5: no facade, no half-updated install): update records the
-current commit first and, on ANY failure, ROLLS BACK - it returns the managed source
-to that prior commit and re-applies the patch set, so a failed update leaves the
-working prior install exactly as it was, not a broken in-between state. The rollback
-is git-based (the managed ComfyUI is a git checkout), so it is cheap and exact; the
-venv is not touched by an update, so there is nothing to restore there.
+Safety: update records the current commit first and, on ANY failure, ROLLS BACK -
+it returns the managed source to that prior commit and re-applies the patch set, so
+a failed update leaves the working prior install exactly as it was, not a broken
+in-between state. The rollback is git-based (the managed ComfyUI is a git
+checkout), so it is cheap and exact; the venv is not touched by an update, so there
+is nothing to restore there.
 
 Requirements are NOT reinstalled by default: a partial pip upgrade cannot be rolled
 back exactly, so update stays within the guaranteeable git rollback. When the pinned
 commit changes ComfyUI's requirements.txt, update SAYS SO and points at
 ``--reinstall-requirements`` (opt-in); passing it reinstalls into the existing venv,
-and a failure there still rolls the source back and reports honestly.
-
-Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
+and a failure there still rolls the source back and reports the failure.
 """
 
 from __future__ import annotations
@@ -47,22 +45,17 @@ from localm.media.managed_comfy_provision import (
 # --------------------------------------------------------------------------- #
 # An update is a long MUTATION of one working tree: fetch, checkout to a new commit,
 # re-apply the patch set, and on failure roll the checkout back and re-apply the OLD
-# patch set. Two of those interleaved is not a subtle race - it is a corrupted
-# checkout, or one call's rollback restoring over the other's in-flight update.
-#
-# This was safe only by accident of having exactly ONE caller (the CLI). Adding the
-# GUI route (#1201) made it two, which is the same shape as #1147 (ensure_comfy: no
-# lock across check-then-launch, second trigger added, both spawned) and #1189
-# (apply(): no single-flight, a second call's backup captured the NEW build).
+# patch set. Two of those interleaved is a corrupted checkout, or one call's
+# rollback restoring over the other's in-flight update.
 #
 # It MUST be cross-process, not a threading.Lock: the GUI route does not call this
 # function in-process at all, it spawns `python -m localm comfy update` as a CHILD
 # PROCESS, so the two contenders are separate interpreters. (managed_comfy._remove_lock
-# is a threading.Lock and is correct for ITS job, which is in-process only - do not
-# copy it here, it would guard nothing.)
+# is a threading.Lock and is correct for ITS job, which is in-process only - it
+# would guard nothing here.)
 #
 # mkdir is ATOMIC; stat-then-create is not - two callers can both observe "free" in
-# the gap and both proceed, which is check-then-act with no atomicity.
+# the gap and both proceed.
 _LOCK_OWNER = "owner.json"
 
 
@@ -87,16 +80,15 @@ def _lock_holder_pid(lock: Path) -> Optional[int]:
 def _acquire_update_lock() -> tuple:
     """Take the update lock. Returns ``(True, "")`` or ``(False, <honest reason>)``.
 
-    FAILS FAST rather than waiting: an update takes minutes, and a caller blocked on a
-    lock is indistinguishable from a hang - the GUI would show a spinner forever and
-    the CLI would look wedged.
+    FAILS FAST rather than waiting: an update takes minutes, so a caller blocked on
+    the lock would be indistinguishable from a hang.
 
     Staleness is judged by PID LIVENESS, never by elapsed time. The operation is
-    unbounded (a fetch over a slow link, a dependency reinstall), so any fixed timeout
-    would eventually reclaim a LIVE holder's lock and produce the exact concurrent
-    mutation this exists to prevent. ``pid_alive`` is conservative - when it genuinely
-    cannot tell it returns True - so an uncertain answer keeps the lock rather than
-    stealing it."""
+    unbounded (a fetch over a slow link, a dependency reinstall), so any fixed
+    timeout would eventually reclaim a LIVE holder's lock and produce the exact
+    concurrent mutation this exists to prevent. ``pid_alive`` is conservative -
+    when it genuinely cannot tell it returns True - so an uncertain answer keeps
+    the lock rather than stealing it."""
     from localm.instances import pid_alive
     lock = _update_lock_path()
     for attempt in (1, 2):
@@ -159,8 +151,8 @@ def _rev_parse_head(root: Path) -> Optional[str]:
 
 def _requirements_changed(root: Path, prev: str, target: str) -> bool:
     """True when requirements.txt differs between *prev* and *target*. ``git diff
-    --quiet`` exits 0 for no change, non-zero for a change; a git error (unknown here)
-    is treated as 'changed' so we warn rather than silently skip a real dep bump."""
+    --quiet`` exits 0 for no change, non-zero for a change; a git error is treated
+    as 'changed', so update warns rather than skipping a real dep bump."""
     ok, _out = _run(["git", "-C", str(root), "diff", "--quiet", prev, target,
                      "--", "requirements.txt"], timeout=60)
     return not ok
@@ -237,7 +229,7 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
     # Everything from here on MUTATES the working tree (fetch, checkout, patch, and
     # the rollback's own checkout+patch). Take the single-flight lock first; a second
     # update is refused honestly rather than interleaved. Read-only refusals above
-    # (not installed, no git history) deliberately never take it.
+    # (not installed, no git history) never take it.
     acquired, busy = _acquire_update_lock()
     if not acquired:
         return _result(False, "busy", busy)
@@ -246,8 +238,8 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         """Return the managed source to prev_commit and re-apply the patch set, then
         report *reason*. Rolls back the git source exactly; if even the rollback
         checkout fails - OR the checkout succeeds but the localm patch set cannot be
-        re-applied on the restored source - say so rather than pretend the tree is
-        clean (rule 5)."""
+        re-applied on the restored source - say so rather than report a clean
+        tree."""
         note = ""
         ok, out = _run(["git", "-C", str(root), "checkout", "--force", "--quiet",
                         prev_commit], on_progress=on_progress, timeout=300)
@@ -256,8 +248,7 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
             # discarded our patch edits (they are re-applied here), so a FAILED re-apply
             # leaves the install UNPATCHED (the __func__ fix gone, ACE-Step music broken)
             # while the tree otherwise reads as the prior install. Surface it in the note
-            # instead of reporting a clean rollback (rule 5: a safety step that fails must
-            # never claim success).
+            # instead of reporting a clean rollback.
             failed = [o for o in apply_patches(root) if not o.ok]
             if failed:
                 detail = "; ".join(f"{o.name}: {o.detail}" for o in failed)
@@ -283,14 +274,13 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         # ASK FOR THE COMMIT BY NAME. A bare `git fetch <url>` uses the default
         # refspec, which brings the remote's current branch tip and nothing else -
         # no tags, and no guarantee the PINNED commit is in the resulting pack.
-        # Reported live on 0.1.5rc3 (#1321): the fetch reported success, then
+        # Such a fetch reports success and the checkout then fails mid-update with
         #
         #     fatal: unable to read tree (fe4195f7f427...)
         #
-        # i.e. git had the commit object but not the tree it points at, so the
-        # checkout failed mid-update. GitHub allows fetching an exact sha
-        # (uploadpack.allowReachableSHA1InWant), which is both precise and
-        # smaller than pulling every branch.
+        # i.e. git has the commit object but not the tree it points at. GitHub
+        # allows fetching an exact sha (uploadpack.allowReachableSHA1InWant),
+        # which is both precise and smaller than pulling every branch.
         ok, out = _run(["git", "-C", str(root), "fetch", "--quiet", repo, target],
                        on_progress=on_progress, timeout=1800)
         if not ok:

@@ -3,10 +3,10 @@
 
 The lazy grammar leaves generation unconstrained until the output matches a
 trigger pattern (e.g. <tool_call>), then the GBNF grammar enforces from that
-point - so thinking models think freely and a started tool call must be valid
-(REC-CODER-GRAMMAR, decided + live-verified 2026-07-02). These tests pin the
-sampler-chain selection, the never-silently-strict fallbacks, and the server
-API contract; the @integration test proves activation on a real model."""
+point, so thinking models think freely and a started tool call must be valid.
+These tests pin the sampler-chain selection, the never-silently-strict
+fallbacks, and the server API contract; the @integration test proves activation
+on a real model."""
 
 from unittest.mock import MagicMock, patch
 
@@ -40,11 +40,8 @@ class TestBuildSamplerLazySelection:
         mock_api.llama_sampler_init_grammar.assert_not_called()
 
     def test_lazy_without_triggers_refuses_and_never_falls_back(self):
-        # A lazy request must NEVER silently become a strict constraint - and
-        # never silently become NO constraint either. These two assertions used
-        # to stand alone and passed while the sampler was built with no grammar
-        # stage at all, so the caller got a normal 200 of unconstrained text it
-        # believed was grammar-conformant. The refusal is what closes that.
+        # A lazy request without triggers raises instead of building either a
+        # strict grammar stage or no grammar stage at all.
         mock_api = self._mock_api()
         with patch(_API, mock_api):
             with pytest.raises(GrammarUnsupportedError) as ei:
@@ -195,9 +192,9 @@ class TestSupportsGrammarIsLocalmOnly:
 
 
 # --------------------------------------------------------------------------- #
-# Real-model proof (same gating as test_gguf_smoke_integration.py): force the
-# trigger into the generated stream, then the continuation MUST be a valid
-# tool call - while the pre-trigger text flowed unconstrained.
+# Real-model proof: force the trigger into the generated stream, then the
+# continuation MUST be a valid tool call, while the pre-trigger text flowed
+# unconstrained.
 # --------------------------------------------------------------------------- #
 
 _REPO = "bartowski/SmolLM2-135M-Instruct-GGUF"

@@ -34,8 +34,7 @@ def test_family_profile_baseline_families_have_no_overrides():
 def test_agent_gen_overrides_only_universal_safe_keys():
     # temperature is safe to fill anywhere...
     assert agent_gen_overrides("phi3-mini") == {"temperature": 0.3}
-    # ...but max_tokens is NOT filled by the Agent path (would risk truncating a
-    # GUI/sub-agent call that relied on the backend default).
+    # ...but max_tokens is NOT filled by the Agent path.
     assert "max_tokens" not in agent_gen_overrides("deepseek-r1-7b")
     assert agent_gen_overrides("deepseek-r1-7b") == {}
     assert agent_gen_overrides("llama3-8b") == {}

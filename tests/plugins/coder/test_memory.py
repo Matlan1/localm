@@ -134,12 +134,8 @@ def test_default_memory_file(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  Injection budget (work item D3 / memory-audit finding 28)
-#
-#  Project memory and user instructions are paid on EVERY turn and cannot be
-#  recovered by compaction (_compact_history rewrites the message list, never the
-#  system prompt), so both are capped. The cap must never be silent: the model
-#  gets an in-band notice and the user gets a warning naming the file.
+#  Injection budget: project memory and user instructions are capped, with an
+#  in-band notice to the model and a warning naming the file.
 # --------------------------------------------------------------------------- #
 
 def _oversized(n: int = _MAX_MEMORY_CHARS * 2) -> str:
@@ -174,7 +170,7 @@ def test_oversized_memory_is_capped(tmp_path):
 
     # Bounded: the whole file did NOT go into the prompt.
     assert len(out) < len(raw)
-    # The budget is respected apart from the notice we deliberately append.
+    # The budget is respected apart from the appended notice.
     assert len(out) <= _MAX_MEMORY_CHARS + 200
     # It still starts with the real content, so the useful part survives.
     assert out.startswith("# Project Memory")
@@ -231,8 +227,8 @@ def test_capping_keeps_whole_lines(tmp_path):
 
 
 def test_unreadable_memory_file_is_reported_not_swallowed(tmp_path):
-    """A file that EXISTS but cannot be read must not look like "no memory"
-    (AGENTS.md rule 5: do not collapse absent and corrupt into one silent path)."""
+    """A file that EXISTS but cannot be read must not look like "no memory":
+    absent and corrupt must not collapse into one silent path."""
     (tmp_path / "LOCALCODER.md").write_text("- something important\n", encoding="utf-8")
 
     def boom(*a, **kw):
@@ -305,12 +301,8 @@ def test_normal_system_flag_override_is_untouched(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  End-to-end through a real Agent.
-#
-#  The functions above are only half the fix: the cap is worthless if the agent
-#  does not actually inject the capped text, and the honesty half is worthless if
-#  the warning never reaches a human. These drive a real Agent (real load_memory,
-#  not a patched one) and assert on the prompt it really builds.
+#  End-to-end through a real Agent: the capped text is injected into the
+#  prompt it really builds, and the warning reaches the human.
 # --------------------------------------------------------------------------- #
 
 def _make_agent(tmp_path):
@@ -345,8 +337,6 @@ def test_agent_prompt_is_bounded_and_user_is_warned(tmp_path):
     prompt = agent._system_prompt
 
     # The whole file did NOT reach the prompt - only the capped version did.
-    # (Comparing len(prompt) to len(raw) would be wrong: the prompt also carries
-    # the ~7650-char base instructions, so it exceeds the memory file either way.)
     assert raw.strip() not in prompt
     injected = load_memory(tmp_path)
     assert injected in prompt

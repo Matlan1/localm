@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S2 (GUI half): a loopback `localm gui` must not be locked out when require_auth
+"""A loopback `localm gui` must not be locked out when require_auth
 is on, WITHOUT putting the API key in JS-readable localStorage. On a loopback bind
 the shell route sets the key as an HttpOnly session cookie (protected mode) or
 seeds the per-process shell token as a JS global (open mode); a non-loopback LAN
@@ -67,13 +67,10 @@ class TestShellTokenInjection:
 
 class TestShellRoute:
     def test_loopback_protected_seeds_no_credential_at_all(self, monkeypatch):
-        # S2's original property, still true and still worth pinning: the key must
-        # NEVER reach page JS or localStorage. What CHANGED is the second half -
-        # this used to also seed an HttpOnly session cookie so a keyed loopback
-        # launch was not locked out, and that auto-seed is gone: presenting no key
-        # to a keyed instance is the same as presenting an invalid one. The
-        # launcher's ?localm_token= grant and the page's key gate are the ways in
-        # now, both covered by their own classes below.
+        # The key must NEVER reach page JS or localStorage. No session cookie is
+        # auto-seeded either: presenting no key to a keyed instance is the same
+        # as presenting an invalid one. The launcher's ?localm_token= grant and
+        # the page's key gate are covered by their own classes below.
         monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
         r = TestClient(_app("127.0.0.1")).get("/", headers={"Host": "127.0.0.1"})
         assert r.status_code == 200
@@ -87,10 +84,9 @@ class TestShellRoute:
     def test_loopback_open_mode_seeds_shell_token_global(self, monkeypatch):
         # Open mode + loopback: the per-process shell token is injected as a JS
         # global (header-based management), not localStorage, and no auth cookie.
-        # Host set to a real loopback literal - a real browser navigating to
-        # 127.0.0.1 sends exactly this; TestClient's own default Host
-        # ("testserver") is a test-harness artifact, not a case this route
-        # needs to serve the token to.
+        # Host is set to a real loopback literal, which is what a browser
+        # navigating to 127.0.0.1 sends; TestClient's default "testserver" Host
+        # is a harness artifact this route does not serve the token to.
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         r = TestClient(_app("127.0.0.1")).get("/", headers={"Host": "127.0.0.1"})
         assert r.status_code == 200
@@ -99,19 +95,17 @@ class TestShellRoute:
         assert "localm_session=" not in _set_cookies(r)
 
     def test_corrupt_session_store_serves_the_shell_not_a_500(self, monkeypatch):
-        # A corrupt/unreadable sessions.json must not 500 the whole GUI: the auto-seed
-        # fails SAFE (serves the shell with NO session cookie -> the client hits the
-        # recoverable key gate), never a hard 500 the user cannot escape.
+        # A corrupt or unreadable sessions.json serves the shell with NO session
+        # cookie, so the client hits the recoverable key gate rather than a 500.
         monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
         from localm import sessions
         monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
         sessions.sessions_file().parent.mkdir(parents=True, exist_ok=True)
         sessions.sessions_file().write_text("{ corrupt not json", encoding="utf-8")
-        # Loopback literal Host is LOAD-BEARING here: the branch is same-origin
-        # gated, so with TestClient's default "testserver" Host this test would
-        # get its no-cookie result from the ORIGIN GATE and never reach the
-        # corrupt-store fail-safe it exists to prove. Same assertion, wrong
-        # reason, and nothing in the output would say so.
+        # A loopback literal Host is load-bearing: the branch is same-origin
+        # gated, so with TestClient's default "testserver" Host this would get its
+        # no-cookie result from the ORIGIN GATE instead of the corrupt-store
+        # fail-safe under test.
         r = TestClient(_app("127.0.0.1")).get("/", headers={"Host": "127.0.0.1"})
         assert r.status_code == 200                      # shell served, not 500
         assert "localm_session=" not in _set_cookies(r)  # fail-safe: no cookie/access
@@ -127,14 +121,10 @@ class TestShellRoute:
         assert SHELL_GLOBAL not in r.text
 
     def test_cross_origin_open_mode_does_not_leak_shell_token(self, monkeypatch):
-        # Item 28 (release blocker): "loopback" describes what the SERVER BOUND
-        # TO, not who is asking. Before this gate, ANY cross-origin GET / on a
-        # loopback, open-mode bind got the real per-process shell token in
-        # plain HTML - any website the user's browser visited could read it
-        # (subject only to CORS, which this bare attach_gui setup has none of -
-        # the fix must not depend on the server's CORS config at all). A
-        # mismatched Origin must get the same empty-token page as the
-        # protected-mode and non-loopback branches.
+        # "loopback" describes what the SERVER BOUND TO, not who is asking. A
+        # mismatched Origin on a loopback, open-mode bind gets the same
+        # empty-token page as the protected-mode and non-loopback branches,
+        # independent of the server's CORS config.
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         r = TestClient(_app("127.0.0.1")).get(
             "/", headers={"Origin": "https://evil.example"})
@@ -144,10 +134,9 @@ class TestShellRoute:
 
     def test_same_origin_explicit_origin_open_mode_still_seeds_shell_token(
             self, monkeypatch):
-        # Must not overcorrect: an Origin header that DOES match Host (a real
-        # browser fetch/reload, which - unlike a bare top-level navigation -
-        # does send Origin) still gets the token. Only a MISMATCHED Origin is
-        # refused.
+        # An Origin header that DOES match Host (a real browser fetch or reload,
+        # which unlike a bare top-level navigation does send Origin) still gets
+        # the token. Only a MISMATCHED Origin is refused.
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         r = TestClient(_app("127.0.0.1")).get(
             "/", headers={"Origin": "http://testserver", "Host": "testserver"})
@@ -157,16 +146,11 @@ class TestShellRoute:
 
     def test_dns_rebind_no_origin_attacker_host_does_not_leak_shell_token(
             self, monkeypatch):
-        # Confirmed gap in the item-28 fix (fresh-context review, 2026-08-05):
-        # a DNS-rebinding attack makes a follow-up navigation the BROWSER
-        # considers same-origin with the attacker's already-open page (Same-
-        # Origin Policy is computed from the URL string navigated to, never
-        # the resolved IP), so it carries NO Origin header at all - exactly
-        # the header shape the no-Origin branch was trusting unconditionally.
-        # The request still lands on this real loopback server (the attacker
-        # repointed their own domain's DNS to it) but Host reflects the
-        # ATTACKER's domain, never a loopback literal, regardless of
-        # resolution. That must refuse the token even with no Origin present.
+        # A DNS-rebinding navigation carries NO Origin header at all: the
+        # Same-Origin Policy is computed from the URL string navigated to, never
+        # the resolved IP. The request lands on this real loopback server while
+        # Host reflects the attacker's domain rather than a loopback literal, and
+        # must be refused even with no Origin present.
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         r = TestClient(_app("127.0.0.1")).get(
             "/", headers={"Host": "evil.example:8642"})
@@ -176,9 +160,9 @@ class TestShellRoute:
 
     def test_no_origin_loopback_literal_host_still_seeds_shell_token(
             self, monkeypatch):
-        # Not an overcorrection: a real loopback literal Host (127.0.0.1,
-        # localhost, or bracketed IPv6) with no Origin - what an actual local
-        # browser navigation sends - still gets the token.
+        # A real loopback literal Host (127.0.0.1, localhost, or bracketed IPv6)
+        # with no Origin, which is what an actual local navigation sends, still
+        # gets the token.
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         for host in ("127.0.0.1", "127.0.0.1:8642", "localhost",
                      "localhost:8642", "[::1]:8642"):
@@ -193,12 +177,9 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
     presented no credential. Presenting no key to a keyed instance is the same as
     presenting an invalid one.
 
-    The auto-seed this class used to guard is GONE. It was origin-gated first,
-    which closed the cross-ORIGIN tier, but it could never close the LOCAL-PROCESS
-    one: a top-level browser navigation to http://127.0.0.1:PORT/ and a local
-    script calling the same URL are byte-identical at the HTTP layer. Measured on
-    a real socket, the cookie it handed out resolved to scopes ['admin'] and
-    minted a fresh admin key.
+    There is no origin-gated auto-seed: a top-level browser navigation to
+    http://127.0.0.1:PORT/ and a local script calling the same URL are
+    byte-identical at the HTTP layer, so no gate can separate them.
 
     Assertions are on the Set-Cookie ITSELF, never on a later request's status
     code: a downstream 401 can arrive for reasons unrelated to this route, so it
@@ -238,7 +219,7 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
         assert self.KEY not in cookies and self.KEY not in r.text
 
     def test_local_process_shaped_request_mints_nothing(self, monkeypatch):
-        """The tier the origin gate could not reach, and the reason the auto-seed
+        """The tier the origin gate cannot reach, and why the auto-seed
         was removed rather than gated harder: no Origin and a loopback-literal
         Host is exactly what a local script sends, and it is indistinguishable
         from the legitimate browser navigation above. Neither gets a session now."""
@@ -298,9 +279,8 @@ class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
         assert _sessions.lookup(sid) is not None            # and not invalidated
 
     def test_an_existing_session_survives_an_owner_key_roll(self, monkeypatch):
-        """THE PROPERTY THE REMOVED BRANCH WAS ORIGINALLY WRITTEN FOR, and the one
-        most at risk from deleting it. The session is deliberately decoupled from
-        the key VALUE, so rolling the owner key must not sign the browser out."""
+        """The session is decoupled from the key VALUE, so rolling the owner
+        key must not sign the browser out."""
         monkeypatch.setenv("LOCALM_API_KEY", self.KEY)
         app = _app("127.0.0.1")
         sid = self._grant_session(app)
@@ -369,10 +349,10 @@ class TestLaunchGrantHandoff:
         assert r.headers["location"] == "/?view=models"
 
     def test_grant_IS_redeemed_on_a_network_bind(self, monkeypatch):
-        # THE host-on-a-network-bind fix: the person launching is on THIS machine and
-        # must be handed a session even when the server is exposed on 0.0.0.0. The
-        # grant is a single-use secret only the launcher knows, so possessing it is
-        # the authorization regardless of bind (a network client never gets it).
+        # The launcher is on THIS machine and is handed a session even when the
+        # server is exposed on 0.0.0.0: the grant is a single-use secret only the
+        # launcher knows, so possessing it is the authorization regardless of
+        # bind.
         monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
         app = _app("0.0.0.0")
         grant = self._grant(app)
@@ -383,8 +363,8 @@ class TestLaunchGrantHandoff:
 
 
 class TestPullGrant:
-    """SEC-PULL-CONFIRM: `localm gui --pull SPEC` mints a single-use, spec-bound
-    secret (mint_pull_grant) so its OWN deep link can auto-start the download with
+    """`localm gui --pull SPEC` mints a single-use, spec-bound secret
+    (mint_pull_grant) so its OWN deep link can auto-start the download with
     zero clicks (see init.js), while a forged `?pull=` link elsewhere - which
     cannot know this secret - falls back to an explicit human confirmation. This
     class covers the grant primitive itself; the HTTP redeem endpoint is covered
@@ -406,9 +386,8 @@ class TestPullGrant:
         assert consume_pull_grant(app, "owner/repo:m.gguf", token) is False
 
     def test_grant_is_bound_to_the_exact_spec(self):
-        # A leaked/observed token must not authorise pulling a DIFFERENT model -
-        # otherwise a forged link could reuse a legitimately-observed token by
-        # pairing it with its own `pull=` spec.
+        # A leaked or observed token must not authorise pulling a DIFFERENT
+        # model.
         from localm.plugins.gui.web import consume_pull_grant, mint_pull_grant
         app = _app("127.0.0.1")
         token = mint_pull_grant(app, "owner/repo:m.gguf")

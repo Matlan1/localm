@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// NEW-STOPCOMFY: the media subsection renders Stop/Restart controls and Stop
-// POSTs /v1/comfy/stop. (Their SHOW/HIDE is driven by the 5s /v1/comfy/status
-// poll - not exercised here since the test has no real timers - and by the
-// `launched_by_localm` flag; the wiring below is what this test pins.)
+// The media subsection renders Stop and Restart controls; Stop POSTs
+// /v1/comfy/stop.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -46,7 +44,7 @@ test("media subsection renders Stop + Restart controls", async () => {
   const doc = win.document;
   assert.ok(doc.querySelector(".comfy-stop-btn"), "Stop button rendered");
   assert.ok(doc.querySelector(".comfy-restart-btn"), "Restart button rendered");
-  // They are type=button so they never submit the settings form.
+  // type=button, so they do not submit the settings form.
   assert.equal(doc.querySelector(".comfy-stop-btn").type, "button");
 });
 

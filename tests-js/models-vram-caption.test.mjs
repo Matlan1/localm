@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Models search-page VRAM caption: vramBasisCaption(totalBytes, gpuInfo) in
-// pages/models.js names WHAT the fit-badge VRAM number is, so a single main-GPU
-// ceiling is never mislabeled as the machine "total" (gui-1 in the
-// explain-is-not-justify audit) and the caption always agrees with the split
-// hint. Pure function - loaded via the jsdom harness like the split-hint test.
+// pages/models.js names what the fit-badge VRAM number is - a single GPU, the
+// main GPU, or a combined split.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -27,9 +25,7 @@ test("vramBasisCaption: single GPU -> plain 'your N GB VRAM', never 'total'", ()
 
 test("vramBasisCaption: multi-GPU, NO split configured -> names the main GPU, not the machine total", () => {
   const cap = caption();
-  // The 2x16 GB no-split case: vram_capacity() returns the single main GPU's
-  // 16 GB, so the caption must say so (not '32 GB total') and must agree with the
-  // split hint that says 'you have 2 GPUs'.
+  // With no split, vram_capacity() returns the single main GPU's 16 GB.
   const msg = cap(16 * GIB, {
     gpus: [{ index: 0, total: 16 * GIB, free: 14 * GIB }, { index: 1, total: 16 * GIB, free: 15 * GIB }],
     gpu_split_indices: [],

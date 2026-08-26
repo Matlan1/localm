@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SRV-4: a console-close (or logoff/shutdown) must run cleanup (unload the
-native model context) so the process does not segfault freeing it during
-interpreter teardown. Ctrl+C / Ctrl+Break stay on Python's default path."""
+"""A console-close (or logoff/shutdown) runs cleanup, unloading the native model
+context rather than freeing it during interpreter teardown. Ctrl+C / Ctrl+Break
+stay on Python's default path."""
 
 from localm import winconsole
 

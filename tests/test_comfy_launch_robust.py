@@ -7,12 +7,11 @@ import sys
 from unittest.mock import MagicMock, patch
 
 from localm.image_gen import comfy
-# ensure_comfy and the launcher/discovery helpers moved into the shared client.
-# ensure_comfy calls _comfy_alive as a bare global in this module, so a test that
-# stubs the reachability probe must patch it on comfy_client (its home), not on
-# the image_gen.comfy re-export. (Helpers tested directly - discover_launch_cmd,
-# _amd_rocm_launch_env, _derive_workdir_from_cmd, apply_fast_dequant - stay on the
-# comfy re-export and need no change.)
+# ensure_comfy calls _comfy_alive as a bare global in comfy_client, so a test
+# that stubs the reachability probe must patch it on comfy_client, not on the
+# image_gen.comfy re-export. The helpers tested directly (discover_launch_cmd,
+# _amd_rocm_launch_env, _derive_workdir_from_cmd, apply_fast_dequant) stay on
+# the comfy re-export.
 from localm.media import comfy_client
 from localm.media import managed_comfy as mc
 
@@ -78,8 +77,8 @@ def test_amd_rocm_launch_env_none_when_bin_missing(monkeypatch, tmp_path):
 
 
 def test_ensure_comfy_uses_configured_timeout(monkeypatch):
-    # ComfyUI never comes up; with no launch ability we still resolve the
-    # configurable timeout instead of the old hard-coded 180s.
+    # ComfyUI never comes up; with no launch ability the configurable timeout
+    # is still resolved.
     monkeypatch.setattr(comfy_client, "_comfy_alive", lambda *a, **k: False)
     monkeypatch.setattr(comfy_client, "load_config",
                         lambda: {"comfy_launch_cmd": None,
@@ -93,9 +92,8 @@ def test_ensure_comfy_uses_configured_timeout(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  comfy_launch_wait_seconds - extracted so a route-level timeout budget can  #
-#  read the SAME number ensure_comfy will actually honour (follow-up to      #
-#  #1057's run_in_threadpool_bounded).                                       #
+#  comfy_launch_wait_seconds - so a route-level timeout budget can read the   #
+#  SAME number ensure_comfy will honour.                                      #
 # --------------------------------------------------------------------------- #
 
 def test_launch_wait_seconds_reads_configured_timeout():
@@ -149,10 +147,10 @@ def test_ensure_comfy_delegates_to_the_shared_helper(monkeypatch, tmp_path):
     alive_calls = {"n": 0}
 
     def _alive(api_url, timeout=3.0):
-        # > 2, not > 1: NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's double-checked
-        # lock adds a RE-CHECK under _launch_lock_for() between the pre-lock
-        # probe and the post-spawn poll loop - three _comfy_alive() calls
-        # minimum before a launch is confirmed up (dead, dead-under-lock, up).
+        # > 2, not > 1: the double-checked lock adds a RE-CHECK under
+        # _launch_lock_for() between the pre-lock probe and the post-spawn poll
+        # loop - three _comfy_alive() calls minimum before a launch is confirmed
+        # up (dead, dead-under-lock, up).
         alive_calls["n"] += 1
         return alive_calls["n"] > 2
 
@@ -186,7 +184,7 @@ def _ext():
 
 def test_discover_prefers_user_launcher(tmp_path):
     # When both a custom launch-comfyui.* and the stock comfyui.* exist, the
-    # user's own launcher wins - localm uses the setup they already have.
+    # user's own launcher wins.
     (tmp_path / f"comfyui.{_ext()}").write_text("stock\n", encoding="utf-8")
     (tmp_path / f"launch-comfyui.{_ext()}").write_text("mine\n", encoding="utf-8")
     cmd = comfy.discover_launch_cmd(tmp_path)
@@ -224,13 +222,12 @@ def test_discover_main_py_with_venv(tmp_path):
 
 def test_ensure_comfy_discovers_launcher_in_workdir(tmp_path):
     # comfy_workdir set + no launch_cmd -> localm finds the launcher itself and
-    # spawns it with the folder as cwd. The old code gave up ("not reachable").
+    # spawns it with the folder as cwd.
     launcher = tmp_path / f"comfyui.{_ext()}"
     launcher.write_text("echo hi\n", encoding="utf-8")
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
            "comfy_launch_timeout": 30}
-    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
-    # double-checked re-check), then up after spawn.
+    # dead, dead-under-lock (the double-checked re-check), then up after spawn.
     alive = iter([False, False, True])
     spawned = {}
 
@@ -251,10 +248,8 @@ def test_ensure_comfy_discovers_launcher_in_workdir(tmp_path):
 
 def test_ensure_comfy_reports_launcher_immediate_exit(tmp_path):
     # The spawn exit-guard (comfy.py): if the launcher dies right after spawn
-    # with a non-zero code (broken .bat, missing venv, bad path), ensure_comfy
-    # must surface that failure NOW instead of waiting out the whole cold-start
-    # timeout. This is the FIRING side of the guard the success tests step over
-    # (where poll() is None == still running).
+    # with a non-zero code, ensure_comfy surfaces that failure immediately
+    # instead of waiting out the whole cold-start timeout.
     launcher = tmp_path / f"comfyui.{_ext()}"
     launcher.write_text("exit 1\n", encoding="utf-8")
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
@@ -275,13 +270,12 @@ def test_ensure_comfy_reports_launcher_immediate_exit(tmp_path):
 
 
 def test_ensure_comfy_immediate_exit_includes_the_launch_log_tail(tmp_path):
-    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: an immediate-exit failure must say WHY,
-    not just the exit code - the real reason (a traceback) is what the launcher
-    wrote to its own captured output before dying, and the caller should not have
-    to go find comfy-launch.log by hand. Writes through the SAME stdout handle
-    ensure_comfy itself opened and passed to Popen (mirroring how a real launcher
-    process's output actually lands there), so this proves the file is read back,
-    not merely that some string was appended."""
+    """An immediate-exit failure must say WHY, not just the exit code - the real
+    reason (a traceback) is what the launcher wrote to its own captured output
+    before dying, and the caller should not have to go find comfy-launch.log by
+    hand. Writes through the SAME stdout handle ensure_comfy itself opened and
+    passed to Popen, so this proves the file is read back rather than that some
+    string was appended."""
     from localm.config import home_dir
     home_dir().mkdir(parents=True, exist_ok=True)  # ensure_comfy expects this to exist
 
@@ -311,11 +305,10 @@ def test_ensure_comfy_immediate_exit_includes_the_launch_log_tail(tmp_path):
 
 
 def test_ensure_comfy_timeout_message_includes_the_launch_log_tail(monkeypatch, tmp_path):
-    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: the "did not come up within N minutes"
-    message already names the log FILE; it must also fold in the file's own tail
-    so the reason is visible without a second trip to disk. Fast-forwards the
-    deadline poll loop to zero iterations via a fake monotonic clock rather than
-    waiting out a real 30s timeout."""
+    """The "did not come up within N minutes" message already names the log FILE;
+    it must also fold in the file's own tail so the reason is visible without a
+    second trip to disk. Fast-forwards the deadline poll loop to zero iterations
+    via a fake monotonic clock rather than waiting out a real 30s timeout."""
     import time as time_mod
     from localm.config import home_dir
     home_dir().mkdir(parents=True, exist_ok=True)  # ensure_comfy expects this to exist
@@ -368,8 +361,7 @@ def _spawn_with_cfg(tmp_path, cfg):
     launcher.write_text("echo hi\n", encoding="utf-8")
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
            "comfy_launch_timeout": 30, **cfg}
-    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
-    # double-checked re-check), then up after spawn.
+    # dead, dead-under-lock (the double-checked re-check), then up after spawn.
     alive = iter([False, False, True])
     spawned = {}
 
@@ -388,15 +380,14 @@ def _spawn_with_cfg(tmp_path, cfg):
 
 
 def test_disable_auto_launch_appended_when_enabled(tmp_path):
-    # MEDIA-2: comfy_disable_auto_launch=True -> launch command gets the flag so
+    # comfy_disable_auto_launch=True -> the launch command gets the flag so
     # ComfyUI starts headless instead of opening its own web page.
     argv = _spawn_with_cfg(tmp_path, {"comfy_disable_auto_launch": True})
     assert "--disable-auto-launch" in str(argv)
 
 
 def test_disable_auto_launch_absent_by_default(tmp_path):
-    # NEGATIVE case: unset (and explicit False) keep the current behavior, so the
-    # flag must NOT be appended. This is what guards against changing the default.
+    # NEGATIVE case: unset (and explicit False) must not append the flag.
     argv_unset = _spawn_with_cfg(tmp_path, {})
     assert "--disable-auto-launch" not in str(argv_unset)
     argv_false = _spawn_with_cfg(tmp_path, {"comfy_disable_auto_launch": False})
@@ -404,17 +395,15 @@ def test_disable_auto_launch_absent_by_default(tmp_path):
 
 
 def test_ensure_comfy_launches_the_managed_instance_when_active(tmp_path):
-    """#621 follow-up: when localm's own managed ComfyUI is installed and
-    selected, ensure_comfy must launch IT (its own venv + main.py) - the
-    managed install is a raw checkout with no bundled launcher script for
-    discovery to find, so before this fix it fell through to "not reachable,
-    configure your own ComfyUI install" even with a working managed instance.
+    """When localm's own managed ComfyUI is installed and selected, ensure_comfy
+    must launch IT (its own venv + main.py): the managed install is a raw
+    checkout with no bundled launcher script for discovery to find, so without
+    managed routing it falls through to "not reachable, configure your own
+    ComfyUI install" even with a working managed instance.
 
-    Only managed_comfy_paths() is faked (not managed_comfy_launch_cmd() /
-    managed_comfy_workdir() themselves), so the REAL command-building/quoting
-    logic in managed_comfy.py actually runs and is asserted on - a prior
-    version of this test mocked managed_comfy_launch_cmd() directly and so
-    never exercised it (confirmed gap from the conserve-mode review)."""
+    Only managed_comfy_paths() is faked (not managed_comfy_launch_cmd() or
+    managed_comfy_workdir() themselves), so the REAL command-building and
+    quoting logic in managed_comfy.py actually runs and is asserted on."""
     comfy_client._confirmed_alive.clear()
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
            "comfy_launch_timeout": 30}
@@ -427,8 +416,7 @@ def test_ensure_comfy_launches_the_managed_instance_when_active(tmp_path):
         venv_python=managed_root / "venv" / "Scripts" / "python.exe",
         extra_model_paths=managed_root / "extra_model_paths.yaml",
     )
-    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
-    # double-checked re-check), then up after spawn.
+    # dead, dead-under-lock (the double-checked re-check), then up after spawn.
     alive = iter([False, False, True])
     spawned = {}
 
@@ -448,8 +436,7 @@ def test_ensure_comfy_launches_the_managed_instance_when_active(tmp_path):
     assert ok is True, msg
     assert spawned["cwd"] == str(managed_root)
     # List MEMBERSHIP, not a stringified-list substring check: str(a_list) reprs
-    # each element (escaping backslashes), so a raw Windows path would never
-    # match as a substring of str(argv) even though the real argv is correct.
+    # each element, escaping backslashes.
     argv = spawned["argv"]
     assert str(fake_paths.venv_python) in argv
     assert str(fake_paths.main_py) in argv
@@ -464,8 +451,7 @@ def test_ensure_comfy_caller_override_beats_managed_routing(tmp_path):
     comfy_client._confirmed_alive.clear()
     own_launcher = tmp_path / f"comfyui.{_ext()}"
     own_launcher.write_text("echo hi\n", encoding="utf-8")
-    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
-    # double-checked re-check), then up after spawn.
+    # dead, dead-under-lock (the double-checked re-check), then up after spawn.
     alive = iter([False, False, True])
     spawned = {}
 
@@ -488,27 +474,24 @@ def test_ensure_comfy_caller_override_beats_managed_routing(tmp_path):
 
 def test_managed_workdir_resolution_is_atomic_if_launch_cmd_raises(tmp_path):
     """If managed_comfy_workdir() succeeds but managed_comfy_launch_cmd() then
-    raises, workdir must NOT stay pointed at the managed folder - it must fall
-    back to the ordinary (non-managed) resolution cleanly, not leave a
-    workdir-with-no-matching-launch_cmd inconsistent state (low-severity but
-    real gap found by the conserve-mode review).
+    raises, workdir must NOT stay pointed at the managed folder - it falls back
+    to the ordinary (non-managed) resolution cleanly rather than leaving a
+    workdir-with-no-matching-launch_cmd inconsistent state.
 
     managed_root is populated with a real main.py + venv/Scripts/python.exe
     (discover_launch_cmd's own fallback-detection targets) so this test
-    actually DISCRIMINATES the two behaviors: under the bug, a leaked
-    workdir makes discover_launch_cmd(managed_root) wrongly succeed and
-    launch a ComfyUI missing --listen/--port (defaulting to the WRONG port,
-    8188, while ensure_comfy keeps polling 8189) - an empty managed_root
-    would make both the fixed and buggy code return the same "not reachable"
-    outcome for the wrong reason, silently failing to catch the regression."""
+    DISCRIMINATES the two behaviours: with a leaked workdir,
+    discover_launch_cmd(managed_root) wrongly succeeds and launches a ComfyUI
+    missing --listen/--port (defaulting to the WRONG port, 8188, while
+    ensure_comfy keeps polling 8189). An empty managed_root would make both
+    outcomes read as "not reachable"."""
     comfy_client._confirmed_alive.clear()
     managed_root = tmp_path / "comfyui"
     (managed_root / "venv" / "Scripts").mkdir(parents=True)
     (managed_root / "main.py").write_text("# fake ComfyUI entry point\n", encoding="utf-8")
     (managed_root / "venv" / "Scripts" / "python.exe").write_bytes(b"")
-    # No comfy_workdir/comfy_launch_cmd configured either -> the clean
-    # fallback must be "no launch_cmd found" (the ordinary not-managed,
-    # nothing-configured outcome), never a launch attempt against managed_root.
+    # No comfy_workdir/comfy_launch_cmd configured either -> the fallback is
+    # "no launch_cmd found", never a launch attempt against managed_root.
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
            "comfy_launch_timeout": 30}
 
@@ -528,15 +511,13 @@ def test_managed_workdir_resolution_is_atomic_if_launch_cmd_raises(tmp_path):
 
 
 def test_concurrent_ensure_comfy_calls_spawn_only_one_process(tmp_path):
-    """NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK: two independent triggers for the
-    SAME api_url (a generate submission and the separate "Launch ComfyUI"
-    button, at minimum - confirmed live on the maintainer's own machine, right
-    after a reboot ruled out any leftover process) must not each independently
+    """Two independent triggers for the SAME api_url (a generate submission and
+    the separate "Launch ComfyUI" button, at minimum) must not each independently
     decide ComfyUI is down and spawn a competing process. Fires two genuinely
     concurrent ensure_comfy() calls at a dead api_url, with a mocked
     slow-but-eventually-successful launch, and asserts only ONE subprocess is
-    actually spawned - the double-checked _launch_lock_for() must serialize
-    the decision, not just the bookkeeping."""
+    actually spawned - the double-checked _launch_lock_for() must serialize the
+    decision, not just the bookkeeping."""
     import threading
 
     comfy_client._confirmed_alive.clear()
@@ -552,10 +533,7 @@ def test_concurrent_ensure_comfy_calls_spawn_only_one_process(tmp_path):
     spawn_count = {"n": 0}
     spawn_lock = threading.Lock()
     # Barrier so BOTH threads reach ensure_comfy()'s pre-lock aliveness check
-    # at (as close to) the same instant as possible - the race this test
-    # exists to prove is the two-simultaneous-callers case, not two callers
-    # that merely happen to run moments apart (which the pre-fix code already
-    # handled fine via the readiness cache once ONE of them finished).
+    # at the same instant.
     start_barrier = threading.Barrier(2)
 
     def fake_popen(argv, cwd=None, **kw):
@@ -569,9 +547,8 @@ def test_concurrent_ensure_comfy_calls_spawn_only_one_process(tmp_path):
         # "Up" only once something has actually been spawned - both callers'
         # PRE-LOCK check must see False (spawn_count starts at 0), so both
         # proceed to race for the lock; whichever wins spawns once, and the
-        # loser's RE-CHECK under the lock (and its own post-spawn poll loop,
-        # for whichever caller ends up waiting rather than launching) then
-        # sees True without ever calling Popen itself.
+        # loser's RE-CHECK under the lock then sees True without ever calling
+        # Popen itself.
         with spawn_lock:
             return spawn_count["n"] > 0
 
@@ -585,15 +562,9 @@ def test_concurrent_ensure_comfy_calls_spawn_only_one_process(tmp_path):
     # run - never let each worker thread enter/exit its OWN `with patch(...)`
     # on the SAME targets. unittest.mock.patch's __enter__/__exit__ save and
     # restore a plain module attribute with no locking of their own, so two
-    # threads independently patching/unpatching the identical target race:
-    # thread B can save thread A's MOCK as "the original" and thread A's
-    # __exit__ can then restore ahead of B's, leaving the attribute
-    # PERMANENTLY pointed at a mock function once both `with` blocks exit -
-    # silently corrupting subprocess.Popen/_comfy_alive/load_config for every
-    # test that runs afterward in this process. Patching once here, before
-    # starting either thread, means both workers merely READ the same
-    # already-substituted functions - no concurrent mutation of the patch
-    # state, so teardown is deterministic.
+    # threads independently patching the identical target race and can leave
+    # the attribute permanently pointed at a mock. Patching once here means
+    # both workers merely READ the same already-substituted functions.
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy_client, "_comfy_alive", side_effect=fake_alive), \
          patch("subprocess.Popen", side_effect=fake_popen):
@@ -610,13 +581,11 @@ def test_concurrent_ensure_comfy_calls_spawn_only_one_process(tmp_path):
     assert all(r is not None for r in results), f"a thread did not finish: {results}"
     assert results[0][0] is True, results[0]
     assert results[1][0] is True, results[1]
-    # Exactly one of the two is the WINNER that actually reached
-    # _launch_and_wait()'s poll loop ("ComfyUI is up."); the other is the
-    # LOSER that found it already up on either its pre-lock check or its
-    # re-check under the lock ("ComfyUI is running.") and never spawned -
-    # which one wins the race is non-deterministic, but the 1-and-1 split is
-    # not: it is the actual proof the lock serialized the decision rather
-    # than both threads independently reaching the launch step.
+    # Exactly one of the two is the WINNER that reached _launch_and_wait()'s
+    # poll loop ("ComfyUI is up."); the other found it already up on either its
+    # pre-lock check or its re-check under the lock ("ComfyUI is running.") and
+    # never spawned. Which one wins is non-deterministic; the 1-and-1 split is
+    # not.
     messages = sorted(r[1] for r in results)
     assert messages == ["ComfyUI is running.", "ComfyUI is up."], messages
     assert spawn_count["n"] == 1, (
@@ -635,7 +604,7 @@ def test_ensure_comfy_error_points_at_the_folder():
 
 
 # --------------------------------------------------------------------------- #
-#  Fast GGUF dequant (the 36 s/it -> ~6-7 s/it fix)                            #
+#  Fast GGUF dequant                                                           #
 # --------------------------------------------------------------------------- #
 
 def test_apply_fast_dequant_rewrites_float32():
@@ -658,7 +627,7 @@ def test_apply_fast_dequant_leaves_explicit_choices():
 
 
 def test_shipped_example_workflow_uses_fast_dequant():
-    # The committed template must not regress to the slow float32 dequant.
+    # The committed template does not use the slow float32 dequant.
     import json
     wf = json.loads(comfy._WORKFLOW_EXAMPLE_PATH.read_text(encoding="utf-8"))
     loaders = [n for n in wf.values()
@@ -676,8 +645,8 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
     if not hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
         monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
     
-    # We want to check how argv is calculated inside comfy_client.py
-    # Since we can mock subprocess.Popen, let's call _spawn_launcher and check spawned argv
+    # Call _spawn_launcher with subprocess.Popen mocked and check the argv it
+    # spawns.
     cfg = {"comfy_launch_cmd": 'Z:\\path\\python.exe main.py --port 8188',
            "comfy_workdir": str(tmp_path), "comfy_launch_timeout": 30,
            "comfy_disable_auto_launch": True}
@@ -691,8 +660,7 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
 
     # On Windows, python.exe should run directly as list (no cmd wrapper)
     monkeypatch.setattr(sys, "platform", "win32")
-    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
-    # double-checked re-check), then up after spawn.
+    # dead, dead-under-lock (the double-checked re-check), then up after spawn.
     alive_1 = iter([False, False, True])
     with patch("localm.config.load_config", return_value=cfg), \
          patch("subprocess.Popen", side_effect=fake_popen), \
@@ -702,11 +670,9 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
     assert len(spawned) == 1
     assert spawned[0] == ['Z:\\path\\python.exe', 'main.py', '--port', '8188', '--disable-auto-launch']
 
-    # On Windows, comfy.bat (batch file) should prepend cmd /d /c. A second,
-    # independent ensure_comfy() attempt at the same URL - clear the
-    # readiness cache the first call just set, else this short-circuits
-    # before ever reaching subprocess.Popen (see the note on _spawn_with_cfg
-    # above for the same isolation concern).
+    # On Windows, comfy.bat (batch file) should prepend cmd /d /c. Clear the
+    # readiness cache the first call just set, else this short-circuits before
+    # ever reaching subprocess.Popen.
     comfy_client._confirmed_alive.clear()
     cfg_bat = {"comfy_launch_cmd": 'Z:\\path\\comfy.bat --port 8188',
                "comfy_workdir": str(tmp_path), "comfy_launch_timeout": 30,

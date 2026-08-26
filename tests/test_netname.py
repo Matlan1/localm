@@ -299,10 +299,9 @@ def test_start_advertiser_no_lan_returns_none(monkeypatch):
 def test_start_advertiser_falls_back_to_companion_lan(monkeypatch):
     """No explicit addresses supplied: uses companion_addresses()'s "lan" pick
     (which already excludes a VPN's virtual tunnel adapter), not the raw
-    outbound-route probe directly - regression for the "localm doesn't like
-    it when I have a VPN active" bug (a VPN becoming the default route used
-    to make the mDNS <name>.local advertisement point at the unreachable
-    VPN tunnel IP instead of the real LAN address)."""
+    outbound-route probe directly. With a VPN as the default route the raw
+    probe makes the mDNS <name>.local advertisement point at the unreachable
+    VPN tunnel IP instead of the real LAN address."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"mdns_enabled": True,
                                                               "mdns_name": "localm"})
     monkeypatch.setattr("localm.tls.companion_addresses",

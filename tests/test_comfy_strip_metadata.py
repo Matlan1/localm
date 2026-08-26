@@ -1,24 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Privacy regression tests for `_strip_png_metadata`.
+"""Privacy regression tests for `_strip_png_metadata`.
 
-ComfyUI PNGs embed the full prompt/workflow in tEXt/eXIf chunks, so localm
-strips them before the saved copy is treated as clean. The function's own
-docstring promises "A failure here must NOT be silent."
+ComfyUI PNGs embed the full prompt/workflow in tEXt/eXIf chunks, so localm strips
+them before the saved copy is treated as clean. The function's own docstring
+promises "A failure here must NOT be silent."
 
-The gap these tests pin (checkup 2026-07-01, Privacy MEDIUM): a custom workflow
-save node can emit WebP/JPEG to the hardcoded `.png` path. The stripper only
-knows PNG chunks, so for a non-PNG file it skipped the loop and returned ""
-(= success) with NO warning, while the caller still printed "Image saved ...".
-In privacy mode the retained copy then still carried the prompt/EXIF while the
-user was told the strip succeeded: a rule-5 fail-safe breach.
+The gap these tests pin: a custom workflow save node can emit WebP/JPEG to the
+hardcoded `.png` path. The stripper only knows PNG chunks, so for a non-PNG file
+it skips the loop and returns "" (= success) with NO warning, while the caller
+still prints "Image saved ...". In privacy mode the retained copy then still
+carries the prompt/EXIF while the user is told the strip succeeded.
 
 Covered:
-  * a non-PNG (JPEG-like) blob returns a NON-EMPTY warning and is left untouched
-    (pre-fix this returned "" -> the proven-failing negative case).
+  * a non-PNG (JPEG-like) blob returns a NON-EMPTY warning and is left untouched.
   * a real PNG carrying a tEXt "prompt" chunk still strips clean (returns "")
     and the secret bytes are gone from the file.
-  * a missing file still returns a warning (unchanged behavior).
+  * a missing file still returns a warning.
 """
 
 from __future__ import annotations
@@ -50,10 +47,8 @@ def _png_with_text_prompt() -> bytes:
 
 
 def test_non_png_file_warns_and_is_left_untouched(tmp_path):
-    """A JPEG/WebP written to the .png path cannot be stripped -> loud warning.
-
-    NEGATIVE CASE: pre-fix this returns "" (silent success). The fix must make
-    it return a non-empty warning so the caller stops implying a clean strip.
+    """A JPEG/WebP written to the .png path cannot be stripped, so it must return
+    a non-empty warning and the caller must stop implying a clean strip.
     """
     blob = b"\xff\xd8\xff\xe1" + b"Exif" + b"prompt: secret"  # JPEG/EXIF magic
     path = tmp_path / "generated.png"
@@ -63,7 +58,7 @@ def test_non_png_file_warns_and_is_left_untouched(tmp_path):
 
     assert warning, "non-PNG file must yield a non-empty warning, not silent success"
     assert "prompt" in warning.lower() or "exif" in warning.lower()
-    # We do not understand the format, so we must not mangle it either: leave it.
+    # An unrecognised format is left byte-for-byte alone.
     assert path.read_bytes() == blob
 
 

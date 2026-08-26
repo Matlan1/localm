@@ -68,23 +68,16 @@ def test_gguf_backend_count_messages_tokens_with_llm():
 
 def test_hf_backend_count_messages_tokens_with_tokenizer():
     # Tests HFWorker (_hf_worker.py), not the HFBackend proxy (hf.py): the
-    # chat-template + tokenizer logic runs only in the isolated child process
-    # now (see the thread-pool-exhaustion fix) - HFBackend.count_messages_tokens
-    # is an RPC to that process. The ORIGINAL version of this test patched
-    # HFBackend.count_messages_tokens itself with a mock and asserted the mock's
-    # own return value, which is method-under-test-agnostic and would have
-    # passed unchanged with the method's real body deleted entirely - fixed to
-    # exercise the real logic through a mocked tokenizer (mocking the external
-    # boundary, not the code being tested).
+    # chat-template + tokenizer logic runs only in the isolated child process,
+    # and HFBackend.count_messages_tokens is an RPC to it. Only the tokenizer
+    # itself is mocked.
     from localm.inference.backends._hf_worker import HFWorker
 
-    # Safe today ONLY because count_messages_tokens's body has zero torch/
-    # transformers imports. _hf_worker.py's other methods (load/embed/
-    # chat_stream) do function-local torch/transformers imports with no
-    # native_lib_loaded() guard - production code relies entirely on process
-    # isolation (HFWorker only ever runs in a spawned child) for safety, not a
-    # runtime check. If this test starts calling one of THOSE methods, it needs
-    # the same guard as test_hf_prompt_tokenization.py/test_hf_runner_isolation.py.
+    # Building an HFWorker in-process is safe ONLY because
+    # count_messages_tokens's body has zero torch/transformers imports. The
+    # other methods (load/embed/chat_stream) do function-local
+    # torch/transformers imports with no native_lib_loaded() guard and rely on
+    # process isolation, so a test that calls one of THOSE needs that guard.
     backend = HFWorker.__new__(HFWorker)
     mock_tokenizer = MagicMock()
     mock_tokenizer.apply_chat_template.return_value = "hello world"

@@ -1,20 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """An omitted "model" field must be distinguishable from an explicit "localm".
 
-checkup item 17. protocol.py's ChatRequest/CompletionRequest.model used to
-default to the string "localm" - a TRUTHY sentinel - so a request that OMITTED
-the field entirely was indistinguishable from one that explicitly asked for
-"localm" at ``reported_model = req.model or engine.display_name``
-(routes/chat.py). The "or" never fell through on the natural (omitted-field)
-request shape, so the client was told the literal string "localm" instead of
-the model that actually answered.
+protocol.py's ChatRequest/CompletionRequest.model must not default to a TRUTHY
+sentinel like the string "localm": with one, a request that OMITTED the field
+entirely is indistinguishable from one explicitly asking for "localm" at
+``reported_model = req.model or engine.display_name`` (routes/chat.py), the "or"
+never falls through, and the client is told the literal string instead of the
+model that answered.
 
-FIXTURE PREMISE (diff-review-discipline.md item 19). The pre-existing tests for
-this exact fallback (test_chat_reload_after_eviction.py) all send
-``{"model": ""}`` explicitly - not one omits the field - so that suite is
-structurally incapable of failing on this defect: the value that distinguishes
-"omitted" from "explicitly emptied" is never in the test data. These tests
-build the request body without a "model" key at all.
+FIXTURE PREMISE: the other tests for this fallback
+(test_chat_reload_after_eviction.py) all send ``{"model": ""}`` explicitly, so the
+value that distinguishes "omitted" from "explicitly emptied" is never in their
+test data. These tests build the request body with no "model" key at all.
 """
 
 from __future__ import annotations
@@ -109,9 +106,8 @@ def test_omitted_model_field_reports_the_serving_model(server):
 
 
 def test_omitted_model_field_reports_the_serving_model_on_completions_route(server):
-    """CompletionRequest carries the identical model default - same fix, same
-    fixture-blindness risk, so it needs its own proof rather than riding on the
-    chat route's coverage."""
+    """CompletionRequest carries the identical model default, so it is asserted
+    separately and does not ride on the chat route's coverage."""
     client, engines = server
 
     r = client.post("/v1/completions", json={"stream": False, "prompt": "hi"})

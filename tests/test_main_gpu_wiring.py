@@ -2,9 +2,8 @@
 """Wiring tests for main_gpu_index into the native llama.cpp model params, for
 both native-load call sites: the chat backend (LlamaCpp) and the embedder
 (GGUFEmbedder). Both route through localm.discover.apply_main_gpu, but each
-constructs its own ``mp`` via a mocked ctypes API, so we verify each call site
-actually SETS mp.main_gpu end to end (not just that the shared helper works in
-isolation - see test_discover.py's TestApplyMainGpu for that unit coverage)."""
+constructs its own ``mp`` via a mocked ctypes API, so each call site is checked
+end to end for actually SETTING mp.main_gpu."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,9 +13,9 @@ from localm.inference.backends.llamacpp.llama import LlamaCpp
 
 def _mock_llama_api():
     """A MagicMock standing in for the ctypes llama.cpp API. The model-params
-    struct is a SimpleNamespace seeded with the real native default (main_gpu=0,
-    per _structs.py) rather than a bare MagicMock, so an untouched attribute
-    reads back as the true default instead of an auto-generated child mock."""
+    struct is a SimpleNamespace seeded with the real native default (main_gpu=0),
+    so an untouched attribute reads back as that default and not as an
+    auto-generated child mock."""
     mock_api = MagicMock()
     mp = SimpleNamespace(main_gpu=0, n_gpu_layers=0, use_mmap=True)
     mock_api.llama_model_default_params.return_value = mp
@@ -28,15 +27,14 @@ class TestLlamaCppMainGpuWiring:
 
     def _build(self, mock_api):
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
-            # verbose=True skips the native-stderr-capture context managers
-            # (irrelevant to this test and unnecessary fd juggling against a
-            # fully mocked api).
+            # verbose=True skips the native-stderr-capture context managers,
+            # which are unnecessary fd juggling against a fully mocked api.
             llm = LlamaCpp("m.gguf", n_ctx=512, n_gpu_layers=99, verbose=True)
             # Close deterministically while `api` is still patched: LlamaCpp's
             # cleanup path (_free_native) reads the module-global `api` name,
             # not a stored instance attribute, so a GC-triggered __del__ after
-            # this `with` exits would otherwise call the REAL native
-            # llama_free_model with a MagicMock pointer.
+            # this `with` exits would call the REAL native llama_free_model
+            # with a MagicMock pointer.
             llm.close()
             return llm
 
@@ -57,9 +55,8 @@ class TestLlamaCppMainGpuWiring:
         assert mock_api.llama_model_default_params.return_value.main_gpu == 0
 
     def test_invalid_configured_index_falls_back_to_zero(self, monkeypatch, caplog):
-        # Pin non-Vulkan so membership validation actually runs, regardless of
-        # what native backend is provisioned in the ambient environment (see
-        # test_discover.py::TestResolveMainGpuIndex).
+        # Pin non-Vulkan so membership validation actually runs, whatever native
+        # backend is provisioned in the ambient environment.
         monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"main_gpu_index": 7})
@@ -110,9 +107,8 @@ class TestGgufEmbedderMainGpuWiring:
         assert mock_api.llama_model_default_params.return_value.main_gpu == 0
 
     def test_invalid_configured_index_falls_back_to_zero(self, monkeypatch, caplog):
-        # Pin non-Vulkan so membership validation actually runs, regardless of
-        # what native backend is provisioned in the ambient environment (see
-        # test_discover.py::TestResolveMainGpuIndex).
+        # Pin non-Vulkan so membership validation actually runs, whatever native
+        # backend is provisioned in the ambient environment.
         monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"main_gpu_index": 7})

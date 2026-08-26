@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0012 hang alarm (localm/inference/_hang_alarm.py): the staged
-detect -> surface -> recover pipeline that the 2026-08-18 whole-server hang
-proved was missing.
+"""The hang alarm (localm/inference/_hang_alarm.py): the staged
+detect -> surface -> recover pipeline.
 
-The loop-freeze tests use a REAL asyncio event loop with a real heartbeat
-task and freeze it with a genuine synchronous time.sleep() injected onto the
-loop thread - the exact mechanism ADR-0012 D4 prescribes - not a mocked gap.
-Restart/surface actions are spies: the property under test is that the alarm
-DETECTS and ACTS within its thresholds, not that os.execv works.
+The loop-freeze tests use a REAL asyncio event loop with a real heartbeat task
+and freeze it with a genuine synchronous time.sleep() injected onto the loop
+thread, not a mocked gap. Restart and surface actions are spies: the property
+under test is that the alarm DETECTS and ACTS within its thresholds, not that
+os.execv works.
 """
 
 from __future__ import annotations
@@ -106,8 +105,8 @@ class _RealLoop:
         return None if self.hb is None else time.monotonic() - self.hb
 
     def freeze(self, seconds: float):
-        """The D4-prescribed hang: a genuinely blocking synchronous sleep
-        executed ON the loop thread, exactly what a rogue handler does."""
+        """A genuinely blocking synchronous sleep executed ON the loop thread,
+        exactly what a rogue handler does."""
         self.loop.call_soon_threadsafe(time.sleep, seconds)
 
     def close(self):
@@ -242,19 +241,17 @@ def test_probe_healthy_server_never_fires():
 
 
 # --------------------------------------------------------------------------- #
-#  Detector S: request starvation (the 2026-08-18 incident class)              #
+#  Detector S: request starvation                                              #
 # --------------------------------------------------------------------------- #
 
 def test_starvation_is_log_only_forensics_never_user_facing():
-    """Maintainer directive (2026-08-18, after two live rounds of feedback):
-    anything user-facing must have ZERO false positives, and no threshold
-    separates "requests wedged by a defect" from "legitimately slow silent
-    work" with certainty - so the starvation watch must never surface, never
-    restart, never touch the window. What it must do instead is produce the
-    forensic record the real incident lacked: name the stuck requests
-    (method + path + age), take an immediate stack snapshot, and take a
-    follow-up snapshot one window later so identical frames prove
-    "genuinely wedged" over "merely idle"."""
+    """Anything user-facing must have ZERO false positives, and no threshold
+    separates "requests wedged by a defect" from "legitimately slow silent work"
+    with certainty - so the starvation watch never surfaces, never restarts and
+    never touches the window. What it does instead is produce a forensic record:
+    name the stuck requests (method + path + age), take an immediate stack
+    snapshot, and take a follow-up snapshot one window later so identical frames
+    prove "genuinely wedged" over "merely idle"."""
     state = {"snap": ((), 0.0)}
     spy = _Spy()
     alarm = _make_alarm(
@@ -263,8 +260,8 @@ def test_starvation_is_log_only_forensics_never_user_facing():
         starvation_after=0.3,
     ).start()
     try:
-        # The incident geometry: two requests wedged beyond the window plus
-        # one young one, nothing progressing at all.
+        # Two requests wedged beyond the window plus one young one, nothing
+        # progressing at all.
         state["snap"] = (
             ((1.0, "GET /api/stats"), (0.9, "GET /api/models"),
              (0.05, "GET /api/activity")), 1.0)
@@ -396,10 +393,9 @@ def test_middleware_tracks_inflight_and_progress():
 @pytest.mark.parametrize("path", ["/health", "/whoami"])
 def test_middleware_excludes_instrument_endpoints_from_tracking(path):
     """/health and /whoami are liveness/identity instruments (the alarm's own
-    probe, external monitors, cross-instance discovery polls); counting them
-    as progress would mask the exact starvation they exist to reveal - in
-    the live incident /health answered in 25ms the whole time the server
-    was unusable."""
+    probe, external monitors, cross-instance discovery polls); counting them as
+    progress would mask the exact starvation they exist to reveal, since /health
+    keeps answering in milliseconds while the server is unusable."""
     tracker = ha.RequestProgress()
 
     async def app(scope, receive, send):

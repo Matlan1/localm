@@ -33,22 +33,19 @@ _CANDIDATES = ["LOCALCODER.md", ".localcoder/memory.md"]
 #
 # Everything under these headings is paid on EVERY turn, and it competes with the
 # repo map (capped at _MAX_MAP_CHARS = 3000, indexer.py) and the conversation
-# itself. Measured 2026-07-22: the base coder system prompt is already ~7650
-# chars, so with a full repo map roughly two thirds of the default 4096-token
-# window (~16400 chars) is spoken for before a single memory bullet.
+# itself.
 #
-# An oversized system prompt is also UNRECOVERABLE at runtime: _compact_history
+# An oversized system prompt is UNRECOVERABLE at runtime: _compact_history
 # (agent/context.py) only rewrites the message list, never the system prompt,
-# while context_chars() counts the system prompt in the fill ratio. So a runaway
-# memory file leaves the agent permanently past its auto-compact threshold,
-# shredding real conversation history every turn without ever getting back under
-# budget. The /remember append path (below) makes that growth easy to reach.
+# while context_chars() counts the system prompt in the fill ratio. A runaway
+# memory file therefore leaves the agent permanently past its auto-compact
+# threshold, shredding real conversation history every turn without ever getting
+# back under budget.
 #
-# These are runaway guards, not routine trimmers: real-world files measured on
-# disk are a few hundred bytes, so they should never fire in normal use. When one
-# does fire the drop is surfaced both to the model (an in-band notice) and to the
-# user (see memory_warning / custom_instructions_warning), never hidden
-# (AGENTS.md rule 5).
+# These are runaway guards, not routine trimmers, and should never fire in normal
+# use. When one does fire the drop is surfaced both to the model (an in-band
+# notice) and to the user (see memory_warning / custom_instructions_warning),
+# never hidden.
 _MAX_MEMORY_CHARS = 3_000
 _MAX_CUSTOM_INSTRUCTIONS_CHARS = 3_000
 
@@ -126,14 +123,11 @@ def _read_injectable(p: Optional[Path]) -> tuple:
     """
     Read *p* for injection. Returns ``(stripped_text, unreadable)``.
 
-    ``unreadable`` distinguishes the two cases the old bare ``except OSError:
-    return ""`` collapsed into one: a file that is simply ABSENT (normal, nothing
-    to say) versus one that EXISTS but could not be read (a locked, corrupt, or
-    permission-denied file). The second silently dropped the user's whole memory
-    out of the system prompt while reporting nothing, so it is surfaced by the
-    *_warning helpers below rather than swallowed (AGENTS.md rule 5). The empty
-    return itself is kept, so an unreadable file degrades to "no memory" instead
-    of killing the session.
+    ``unreadable`` distinguishes two cases: a file that is simply ABSENT (normal,
+    nothing to say) versus one that EXISTS but could not be read (a locked,
+    corrupt, or permission-denied file). The second is surfaced by the *_warning
+    helpers below. Either way the text is empty, so an unreadable file degrades to
+    "no memory" instead of killing the session.
     """
     if p is None:
         return "", False
@@ -150,9 +144,9 @@ def load_memory(cwd: Path) -> str:
     """Return memory file content, stripped and capped for injection, or empty
     string if none exists.
 
-    Capped at _MAX_MEMORY_CHARS: content over the budget is cut back with a
-    visible notice rather than dropped silently. Use :func:`memory_warning` to
-    tell the user when that happened.
+    Capped at _MAX_MEMORY_CHARS: content over the budget is cut back and leaves a
+    visible notice, never dropped silently. Use :func:`memory_warning` to tell the
+    user when that happened.
     """
     text, _ = _read_injectable(find_memory_file(cwd))
     return _cap_for_injection(text, _MAX_MEMORY_CHARS, "project memory", _MEMORY_REMEDY)
@@ -173,12 +167,11 @@ def memory_warning(cwd: Path) -> str:
     return _overflow_warning(p, raw, _MAX_MEMORY_CHARS, "Project memory", _MEMORY_REMEDY)
 
 
-# User-authored custom instructions (rec#584). This is distinct from the project
-# MEMORY above: memory is a running list of project FACTS, added by the user with
-# /remember, whereas system.md is hand-written guidance the user wants the agent
-# to follow (conventions, style, constraints). It is injected into the system
-# prompt under "## User Instructions". A single, obvious location keeps it
-# discoverable and out of the memory file.
+# User-authored custom instructions, distinct from the project MEMORY above:
+# memory is a running list of project FACTS added by the user with /remember,
+# whereas system.md is hand-written guidance the user wants the agent to follow
+# (conventions, style, constraints). It is injected into the system prompt under
+# "## User Instructions".
 CUSTOM_INSTRUCTIONS_FILE = ".localcoder/system.md"
 
 _INSTRUCTIONS_REMEDY = "Shorten it so the whole file is followed."
@@ -198,10 +191,9 @@ def load_custom_instructions(cwd: Path) -> str:
     """Return the contents of ``.localcoder/system.md`` (stripped and capped for
     injection), or empty string when the file does not exist or cannot be read.
 
-    Capped at _MAX_CUSTOM_INSTRUCTIONS_CHARS. These are the user's own explicit
-    directives, so the cap is deliberately loud rather than quiet: the model sees
-    a notice that the file was cut, and :func:`custom_instructions_warning` tells
-    the user which of their instructions are not being followed.
+    Capped at _MAX_CUSTOM_INSTRUCTIONS_CHARS, loudly: the model sees a notice that
+    the file was cut, and :func:`custom_instructions_warning` tells the user which
+    of their instructions are not being followed.
     """
     text, _ = _read_injectable(_existing_instructions_file(cwd))
     return _cap_for_injection(text, _MAX_CUSTOM_INSTRUCTIONS_CHARS,

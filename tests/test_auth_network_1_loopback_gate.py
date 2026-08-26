@@ -1,18 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""AUTH-NETWORK-1 (security): cli/_core.py's _exposed_bind_warning() and
-_resolve_tls() gated two security-relevant decisions (the unauthenticated-bind
-warning, and whether to skip TLS) on a literal {"127.0.0.1", "localhost", "::1"}
-set instead of the already-hoisted bindhost.is_loopback_host() - which exists
-specifically because this exact check was independently copy-pasted five times
-before. A bind host like "127.0.0.2" is loopback per ipaddress.is_loopback
-(the whole 127.0.0.0/8 range) but is NOT in the literal set, so the two gates
-misclassified it as network-exposed: an unauthenticated 127.0.0.2 bind wrongly
-triggered the "anyone on the network can use this" warning, and a plain-HTTP
-127.0.0.2 bind wrongly minted a TLS certificate instead of staying loopback
-plain-HTTP.
+"""cli/_core.py's _exposed_bind_warning() and _resolve_tls() gate two
+security-relevant decisions - the unauthenticated-bind warning, and whether to
+skip TLS - on bindhost.is_loopback_host(), which is ipaddress-based and covers
+the whole 127.0.0.0/8 range plus ::1 rather than a literal
+{"127.0.0.1", "localhost", "::1"} set.
 
-Regression: both gates must use bindhost.is_loopback_host() (ipaddress-based,
-covers the whole 127.0.0.0/8 range and ::1), not the narrower literal set.
+So a bind host like "127.0.0.2" counts as loopback: no network-exposure
+warning, and no TLS certificate minted. A real network bind still gets both.
 """
 
 import os
@@ -22,9 +16,7 @@ from localm.cli._core import _exposed_bind_warning, _resolve_tls
 
 
 def test_bindhost_confirms_non_canonical_loopback():
-    # Sanity: bindhost.is_loopback_host() (the canonical predicate) already
-    # correctly classifies 127.0.0.2 as loopback - the bug is that cli/_core.py
-    # did not use it.
+    # bindhost.is_loopback_host() classifies 127.0.0.2 as loopback.
     assert is_loopback_host("127.0.0.2") is True
     assert is_loopback_host("127.1") is False  # not a form ipaddress.ip_address parses
 
@@ -49,8 +41,7 @@ def test_real_network_bind_still_warns(monkeypatch):
 
 
 def test_non_canonical_loopback_bind_stays_plain_http():
-    # A loopback bind must resolve to (None, None) - plain HTTP, no TLS cert
-    # minted - the same as the canonical "127.0.0.1" form.
+    # A loopback bind resolves to (None, None): plain HTTP, no TLS cert minted.
     assert _resolve_tls("127.0.0.2", no_tls=False, tls_cert=None, tls_key=None) == (None, None)
 
 

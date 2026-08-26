@@ -11,67 +11,35 @@ from pathlib import Path
 from typing import Callable, Optional
 import io
 
-# Hard cap on extracted text per document - protects the chunker and the
-# index from a runaway file. ~8 MB of text is far beyond any useful context.
+# Hard cap on extracted text per document.
 MAX_TEXT_CHARS = 8_000_000
 
-# Hard cap on the DECOMPRESSED bytes we will pull out of a zip container
-# (.docx). The upload route caps the COMPRESSED payload (~30 MB), but a zip's
-# deflate ratio is ~1000x, so a 1 MB upload can decompress to gigabytes and
-# exhaust RAM (a "zip bomb" DoS) before the text cap above ever applies. 80 MB
-# of decompressed XML is far more than any real document needs (the extracted
-# text is itself capped at MAX_TEXT_CHARS) while making the amplification
-# attack impossible. We enforce it with a BOUNDED stream read, not by trusting
-# the zip header's self-reported size (which an attacker controls).
+# Hard cap on the DECOMPRESSED bytes read out of a zip container (.docx),
+# enforced with a bounded stream read rather than the zip header's self-reported
+# size.
 MAX_ARCHIVE_MEMBER_BYTES = 80_000_000
 
 # Hard cap on how many members an archive extractor will process, and the note
-# emitted when either that cap or the whole-archive MAX_TEXT_CHARS budget is hit.
-# Without these, an archive of thousands of highly-compressible members would be
-# decoded and joined in memory in full BEFORE the per-document MAX_TEXT_CHARS
-# truncation ever applied - a decompression-amplification DoS (a ~30 MB zip ->
-# ~30 GB of RAM). We stop as soon as the accumulated text reaches the budget.
+# emitted when either that cap or the whole-archive text budget is reached.
 MAX_ARCHIVE_MEMBERS = 5_000
 _ARCHIVE_TRUNCATED_NOTE = "[archive truncated: content budget reached]"
 
 # Hard cap on the total bytes an archive extractor may INFLATE, across every
 # member, whether or not that member yielded any text.
-#
-# The three caps above bound the wrong quantities for this attack, and they
-# MULTIPLY rather than compose: MAX_ARCHIVE_MEMBER_BYTES * MAX_ARCHIVE_MEMBERS is
-# 400 GB. The text budget only advances when a member YIELDS TEXT, so a member
-# whose content sniffs as binary is skipped and charges NOTHING - the loop then
-# runs to the full member cap while each iteration still decompresses up to 80 MB.
-# MEASURED (checkup 2026-08-11, LM-FZ-003): a 27.7 MB zip of 5,000 compressible
-# .bin members inflated to 28.0 GB and burned 86.93 s of CPU in ONE call, ending
-# in a correct "no extractable text" refusal - the refusal was never the problem,
-# the 87 seconds spent reaching it was. It fits under the 30 MB /api/rag/extract
-# request cap, which bounds what ARRIVES and says nothing about what decompression
-# PRODUCES.
-#
-# 500 MB is ~60x the ~8 MB text budget, so a legitimate document archive stops on
-# text long before reaching it, and ~1.6 s at the measured 322 MB/s.
 MAX_ARCHIVE_INFLATED_BYTES = 500_000_000
 
 # Hard cap on how deeply extraction may descend into nested containers. The
-# archive extractors already SKIP nested zip/tar members, but the single-stream
-# fallback (a bare .gz/.bz2/.xz that is NOT a tarball) re-enters extract_bytes on
-# its decompressed inner bytes, so gzip(gzip(gzip(...))) - a ~30 KB file - would
-# recurse without bound and raise RecursionError (not an ExtractError, so it
-# escapes every `except ExtractError` guard in the add/upload/extract routes: a
-# decompression-amplification DoS). A small bound is plenty: the deepest LEGIT
-# nesting is ~2 (a .gz wrapping a .zip of text), and this defends the whole
-# recursive extractor, not just the one known vector.
+# single-stream fallback (a bare .gz/.bz2/.xz that is not a tarball) re-enters
+# extract_bytes on its decompressed inner bytes, so the descent is bounded here.
 MAX_EXTRACT_DEPTH = 8
 
 # Tar-family containers (plain tar plus single-stream gzip/bzip2/xz, which may be
-# a compressed tarball OR a single compressed file). All route to the tar-or-
+# a compressed tarball or a single compressed file). All route to the tar-or-
 # stream handler, which falls back to single-stream decompression when the
-# payload is not actually a tar (AUDIT-MED-17).
+# payload is not actually a tar.
 _TAR_LIKE_SUFFIXES = {".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz", ".txz"}
 
-# Suffixes handled by extract_text. Anything not listed is refused (binary
-# formats would poison the index with mojibake).
+# Suffixes handled by extract_text. Anything not listed is refused.
 _PLAIN_SUFFIXES = {
     ".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".tsv",
     ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg",
@@ -85,26 +53,22 @@ _ARCHIVE_SUFFIXES = {".zip", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz", ".txz
 
 EXTRACTABLE_SUFFIXES = _PLAIN_SUFFIXES | {".pdf", ".docx", ".html", ".htm", ".ipynb"} | _IMAGE_SUFFIXES | _ARCHIVE_SUFFIXES
 
-# SECRET / key material. A plain-text key/cert file must not land in a searchable,
-# model-visible index, whether via a folder walk (AUDIT-MED-18) or an
+# SECRET / key material: never indexed, whether via a folder walk or an
 # explicitly-named API pick (confine_index_path with a policy). Covers PEM
-# keys/certs, PKCS bundles, keystores, and formats that routinely embed a private
-# key inline (OpenVPN configs; direnv is handled by NAME in SECRET_INDEX_NAMES).
+# keys/certs, PKCS bundles, keystores, and formats that embed a private key
+# inline (OpenVPN configs; direnv is handled by NAME in SECRET_INDEX_NAMES).
 #
-# Kept SEPARATE from UNINDEXABLE_SUFFIXES below because the two carry different
-# consequences, and conflating them was REG-567: naming a secret is a SECURITY
-# refusal the caller must be told about loudly, while naming a .mp4 is just "that
-# file has no text in it" and must not take down the other 29 files in the batch.
+# Separate from UNINDEXABLE_SUFFIXES below: naming a secret is a refusal the
+# caller is told about, while naming an unindexable file is an individual
+# per-file failure that leaves the rest of the batch indexing.
 SECRET_SUFFIXES = {
     ".pem", ".key", ".crt", ".cer", ".der", ".p12", ".pfx",
     ".keystore", ".jks", ".asc", ".gpg", ".kdbx",
     ".ppk", ".p8", ".pk8", ".pkcs12", ".p7b", ".p7c", ".ovpn",
 }
 
-# NON-SECRET files with no extractable text. Skipping these is a convenience and a
-# perf guard, NOT a security boundary: nothing is protected by refusing to index a
-# .mp4, so a request that names one is not a refusal - the file is simply reported
-# as an individual failure and everything else in the batch still indexes.
+# NON-SECRET files with no extractable text. Not a refusal: such a file is
+# reported as an individual failure and the rest of the batch still indexes.
 UNINDEXABLE_SUFFIXES = {
     # Executables / Binaries
     ".exe", ".dll", ".so", ".dylib", ".bin", ".out", ".app", ".msi",
@@ -118,23 +82,18 @@ UNINDEXABLE_SUFFIXES = {
     ".ttf", ".otf", ".woff", ".woff2",
     # Other binary data
     ".pyc", ".pyd", ".db", ".sqlite",
-    # Model weights / large ML binaries: multi-GB files with no index value that
-    # would otherwise be fully read into RAM and sha256-hashed (twice) before
-    # being rejected, on every re-add (rag-blacklist-model-files). This is why the
-    # per-file refusal below must still happen BEFORE the file is read.
+    # Model weights / large ML binaries, refused before the file is read.
     ".gguf", ".safetensors", ".pt", ".pth", ".onnx", ".ckpt", ".h5",
     ".pb", ".tflite", ".npz", ".npy", ".pkl",
 }
 
-# The union: everything a recursive folder walk filters out. Unchanged in content,
-# so the walk behaves exactly as before.
+# The union: everything a recursive folder walk filters out.
 BLACKLISTED_SUFFIXES = SECRET_SUFFIXES | UNINDEXABLE_SUFFIXES
 
-# Extensionless / dotfile secrets a recursive folder walk must skip - the suffix
-# blacklist cannot catch these (AUDIT-MED-18). This filters the recursive walk;
-# the API path (confine_index_path with a policy) applies it to explicit single-
-# file picks too, so a `rag`-scoped caller cannot name a key file directly. The
-# local CLI (policy=None) is unconfined and still honours an explicit pick.
+# Extensionless / dotfile secrets a recursive folder walk must skip, which the
+# suffix blacklist cannot catch. confine_index_path (with a policy) applies it to
+# explicit single-file picks too, so an API caller cannot name a key file
+# directly; the local CLI (policy=None) is unconfined and still honours a pick.
 SECRET_INDEX_NAMES = {
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
     ".netrc", ".pgpass", ".htpasswd", ".git-credentials",
@@ -143,18 +102,8 @@ SECRET_INDEX_NAMES = {
 }
 
 
-# Config-doc TEMPLATES that are SAFE to index. These are committed to git by
-# convention and carry PLACEHOLDERS, not real values: they document which config
-# vars a project needs, which is genuinely useful context for a RAG index over a
-# repo. Blanket-matching ".env." dropped them silently (REG-460).
-#
-# An ALLOWLIST, deliberately, rather than a loosened prefix match. The safe/unsafe
-# split here is by name convention and only fail-safe in one direction: the
-# canonical github/gitignore Node.gitignore ignores `.env` and `.env.*` and
-# un-ignores ONLY `!.env.example`. Every other .env* name carries REAL values -
-# above all `.env.local`, the standard name for local SECRET overrides. So a name
-# that is not positively vetted here stays SECRET (AUDIT-MED-18: key material must
-# never land in a searchable, model-visible index).
+# Config-doc TEMPLATES that are indexed rather than treated as secret. An
+# allowlist: any .env* name not listed here is treated as secret.
 SAFE_ENV_TEMPLATE_NAMES = {
     ".env.example",     # canonical; the one name upstream gitignore un-ignores
     ".env.template",
@@ -185,16 +134,14 @@ _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
               ".pytest_cache", ".mypy_cache", "dist", "build", ".idea",
               ".vscode"}
 
-# Cache for the LLM format tie-break, keyed by unknown extension. Only a genuine
-# guess (heuristic-unsure + a chat model loaded) ever lands here, so a corpus of
+# Cache for the LLM format tie-break, keyed by unknown extension, so a corpus of
 # same-extension files classifies at most once per process.
 _EXT_CLASSIFICATION_CACHE: dict[str, str] = {}
 
-# Canonical, lowercase format labels for the file types localm indexes. A KNOWN
-# extension is the authoritative, FREE signal; the structural sniff below only
-# runs for an UNKNOWN extension whose bytes decoded as text (the odd-extension
-# case the LLM classifier used to guess - and then discard). This label feeds
-# retrieval-filtering / display, not parsing.
+# Canonical, lowercase format labels for the file types localm indexes. A known
+# extension decides; the structural sniff below runs only for an unknown
+# extension whose bytes decoded as text. The label feeds retrieval-filtering and
+# display, not parsing.
 _SUFFIX_FORMAT = {
     ".txt": "text", ".log": "text", ".rst": "text",
     ".md": "markdown", ".markdown": "markdown",
@@ -218,13 +165,12 @@ _SUFFIX_FORMAT = {
 }
 
 
-# A structural sniff only ever needs the start of a document, so it works on a
-# bounded prefix (cheap and fixed-cost even for an 8 MB file); JSON above this
-# size is confirmed by matching the closing bracket rather than parsing megabytes.
+# The structural sniff reads a bounded prefix only; JSON larger than
+# _JSON_PARSE_MAX is confirmed by matching the closing bracket instead of parsed.
 _SNIFF_PREFIX = 65_536
 _JSON_PARSE_MAX = 1_000_000
-# Tag names that mark HTML rather than generic XML (single-letter/ambiguous names
-# like <a> are deliberately excluded so a real XML element does not read as HTML).
+# Tag names that mark HTML rather than generic XML. Single-letter/ambiguous names
+# are excluded, so a real XML element does not read as HTML.
 _HTML_TAG_RE = re.compile(
     r"</?(?:div|span|body|table|tr|td|th|ul|ol|li|h[1-6]|section|article|"
     r"head|title|nav|header|footer|button|form|input|img|p)\b")
@@ -242,9 +188,8 @@ def sniff_text_format(text: str) -> Optional[str]:
         return None
     head = s[:1]
 
-    # JSON: confirm rather than guess - a bare leading '{'/'[' is also a markdown
-    # link or a '[section]' header. Parse when the document is small; for a very
-    # large one, match the closing bracket instead of parsing megabytes.
+    # JSON: parse when the document is small; for a large one, match the closing
+    # bracket instead.
     if head in "{[":
         if len(s) <= _JSON_PARSE_MAX:
             try:
@@ -280,9 +225,8 @@ def sniff_text_format(text: str) -> Optional[str]:
         if any("=" in ln for ln in lines):
             return "ini"
 
-    # CSV: a consistent, non-zero comma count across the first rows, with enough
-    # evidence to not mislabel prose/code that merely contains commas - either
-    # >=3 columns or >=3 rows, and no obvious code/prose punctuation in a row.
+    # CSV: a consistent, non-zero comma count across the first rows, plus either
+    # >=3 columns or >=3 rows, and no code/prose punctuation in a row.
     if len(lines) >= 2 and "," in lines[0]:
         rows = lines[:10]
         counts = [ln.count(",") for ln in rows]
@@ -292,7 +236,7 @@ def sniff_text_format(text: str) -> Optional[str]:
             return "csv"
 
     # Markdown: an ATX heading at the very top, corroborated by another markdown
-    # marker so a lone '#'-comment in code/yaml/ini is not mislabeled markdown.
+    # marker.
     if lines and re.match(r"#{1,6}\s+\S", lines[0]):
         corroborated = (
             any(re.match(r"#{1,6}\s+\S", ln) for ln in lines[1:])
@@ -302,9 +246,8 @@ def sniff_text_format(text: str) -> Optional[str]:
         if corroborated:
             return "markdown"
 
-    # YAML: "key: value" block-mapping lines must be the DOMINANT shape and carry
-    # no assignment/call punctuation (so colon-annotated code - "x: int = 1" - is
-    # not read as YAML).
+    # YAML: "key: value" block-mapping lines must be the dominant shape and carry
+    # no assignment/call punctuation.
     kv = [ln for ln in lines
           if re.match(r"[A-Za-z0-9_.-]+\s*:(\s+\S|\s*$)", ln)
           and not any(ch in ln for ch in "={(")]
@@ -343,14 +286,10 @@ def classify_format(text: str, filename: str = "", *,
     sniffed = sniff_text_format(text)
     if sniffed:
         return sniffed
-    # Unknown extension AND inconclusive structure: the ONLY place a model may be
-    # consulted, and only when the toggle is on. The OUTCOME (a real guess, or the
-    # "text" fallback) is cached per extension so a same-extension corpus attempts
-    # the tie-break AT MOST ONCE per process - never re-firing a chat call per file
-    # (the "not even cached, retries per file" cost). This also bounds the case the
-    # classify_fn short-circuit alone cannot: a non-chat engine (e.g. an HF encoder
-    # embedder) being resident makes active_model() truthy, so the first such file
-    # would still issue one failing chat call; caching the outcome stops the rest.
+    # Unknown extension and inconclusive structure: the only place a model is
+    # consulted, and only when the toggle is on. The outcome (a real guess, or the
+    # "text" fallback) is cached per extension, so a same-extension corpus
+    # attempts the tie-break at most once per process.
     if classify_fn is not None:
         cached = _EXT_CLASSIFICATION_CACHE.get(suffix)
         if cached is not None:
@@ -359,9 +298,7 @@ def classify_format(text: str, filename: str = "", *,
             from localm.config import load_config
             enabled = bool(load_config().get("rag_classify_unknown_files", True))
         except Exception as e:
-            # Config unreadable: fall back to the DEFAULT (feature on), matching a
-            # fresh install where the key is simply absent. Benign default, but surface
-            # it so a genuinely corrupt config is discoverable, not silent. Rule 5.
+            # Config unreadable: fall back to the default (feature on) and log it.
             from localm.debuglog import logger as _dbg
             _dbg.debug("rag classify_format: could not load config, assuming "
                        "rag_classify_unknown_files=on: %s", e)
@@ -472,10 +409,8 @@ def _decode_text(data: bytes) -> str:
         return data.decode("utf-16", errors="replace")          # BOM, either endianness
     if data.startswith(b"\xef\xbb\xbf"):
         return data.decode("utf-8-sig", errors="replace")
-    # BOM-less UTF-16 must be sniffed BEFORE trying UTF-8: NUL is a valid
-    # UTF-8 codepoint, so ASCII-range UTF-16 (every other byte NUL) decodes
-    # as UTF-8 "successfully" into NUL-riddled garbage. Real text files
-    # contain no NULs at all.
+    # BOM-less UTF-16 is sniffed BEFORE trying UTF-8: a NUL-heavy sample is
+    # decoded as UTF-16 of the matching endianness.
     sample = data[:512]
     if sample and sample.count(0) > len(sample) // 4:
         endian = "utf-16-be" if sample[0:1] == b"\x00" else "utf-16-le"
@@ -483,7 +418,7 @@ def _decode_text(data: bytes) -> str:
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        # Legacy single-byte encoding - cp1252 maps every byte, nothing is lost
+        # Legacy single-byte encoding: cp1252 maps every byte.
         return data.decode("cp1252", errors="replace")
 
 
@@ -553,9 +488,8 @@ def extract_bytes(data: bytes, filename: str,
             raise ExtractError(f"Active model returned empty description for {filename}")
         text = desc
     elif inferred_ext in _PLAIN_SUFFIXES:
-        # The document's format label is derived separately, heuristic-first, by
-        # classify_format() at index time (rag/store.py) and carried into chunk
-        # metadata - not guessed-and-discarded here, and never a blocking chat call.
+        # The format label is derived separately by classify_format() at index
+        # time and carried into chunk metadata.
         text = _decode_text(data)
     elif inferred_ext in (".html", ".htm"):
         from localm.netpolicy import html_to_text
@@ -602,9 +536,8 @@ def _extract_zip(data: bytes, filename: str,
                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None,
                  *, _depth: int = 0) -> str:
     """Extract and merge text from a ZIP archive, BOUNDED in total output and
-    member count so a many-member archive cannot amplify into a RAM DoS
-    (AUDIT-HIGH-8). Per-member read failures are logged, not folded into the
-    indexed text (AUDIT-MED-21)."""
+    member count so a many-member archive cannot amplify into a RAM DoS.
+    Per-member read failures are logged, not folded into the indexed text."""
     import io
     texts: list = []
     total = 0
@@ -623,16 +556,11 @@ def _extract_zip(data: bytes, filename: str,
                 processed += 1
                 try:
                     with zf.open(member) as fh:
-                        # Charged against the WHOLE-ARCHIVE inflation budget, and
-                        # the read is clamped to what is left of it so the final
-                        # member cannot overshoot by a further MAX_ARCHIVE_MEMBER_
-                        # BYTES before being charged.
+                        # Clamped to what is left of the whole-archive inflation
+                        # budget, so the final member cannot overshoot it.
                         member_data = fh.read(min(limit, MAX_ARCHIVE_INFLATED_BYTES - inflated) + 1)
-                    # Charge and break BEFORE the per-member limit check below:
-                    # that check SKIPS an oversized member with `continue`, but the
-                    # bytes were already inflated to discover it was oversized.
-                    # Charging afterwards would let the measured bomb shape (every
-                    # member skipped) run entirely uncharged.
+                    # Charge and break BEFORE the per-member limit check below,
+                    # which skips an oversized member that was already inflated.
                     inflated += len(member_data)
                     if inflated >= MAX_ARCHIVE_INFLATED_BYTES:
                         truncated = True
@@ -667,9 +595,8 @@ def _extract_tar_or_stream(data: bytes, filename: str,
                            *, _depth: int = 0) -> str:
     """Extract a tar-family payload. Handles plain and compressed TARBALLS
     (.tar/.tgz/.tbz/.txz/.tar.gz) via tarfile; when the payload is a SINGLE
-    gzip/bzip2/xz-compressed file rather than a tar, decompresses that one stream
-    and extracts its inner content (AUDIT-MED-17: previously a single .gz was
-    mis-routed here and failed, and .tgz/.tbz/.txz had no handler at all).
+    gzip/bzip2/xz-compressed file rather than a tar, decompresses that one
+    stream and extracts its inner content.
 
     The single-stream branch RECURSES into extract_bytes on the decompressed
     bytes, so it passes ``_depth + 1`` - a nested .gz.gz.gz... is bounded by
@@ -680,23 +607,10 @@ def _extract_tar_or_stream(data: bytes, filename: str,
     try:
         tf = tarfile.open(fileobj=io.BytesIO(data))
     except (tarfile.ReadError, EOFError, zlib.error):
-        # "Cannot read this as a tar" arrives in more than one shape, and all of
-        # them take the same fallback. ReadError is the ordinary signal (it is
-        # simply not a tar). But a CORRUPT or TRUNCATED gzip surfaces
-        # differently: tarfile's gzopen reads the first tar block through a
-        # GzipFile, which raises EOFError on a truncated stream (or zlib.error
-        # for a mid-block corruption), and gzopen converts only OSError to
-        # ReadError - neither of those IS an OSError, so pre-REG-459 they
-        # escaped raw, past every `except ExtractError` guard in the callers:
-        # the folder index ABORTED THE WHOLE RUN instead of recording the one
-        # bad file in failed[], and the /api/rag/extract upload 500ed instead of
-        # returning its intended clean 422.
-        #
-        # Deliberately NOT a blanket `except Exception` (rule 5): these three are
-        # the decompression failures that mean "unreadable as a tar", so they
-        # fall through to _decompress_single_stream, which re-reads the bytes as
-        # a single stream and raises a clean, per-FILE ExtractError if that fails
-        # too. Anything else still propagates rather than being silently reshaped.
+        # ReadError, EOFError and zlib.error all mean "unreadable as a tar" and
+        # take the same fallback: _decompress_single_stream re-reads the bytes as
+        # a single stream and raises a per-file ExtractError if that fails too.
+        # Anything else propagates.
         inner = _decompress_single_stream(data, filename)
         return extract_bytes(inner, _strip_compression_suffix(filename),
                              describe_image_fn, _depth=_depth + 1)
@@ -712,13 +626,9 @@ def _extract_tar_members(tf, filename: str, describe_image_fn, *, _depth: int = 
     inflated = 0
     truncated = False
     limit = MAX_ARCHIVE_MEMBER_BYTES
-    # Collect at most MAX_ARCHIVE_MEMBERS headers by iterating the tar LAZILY.
-    # `getmembers()` parses EVERY member header up front, so a small compressed
-    # tarball of hundreds of thousands of members (a member-count bomb) took ~20s
-    # to enumerate BEFORE the per-loop cap ever applied - unbounded work under the
-    # size cap, and no exception, so it slipped past the ExtractError guards. The
-    # lazy scan stops reading headers at the cap; we sort only that bounded subset
-    # for deterministic order.
+    # Collect at most MAX_ARCHIVE_MEMBERS headers by iterating the tar LAZILY, so
+    # header parsing stops at the cap; only that bounded subset is sorted, for
+    # deterministic order.
     members: list = []
     try:
         for member in tf:
@@ -743,8 +653,8 @@ def _extract_tar_members(tf, filename: str, describe_image_fn, *, _depth: int = 
                 if f is None:
                     continue
                 # Same whole-archive inflation budget as _extract_zip, charged and
-                # broken on BEFORE the per-member check for the same reason: that
-                # check skips an oversized member that has already been inflated.
+                # broken on BEFORE the per-member check below, which skips a
+                # member that was already inflated.
                 member_data = f.read(min(limit, MAX_ARCHIVE_INFLATED_BYTES - inflated) + 1)
                 inflated += len(member_data)
                 if inflated >= MAX_ARCHIVE_INFLATED_BYTES:
@@ -816,8 +726,8 @@ def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
     size (zip-bomb guard). The compressed upload is capped upstream, but a
     zip's deflate ratio is ~1000x, so a 1 MB upload can decompress to
     gigabytes; a bounded STREAM read - not trusting the header's self-reported
-    ZipInfo.file_size, which an attacker controls - is what actually prevents
-    the amplification from exhausting RAM (CWE-409)."""
+    ZipInfo.file_size, which an attacker controls - is what prevents the
+    amplification from exhausting RAM."""
     limit = MAX_ARCHIVE_MEMBER_BYTES
     with zf.open(member) as fh:            # ZipExtFile decompresses lazily on read
         raw = fh.read(limit + 1)          # bounded: at most limit+1 decompressed bytes
@@ -839,36 +749,15 @@ def _extract_docx(data: bytes, filename: str) -> str:
             xml = _read_zip_member(zf, "word/document.xml", filename)
     except (zipfile.BadZipFile, KeyError, OSError) as e:
         raise ExtractError(f"Cannot parse {filename} as .docx: {e}")
-    # Tabs and explicit breaks inside runs. The attribute span is `[^<>]*`, NOT
-    # `[^>]*`: bounded only by `>`, a malformed document whose openers never close
-    # (`'<w:br' * n`, no `>` anywhere) makes the class run to end-of-text and then
-    # backtrack a character at a time, from EVERY opener - quadratic, measured
-    # 0.012 / 0.157 / 2.575s at 2.5 / 10 / 40 KB of document.xml. Excluding `<`
-    # too stops each attempt at the next tag instead, which is O(1) per opener.
-    # Same justification the run extractor below already gives for its own class:
-    # XML escapes `<`, so a real attribute value can never contain one.
+    # Tabs and explicit breaks inside runs. The attribute span excludes both < and
+    # >, so a match stops at the next tag instead of scanning past it.
     xml = re.sub(r"<w:(?:tab|br|cr)\b[^<>]*/?>", "\t", xml)
-    # Split on the paragraph END tag - a LINEAR str.split, not a backtracking
-    # regex. The old `<w:p\b.*?</w:p>` findall was quadratic on malformed XML
-    # with tens of thousands of unmatched <w:p openers (ReDoS: ~135s CPU on a
-    # 50k-opener input). str.split is O(n); the inner <w:t> match is bounded to
-    # a single paragraph chunk and cannot backtrack across paragraph boundaries.
+    # Split on the paragraph END tag with str.split; the inner <w:t> match is then
+    # bounded to a single paragraph chunk.
     paragraphs = []
     for para in xml.split("</w:p>"):
-        # LINEAR run extraction. The content group is `[^<]*`, NOT `.*?`: a lazy
-        # `.*?` rescans to end-of-paragraph once per `<w:t>` opener, so a paragraph
-        # with tens of thousands of UNCLOSED openers is O(n^2) and pins a CPU for
-        # minutes on a tiny file (a CPU-DoS the ExtractError-only route guards
-        # can't stop, since it raises only after the burn). XML text is escaped,
-        # so a real run never contains a raw '<'; `[^<]*` stops at the next tag and
-        # cannot backtrack across openers, making this O(n) while staying correct.
-        # The ATTRIBUTE span is `[^<>]*` for the same reason the content group is
-        # `[^<]*`. The content group was already hardened; the attribute one was
-        # missed, and it has the identical shape: with only `>` excluded, a
-        # paragraph of `'<w:t' * n` openers that never close scans to the end and
-        # backtracks once per opener (0.014 / 0.178 / 0.799s at 8 / 32 / 64 KB).
-        # A hardening pass that fixes one class in a pattern and leaves its
-        # sibling is exactly how this survived the first round.
+        # Run extraction. The content group excludes <, and the attribute span
+        # excludes both < and >, so each match stops at the next tag.
         runs = re.findall(r"<w:t\b[^<>]*>([^<]*)</w:t>", para)
         if runs:
             paragraphs.append(_unescape_xml("".join(runs)))
@@ -884,15 +773,11 @@ def _extract_ipynb(data: bytes, filename: str) -> str:
     try:
         nb = json.loads(data.decode("utf-8", errors="replace"))
     except (json.JSONDecodeError, ValueError, RecursionError) as e:
-        # Deeply-nested JSON makes json.loads raise RecursionError (a
-        # RuntimeError, NOT a JSONDecodeError), which would otherwise escape this
-        # guard and surface as an unhandled HTTP 500 from the extract route. Fold
-        # it into a clean ExtractError -> 422, like sniff_format already does.
+        # RecursionError from deeply-nested JSON is folded into ExtractError too:
+        # it is a RuntimeError, not a JSONDecodeError.
         raise ExtractError(f"Cannot parse {filename} as a notebook: {type(e).__name__}")
-    # A notebook is a JSON object with a "cells" list, but an uploaded file may
-    # be malformed (cells as a string, a cell as an int, source as a non-list).
-    # Validate the shape and coerce defensively so a wrong type raises a clean
-    # ExtractError -> 422, never an unhandled TypeError/AttributeError -> 500.
+    # A notebook is a JSON object with a "cells" list. Validate the shape and
+    # coerce, so a malformed file raises ExtractError rather than TypeError.
     if not isinstance(nb, dict):
         raise ExtractError(f"{filename} is not a valid notebook (expected a JSON object)")
     cells = nb.get("cells", [])
@@ -903,8 +788,8 @@ def _extract_ipynb(data: bytes, filename: str) -> str:
         if not isinstance(cell, dict):
             continue                      # skip a malformed cell, do not crash
         source = cell.get("source", "")
-        # "source" is normally a list of line strings, but hand-written or
-        # malformed notebooks may store a bare string (or other JSON); coerce.
+        # "source" is normally a list of line strings; a bare string or other JSON
+        # is coerced.
         if isinstance(source, list):
             src = "".join(str(s) for s in source)
         else:

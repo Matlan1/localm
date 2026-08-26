@@ -1,24 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""_gpu_registry_sync() must never run on the server event loop (REG-454).
+"""_gpu_registry_sync() must never run on the server event loop.
 
 It does blocking work on every model load/unload: a registry temp-file
 write + os.replace, a _model_file_size() stat/rglob walk, and - when a non-zero
 main_gpu_index is configured - _current_gpu_index() -> resolve_main_gpu_index()
 -> discover.list_gpus(), a real torch/nvidia-smi hardware probe bounded to a 4s
 deadline. On the single event loop that stalls EVERY concurrent request and
-stream for up to that deadline: the same "GPU probes on the event loop" hang
-class fixed in #541.
-
-The periodic heartbeat (_gpu_registry_heartbeat_loop) and the idle-unload path
-were explicitly wrapped in run_in_executor with a comment naming this exact
-stall risk; the load/unload call sites were left synchronous.
+stream for up to that deadline.
 
 These tests assert the property directly - the sync work runs on a thread OTHER
-than the event-loop thread - rather than trying to measure a stall. The suite
-never caught this because _gpu_registry_sync no-ops whenever _gpu_coord is
-falsy, which it always is under pytest (no advertised, non-isolated server), and
-where a test does set main_gpu_index, list_gpus is mocked - so no real probe and
-no measurable stall ever occurs.
+than the event-loop thread - rather than trying to measure a stall.
 """
 
 from __future__ import annotations
@@ -139,11 +130,9 @@ def test_unload_one_model_syncs_registry_off_the_loop(probe):
 
 
 def test_unload_embedder_if_matches_syncs_registry_off_the_loop(probe, monkeypatch, tmp_path):
-    """The targeted-unload counterpart: it already offloads loaded_path(), the
-    cheap active_requests() precheck, reset_embedder(force=False) (which now
-    makes the final busy/idle decision atomically under embedder._LOCK - see
-    its docstring) and the VRAM wait, each with a comment naming the
-    event-loop freeze hazard - but not the registry sync."""
+    """The targeted-unload counterpart: loaded_path(), the active_requests()
+    precheck, reset_embedder(force=False) and the VRAM wait are already
+    offloaded, and the registry sync must be too."""
     model = tmp_path / "emb.gguf"
     model.write_bytes(b"x")
     monkeypatch.setattr("localm.inference.embedder.loaded_path", lambda: str(model))

@@ -2,12 +2,12 @@
 """Multi-instance GPU/VRAM coordination route (see ``localm.gpu_registry``).
 
 One endpoint: a sibling localm instance on this machine, itself out of local
-eviction candidates, asks THIS instance to release its own VRAM. Deliberately
-a SEPARATE auth code path from ``require_scope``/``MODELS_WRITE``: it accepts
-ONLY this instance's own ``coordination_token`` (minted fresh at startup,
-stored only in this instance's own 0600 gpu-registry entry) - never the real
-API key, shell token, or instance attach token, so holding a real API key
-alone does not grant this without ALSO knowing the token."""
+eviction candidates, asks THIS instance to release its own VRAM. A SEPARATE
+auth code path from ``require_scope``/``MODELS_WRITE``: it accepts ONLY this
+instance's own ``coordination_token`` (minted fresh at startup, stored only in
+this instance's own 0600 gpu-registry entry) - never the real API key, shell
+token, or instance attach token, so holding a real API key alone does not grant
+this without ALSO knowing the token."""
 
 from __future__ import annotations
 
@@ -52,10 +52,9 @@ def register(app: FastAPI, ctx) -> None:
         # JSON body field, so a non-ASCII one would raise instead of 403. The
         # str() coercion stays - a JSON body can carry a non-str token.
         if not expected or not presented or not ct_equal(str(presented), str(expected)):
-            # Deliberately identical 403 whether coordination is simply not
-            # enabled on this instance (no _gpu_coord) or a token was
-            # presented and did not match - never confirm/deny which case it
-            # is to an unauthenticated caller.
+            # An identical 403 whether coordination is not enabled on this
+            # instance (no _gpu_coord) or a token was presented and did not
+            # match, so the two cases are indistinguishable to a caller.
             raise HTTPException(
                 403, "Invalid or missing coordination token.")
         result = await _hs.unload_all_models()

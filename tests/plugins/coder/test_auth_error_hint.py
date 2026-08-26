@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""U9: a coder 401/403 must surface an actionable API-key hint, not a bare
+"""A coder 401/403 must surface an actionable API-key hint, not a bare
 '401 Client Error'. The HTTP backend raises CoderAuthError (carrying how to
 find/set the key) for auth statuses, and behaves normally otherwise.
 
-Also covers #964's client-side gap: a non-auth error status whose response
-carries server-provided detail (FastAPI's {"detail": ...} body, e.g. the
-grammar-worker-fault 503 from inference/routes/chat.py) must surface that
-detail to the user - requests.raise_for_status() never reads the body at
-all, which is why a careful server-side error message like "the model
-worker faulted" never reached the reporter of #964.
+A non-auth error status whose response carries server-provided detail
+(FastAPI's {"detail": ...} body, e.g. the grammar-worker-fault 503 from
+inference/routes/chat.py) must also surface that detail:
+requests.raise_for_status() never reads the body at all.
 """
 
 from unittest.mock import MagicMock, patch
@@ -68,7 +66,7 @@ def test_non_auth_status_still_raises_plain_httperror():
 
 
 def test_grammar_worker_fault_503_surfaces_server_detail():
-    """#964: the exact shape inference/routes/chat.py's grammar-worker-fault
+    """The exact shape inference/routes/chat.py's grammar-worker-fault
     503 sends (a FastAPI {"detail": "..."} body) must reach the raised
     exception's message, not just the bare status line."""
     body = {"detail": "Grammar validation failed: the model worker faulted "

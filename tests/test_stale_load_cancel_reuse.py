@@ -1,25 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A reused engine must never carry a stale, already-SET load-cancel event into
-its next load (REG-461).
+its next load.
 
 switch_engine builds a fresh cancel Event per call but only ever INSTALLS it on
 the engine when preempt=True. An engine object outlives a load: idle-unload
-deliberately keeps it in _engines for lazy reload (see
-test_idle_unload_keeps_engine.py), so a preempt=True switch that gets
-superseded leaves that engine holding a SET event with nothing to clear it -
-set_load_cancel had exactly one call site, and the GGUF backend clears
-_load_cancel only in its own __init__.
+keeps it in _engines for lazy reload (see test_idle_unload_keeps_engine.py), so
+a preempt=True switch that gets superseded leaves that engine holding a SET
+event with nothing to clear it - set_load_cancel has exactly one call site, and
+the GGUF backend clears _load_cancel only in its own __init__.
 
 The next API-routed request for that model goes through
 switch_engine(preempt=False), which reuses the engine and SKIPS the install, so
 the stale SET event survives. The real backend honours it: gguf.py passes
 _load_cancel into ModelRunner.spawn_and_load, which sends cancel_load
-immediately when the event is already set (llamacpp/_runner.py:331), so the
-load aborts with ModelLoadCancelled -> switch_engine returns "superseded" ->
-get_engine raises 503. Nothing clears the event, so EVERY later request for
-that model 503s indefinitely.
+immediately when the event is already set, so the load aborts with
+ModelLoadCancelled -> switch_engine returns "superseded" -> get_engine raises
+503. Nothing clears the event, so EVERY later request for that model 503s
+indefinitely.
 
-The existing switch tests never catch this: they build a FRESH engine per test
+The existing switch tests cannot catch this: they build a FRESH engine per test
 and reset the _switch_* globals, so no engine ever survives a cancelled
 preempt=True switch and is then loaded again via preempt=False.
 """
@@ -92,7 +91,7 @@ def _reset():
 def registered(monkeypatch):
     """M and N registered, with VRAM to spare so nothing is evicted. get_engine
     routes by NAME only against a populated registry; with an empty one it
-    deliberately serves the active engine instead (single-model mode), which
+    serves the active engine instead (single-model mode), which
     would sidestep the reuse path under test entirely."""
     reg = {"M": {"path": "models/M.gguf", "source": "local"},
            "N": {"path": "models/N.gguf", "source": "local"}}

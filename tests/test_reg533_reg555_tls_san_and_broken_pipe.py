@@ -1,25 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression audit 2026-07-14: two over-broad matches that read a REAL thing as
-a benign one.
+"""Two over-broad matches that would read a REAL thing as a benign one.
 
-REG-533 [LOW] localm/tls.py:136 - _VPN_ADAPTER_NAME_MARKERS matched by UNANCHORED
-substring, so a real NIC whose name merely CONTAINS "tun"/"tap"/"ppp" was read as
-a VPN tunnel. _primary_lan_ip() then discards its address and san_targets() leaves
-it out of the leaf certificate, so a device reaching that machine on its real
-address gets a TLS SAN mismatch that used to validate.
+localm/tls.py - _VPN_ADAPTER_NAME_MARKERS must not match by UNANCHORED substring,
+or a real NIC whose name merely CONTAINS "tun"/"tap"/"ppp" reads as a VPN tunnel.
+_primary_lan_ip() then discards its address and san_targets() leaves it out of the
+leaf certificate, so a device reaching that machine on its real address gets a TLS
+SAN mismatch.
 
-REG-555 [MEDIUM] localm/cli/_core.py:142 - `except OSError` treated ANY errno
-EINVAL as a closed pipe: sys.stdout.close() then SystemExit(0). Windows raises
-EINVAL for a broad set of GENUINE I/O misuse, so a command that hard-failed
-exited 0, printed nothing and filed no report - telling the user, and every
-script checking the exit code, that it SUCCEEDED. A direct AGENTS.md rule-5
-violation (reports success on a real failure, hides real bugs).
+localm/cli/_core.py - `except OSError` must not treat ANY errno EINVAL as a closed
+pipe (sys.stdout.close() then SystemExit(0)). Windows raises EINVAL for a broad
+set of GENUINE I/O misuse, so a command that hard-failed would exit 0, print
+nothing and file no report, telling the user and every script checking the exit
+code that it SUCCEEDED.
 
-The EINVAL split rests on a MEASURED fact, not an assumption: on this Windows box
-a real early pipe close surfaces as OSError errno=22 with isinstance(e,
-BrokenPipeError) FALSE - so "only treat a true BrokenPipeError as a pipe" would
-break every `localm ... | head`. os.fstat's S_ISFIFO is what actually separates
-the two at the handler.
+The EINVAL split cannot be made on the exception type: on Windows a real early
+pipe close surfaces as OSError errno=22 with isinstance(e, BrokenPipeError)
+FALSE, so "only treat a true BrokenPipeError as a pipe" would break every
+`localm ... | head`. os.fstat's S_ISFIFO is what separates the two at the handler.
 """
 
 import errno
@@ -37,7 +34,7 @@ from localm.cli._core import _GracefulGroup
 
 
 # --------------------------------------------------------------------------- #
-#  REG-533: a real adapter must not be mistaken for a VPN tunnel               #
+#  A real adapter must not be mistaken for a VPN tunnel                        #
 # --------------------------------------------------------------------------- #
 
 class _Addr:
@@ -100,13 +97,12 @@ def test_vpn_adapter_ips_only_collects_the_vpn(monkeypatch):
 
 
 def test_pppoe_address_survives_into_the_cert_san(monkeypatch):
-    """The consequence the finding turns on, end to end through the REAL
-    san_targets -> _primary_lan_ip -> _vpn_adapter_ips chain (nothing in that
-    chain is stubbed - only the OS-level probes it reads): a Linux box that dials
-    PPPoE has ppp0 as its default route, so the outbound probe reports ppp0's
-    address as the primary LAN IP. That address must be certified, or the admin
-    reaching https://<that-ip>:port over the port-forward hits a TLS SAN mismatch
-    that used to validate."""
+    """End to end through the REAL san_targets -> _primary_lan_ip ->
+    _vpn_adapter_ips chain (nothing in that chain is stubbed - only the OS-level
+    probes it reads): a Linux box that dials PPPoE has ppp0 as its default route,
+    so the outbound probe reports ppp0's address as the primary LAN IP. That
+    address must be certified, or the admin reaching https://<that-ip>:port over
+    the port-forward hits a TLS SAN mismatch."""
     psutil = pytest.importorskip("psutil")
     monkeypatch.setattr(psutil, "net_if_addrs", lambda: {
         "ppp0": [_Addr("203.0.113.9")],
@@ -142,7 +138,7 @@ def test_vpn_tunnel_address_is_still_kept_out_of_the_san(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  REG-555: only an ACTUAL broken pipe may exit 0 without a report             #
+#  Only an ACTUAL broken pipe may exit 0 without a report                      #
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture()
@@ -184,15 +180,14 @@ def test_genuine_einval_is_reported_not_silently_swallowed(cli, exc, label):
 
 
 def test_a_real_broken_pipe_is_still_silent(cli):
-    """NEGATIVE CASE, the important one: an actual early pipe close
-    (`localm ... | head`) must still exit 0 with no report and no traceback
-    cascade - reporting would write to the same dead stdout and re-crash.
+    """NEGATIVE CASE: an actual early pipe close (`localm ... | head`) must still
+    exit 0 with no report and no traceback cascade - reporting would write to the
+    same dead stdout and re-crash.
 
     Uses a REAL os.pipe() as stdout so the code's own S_ISFIFO check sees a
-    genuine pipe, rather than mocking the check being tested. Driven through
-    click's own main() rather than CliRunner, because CliRunner REPLACES
-    sys.stdout with a StringIO for the duration of invoke() - which would hide
-    the very pipe this test exists to present."""
+    genuine pipe, not a mock of the check being tested. Driven through click's own
+    main(), not CliRunner, which REPLACES sys.stdout with a StringIO for the
+    duration of invoke() and would hide the pipe."""
     r, w = os.pipe()
     pipe_stdout = os.fdopen(w, "w")
     g = _group(OSError(errno.EINVAL, "closed pipe"))
@@ -226,8 +221,8 @@ def test_broken_pipe_error_is_still_silent_whatever_stdout_is(cli):
 
 def test_epipe_oserror_is_still_silent(cli):
     """NEGATIVE CASE: EPIPE means exactly "broken pipe" and needs no
-    qualification. (Python maps OSError(EPIPE) to BrokenPipeError anyway - this
-    pins that behaviour rather than assuming it.)"""
+    qualification. Python maps OSError(EPIPE) to BrokenPipeError; this pins
+    that."""
     e = OSError(errno.EPIPE, "broken pipe")
     assert isinstance(e, BrokenPipeError), "OSError(EPIPE) must map to BrokenPipeError"
     res = CliRunner().invoke(_group(e), ["boom"])

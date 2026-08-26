@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// NEW-1 model-switch-indication: the chat transcript shows a small divider where
-// the active model changed between turns. A run of turns from the same model
-// shows none; the first model-bearing turn establishes the baseline (no divider);
-// legacy messages with no `model` field never crash or divide.
+// The chat transcript shows a divider where the active model changed between
+// turns. A run of turns from the same model shows none, the first model-bearing
+// turn establishes the baseline, and messages with no `model` field neither
+// crash nor divide.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -48,7 +48,7 @@ test("NEW-1: legacy messages without a model field never crash or divide", () =>
   const { window } = loadApp();
   setupConv(window, [
     { role: "user", content: "hi" },
-    { role: "assistant", content: "old reply" },              // pre-feature, no model
+    { role: "assistant", content: "old reply" },              // no model field
     { role: "user", content: "more" },
     { role: "assistant", content: "new", model: "gemma-4-12b" },
   ]);

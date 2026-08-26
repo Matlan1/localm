@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Jobs plugin: scheduled recurring tasks (in-app agent jobs).
 
-Backend only (the GUI lands separately). A job runs a chat or coder prompt on
-an interval or 5-field cron schedule; the scheduler wakes periodically, finds
-enabled + due jobs, runs each via the runner, and records the result.
+A job runs a chat or coder prompt on an interval or 5-field cron schedule; the
+scheduler wakes periodically, finds enabled + due jobs, runs each via the
+runner, and records the result.
 
 Modules:
   store.py      - Job dataclass + JobStore (persist defs + results, path-confined)

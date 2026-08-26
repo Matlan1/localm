@@ -1,16 +1,13 @@
-"""The cold torch GPU probe must run OUT of process (issue #833).
+"""The cold torch GPU probe must run OUT of process.
 
 A cold ``import torch`` on Windows runs a loop of ``LoadLibraryExW`` calls, which
 holds the OS loader lock; creating a thread needs that same lock, so no thread
 anywhere in the process can start while it runs, and the asyncio event loop
-stalls. A report's watchdog dump caught the request thread and a
-``subprocess.run`` both parked at the last line of ``Thread.start()`` while the
-GPU probe was inside torch's DLL loading, for 10.9s.
+stalls.
 
-The regression guard that matters is structural rather than timed: after a probe
-on a process where torch was NOT already resident, torch must still not be
-resident, because the enumeration happened in a child. A wall-clock assertion
-would be flaky on a loaded runner; this one is deterministic.
+The regression guard is structural rather than timed: after a probe on a process
+where torch was NOT already resident, torch must still not be resident, because
+the enumeration happened in a child.
 """
 from __future__ import annotations
 
@@ -29,7 +26,7 @@ from localm import discover
 class TestColdProbeStaysOutOfProcess:
 
     def test_cold_probe_uses_the_child_and_never_imports_torch_here(self, monkeypatch):
-        """The whole point of #833: a cold probe must not import torch here."""
+        """A cold probe must not import torch here."""
         calls = []
         monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
@@ -72,17 +69,13 @@ class TestColdProbeStaysOutOfProcess:
 
 class TestIsolatedProbeDegradesHonestly:
     """Every failure mode must return [] so the caller falls through to
-    nvidia-smi exactly as an in-process failure used to, and must say why at
-    debug rather than leaving "no GPU" indistinguishable from "could not ask"
-    (AGENTS.md rule 5)."""
+    nvidia-smi, and must say why at debug, so "no GPU" is never
+    indistinguishable from "could not ask"."""
 
     # caplog must name the "localm" logger, not just set a level. caplog's own
     # level lands on the ROOT logger, and discover logs through the "localm"
-    # one, whose level a sibling test can leave above DEBUG (and whose
-    # isEnabledFor answer is memoised in Logger._cache until setLevel clears
-    # it - see test_deferred_import_log's fixture docstring). Without the
-    # logger= argument these assertions pass standalone and fail in a full-suite
-    # run, which is exactly how they first failed.
+    # one, whose level a sibling test can leave above DEBUG and whose
+    # isEnabledFor answer is memoised in Logger._cache until setLevel clears it.
     _LOGGER = "localm"
 
     def _run(self, monkeypatch, **kw):
@@ -145,15 +138,10 @@ class TestIsolatedProbeDegradesHonestly:
         assert out == [], "the child ANSWERED (with []); that is not a cannot-ask"
         assert "WinError 126" in caplog.text
 
-    # A short synthetic stderr cannot fail on the truncation defect - the value
-    # that distinguishes right from wrong is a message LONGER than the old
-    # 200-char cap, with a long path prefix ahead of the actionable content
-    # (diff-review-discipline.md item 19). Shaped from the real field evidence
-    # (issues/log_1.txt, log_2.txt): a virtualenv install-path warnings.warn()
-    # prefix, 180 chars alone, followed by the actionable GPU-architecture-list
-    # message. Cutting the combined 456-char string at 200 chars (the old
-    # behaviour) leaves exactly "...The following list o" - reproducing the
-    # observed fragment - and drops everything a user would need to act on.
+    # A short synthetic stderr cannot exercise truncation. This one is 456 chars:
+    # a 180-char virtualenv install-path warnings.warn() prefix ahead of the
+    # actionable GPU-architecture-list message, so a cap applied to the head
+    # drops everything a user would need to act on.
     _LONG_PATH_PREFIX = (
         "/opt/pyenv/versions/3.12.4/lib/python3.12/site-packages/torch/cuda/"
         "__init__.py:422: UserWarning: Found GPU0 NVIDIA RTX PRO 4000 Blackwell "
@@ -183,8 +171,7 @@ class TestIsolatedProbeDegradesHonestly:
             self, monkeypatch, caplog):
         """A cap must still exist (an adversarial/huge child stream cannot be
         logged unbounded), but a truncated diagnostic must SAY it was
-        truncated (AGENTS.md rule 5) rather than stopping mid-sentence with no
-        indication anything is missing."""
+        truncated, never stop mid-sentence with no indication."""
         caplog.set_level("DEBUG", logger=self._LOGGER)
         huge = self._LONG_PATH_PREFIX + self._ACTIONABLE_TAIL * 20
         assert len(huge) > discover._CHILD_STDERR_LOG_CAP
@@ -217,10 +204,9 @@ class TestIsolatedProbeDegradesHonestly:
 
 
 class TestWedgedTorchIsNotRetriedForever:
-    """`list_gpus` re-probes on every call by design (no TTL). So a box whose
-    torch cannot answer must not pay the full timeout every single probe, or it
-    never reaches the nvidia-smi fallback inside the caller's 15s deadline - the
-    sm_120 case in the report this came from."""
+    """`list_gpus` re-probes on every call (no TTL), so a box whose torch cannot
+    answer must not pay the full timeout every single probe, or it never reaches
+    the nvidia-smi fallback inside the caller's 15s deadline."""
 
     def setup_method(self):
         discover._reset_gpu_probe_cache()
@@ -329,10 +315,8 @@ class TestChildProbeContract:
     # A STUB torch, so the enumeration contract is covered on EVERY platform
     # rather than only where a real torch happens to be installed. CI installs
     # `.[dev,rag]`, which has no torch, so the importorskip test below skips
-    # there - and a skip looks identical to a pass in a green job. This one runs
-    # the child's real _enumerate() against a fake torch, so the JSON contract,
-    # the field set and the int coercion are all exercised on the Linux runner
-    # that the isolated-spawn change most needs covering.
+    # there. This one runs the child's real _enumerate() against a fake torch, so
+    # the JSON contract, the field set and the int coercion are all exercised.
     _STUB_TORCH = """
 class _Cuda:
     @staticmethod
@@ -377,8 +361,8 @@ cuda = _Cuda()
         ], f"enumeration contract drifted: {devices!r}"
 
     def test_child_skips_a_device_that_cannot_report_memory(self, tmp_path):
-        """One device failing must never hide the rest - the in-process branch
-        has always had that property and the child must match it."""
+        """One device failing must never hide the rest: the in-process branch
+        has that property and the child matches it."""
         stub = """
 class _Cuda:
     @staticmethod
@@ -450,13 +434,6 @@ cuda = _Cuda()
 
 # --------------------------------------------------------------------------- #
 #  The child's stderr is relayed ONCE per distinct cause, not once per probe   #
-#                                                                              #
-#  list_gpus deliberately re-probes on every call (no TTL, so the live "free"  #
-#  reading is never stale) and the GUI VRAM meter polls it about every 2.5s.   #
-#  Relaying the child's whole stderr blob unconditionally wrote it ~24 times a #
-#  minute for the life of the server on any box where the probe keeps failing. #
-#  The file already had a latch for exactly this shape                         #
-#  (_isolated_torch_broken_warned); the stderr relay never got one.            #
 # --------------------------------------------------------------------------- #
 
 from localm import discover as _discover
@@ -488,8 +465,6 @@ def probe_log(monkeypatch, caplog):
         # caplog.records ACCUMULATES across calls, so a test that drives this
         # helper twice would otherwise read the FIRST drive's lines back out of
         # the second drive's result and pass no matter what the second one did.
-        # Measured: the reset test below was green with its fix reverted until
-        # this clear was added.
         caplog.clear()
         with caplog.at_level(logging.DEBUG, logger="localm"):
             for _ in stderrs:
@@ -510,13 +485,8 @@ def test_the_same_probe_failure_is_relayed_once_not_every_probe(probe_log):
 
 
 def test_a_DIFFERENT_probe_failure_is_still_relayed(probe_log):
-    """The property a plain once-only bool would destroy.
-
-    The neighbouring _isolated_torch_broken_warned latch guards a FIXED
-    sentence, so a bool is right there. Here the message IS the diagnostic, and
-    silencing a second, different cause would trade a log flood for a hidden
-    problem - the wrong side of rule 5. This is the test that keeps the latch
-    keyed on the text.
+    """The latch is keyed on the relayed TEXT, not on a once-only bool: a
+    second, different cause is still relayed rather than swallowed.
     """
     first = "RuntimeError: HIP error: no ROCm-capable device is detected"
     second = "ImportError: libtorch_hip.so: cannot open shared object file"
@@ -535,23 +505,17 @@ def test_a_probe_that_says_nothing_relays_nothing(probe_log):
 
 
 def test_the_latch_announces_itself_rather_than_going_silently_blind(probe_log):
-    # Pathological input (stderr that differs every probe) is bounded, but the
-    # bound is stated in the log rather than quietly dropping causes - a monitor
-    # that stops reporting without saying so is the failure rule 5 is about.
+    # Pathological input (stderr that differs every probe) is bounded, and the
+    # log says the cap was reached rather than dropping causes silently.
     messages = probe_log([f"distinct failure {i}" for i in range(12)])
     assert any("further distinct causes suppressed" in m for m in messages), (
         "the cap was reached with no line saying so")
 
 
 def test_resetting_the_probe_cache_also_clears_the_stderr_latch(probe_log):
-    """The latch belongs in _reset_gpu_probe_cache, same as its neighbour.
-
-    That function already clears _isolated_torch_broken_warned with a comment
-    saying why: without it, one test's simulated probe failure silently changes
-    behaviour for every later test in the worker. This latch has the identical
-    property, so leaving it out makes a reset only PARTIALLY reset - and the
-    symptom (a relay that never appears again) reads as "the relay is broken"
-    rather than "it already said this once".
+    """_reset_gpu_probe_cache clears the stderr latch as well as
+    _isolated_torch_broken_warned, so the same cause is relayed again after a
+    reset.
     """
     boom = "RuntimeError: HIP error: no ROCm-capable device is detected"
     assert any(boom in m for m in probe_log([boom])), "test premise: first relay"

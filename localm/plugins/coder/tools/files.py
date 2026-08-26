@@ -17,9 +17,8 @@ from pathlib import Path
 from typing import Optional
 
 from .base import ToolResult, _confine, _truncate
-# The indexer's own skip/file-type tables, so grep and the project map agree on
-# what counts as noise and what counts as source (indexer imports nothing from
-# this package, so this is not a cycle).
+# The indexer's skip and file-type tables, shared so grep and the project map
+# classify files the same way.
 from ..indexer import _SKIP_DIRS, _SYMBOL_LANGS, _TEXT_EXTS
 
 def _render_notebook(nb: dict) -> str:
@@ -90,13 +89,7 @@ def _verify_syntax(path: Path, content: str) -> Optional[str]:
     """
     suffix = path.suffix.lower()
     if suffix == ".py":
-        # compile() builtin only: it parses to a code object in memory and never
-        # touches disk. py_compile.compile() (the previous approach) writes the
-        # source to a temp .py file to compile it, and CPython's import-cache
-        # write leaves a matching .pyc behind in the system temp dir's
-        # __pycache__/ that nothing here ever unlinked - i.e. the file's own
-        # content, compiled, sitting in shared temp storage regardless of
-        # session mode. compile() has no such side effect.
+        # compile() parses to a code object in memory and writes nothing to disk.
         try:
             compile(content, str(path), "exec")
         except SyntaxError as e:
@@ -134,8 +127,8 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
 
     rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
 
-    # Render Jupyter notebooks as readable text rather than raw JSON
-    # (offset/limit are ignored - cell structure beats line numbers there)
+    # Render Jupyter notebooks as readable text rather than raw JSON; offset and
+    # limit are ignored.
     if p.suffix == ".ipynb":
         try:
             nb   = json.loads(raw)
@@ -158,9 +151,8 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
             return ToolResult.error(
                 f"offset {start} is past the end of {rel} ({total_lines} lines)")
         count = int(limit) if limit else total_lines
-        # An empty file is 1 (empty) line per _line_count, but splitlines()
-        # gives []; without the fallback the slice is empty and the range
-        # label comes out backwards ("1-0 of 1").
+        # splitlines() returns [] for an empty file; the fallback supplies the single
+        # empty line _line_count reports.
         all_lines = raw.splitlines(keepends=True) or [""]
         sliced = all_lines[start - 1:start - 1 + count]
         end = start + len(sliced) - 1
@@ -213,10 +205,7 @@ def tool_write_file(cwd: Path, path: str, content: str) -> ToolResult:
     return result
 
 
-# Bounds for the whitespace-tolerant edit fallback below. Generous on purpose:
-# they are meant to exclude only inputs whose cost is already pathological, not
-# to police ordinary edits. A 400-token `old` is a ~40-line snippet and a 512 KB
-# file is far past what a model edits in one call.
+# Bounds for the whitespace-tolerant edit fallback below.
 _WS_FALLBACK_MAX_TOKENS = 400
 _WS_FALLBACK_MAX_TEXT = 512 * 1024
 
@@ -224,34 +213,9 @@ _WS_FALLBACK_MAX_TEXT = 512 * 1024
 # --------------------------------------------------------------------------- #
 #  Model-supplied regex: the one place the PATTERN is attacker-controlled       #
 # --------------------------------------------------------------------------- #
-#
-# Everywhere else in this codebase the pattern is ours and the TEXT is hostile,
-# which is fixed by de-ambiguating the pattern. `grep` and `search_replace` are
-# the inverse: the model hands us the regex. You cannot de-ambiguate a pattern
-# you did not write, so this is bounded instead - and it needs BOTH halves,
-# because neither alone is sufficient:
-#
-#   THE TIMEOUT is the only thing that can stop a match already running.
-#   Measured, end to end through tool_search_replace with dry_run=True, one file
-#   of n spaces and pattern `(\s*)*x`: 0.008 / 0.117 / 1.72s at n = 16 / 20 / 24.
-#   That is ~4x per two characters - EXPONENTIAL, extrapolating to ~31 hours at
-#   n=40, against a repo that really contains lines with 70 characters of
-#   leading whitespace. stdlib `re` cannot be interrupted once inside a match at
-#   any price, which is why the engine has to change.
-#
-#   THE CAPS keep the common path from ever reaching the timeout, and they are
-#   not redundant: a timeout still lets an attacker burn the full budget on
-#   every file in a glob.
-#
-# Switching engines is NOT itself the fix, and assuming it was would have moved
-# the vulnerability rather than closed it. The two engines have DIFFERENT
-# catastrophic sets, neither containing the other (measured):
-#     (\s*)*x   on 26 spaces   stdlib 7.0044s   regex 0.0001s
-#     (a|a)*$   on 30 a's      stdlib 2.3561s   regex 6.4100s   (both exponential)
-# `regex` is immune to the witness above and ~2.7x WORSE on the textbook
-# alternation shape - which a model writing a search for alternatives produces
-# by accident. So no engine choice is safe on a pattern we did not write, and
-# the timeout is load-bearing rather than belt-and-braces.
+# grep and search_replace run a pattern supplied by the model. Matching is
+# bounded by a per-match timeout and by line and file size caps, and runs on
+# the interruptible regex engine rather than stdlib re.
 _MODEL_REGEX_TIMEOUT = 2.0          # seconds per individual match operation
 _MODEL_REGEX_MAX_LINE = 64 * 1024   # a single line longer than this is not searched
 
@@ -259,17 +223,16 @@ _MODEL_REGEX_MAX_LINE = 64 * 1024   # a single line longer than this is not sear
 def _compile_model_pattern(pattern: str, flags):
     """Compile an attacker-supplied pattern on the interruptible engine.
 
-    Deliberately NO fallback to stdlib ``re`` when ``regex`` is missing. A
-    fallback would silently restore the unbounded path while every caller
-    carried on believing it was bounded - a safety step that fails and reports
-    success, which AGENTS.md rule 5 forbids in as many words. If the engine is
-    absent the tool refuses and says why, which is recoverable; a silent
+    NO fallback to stdlib ``re`` when ``regex`` is missing: a fallback would
+    silently restore the unbounded path while every caller carried on believing
+    it was bounded - a safety step that fails and reports success. If the engine
+    is absent the tool refuses and says why, which is recoverable; a silent
     downgrade is not.
 
-    ``regex`` is a DECLARED core dependency for this reason. It was previously
-    present only transitively, via `transformers` under optional-dependencies,
-    so a base install had no `regex` at all and this guard would have been
-    absent exactly where nobody was looking.
+    ``regex`` is a DECLARED core dependency for this reason. Carried only
+    transitively (via `transformers` under optional-dependencies) it would be
+    missing from a base install, so this guard would be absent exactly where
+    nobody is looking.
     """
     try:
         import regex
@@ -334,11 +297,9 @@ def _run_model_regex(op, *args, **kwargs):
             "substring or a single quantifier is usually what was meant."
         ) from exc
     except MemoryError as exc:
-        # A DIFFERENT fact from _ModelRegexTooSlow, so it gets its own message:
-        # this is memory exhaustion, not a time-budget overrun, and saying
-        # "took longer than Xs" here would be false. It is still the same CLASS
-        # of fact as a timeout though - about the PATTERN, not the file - so it
-        # is reported the same way (see the two call sites that catch both).
+        # Memory exhaustion rather than a time-budget overrun, so it raises its own
+        # exception type. Both are facts about the pattern and both call sites catch
+        # them together.
         raise _ModelRegexTooExpensive(
             "the search pattern exhausted memory while matching a single file "
             "and was stopped. Patterns with nested or recursive quantifiers "
@@ -359,14 +320,14 @@ def _resolve_edit(text: str, old: str):
       - ``tolerant``: True when the exact match missed and a whitespace-tolerant
         match was used instead (so the caller can say so, not hide it).
 
-    An exact substring match is tried first and always wins (unchanged
-    behavior). Only on an exact miss does it retry with a whitespace-tolerant
-    match: every run of whitespace in ``old`` is allowed to match any run of
-    whitespace in the file, so a snippet the model reconstructed with a
-    different indentation or a collapsed line wrap still lands. That fallback is
-    accepted ONLY when it matches exactly one region - never guess between
-    several candidates - so it can widen what matches but can never change WHICH
-    of two ambiguous regions is edited.
+    An exact substring match is tried first and always wins. Only on an exact
+    miss does it retry with a whitespace-tolerant match: every run of whitespace
+    in ``old`` is allowed to match any run of whitespace in the file, so a
+    snippet the model reconstructed with a different indentation or a collapsed
+    line wrap still lands. That fallback is accepted ONLY when it matches
+    exactly one region - never guess between several candidates - so it can
+    widen what matches but can never change WHICH of two ambiguous regions is
+    edited.
     """
     idx = text.find(old)
     if idx != -1:
@@ -377,14 +338,9 @@ def _resolve_edit(text: str, old: str):
     if not stripped:
         return None
     tokens = re.split(r"\s+", stripped)
-    # Both `text` and `old` are model-supplied, and this search is O(len(text) x
-    # len(pattern)): every start position can match a long prefix before failing.
-    # Measured 0.646s for a 16 KB file against an 8 KB `old`, which squares - a
-    # 160 KB file would be about a minute of pinned CPU on ONE edit_file call.
-    # The exact-match path above (str.find, linear) is unaffected; this is only
-    # the whitespace-tolerant FALLBACK, so declining it on a pathological input
-    # loses a convenience, not a capability - the caller gets the same "no unique
-    # match" answer it already gets whenever the fallback finds none or many.
+    # This search is O(len(text) x len(pattern)), so oversized inputs are declined
+    # here and reported as no unique match. The exact-match path above is linear
+    # and unaffected.
     if len(tokens) > _WS_FALLBACK_MAX_TOKENS or len(text) > _WS_FALLBACK_MAX_TEXT:
         return None
     pattern = r"\s+".join(re.escape(tok) for tok in tokens)
@@ -407,8 +363,7 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
     except Exception as e:
         return ToolResult.error(str(e))
 
-    # '' is "in" every string, so an empty `old` would silently prepend `new`
-    # to the file and report a bogus occurrence count - reject it instead.
+    # Reject an empty old: the empty string is contained in every string.
     if not old:
         return ToolResult.error(
             "`old` is empty - pass the exact text to replace (read the file "
@@ -499,8 +454,6 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
         )
 
     # ---- Phase 1: validate every edit and snapshot every target, no writes ----
-    # Validation is complete BEFORE the first byte is written, so the common
-    # failure (a typo'd `old`) costs no disk churn and no rollback at all.
     planned: list[tuple[Path, str]] = []   # (abs path, text after this edit)
     snapshots: dict[Path, bytes] = {}      # abs path -> original bytes on disk
     current: dict[Path, str] = {}          # abs path -> text as edits so far left it
@@ -520,8 +473,7 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
                 f"{label} ({path}) needs both `old` and `new`.")
         old, new = str(old), str(new)
 
-        # '' is "in" every string, so an empty `old` would silently prepend
-        # `new` to the file - reject it exactly as edit_file does.
+        # Reject an empty old, exactly as edit_file does.
         if not old:
             return ToolResult.error(
                 f"{label} ({path}): `old` is empty - pass the exact text to "
@@ -537,10 +489,9 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
         if not p.is_file():
             return ToolResult.error(f"{label}: Not a file: {p}")
 
-        # Later edits must see the text as EARLIER edits in this batch left it,
-        # so two edits to the same file compose instead of the second silently
-        # missing (or clobbering the first). The SNAPSHOT stays the original
-        # on-disk bytes, so a rollback still undoes the whole batch.
+        # Later edits in the batch see the text as earlier edits left it, so several
+        # edits to one file compose. The snapshot stays the original on-disk bytes so
+        # a rollback undoes the whole batch.
         if p in current:
             text = current[p]
         else:
@@ -559,8 +510,7 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
         planned.append((p, current[p]))
 
     # ---- Phase 2: write, rolling every file back if any write fails ----
-    # One write per FILE (not per edit): several edits to the same file were
-    # already composed in phase 1, so the final text is written once.
+    # One write per file: several edits to one file were composed in phase 1.
     targets: list[Path] = []
     for p, _text in planned:
         if p not in targets:
@@ -571,18 +521,17 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
             p.write_text(current[p], encoding="utf-8")
             written.append(p)
         except Exception as e:
-            # The FAILING file is restored too, not just the ones before it:
-            # write_text opens with "w", which truncates before writing, so a
-            # failure partway through leaves that file empty or half-written.
-            # Restoring it is a no-op when the write never started.
+            # The failing file is restored too: write_text truncates before writing, so
+            # a failure partway through leaves it empty or half-written. Restoring is a
+            # no-op when the write never started.
             rollback_errors = _restore_snapshots(snapshots, written + [p])
             failed_rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
             msg = (f"Failed to write {failed_rel}: {e}\n"
                    f"Rolled back {len(written) + 1} file(s) - no file was left "
                    "partially edited.")
             if rollback_errors:
-                # RULE 5: a rollback that itself failed must NEVER be reported as
-                # a clean all-or-nothing. Say exactly which files are now suspect.
+                # A rollback that itself failed is not reported as clean: name the files
+                # that are now suspect.
                 msg += ("\nWARNING: the rollback ITSELF failed for: "
                         + "; ".join(rollback_errors)
                         + "\nThese files may hold a partial edit - inspect them "
@@ -834,8 +783,8 @@ def tool_search_files(cwd: Path, pattern: str, path: str = ".") -> ToolResult:
     full_pattern = str(base / pattern) if not Path(pattern).is_absolute() else pattern
     try:
         matches = set(_glob.glob(full_pattern, recursive=True))
-        # Bare filename patterns ("*.py") only match the top level - agents
-        # almost always mean "anywhere in the project", so search subdirs too
+        # Bare filename patterns match only the top level, so subdirectories are
+        # searched as well.
         if not Path(pattern).is_absolute() and "/" not in pattern \
                 and "\\" not in pattern and "**" not in pattern:
             matches |= set(_glob.glob(str(base / "**" / pattern), recursive=True))
@@ -873,18 +822,15 @@ def tool_search_files(cwd: Path, pattern: str, path: str = ".") -> ToolResult:
 #  grep: caps, skip rules, and the streaming matcher
 # ---------------------------------------------------------------------------
 
-# Defaults for grep's three caps. Each is overridable PER CALL (max_per_file,
-# max_output_lines, max_file_bytes) and persistently via the matching
-# coder_grep_* config key; these are only the fallbacks. Every cap that actually
-# bites is reported in the output - a cap the caller cannot see is a silent lie
-# about coverage (AGENTS.md rule 5), which is why none of them is quiet.
+# Fallback values for grep's three caps. Each is overridable per call
+# (max_per_file, max_output_lines, max_file_bytes) and via the matching
+# coder_grep_* config key. Every cap that bites is reported in the output.
 _GREP_MAX_PER_FILE     = 20          # hits shown per file (the rest are COUNTED)
 _GREP_MAX_OUTPUT_LINES = 300         # output lines before the sweep stops
 _GREP_MAX_FILE_BYTES   = 4 * 1024 * 1024   # per-file size cap
 
-# Bytes sniffed to tell text from binary. A NUL in the first chunk is the same
-# heuristic git uses; it needs no new extension table (the known-text extensions
-# below skip the sniff entirely).
+# Bytes sniffed to tell text from binary: a NUL in the first chunk means binary.
+# The known-text extensions below skip the sniff entirely.
 _GREP_SNIFF_BYTES = 4096
 
 
@@ -959,9 +905,8 @@ def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
     total = 0
     with fp.open("r", encoding="utf-8", errors="replace") as fh:
         for lineno, raw in enumerate(fh, 1):
-            # Text mode is universal-newline: \r\n and a lone \r are already
-            # translated to \n on read, so stripping \n is the whole job here
-            # (verified against io.TextIOWrapper, not assumed).
+            # Text mode is universal-newline, so CR LF and a lone CR arrive already
+            # translated; stripping the trailing newline is the whole job.
             line = raw.rstrip("\n")
             if pending:
                 still = []
@@ -972,10 +917,7 @@ def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
                     else:
                         still.append(entry)
                 pending = still
-            # A single absurdly long line is skipped rather than searched: the
-            # per-match budget below would stop a runaway, but only after paying
-            # it, and paying it once per line of a large file is the accumulation
-            # the caps exist to prevent.
+            # A single line longer than the cap is skipped rather than searched.
             if len(line) > _MODEL_REGEX_MAX_LINE:
                 continue
             if _run_model_regex(rx.search, line):
@@ -985,16 +927,13 @@ def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
                     hit_offset = len(before)
                     wanted = len(window) + context
                     if len(window) >= wanted:
-                        # Already complete (context=0: the hit line IS the whole
-                        # window). Closing it here rather than on the next line
-                        # is what keeps a context=0 hit a ONE-line window.
+                        # With context=0 the hit line is the whole window, so it closes here.
                         hits.append((lineno, window, hit_offset))
                     else:
                         pending.append([lineno, window, hit_offset, wanted])
             if context > 0:
                 before.append(line)
-    # Hits still short of their trailing context at EOF (the old whole-file
-    # implementation clamped the slice at the last line - same result).
+    # Hits still short of their trailing context at EOF.
     hits.extend((entry[0], entry[1], entry[2]) for entry in pending)
     return hits, total
 
@@ -1040,29 +979,19 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
         return ToolResult.error(str(e))
 
     # ---- Pre-filter: decide what to read BEFORE reading anything ----
-    # Ordered cheapest-check-first, because on a real repo most candidates are
-    # rejected: name-only checks (free), then ONE stat (regular-file + size),
-    # then the cwd-confinement resolve(), then the binary sniff (the only step
-    # that opens the file). Enumeration itself is cheap (measured ~0.08s for
-    # 4.5k entries); resolve() and stat() are what cost, so they run on
-    # survivors, not on every .git object.
+    # Checks run cheapest first: name-only checks, then one stat (regular file and
+    # size), then the cwd-confinement resolve, then the binary sniff, which is the
+    # only step that opens the file.
     #
-    # Confinement still gates every file that is READ: a traversal glob like
-    # '../*' makes base.glob() climb above the project root, so the resolved
-    # path is checked back inside cwd (the same guard tool_search_files
-    # applies - _confine() only protects the `path` arg, not the `glob` arg).
-    # It sits BEFORE the sniff so an out-of-cwd file is never even opened.
-    # normcase both sides so the prefix test is case-correct on Windows, matching
-    # WindowsPath.is_relative_to (which compares case-insensitively); realpath is
-    # exactly what Path.resolve() calls, minus the Path object churn - measured
-    # ~1.9x cheaper, and this runs once per candidate file.
+    # Confinement gates every file that is read: a traversal glob makes base.glob()
+    # climb above the project root, so the resolved path is checked back inside cwd
+    # before the sniff opens anything (_confine() covers the path arg only, not the
+    # glob arg). normcase both sides so the prefix test is case-correct on Windows;
+    # realpath is what Path.resolve() calls without the Path object churn.
     cwd_prefix = _os_path.normcase(str(cwd.resolve()))
     cwd_prefix_sep = cwd_prefix + os.sep
     base_depth = len(base.parts)
-    # A noise directory the CALLER named in glob= is not noise - they asked for
-    # it. Without this, glob="build/**/*.py" returns nothing (build/, dist/,
-    # target/, venv/ are all in _SKIP_DIRS), which is a silent coverage loss
-    # dressed up as "no matches".
+    # A noise directory the caller names in glob= is searched rather than skipped.
     requested = {seg for seg in file_glob.replace("\\", "/").split("/")
                  if seg in _SKIP_DIRS}
     prune_dirs = _SKIP_DIRS - requested
@@ -1070,14 +999,13 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
     skipped_noise: set = set()
     skipped_binary = skipped_large = 0
     for fp in candidates:
-        # Noise directories are pruned by NAME and only BELOW the search root,
-        # so pointing path= AT one (grep inside node_modules) still works.
+        # Noise directories are pruned by name and only below the search root, so
+        # pointing path= at one still searches it.
         noise_dir = next((part for part in fp.parts[base_depth:-1]
                           if part in prune_dirs), None)
         if noise_dir is not None:
-            # Count the DIRECTORY, not each entry under it: glob yields
-            # directories as well as files, so counting entries reported
-            # thousands of "files" not searched when a handful were.
+            # Count the directory itself, not each entry under it: glob yields
+            # directories as well as files.
             skipped_noise.add(noise_dir)
             continue
         try:
@@ -1105,17 +1033,12 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
         try:
             hits, hit_total = _grep_file_hits(fp, rx, context, per_file_cap)
         except (_ModelRegexTooSlow, _ModelRegexTooExpensive) as e:
-            # BEFORE the generic handler on purpose. Falling through to it would
-            # file a runaway pattern under "could not read this file" (MemoryError
-            # IS an Exception subclass, so it would fall straight into the generic
-            # handler below and be reported that way), which is both wrong and
-            # unactionable - the user would go looking at the file. A pattern too
-            # slow or too memory-hungry to run is a fact about the PATTERN, so it
-            # aborts the call and says so rather than degrading into a partial
-            # result.
+            # Ordered before the generic handler below, which would otherwise catch
+            # MemoryError and file it as an unreadable file. A pattern too slow or too
+            # memory-hungry aborts the call instead of returning a partial result.
             return ToolResult.error(str(e))
         except Exception:
-            # Record (do not silence) the skip so an incomplete match set is not reported as complete.
+            # Record the skip rather than silencing it.
             try:
                 unreadable.append(str(fp.relative_to(cwd)))
             except ValueError:
@@ -1146,7 +1069,7 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
                     )
                 break
 
-    # Note unreadable files so an incomplete search is not mistaken for complete.
+    # Note unreadable files.
     unreadable_note = ""
     if unreadable:
         shown = ", ".join(unreadable[:20])
@@ -1156,14 +1079,11 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
             f"\n[{len(unreadable)} file(s) could not be read and were not searched: {shown}]"
         )
 
-    # Note the pre-filter skips for the same reason: a faster search that quietly
-    # covers less is exactly the "hidden problem" rule 5 forbids.
+    # Note the pre-filter skips.
     skipped_note = ""
     reasons = []
     if skipped_noise:
-        # Name the ACTUAL directories skipped, and the way to search them
-        # anyway. "(.git, node_modules, ...)" told the caller neither which dir
-        # was dropped nor how to get it back.
+        # Name the directories actually skipped and how to search them anyway.
         named = ", ".join(sorted(skipped_noise)[:6])
         if len(skipped_noise) > 6:
             named += f", +{len(skipped_noise) - 6} more"
@@ -1229,18 +1149,13 @@ def tool_search_replace(
     except _ModelRegexUnavailable as e:
         return ToolResult.error(str(e))
 
-    # The same per-file size cap `grep` already honours. Its absence here was a
-    # bug on its own account, independent of the timeout: search_replace read
-    # every matched file whole with NO ceiling and ran the pattern over the full
-    # text, so it was strictly the worse of the two places to hand a hostile
-    # pattern. Reusing grep's configured value rather than inventing a second
-    # knob, so one setting still means one thing.
+    # Reuse grep's configured per-file size cap.
     size_cap = _grep_cap(None, _grep_config(), "coder_grep_max_file_bytes",
                          _GREP_MAX_FILE_BYTES)
 
-    # Confine glob results to cwd: a traversal glob like '../*' makes
-    # cwd.glob() climb above the project root and would rewrite files outside
-    # it. Filter matches back inside cwd before touching anything on disk.
+    # Confine glob results to cwd: a traversal glob makes cwd.glob() climb above the
+    # project root, so matches are filtered back inside cwd before anything on disk
+    # is touched.
     cwd_resolved = cwd.resolve()
     candidates = sorted(
         p for p in cwd.glob(glob)
@@ -1258,38 +1173,18 @@ def tool_search_replace(
                 except ValueError:
                     oversized.append(str(fp))
                 continue
-            # TWO separate reads, deliberately not one decoded from the other:
-            #
-            # old_bytes (read_bytes, no translation) is the pre-change
-            # snapshot the changed-files/undo tracker needs (ToolResult.
-            # changes) - matching execution.py's existing snapshot convention
-            # for write_file/edit_file (`abs_path.read_bytes()`), which is
-            # also untranslated raw bytes.
-            #
-            # text (read_text, universal-newline translation ON) is what the
-            # regex substitution runs against. Decoding old_bytes directly
-            # instead of using read_text() here was tried and is WRONG: on
-            # Windows, read_text() normalises CRLF -> LF on the way in and
-            # write_text() re-normalises LF -> CRLF on the way out, so the
-            # round trip is symmetric and a CRLF file stays CRLF with no
-            # extra bytes. Skipping the read-side normalisation left literal
-            # \r\n in `text`; write_text()'s own \n -> \r\n translation then
-            # ran on top of that untouched \r, inserting an EXTRA \r before
-            # every line ending post-substitution ("x = 2\r\n" -> disk bytes
-            # "x = 2\r\r\n", which read_text() then reports as "x = 2\n\n" -
-            # a spurious blank line on every line the sweep touched).
-            #
-            # ONE root cause, TWO symptoms in different subsystems: the exact
-            # same raw-vs-normalised mismatch, left unhandled, would also make
-            # diffutil.compute_search_replace_diff's patch-mode preview show
-            # spurious full-line noise on a CRLF file (it diffs this old_bytes
-            # against new_text, which is always LF-only) - see the matching
-            # normalise step there. Collapsing this back to one read will look
-            # correct on Linux (no CRLF to expose it) and silently reopen both.
+            # Two reads that must stay separate. old_bytes (read_bytes, no
+            # translation) is the pre-change snapshot for the changed-files/undo
+            # tracker; text (read_text, universal-newline translation on) is what the
+            # regex substitution runs against. read_text normalises CR LF to LF on the
+            # way in and write_text re-normalises on the way out, so a CRLF file stays
+            # CRLF; decoding old_bytes here instead leaves CR LF in text and doubles
+            # the CR on write. diffutil.compute_search_replace_diff normalises
+            # old_bytes for the same reason.
             old_bytes = fp.read_bytes()
             text = fp.read_text(encoding="utf-8", errors="replace")
         except Exception:
-            # Record (do not silence) the skip so a partial mutation is not reported as complete.
+            # Record the skip rather than silencing it.
             try:
                 unreadable.append(str(fp.relative_to(cwd)))
             except ValueError:
@@ -1301,16 +1196,8 @@ def tool_search_replace(
                 continue
             new_text = _run_model_regex(rx.sub, replacement, text)
         except (_ModelRegexTooSlow, _ModelRegexTooExpensive) as e:
-            # Abort before writing anything. This tool MUTATES, so a partial
-            # sweep is worse than none: half the glob rewritten and the rest not
-            # is a state nobody asked for and the caller cannot tell from success.
-            # `changes` is applied after this loop, so returning here leaves the
-            # working tree untouched. Before this except also named
-            # _ModelRegexTooExpensive, a MemoryError here escaped the try block
-            # entirely (no handler matched it) and reached execution.py's
-            # generic `except Exception as e: ToolResult.error(f"Tool error: {e}")`
-            # - and str(MemoryError()) is '', so it surfaced as an empty
-            # "Tool error: " with no indication anything about the pattern.
+            # Abort before writing anything: changes is applied after this loop, so
+            # returning here leaves the working tree untouched.
             return ToolResult.error(str(e))
         try:
             rel = fp.relative_to(cwd)
@@ -1318,8 +1205,8 @@ def tool_search_replace(
             rel = fp
         changes.append((fp, rel, new_text, len(matches), old_bytes))
 
-    # Warn about unreadable files so the user knows the replacement may be partial
-    # (matches in these files were skipped, not applied) - surface, do not silence.
+    # Warn about unreadable files: matches in them were skipped, not applied, so the
+    # replacement may be partial.
     unreadable_note = ""
     if unreadable:
         shown = ", ".join(unreadable[:20])
@@ -1344,11 +1231,9 @@ def tool_search_replace(
     report = "\n".join(summary_lines)
 
     if dry_run:
-        # Same (path, old_bytes, new_text) shape as the real-apply return
-        # below, populated from the SAME matching pass above rather than a
-        # second implementation - so patch mode's preview (which calls this
-        # tool with dry_run=True to compute a diff without touching disk)
-        # can never see a different set of files than a real apply would.
+        # Same (path, old_bytes, new_text) shape as the real-apply return below, built
+        # from the same matching pass, so a dry run reports the same file set an apply
+        # would write.
         return ToolResult.success(
             f"[dry-run] Would replace {total} match(es) in {len(changes)} file(s):\n{report}{unreadable_note}",
             summary=f"[dry-run] {total} replacement(s) in {len(changes)} file(s)",
@@ -1362,13 +1247,9 @@ def tool_search_replace(
         try:
             fp.write_text(new_text, encoding="utf-8")
         except Exception as e:
-            # Honesty on a mid-loop write failure: the files written before this
-            # one ARE modified on disk. A bare error would read as "nothing
-            # changed" - say exactly what was and was not applied. `changes`
-            # carries only the files that succeeded, so the caller (the
-            # changed-files/undo tracker) can still record and undo the real,
-            # partial mutation instead of it going untracked because the call
-            # overall reports failure.
+            # Earlier files in this batch are already modified on disk; report what
+            # was and was not applied. changes carries only the files that succeeded, so
+            # the caller can still record and undo the partial mutation.
             pending = [str(r) for _, r, _, _, _ in changes
                        if str(r) not in written]
             return ToolResult.error(

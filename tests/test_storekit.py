@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm.storekit: the atomic-write + per-namespace-lock mechanics hoisted out
-of rag/store.py and memory/store.py's independently hand-written copies
-(CF-9/CF-10). Regression: both stores must delegate to this ONE implementation
-(not a re-copied one), and memory's copy must gain rag's PermissionError retry
-it previously lacked.
+"""localm.storekit: the atomic-write and per-namespace-lock mechanics shared by
+rag/store.py and memory/store.py. Both stores must delegate to this ONE
+implementation, never a copy, and the shared implementation carries the
+PermissionError retry.
 """
 
 import threading
@@ -38,9 +37,8 @@ def test_atomic_write_leaves_no_temp_file_behind(tmp_path):
 
 
 def test_atomic_write_retries_on_permission_error(tmp_path, monkeypatch):
-    """The Windows AV-lock workaround (PR #566): a transient PermissionError
-    on replace() must be retried, not raised immediately - this is the
-    property memory/store.py's old hand-written copy LACKED (CF-10)."""
+    """The Windows AV-lock workaround: a transient PermissionError on
+    replace() must be retried, not raised immediately."""
     target = tmp_path / "data.json"
     calls = {"n": 0}
     real_replace = type(target).replace
@@ -70,8 +68,7 @@ def test_atomic_write_gives_up_after_five_attempts(tmp_path, monkeypatch):
 
 def test_atomic_write_temp_names_unique_per_thread(tmp_path):
     """Two concurrent writers to DIFFERENT files must not collide on the temp
-    name even if called from different threads at the same instant (CHK-MEM-LOCK's
-    rationale for a unique temp name, preserved from memory/store.py's copy)."""
+    name even when called from different threads at the same instant."""
     results = {}
 
     def writer(n):

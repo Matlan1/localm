@@ -1,8 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R47: a Settings "Report a bug" control that POSTs a description (and an
-// optional "attach recent log" flag) to /api/bug-report, which saves an
-// editable report file the user can send to the maintainer.
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
@@ -47,13 +43,6 @@ test("R47: Save report POSTs description + include_log and shows the saved path"
 });
 
 test("#958: the include-log checkbox defaults to checked, and its value is honored unset", async () => {
-  // The digest is a no-op unless the run already has --debug/LOCALM_DEBUG=1
-  // on (a normal run writes no on-disk log at all, so there is nothing to
-  // attach either way) and is always scrubbed + chat-content-free (#961) -
-  // so attaching it by default costs nothing for the common case and helps
-  // the subset of users who already opted into debug logging. Previously
-  // opt-in, which meant #958's own reports (filed with defaults) had no log
-  // section even when one existed.
   const posts = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts) });
   const doc = window.document;
@@ -120,7 +109,7 @@ test("R47: the POST carries a browser client context (UA, page, viewport, consol
   const posts = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts) });
   const doc = window.document;
-  // A JS error captured by app.js's always-on client error ring buffer.
+  // a JS error in app.js's client error ring buffer
   window.__localmClientLog.push("12:00:00  TypeError: render is not a function");
   doc.getElementById("bug-desc").value = "studio page went blank";
   doc.getElementById("bug-send").click();
@@ -145,7 +134,7 @@ test("R47: Send to maintainer POSTs upload:true and shows the tracking issue URL
   }) });
   const doc = window.document;
   doc.getElementById("bug-desc").value = "studio froze";
-  // The button is revealed by capabilities in the app; click it directly here.
+  // the app reveals this button via capabilities; click it directly
   doc.getElementById("bug-upload").click();
   await flush();
   assert.equal(posts.length, 1, "one bug-report POST");
@@ -188,9 +177,7 @@ test("R47: Retry re-sends the report and Download hands back the saved markdown"
   const blobs = [];
   window.URL.createObjectURL = (b) => { blobs.push(b); return "blob:x"; };
   window.URL.revokeObjectURL = () => {};
-  // jsdom does not implement download-anchor navigation (a real browser downloads
-  // the file); no-op the click so the real-browser behaviour is not mistaken for
-  // an error, while still verifying the blob was built.
+  // jsdom does not implement download-anchor navigation; no-op the click
   window.HTMLAnchorElement.prototype.click = function () {};
   doc.getElementById("bug-desc").value = "please send";
   doc.getElementById("bug-upload").click();
@@ -208,7 +195,7 @@ test("R47: a 2xx upload with no issue_url still reports 'Sent' (matches the toas
   const posts = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
     saved: true, uploaded: true, path: "/home/bug-reports/bug-z.md",
-    maintainer: "owner@example.com",  // note: proxy returned no issue_url
+    maintainer: "owner@example.com",  // proxy returned no issue_url
   }) });
   const doc = window.document;
   doc.getElementById("bug-desc").value = "no url returned";

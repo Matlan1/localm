@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression pin (confirmed by the conserve-mode review, 2026-07-13): the real
-GUI/CLI generation path (image/music/video backend.py's settings()) used to
-resolve `workdir`/`launch_cmd` from the LEGACY GLOBAL `comfy_workdir`/
-`comfy_launch_cmd` config keys unconditionally, then pass them as an explicit
-override into `comfy_client.ensure_comfy()`. Because ensure_comfy()'s managed-
-instance auto-routing (#621) only activates when the CALLER passed no explicit
-workdir/launch_cmd ("caller override wins"), any user who ever set the legacy
-global comfy_workdir - even long before a managed instance existed - had that
-stale value silently defeat managed routing forever, through the ONE realistic
-end-to-end path real users actually hit (Settings -> Media / the Generate
+"""Regression pin: the real GUI/CLI generation path (image/music/video
+backend.py's settings()) must not resolve `workdir`/`launch_cmd` from the LEGACY
+GLOBAL `comfy_workdir`/`comfy_launch_cmd` config keys unconditionally and pass
+them as an explicit override into `comfy_client.ensure_comfy()`.
+
+ensure_comfy()'s managed-instance auto-routing only activates when the CALLER
+passed no explicit workdir/launch_cmd (caller override wins), so any user who
+ever set the legacy global comfy_workdir - even long before a managed instance
+existed - would have that stale value defeat managed routing forever, through
+the one end-to-end path real users hit (Settings -> Media / the Generate
 button), even though `resolve_comfy_target()`/`default_api_url()` correctly
-resolved the managed API URL. `legacy_comfy_value()` (managed_comfy.py) closes
-this: it suppresses the legacy global fallback specifically while managed
-routing is active, while a genuine PER-PLUGIN override (comfy_blk) still
-always wins, exactly like before.
+resolve the managed API URL.
+
+`legacy_comfy_value()` (managed_comfy.py) suppresses the legacy global fallback
+specifically while managed routing is active, while a genuine PER-PLUGIN
+override (comfy_blk) still always wins.
 """
 
 from __future__ import annotations
@@ -36,18 +37,15 @@ def _mock_managed_active(monkeypatch, active: bool):
 
     Each backend.py does `from localm.media.managed_comfy import ...,
     managed_comfy_active` - a DIRECT name import, which binds its own
-    module-level reference to the function object at import time. Patching
-    only `mc.managed_comfy_active` (the managed_comfy module's own attribute)
-    does NOT affect that already-bound reference in image_backend/
-    music_backend/video_backend - each backend module's own `settings()`
-    keeps calling the ORIGINAL, unpatched function. legacy_comfy_value()
-    (defined in managed_comfy.py, calling managed_comfy_active via its own
-    module's global namespace) IS correctly affected, which is why the
-    legacy-global tests below passed even before this helper covered the
-    per-plugin case - they were, by luck, only ever exercising the half of
-    the fix that patching mc alone actually reaches. Verified live: with only
-    `mc.managed_comfy_active` patched, `image_backend.managed_comfy_active({})`
-    still returned the REAL (unpatched) answer."""
+    module-level reference to the function object at import time. Patching only
+    `mc.managed_comfy_active` (the managed_comfy module's own attribute) does
+    NOT affect that already-bound reference in
+    image_backend/music_backend/video_backend - each backend module's own
+    `settings()` keeps calling the ORIGINAL, unpatched function.
+    legacy_comfy_value(), defined in managed_comfy.py and calling
+    managed_comfy_active through its own module's global namespace, IS
+    correctly affected, so the legacy-global tests below pass with `mc` patched
+    alone while the per-plugin case is not covered at all."""
     monkeypatch.setattr(mc, "managed_comfy_active", lambda cfg=None: active)
     for mod in (image_backend, music_backend, video_backend):
         monkeypatch.setattr(mod, "managed_comfy_active", lambda cfg=None: active)
@@ -55,16 +53,15 @@ def _mock_managed_active(monkeypatch, active: bool):
 
 @pytest.mark.parametrize("backend_mod", BACKENDS)
 def test_legacy_workdir_defeats_managed_routing_without_the_fix(backend_mod, monkeypatch):
-    """Pin the BROKEN (pre-fix) behavior directly against legacy_comfy_value()
-    in isolation, proving the bug this fix closes was real: honouring the
-    legacy global value unconditionally reproduces the exact failure."""
+    """Pin the pre-fix behaviour directly against legacy_comfy_value() in
+    isolation: honouring the legacy global value unconditionally reproduces the
+    failure."""
     full_config = {"comfy_target": "own", "comfy_workdir": "Z:\\Users\\test\\MyOwnComfyUI"}
     _mock_managed_active(monkeypatch, True)
-    # The OLD behavior every backend.py used to have, inlined here to prove the
-    # new legacy_comfy_value() genuinely changes the outcome for this exact input.
+    # The old behavior, inlined here for comparison with legacy_comfy_value().
     old_behavior = full_config.get("comfy_workdir", "") or ""
     assert old_behavior == "Z:\\Users\\test\\MyOwnComfyUI"
-    # The FIX: suppressed to "" while managed routing is active.
+    # Suppressed to "" while managed routing is active.
     assert mc.legacy_comfy_value("comfy_workdir", full_config) == ""
 
 
@@ -72,9 +69,9 @@ def test_legacy_workdir_defeats_managed_routing_without_the_fix(backend_mod, mon
 def test_settings_suppresses_legacy_workdir_when_managed_active(backend_mod, monkeypatch):
     """The real end-to-end path: backend.settings() must NOT leak the stale
     legacy comfy_workdir/comfy_launch_cmd into ensure_comfy() as an explicit
-    override while the managed instance is active - this is exactly the
-    scenario the review's live repro reproduced (an existing comfy_workdir
-    survives `localm comfy setup`, comfy_target stays at its default 'own')."""
+    override while the managed instance is active - an existing comfy_workdir
+    survives `localm comfy setup`, and comfy_target stays at its default
+    'own'."""
     _mock_managed_active(monkeypatch, True)
     full_config = {
         "comfy_target": "own",
@@ -88,9 +85,8 @@ def test_settings_suppresses_legacy_workdir_when_managed_active(backend_mod, mon
 
 @pytest.mark.parametrize("backend_mod", BACKENDS)
 def test_settings_still_honours_legacy_workdir_when_managed_inactive(backend_mod, monkeypatch):
-    """No managed instance active (the ordinary case today) -> the legacy
-    global fallback must keep working exactly as before - no regression for
-    the common case of a user pointing localm at their own ComfyUI."""
+    """With no managed instance active, settings() returns the legacy global
+    comfy_workdir and comfy_launch_cmd unchanged."""
     _mock_managed_active(monkeypatch, False)
     full_config = {
         "comfy_target": "user",
@@ -104,9 +100,9 @@ def test_settings_still_honours_legacy_workdir_when_managed_inactive(backend_mod
 
 @pytest.mark.parametrize("backend_mod", BACKENDS)
 def test_settings_per_plugin_override_wins_in_user_mode(backend_mod, monkeypatch):
-    """A genuine PER-PLUGIN comfy.workdir/launch_cmd/api_url override IS the
-    deliberate choice when comfy_target == "user" (own_active False) - the
-    legitimate "use my own ComfyUI" case, unchanged by this fix."""
+    """With comfy_target == "user" and no managed instance active, a
+    per-plugin comfy.workdir/launch_cmd/api_url override is what settings()
+    returns."""
     _mock_managed_active(monkeypatch, False)
     plugin_name = {
         image_backend: "image", music_backend: "music", video_backend: "video",
@@ -122,13 +118,12 @@ def test_settings_per_plugin_override_wins_in_user_mode(backend_mod, monkeypatch
 
 @pytest.mark.parametrize("backend_mod", BACKENDS)
 def test_settings_per_plugin_override_suppressed_when_own_active(backend_mod, monkeypatch):
-    """NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD: a PER-PLUGIN
-    comfy.workdir/launch_cmd/api_url set at some earlier point (before the
-    user ever touched comfy_target, or before switching it back to "own")
-    reads identically to a deliberate override and must NOT be allowed to
-    defeat managed routing, exactly like the legacy global value already
-    could not. Selecting "own" must mean "own", regardless of what a
-    per-plugin field happens to still hold."""
+    """A PER-PLUGIN comfy.workdir/launch_cmd/api_url set at some earlier point
+    (before the user ever touched comfy_target, or before switching it back to
+    "own") reads identically to a deliberate override and must NOT be allowed to
+    defeat managed routing, exactly as the legacy global value cannot. Selecting
+    "own" must mean "own", regardless of what a per-plugin field happens to
+    still hold."""
     _mock_managed_active(monkeypatch, True)
     plugin_name = {
         image_backend: "image", music_backend: "music", video_backend: "video",
@@ -152,11 +147,9 @@ def test_settings_per_plugin_override_suppressed_when_own_active(backend_mod, mo
 @pytest.mark.parametrize("backend_mod", BACKENDS)
 def test_backend_ensure_available_launches_managed_instance_end_to_end(backend_mod, tmp_path):
     """The REAL per-plugin call path (settings() -> _comfy_ensure_available() ->
-    ensure_comfy()), not ensure_comfy() called directly - proving managed
-    auto-launch actually works through image AND music AND video, not just
-    image (the only one previously exercised end to end; a gap found by the
-    conserve-mode review, since all three share byte-identical settings()
-    resolution but nothing had ever proven that in a real test)."""
+    ensure_comfy()), not ensure_comfy() called directly - so managed auto-launch
+    is proven through image AND music AND video, which share byte-identical
+    settings() resolution."""
     comfy_client._confirmed_alive.clear()
     managed_root = tmp_path / "comfyui"
     fake_paths = mc.ManagedComfyPaths(
@@ -168,11 +161,10 @@ def test_backend_ensure_available_launches_managed_instance_end_to_end(backend_m
     )
     full_config = {"comfy_target": "own", "comfy_launch_timeout": 30}
     # Three calls, not two: ensure_comfy()'s initial check (False - nothing up
-    # yet), then the double-checked re-check taken under
-    # _launch_lock_for(api_url) (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK -
-    # False here too: no other caller raced ahead of us while we acquired the
-    # lock), and only THEN the post-spawn wait-loop poll that actually
-    # observes our own launch succeeding (True).
+    # yet), the double-checked re-check taken under _launch_lock_for(api_url)
+    # (False too: no other caller raced ahead while we acquired the lock), and
+    # only THEN the post-spawn wait-loop poll that actually observes our own
+    # launch succeeding (True).
     alive = iter([False, False, True])
     spawned = {}
 

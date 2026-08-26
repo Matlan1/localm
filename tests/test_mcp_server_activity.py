@@ -2,11 +2,11 @@
 """The MCP `server_activity` tool: what a running localm server is doing, and
 an honest answer when that cannot be determined.
 
-ADR-0008 U6. The MCP server is a SEPARATE PROCESS from the HTTP/GUI server and
-shares no memory with it, so a model pull started from a browser tab is
-completely invisible to an agent driving localm over MCP - which will then
-happily start a second one. The only way to answer is to find the running
-instances on disk and ask each over HTTP.
+The MCP server is a SEPARATE PROCESS from the HTTP/GUI server and shares no
+memory with it, so a model pull started from a browser tab is completely
+invisible to an agent driving localm over MCP - which will then happily start a
+second one. The only way to answer is to find the running instances on disk and
+ask each over HTTP.
 
 The failure modes carry the weight here, because an agent acts on this answer.
 "No server is running" (nothing to ask), "could not reach it" (asked, no
@@ -44,11 +44,10 @@ def _call(tools):
 def _claims_idle(out: str) -> bool:
     """Whether the text POSITIVELY claims a server reported itself idle.
 
-    Deliberately matches the exact phrase the ok-and-empty branch emits rather
-    than the bare word "idle": the no-server message ends by explaining that it
-    is NOT the same as a server reporting idle, and a substring check cannot
-    tell a disclaimer from a claim. An earlier version of these tests used
-    `"idle" not in out` and failed on the disclaimer while the code was right.
+    Matches the exact phrase the ok-and-empty branch emits rather than the bare
+    word "idle": the no-server message ends by explaining that it is NOT the same
+    as a server reporting idle, and a substring check cannot tell a disclaimer
+    from a claim.
     """
     return "idle, nothing running" in out.lower()
 
@@ -115,10 +114,10 @@ def test_only_a_real_answer_reports_idle(tools, monkeypatch):
 
 
 def test_unauthorized_matches_the_other_failure_branches_register(tools, monkeypatch):
-    """#953 (grader 2): the pre-fix "needs an API key this process does not
-    have" wording read like an optional hardening tip rather than the same
-    kind of failure "could not be reached"/"could not be read" already are.
-    Match their "could not be X" register instead."""
+    """The "needs an API key this process does not have" wording must not read
+    like an optional hardening tip. It is the same kind of failure as "could not
+    be reached" / "could not be read", and must match their "could not be X"
+    register."""
     _patch_instances(monkeypatch, _LIVE)
     _patch_read(monkeypatch, "unauthorized", 401)
     out = _call(tools)
@@ -129,10 +128,10 @@ def test_unauthorized_matches_the_other_failure_branches_register(tools, monkeyp
 # ------------------------------------------------------------ the good case
 
 def test_snapshot_called_with_include_token(tools, monkeypatch):
-    """#953: this tool asks each discovered instance over HTTP, so it needs
-    the attach token a genuinely open instance's middleware requires - unlike
-    `localm ps`, which must never see it. Confirms the ONE flag distinguishing
-    those two callers is actually passed."""
+    """This tool asks each discovered instance over HTTP, so it needs the attach
+    token a genuinely open instance's middleware requires - unlike `localm ps`,
+    which must never see it. Confirms the ONE flag distinguishing those two
+    callers is actually passed."""
     from localm import instances
     captured = {}
 

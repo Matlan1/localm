@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// F8-PERSIST-ARCH-AND-EXPERT-COUNT: the local (registered) model list now
-// shows the same real, from-the-file-header architecture/MoE badges the
-// HuggingFace search page already shows for a remote repo (see
-// models-discover-arch-moe.test.mjs) - hard metadata captured once at
-// registration/pull time, not a name guess, so there is only ever a
-// "confirmed" tier here, never "likely". These cover refreshModelsPage's
-// rendering, not the server-side fields (that is
-// tests/test_model_type_detection.py's F8 coverage).
+// The local (registered) model list renders architecture and MoE badges from
+// the file-header metadata captured at registration or pull time. Local
+// metadata is always confirmed, so there is no "likely" tier here. Covers
+// refreshModelsPage's rendering only, not the server-side fields.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -41,9 +37,8 @@ test("registry-arch-moe: a confirmed MoE model shows architecture + a solid MoE 
 });
 
 test("registry-arch-moe: a confirmed DENSE model (expert_count: 0) shows architecture but no MoE badge", async () => {
-  // The exact collapse the coordinator warned against, done right: 0 is a real,
-  // confirmed answer (the header WAS read), not "we don't know" - so it must
-  // render identically to "no evidence" (no badge), never a positive "Dense" claim.
+  // expert_count 0 is a confirmed answer and renders as no badge, the same as
+  // no evidence, never a positive "Dense" claim.
   const models = [{ name: "plain-llama", active: false, loaded: false, model_type: "llm",
     architecture: "llama", expert_count: 0 }];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(models) });
@@ -54,10 +49,8 @@ test("registry-arch-moe: a confirmed DENSE model (expert_count: 0) shows archite
 });
 
 test("registry-arch-moe: a legacy entry (no architecture/expert_count keys at all) shows neither badge", async () => {
-  // Mirrors the server-side contract: an entry registered before this feature
-  // existed has neither key, and the API sends that through as null/undefined
-  // (never a default 0/""), so the GUI must not invent a badge OR a false
-  // "confirmed dense" state from an absent key.
+  // An entry registered before these keys existed carries neither, and the API
+  // sends that through as null or absent rather than a default 0 or "".
   const models = [{ name: "old-model", active: false, loaded: false, model_type: "llm" }];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(models) });
   await window.refreshModelsPage();

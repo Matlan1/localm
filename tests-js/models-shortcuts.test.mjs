@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// S6: the Add-a-model dialog's curated shortcut picker (GET /api/models/shortcuts,
-// see PARITY-AUDIT-CLI-GUI-2026-08-19.md #14). Using a shortcut already worked from
-// the GUI - the pull endpoint resolves an alias the same as the CLI - what was
-// missing is any way to discover the alias keyspace. Picking one must prefill the
-// Add box with the RESOLVED spec (not the bare alias), exactly like clicking a
-// discover result row does.
-//
-// The data fetch is deliberately NOT eager at module load (see models.js's own
-// comment on _loadPullShortcuts): it is an authenticated read, and the boot
-// deep-link/restore path must fire ONLY the auth probe until a client is confirmed
-// authed (keygate.test.mjs). So these tests drive it the same way the real page
-// does - through refreshModelsPage(), same as models-tab-counts.test.mjs.
+// The shortcuts fetch is not eager at module load, so these tests drive it
+// through refreshModelsPage().
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

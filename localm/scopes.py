@@ -8,7 +8,7 @@ owns a scope equal to its name (the coder plugin -> "coder"); cross-cutting
 kernel capabilities have explicit scopes ("models:write", "config:write", ...).
 
 This module is the single source of truth shared by the permission system, the
-plugin engine, and the chat control surface, so they never drift.
+plugin engine, and the chat control surface.
 """
 
 from __future__ import annotations
@@ -23,9 +23,8 @@ PLUGINS_ADMIN = "plugins:admin"   # enable/disable/install/uninstall (privileged
 KEYS_ADMIN    = "keys:admin"      # create / scope / revoke API keys (privileged)
 ADMIN         = "admin"           # wildcard owner scope: implies every scope
 
-# --- First-party plugin capabilities (each == the plugin's name) ----------- #
-# Third-party plugins declare their own scope (== their name) in the manifest;
-# it is registered at install time via is_valid_scope(..., extra=...).
+# First-party plugin capabilities (each == the plugin's name). A third-party
+# plugin registers its own scope at install time via is_valid_scope(extra=...).
 CHAT  = "chat"     # the built-in, always-enabled chat plugin
 CODER = "coder"            # restricted coder: read + confined edit, no shell
 CODER_FULL = "coder:full"  # unrestricted coder (shell exec); PRIVILEGED, owner-only to mint
@@ -66,8 +65,7 @@ EXTRA_SCOPES: dict[str, str] = {
     CODER_FULL: "AI coding agent - FULL: shell execution + edits (privileged)",
 }
 
-# Scopes that must never be granted implicitly or to an untrusted key.
-# coder:full hands out shell execution, so only the owner may mint a key with it.
+# Scopes that are never granted implicitly or to an untrusted key.
 PRIVILEGED_SCOPES = frozenset(
     {PLUGINS_ADMIN, KEYS_ADMIN, CONFIG_WRITE, ADMIN, CODER_FULL})
 
@@ -91,9 +89,9 @@ def is_valid_scope(scope: str, *, extra: set[str] | None = None) -> bool:
 
 
 def grants(held: set[str], required: str) -> bool:
-    """Does a key holding *held* scopes satisfy *required*? ADMIN implies all;
-    coder:full implies the base coder capability (it is the unrestricted coder,
-    so a coder:full key must also pass routes gated on the plain coder scope)."""
+    """Does a key holding *held* scopes satisfy *required*? ADMIN implies every
+    scope; coder:full implies the base coder scope, so a coder:full key passes
+    routes gated on plain coder."""
     if ADMIN in held or required in held:
         return True
     if required == CODER and CODER_FULL in held:

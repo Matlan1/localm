@@ -1,40 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI form of `localm ps` / `localm stop <id>` (PARITY-AUDIT-CLI-GUI-2026-08-19.md,
-CLI-only gap #7). No route read or acted on another running instance before this -
-the GUI's existing shutdown/restart buttons always act on `app.state.instance_id`
-(this process), so a GUI-only user could not discover a second localm running in
-another project directory, see its port, or stop it.
+"""GUI form of `localm ps` / `localm stop <id>`.
 
   GET  /api/instances              - every registered instance, this one included
                                       (`self: true` on it), read-only.
   POST /api/instances/{id}/stop    - stop ONE OTHER instance by id or id prefix.
 
-WHY THE STOP ROUTE IS ADMIN-ONLY, not CONFIG_WRITE like the sibling
-/v1/server/shutdown|restart (localm/inference/routes/admin.py): those two stay
-within the CALLING instance's own blast radius by construction - a
-CONFIG_WRITE key is scoped to changing THIS server's own state, and self-stop is
-exactly that. Stopping a DIFFERENT instance reaches outside that boundary into a
-process that may be serving an unrelated project or user, which is a strictly
-bigger grant. Nothing in the tree documented a security posture for this before
-(checked: instances.snapshot/kill_pid have exactly two callers anywhere, the CLI
-and one internal read-only MCP tool - grep instances.py's own callers to
-re-verify if this ever needs re-litigating).
-
-The CLI's own cross-instance `stop` gets away with less ceremony only because
-its trust boundary is stronger than any HTTP scope: it reads the target's
-registry entry (0600, owner-only) and, on a declined/unreachable graceful
-shutdown, sends a raw OS kill signal - which requires being the same OS user.
-Gating this route on scopes.ADMIN (the owner) is the closest HTTP-scope
-equivalent of "same local user" - open mode (no key configured anywhere) still
-passes through unchanged, same as every other owner-gated route in this
-codebase (see CHK-UPDATE-ROLLBACK in inference/routes/admin.py for the
-identical reasoning applied to a same-instance-but-still-owner-only action).
+The stop route is gated on scopes.ADMIN (the owner), not CONFIG_WRITE like the
+sibling /v1/server/shutdown|restart (localm/inference/routes/admin.py): stopping
+a DIFFERENT instance reaches outside the calling instance's own blast radius,
+into a process that may be serving an unrelated project or user. Open mode (no
+key configured anywhere) still passes through unchanged, same as every other
+owner-gated route.
 
 Both routes are plain `def`, not `async def`: listing probes each entry over
 loopback HTTP (default_probe, up to ~0.7s per entry) and stopping polls PID
 liveness with blocking sleeps - Starlette threadpools a sync handler, so
-neither blocks the event loop, matching the established idiom at
-localm/plugins/gui/routes/admin.py's export_logs.
+neither blocks the event loop.
 """
 
 from __future__ import annotations
@@ -44,12 +25,10 @@ from fastapi import Depends, FastAPI, HTTPException
 from localm import scopes
 from localm.inference.http_server import require_scope
 
-# The fields a listing may show a client. Whitelisted explicitly rather than
-# passing instances.snapshot()'s row through as-is: that row carries `_path`
-# (this machine's filesystem path to the OTHER instance's registry file),
-# which is server-internal and was never meant to reach a network client - a
-# network-bound instance can serve a phone/companion client this data has no
-# business going to. `token` is already stripped by snapshot()'s own default.
+# The fields a listing may show a client. Whitelisted explicitly: instances
+# .snapshot()'s row also carries `_path` (this machine's filesystem path to the
+# OTHER instance's registry file), which is server-internal and must not reach a
+# network client. `token` is already stripped by snapshot()'s own default.
 _LIST_FIELDS = ("instance_id", "alive", "root_dir", "mode", "scheme", "host",
                 "port", "pid", "started", "version")
 
@@ -71,11 +50,10 @@ def register(app: FastAPI, ctx) -> None:
         for r in rows:
             row = {k: r.get(k) for k in _LIST_FIELDS}
             row["self"] = row["instance_id"] == self_id
-            # Pre-bracketed display address (the BIND host, same choice
-            # cli/models.py's ps_cmd makes and the same reason: this answers
-            # "what did this instance bind", not "how would I connect to it" -
-            # url_host() lives once so an IPv6 bind never grows a second,
-            # divergent bracketing implementation on the GUI side.
+            # Pre-bracketed display address (the BIND host, the same choice
+            # cli/models.py's ps_cmd makes): this answers "what did this
+            # instance bind", not "how would I connect to it". Bracketing an
+            # IPv6 bind lives once, in url_host().
             row["address"] = (f"{row.get('scheme') or 'http'}://"
                               f"{url_host(row.get('host') or '127.0.0.1')}"
                               f":{row.get('port', '?')}")
@@ -129,8 +107,7 @@ def register(app: FastAPI, ctx) -> None:
                 # The target's open-mode management gate refuses an
                 # unauthenticated shutdown from a caller with no shell/API-key
                 # credential for THAT instance - the default case, not a
-                # misconfiguration (see cli/models.py's stop_cmd, identical
-                # comment). Fall back to a direct kill rather than failing.
+                # misconfiguration. Falls back to a direct kill.
                 graceful_denied = True
             elif resp.status_code == 200:
                 deadline = time.monotonic() + timeout
@@ -146,9 +123,8 @@ def register(app: FastAPI, ctx) -> None:
             stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
             if stopped:
                 # A direct kill bypasses the target's own clean-shutdown path,
-                # which normally clears its crash marker - without this, the
-                # next start of THAT instance would misreport this intentional
-                # stop as a crash. Same as cli/models.py's stop_cmd.
+                # which normally clears its crash marker, so the next start of
+                # THAT instance would otherwise report this stop as a crash.
                 try:
                     from localm import bugreport
                     bugreport.disarm_crash_guard(

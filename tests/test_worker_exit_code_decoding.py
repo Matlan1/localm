@@ -1,21 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A dead worker's exit code must be reported DECODED, not raw.
 
-Issues 1222/1223 reported ``Native inference fault (worker exit -4)`` and that
-number was the only fact the product gave about the death. It is also the most
-discriminating one available: on POSIX ``multiprocessing`` reports ``-N`` for
-death by signal N, so ``-4`` is SIGILL - an illegal instruction, which is a
-different FAMILY of cause from a segfault (-11) or an abort (-6) and points the
-investigation somewhere different. Decoding it had to be done by hand before the
-diagnosis could even pick a direction.
+The raw number is the most discriminating fact available about a worker death:
+on POSIX ``multiprocessing`` reports ``-N`` for death by signal N, so ``-4`` is
+SIGILL - an illegal instruction, a different FAMILY of cause from a segfault
+(-11) or an abort (-6), pointing the investigation somewhere different.
 
 BOTH OS CONVENTIONS ARE TESTED ON WHATEVER PLATFORM THIS RUNS ON, via
 ``describe_exit_code``'s explicit *posix* parameter. That is the point of the
 parameter: the conventions are mutually exclusive, so a Windows runner can never
-produce ``-4``-means-SIGILL and a Linux runner can never produce an NTSTATUS -
-and the field crash is on the branch this project's own box cannot reach. Gating
-these on ``sys.platform`` instead would leave the branch that actually matters
-permanently unexercised while the file still read as covered.
+produce ``-4``-means-SIGILL and a Linux runner can never produce an NTSTATUS.
+Gating these on ``sys.platform`` instead would leave one branch permanently
+unexercised while the file still read as covered.
 """
 
 import os
@@ -42,7 +38,7 @@ class TestPosixSignalDecoding:
         assert "-4" in out, out
 
     @pytest.mark.parametrize("code,name", [
-        (-4, "SIGILL"),     # illegal instruction - the reported one
+        (-4, "SIGILL"),     # illegal instruction
         (-11, "SIGSEGV"),   # segfault: a DIFFERENT family of cause
         (-6, "SIGABRT"),    # a deliberate native abort, e.g. GGML_ABORT
         (-9, "SIGKILL"),    # killed from outside, not a fault at all
@@ -71,10 +67,10 @@ class TestPosixSignalDecoding:
         assert "None" not in out
 
     def test_posix_codes_are_not_decoded_through_the_host_signal_enum(self):
-        """REGRESSION GUARD for a real defect this file caught, so nobody
-        "simplifies" the decoder back to a bare signal.Signals() lookup.
+        """REGRESSION GUARD, so the decoder is not "simplified" back to a bare
+        signal.Signals() lookup.
 
-        MEASURED: the two enums disagree on the numbers that matter.
+        The two enums disagree on the numbers that matter.
 
             Windows  SIGABRT == 22        Linux  SIGABRT ==  6
             Windows  6 is absent          Linux  22 == SIGTTOU
@@ -101,8 +97,8 @@ class TestWindowsNtstatusDecoding:
         assert "signal" not in out.lower()
 
     def test_the_measured_native_abort_code_is_named(self):
-        """3221226505 == 0xC0000409, measured from a real os.abort() on this
-        project's own CRT while building the worker crash-trace capture."""
+        """3221226505 == 0xC0000409, the exit code a native os.abort()
+        produces on Windows."""
         out = describe_exit_code(3221226505, posix=False)
         assert "0xC0000409" in out
         assert "abort" in out.lower()
@@ -126,13 +122,10 @@ class TestWindowsNtstatusDecoding:
 class TestNativeFaultClassification:
     """A worker death must not be CALLED a native fault unless it was one.
 
-    Two places in this repo already knew exit 1 is an uncaught Python exception
-    rather than a native abort - `_runner_entry`'s own docstring, and
-    tests/test_image_decode_without_pillow.py, whose entire subject is a missing
-    Pillow surfacing as "Native inference fault (worker exit 1)" with a plain
-    ModuleNotFoundError in the log ("Every clause of that was false"). That was
-    fixed for Pillow specifically; the misclassification lived at the site that
-    WORDS the message, which a per-cause fix cannot reach (diff-review item 23).
+    Exit 1 is an uncaught Python exception rather than a native abort: a missing
+    Pillow surfaces as "Native inference fault (worker exit 1)" with a plain
+    ModuleNotFoundError in the log unless the classification is made at the site
+    that WORDS the message, which a per-cause fix cannot reach.
     """
 
     @pytest.mark.parametrize("code", [-4, -11, -6, -9])
@@ -151,16 +144,16 @@ class TestNativeFaultClassification:
 
     @pytest.mark.parametrize("code", [0, 1, 3, -1])
     def test_an_ordinary_windows_exit_is_not(self, code):
-        """-1 included on purpose: Process.terminate() produces it on Windows,
-        and 3 is what an ARMED-faulthandler abort exits with - neither is
-        classifiable from the code alone, so neither may be asserted as native."""
+        """-1 is included: Process.terminate() produces it on Windows, and 3 is
+        what an ARMED-faulthandler abort exits with. Neither is classifiable from
+        the code alone, so neither may be asserted as native."""
         assert not death_was_a_native_fault(code, posix=False)
 
     def test_a_captured_trace_settles_it_on_either_platform(self):
-        """The strongest evidence, and the reason it leads rather than tiebreaks:
+        """The strongest evidence, and it leads rather than tiebreaks:
         faulthandler only fires on SIGSEGV/SIGFPE/SIGABRT/SIGBUS/SIGILL, so a
-        trace means a native signal even when the exit code cannot say so - which
-        is exactly the Windows armed-abort-exits-3 case."""
+        trace means a native signal even when the exit code cannot say so - the
+        Windows armed-abort-exits-3 case."""
         assert death_was_a_native_fault(3, trace_captured=True, posix=False)
         assert death_was_a_native_fault(1, trace_captured=True, posix=True)
 
@@ -169,13 +162,11 @@ class TestNativeFaultClassification:
         assert death_was_a_native_fault(bad) is False
 
     def test_a_real_python_exception_death_is_not_called_a_native_fault(self):
-        """END TO END, through a REAL child, on the exact fault the false message
-        was reported for: chat_stream before any load -> worker is None ->
-        AttributeError -> uncaught -> exit 1.
+        """END TO END, through a REAL child: chat_stream before any load ->
+        worker is None -> AttributeError -> uncaught -> exit 1.
 
-        This is the regression oracle for the reported symptom. It is sited at the
-        runner rather than on the predicate because the defect was in how the
-        message is WORDED, and a predicate test cannot see that."""
+        Sited at the runner rather than on the predicate because the property is
+        how the message is WORDED, which a predicate test cannot see."""
         r = ModelRunner()
         r._spawn()
         try:
@@ -209,10 +200,9 @@ class TestNeverRaises:
 
 class TestRunnerReportsTheDecodedCode:
     """The decoder existing is not the property; the RUNNER using it is. These
-    are sited at the runner rather than only on the helper because the defect was
-    that every user-facing message interpolated the RAW code - a helper-level
-    test cannot see that (diff-review item 23: extracting a helper moves the
-    tests away from where the bug lives)."""
+    are sited at the runner rather than only on the helper because every
+    user-facing message must not interpolate the RAW code, which a helper-level
+    test cannot see."""
 
     def test_exit_reason_is_decoded_for_a_signal_death(self, monkeypatch):
         r = ModelRunner()
@@ -234,14 +224,12 @@ class TestRunnerReportsTheDecodedCode:
         proves the decoding survives into the message a user actually reads.
 
         THE WINDOWS ARM DOES NOT ASSERT 0xC0000409, AND MUST NOT BE "FIXED" TO.
-        An unarmed Windows abort does exit 0xC0000409 (measured), but the worker
-        now arms faulthandler before anything else, and faulthandler installs a
-        SIGABRT handler - so os.abort() takes the ordinary CRT path and exits 3
-        instead of __fastfail's NTSTATUS. Measured both ways this session: armed
-        -> 3, unarmed -> 0xC0000409. So on Windows this fault mode no longer
-        yields a decodable code at all, and what characterises the fault is the
-        captured trace instead. Asserting the NTSTATUS here would be asserting a
-        value the crash-trace capture removed."""
+        An unarmed Windows abort exits 0xC0000409, but the worker arms
+        faulthandler before anything else and faulthandler installs a SIGABRT
+        handler, so os.abort() takes the ordinary CRT path and exits 3 instead of
+        __fastfail's NTSTATUS. On Windows this fault mode therefore yields no
+        decodable code at all, and what characterises the fault is the captured
+        trace instead."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
         r = ModelRunner()
         r._spawn()
@@ -269,24 +257,20 @@ class TestRunnerReportsTheDecodedCode:
         would silently reintroduce the bare number, and no behavioural test would
         catch it because the message would still be produced.
 
-        MEASURED, and it is why this static guard is load-bearing rather than
-        belt-and-braces: with the call sites reverted to the raw code, THIS IS
-        THE ONLY TEST IN THIS FILE THAT GOES RED ON WINDOWS. The behavioural test
-        above cannot - the fault-injection abort exits 3 there, and "3" is what
-        both the raw and the decoded form produce, so nothing distinguishes them.
-        On POSIX the behavioural test goes red too (SIGABRT disappears from the
-        message). Do not delete this scan on the grounds that an end-to-end test
-        covers it; on this project's own dev platform it does not."""
+        With the call sites reverted to the raw code, this is the only test in
+        this file that goes red on Windows: the fault-injection abort exits 3
+        there, and "3" is what both the raw and the decoded form produce, so
+        nothing distinguishes them. On POSIX the behavioural test goes red too
+        (SIGABRT disappears from the message)."""
         import inspect
 
         from localm.inference.backends.llamacpp import _runner
 
         src = inspect.getsource(_runner)
-        # THE RULE THIS ENCODES: the raw exit code has exactly TWO legitimate
-        # consumers - the decoder that RENDERS it (describe_exit_code) and the
-        # classifier that INTERPRETS it (death_was_a_native_fault) - and both are
-        # reached through one-line accessors. Anything else touching the number is
-        # on its way into a message and must use _exit_reason() instead.
+        # The raw exit code has exactly TWO legitimate consumers: the decoder
+        # that RENDERS it (describe_exit_code) and the classifier that INTERPRETS
+        # it (death_was_a_native_fault), both reached through one-line accessors.
+        # Anything else on its way into a message uses _exit_reason().
         offenders = [
             line.strip() for line in src.splitlines()
             if "_exitcode()" in line
@@ -305,16 +289,14 @@ class TestRunnerReportsTheDecodedCode:
     def test_sibling_runners_also_decode_their_exit_codes(self, modname):
         """The same guard for the OTHER two isolated workers.
 
-        ``describe_exit_code`` was put in ``_mp_spawn`` shared rather than beside
-        ``ModelRunner`` so these two could reuse it; until they did, a user whose
-        HF or embedding worker died still got the bare number that made issues
-        1222/1223 hard to triage, while the changelog said the product decodes
-        it. One claim, three workers - so one guard covering all three.
+        ``describe_exit_code`` lives in ``_mp_spawn`` shared rather than beside
+        ``ModelRunner`` so all three runners reuse it. One claim, three workers,
+        so one guard covering all three.
 
         Matches ``.exitcode`` (with the dot) rather than the bare word, so the
         module docstrings that mention ``is_alive()``/``exitcode`` in prose are
-        not false positives - verified: both modules scan clean today, and both
-        go red when a call site is reverted to the raw attribute."""
+        not false positives; both modules scan clean today and both go red when
+        a call site is reverted to the raw attribute."""
         import importlib
         import inspect
 

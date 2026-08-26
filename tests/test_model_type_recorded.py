@@ -2,21 +2,16 @@
 """A registry entry with NO model_type is a third state, and the API has to say so.
 
 Both model endpoints read ``entry.get("model_type", "llm")``. That default is
-LOAD-BEARING and stays: the chat-model picker asks ``/api/models?type=llm``, so a
-legacy entry from before the field existed must remain selectable for chat. What
-it is not is a recorded fact - presenting it as a Role reads as "somebody
-classified this as an LLM" when nobody did, which is the same collapse
-``_register``'s own docstring rejects for ``expert_count=0`` versus an absent key.
+LOAD-BEARING: the chat-model picker asks ``/api/models?type=llm``, so a legacy
+entry from before the field existed stays selectable for chat. It is not a
+recorded fact, though, so ``model_type_recorded: false`` rides alongside,
+emitted ONLY when nothing is recorded. Every other model's payload is
+unchanged.
 
-So ``model_type_recorded: false`` rides alongside, emitted ONLY when there is
-nothing recorded. Every normal model's payload is byte-identical, and a client
-predating the field behaves exactly as before.
-
-The pairing is what matters and is why the filter assertions sit in the same
-tests as the flag ones: reporting the truth and keeping the permissive default
-are two halves of one change, and a later edit that "cleans up" the default by
-dropping it would satisfy every flag assertion here while silently removing
-untagged models from the chat picker.
+The filter assertions sit in the same tests as the flag ones, because reporting
+the absence and keeping the permissive default are two halves of one behaviour:
+dropping the default would satisfy every flag assertion while removing untagged
+models from the chat picker.
 """
 
 from unittest.mock import patch
@@ -68,19 +63,17 @@ class TestModelsListRoute:
     def test_untagged_entry_is_flagged_and_typed_entry_is_not(self, gui_app):
         rows = self._models(gui_app, {"typed": TYPED, "untagged": UNTAGGED})
         assert rows["untagged"]["model_type_recorded"] is False
-        # ABSENT, not True: an omitted key keeps the payload byte-identical for
-        # every already-typed model and for any client predating the field.
+        # ABSENT, not True: the key is omitted for an already-typed model.
         assert "model_type_recorded" not in rows["typed"]
 
     def test_the_llm_default_still_rides_along_for_the_untagged_row(self, gui_app):
-        # The flag says the type is a guess; it does not remove the guess. A
-        # consumer that only knows `model_type` keeps working unchanged.
+        # The flag says the type is a guess; it does not remove the guess, so
+        # `model_type` is still present.
         rows = self._models(gui_app, {"untagged": UNTAGGED})
         assert rows["untagged"]["model_type"] == "llm"
 
     def test_recorded_unknown_is_not_flagged(self, gui_app):
-        # The distinction the whole change rests on: 'unknown' was chosen,
-        # "nothing recorded" was not.
+        # 'unknown' was chosen; "nothing recorded" was not.
         rows = self._models(gui_app, {"mystery": UNKNOWN})
         assert "model_type_recorded" not in rows["mystery"]
         assert rows["mystery"]["model_type"] == "unknown"
@@ -91,10 +84,8 @@ class TestModelsListRoute:
         assert rows["nulled"]["model_type_recorded"] is False
 
     def test_type_llm_filter_STILL_returns_the_untagged_entry(self, gui_app):
-        """The load-bearing half. models-sidebar.js fetches /api/models?type=llm
-        for the chat picker, so a legacy untagged model must stay in that list.
-        Dropping the route's default would satisfy every flag assertion above
-        and silently make that model unselectable for chat."""
+        """models-sidebar.js fetches /api/models?type=llm for the chat picker,
+        so a legacy untagged model stays in that list."""
         app, _ = gui_app
         with patch("localm.config.load_registry",
                    return_value={"typed": TYPED, "untagged": UNTAGGED, "mystery": UNKNOWN}):
@@ -147,9 +138,8 @@ def auth(tmp_path, monkeypatch):
 @pytest.fixture
 def gui_app(tmp_path, monkeypatch):
     """The GUI router on a bare app, mirroring tests/test_gui.py's fixture of the
-    same name. Deliberately NOT create_app(): that mounts the full auth stack and
-    every request here would 403, which is a fact about the fixture rather than
-    about the route under test."""
+    same name. NOT create_app(), which mounts the full auth stack and would 403
+    every request here."""
     from fastapi import FastAPI
     from localm.plugins.gui.web import attach_gui
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))

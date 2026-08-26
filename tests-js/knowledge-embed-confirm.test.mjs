@@ -3,12 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// FIX3: switching the embedding model used to write config and reset the
-// embedder as the FIRST thing POST /api/rag/embedding did, then only reported
-// what it had just invalidated inside the job log - after the fact. Now the
-// GUI dry-runs the switch (POST without confirm) first; if that names
-// collections that would be affected, the user is asked BEFORE the second,
-// confirmed POST that actually makes the change.
+// Switching the embedding model dry-runs first (POST without confirm); if that
+// names affected collections the user is asked, then a second POST with
+// confirm:true makes the change.
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -79,7 +76,6 @@ test("affected collections: the confirm modal shows them before any confirmed PO
   assert.match(modal.textContent, /docs/);
   assert.match(modal.textContent, /old-model/);
   assert.match(modal.textContent, /42 chunks/);
-  // Not yet confirmed - the actual switch must not have happened.
   assert.equal(confirmBody(calls), null, "no confirmed POST before the user answers");
 });
 

@@ -315,10 +315,9 @@ def test_path_re_contract(path, ok):
 
 def test_redirect_uses_partial_bytes_when_client_disconnects_before_crlfcrlf():
     # A client that sends a Host header then dies mid-handshake (EOF before the
-    # blank line) must still get a best-effort redirect built from whatever
-    # arrived, not a hang or a bare reset: readuntil raises IncompleteReadError,
-    # whose .partial carries the bytes read so far - the except clause must use
-    # them, not discard them.
+    # blank line) still gets a best-effort redirect built from whatever arrived:
+    # readuntil raises IncompleteReadError, whose .partial carries the bytes read
+    # so far.
     async def go():
         reader = asyncio.StreamReader()
         reader.feed_data(b"ET /x HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n")
@@ -334,10 +333,9 @@ def test_redirect_uses_partial_bytes_when_client_disconnects_before_crlfcrlf():
 
 def test_redirect_falls_back_to_explain_page_on_oversized_preamble():
     # A client that floods headers without ever sending the terminating blank
-    # line trips asyncio's LimitOverrunError (no .partial attribute at all, so
-    # the getattr fallback to b"" must be exercised) rather than hanging the
-    # connection forever. The result must still be a clean HTTP response, never
-    # an unhandled exception.
+    # line trips asyncio's LimitOverrunError, which carries no .partial attribute
+    # at all, so the getattr fallback is exercised. The result is still a clean
+    # HTTP response, never an unhandled exception.
     async def go():
         reader = asyncio.StreamReader()
         oversized = b"X-Pad: " + b"a" * 70000 + b"\r\n"
@@ -549,8 +547,7 @@ def test_safe_close_closes_a_real_writer():
 
 
 # --------------------------------------------------------------------------- #
-#  _get_stable_stream: resolve-once caching (fires-control: without the cache
-#  guard, a broken resolver would be retried on every single connection)
+#  _get_stable_stream: resolve-once caching
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture
@@ -617,9 +614,6 @@ def test_safe_notice_falls_back_to_live_stderr_when_no_stable_stream(monkeypatch
 
 
 def test_safe_notice_never_raises_even_when_the_stream_write_fails(monkeypatch):
-    # Fires-control: remove the try/except in _safe_notice and this test fails
-    # with the OSError propagating - which is exactly the WinError-6 cascade
-    # this function exists to prevent (see the module docstring).
     class BrokenStream:
         def write(self, s):
             raise OSError("[WinError 6] The handle is invalid")

@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Cancelling an image generation must still restore VRAM.
 
-Regression: Stop unloaded the chat model (to free VRAM for the image model) but,
-because the chat-model reload ran only on success, a cancel left the chat model
-unloaded AND ComfyUI's model resident - the reported "fails unloading the image
-model, loading chat". The reload must run on the cancel path too.
+Stop unloads the chat model to free VRAM for the image model, so the chat-model
+reload must run on the cancel path as well as on success.
 """
 
 import asyncio
@@ -27,20 +25,18 @@ class _FakeJob:
         self.lines.append(ev)
 
     def mark_outcome(self, status):
-        # Board item #27 follow-up: _generate now calls this once its real
-        # deliverable is decided, before the VRAM-reload tail. Recorded (not a
-        # no-op stub) so tests below can assert it fires at the right point -
-        # see test_start_fn_outcome_honesty.py for the jobs.py mechanism itself.
+        # _generate calls this once its real deliverable is decided, before the
+        # VRAM-reload tail. Recorded rather than a no-op stub so the tests below
+        # can assert it fires at the right point.
         self.outcomes.append(status)
 
 
 def _run_generate(monkeypatch, *, gen_result, cancelled):
     """Drive the plug's inner _generate closure and return (reload_called, job)."""
-    # api_url is read unconditionally by #709's placement resolver
-    # (resolve_media_placement(_cfg, s["api_url"])) before the reload logic
-    # under test runs; the real settings loader always supplies it, so this
-    # fake must too or the closure dies on KeyError before reaching the code
-    # under test. Placement itself stays off (no comfy_gpu_placement config).
+    # api_url is read unconditionally by the placement resolver
+    # (resolve_media_placement(_cfg, s["api_url"])) before the reload logic under
+    # test runs, so this fake must supply it or the closure dies on KeyError.
+    # Placement itself stays off (no comfy_gpu_placement config).
     s = {"reload_after": True, "warning": "", "api_url": "http://127.0.0.1:8188"}
     monkeypatch.setattr(plug._backend, "settings", lambda cfg: s)
     monkeypatch.setattr(plug._backend, "ensure_available",
@@ -67,9 +63,9 @@ def _run_generate(monkeypatch, *, gen_result, cancelled):
     request = MagicMock()
     request.app.state.jobs = _FakeJobs()
     request.app.state.self_url = "http://127.0.0.1:8642/v1"
-    # KEY-SCOPE-2: imagine() now stamps the job owner via principal_id(request),
-    # which reads real headers/cookies - give the mock empty ones so it resolves to
-    # an anonymous (None) principal instead of trying to hash a MagicMock attribute.
+    # imagine() stamps the job owner via principal_id(request), which reads real
+    # headers/cookies - give the mock empty ones so it resolves to an anonymous
+    # (None) principal instead of hashing a MagicMock attribute.
     request.headers = {}
     request.cookies = {}
 
@@ -115,10 +111,9 @@ def _wait_for_terminal(job, timeout=3.0):
 
 
 def test_generate_reports_done_when_reload_raises_after_success(monkeypatch):
-    """The concrete, originally-flagged bug (board item #27's follow-up,
-    dev-notes/FIX-2026-08-05-start-fn-outcome-honesty.md): a successful
-    generation whose VRAM handover then raises (e.g. a non-comfy backend's
-    free_vram()) must still land on job.status == "done", not "failed".
+    """A successful generation whose VRAM handover then raises (e.g. a non-comfy
+    backend's free_vram()) must still land on job.status == "done", not
+    "failed".
 
     Drives the REAL JobManager.start_fn (unlike the fake-job tests above), so
     the interaction between _generate's mark_outcome call and jobs.py's own

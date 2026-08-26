@@ -11,19 +11,12 @@ from localm.media.comfy_client import (
 )
 from localm.debuglog import logger
 
-# Table mapping ComfyUI model subdirectories to localm model_types. Deliberately
-# narrower than ComfyUI's OWN folder set (see media/managed_comfy.py's
-# _MODEL_FOLDER_TYPES, which lists controlnet/upscale_models/embeddings/
-# clip_vision/style_models for ComfyUI's own extra_model_paths.yaml): those
-# conventions fall through to "unknown"/Other here BY DESIGN, not by omission.
-# MODEL_TYPES (registry.py) is a closed enum wired through plugins/engine.py's
-# routing, contract.py, and the CLI/GUI type-selector - localm's own generation
-# pipeline never picks "which controlnet" or "which upscaler" through localm's
-# model registry; ComfyUI resolves those itself from the workflow JSON via
-# extra_model_paths.yaml, which already points at the same folders. Widening
-# this table would need every one of those consumers taught new types for no
-# functional gain today - the files still get registered (as unknown/Other)
-# and remain fully usable by ComfyUI either way.
+# Table mapping ComfyUI model subdirectories to localm model_types. Narrower
+# than ComfyUI's OWN folder set (see media/managed_comfy.py's
+# _MODEL_FOLDER_TYPES): controlnet/upscale_models/embeddings/clip_vision/
+# style_models fall through to "unknown"/Other here. Those files are still
+# registered and stay usable by ComfyUI, which resolves them itself from the
+# workflow JSON via extra_model_paths.yaml.
 SUBFOLDER_MAPPING = {
     "unet": "diffusion-unet",
     "unet_gguf": "diffusion-unet",
@@ -52,15 +45,10 @@ class ScanPreview(NamedTuple):
 
 def get_comfy_workdir() -> Optional[str]:
     # Managed routing is absolute: when localm's own ComfyUI is selected and
-    # installed, that IS the folder to scan, full stop - any per-plugin/global
-    # workdir left over from before (or set for an unrelated custom install)
-    # must not shadow it, matching the same "own means own" rule
-    # image/music/video backend.py now enforce for the launch path
-    # (NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). This scan
-    # button has no single "current plugin" to resolve against (it is a
-    # generic action, not tied to one media type), so the non-managed
-    # fallback below still checks all three plugin blocks itself rather than
-    # calling resolve_comfy_target() with a specific plugin.
+    # installed, that IS the folder to scan, and no per-plugin or global workdir
+    # shadows it. This scan has no single "current plugin" to resolve against,
+    # so the non-managed fallback below checks all three plugin blocks itself
+    # instead of calling resolve_comfy_target() with a specific plugin.
     from localm.media.managed_comfy import resolve_comfy_target
     target = resolve_comfy_target()
     if target.managed:
@@ -75,17 +63,13 @@ def get_comfy_workdir() -> Optional[str]:
 
 def _resolve_explicit_workdir_models_path(workdir: str) -> Path:
     """An explicit *workdir* override (the guided Import-from-ComfyUI flow) is
-    normally a real ComfyUI checkout root picked via Browse or typed by hand, so
-    its models live at <workdir>/models exactly as ComfyUI itself expects. The
-    one exception is the "Use localm's own ComfyUI" quick-fill, which hands back
-    the managed checkout root itself (managed-status's `path` field is also
-    legitimately shown elsewhere as "installed at", so it cannot just be
-    changed to return the models dir instead). A managed install's models live
-    in a SIBLING directory, never inside a `models` subfolder under the
-    checkout - managed_comfy_provision.py's copy step excludes "models" from
-    what gets copied there, so <root>/models never exists. Recognize that one
-    specific, unambiguous root and redirect to the real managed models dir
-    rather than guessing at a subfolder that provably never exists for it."""
+    normally a real ComfyUI checkout root, so its models live at
+    <workdir>/models. The one exception is the "Use localm's own ComfyUI"
+    quick-fill, which hands back the managed checkout root itself. A managed
+    install's models live in a SIBLING directory, never inside a `models`
+    subfolder under the checkout (managed_comfy_provision.py's copy step
+    excludes "models"), so that one root is recognized and redirected to the
+    real managed models dir."""
     from localm.media.managed_comfy import managed_comfy_paths
     paths = managed_comfy_paths()
     if Path(workdir).resolve() == paths.root.resolve():
@@ -96,18 +80,13 @@ def _resolve_explicit_workdir_models_path(workdir: str) -> Path:
 def _resolve_scan_models_path(workdir: Optional[str]) -> Optional[Path]:
     """Resolve the actual directory scan_comfy_models/preview_comfy_models
     should walk. An explicit *workdir* is a one-off override (see
-    _resolve_explicit_workdir_models_path). With none given, this mirrors the
-    same managed-routing check get_comfy_workdir() makes, but - unlike
-    get_comfy_workdir() - resolves straight to the managed ComfyUI's actual
-    models directory rather than its checkout root: the managed instance's
-    models live directly under <LOCALM_HOME>/comfyui-models, a SIBLING of the
-    checkout root (managed_comfy.py's module docstring; comfy_models_dest_dir()
-    downloads there), never inside a `models` subfolder under the checkout.
-    get_comfy_workdir() correctly reports the checkout root for OTHER purposes
-    (e.g. display), but appending "/models" to it - the only thing a scan can
-    do with a bare workdir string - always finds nothing for a managed
-    install. Falls back to get_comfy_workdir() + "/models" exactly as before
-    when not managed. Returns None when nothing is configured/resolvable."""
+    _resolve_explicit_workdir_models_path). With none given, this makes the same
+    managed-routing check get_comfy_workdir() makes but resolves straight to the
+    managed ComfyUI's actual models directory: the managed instance's models
+    live directly under <LOCALM_HOME>/comfyui-models, a SIBLING of the checkout
+    root, never inside a `models` subfolder under it. Falls back to
+    get_comfy_workdir() + "/models" when not managed. Returns None when nothing
+    is configured or resolvable."""
     if workdir:
         return _resolve_explicit_workdir_models_path(workdir)
     from localm.media.managed_comfy import managed_comfy_active, managed_comfy_paths
@@ -137,7 +116,7 @@ def _existing_registered_paths(reg: dict) -> set:
     malformed entry (non-dict, or a null / non-string / empty path). `"path" in
     entry` TypeErrors on a null entry and `Path(entry["path"])` raises on a null
     / int path; routing every entry through _entry_path keeps one corrupt row
-    from crashing a scan or preview. Mirrors #562's registry consumers."""
+    from crashing a scan or preview."""
     existing = set()
     for entry in reg.values():
         epath = _entry_path(entry)
@@ -202,11 +181,9 @@ def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
                     if isinstance(input_def, list) and input_def and isinstance(input_def[0], list):
                         options = [o for o in input_def[0] if isinstance(o, str)]
                         if _looks_like_model_files(options):
-                            # ONE shared node-name -> model_type inference, not a
-                            # private copy: the media plugins' model-role wiring
-                            # reads the SAME table (comfy_client.model_type_for_node),
-                            # so a file this scan files as 'vae' is the file that
-                            # surface offers for a vae role.
+                            # ONE shared node-name -> model_type inference: the
+                            # media plugins' model-role wiring reads the SAME
+                            # table (comfy_client.model_type_for_node).
                             inferred_type = model_type_for_node(node_name)
                             if inferred_type != "unknown":
                                 for opt in options:
@@ -230,12 +207,10 @@ def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = 
     reading or mutating the persistent comfy_workdir config value.
 
     *progress_cb*, when given, is called as ``progress_cb(done, total, name)``
-    once per discovered file as it is registered (or found already registered)
-    - the one point in this function with an honest denominator (the directory
-    walk above it has none). The GUI route wires this to Job.progress() so the
-    guided Import-from-ComfyUI flow can show a real "registering model N of M"
-    count instead of a silent wait; a caller that passes nothing (every
-    existing caller) sees no behavior change."""
+    once per discovered file as it is registered (or found already registered),
+    which is the one point in this function with a denominator - the directory
+    walk above it has none. The GUI route wires this to Job.progress(). A caller
+    that passes nothing sees no behavior change."""
     models_path = _resolve_scan_models_path(workdir)
     if models_path is None:
         return ScanResult(added=0, skipped=0, method="none (comfy_workdir not configured)")

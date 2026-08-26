@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GUI managed-ComfyUI routes: set up / status / remove localm's OWN ComfyUI.
 
-Stage S5 (GUI-button slice) of the localm-managed ComfyUI feature. These wire the
-GUI's "Set up localm's own ComfyUI" surface to the EXISTING entry points; they add
-no provisioning logic of their own (S2/S3 own that in localm/media/managed_comfy*):
+These wire the GUI's "Set up localm's own ComfyUI" surface to the EXISTING entry
+points and add no provisioning logic of their own (that lives in
+localm/media/managed_comfy*):
 
   POST /api/comfy/setup           -> dispatch `localm comfy setup` as a background
                                      JOB (a multi-GB install must not block the
                                      request); returns {"job_id"} to stream.
   GET  /api/comfy/managed-status  -> is a managed instance installed, where, and is
-                                     localm routing to it (the S1 coexistence state).
+                                     localm routing to it (the coexistence state).
                                      Also reports "corrupt" (an incomplete install
                                      left behind by an abandoned setup attempt) vs
                                      "installing" (a setup job genuinely still running),
@@ -23,11 +23,9 @@ no provisioning logic of their own (S2/S3 own that in localm/media/managed_comfy
   POST /api/comfy/repair          -> clear an INCOMPLETE install (never a genuinely
                                      installed one) and re-run setup, in one action.
 
-Off by default: nothing here changes behaviour until the user opts in. The S1
+Off by default: nothing here changes behaviour until the user opts in. The
 coexistence toggle (comfy_target) is NOT duplicated here - it stays a Settings
 field; this only adds the set-up/status/remove actions around it.
-
-Design: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md (decision 8).
 """
 
 from __future__ import annotations
@@ -43,14 +41,12 @@ from localm.inference.http_server import principal_id, require_scope
 
 # remove_managed_comfy() rmtrees a checkout that can include a full venv and
 # ComfyUI's custom_nodes - potentially tens of thousands of files - with no
-# internal timeout of its own (unlike the urlopen-bound comfy-status/model
-# calls elsewhere). 120s is generous for even a large tree on a slow disk;
-# genuinely exceeding it means a file lock held by a dead process or a hung
-# filesystem call, not ordinary deletion time. Safe against a second
-# concurrent rmtree after a client retries past this timeout:
-# remove_managed_comfy() now holds its own lock for the whole delete (see
-# managed_comfy.py's _remove_lock) regardless of whether the caller is still
-# waiting on it.
+# internal timeout of its own. 120s is generous for even a large tree on a slow
+# disk; exceeding it means a file lock held by a dead process or a hung
+# filesystem call, not ordinary deletion time. A second concurrent rmtree after
+# a client retries past this timeout is prevented by remove_managed_comfy()'s
+# own lock (managed_comfy.py's _remove_lock), held for the whole delete
+# regardless of whether the caller is still waiting on it.
 _REMOVE_TIMEOUT_S = 120.0
 
 
@@ -61,9 +57,9 @@ def register(app: FastAPI, ctx) -> None:
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def comfy_managed_status():
         """Whether localm's OWN ComfyUI is installed, where it lives, and whether
-        media calls currently route to it (the S1 coexistence state). Drives the
-        GUI's swap between the Set-up button, the installed/Remove view, and (new)
-        a "needs repair" view.
+        media calls currently route to it (the coexistence state). Drives the
+        GUI's swap between the Set-up button, the installed/Remove view, and a
+        "needs repair" view.
 
         `state` distinguishes four cases the plain `installed` boolean alone
         cannot: "not_installed" (nothing here, offer Set up), "installing" (the
@@ -107,16 +103,15 @@ def register(app: FastAPI, ctx) -> None:
         """The update-availability half of the status, so the GUI can offer Update
         only when there is something to update TO and can say WHY when it cannot.
 
-        Deliberately CHEAP and side-effect-free: it reads the provisioning marker and
-        tests for a `.git` dir. It does NOT shell out to git - this runs on the event
-        loop on every settings-page poll, and a subprocess per poll is exactly the
-        kind of per-call cost that multiplies by the fastest caller's interval.
+        CHEAP and side-effect-free: it reads the provisioning marker and tests for
+        a `.git` dir. It does NOT shell out to git; this runs on the event loop on
+        every settings-page poll.
 
-        ``updatable`` is therefore an ADVISORY pre-flight, not the gate. The
-        authoritative refusal still lives in update_managed_comfy(), which resolves
-        HEAD with real git and returns its own honest message; this only lets the GUI
-        say so BEFORE the user starts a job that would fail minutes later. A `.git`
-        dir present but unusable still reaches that real check unchanged."""
+        ``updatable`` is an ADVISORY pre-flight, not the gate. The authoritative
+        refusal lives in update_managed_comfy(), which resolves HEAD with real git
+        and returns its own message; this only lets the GUI say so BEFORE the user
+        starts a job that would fail minutes later. A `.git` dir present but
+        unusable still reaches that real check unchanged."""
         from localm.media.managed_comfy_fresh import (COMFYUI_PINNED_COMMIT,
                                                       COMFYUI_PINNED_VERSION)
         from localm.media.managed_comfy_provision import MARKER_FILENAME
@@ -131,7 +126,7 @@ def register(app: FastAPI, ctx) -> None:
                 installed_version = v if isinstance(v, str) else None
         except (OSError, ValueError):
             # An unreadable marker is not fatal: report unknown rather than guessing
-            # "up to date", which would hide a genuinely available update (rule 5).
+            # "up to date", which would hide a genuinely available update.
             pass
 
         updatable = (root / ".git").exists()
@@ -155,7 +150,7 @@ def register(app: FastAPI, ctx) -> None:
     def _start_setup_job(request: Request, copy_custom_nodes: bool):
         # Pass an EXPLICIT custom-nodes flag so the CLI never prompts (its
         # resolve_copy_custom_nodes short-circuits on a set flag) - the job runs with
-        # stdin closed and must not hang. Default: a clean start (decision 3).
+        # stdin closed and must not hang. Defaults to a clean start.
         flag = "--copy-custom-nodes" if copy_custom_nodes else "--no-custom-nodes"
         return jobs.start_cli(
             "comfy-setup", ["comfy", "setup", flag],
@@ -169,15 +164,14 @@ def register(app: FastAPI, ctx) -> None:
         block the request). Streams progress via /api/jobs/{id}/events, like a model
         pull. Refuses (409) when a managed instance already exists - the user removes
         it first (or uses /api/comfy/repair for an incomplete one - see
-        comfy_managed_status's "corrupt" state); we never silently clobber.
+        comfy_managed_status's "corrupt" state); an existing instance is never
+        clobbered.
 
         Also refuses (409) when a setup job is ALREADY running: the on-disk check
         alone is not enough, since the checkout directory does not exist yet for the
-        first few moments of a fresh setup - two overlapping "Set up" clicks (e.g.
+        first few moments of a fresh setup, so two overlapping "Set up" clicks (e.g.
         two browser tabs) would both pass that check and double-launch the setup CLI
-        onto the same target checkout. comfy_update and comfy_repair already guard
-        this way against a concurrent comfy-setup job; this closes the same race for
-        comfy-setup against itself."""
+        onto the same target checkout."""
         from localm.media.managed_comfy import managed_comfy_paths
         if managed_comfy_paths().root.exists():
             raise HTTPException(
@@ -233,28 +227,22 @@ def register(app: FastAPI, ctx) -> None:
         and must not block the request - same shape as /api/comfy/setup, streamed via
         /api/jobs/{id}/events.
 
-        Until this route existed the update path was CLI-only: the GUI offered set up,
-        repair and remove but no way to update, so a GUI-only user could install a
-        managed ComfyUI and never move it off the pin they installed on.
-
-        ``reinstall_requirements`` forwards `--reinstall-requirements`. It is off by
-        default for the same reason the CLI defaults it off (a partial pip upgrade is
-        not exactly rollback-able, so only the git source rollback is guaranteed), but
-        it MUST be reachable from here: when a pin advances across a dependency change,
-        an update without it leaves a checkout that moved without its new deps.
+        ``reinstall_requirements`` forwards `--reinstall-requirements`. Off by
+        default, matching the CLI: a partial pip upgrade is not reliably
+        rollback-able, so only the git source rollback is guaranteed. It is
+        reachable from here because a pin that advances across a dependency change
+        otherwise leaves a checkout that moved without its new deps.
 
         ``commit`` forwards `--commit <sha>`, the CLI's own "advanced: update to a
         specific ComfyUI commit instead of the shipped pin" testing knob
-        (localm/cli/comfy.py). Not validated here: update_managed_comfy() resolves and
-        checks out whatever it is given and reports a bad ref honestly through the
-        job's own output, the same "own it, report honestly" split as the non-git
-        refusal above - a route-side format check would just duplicate that failure
-        path for a value nothing but git itself can actually verify.
+        (localm/cli/comfy.py). Not validated here: update_managed_comfy() resolves
+        and checks out whatever it is given and reports a bad ref through the job's
+        own output.
 
         Refuses (409) when nothing is installed, when an update is already running, or
         while a setup/repair job is still in flight - never two writers on one checkout.
         The non-git refusal is NOT duplicated here: update_managed_comfy() owns it and
-        reports it honestly through the job's own output (the GUI also pre-warns from
+        reports it through the job's own output (the GUI also pre-warns from
         managed-status's advisory ``updatable``)."""
         from localm.media.managed_comfy import is_managed_comfy_installed
         if not is_managed_comfy_installed():
@@ -283,8 +271,8 @@ def register(app: FastAPI, ctx) -> None:
         """Delete localm's managed ComfyUI (and, with with_models, its managed models
         folder) via the shared remove_managed_comfy helper - the same removal the
         `localm comfy remove` CLI runs. The user's own ComfyUI is never touched. A
-        delete that fails is surfaced (500), never reported as success (rule 5); an
-        honest no-op is returned when nothing is installed."""
+        delete that fails is surfaced (500), never reported as success; an honest
+        no-op is returned when nothing is installed."""
         from localm.media.managed_comfy import remove_managed_comfy
         try:
             removed, failed = await run_in_threadpool_bounded(

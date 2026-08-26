@@ -34,11 +34,8 @@ def _is_interactive() -> bool:
 
 
 def _offer_open(path: Path) -> None:
-    """In an interactive terminal, offer to open/play the just-generated media.
-
-    The CLI cannot display an image or play audio/video itself, but the file is
-    on disk - so we offer to open it in the OS default app. Skipped silently in
-    a non-interactive shell (piped/scripted), where we only print the path.
+    """In an interactive terminal, offer to open the just-generated media in
+    the OS default app. Skipped silently in a non-interactive shell.
     """
     if not _is_interactive():
         return
@@ -52,15 +49,15 @@ def _offer_open(path: Path) -> None:
 
 
 def _remember_func_shim() -> None:
-    """Persist comfy_func_shim=True so every future localm-spawned ComfyUI gets the
-    in-memory __func__ shim automatically (the "remember, stop asking" choice)."""
+    """Persist comfy_func_shim=True so every future localm-spawned ComfyUI gets
+    the in-memory __func__ shim automatically."""
     from ..config import update_config
     update_config(lambda cfg: cfg.__setitem__("comfy_func_shim", True))
 
 
 def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
     """React to a media generation that failed with the known ComfyUI __func__
-    regression (MEDIA-1). On an interactive terminal, offer localm's in-memory,
+    regression. On an interactive terminal, offer localm's in-memory,
     localm-side shim and, on consent, apply it to a ComfyUI localm SPAWNS and retry
     ONCE. Returns the (possibly retried) ``(ok, message)``; a decline, an unrelated
     error, or a non-interactive shell returns ``(False, message)`` unchanged. Never
@@ -80,10 +77,8 @@ def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
         "(Comfy-Org/ComfyUI #12116).[/yellow] localm can apply an in-memory, "
         "localm-side fix to a ComfyUI it starts: it writes nothing into your "
         "ComfyUI install and self-expires once ComfyUI ships its own fix.")
-    # Managed-ComfyUI re-offer: alongside the fix-this-run shim, offer the durable fix -
-    # localm's OWN managed, patched ComfyUI - but only ONCE, and only when the user
-    # has no managed instance yet (else it is moot). Presented here, at the same
-    # offer point, so the two read coherently: fix-now (shim) vs fix-for-good.
+    # Alongside the fix-this-run shim, offer localm's own managed, patched
+    # ComfyUI - once only, and only while the user has no managed instance.
     from ..media.comfy_client import (managed_comfy_setup_offer_message,
                                       mark_managed_comfy_setup_offered,
                                       should_offer_managed_comfy_setup)
@@ -104,9 +99,9 @@ def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
         _remember_func_shim()
     else:
         return False, message
-    # Apply to a ComfyUI localm spawns only. If localm launched the live one, restart
-    # it with the fix; otherwise we must not touch the user's own instance - ask them
-    # to close it, then localm will start a fixed one on the retry.
+    # Applies to a ComfyUI localm spawns only. If localm launched the live one,
+    # restart it with the fix; otherwise the user's own instance is left
+    # untouched and they are asked to close it, so the retry starts a fixed one.
     if spawned_pid(api_url) is not None:
         console.print("[dim]Restarting the ComfyUI localm launched, with the fix...[/dim]")
         restart_comfy(api_url)
@@ -127,25 +122,12 @@ def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
 
 
 def _generate_or_abort(api_url: str, run):
-    """Run a media generation, and on Ctrl-C actually STOP the render.
+    """Run a media generation, and on Ctrl-C tell ComfyUI to stop the render.
 
-    Without this, Ctrl-C ends the localm process while ComfyUI carries on
-    rendering the prompt it was handed and keeps its VRAM held - the terminal
-    throws away the only handle it had on that work, and the card stays full
-    until something else frees it. The user reads the interrupt as "stopped";
-    the machine disagrees.
-
-    ``interrupt_comfy`` (abort the running prompt + clear the queue) and
-    ``free_comfy_vram`` are plain HTTP calls to ComfyUI, so they work from any
-    process. That is what makes this fixable HERE at all, unlike ``stop_comfy``,
-    which also needs the subprocess handle that only the launching process
-    holds - see localm/cli/comfy.py's module docstring.
-
-    Best-effort by nature (ComfyUI may already be gone), but never SILENTLY:
-    the abort's own result is reported, so an interrupt that did not land says
-    so instead of leaving the user believing the render stopped. The
-    KeyboardInterrupt is re-raised afterwards so Click still exits the way it
-    always did.
+    On KeyboardInterrupt it calls ``interrupt_comfy`` (abort the running prompt
+    and clear the queue) and ``free_comfy_vram`` - plain HTTP calls that work
+    from any process - reports whether the abort actually landed, and re-raises
+    the KeyboardInterrupt.
     """
     from rich.markup import escape
 
@@ -166,8 +148,7 @@ def _generate_or_abort(api_url: str, run):
             console.print("[dim]Render aborted, queue cleared, VRAM freed.[/dim]")
         else:
             # interrupt_comfy swallows its own transport errors and returns
-            # False. That is "I could not tell it to stop", which must not be
-            # printed as if the render had ended.
+            # False, which means "could not tell it to stop".
             console.print("[yellow]![/yellow]  ComfyUI did not accept the abort "
                           "(it may already have stopped, or be unreachable). "
                           "Check with [dim]localm comfy status[/dim]")
@@ -215,9 +196,9 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
                                   generate_image)
 
     api_url = default_api_url()
-    # generate_image() calls ensure_comfy() internally, which auto-launches ComfyUI
-    # from comfy_launch_cmd/comfy_workdir (or returns a clear error when they are
-    # unset), so the CLI honours the same config the GUI uses (H1).
+    # generate_image() calls ensure_comfy() internally, which auto-launches
+    # ComfyUI from comfy_launch_cmd/comfy_workdir, or returns a clear error
+    # when they are unset.
 
     out_path = Path(out) if out \
         else Path(f"image_{_time.strftime('%Y%m%d_%H%M%S')}.png")
@@ -286,9 +267,8 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     from ..music_gen import generate_music
     console = Console()
 
-    # generate_music() calls ensure_comfy() internally (auto-launch from
-    # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
-    # honours the same config the GUI uses (H1).
+    # generate_music() calls ensure_comfy() internally: auto-launch from
+    # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
 
     api_url = default_api_url()
     out_path = Path(out) if out \
@@ -366,9 +346,8 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     from ..video_gen import generate_video
     console = Console()
 
-    # generate_video() calls ensure_comfy() internally (auto-launch from
-    # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
-    # honours the same config the GUI uses (H1).
+    # generate_video() calls ensure_comfy() internally: auto-launch from
+    # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
 
     api_url = default_api_url()
     out_path = Path(out) if out \

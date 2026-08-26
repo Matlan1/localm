@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Read-only issues tracker for testers.
 
-Lists the repo's open/closed issues through the localm proxy (the same Worker that
-files bug reports), so a tester can see whether a bug they filed is acknowledged or
-fixed - closing the loop report -> track -> "fixed in vX" -> update. Named
-``issue_tracker`` (not ``issues``) to avoid confusion with the protected local
-``issues/`` directory.
+Lists the repo's open/closed issues through the localm proxy (the same Worker
+that files bug reports), so a tester can see whether a bug they filed is
+acknowledged or fixed.
 
-The proxy uses the server-side Issues token (read-only here); no GitHub account is
-needed. Failures raise :class:`~localm.bugreport.LocalmError` (surfaced, never faked).
+The proxy uses the server-side Issues token (read-only here); no GitHub account
+is needed. Failures raise :class:`~localm.bugreport.LocalmError`.
 """
 
 from __future__ import annotations

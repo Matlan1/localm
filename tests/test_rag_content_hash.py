@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B11: RAG change-detection must be content-aware.
+"""RAG change-detection must be content-aware.
 
-(mtime, size) alone missed same-size edits whose mtime was unchanged (coarse
+(mtime, size) alone misses same-size edits whose mtime is unchanged (coarse
 mtime FS, cp -p / rsync --times, git restore, restore-from-backup), leaving the
-index silently stale. add_paths now also compares a content hash, supports
-force=True (repair), and Collection.documents() lists indexed paths.
+index stale. add_paths also compares a content hash, supports force=True
+(repair), and Collection.documents() lists indexed paths.
 """
 
 import os
@@ -17,7 +17,7 @@ def _write(p, text):
 
 
 def test_same_size_same_mtime_edit_is_reindexed(tmp_path):
-    # NEGATIVE: pre-fix this is skipped (mtime+size match) -> updated == 0.
+    # NEGATIVE: mtime and size both match, so only the content hash catches it.
     base = tmp_path / "rag"
     docs = tmp_path / "docs"
     docs.mkdir()

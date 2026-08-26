@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The owner key is USER-CHOOSABLE, so its persisted digest gets a real KDF.
 
-CodeQL alert 88 (py/weak-sensitive-data-hashing) on ``auth._hash_key``. The
-premise that it only ever sees ``secrets.token_urlsafe(32)`` is false: it holds
-for named KEYSTORE keys, but ``localm key set KEY`` persists a key the user
+``auth._hash_key`` does not only ever see ``secrets.token_urlsafe(32)``: that
+holds for named KEYSTORE keys, but ``localm key set KEY`` persists a key the user
 provides, and ``LOCALM_API_KEY`` / a hand-edited ``auth.key`` bypass
-``set_api_key`` entirely so they are not even length- or charset-checked.
+``set_api_key`` entirely, so they are not even length- or charset-checked.
 
 The harm is not that the digest authenticates (the owner key is verified by a
 PLAINTEXT constant-time compare against ``auth.key``). It is that the digest is
@@ -83,16 +82,14 @@ def test_set_api_key_stores_a_kdf_record_not_a_bare_sha256(auth):
     assert len(records) == 1
     rec = records[0]
     assert rec["alg"] == "scrypt"
-    # Salt AND parameters are stored, so the cost can be raised later without
-    # invalidating a key derived under the old ones.
+    # Salt AND parameters are stored.
     for field in ("salt", "n", "r", "p", "dklen", "digest"):
         assert field in rec, f"{field} missing from the stored record"
     assert len(bytes.fromhex(rec["salt"])) >= 16
 
     bare = _sha256(key)
     assert rec["digest"] != bare
-    # Not merely "the digest field differs" - the bare digest must appear nowhere
-    # in the artefact, or the weak value would still be sitting on disk.
+    # The bare digest appears nowhere in the artefact.
     assert bare not in auth.owner_kdf_file().read_text(encoding="utf-8")
     # And the identity the rest of the system persists is the derived one.
     assert auth._hash_key(key) == rec["digest"] != bare
@@ -145,14 +142,14 @@ def test_legacy_keystore_record_verifies_and_is_upgraded_in_place(auth):
         "id": "legacy01", "name": "old", "hash": _sha256(token),
         "scopes": ["chat"], "created": 1.0, "expires": None,
         "fs_access": "none",
-        # deliberately NO "alg": this is the on-disk shape before the fix
+        # no "alg": the legacy on-disk shape
     }]
     auth.keystore_file().write_text(json.dumps(legacy, indent=2),
                                     encoding="utf-8")
     before = auth.keystore_file().read_text(encoding="utf-8")
     assert "alg" not in before
 
-    # It still authenticates - nobody is locked out by the upgrade.
+    # It still authenticates.
     assert auth.verify(token) == {"chat"}
 
     after = auth.keystore_file().read_text(encoding="utf-8")
@@ -160,8 +157,7 @@ def test_legacy_keystore_record_verifies_and_is_upgraded_in_place(auth):
     upgraded = json.loads(after)[0]
     assert upgraded["alg"] == "sha256"
     assert upgraded["hash"] == _sha256(token)      # the digest itself is unchanged
-    # ...and it still verifies AFTER the rewrite, which is the half that would
-    # break if the upgrade corrupted the row.
+    # ...and it still verifies after the rewrite.
     assert auth.verify(token) == {"chat"}
     assert auth.fs_access_for(token) == "none"
 
@@ -204,8 +200,7 @@ def test_legacy_owner_sessions_are_relinked_to_the_derived_identity(auth):
 def test_a_job_stamped_with_the_legacy_owner_digest_stays_the_owners(auth,
                                                                     monkeypatch):
     """jobs.json is the other store holding this digest. A scheduled job stamped
-    before the upgrade must not silently lose its owner (REG-509 by a new
-    route)."""
+    before the upgrade must not silently lose its owner."""
     from localm.plugins.builtin.jobs.runner import _shell_still_authorized
     key = "correct-horse"
     auth.set_api_key(key)
@@ -221,9 +216,8 @@ def test_a_job_stamped_with_the_legacy_owner_digest_stays_the_owners(auth,
         lambda j: None)
     assert _shell_still_authorized(job) is True
 
-    # Fires-control: the same path must still REFUSE a digest that is neither the
-    # legacy nor the derived identity, or the dual-accept above would be proving
-    # nothing.
+    # The same path refuses a digest that is neither the legacy nor the derived
+    # identity.
     class _Foreign:
         owner = _sha256("somebody-elses-key")
         owner_is_owner_key = False
@@ -287,22 +281,13 @@ def test_the_derived_identity_survives_a_restart(auth):
 #  (c2) set_api_key's OWN call to the KDF is NOT memoised (unlike verify()),   #
 #       so its cost is bounded by _OWNER_KDF_KEEP, not by "once per process"   #
 # --------------------------------------------------------------------------- #
-#  MEASURED 2026-08-12: tests/test_auth.py::test_set_api_key_accepts_every_
-#  generated_key (200x set_api_key with a fresh random key each time) took
-#  ~345s on a loaded box before this fix, because _owner_kdf_record_for
-#  re-verifies EVERY kept historical record with a FULL scrypt derivation
-#  before minting a new one - and a genuinely new key can never match any of
-#  them, so that work is wasted on every single call once the kept-records
-#  list saturates. _OWNER_KDF_KEEP was 8 (up to 9 derivations/call, ~1.7-2s
-#  on this box); cut to 3 for exactly this reason. See
-#  dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md.
 
 def test_owner_kdf_keep_is_small_enough_to_stay_fast(auth):
     """Pins the actual fix: the constant that bounds how many full scrypt
     derivations a single set_api_key call can burn re-verifying stale,
     guaranteed-not-to-match records before minting a new one. A wall-clock
-    assertion would be flaky on a busy shared box (see test-slot-policy.md);
-    this constant IS the bound, so assert it directly."""
+    assertion would be flaky on a busy shared box; this constant IS the bound,
+    so assert it directly."""
     assert auth._OWNER_KDF_KEEP <= 4, (
         f"_OWNER_KDF_KEEP={auth._OWNER_KDF_KEEP} lets a single set_api_key "
         "call burn that many extra full scrypt derivations against kept "
@@ -316,9 +301,8 @@ def test_set_api_key_scan_cost_is_bounded_by_owner_kdf_keep(auth, monkeypatch):
     for a genuinely new key must never run the KDF more than once per KEPT
     record plus once to mint, regardless of how many historical records the
     install has accumulated in total."""
-    # Saturate the kept-records list with distinct keys first, then measure
-    # ONE MORE call - the worst case, where every kept record is a guaranteed
-    # miss for the new key.
+    # Saturate the kept-records list with distinct keys first, then measure ONE
+    # MORE call, where every kept record is a guaranteed miss for the new key.
     for i in range(auth._OWNER_KDF_KEEP + 5):
         auth.set_api_key(f"distinct-key-{i}-aaaaaaaa")
     calls = _counting_derive(auth, monkeypatch)
@@ -388,7 +372,7 @@ def test_env_var_owner_key_works_end_to_end_and_is_derived(auth, monkeypatch):
     charset-checked - it is the sharpest version of the user-chosen case."""
     from localm.inference.http_server import _principal_from_token
     from localm import scopes as S
-    key = "hunter2"                        # shorter than MIN_KEY_LEN, on purpose
+    key = "hunter2"                        # shorter than MIN_KEY_LEN
     monkeypatch.setenv("LOCALM_API_KEY", key)
 
     assert auth.get_api_key() == key
@@ -435,8 +419,8 @@ def test_rotating_the_owner_key_changes_the_identity_at_once(auth):
     auth.set_api_key("second-key-bb")
     second = auth._hash_key("second-key-bb")
     assert second != first
-    # ...and the OLD key's record is still on file, so if it is ever set again it
-    # derives the same identity it had before rather than orphaning its jobs.
+    # ...and the OLD key's record is still on file, so setting it again derives
+    # the same identity.
     auth.set_api_key("first-key-aa")
     assert auth._hash_key("first-key-aa") == first
 
@@ -473,13 +457,10 @@ def test_an_unknown_hash_alg_refuses_to_match(auth):
 
 
 # --------------------------------------------------------------------------- #
-#  Migration is the risky half: when it fails it must be LOUD, never a lockout  #
+#  A failed migration is surfaced and never locks the owner out                #
 # --------------------------------------------------------------------------- #
-#  AGENTS.md rule 5: a security step that fails must never report success. The
-#  mirror-image failure matters just as much here - a migration that quietly
-#  gives up must not degrade into "access denied", because that locks the owner
-#  out of their own instance with no way back in. Every test below asserts BOTH
-#  halves: still authenticated, and the failure was surfaced.
+#  Every test below asserts both halves: still authenticated, and the failure
+#  was surfaced.
 
 def _captured_warnings(module, monkeypatch) -> list:
     seen: list = []
@@ -565,10 +546,6 @@ def test_migration_never_silently_downgrades_to_the_weak_digest(auth,
 # --------------------------------------------------------------------------- #
 #  (f) the ACL half: sessions.json is restricted exactly like auth.key         #
 # --------------------------------------------------------------------------- #
-#  This was the OTHER half of alert 88: sessions.py::_restrict_perms was
-#  POSIX-only while auth.py ran icacls, so on Windows the key DIGEST was
-#  readable by any local account while the PLAINTEXT next to it was not. The fix
-#  landed with WS9 (#841); these tests PIN it so it cannot regress back.
 
 def _acl_fingerprint(path):
     """A comparable description of *path*'s permissions on this platform."""
@@ -612,36 +589,19 @@ def test_sessions_restrict_perms_is_not_posix_only(auth):
     untouched.write_text("[]", encoding="utf-8")
 
     if os.name == "posix":
-        # Pin the sibling's mode instead of inheriting whatever the environment's
-        # umask happens to produce. Measured 0o644 here and on CI (umask 0022),
-        # but under umask 0077 a fresh file is ALREADY 0o600 - and then a
-        # fires-control phrased as "the sibling is not 0600" fails on a machine
-        # where nothing is wrong. The control has to come from this test, not
-        # from ambient process state.
+        # Pin the sibling's mode rather than inheriting the environment's umask.
         os.chmod(untouched, 0o644)
         assert oct(os.stat(store).st_mode & 0o777) == "0o600"
         assert oct(os.stat(untouched).st_mode & 0o777) == "0o644"
     else:
-        # The control CANNOT be "an untouched sibling carries inherited aces".
-        # That is true on a normal workstation (measured here: SYSTEM,
-        # Administrators and OWNER RIGHTS, each printed with the "(I)" marker)
-        # and FALSE on the GitHub windows-latest runner, where a fresh file in
-        # the temp tree carries none - so the control failed on CI while the
-        # product behaviour was correct. Ambient ACL layout is a property of the
-        # machine, not of the code under test, and a control must not depend on it.
-        #
-        # What IS invariant is the contract of `/inheritance:r /grant:r <user>:F`:
-        # after it, the file has no INHERITED entry. And the fires-control comes
-        # from the RETURN VALUE, which is environment-independent: the POSIX-only
-        # implementation that was the actual defect fell off the end of a
-        # `if os.name == "posix":` branch and returned None on Windows, so
-        # `is True` here fails against it on any Windows box.
+        # The control is the RETURN VALUE plus the contract of
+        # `/inheritance:r /grant:r <user>:F`: after it the file has no
+        # INHERITED entry. Ambient ACL layout is not asserted on.
         assert sessions._restrict_perms(store) is True
         fingerprint = _acl_fingerprint(store)
         assert not any("(I)" in ace for ace in fingerprint), fingerprint
-    # The real regression guard, on both platforms: sessions.json (the key
-    # DIGEST) is treated exactly like auth.key (the PLAINTEXT). That asymmetry
-    # was the ACL half of CodeQL 88.
+    # On both platforms: sessions.json (the key digest) is treated exactly like
+    # auth.key (the plaintext).
     assert _acl_fingerprint(store) == _acl_fingerprint(auth.key_file())
 
 

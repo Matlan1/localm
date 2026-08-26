@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-UPDATER-INTEGRITY (signature half): the self-updater verifies an Ed25519
-signature over the downloaded build against a PINNED public key before extracting
-or executing it. Signing is auth-model style: with a key pinned it ENFORCES (a
-missing, unsigned, tampered, or downgraded build all refuse before any swap); with
-NO key pinned it fails OPEN (applies on the HTTPS + private-channel trust) so the
-feature is not inert out of the box. The SHIPPED default pins a key, and a guard
-below keeps it non-empty so the "empty key bricks self-update" bug cannot recur.
+"""The self-updater verifies an Ed25519 signature over the downloaded build
+against a PINNED public key before extracting or executing it. Signing is
+auth-model style: with a key pinned it ENFORCES (a missing, unsigned, tampered,
+or downgraded build all refuse before any swap); with NO key pinned it fails OPEN
+(applies on the HTTPS + private-channel trust) so the feature is not inert out of
+the box. The SHIPPED default pins a key, and a guard below keeps it non-empty so
+an empty key cannot brick self-update.
 """
 
 import base64
@@ -65,19 +65,16 @@ def test_missing_signature_fails_closed(monkeypatch):
 
 
 def test_no_pinned_key_allows_unsigned(monkeypatch):
-    # Fail-OPEN when unconfigured (no key pinned): signing is optional hardening that
-    # is not turned on, so verification allows the update rather than bricking it. The
-    # shipped default DOES pin a key (test_shipped_pubkeys_are_pinned), so this is the
-    # dormant safety net, not production behaviour.
+    # Fail-OPEN when unconfigured (no key pinned): verification allows the
+    # update rather than bricking it. The shipped default DOES pin a key.
     monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ())
     updater.verify_signature(b"build", None)                # must NOT raise
     updater.verify_signature(b"build", "c2ln")              # a stray sig is ignored too
 
 
 def test_shipped_pubkeys_are_pinned(monkeypatch):
-    # GUARD: the real shipped tuple must stay non-empty and every pin must be a valid
-    # 32-byte (64-hex) Ed25519 public key. This is the tripwire that stops the
-    # "empty _UPDATE_PUBKEYS bricks self-update" regression from ever shipping again.
+    # The real shipped tuple must stay non-empty and every pin must be a valid
+    # 32-byte (64-hex) Ed25519 public key.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     assert updater._UPDATE_PUBKEYS, "_UPDATE_PUBKEYS must not ship empty (see updater.py)"
     for hexkey in updater._UPDATE_PUBKEYS:
@@ -104,9 +101,9 @@ def test_key_rotation_allowlist(monkeypatch):
 
 
 def test_all_pins_malformed_names_the_real_cause(monkeypatch, caplog):
-    # HONESTY-0702 (missing != corrupt): with a key PINNED but unparseable the
-    # refusal must name the broken pin - not claim verification "is not set up" -
-    # and the skipped pin is warned, never silent.
+    # With a key PINNED but unparseable, the refusal names the broken pin rather
+    # than reporting that verification is not set up, and the skipped pin is
+    # warned about.
     import logging
     priv, _ = _keypair()
     monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ("not-hex",))
@@ -183,9 +180,8 @@ def test_apply_refuses_unsigned_build_before_swap(tmp_path, monkeypatch, apply_c
 
 
 def test_apply_applies_when_no_key_pinned(tmp_path, monkeypatch, apply_cfg):
-    # Fail-OPEN: with no key pinned the signature stage does not block, so an update
-    # applies out of the box (a reboot-class swap here). Proves the feature is not
-    # inert without signing configured.
+    # Fail-OPEN: with no key pinned the signature stage does not block, so an
+    # update applies out of the box (a reboot-class swap here).
     monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ())
     inst = _fake_install(tmp_path)
     data = _build_zip_bytes("0.2.0")
@@ -231,14 +227,9 @@ def test_sign_release_script_roundtrip(tmp_path, monkeypatch):
     script = Path(updater.__file__).resolve().parents[1] / "scripts" / "sign_release.py"
     if not script.is_file():
         # scripts/sign_release.py is gitignored, maintainer-only release
-        # tooling (AGENTS.md rule 6) - never committed, so a fresh clone or a
-        # worktree that never got it copied in genuinely does not have this
-        # file. This import runs at TEST-EXECUTION time (unlike
-        # tests/test_tier2_model_selection.py's module-level guard, which
-        # skips before collection even starts), so a plain pytest.skip here
-        # is enough - no allow_module_level needed. The rest of this file
-        # (signature verification against the updater's own code) is
-        # unaffected and keeps running.
+        # tooling, so a fresh clone or an uncopied worktree does not have this
+        # file. The import runs while the test executes, so a plain pytest.skip
+        # is enough; the rest of the file keeps running.
         pytest.skip(f"{script} not present (gitignored maintainer-only "
                     "release tooling, AGENTS.md rule 6) - skipping the "
                     "sign_release.py round-trip")

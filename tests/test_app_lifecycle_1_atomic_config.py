@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""APP-LIFECYCLE-1 (correctness, race): cli/models.py's config_cmd() and
-inference/routes/config.py's patch_config() used to do a raw
-load_config()/mutate/save_config() sequence instead of the atomic
-update_config(mutator) helper config.py already provides for exactly this
-reason. load_config() and save_config() each take config._io_lock only for
-their OWN call, so the window between them is unlocked: a concurrent config
-write racing either call site (or racing each other) can be silently lost.
+"""cli/models.py's config_cmd() and inference/routes/config.py's
+patch_config() must go through the atomic update_config(mutator) helper, which
+holds config._io_lock across the whole read-modify-write.
 
-Regression: both call sites now go through update_config(), which holds the
-lock across the whole read-modify-write, so a concurrent writer's change is
-never silently dropped.
+A raw load_config()/mutate/save_config() sequence takes the lock only for each
+of its own calls, so the window between them is unlocked and a concurrent
+config write racing either call site can be silently lost.
 """
 
 import threading
@@ -32,10 +28,8 @@ def home(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  Demonstrate the hazard the fix closes: a bare load/mutate/save pair CAN    #
-#  lose a concurrent update_config() write in the unlocked window between    #
-#  load and save. This is the exact shape config_cmd()/patch_config() used   #
-#  to have.                                                                   #
+#  A bare load/mutate/save pair loses a concurrent update_config() write in   #
+#  the unlocked window between load and save.                                 #
 # --------------------------------------------------------------------------- #
 
 def _bare_load_mutate_save(key, value, *, delay_before_save):
@@ -44,8 +38,8 @@ def _bare_load_mutate_save(key, value, *, delay_before_save):
     proven hazardous, so the fix's rationale is verified against real
     load_config/save_config behavior, not just asserted."""
     c = cfg.load_config()
-    time.sleep(delay_before_save)   # the unlocked window (AGENTS.md rule: prove
-    c[key] = value                  # the race, don't just assert the fix ran)
+    time.sleep(delay_before_save)   # the unlocked window
+    c[key] = value
     cfg.save_config(c)
 
 
@@ -75,9 +69,9 @@ def test_bare_load_save_pair_can_lose_a_concurrent_update(home):
 
     final = cfg.load_config()
     assert final["temperature"] == 0.9  # the bare writer's own change lands
-    # THE BUG: the concurrent update_config() write, which landed and was
-    # persisted DURING the bare writer's window, gets silently overwritten
-    # when the bare writer's stale in-memory copy is saved afterward.
+    # The concurrent update_config() write, persisted DURING the bare writer's
+    # window, is overwritten when the bare writer's stale in-memory copy is
+    # saved afterward.
     assert final["main_gpu_index"] != 1, (
         "expected the bare load/mutate/save race to LOSE the concurrent "
         "write - if this assertion fails, the race no longer reproduces "
@@ -85,9 +79,8 @@ def test_bare_load_save_pair_can_lose_a_concurrent_update(home):
 
 
 # --------------------------------------------------------------------------- #
-#  The fix: update_config() holds the lock across the whole read-modify-     #
-#  write, so two concurrent update_config() writers never lose each other's  #
-#  change - this is what config_cmd()/patch_config() now use.                #
+#  update_config() holds the lock across the whole read-modify-write, so two  #
+#  concurrent update_config() writers never lose each other's change.         #
 # --------------------------------------------------------------------------- #
 
 def test_update_config_never_loses_a_concurrent_write(home):
@@ -135,18 +128,10 @@ def _install_slow_merge(monkeypatch, delay=0.15):
         block (config.py) - so in the FIXED call-site shape this delay widens
         a window that IS held under the lock.
 
-    A previous version of this helper patched _atomic_write_json instead. That
-    point is inside the lock in BOTH the old and the new shape (bare
-    save_config() also takes _io_lock around its own _atomic_write_json call),
-    so delaying it only ever widened an already-locked window and could not
-    tell the two call-site shapes apart - both "pass" whether or not the call
-    site actually routes through update_config(). That made
-    test_cli_config_cmd_survives_a_concurrent_writer and
-    test_http_patch_config_survives_a_concurrent_writer pass identically on
-    pre-fix code (see PR #584 follow-up verification). Patching
-    _merge_stored_config fixes that: it is genuinely unlocked in the old shape
-    and genuinely locked in the new one, so only the correct (update_config-
-    routed) call site can survive a concurrent writer landing in that window."""
+    _atomic_write_json is NOT a usable patch point here: it sits inside the
+    lock in BOTH shapes (bare save_config() also takes _io_lock around its own
+    call), so delaying it widens an already-locked window and cannot tell the
+    two call-site shapes apart."""
     real = cfg._merge_stored_config
 
     def slow(cfgd, stored):
@@ -235,11 +220,9 @@ def test_http_patch_config_survives_a_concurrent_writer(home, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  Follow-up to #584/#586: four more call sites had the exact same bare      #
-#  load_config()/mutate/save_config() shape (found by an adversarial review  #
-#  of the #586 PR). Same technique (_install_slow_merge), same proof: each   #
-#  site must survive a concurrent update_config() writer landing in its      #
-#  widened merge window instead of silently losing it on the final save.     #
+#  Four more call sites with the same bare load_config()/mutate/save_config() #
+#  shape. Same technique (_install_slow_merge): each must survive a           #
+#  concurrent update_config() writer landing in its widened merge window.     #
 # --------------------------------------------------------------------------- #
 
 def test_save_plugin_config_survives_a_concurrent_writer(home, monkeypatch):

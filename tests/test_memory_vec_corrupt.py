@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HON-3: a corrupt/unreadable vector sidecar (.vec.json) must degrade to lexical
-recall WITHOUT hiding the fault. Unlike an absent sidecar (a normal cold start),
-a present-but-unparseable one is an unexpected problem the operator should be able
-to see - mirroring the records-path warning in the same loader. The stored
-records themselves are never lost; only the vector cache is dropped, so recall
-falls back to BM25.
+"""A corrupt/unreadable vector sidecar (.vec.json) must degrade to lexical recall
+WITHOUT hiding the fault. An absent sidecar is a normal cold start; a
+present-but-unparseable one warns, mirroring the records-path warning in the
+same loader. The stored records themselves are never lost; only the vector
+cache is dropped, so recall falls back to BM25.
 """
 
 from __future__ import annotations
@@ -32,15 +31,14 @@ def test_corrupt_vec_sidecar_warns_and_degrades(tmp_path, caplog):
     # Degraded, not crashed: records still load; vectors dropped -> lexical.
     assert len(s2) == 1
     assert s2._vectors == {}
-    # SURFACED, not silent (the whole point of HON-3).
+    # SURFACED, not silent.
     assert any("vector sidecar" in r.message.lower() for r in caplog.records), \
         "corrupt vector sidecar was reset silently (no warning)"
 
 
 def test_non_object_vec_sidecar_warns_not_crashes(tmp_path, caplog):
-    # A valid-JSON-but-not-an-object sidecar (e.g. a bare list) used to raise
-    # AttributeError straight out of _load and break the whole store; it must now
-    # degrade+warn like any other corrupt sidecar.
+    # A valid-JSON-but-not-an-object sidecar (e.g. a bare list) degrades and
+    # warns like any other corrupt sidecar.
     root = tmp_path / "mem"
     s = _seed(root)
     s._vec_file().write_text("[1, 2, 3]", encoding="utf-8")
@@ -51,8 +49,8 @@ def test_non_object_vec_sidecar_warns_not_crashes(tmp_path, caplog):
 
 
 def test_absent_vec_sidecar_is_silent(tmp_path, caplog):
-    # NEGATIVE / distinctness: an absent sidecar (the normal cold-start case) must
-    # NOT warn. Branching corrupt-vs-absent is exactly what HON-3 asks for.
+    # NEGATIVE / distinctness: an absent sidecar (the normal cold-start case)
+    # must NOT warn.
     root = tmp_path / "mem"
     _seed(root)
     assert not MemoryStore("owner", "chat", root=root)._vec_file().is_file()

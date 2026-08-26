@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm.bindhost: the loopback-host predicate hoisted out of five copies
-(2026-07-09 quality audit finding #1) - one of which had already drifted to a
-non-identical inline variant (routes/system.py). Regression: every former
-definition site must re-export the SAME function object, not a fresh copy that
-can drift again."""
+"""localm.bindhost holds the single loopback-host predicate. Every site that once
+defined its own must re-export the SAME function object, not a copy that can
+drift."""
 
 import pytest
 
@@ -32,10 +30,8 @@ def test_all_former_call_sites_reexport_the_same_function():
 
 
 def test_system_route_uses_shared_predicate_not_a_drifted_inline_copy():
-    # routes/system.py's whoami() previously had a NON-IDENTICAL inline
-    # variant (checked a 3-item tuple first, ipaddress only as a fallback) -
-    # confirm it now calls the shared helper for a loopback-shaped host that
-    # only the ipaddress-based check recognizes.
+    # whoami() calls the shared helper for a loopback-shaped host that only the
+    # ipaddress-based check recognizes.
     from localm.inference.routes import system as system_routes
     assert system_routes.is_loopback_host is is_loopback_host
     assert system_routes.is_loopback_host("127.0.0.5") is True

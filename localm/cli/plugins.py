@@ -266,8 +266,7 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None):
             # localm[<extra>] contains a real, literal "[...]" pip-extra syntax
             # span - escape the WHOLE "localm[...]" fragment (not just e.extra),
             # or Rich parses "[coder]"/"[voice]" etc. as a bogus style tag and
-            # silently drops it, printing "(pip extra: localm)" - confirmed
-            # empirically against this venv's rich before this fix.
+            # silently drops it, printing "(pip extra: localm)".
             extra = (f" [dim](pip extra: {escape(f'localm[{e.extra}]')})[/dim]"
                      if e.extra else "")
             console.print(f"  [bold]{i:>2}.[/bold] {escape(e.name):<7} "
@@ -511,14 +510,14 @@ def plugin_status():
 #  Plugin-scoped settings (`localm plugin config`)                     #
 #                                                                      #
 #  The terminal counterpart to the GUI's three plugin settings routes. #
-#  See settings_schema.plugin_config_kind for WHY this has two paths:  #
-#  the media and tts blocks are static schemas this process can read   #
-#  offline, while a host.add_settings() block only exists inside a     #
-#  process that has LOADED that plugin - which the CLI deliberately    #
-#  never is (set_enabled_state and friends exist to keep it that way,  #
-#  and _load would fire the on_first_use hook for what is only a read).#
-#  So the generic case asks a RUNNING localm, and when there is none   #
-#  it says exactly that rather than reporting an empty field list.     #
+#  Two paths (see settings_schema.plugin_config_kind): the media and   #
+#  tts blocks are static schemas this process can read offline, while  #
+#  a host.add_settings() block only exists inside a process that has   #
+#  LOADED that plugin, which the CLI never is (set_enabled_state and   #
+#  friends keep it that way, and _load would fire the on_first_use     #
+#  hook for what is only a read). So the generic case asks a RUNNING   #
+#  localm, and when there is none it says exactly that rather than     #
+#  reporting an empty field list.                                      #
 # ------------------------------------------------------------------ #
 
 def _plugin_install_state(name):
@@ -577,8 +576,8 @@ def _fmt_field_value(f) -> str:
 
     if "value" not in f:
         # A SECRET field's value never round-trips out of the server in
-        # plaintext (plugin_settings_schema_json omits it deliberately), so
-        # report whether it is configured, never what it is.
+        # plaintext (plugin_settings_schema_json omits it), so report whether it
+        # is configured, never what it is.
         return "[dim](set)[/dim]" if f.get("is_override") else "[dim](not set)[/dim]"
     val = f.get("value")
     if isinstance(val, bool):
@@ -646,10 +645,10 @@ def _runtime_fields(name):
     remote = bool(os.environ.get("LOCALM_URL", "").strip())
     if url is None:
         _explain_from_local_state()
-        # AGENTS.md rule 5: this is "could not ask", NOT "there is nothing
-        # there". A plugin declares its settings while it LOADS, so only a
-        # running localm knows this one's field list - reporting an empty
-        # section here would be a different, and false, answer.
+        # This is "could not ask", NOT "there is nothing there". A plugin
+        # declares its settings while it LOADS, so only a running localm knows
+        # this one's field list - reporting an empty section here would be a
+        # different, and false, answer.
         console.print(f"[yellow]{escape(name)}'s settings are declared when "
                       f"the plugin loads[/yellow], so a running localm is "
                       f"needed to list them, and {escape(str(why))}.")
@@ -723,9 +722,9 @@ def plugin_config(name, key, value):
     installed, active = _plugin_install_state(name)
     note = None
     if not active:
-        # Not a refusal: the settings routes deliberately accept a write for an
-        # inactive plugin so it can be configured BEFORE being enabled (see
-        # _tts_payload's `active` note). Say so instead of failing.
+        # Not a refusal: the settings routes accept a write for an inactive
+        # plugin so it can be configured BEFORE being enabled (see _tts_payload's
+        # `active` note). Say so instead of failing.
         state = "installed but not enabled" if installed else "not installed"
         note = (f"[dim]{escape(name)} is {state}; these settings are stored "
                 f"either way and apply once it runs.[/dim]")
@@ -810,11 +809,10 @@ def _runtime_plugin_config(name, key, value):
     if not saved.get("is_override"):
         _report_set(name, key, None)
     elif "value" not in saved:
-        # A SECRET field's value is deliberately never echoed back
-        # (plugin_settings_schema_json omits it), so confirm the write without
-        # inventing a value - and, the reason this branch exists, without
-        # reading that absence as "cleared", which is what a plain
-        # saved.get("value") did: it reported a successful SET as a CLEAR.
+        # A SECRET field's value is never echoed back
+        # (plugin_settings_schema_json omits it), so the write is confirmed
+        # without inventing a value and without reading that absence as
+        # "cleared".
         console.print(f"[green]OK[/green] {escape(name)}.{escape(key)} set "
                       f"[dim](not shown)[/dim]")
     else:

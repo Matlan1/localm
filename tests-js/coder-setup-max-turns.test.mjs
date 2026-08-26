@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// NEW-DEFAULT-VALUE-PLACEHOLDER: setup-max-turns used to render a hardcoded
-// solid "40" (index.html value="40") and coder.js always sent
-// `Number(...) || 40`, duplicating the server's own default (sessions.py:73,
-// CreateSessionRequest.max_turns: int = 40) instead of leaving it the single
-// source of truth. Its sibling setup-temperature already did this right
-// (placeholder="default", omitted from the body when blank) - this brings
-// max_turns in line with it.
+// setup-max-turns renders as an empty field with a placeholder, and is omitted
+// from the session POST when blank.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

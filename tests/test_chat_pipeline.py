@@ -59,7 +59,7 @@ def test_priority_then_registration_order():
 
 
 # --------------------------------------------------------------------------- #
-#  CHAT-2b: thinking-model <think> nudge in regular chat                       #
+#  thinking-model <think> nudge in regular chat                               #
 # --------------------------------------------------------------------------- #
 
 def _think_ctx(model_id):

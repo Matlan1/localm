@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Quoted paths through the coder's shell tool.
+"""Quoted paths through the coder's shell tool.
 
-Quoting a path is the normal way to pass one containing spaces, and it was
-broken on Windows by two separate defects on the same chain:
+Quoting a path is the normal way to pass one containing spaces. Two hazards on
+the same chain, both covered here:
 
-  A. the argv route kept the quote CHARACTERS in the token, so the process was
+  A. the argv route keeping the quote CHARACTERS in the token, so the process is
      handed a filename with literal quotes in it; and
-  B. the shell route handed cmd.exe an argv list, which subprocess renders with
-     list2cmdline - MSVCRT escaping (\\") that cmd.exe misreads.
+  B. the shell route handing cmd.exe an argv list, which subprocess renders with
+     list2cmdline - MSVCRT escaping that cmd.exe misreads.
 
-Both are covered here, along with a fires-control that shows each pre-fix
-mechanism failing in the same run that shows the fix working.
+Each mechanism is also driven unfixed, in the same run, so a pass here cannot be
+for an unrelated reason.
 
 Every target is a disposable file the test creates under its own tmp_path.
 Nothing here reads, stats, or names a file that belongs to the machine.
@@ -34,9 +33,9 @@ MARK = "PAYLOAD-TOKEN"
 def _went_through_the_shell(launched) -> bool:
     """Did *launched* - whatever reached subprocess - go through the platform shell?
 
-    The launch form differs by platform deliberately: POSIX gets an argv list
-    (execv receives it verbatim), Windows a raw command-line STRING, because an
-    argv list is re-quoted by list2cmdline in syntax cmd.exe misreads. See
+    The launch form differs by platform: POSIX gets an argv list (execv receives
+    it verbatim), Windows a raw command-line STRING, because an argv list is
+    re-quoted by list2cmdline in syntax cmd.exe misreads. See
     tools/base.py:platform_shell.
     """
     if isinstance(launched, str):
@@ -79,12 +78,12 @@ class TestSplitCommandRemovesQuotes:
             "reader", "a dir with spaces/f.txt"]
 
     def test_embedded_quote_is_grouped_and_the_quotes_removed(self):
-        """The case that rules out stripping quotes off the old tokens.
+        """The case that rules out stripping quotes off the tokens.
 
-        posix=False, the mode this used to use on Windows, honours a quote only
-        where one OPENS a token, so it split this into ['--message="a', 'b"'].
-        No post-pass repairs a boundary; and even given the right boundary,
-        tok.strip('"') would leave '--message="a b'.
+        posix=False honours a quote only where one OPENS a token, so it splits
+        this into ['--message="a', 'b"']. No post-pass repairs a boundary; and
+        even given the right boundary, tok.strip('\"') would leave
+        '--message="a b'.
         """
         assert _split_command('git commit --message="a b"') == [
             "git", "commit", "--message=a b"]
@@ -184,16 +183,16 @@ class TestQuotedPathsReallyExecute:
 
 
 # ---------------------------------------------------------------------------
-#  Fires-control
+#  The old split modes
 # ---------------------------------------------------------------------------
 
 class TestTheQuotingDefectsFire:
-    """The pre-fix mechanisms, run against the same real files, in the same run
+    """Both defect mechanisms, run against the same real files, in the same run
     that shows the fix working.
 
     Without this, the tests above could pass for a reason unrelated to the fix,
-    and a regression to either old mechanism would look like a change nobody
-    has to explain.
+    and a regression to either mechanism would look like a change nobody has to
+    explain.
     """
 
     def test_the_old_split_mode_got_the_token_boundary_wrong(self):

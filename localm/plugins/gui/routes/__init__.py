@@ -6,8 +6,7 @@ the FastAPI ``app``. ``attach_gui`` (in ``localm.plugins.gui.web``) creates the
 shared services (the coder ``SessionManager`` and the background ``JobManager``),
 publishes them on ``app.state``, builds the shared ``ctx`` (the active-model
 accessor, the model-switch callable, and the job manager), and calls each group's
-``register``. This keeps ``attach_gui`` small and each route group in its own file
-without changing any route path, status code, response shape, or auth dependency.
+``register``.
 
 The page-shell ``/`` + ``/index.html`` handler and the catch-all static mount stay
 in ``attach_gui`` itself: the shell carries conditional, per-request auth seeding

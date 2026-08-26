@@ -4,9 +4,9 @@ backend, session mode, plugins), an allowlisted config subset, dependency
 versions, the in-memory recent-activity log, and (for the GUI) browser context -
 while NEVER leaking the API key, config secrets, or chat content.
 
-This pins the "reports still contain no useful data" fix: the rich sections are
-present and correct, and the privacy boundary holds (DEBUG-level model output and
-non-allowlisted config keys stay out).
+These pin both halves: the rich sections are present and correct, and the
+privacy boundary holds (DEBUG-level model output and non-allowlisted config keys
+stay out).
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ def test_ring_buffer_captures_info_but_never_debug(fresh_ring):
     logger = fresh_ring
     logger.info("model load: gemma-3 on vulkan")
     logger.warning("VRAM low, falling back to CPU clip")
-    # The raw, pre-scrub model output is logged at DEBUG (llama.py) - it must
-    # NEVER enter the buffer, even though the buffer is always on.
+    # The raw, pre-scrub model output logged at DEBUG never enters the buffer,
+    # even though the buffer is always on.
     logger.debug("raw model output:\nthis is private chat content")
     joined = "\n".join(debuglog.recent_activity())
     assert "model load: gemma-3 on vulkan" in joined
@@ -128,12 +128,11 @@ def test_config_subset_allowlisted_and_scrubbed(monkeypatch):
 
 
 def test_config_subset_redacts_query_string_credential_by_name(monkeypatch):
-    """QA-FINDING-bugreport-url-query-secret-leak-2026-08-13: comfy_api_url /
-    net_search_url / coder_reviewer are user-supplied URLs that routinely carry
-    a credential as a query parameter, not only via user:pass@. The config
-    subset chain does not call _scrub_secrets (it has its own narrower chain),
-    so this is a genuinely separate path from the _scrub_secrets tests in
-    test_bugreport.py and must be verified independently."""
+    """comfy_api_url / net_search_url / coder_reviewer are user-supplied URLs
+    that routinely carry a credential as a query parameter, not only via
+    user:pass@. The config subset chain does not call _scrub_secrets (it has its
+    own narrower chain), so this is a genuinely separate path from the
+    _scrub_secrets tests and must be verified independently."""
     fake = {
         "net_search_url": "https://searx.example.com/search?api_key=CANARY1",
         "comfy_api_url": "http://qauser:CANARY2@127.0.0.1:8188",
@@ -183,8 +182,8 @@ def test_corrupt_config_flagged_unreadable_not_silently_defaulted(tmp_path, monk
     one - see bugreport._config_unreadable / config.load_config_checked.
 
     Uses REAL files on disk rather than monkeypatching load_config, unlike the
-    tests above: a lambda can never be "unreadable", which is exactly the
-    fixture shape that let a corrupt config go undetected in the first place.
+    tests above: a lambda can never be "unreadable", so that fixture shape
+    cannot express this case at all.
     """
     import localm.config as cfg
     home = tmp_path / "home"
@@ -196,9 +195,7 @@ def test_corrupt_config_flagged_unreadable_not_silently_defaulted(tmp_path, monk
     # arm A: a real, valid config on disk.
     cfg.CONFIG_FILE.write_text('{"n_ctx": 31337}', encoding="utf-8")
     report_present = bugreport.build_report("x")
-    # Prove the injection took before trusting anything downstream: if
-    # CONFIG_FILE were mis-pointed, every arm below would silently render the
-    # same built-in defaults and the rest of this test would prove nothing.
+    # The injection took: CONFIG_FILE points at the file just written.
     assert "31337" in report_present
 
     # arm B: overwrite the SAME path with corrupt JSON.
@@ -215,9 +212,8 @@ def test_corrupt_config_flagged_unreadable_not_silently_defaulted(tmp_path, monk
     assert marker in report_corrupt
     assert marker not in report_absent
 
-    # The actual finding: the two Configuration sections must not be
-    # byte-identical (they were, before this fix - both showed bare defaults
-    # with nothing distinguishing "corrupt" from "never configured").
+    # The two Configuration sections are not byte-identical: corrupt is
+    # distinguishable from never configured.
     def _config_section(text):
         start = text.index("## Configuration (safe subset)")
         end = text.find("\n\n## ", start)

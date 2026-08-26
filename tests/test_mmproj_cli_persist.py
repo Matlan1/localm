@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A CLI `--mmproj` override never persisted to the registry, unlike every
-other mmproj-discovery path (pull.py's auto-attach, the registry's own
-recorded field). So vision_input_guidance()'s own "switch to it" suggestion
-(`localm run <model>`) lost the projector again the moment --mmproj was left
-off. persist_cli_mmproj() closes that, but ONLY once the caller has confirmed
-the projector genuinely loaded (supports_images=True for this run) - it must
-never record a broken association, or vision_capable_models() would list a
-model whose vision does not actually work: a new false-positive surface in
-the area PR #1073 just fixed.
+"""A CLI `--mmproj` override is persisted to the registry, like every other
+mmproj-discovery path (pull.py's auto-attach, the registry's own recorded
+field), so vision_input_guidance()'s "switch to it" suggestion
+(`localm run <model>`) keeps the projector when --mmproj is left off.
+
+persist_cli_mmproj() records it ONLY once the caller has confirmed the
+projector genuinely loaded (supports_images=True for this run): a broken
+association would make vision_capable_models() list a model whose vision does
+not work.
 """
 
 from unittest.mock import MagicMock
@@ -75,8 +75,7 @@ class TestPersistCliMmproj:
         assert store["m"]["mmproj"] == str(proj_f.resolve())   # unchanged
 
     def test_does_not_overwrite_a_different_recorded_mmproj(self, fake_registry, tmp_path):
-        # Hard-won rule: never silently override a user's prior explicit
-        # choice. A one-off --mmproj may be a deliberate experiment.
+        # A prior explicit user choice is never silently overridden.
         store, models_dir = fake_registry
         model_f = models_dir / "m.gguf"
         model_f.write_bytes(b"GGUF")
@@ -171,10 +170,8 @@ class TestCliRunPersistsConfirmedMmproj:
 
     def test_failed_load_does_not_persist_a_broken_association(
             self, fake_registry, tmp_path, monkeypatch):
-        # The critical negative case: a --mmproj that did NOT load successfully
-        # (backend reports supports_images=False) must leave the registry
-        # untouched - persisting it would make vision_capable_models() list a
-        # model whose vision does not actually work.
+        # A --mmproj that did NOT load successfully (the backend reports
+        # supports_images=False) leaves the registry untouched.
         store, models_dir = fake_registry
         model_f = models_dir / "vision-model.gguf"
         model_f.write_bytes(b"GGUF")

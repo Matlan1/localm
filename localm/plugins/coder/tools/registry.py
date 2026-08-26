@@ -58,49 +58,39 @@ class ToolDef:
     description: str
     params:      dict
     destructive: bool = False
-    # Opt-in marker for a tool whose output is external, attacker-influenceable
-    # content (read by provenance.is_untrusted_tool). The built-in network tools
-    # and MCP tools are detected by name, so this is the seam for a future plugin
-    # tool that returns fetched content to flag itself as untrusted.
+    # Marks a tool whose output is external, attacker-influenceable content; read
+    # by provenance.is_untrusted_tool. The built-in network tools and MCP tools are
+    # detected by name instead, so this is the seam a plugin tool uses to flag
+    # itself.
     untrusted_output: bool = False
     # A NON-mutating tool that should still ask before running, ORed into
-    # execution.py's needs_confirm alongside `destructive` and net_mode=="ask"
-    # (agent/execution.py). Deliberately separate from `destructive`: that flag
-    # also triggers dry-run-skip and an undo-snapshot, both meaningless for a
-    # read. For rag_search: a collection is not scoped to the coder's cwd (unlike
-    # a file read, which is implicitly already in scope), so its content can
-    # enter the model's context unprompted - the same reasoning docs/network.md
-    # gives for fetch_url/web_search defaulting to net_mode=ask despite being
-    # non-destructive reads.
+    # execution.py's needs_confirm alongside destructive and the ask network mode.
+    # Separate from destructive, which also triggers dry-run-skip and an undo
+    # snapshot.
     ask_by_default: bool = False
 
 
 # The ONLY tools a RESTRICTED (shareable, non-owner) coder session may use: an
 # allowlist, so a newly-added tool is denied to a restricted key by default. These
-# read the project or edit files WITHIN the confined cwd; NONE spawn a process, run
+# read the project or edit files WITHIN the confined cwd; none spawn a process, run
 # code, hit the network, read the environment, or re-enter the agent. Everything
-# else - run_shell/run_tests (RCE; a planted conftest runs), git_commit/git_push
-# (git hooks run), web_search/fetch_url (network), generate_image, read_env
-# (secret disclosure), spawn_agent, and every dynamically-registered MCP/plugin/
-# skill tool - is disabled for a restricted session. So a key you hand out can read
-# and edit this project, but cannot execute anything; you review and run.
+# else is disabled for a restricted session, including run_shell/run_tests,
+# git_commit/git_push, web_search/fetch_url, generate_image, read_env, spawn_agent,
+# and every dynamically-registered MCP, plugin or skill tool.
 SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
     "read_file", "list_dir", "tree", "grep", "search_files",
     "write_file", "edit_file", "edit_files", "patch_file", "search_replace",
     "edit_notebook_cell",
     "git_status", "git_diff", "git_log",
-    # The task list is agent state, not a capability: audited against this
-    # allowlist's own criteria, it spawns no process, runs no code, reaches no
-    # network, reads no environment, re-enters no agent, and touches no project
-    # file. Its only disk trace is a key in the checkpoint the session already
-    # writes, so a restricted key gains no reach it did not have.
+    # The task list is agent state, not a capability: it spawns no process, runs no
+    # code, reaches no network, reads no environment, re-enters no agent and touches
+    # no project file. Its only disk trace is a key in the checkpoint the session
+    # already writes.
     "set_todos", "read_todos",
 })
-# edit_files is on the list deliberately: it is edit_file's exact-string
-# replacement applied to N files in one call, each path put through the same
-# _confine() check, and a restricted session can already call edit_file N times.
-# So it grants no capability the allowlist did not already grant - it only makes
-# the same edit atomic.
+# edit_files is edit_file's exact-string replacement applied to N files in one
+# call, each path put through the same _confine() check, so it grants no capability
+# the allowlist did not already grant; it only makes the same edit atomic.
 
 
 def _spawn_role_help() -> str:
@@ -167,9 +157,8 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
                     "occurrence of `old` with `new` in `path`, matched exactly."
                 ),
                 "required": True,
-                # The native tool schema (agent/tooldefs.py) reads this: without it
-                # an array is described as an array of STRINGS, and a native
-                # tool-calling backend would be told the wrong shape.
+                # The native tool schema (agent/tooldefs.py) reads this; without it
+                # the array is described as an array of strings.
                 "items": {
                     "type": "object",
                     "properties": {
@@ -234,12 +223,8 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "job_id": {"type": "string", "description": "Job id from run_shell_background", "required": True},
         },
         # NOT destructive, unlike its two siblings: this only reads a status field
-        # and an output buffer - it starts nothing, kills nothing, writes nothing.
-        # Marking it destructive would put a confirmation card in front of EVERY
-        # poll of a running build, and would deny it outright in an unattended run
-        # (the gate fails closed), making a started job impossible to observe.
-        # The capability that needs gating is starting and killing, and those two
-        # are gated.
+        # and an output buffer, and starts nothing, kills nothing, writes nothing.
+        # Starting and killing are the gated capabilities.
     ),
     "kill_shell_job": ToolDef(
         name="kill_shell_job",
@@ -380,18 +365,11 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         },
         # A child agent runs write_file/run_shell/git_* of its own in the PARENT's
         # cwd, so spawn_agent is at least as destructive as the tools it grants.
-        # Marking it so has three effects, all of them required:
-        #   1. _execute_tools gives it its own segment, so two spawn_agent calls in
-        #      one model turn can never run children CONCURRENTLY in the same cwd -
-        #      the invariant that function's own docstring already claims.
-        #   2. it leaves the 120s parallel-batch deadline, whose pool is abandoned
-        #      with shutdown(wait=False): a timed-out child kept writing while
-        #      _absorb_child_state mutated the parent.
-        #   3. an unbounded write+shell grant now passes the same confirmation gate
-        #      every single destructive tool passes, instead of skipping it.
-        # The serialisation is deliberate and permanent, not a stopgap: safe
-        # concurrent delegation needs real per-child isolation (its own working
-        # tree), which an unflagged parallel batch over one shared cwd is not.
+        # Marking it destructive gives it its own segment in _execute_tools, so two
+        # spawn_agent calls in one model turn can never run children CONCURRENTLY in
+        # the same cwd; keeps it out of the parallel-batch deadline, whose pool is
+        # abandoned with shutdown(wait=False); and puts the write and shell grant
+        # behind the same confirmation gate every destructive tool passes.
         destructive=True,
     ),
     "spawn_agent_background": ToolDef(
@@ -410,18 +388,12 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "max_turns": {"type": "int",    "description": "Max iterations (default 10)",   "required": False},
             "role":      {"type": "string", "description": _spawn_role_help(),              "required": False},
         },
-        # Destructive for the same reason spawn_agent is - it grants a child
-        # unbounded write+shell in this cwd - and deliberately NOT exempted from
-        # the gate just because it returns quickly. Two consequences are worth
-        # stating, because both are correct rather than incidental:
-        #   1. it gets its own serial segment, exactly like spawn_agent. That
-        #      costs nothing here: the segment serialises the DISPATCH, which is
-        #      a fast registry submit, not the child's run. The children still
-        #      overlap - that is the whole feature - because the concurrency
-        #      lives past the tool call, not inside it.
-        #   2. the ONE confirmation taken here covers everything the child does
-        #      for its entire run, since a backgrounded child cannot come back
-        #      and ask. That widening is documented on the tool itself.
+        # Destructive for the same reason spawn_agent is: it grants a child
+        # unbounded write and shell access in this cwd, and it is not exempted from
+        # the gate for returning quickly. Its serial segment serialises the DISPATCH,
+        # a fast registry submit, not the child's run, so backgrounded children still
+        # overlap. The ONE confirmation taken here covers everything the child does
+        # for its entire run, since a backgrounded child cannot come back and ask.
         destructive=True,
     ),
     "check_agent_job": ToolDef(
@@ -434,12 +406,10 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         params={
             "job_id": {"type": "string", "description": "Job id from spawn_agent_background", "required": True},
         },
-        # NOT destructive, matching check_shell_job (#791): this only reads a
-        # status field. Gating a poll behind confirmation would prompt the user
-        # on every status check and make background work unusable interactively.
-        # Nothing is weakened by it: `destructive` is the CONFIRMATION axis, not
-        # the capability axis - the capability is gated by membership in the
-        # agent-exec disable family (agent/constants.py).
+        # NOT destructive, matching check_shell_job: this only reads a status field.
+        # destructive is the CONFIRMATION axis, not the capability axis; the
+        # capability is gated by membership in the agent-exec disable family
+        # (agent/constants.py).
         destructive=False,
     ),
     "generate_image": ToolDef(
@@ -473,8 +443,8 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "do not already know the collection name."
         ),
         params={},
-        # Not in SAFE_RESTRICTED_TOOLS (see ADR-0006): a restricted coder
-        # session never sees this tool at all.
+        # Not in SAFE_RESTRICTED_TOOLS: a restricted coder session never sees this
+        # tool at all.
     ),
     "rag_search": ToolDef(
         name="rag_search",
@@ -490,12 +460,11 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "query":      {"type": "string", "description": "What to search for",                          "required": True},
             "k":          {"type": "int",    "description": "How many excerpts to return (default 4, max 20)", "required": False},
         },
-        # Not destructive (reads nothing that mutates state) but still asks by
-        # default: a collection is not scoped to the coder's cwd, so its
-        # content can enter the model's context unprompted - see ADR-0006 and
-        # the ask_by_default field comment above. Also marked untrusted_output:
-        # retrieved document text is external, attacker-influenceable content,
-        # same class as fetch_url/web_search (provenance.py).
+        # Not destructive (it mutates nothing) but still asks by default: a
+        # collection is not scoped to the coder's cwd, so its content can enter the
+        # model's context unprompted. untrusted_output because retrieved document
+        # text is external, attacker-influenceable content, the same class as
+        # fetch_url/web_search (provenance.py).
         ask_by_default=True,
         untrusted_output=True,
     ),
@@ -558,15 +527,13 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         },
         destructive=True,
     ),
-    # The task list (tools/tasks.py). NOT destructive, deliberately: it writes no
-    # user file, so a confirmation prompt for it would be noise, and under
-    # auto_approve=off / an unattended run the fail-closed branch in
+    # The task list (tools/tasks.py). NOT destructive: it writes no user file, and
+    # under auto_approve off or an unattended run the fail-closed branch in
     # _execute_tool would DENY the model its own bookkeeping. The flag's other
-    # meaning - "run alone, never in a parallel batch" (agent/loop.py) - is not
-    # needed either: set_todos replaces the whole list under the agent's lock,
-    # so two calls in one batch are last-writer-wins with no torn state, and
-    # read_todos only reads. Compare spawn_agent, which IS destructive because
-    # concurrent children in one cwd break its own invariant.
+    # meaning, run alone and never in a parallel batch (agent/loop.py), is not needed
+    # either: set_todos replaces the whole list under the agent's lock, so two calls
+    # in one batch are last-writer-wins with no torn state, and read_todos only
+    # reads.
     "set_todos": ToolDef(
         name="set_todos",
         fn=tool_set_todos,
@@ -610,9 +577,9 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "max_turns": {"type": "int",    "description": "Per-child iteration cap (default 10)", "required": False},
             "timeout_s": {"type": "int",    "description": "Wall-clock budget in seconds for the whole batch, shared by every child (default 600)", "required": False},
         },
-        # Destructive so _execute_tools runs it ALONE. The tool manages its own
-        # internal 2-way concurrency; letting the batch executor also run it
-        # alongside other tools would stack concurrency the box cannot serve.
+        # Destructive so _execute_tools runs it ALONE: the tool manages its own
+        # internal 2-way concurrency, and the batch executor running it alongside
+        # other tools would stack concurrency on top of that.
         destructive=True,
     ),
 }

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SRV-5: debug mode must make the SERVER CONSOLE verbose - mirror debug logs to
-stderr and raise uvicorn's log level - not just write to a file."""
+"""Debug mode must make the SERVER CONSOLE verbose: mirror debug logs to stderr
+and raise uvicorn's log level, not just write to a file."""
 
 import logging
 import os
@@ -38,11 +38,8 @@ def test_console_handler_added_once():
 
 
 def test_console_stream_is_a_private_stderr_dup():
-    """LOG-1: the console mirror must write through a PRIVATE duplicate of
-    stderr, not fd 2 itself. Sharing fd 2 is what makes the native-stderr
-    redirection (_quiet_stderr/_capture_stderr dup2 over fd 2) raise
-    '[WinError 6] The handle is invalid' on Windows and flood the console.
-    A distinct fileno() proves the isolation."""
+    """The console mirror must write through a PRIVATE duplicate of stderr,
+    not fd 2 itself. A distinct fileno() proves the isolation."""
     stream = debuglog._stable_console_stream()
     if stream is None:
         pytest.skip("stderr has no duplicable fd in this environment")
@@ -53,10 +50,10 @@ def test_console_stream_is_a_private_stderr_dup():
 
 
 def test_console_stream_survives_fd_redirect(tmp_path, monkeypatch):
-    """LOG-1 regression: the mirror must keep writing WHILE its underlying fd is
-    redirected elsewhere (what _quiet_stderr/_capture_stderr do to fd 2 around a
-    model load / generation). Run against a stand-in stderr so the test never
-    touches the real fd 2 or pytest's own capture."""
+    """The mirror must keep writing WHILE its underlying fd is redirected
+    elsewhere (what _quiet_stderr/_capture_stderr do to fd 2 around a model load
+    or generation). Run against a stand-in stderr, never the real fd 2 or
+    pytest's own capture."""
     standin = open(tmp_path / "stderr.txt", "w", encoding="utf-8")
     monkeypatch.setattr(sys, "stderr", standin)
     stream = debuglog._stable_console_stream()

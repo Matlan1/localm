@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """setup.bat/setup.sh must never install uv itself outside the clone without
-asking. Both used to ask "Portable vs Shared" for the Python runtime + downloads
-AFTER already installing uv (via Astral's official installer) unconditionally to
-its default per-user location - so "Portable - everything in this folder" was a
-broken promise for uv's own binary. This asserts the fix: the portable/shared
-choice is asked BEFORE uv is ever installed, and a Portable pick sets Astral's own
-UV_INSTALL_DIR override so uv itself lands inside the clone too, tracked in the
-install manifest for a symmetric uninstall (see AGENTS.md rule 4: self-contained,
-nothing installed globally without being asked)."""
+asking. The portable/shared choice is asked BEFORE uv is ever installed, and a
+Portable pick sets Astral's own UV_INSTALL_DIR override so uv itself lands
+inside the clone too, tracked in the install manifest for a symmetric
+uninstall."""
 
 from pathlib import Path
 
@@ -45,10 +41,9 @@ def test_sh_asks_portable_vs_shared_before_installing_uv():
 def test_bat_sets_uv_install_dir_before_the_installer_when_contained():
     text = _bat()
     contained_set_idx = text.index('set "UV_INSTALL_DIR=%CD%\\.uv"')
-    # The real invocation, not the "install it yourself" messages shown when the
-    # user declines or the bootstrap fails - those `echo` the identical URL as
-    # plain text, so match on the unique `-NoProfile ... -Command` prefix only
-    # the real invocation carries.
+    # Match the real invocation, not the install-it-yourself messages that echo
+    # the identical URL as plain text: the `-NoProfile ... -Command` prefix is
+    # carried only by the real invocation.
     installer_idx = text.index(
         'powershell -NoProfile -ExecutionPolicy Bypass -Command '
         '"irm https://astral.sh/uv/install.ps1')
@@ -62,10 +57,9 @@ def test_bat_sets_uv_install_dir_before_the_installer_when_contained():
 def test_sh_sets_uv_install_dir_before_the_installer_when_contained():
     text = _sh()
     contained_set_idx = text.index('export UV_INSTALL_DIR="$(pwd)/.uv"')
-    # The real invocation, not the "install it yourself" messages shown when the
-    # user declines or the bootstrap fails - those contain the identical command
-    # as plain text and appear earlier/later in the file, so match on the `|| true`
-    # suffix that ONLY the real invocation carries.
+    # Match the real invocation, not the install-it-yourself messages carrying
+    # the identical command as plain text: the `|| true` suffix is carried only
+    # by the real invocation.
     installer_idx = text.index(
         "curl -LsSf https://astral.sh/uv/install.sh | sh || true")
     assert contained_set_idx < installer_idx, (
@@ -88,8 +82,7 @@ def test_sh_records_and_passes_uv_dir_to_the_manifest():
 
 
 def test_bat_uv_install_dir_is_a_documented_astral_override_not_invented():
-    # UV_INSTALL_DIR is already read elsewhere in the SAME file (the PATH-prepend
-    # after installing) - confirms it is Astral's real, already-relied-upon
-    # override, not a made-up variable name.
+    # UV_INSTALL_DIR is already read elsewhere in the SAME file, by the
+    # PATH-prepend after installing.
     text = _bat()
     assert "if defined UV_INSTALL_DIR" in text

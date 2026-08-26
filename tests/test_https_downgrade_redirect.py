@@ -2,15 +2,11 @@
 """http_ssl.HttpsOnlyRedirect: a verified HTTPS request must not be walked off
 HTTPS by a redirect.
 
-THE DEFECT. Verifying the first hop's certificate says nothing about the hops
-after it. urllib's HTTPRedirectHandler follows up to 10 redirects and, in
-http_error_302, admits any target whose scheme is in
-``('http', 'https', 'ftp', '')`` - so a plain ``http://`` Location IS followed,
-in cleartext. verified_urlopen installed a redirect handler only when the caller
-passed one, and six of its eight call sites passed none. The sharpest was
-setup_llama._download, which fetches the native llama.cpp archive whose bytes
-become a loaded DLL, under a comment asserting it "verifies both hops" over
-HTTPS - a guarantee nothing enforced, on a download whose sha256 check is opt-in.
+Verifying the first hop's certificate says nothing about the hops after it.
+urllib's HTTPRedirectHandler follows up to 10 redirects and, in http_error_302,
+admits any target whose scheme is in ``('http', 'https', 'ftp', '')``, so a
+plain ``http://`` Location IS followed, in cleartext. HttpsOnlyRedirect is
+installed by verified_urlopen for every caller, and refuses that downgrade.
 
 THREE real loopback stubs, not one, and the third is what makes the other two
 mean anything:
@@ -21,24 +17,19 @@ mean anything:
   hop C  https, the legitimate second hop: the GitHub -> release-CDN 302 that
          every real download depends on.
 
-Routing the refused redirect to a stub that WOULD answer is deliberate (the
-precedent is tests/test_comfy_redirect_refused.py): a Location pointing at
+The refused redirect points at a stub that WOULD answer: a Location pointing at
 something genuinely unreachable cannot tell "refused" apart from "reached for it
-and failed", and both look like the same exception. Under the fix hop B is never
-contacted; under a regression its bytes come back to the caller exactly as a
-real downgrade would deliver them.
+and failed". Hop B is never contacted when the guard holds; without it, hop B's
+bytes come back to the caller exactly as a real downgrade would deliver them.
 
-AND THE CONTROL FOR THE CONTROL: test_urllib_default_does_follow_the_downgrade
+THE CONTROL FOR THE CONTROL: test_urllib_default_does_follow_the_downgrade
 drives these same stubs through urllib's OWN opener and asserts hop B's bytes DO
-arrive. Without it, "hop B was never dialed" would also be the reading if hop A
-had stopped redirecting, or the cert had stopped verifying, or the fixture had
-quietly broken - a refusal test that cannot distinguish those is green for a
-reason that has nothing to do with the guard.
+arrive, so "hop B was never dialed" cannot also be the reading for a hop A that
+stopped redirecting, a cert that stopped verifying, or a broken fixture.
 
 TEST (b) IS THE LOAD-BEARING ONE. Refusing every 3xx would pass (a) and break
 setup-llama, the updater and the bug-report upload, all of which legitimately
-follow a 302 within https. A fix that passes (a) and fails (b) is worse than the
-defect it closes.
+follow a 302 within https.
 """
 
 from __future__ import annotations
@@ -116,10 +107,9 @@ def local_ca(tmp_path, monkeypatch):
     """A throwaway CA + 127.0.0.1 leaf (localm's own tls.py mints them), and
     verified_urlopen taught to trust that CA.
 
-    Patching ssl.create_default_context rather than passing a context in is
-    deliberate: the code under test builds its own, and the point of these tests
-    is what THAT code does. The certifi fallback builds one the same way, so a
-    real certificate failure would still take its normal path."""
+    Patches ssl.create_default_context rather than passing a context in, because
+    the code under test builds its own. The certifi fallback builds one the same
+    way, so a real certificate failure still takes its normal path."""
     cert, key = tls.ensure_cert(tmp_path)
     ca = str(tls.ca_cert_path(tmp_path))
 
@@ -198,10 +188,10 @@ def test_urllib_default_does_follow_the_downgrade(hops, local_ca):
 
 
 def test_refusal_is_a_urlerror_so_every_caller_reports_it(hops):
-    """RedirectDowngradeRefused is a URLError on purpose: each outbound caller
-    already funnels URLError into its own domain error while interpolating the
-    reason, so a refusal surfaces as a real failure everywhere rather than
-    escaping as an unhandled type - and can never read as a success."""
+    """RedirectDowngradeRefused is a URLError: each outbound caller funnels
+    URLError into its own domain error while interpolating the reason, so a
+    refusal surfaces as a real failure everywhere and never reads as a
+    success."""
     a, b, _c = hops
     a.redirect_to = f"{b.base_url}/payload"
 
@@ -213,15 +203,10 @@ def test_refusal_is_a_urlerror_so_every_caller_reports_it(hops):
 
 
 def test_setup_llama_download_refuses_and_says_why(hops, tmp_path):
-    """The sharpest call site, end to end, at the layer where the consequence
-    lands rather than at the guard.
-
-    Everything above proves http_ssl refuses and that the handler is installed.
-    Neither can see what setup_llama does with the refusal - and its generic
-    OSError branch, which RedirectDowngradeRefused would otherwise reach (a
-    URLError IS an OSError), tells the user this "looks like a dropped or flaky
-    connection" and to retry. Retrying an attempt to hand localm a native
-    library over cleartext is the opposite of the right advice.
+    """End to end at the layer where the consequence lands rather than at the
+    guard: setup_llama names the downgrade rather than routing it into its
+    generic OSError branch (a URLError IS an OSError), which tells the user this
+    "looks like a dropped or flaky connection" and to retry.
 
     Asserted on the DATA first: whether a file was written is the property, the
     message is the proxy. A runner stops at the first failing assertion, so this
@@ -245,11 +230,10 @@ def test_setup_llama_download_refuses_and_says_why(hops, tmp_path):
 
 
 def test_a_plain_http_caller_is_not_broken_by_the_guard(hops):
-    """The rule is DOWNGRADE, not https-only. A caller that started on plain
-    http (a user-configured http endpoint) has no confidentiality to lose, and
-    refusing its http -> http redirect would be a new failure this finding does
-    not justify. Hop A is https here, so drive the plain hop B into hop C's
-    payload instead: b -> c over http."""
+    """The rule is DOWNGRADE, not https-only: a caller that started on plain
+    http (a user-configured http endpoint) still follows an http -> http
+    redirect. Hop A is https here, so the plain hop B drives hop C's payload
+    instead: b -> c over http."""
     _a, b, _c = hops
     plain_target = _Stub(_Payload)
     plain_target.body = _HOPC_BYTES

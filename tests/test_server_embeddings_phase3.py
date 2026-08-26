@@ -1,19 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""M2 Phase 3 - server / embeddings family.
+"""Server / embeddings family. Three properties:
 
-Covers three backlog items:
+  - /v1/embeddings honors encoding_format="base64" (returning base64
+    little-endian float32 per the OpenAI spec) or rejects an unknown format
+    with 400, never silently returning float arrays.
 
-  FAC-9  /v1/embeddings must honor encoding_format="base64" (return base64
-         little-endian float32 per the OpenAI spec) or reject an unknown
-         format with 400 - not silently return float arrays.
+  - the MCP 'embed' tool is not advertised when the active backend cannot embed
+    (the common GGUF backend raises NotImplementedError), and calling it on
+    such a backend reports unsupported rather than crashing.
 
-  FAC-6  the MCP 'embed' tool must not be advertised when the active backend
-         cannot embed (the common GGUF backend raises NotImplementedError),
-         and calling it on such a backend must report unsupported, not crash.
-
-  SEC-3  PATCH /v1/config must refuse to set require_auth=true while no API
-         key is configured (a one-way self-lockout), with a clear 400; once a
-         key exists the same PATCH succeeds.
+  - PATCH /v1/config refuses to set require_auth=true while no API key is
+    configured (a one-way self-lockout), with a clear 400; once a key exists
+    the same PATCH succeeds.
 """
 
 import base64
@@ -46,7 +44,7 @@ def _make_engine(embed_value=None):
 
 
 # --------------------------------------------------------------------------- #
-#  FAC-9 - encoding_format=base64                                              #
+#  encoding_format=base64                                                      #
 # --------------------------------------------------------------------------- #
 
 class TestEmbeddingsEncodingFormat:
@@ -91,7 +89,7 @@ class TestEmbeddingsEncodingFormat:
 
 
 # --------------------------------------------------------------------------- #
-#  FAC-6 - MCP embed tool degrades on a non-embedding backend                  #
+#  MCP embed tool degrades on a non-embedding backend                          #
 # --------------------------------------------------------------------------- #
 
 def _mcp(default_model="stub", *, can_embed):
@@ -144,10 +142,10 @@ class TestMcpEmbedToolCapability:
         assert "embed" in resp["error"]["message"].lower()
 
     def test_embed_handler_degrades_when_backend_raises(self):
-        # If embed IS advertised but the backend nonetheless raises at call
-        # time (e.g. a model that only reveals it once loaded), the handler
-        # must report the error, not crash. We register the tool by claiming
-        # can_embed=True, then have the engine raise NotImplementedError.
+        # If embed IS advertised but the backend nonetheless raises at call time
+        # (e.g. a model that only reveals it once loaded), the handler reports
+        # the error rather than crashing. The tool is registered by claiming
+        # can_embed=True, then the engine raises NotImplementedError.
         from localm.plugins.mcpserver.server import (
             EngineCache, MCPStdioServer, build_tools)
 
@@ -170,17 +168,15 @@ class TestMcpEmbedToolCapability:
 
 
 # --------------------------------------------------------------------------- #
-#  SEC-3 - PATCH /v1/config require_auth self-lockout guard                    #
+#  PATCH /v1/config require_auth self-lockout guard                            #
 # --------------------------------------------------------------------------- #
 
 class TestRequireAuthLockoutGuard:
     @pytest.fixture(autouse=True)
     def _isolated_config_file(self, tmp_path, monkeypatch):
-        # save_config/load_config/update_config all read the FROZEN CONFIG_FILE/
-        # HOME_DIR module attributes, not the lazy home_dir() the autouse
-        # per-test LOCALM_HOME env fixture affects - repoint them explicitly so
-        # this test's real config write/read never touches another test's file
-        # (mirrors test_config_atomic_concurrency.py's `home` fixture).
+        # save_config/load_config/update_config all read the FROZEN CONFIG_FILE
+        # and HOME_DIR module attributes, not the lazy home_dir() the autouse
+        # per-test LOCALM_HOME fixture affects, so repoint them explicitly.
         import localm.config as cfg
         home = tmp_path / ".localm"
         monkeypatch.setattr(cfg, "HOME_DIR", home)
@@ -197,11 +193,9 @@ class TestRequireAuthLockoutGuard:
             app, raise_server_exceptions=True,
             headers={"Authorization": f"Bearer {app.state.shell_token}"})
 
-    # NOTE: patch_config() now persists via config.update_config() (APP-LIFECYCLE-1,
-    # the atomic read-modify-write helper), not a load_config()/save_config()
-    # pair - so these tests verify against the REAL persisted config (the
-    # autouse per-test LOCALM_HOME isolates the file) instead of mocking
-    # save_config, which update_config no longer calls at all.
+    # patch_config() persists via config.update_config(), the atomic
+    # read-modify-write helper, so these tests verify against the REAL persisted
+    # config; the autouse per-test LOCALM_HOME isolates the file.
 
     def test_enable_require_auth_without_key_rejected_400(self):
         os.environ.pop("LOCALM_API_KEY", None)
@@ -232,8 +226,7 @@ class TestRequireAuthLockoutGuard:
 
     def test_setting_require_auth_false_without_key_not_blocked(self):
         # The guard only blocks ENABLING the lockout. Writing require_auth=False
-        # (or any unrelated key) while keyless must never be blocked by the
-        # guard - otherwise even backing out becomes impossible.
+        # (or any unrelated key) while keyless is never blocked.
         os.environ.pop("LOCALM_API_KEY", None)
         from localm.config import load_config, save_config
         save_config({"require_auth": False})

@@ -1,17 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// F12b (memory-audit 2026-07-02 [9]): the memory modal surfaces PENDING
-// CORRECTIONS - a later statement that contradicts a saved (user-typed) fact.
-// The system never auto-overwrites; the user accepts (apply) or rejects (keep).
-// This verifies the modal renders a proposal and the buttons POST accept/reject.
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
 function makeFetch(calls, state) {
-  // state.pending is the mutable pending-corrections list. GET reflects it and a
-  // resolve POST removes the addressed item, mirroring the server (robust to the
-  // load-time refreshMemory() call in init.js consuming a response first).
+  // state.pending is the mutable pending-corrections list; GET reflects it and a
+  // resolve POST removes the addressed item
   return async (url, opts = {}) => {
     const u = String(url);
     const method = (opts.method || "GET").toUpperCase();
@@ -62,7 +56,7 @@ test("F12b: modal renders a pending correction and Apply POSTs accept", async ()
   assert.ok(calls.find((c) =>
     c.u === "/api/memory/corrections/abc123/accept" && c.method === "POST"),
     "posted accept");
-  // After applying, the suggestion is gone from the re-rendered list.
+  // after applying, the suggestion is gone from the re-rendered list
   assert.doesNotMatch(
     window.document.getElementById("modal-body").textContent, /Suggested corrections/);
 });

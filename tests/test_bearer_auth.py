@@ -81,8 +81,8 @@ class TestOpenMode:
         assert r.status_code == 200
 
     def test_model_unload_with_shell_token(self, client):
-        # Model load/unload are MODELS_WRITE management routes; in open mode
-        # they now require the loopback shell token (the GUI shell injects it).
+        # Model load/unload are MODELS_WRITE management routes; in open mode they
+        # require the loopback shell token (the GUI shell injects it).
         os.environ.pop("LOCALM_API_KEY", None)
         token = client.app.state.shell_token
         r = client.post("/v1/models/unload",

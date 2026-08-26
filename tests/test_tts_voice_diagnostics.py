@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""TTS/voice diagnostics gaps from the 2026-07-02 honesty audit.
+"""TTS/voice diagnostics honesty gaps.
 
-- tts/plug.py silently returned {} for a corrupt or unreadable SHIPPED template
-  and silently dropped the user's overrides on a config-layer failure - both
-  now leave a log trace (behaviour unchanged: TTS keeps serving).
-- voice/plug.py picked the HTTP status (501 vs 422) by substring-matching
-  "faster-whisper" in the human error MESSAGE; it now branches on the
-  structured VoiceError.code, so rewording a message cannot flip the status."""
+- tts/plug.py must not silently return {} for a corrupt or unreadable SHIPPED
+  template, nor silently drop the user's overrides on a config-layer failure -
+  both leave a log trace (behaviour unchanged: TTS keeps serving).
+- voice/plug.py must not pick the HTTP status (501 vs 422) by substring-matching
+  "faster-whisper" in the human error MESSAGE; it branches on the structured
+  VoiceError.code, so rewording a message cannot flip the status."""
 
 import logging
 
@@ -32,11 +32,8 @@ class TestTtsTemplateDiagnostics:
         if write_corrupt:
             path.write_text("{ not json", encoding="utf-8")
         # Patch the module that OWNS the global, not the one that re-exports the
-        # function: plug.py does `from ...settings import defaults as _defaults`,
-        # so _defaults resolves _TEMPLATE in settings' namespace. #793 moved the
-        # loader there and this patch kept naming plug, which simply added an
-        # attribute nobody reads (monkeypatch.setattr raises for a missing one,
-        # which is what turned it red rather than silently vacuous).
+        # function: plug.py does `from ...settings import defaults as _defaults`, so
+        # _defaults resolves _TEMPLATE in settings' namespace.
         monkeypatch.setattr(tts_settings, "_TEMPLATE", path)
         with caplog.at_level(logging.WARNING, logger="localm"):
             assert tts_plug._defaults() == {}
@@ -74,16 +71,16 @@ class TestVoiceStatusByCode:
         return TestClient(app)
 
     def test_missing_dependency_is_501_via_code(self, monkeypatch):
-        # Message deliberately does NOT contain "faster-whisper": pre-fix the
-        # substring match would have mis-picked 422 for this failure class.
+        # The message does NOT contain "faster-whisper", so a substring match
+        # would mis-pick 422 for this failure class.
         c = self._client(VoiceError("speech engine not installed",
                                     code="needs-faster-whisper"), monkeypatch)
         r = c.post("/api/voice/transcribe", json={"audio_b64": "aGk="})
         assert r.status_code == 501
 
     def test_decode_error_is_422_even_if_message_mentions_the_package(self, monkeypatch):
-        # Pre-fix, "faster-whisper" appearing in a DECODE message flipped the
-        # status to 501; the class tag must win over the wording.
+        # The class tag wins over the wording: "faster-whisper" in a DECODE
+        # message must not flip the status to 501.
         c = self._client(VoiceError("could not decode (hint: faster-whisper "
                                     "supports wav/webm)", code="decode"), monkeypatch)
         r = c.post("/api/voice/transcribe", json={"audio_b64": "aGk="})

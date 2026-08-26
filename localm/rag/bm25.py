@@ -40,18 +40,16 @@ def _is_cjk(ch: str) -> bool:
 
 
 # Common English function words. OPT-IN only (see tokenize/BM25 stop_words): a
-# caller filters these from the LEXICAL index+query so a stopword can never be the
-# SOLE basis of a match. This matters for small/topically-narrow corpora - exactly
-# localm's home-scale RAG target - where a stopword can land in few enough docs to
-# earn a spuriously high IDF and, once max-normalised into the hybrid blend, outrank
-# the true semantic match. Kept to genuine function words so we strip noise, not
-# meaning; non-English tokens are simply absent from the set and pass through
-# untouched, preserving the tokenizer's multilingual neutrality.
+# caller filters these from the LEXICAL index+query so a stopword can never be
+# the SOLE basis of a match. On a small or topically-narrow corpus a stopword
+# can land in few enough docs to earn a high IDF and, once max-normalised into
+# the hybrid blend, outrank the true semantic match. Kept to genuine function
+# words; non-English tokens are absent from the set and pass through untouched.
 #
-# Deliberately NOT the default: localm.memory.store imports tokenize() and depends
-# on stopwords SURVIVING (its REG-590 self-reference check reads "i"/"me"/"my" from
-# the raw token stream), and memory/coder keep their own relevance-gate stopword
-# copies. A future refactor could let those share this one set.
+# NOT the default: localm.memory.store imports tokenize() and depends on
+# stopwords SURVIVING (its self-reference check reads "i"/"me"/"my" from the raw
+# token stream), and memory/coder keep their own relevance-gate stopword
+# copies.
 ENGLISH_STOP_WORDS = frozenset(
     "a an and are as at be been but by can could did do does done for from had has "
     "have he her him his i if in into is it its me my no not of on only or our over "
@@ -70,8 +68,8 @@ def tokenize(text: str, stop_words: "frozenset[str] | None" = None) -> list[str]
     Hangul) are emitted one token per character so a query can still match.
 
     When *stop_words* is given, tokens in that set are dropped (case is already
-    folded above). Default None leaves every token in place - callers that need
-    stopwords (e.g. the memory self-reference check) must not have them removed.
+    folded above). Default None leaves every token in place; callers that need
+    stopwords (e.g. the memory self-reference check) rely on that.
     """
     tokens: list[str] = []
     for run in _TOKEN_RE.findall(text.lower()):

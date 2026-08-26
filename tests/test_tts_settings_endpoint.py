@@ -2,19 +2,15 @@
 """The tts plugin's server-side settings write surface: GET/POST /v1/tts/config
 plus the settings_schema helpers behind them.
 
-Before this, config["plugins"]["tts"] (engine, model, device, dtype, voice,
-speed, library, wasm_paths) was resolved READ-ONLY by the plugin and could only
-be changed by hand-editing config.json - the GUI's voice picker wrote a
-DIFFERENT store (browser localStorage), so a user who picked a voice believed
-they had changed the server-side one and had not (2026-07-22 settings-exposure
-audit).
+config["plugins"]["tts"] holds engine, model, device, dtype, voice, speed,
+library and wasm_paths.
 
 Shape mirrors the per-plugin media config (validate_media_block + POST
 /v1/media/config/{name}): validated in settings_schema, deep-merged into the
 plugin's own block, blank clears an override back to the shipped template
 default. The two fields that become a script/wasm URL in EVERY browser client
-(library, wasm_paths) additionally require an owner (ADMIN) principal, mirroring
-REC-MEDIA-CMD for launch_cmd/api_url.
+(library, wasm_paths) additionally require an owner (ADMIN) principal, as
+launch_cmd/api_url do for a media backend.
 """
 
 import pytest
@@ -68,9 +64,8 @@ def test_schema_flags_the_admin_only_script_url_fields():
 
 
 def test_schema_hides_admin_only_fields_for_non_owner():
-    # Regression for pentest finding LM-PT-002: library/wasm_paths become a
-    # script/wasm URL every browser loads, so a non-owner must not see their
-    # resolved value either (mirrors the write-side owner gate).
+    # library/wasm_paths become a script/wasm URL every browser loads, so a
+    # non-owner must not see their resolved value either.
     owner_fields = {f["key"] for f in ss.tts_schema_json({})}
     scoped_fields = {f["key"] for f in ss.tts_schema_json({}, is_owner=False)}
     assert {"library", "wasm_paths"} <= owner_fields, "owner sees everything"
@@ -103,8 +98,8 @@ def test_validate_rejects_an_unknown_field():
 
 
 def test_validate_rejects_an_unknown_voice():
-    # tts.js silently falls back to the FIRST voice for an unknown id, so a typo
-    # would look like "the setting did nothing" - reject it at set time instead.
+    # tts.js falls back to the FIRST voice for an unknown id, so a typo is
+    # rejected at set time.
     with pytest.raises(ValueError):
         ss.validate_tts_block({"voice": "af_nosuchvoice"})
 
@@ -138,9 +133,8 @@ def test_validate_rejects_an_unsupported_engine():
 
 
 def test_validate_confines_library_and_wasm_paths_to_the_plugin_assets():
-    # These become a script / wasm URL that EVERY browser client loads. A remote
-    # or absolute one would be code injection into every user's page, so only a
-    # relative in-plugin path is accepted.
+    # These become a script / wasm URL that EVERY browser client loads, so only
+    # a relative in-plugin path is accepted.
     for bad in ("https://evil.example/x.js", "//evil.example/x.js",
                 "/etc/passwd", "Z:/windows/x.js", "..\\..\\x.js",
                 "../../../secret.js", "vendor\\kokoro.min.js",
@@ -157,8 +151,7 @@ def test_validate_confines_library_and_wasm_paths_to_the_plugin_assets():
 
 def test_validate_rejects_asset_paths_that_would_404_in_the_browser():
     """Existing on disk is not enough: the browser fetches these over HTTP."""
-    # A file that is simply not there (a typo) is caught at set time rather than
-    # breaking text-to-speech for every client later.
+    # A file that is simply not there (a typo) is caught at set time.
     with pytest.raises(ValueError):
         ss.validate_tts_block({"library": "vendor/nope.js"})
     # library must be a FILE: a folder imports as nothing.
@@ -167,10 +160,9 @@ def test_validate_rejects_asset_paths_that_would_404_in_the_browser():
     # An empty segment ("a//b") resolves on disk but is a different URL path.
     with pytest.raises(ValueError):
         ss.validate_tts_block({"library": "vendor//kokoro.min.js"})
-    # Windows/macOS filesystems are case-insensitive; the HTTP path is not. The
-    # rejection REASON differs by platform (a case-insensitive filesystem finds
-    # the file and reports the real spelling; a case-sensitive one simply does
-    # not find it), so only the refusal itself is asserted here.
+    # Windows/macOS filesystems are case-insensitive and the HTTP path is not,
+    # so the rejection REASON differs by platform; only the refusal itself is
+    # asserted here.
     with pytest.raises(ValueError):
         ss.validate_tts_block({"library": "VENDOR/kokoro.min.js"})
     # Same canonical-spelling rule, platform-independently: "./x" is a different
@@ -271,10 +263,8 @@ def test_post_rejects_unknown_field_and_bad_value(client):
 def test_the_plugin_serves_what_the_settings_endpoint_wrote(env):
     """END TO END: the write surface actually changes what the browser gets.
 
-    The plugin's own /api/tts/config is the resolved config tts.js loads; a save
-    through the settings endpoint must show up there, which is the whole point
-    (before this, the GUI voice picker wrote browser localStorage instead and
-    the server-side voice never moved)."""
+    The plugin's own /api/tts/config is the resolved config tts.js loads, so a
+    save through the settings endpoint must show up there."""
     from types import SimpleNamespace
 
     from fastapi import FastAPI
@@ -310,12 +300,12 @@ def test_write_requires_config_write_scope(client, monkeypatch):
 
 
 def test_a_tts_capability_key_cannot_read_or_write_these_settings(env):
-    """The REASON these routes are core and not on the plugin's own router.
+    """These routes are core, not on the plugin's own router.
 
     Routes mounted by a plugin are auto-scoped to that plugin's capability, so a
-    key that merely grants "may use text-to-speech" would have been able to
-    rewrite the voice model id and the script URL every browser loads. Settings
-    cost config:read / config:write instead."""
+    key that merely grants "may use text-to-speech" would be able to rewrite the
+    voice model id and the script URL every browser loads. Settings cost
+    config:read / config:write instead."""
     from localm import auth, scopes
     from localm.inference.http_server import create_app
 
@@ -346,8 +336,8 @@ def test_active_is_false_when_the_plugin_is_not_installed(client):
 
 def test_script_url_fields_require_an_owner_admin_key(env):
     """library / wasm_paths are loaded as a script + wasm base by EVERY browser
-    client, so a non-owner config:write key must not be able to set them
-    (mirrors REC-MEDIA-CMD for a media backend's launch_cmd / api_url)."""
+    client, so a non-owner config:write key must not be able to set them, the
+    same as a media backend's launch_cmd / api_url."""
     from localm import auth, scopes
     from localm.inference.http_server import create_app
 
@@ -374,10 +364,9 @@ def test_script_url_fields_require_an_owner_admin_key(env):
 
 
 def test_get_hides_library_and_wasm_paths_from_a_config_read_only_key(env):
-    """Regression for pentest finding LM-PT-002: a config:read-scoped,
-    non-owner key must not learn library/wasm_paths (the script/wasm URL
-    every browser loads) from GET /v1/tts/config, even though it may
-    legitimately read every other tts setting."""
+    """A config:read-scoped, non-owner key must not learn library/wasm_paths
+    (the script/wasm URL every browser loads) from GET /v1/tts/config, even
+    though it may legitimately read every other tts setting."""
     from localm import auth, scopes
     from localm.inference.http_server import create_app
 
@@ -397,9 +386,9 @@ def test_get_hides_library_and_wasm_paths_from_a_config_read_only_key(env):
 
 def test_post_response_hides_library_and_wasm_paths_from_a_scoped_writer(env):
     """The write endpoint's own response echoes the plugin's resolved fields
-    back too (e.g. after saving voice) - same leak, same fix: a config:write
-    key that is not an owner must not have library/wasm_paths' value echoed
-    back even for a save that never touched either field."""
+    back too (e.g. after saving voice), so a config:write key that is not an
+    owner must not have library/wasm_paths' value echoed back, even for a save
+    that never touched either field."""
     from localm import auth, scopes
     from localm.inference.http_server import create_app
 

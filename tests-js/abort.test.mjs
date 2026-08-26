@@ -3,44 +3,22 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
 
-// runCompletion() only ever mutates the *conv* object passed to it - it never
-// touches chat.conversations/activeId itself, so most tests here never seed
-// them (production always calls it with the active conversation; the plain
-// object these tests build is enough to see runCompletion's OWN behaviour).
-// But renderChat() (now called after persisting a stopped or completed reply)
-// reads the conversation back through currentConv(), which resolves through
-// chat.conversations/activeId - a top-level `const`, not a window property, so
-// it can only be reached from inside the shared script realm. Seed it via
-// runScript so renderChat() finds the SAME conversation object these tests
-// already hold, matching what always holds true in the real app.
+// Makes `conv` the active conversation. chat.conversations/activeId are
+// top-level consts, not window properties, so they must be set from inside the
+// script realm for currentConv() to resolve to this same object.
 function activateConv(window, conv) {
   window.__testConv = conv;
   runScript(window, "chat.conversations = [window.__testConv]; chat.activeId = window.__testConv.id;");
 }
 
-// BUG-13: when the user presses Stop mid-stream, runCompletion's read rejects
-// with an AbortError. The catch only suppressed the error toast - it then went
-// on to persist the partial reply, speak it aloud, and (with web access on)
-// fire the web loop / recurse. A Stop must never speak the partial or recurse
-// on it - those two guards are what this file protects.
-//
-// Persistence itself was reconsidered later (see "Stop now persists..." below):
-// BUG-13's own bug was never about saving the text, only about a partial being
-// mistaken for a finished, continuable reply. The two are separable as long as
-// the persisted message is built directly in the abort branch, never by
-// falling into the shared post-completion code that leads to TTS/recursion.
-//
-// We simulate "the model streamed a (web-call) reply, THEN the user stopped":
-// readSSE delivers one content delta (so `full` is non-empty and is a parseable
-// web tool call) and then throws AbortError.
-
 const WEB_CALL = '<tool_call>{"name":"web_search","query":"x"}</tool_call>';
 
+// Streams one content delta carrying a web tool call, then throws AbortError.
 async function runAborted({ speak = true, web = true } = {}) {
   const okResponse = { ok: true, status: 200, text: async () => "", json: async () => ({}) };
   const { window } = loadApp({ fetchImpl: () => Promise.resolve(okResponse) });
   window.maybeCompactConversation = async () => {};
-  window.runWebCall = async () => {};   // noop: the web path needs no real response
+  window.runWebCall = async () => {};   // noop stub
   window.readSSE = async (_r, onData) => {
     onData(JSON.stringify({ choices: [{ delta: { content: WEB_CALL } }] }));
     throw Object.assign(new Error("aborted"), { name: "AbortError" });
@@ -87,7 +65,7 @@ test("Stop with no content at all does not persist an empty assistant turn", asy
   const { window } = loadApp({ fetchImpl: () => Promise.resolve(okResponse) });
   window.maybeCompactConversation = async () => {};
   window.readSSE = async () => {
-    // Aborted before a single delta arrived.
+    // Aborts before any delta arrives.
     throw Object.assign(new Error("aborted"), { name: "AbortError" });
   };
   window.document.getElementById("p-speak").checked = false;
@@ -97,9 +75,6 @@ test("Stop with no content at all does not persist an empty assistant turn", asy
   assert.equal(conv.messages.length, 1, "no assistant turn saved when there was nothing to save");
 });
 
-// U-STOP: a stop must be unmistakable - the partial is marked [stopped] on screen
-// and any speech already playing is halted (so a stopped reply is never silently
-// left looking live or kept being read aloud).
 test("U-STOP: Stop marks the partial [stopped] on screen and cancels speech", async () => {
   const okResponse = { ok: true, status: 200, text: async () => "", json: async () => ({}) };
   const { window } = loadApp({ fetchImpl: () => Promise.resolve(okResponse) });
@@ -124,13 +99,6 @@ test("U-STOP: Stop marks the partial [stopped] on screen and cancels speech", as
     "the persisted content is the raw text, without the [stopped] marker baked in");
 });
 
-// Token-rate persistence: a completed (non-aborted) turn's usage figures used to
-// reach only the DOM ($("chat-usage")), never the saved reply object, so they
-// were gone the moment the page reloaded. This is unrelated to BUG-13/U-STOP -
-// an aborted stream never receives a usage chunk at all (the server only sends
-// it on the final SSE frame, which a disconnect prevents from ever arriving) -
-// so there was nothing to lose on Stop specifically; the loss was universal,
-// for every successful turn.
 test("A completed turn's usage is saved on the reply, not just shown in the DOM", async () => {
   const okResponse = { ok: true, status: 200, text: async () => "", json: async () => ({}) };
   const { window } = loadApp({ fetchImpl: () => Promise.resolve(okResponse) });
@@ -147,10 +115,8 @@ test("A completed turn's usage is saved on the reply, not just shown in the DOM"
   activateConv(window, conv);
   await window.runCompletion(conv);
 
-  // Field-by-field, not a whole-object deepEqual: chunk.usage was parsed by
-  // JSON.parse INSIDE the jsdom realm, so it carries that realm's Object
-  // prototype, not Node's - a whole-object deepEqual fails on that alone even
-  // though every field matches.
+  // usage is parsed inside the jsdom realm and carries that realm's Object
+  // prototype, so it must be compared field by field, not with deepEqual.
   const saved = conv.messages[1].usage;
   assert.ok(saved, "usage travels with the reply so it survives a reload");
   assert.equal(saved.total_tokens, 15);

@@ -1,24 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """LlamaCpp._load_mmproj stderr handling.
 
-Before this fix, MtmdContext(mmproj_path, self._model_ptr) - unlike every other
-native call in this file - ran with NO stderr redirect at all: not
-_capture_stderr, not _quiet_stderr, not suppress_console_mirror. Real field logs
-showed two consequences: (1) llama.cpp's own CLIP loader tensor dump (roughly
-half of every vision-load log) landed straight on the user's console, mid-line
-over the live load spinner, and (2) the module's own internal mtmd_input_text
-ABI probe (_PROBE_CONTROL / _PROBE_EMBEDDED_NUL in mtmd.py) leaked its raw probe
-bytes ("add_text: aaaa...") the same way. And on a genuine NULL mmproj open, the
-real native reason was never captured, so the raised MtmdUnavailable's generic
-message ("mmproj incompatible with this model or build") was all a caller - and
-the debug log - ever saw.
+MtmdContext(mmproj_path, self._model_ptr) runs under a stderr redirect, like
+every other native call in llama.py, so three things hold: llama.cpp's CLIP
+loader tensor dump does not land on the user's console over the live load
+spinner; the module's own mtmd_input_text ABI probe (_PROBE_CONTROL /
+_PROBE_EMBEDDED_NUL in mtmd.py) does not leak its raw probe bytes ("add_text:
+aaaa...") either; and on a NULL mmproj open the real native reason IS captured
+and reaches the warning, not just MtmdUnavailable's generic message.
 
-_load_mmproj was pulled out of LlamaCpp.__init__ specifically so these are
-testable without a real native model/GPU (same reasoning _stderr_ctx_for_generate
-documents for its own extraction in llama.py). Each test here drives the REAL
-method, with only MtmdContext itself swapped for a controllable stand-in that
-mimics the native library's behavior of writing raw bytes straight to fd 2 - the
-same trick test_moe_placement_report.py uses for llama_load_model_from_file."""
+_load_mmproj is a separate method from LlamaCpp.__init__, so these are testable
+without a real native model or GPU. Each test drives the REAL method, with only
+MtmdContext swapped for a stand-in that mimics the native library's behaviour of
+writing raw bytes straight to fd 2."""
 
 import logging
 import os
@@ -34,10 +28,10 @@ def _bare_instance():
 
 
 def _redirect_fd2_to(path):
-    """Point the REAL fd 2 at *path* and return the saved fd to restore it
-    with. Standing in for "the user's terminal" - only what actually reaches
-    THIS fd, after _load_mmproj's own internal redirect/restore cycle, counts
-    as reaching the console."""
+    """Point the REAL fd 2 at *path* and return the saved fd to restore it with.
+    This fd stands in for the user's terminal: only what reaches it, after
+    _load_mmproj's own internal redirect/restore cycle, counts as reaching the
+    console."""
     target_fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
     saved = os.dup(2)
     os.dup2(target_fd, 2)
@@ -51,8 +45,7 @@ def _restore_fd2(saved):
 
 
 class TestVisionLoadNeverReachesConsole:
-    """Required proof 1: a vision load does not emit CLIP loader output to
-    the console."""
+    """A vision load does not emit CLIP loader output to the console."""
 
     def test_clip_loader_dump_is_suppressed(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -60,8 +53,7 @@ class TestVisionLoadNeverReachesConsole:
 
         class _FakeMtmdPrintsLikeClip:
             def __init__(self, mmproj_path, model_ptr, gpu_index=0):
-                # Verbatim shape from the field logs (issues/log_1.txt:1-314):
-                # a real load prints one such line per tensor.
+                # Verbatim shape from a real load: one such line per tensor.
                 os.write(2, b"clip_model_loader: tensor[0]: mm.0.weight\n")
                 os.write(2, b"clip_model_loader: tensor[1]: mm.0.bias\n")
                 os.write(2, b"load_hparams: has_vision_encoder = 1\n")
@@ -88,10 +80,9 @@ class TestVisionLoadNeverReachesConsole:
             f"native load_hparams output reached the console: {seen!r}")
 
     def test_fires_control_unwrapped_call_does_leak(self, tmp_path, monkeypatch):
-        """Proves the test above can actually fail: calling the SAME fake
-        directly, with no suppression at all, must leak to fd 2 - otherwise
-        test_clip_loader_dump_is_suppressed would pass even with the fix
-        reverted, for a reason that has nothing to do with the fix."""
+        """The SAME fake called directly, with no suppression, DOES reach fd 2,
+        so the test above is measuring the suppression rather than an inert
+        fake."""
         class _FakeMtmdPrintsLikeClip:
             def __init__(self, mmproj_path, model_ptr, gpu_index=0):
                 os.write(2, b"clip_model_loader: tensor[0]: mm.0.weight\n")
@@ -112,10 +103,10 @@ class TestVisionLoadNeverReachesConsole:
 
 
 class TestAbiProbeNeverReachesConsole:
-    """Required proof 3: the internal mtmd_input_text ABI probe's output does
-    not reach the console. Mirrors the real shape from mtmd.py's
-    _PROBE_CONTROL/_PROBE_EMBEDDED_NUL, which llama.cpp echoes back via its
-    own "add_text: ..." tokenizer trace (issues/log_1.txt:348-349)."""
+    """The internal mtmd_input_text ABI probe's output does not reach the
+    console. The fake mirrors the real shape from mtmd.py's
+    _PROBE_CONTROL/_PROBE_EMBEDDED_NUL, which llama.cpp echoes back via its own
+    "add_text: ..." tokenizer trace."""
 
     def test_probe_bytes_are_suppressed(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -123,9 +114,8 @@ class TestAbiProbeNeverReachesConsole:
 
         class _FakeMtmdRunsAbiProbe:
             def __init__(self, mmproj_path, model_ptr, gpu_index=0):
-                # The exact leaked shape from the field log: the control probe
-                # ("a"*256) followed by the embedded-NUL probe (prints empty
-                # after the NUL truncates it).
+                # The leaked shape: the control probe ("a"*256) followed by the
+                # embedded-NUL probe (prints empty after the NUL truncates it).
                 os.write(2, b"add_text: " + b"a" * 256 + b"\n")
                 os.write(2, b"add_text: \n")
                 self.supports_vision = True
@@ -151,8 +141,8 @@ class TestAbiProbeNeverReachesConsole:
 
 
 class TestFailedMmprojOpenSurfacesNativeReason:
-    """Required proof 2: a failed mmproj open surfaces the native reason
-    rather than only the generic message."""
+    """A failed mmproj open surfaces the native reason rather than only the
+    generic message."""
 
     def test_native_reason_reaches_the_warning(self, tmp_path, monkeypatch, caplog):
         monkeypatch.setattr(
@@ -182,11 +172,9 @@ class TestFailedMmprojOpenSurfacesNativeReason:
 
     def test_generic_message_alone_is_not_good_enough(
             self, tmp_path, monkeypatch, caplog):
-        """Fires-control for the assertion shape above: a fake that raises
-        the SAME generic exception but writes NOTHING to fd 2 (simulating a
-        build with no diagnosable native reason) must NOT fabricate detail -
-        proving the test above is checking real captured text, not a fixed
-        string this method always appends."""
+        """A fake that raises the SAME generic exception but writes NOTHING to
+        fd 2 - a build with no diagnosable native reason - produces no
+        fabricated detail in the warning."""
         monkeypatch.setattr(
             "localm.debuglog.native_stderr_target", lambda: None)
 
@@ -207,9 +195,8 @@ class TestFailedMmprojOpenSurfacesNativeReason:
         assert "unknown projector type" not in caplog.text
 
     def test_warning_level_not_debug(self, tmp_path, monkeypatch, caplog):
-        """A vision model silently dropping to text-only is a real capability
-        loss (AGENTS.md rule 5) and must reach a level a user actually sees,
-        not only LOCALM_DEBUG=1's debug log."""
+        """A vision model dropping to text-only is logged at WARNING, not only
+        in LOCALM_DEBUG=1's debug log."""
         monkeypatch.setattr(
             "localm.debuglog.native_stderr_target", lambda: None)
 
@@ -231,11 +218,9 @@ class TestFailedMmprojOpenSurfacesNativeReason:
 
 
 class TestVerboseModeSkipsTheWrap:
-    """verbose=True means "let native output through unfiltered" everywhere
-    else in this file (_stderr_ctx_for_generate, the main model load's
-    _load_ctx/_mirror_ctx) - _load_mmproj must honour the same contract
-    rather than silently suppressing even the mode that explicitly asked not
-    to be suppressed."""
+    """verbose=True means "let native output through unfiltered" everywhere in
+    llama.py (_stderr_ctx_for_generate, the main model load's
+    _load_ctx/_mirror_ctx), and _load_mmproj honours the same contract."""
 
     def test_verbose_true_does_not_redirect_fd2(self, tmp_path, monkeypatch):
         class _FakeMtmdPrints:

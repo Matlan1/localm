@@ -34,8 +34,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
     # The one PATCH /v1/config test below is a management write that needs the
-    # loopback shell token in open mode; seed it by default (GET schema reads are
-    # unaffected, and the protected-mode test overrides the header with its key).
+    # loopback shell token in open mode; seed it by default. GET schema reads are
+    # unaffected, and the protected-mode test overrides the header with its key.
     app = create_app(None)
     with TestClient(
         app, headers={"Authorization": f"Bearer {app.state.shell_token}"}) as c:
@@ -116,7 +116,7 @@ def test_never_leaks_a_secret_value(client, monkeypatch):
     by_key = _fields(client)
     assert by_key["fake_secret"]["widget"] == "secret"
     assert by_key["fake_secret"]["secret"] is True
-    # The crucial guarantee: no value is serialized for a secret field.
+    # No value is serialized for a secret field.
     assert "default" not in by_key["fake_secret"]
 
 

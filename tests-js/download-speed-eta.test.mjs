@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// U4: the model download bar showed only "<pct>%  ·  <downloaded> / <total>".
-// It now also shows a smoothed (rolling-window) speed and an ETA, computed by
-// the pure downloadRate() helper and formatted with fmtDuration().
+// The model download bar's smoothed (rolling-window) speed and ETA: the pure
+// downloadRate() helper and fmtDuration() formatting.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
@@ -11,7 +10,7 @@ function call(win, expr) {
   return win.__out;
 }
 
-// Default fetch shape so app.js's lazy refreshes don't throw on the bare window.
+// Default fetch shape for app.js's lazy refreshes on a bare window.
 function stubFetch() {
   return async () => ({
     ok: true, status: 200, text: async () => "",
@@ -19,8 +18,8 @@ function stubFetch() {
   });
 }
 
-// Cross-realm objects (built inside jsdom) fail deepStrictEqual on prototype
-// identity, so assert the two fields directly.
+// Cross-realm objects built inside jsdom fail deepStrictEqual on prototype
+// identity; assert the two fields directly.
 function assertNull(r) {
   assert.equal(r.bytesPerSec, null);
   assert.equal(r.etaSec, null);
@@ -32,7 +31,7 @@ function assertNull(r) {
 
 test("downloadRate averages over the sample window", () => {
   const { window: win } = loadApp({ fetchImpl: stubFetch() });
-  // 10s window, 10 MB transferred -> 1 MB/s, regardless of per-chunk jitter.
+  // 10s window, 10 MB transferred -> 1 MB/s.
   const r = call(win,
     `downloadRate([{t:0,downloaded:0},{t:3000,downloaded:5000000},` +
     `{t:10000,downloaded:10000000}], 20000000)`);
@@ -98,9 +97,8 @@ function makeFetch() {
 
 test("pull progress text includes the smoothed speed and ETA", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
-  // Deterministic rate so the test does not depend on wall-clock timing, and a
-  // stubbed streamJob that fires one progress event and captures the bar text
-  // before the handler overwrites it with "done".
+  // Fixed rate plus a streamJob that fires one progress event and captures the
+  // bar text before the handler overwrites it with "done".
   runScript(win, `
     downloadRate = () => ({ bytesPerSec: 5 * 1024 * 1024, etaSec: 90 });
     streamJob = async (jobId, onLine, onProgress) => {
@@ -122,7 +120,7 @@ test("pull progress text includes the smoothed speed and ETA", async () => {
 });
 
 // --------------------------------------------------------------------------- //
-//  R06: a multi-file (split GGUF) download shows "file N of M: <name>"          //
+//  a multi-file (split GGUF) download shows "file N of M: <name>"               //
 // --------------------------------------------------------------------------- //
 
 test("pull progress shows the current file for a multi-file download", async () => {
@@ -162,8 +160,7 @@ test("pull progress hides the file line for a single-file download", async () =>
 
 // --------------------------------------------------------------------------- //
 // A lost SSE connection (streamJob giving up after exhausting its reconnect   //
-// budget) must never be rendered the same as a genuine pull failure - see     //
-// streamjob-reconnect.test.mjs for the helpers.js-level contract this renders.//
+// budget) renders differently from a genuine pull failure.                    //
 // --------------------------------------------------------------------------- //
 
 test("a disconnected pull (streamJob gave up reconnecting) is NOT painted as failed", async () => {

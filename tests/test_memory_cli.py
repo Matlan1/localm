@@ -52,7 +52,7 @@ def _cli_store():
 
 
 # --------------------------------------------------------------------------- #
-#  The namespace - the one that makes everything else meaningful               #
+#  The namespace                                                               #
 # --------------------------------------------------------------------------- #
 
 def test_cli_and_routes_resolve_the_same_store(home):
@@ -77,14 +77,14 @@ def test_a_fact_written_by_the_route_is_visible_to_the_cli(home):
     out = _run("list").output
     assert "written by the route" in out
 
-    # ...and the reverse, which is the direction a CLI-only user actually needs.
+    # ...and the reverse.
     _run("add", "written by the cli")
     texts = [r.text for r in _chat_store().all()]
     assert "written by the cli" in texts
 
 
 # --------------------------------------------------------------------------- #
-#  add - the silent-coercion trap                                              #
+#  add                                                                         #
 # --------------------------------------------------------------------------- #
 
 def test_add_produces_the_same_record_the_append_route_does(home):
@@ -134,12 +134,12 @@ def test_add_refuses_past_the_cap_like_the_route_does(home, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  forget / forgotten / restore - the archive contract                         #
+#  forget / forgotten / restore                                                #
 # --------------------------------------------------------------------------- #
 
 def test_forget_deletes_and_does_not_claim_it_is_recoverable(home):
-    """MEASURED: `delete()` never writes the forgotten sidecar. Telling the user
-    otherwise would be a promise `restore` cannot keep."""
+    """`delete()` never writes the forgotten sidecar, so the CLI must not claim
+    the record is recoverable."""
     _run("add", "the user drinks tea")
     mem_id = _cli_store().all()[0].id
     out = _run("forget", mem_id, "--yes").output
@@ -152,10 +152,9 @@ def test_forget_deletes_and_does_not_claim_it_is_recoverable(home):
 
 
 def test_forget_refuses_an_unknown_id_without_touching_anything(home):
-    """Guarded twice on purpose - the get() lookup and delete()'s own False - so
-    a fires-control that removes only one correctly stays green. Both the exit
-    code and the surviving record are asserted, because the status alone would
-    not show that the OTHER fact was left alone."""
+    """Guarded twice - the get() lookup and delete()'s own False. Both the exit
+    code and the surviving record are asserted; the status alone would not show
+    that the OTHER fact was left alone."""
     _run("add", "keep me")
     res = _run("forget", "nope", "--yes", expect_ok=False)
     assert res.exit_code == 1
@@ -178,9 +177,7 @@ def test_forgotten_lists_what_localm_dropped_itself_and_restore_brings_it_back(h
     gone_id = _cli_store().forgotten()[0]["id"]
     assert gone_id in out
     # The rows carry `forgotten_at`, NOT `reason` - that key belongs to the
-    # coder's episode archive. Reading the wrong one renders "?" forever and is
-    # invisible unless something asserts the column actually resolves, which is
-    # how the real bug survived the first pass here.
+    # coder's episode archive.
     assert "just now" in out, (
         "the archived-at column rendered '?' - it is reading a key the row does "
         "not have")
@@ -199,14 +196,13 @@ def test_restore_refuses_an_id_that_was_never_archived(home):
 
 
 # --------------------------------------------------------------------------- #
-#  clear - the privacy claim                                                   #
+#  clear                                                                       #
 # --------------------------------------------------------------------------- #
 
 def test_clear_takes_the_archive_too_so_the_claim_is_true(home):
-    """MEASURED before this was written: a plain `clear()` leaves every archived
-    record readable in the `.forgotten.jsonl` sidecar. Reporting the memory
-    cleared while the text is still on disk is a privacy claim that is not true,
-    which is the same line the coder's episode store already draws."""
+    """A plain `clear()` leaves every archived record readable in the
+    `.forgotten.jsonl` sidecar, so the CLI must take the archive too before it
+    reports the memory cleared."""
     for i in range(3):
         _run("add", f"secret fact {i}")
     store = _cli_store()
@@ -230,7 +226,7 @@ def test_clear_on_an_empty_store_says_so_rather_than_claiming_an_erase(home):
 
 
 def test_clear_reports_a_partial_erase_as_a_failure(home, monkeypatch):
-    """The one command with no undo, so "erased" has to be a MEASURED claim."""
+    """The one command with no undo: a partial erase reports as a failure."""
     _run("add", "stubborn")
     import localm.memory.store as _st
     monkeypatch.setattr(_st.MemoryStore, "clear",
@@ -241,7 +237,7 @@ def test_clear_reports_a_partial_erase_as_a_failure(home, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  corrections - the half the terminal could produce but never read            #
+#  corrections                                                                 #
 # --------------------------------------------------------------------------- #
 
 def _propose(store, target_id, text):

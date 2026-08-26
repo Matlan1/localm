@@ -1,16 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// gui-design.md rule 7: "Every list renders a real empty state (a centered icon
-// + a one-line 'do this next' hint), never a blank scroll area or a lone .sub
-// line. Use the emptyState(icon, text, hint) helper."
-//
-// Two lists on the Settings page broke that rule (findings F6/F7 of the
-// conformance sweep) while a third on the same page - the keys list - already
-// used the helper:
-//   - Issues rendered the bare string "No issues." into a .sub div;
-//   - Uploads rendered NOTHING at all, the literal blank area the rule names.
-//
-// These tests pin the fix at the DOM level rather than on the copy, so a later
-// wording change does not break them but deleting the empty state does.
+// The Settings page's Issues and Uploads lists render an empty state built by
+// the emptyState(icon, text, hint) helper: a centred icon, a line of text, and
+// a one-line hint. Asserted on the DOM structure, not on the copy.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -43,8 +34,7 @@ test("rule 7: an empty Issues list renders a designed empty state, not a bare li
 
   assert.equal(emptyStates(out).length, 1,
                "exactly one .empty-state block for an empty issues list");
-  // The helper's three parts: a centred ICON, a line of text, and a hint. The
-  // icon is what a lone .sub line can never have, so assert it specifically.
+  // The helper's three parts: a centred icon, a line of text, and a hint.
   assert.equal(out.querySelectorAll(".empty-state-ic").length, 1, "a centred icon");
   assert.equal(out.querySelectorAll(".empty-state-text").length, 1, "a line of text");
   assert.equal(out.querySelectorAll(".empty-state-hint").length, 1, "a do-this-next hint");
@@ -62,9 +52,6 @@ test("rule 7: an empty Uploads list renders an empty state instead of nothing", 
 });
 
 test("a NON-empty list still renders rows and NO empty state", async () => {
-  // The control that keeps the two fixes honest: an empty state that renders
-  // unconditionally would satisfy both tests above and be a worse bug than the
-  // one being fixed.
   const { window } = loadAppWithPages({
     fetchImpl: makeFetch({
       issues: [{ number: 7, state: "open", title: "something broke" }],
@@ -84,9 +71,7 @@ test("a NON-empty list still renders rows and NO empty state", async () => {
 });
 
 test("a FAILED issues fetch still says it could not load - not 'no issues'", async () => {
-  // "there are none" and "I could not ask" are different answers, and rule 7's
-  // empty state is only correct for the first. Collapsing them would be the
-  // AGENTS.md rule 5 fault: a failure wearing a success-shaped result.
+  // A fetch error renders an error message, not the empty state.
   const { window } = loadAppWithPages({
     fetchImpl: makeFetch({ issuesError: "upstream refused" }),
   });

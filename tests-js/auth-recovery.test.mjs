@@ -1,11 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// AUTH-1(b): recover a WEDGED auth state without a manual "clear site data".
-//   - A successful login that still boots 401 (a stale service-worker shell)
-//     self-heals: unregister the SW + drop caches + reload ONCE (guarded).
-//   - A 401 with no prior successful login just shows the key gate (no reset).
-//   - An UNREACHABLE server shows a "reconnecting" overlay, NOT the key gate, so
-//     a dead server is not mistaken for a bad key and re-entered in a loop.
-// We deliberately do NOT touch SameSite (the rejected misdiagnosis).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,10 +13,7 @@ const allOk = () => Promise.resolve({
 });
 const down = () => Promise.reject(new Error("ECONNREFUSED"));
 
-// jsdom's location.reload cannot always be redefined (and navigation is a no-op
-// that only logs), so this is best-effort - the existing keygate tests do the
-// same. The self-heal is proven by its observable side effects (SW unregister,
-// cache delete, the one-shot guard), not by counting reloads.
+// Best-effort: jsdom's location.reload cannot always be redefined.
 function stubReload(window) {
   try { Object.defineProperty(window.location, "reload", { configurable: true, value: () => {} }); }
   catch (e) { /* jsdom no-op nav */ }
@@ -47,7 +37,7 @@ test("AUTH-1b: a successful login that still boots 401 self-heals (SW reset + re
   await tick();   // load-time probe: 401, no marker -> gate shown, NO reset
   stubReload(window);
   const { unregistered, deleted } = stubSWAndCaches(window);
-  window.sessionStorage.setItem("localm.loginOk", "1");   // a prior login DID succeed
+  window.sessionStorage.setItem("localm.loginOk", "1");   // a prior login succeeded
 
   const ok1 = await window.bootAuthProbe();
   assert.equal(ok1, false, "still locked (it reloads to recover)");
@@ -56,7 +46,7 @@ test("AUTH-1b: a successful login that still boots 401 self-heals (SW reset + re
   assert.equal(window.sessionStorage.getItem("localm.swReset"), "1", "the one-shot guard is set");
   assert.equal(window.sessionStorage.getItem("localm.loginOk"), null, "the login marker was consumed");
 
-  // It must NOT loop: a second wedged probe (guard already set) just shows the gate.
+  // A second wedged probe, guard already set, just shows the gate.
   const ok2 = await window.bootAuthProbe();
   assert.equal(ok2, false);
   assert.equal(unregistered.length, 1, "no second reset (guarded - cannot loop)");
@@ -100,17 +90,7 @@ test("AUTH-1b: submitting the gate with a good key marks the login (so the reloa
     "a successful login is marked so a still-401 reload self-heals instead of looping");
 });
 
-// --- NEW-RESTART-DEAD-BUTTONS: the open-mode shell token ------------------
-// In open (keyless loopback) mode the ONLY management credential is the
-// per-process shell token baked into the served HTML. It rotates on every
-// server start, helpers.js reads it into a const at load, and the open-mode
-// gate demands it for every /api|/v1 metadata GET as well as every write - so a
-// page that outlives the process which served it 403s on essentially
-// everything. Before this fix nothing detected that: the #399 self-heal is
-// gated on an X-CSRF-Token we never send in open mode, and a 403 fell through
-// bootAuthProbe to unlockUI(), revealing a shell whose every call failed with
-// nothing on screen to say why. That is the reported "every button is dead
-// after a restart".
+// --- the open-mode shell token --------------------------------------------
 const SHELL = "SHELL-TOKEN-FROM-THE-OLD-PROCESS";
 const forbidden = () => Promise.resolve({
   ok: false, status: 403,
@@ -122,9 +102,7 @@ test("RESTART: an open-mode boot whose shell token is STALE (403) never unlocks 
      "the shell, and attempts the recovery", async () => {
   const { window } = loadApp({ fetchImpl: forbidden, shellToken: SHELL });
   await tick();
-  // The load-time probe already ran. Assert on what it left behind: the shell
-  // must NOT have been revealed as working, and the recovery must have been
-  // attempted (its one-shot guard is the durable trace of that).
+  // The load-time probe already ran; assert on what it left behind.
   assert.notEqual(window.__localmLocked, false,
     "a 403 must never reach unlockUI() - that is what presented a dead shell as a live one");
   assert.equal(window.sessionStorage.getItem("localm.shellReset"), "1",
@@ -135,8 +113,7 @@ test("RESTART: a 403 that SURVIVES the one-shot recovery says so instead of " +
      "reloading again or unlocking", async () => {
   const { window } = loadApp({ fetchImpl: forbidden, shellToken: SHELL });
   await tick();
-  // Simulate "the reload already happened and the fresh document still 403s":
-  // the guard is set, and we re-arm the in-page latch so the probe can run again.
+  // The guard is already set; re-arm the in-page latch so the probe runs again.
   runScript(window, "_shellRecoveryStarted = false;");
   const { unregistered } = stubSWAndCaches(window);
   const ok = await window.bootAuthProbe();
@@ -150,7 +127,7 @@ test("RESTART: a 403 that SURVIVES the one-shot recovery says so instead of " +
 
 test("RESTART: a shell-token 403 on an ORDINARY call (the real restart case: the " +
      "page booted fine, then the server re-execed) triggers the recovery", async () => {
-  // Boot healthy in open mode, exactly as a user would before clicking Restart.
+  // Boot healthy in open mode.
   let status = 200;
   const fetchImpl = async () => (status === 200
     ? { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" }
@@ -161,7 +138,7 @@ test("RESTART: a shell-token 403 on an ORDINARY call (the real restart case: the
 
   stubReload(window);
   const { unregistered, deleted } = stubSWAndCaches(window);
-  status = 403;                       // the server re-execed; our token is dead
+  status = 403;                       // the server re-execed; the token is stale
   await window.fetch("/api/stats", { headers: window.authHeaders() });
   await tick();
 
@@ -210,9 +187,6 @@ test("RESTART: a 403 from /api/image-proxy is the route saying the feature is OF
 });
 
 test("RESTART: a 403 with NO shell token is NOT swept into the shell recovery", async () => {
-  // Negative control. The recovery keys on the shell token's VALUE, so it fires
-  // only for the open-mode case it can actually diagnose; every other 403 keeps
-  // its existing handling.
   const { window } = loadApp({ fetchImpl: forbidden });   // no shellToken
   await tick();
   assert.equal(window.sessionStorage.getItem("localm.shellReset"), null,
@@ -221,17 +195,6 @@ test("RESTART: a 403 with NO shell token is NOT swept into the shell recovery", 
 
 test("RESTART: sentShellToken tells the two credential modes apart - it is what " +
      "keeps this recovery off every other kind of 403", async () => {
-  // The predicate, asserted directly, because that is the only thing here that
-  // CAN fail. An end-to-end "a session-mode 403 takes the CSRF self-heal
-  // instead" test was written first and then dropped: the CSRF branch of the
-  // fetch wrapper RETURNS its retried response, the shell branch is an `else`,
-  // AND authHeaders never emits both credentials - so the outcome is guaranteed
-  // three times over and no single realistic mutation could turn that test red.
-  // It would have read as coverage of the interaction while being structurally
-  // incapable of detecting a regression in it. (The invariant it was really
-  // leaning on - a session drops the shell bearer - is already pinned by "S3:
-  // once a session exists, authHeaders drops the shell-token bearer" in
-  // keygate.test.mjs.)
   const { window } = loadApp({ fetchImpl: allOk, shellToken: SHELL });
   await tick();
 
@@ -249,21 +212,9 @@ test("RESTART: sentShellToken tells the two credential modes apart - it is what 
   assert.equal(window.sentShellToken(null), false, "no headers at all is not a shell request");
 });
 
-// Driving the reconnect poll. Two mechanics, both forced on us by the
-// environment rather than chosen:
-//
-//  - jsdom's location.reload is NON-CONFIGURABLE, so it cannot be replaced and
-//    reloads cannot be counted (the note at the top of this file says the same,
-//    and stubReload above is best-effort for exactly this reason). The poll
-//    clears its own interval on the line immediately before it reloads, and on
-//    no other path, so a clearInterval call is a faithful 1:1 marker of "this
-//    poll decided to reload" - which is the branch under test.
-//  - setInterval is replaced so the 3s poll can be stepped by hand; waiting on
-//    wall clock would make these tests take ~15s for no extra signal.
-//
-// Reachability is driven through the REAL serverReachable() by making fetch
-// throw, rather than by stubbing serverReachable itself - the poll's whole job
-// is to interpret that function's answer, so replacing it would test the stub.
+// Replaces setInterval so the reconnect poll can be stepped by hand, and counts
+// clearInterval calls as reload decisions: the poll clears its own interval only
+// on the line immediately before it reloads.
 function armPoll(window) {
   const state = { reloadDecisions: 0, poll: null, down: false };
   window.setInterval = (fn) => { state.poll = fn; return 42; };
@@ -273,12 +224,6 @@ function armPoll(window) {
 
 test("RESTART: the reconnect poll does not reload until it has seen the server " +
      "actually go DOWN, when the caller never observed a down", async () => {
-  // (d): _do_restart unloads the engines and waits on wait_for_vram_release
-  // BEFORE os.execv, so the OLD process keeps answering for seconds after the
-  // restart POST. Reloading on its first answer hands the browser a document
-  // from the process that is about to die - a brand new page holding an already
-  // doomed shell token, which is one of the two ways the dead-buttons state is
-  // reached.
   const state = { down: false };
   const fetchImpl = async () => {
     if (state.down) throw new Error("ECONNREFUSED");
@@ -294,7 +239,7 @@ test("RESTART: the reconnect poll does not reload until it has seen the server "
   assert.equal(p.reloadDecisions, 0,
     "the first answer may still be the OLD process mid-unload - do not reload into it");
 
-  state.down = true;                     // the re-exec: it really goes away
+  state.down = true;                     // the re-exec: the server goes away
   await p.poll();
   assert.equal(p.reloadDecisions, 0, "still down - keep waiting");
 
@@ -306,10 +251,6 @@ test("RESTART: the reconnect poll does not reload until it has seen the server "
 
 test("RESTART: the wait for a down is BOUNDED - a re-exec faster than one poll " +
      "must not strand the user on the overlay forever", async () => {
-  // The gap between os.execv and the new process serving can be shorter than
-  // the 3s poll, so the down transition can be missed entirely. Waiting forever
-  // for a transition that already happened would be strictly worse than the bug
-  // being fixed, so the wait gives up and reloads anyway.
   const { window } = loadApp({ fetchImpl: allOk, shellToken: SHELL });
   await tick();
   const p = armPoll(window);

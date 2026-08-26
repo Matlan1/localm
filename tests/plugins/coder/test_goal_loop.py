@@ -26,7 +26,7 @@ def test_run_verify_captures_output(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  _run_goal_loop: iterate until the command passes, or give up honestly       #
+#  _run_goal_loop: iterate until the command passes, or stop at the cap       #
 # --------------------------------------------------------------------------- #
 
 class _FakeAgent:
@@ -69,7 +69,7 @@ def test_goal_loop_gives_up_honestly_at_the_cap(tmp_path, monkeypatch):
     success, _ = cli._run_goal_loop(agent, "do it", "pytest -x", 3, tmp_path)
     assert success is False
     # 3 verify attempts; a fix turn after the 1st and 2nd failure, none after the
-    # 3rd (the cap) -> 2 fix turns, never a false success.
+    # 3rd (the cap) -> 2 fix turns.
     assert len(agent.run_task_calls) == 1
     assert len(agent.continue_calls) == 2
 
@@ -80,9 +80,9 @@ def test_goal_loop_stops_at_once_when_the_check_could_not_run(tmp_path,
     reach it. Iterating burns the whole budget asking the model to fix a
     condition it cannot touch.
 
-    The launch fact rides on the outcome, so build a real VerifyOutcome rather
-    than a bare tuple - a bare tuple means "it ran", which is the point of the
-    companion test below."""
+    The launch fact rides on the outcome, so this builds a real VerifyOutcome
+    rather than a bare tuple; a bare tuple means "it ran", which the companion
+    test below covers."""
     from localm.plugins.coder.verify import VerifyOutcome
     calls = []
 
@@ -94,25 +94,23 @@ def test_goal_loop_stops_at_once_when_the_check_could_not_run(tmp_path,
     monkeypatch.setattr(cli, "_run_verify", _verify)
     agent = _FakeAgent()
     success, _ = cli._run_goal_loop(agent, "do it", "npm test", 5, tmp_path)
-    assert success is False              # nothing was verified: never a pass
+    assert success is False              # nothing was verified
     assert len(calls) == 1               # and never retried
-    assert agent.continue_calls == []    # the model is not billed for it
+    assert agent.continue_calls == []    # no fix turn
 
 
 def test_goal_loop_still_retries_a_command_not_found_that_ran(tmp_path,
                                                               monkeypatch):
-    """FIRES-CONTROL, and the correction that matters. Exit 127 from a check
-    that DID start (a shell whose script is missing, npm whose test binary is
-    missing) is fixable by the model - it has a shell and can create the script,
-    chmod +x, or install the dependency. Short-circuiting on the exit code would
-    throw the entire iteration budget away on exactly the failures goal mode
-    exists to fix."""
+    """The control for the test above. Exit 127 from a check that DID start (a
+    shell whose script is missing, npm whose test binary is missing) is fixable
+    by the model - it has a shell and can create the script, chmod +x, or
+    install the dependency - so the loop must still retry it."""
     monkeypatch.setattr(cli, "_run_verify",
                         lambda cmd, wd: (127, "sh: ./check.sh: not found"))
     agent = _FakeAgent()
     success, _ = cli._run_goal_loop(agent, "do it", "./check.sh", 3, tmp_path)
     assert success is False
-    assert len(agent.continue_calls) == 2       # retried, not abandoned
+    assert len(agent.continue_calls) == 2       # retried
 
 
 def test_goal_task_wrap_forbids_editing_the_check():

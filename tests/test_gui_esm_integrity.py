@@ -19,8 +19,7 @@ browser" bug because the real module GRAPH is never linked or evaluated:
 (The third, reassigning a read-only import binding, is guarded by
 test_gui_no_import_reassignment.py.)
 
-These are static checks because the harness structurally cannot be. They are the
-regression guards for the two "blank page" bugs that shipped GREEN.
+These are static checks, because the harness structurally cannot make them.
 """
 
 import re

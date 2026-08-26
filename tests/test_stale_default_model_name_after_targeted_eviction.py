@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Sibling regression to test_stale_default_model_name_after_switch.py. That
-fix updated _last_active_model_name in unload_all_models only (see its own
-ROOTCAUSE note). unload_one_model and _idle_unload_once clear
-_active_model_name to None under the exact same "retain the Engine in
-_engines for lazy reload" contract, but did not update _last_active_model_name
-- so an unnamed request after either of THESE eviction paths could still
-resolve to a stale model name.
+"""_last_active_model_name must be updated by every eviction path.
 
-FIXTURE PREMISE (diff-review-discipline.md item 19), same as the sibling
-file: the failing case needs a server that switched to a SECOND model before
-the eviction under test. A fixture that only ever loads one model can never
-distinguish "resolved to the right model" from "resolved to the only model
-there is" - both read identically."""
+unload_one_model and _idle_unload_once clear _active_model_name to None under the
+same "retain the Engine in _engines for lazy reload" contract as
+unload_all_models, so an unnamed request after either of those eviction paths must
+not resolve to a stale model name.
+
+FIXTURE PREMISE: the failing case needs a server that switched to a SECOND model
+before the eviction under test. A fixture that only ever loads one model cannot
+distinguish "resolved to the right model" from "resolved to the only model there
+is" - both read identically."""
 
 from __future__ import annotations
 
@@ -25,8 +23,7 @@ from tests.conftest import probe_double
 
 
 class FakeEngine:
-    """Stands in for the model backend only - see
-    test_stale_default_model_name_after_switch.py."""
+    """Stands in for the model backend only."""
 
     def __init__(self, display_name: str):
         self.display_name = display_name
@@ -64,12 +61,9 @@ def _reset_server_state():
 
 @pytest.fixture
 def two_model_server(monkeypatch):
-    """Boots with model-a (the startup/default model), then switches to
-    model-b before the eviction under test - identical premise to
-    test_stale_default_model_name_after_switch.py's fixture of the same
-    name. Plenty of free VRAM means the switch does not evict model-a, so
-    both stay resident with model-b active - matching that sibling fixture's
-    behavior exactly."""
+    """Boots with model-a (the startup/default model), then switches to model-b
+    before the eviction under test. Plenty of free VRAM means the switch does not
+    evict model-a, so both stay resident with model-b active."""
     engines: dict[str, FakeEngine] = {}
 
     def factory(name):
@@ -100,11 +94,10 @@ def two_model_server(monkeypatch):
 
 
 def test_get_engine_resolves_switched_model_after_unload_one_model(two_model_server):
-    """unload_one_model(name) sibling of the unload_all_models fix: evicting
-    the ACTIVE model by name alone (leaving the background model-a resident
-    and untouched, since unload_one_model only touches its target) must
-    still leave model-b resolvable by an unnamed request, exactly like
-    unload_all_models already does."""
+    """Evicting the ACTIVE model by name with unload_one_model(name) - leaving
+    the background model-a resident and untouched, since unload_one_model only
+    touches its target - must still leave model-b resolvable by an unnamed
+    request, exactly like unload_all_models."""
     engines = two_model_server
     assert engines["model-a"].loaded, "test premise: model-a stays resident (plenty of VRAM)"
 
@@ -128,16 +121,14 @@ def test_get_engine_resolves_switched_model_after_unload_one_model(two_model_ser
 
 
 def test_get_engine_resolves_switched_model_after_idle_unload(two_model_server):
-    """_idle_unload_once(ttl) sibling: when the idle-evicted model was the
-    LAST one resident, its own partial-recovery fallback (_engines_lru[-1])
-    finds nothing and _active_model_name goes to None - must still be
-    recoverable via _last_active_model_name, exactly like the other two
-    eviction paths.
+    """When the idle-evicted model was the LAST one resident,
+    _idle_unload_once(ttl)'s own partial-recovery fallback (_engines_lru[-1])
+    finds nothing and _active_model_name goes to None; the model must still be
+    recoverable via _last_active_model_name.
 
-    model-a is unloaded directly (not through unload_one_model, to keep this
-    test isolated to the _idle_unload_once code path alone) so _engines_lru
-    is genuinely empty once model-b, the only remaining resident model, is
-    idle-evicted - the branch this test exists to cover."""
+    model-a is unloaded directly rather than through unload_one_model, so
+    _engines_lru is genuinely empty once model-b, the only remaining resident
+    model, is idle-evicted."""
     engines = two_model_server
     engines["model-a"].unload()
     hs._engines_lru.remove("model-a")

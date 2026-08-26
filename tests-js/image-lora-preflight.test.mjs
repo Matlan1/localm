@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Gap-1 regression: images.js's img-generate handler must forward the
-// selected LoRA into the preflight overrides, mirroring how it already
-// forwards model_overrides. Without this, checkModelsBeforeGenerate never
-// sees lora_name and can never detect/report a missing LoRA before the real
-// generate call fails (see helpers.js's checkModelsBeforeGenerate and the
-// /api/media/image/preflight route in routes/models.py).
+// images.js's img-generate handler forwards the selected LoRA into the
+// preflight overrides alongside model_overrides.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

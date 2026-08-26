@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B4: `localm ps` (running per-directory instances) and `localm status` (the
+"""`localm ps` (running per-directory instances) and `localm status` (the
 server serving this directory), built on the instance discovery registry.
 Also `localm stop`: id/prefix/--all target resolution, the graceful
 /v1/server/shutdown HTTP path, and the direct-kill fallback."""
@@ -37,7 +37,7 @@ def test_snapshot_empty(tmp_path):
 
 
 def test_snapshot_include_token_keeps_it(tmp_path):
-    """#953: an INTERNAL caller (the MCP server_activity tool) needs the attach
+    """An INTERNAL caller (the MCP server_activity tool) needs the attach
     token to authenticate its own request to a genuinely open instance - the
     opt-in companion to the strip-by-default case above. Never used for
     anything a human reads."""
@@ -85,7 +85,7 @@ def test_status_found(monkeypatch):
 
 
 def test_status_passes_the_registry_token_to_activity(monkeypatch):
-    """#953: `localm status` must thread the instance's own attach token
+    """`localm status` must thread the instance's own attach token
     through to read_activity, or a genuinely open server has no way to prove
     this is a local process and 403s the activity read."""
     monkeypatch.setattr(instances, "find_attachable", lambda *a, **k: {
@@ -166,8 +166,8 @@ def test_stop_by_id_graceful_shutdown_success(monkeypatch):
     entry = _entry("abcd1234ef", 999999, "/proj/demo")
     monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
-    # The server answered 200 and the pid is confirmed gone right away - the
-    # graceful path alone must be enough; kill_pid must NEVER be reached.
+    # The server answered 200 and the pid is confirmed gone right away, so the
+    # graceful path suffices and kill_pid is never reached.
     monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
     monkeypatch.setattr(instances, "kill_pid",
                          lambda *a, **k: (_ for _ in ()).throw(
@@ -190,12 +190,9 @@ def test_stop_by_id_graceful_shutdown_success(monkeypatch):
 
 
 def test_stop_falls_back_to_kill_pid_when_graceful_shutdown_denied(monkeypatch):
-    # A plain local instance with no LOCALM_API_KEY set refuses an
-    # unauthenticated shutdown request (the open-mode management gate) - the
-    # SAME 403 `localm unload` hits unauthenticated. That is the default case
-    # for a bare `localm run`/`gui`/`serve`, not a rare misconfiguration, so
-    # `stop` must fall back to killing the process directly rather than
-    # hard-failing (verified live against a real running instance).
+    # A plain local instance with no LOCALM_API_KEY set refuses an unauthenticated
+    # shutdown request (the open-mode management gate), the same 403 `localm unload`
+    # hits unauthenticated, so `stop` falls back to killing the process directly.
     entry = _entry("abcd1234ef", 111, "/proj/demo")
     monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
@@ -213,15 +210,13 @@ def test_stop_falls_back_to_kill_pid_when_graceful_shutdown_denied(monkeypatch):
 
     assert res.exit_code == 0
     assert killed == {"pid": 111}
-    assert "LOCALM_API_KEY" in res.output   # explains WHY it fell back
+    assert "LOCALM_API_KEY" in res.output   # names the fallback reason
     assert "stopped" in res.output
 
 
 def test_stop_disarms_crash_guard_after_a_confirmed_direct_kill(monkeypatch):
-    # A direct kill (the fallback path) bypasses the server's own clean-
-    # shutdown code, which is what normally clears the crash marker - without
-    # this, the next `localm` start misreports an intentional `stop` as a
-    # crash and files a spurious bug report (confirmed live, then fixed).
+    # A direct kill bypasses the server's own clean-shutdown code, which is what
+    # normally clears the crash marker, so `stop` disarms the marker itself.
     entry = _entry("abcd1234ef", 111, "/proj/demo")
     monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
@@ -238,16 +233,14 @@ def test_stop_disarms_crash_guard_after_a_confirmed_direct_kill(monkeypatch):
 
     assert res.exit_code == 0
     assert "home" in disarmed
-    # The direct-kill disarm must target THIS entry's own marker (its
-    # instance_id), never an unscoped/shared one - or a still-live sibling
-    # instance sharing the same LOCALM_HOME could have its marker deleted.
+    # The direct-kill disarm targets THIS entry's own marker (its instance_id),
+    # never an unscoped or shared one, so a live sibling instance sharing the same
+    # LOCALM_HOME keeps its marker.
     assert disarmed["instance_id"] == "abcd1234ef"
 
 
 def test_stop_does_not_disarm_crash_guard_when_kill_fails(monkeypatch):
-    # If the kill did NOT actually confirm the process is gone, the marker
-    # must survive - the process could still be running and a later genuine
-    # crash must still be caught on the next start.
+    # If the kill did NOT confirm the process is gone, the marker survives.
     entry = _entry("abcd1234ef", 111, "/proj/demo")
     monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])

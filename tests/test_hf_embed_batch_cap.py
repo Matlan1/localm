@@ -3,16 +3,14 @@
 
 HFBackend.embed() loops over texts one at a time with no batching (or, for a
 sentence-transformer model, batches with no truncation at all), against a model
-that is always loaded full bf16/fp32 - so an oversized batch had no bound of its
-own beyond the generous hf_embed_timeout_s (see _hf_runner.EMBED_TIMEOUT_DEFAULT's
-comment). These tests exercise the new cap directly against HFBackend (no real
-model/subprocess - mirrors test_image_unsupported.py's idiom: construct a real
-HFBackend, hand-set _loaded=True and a fake _runner), plus the route-level mapping
-to a 413.
+that is always loaded full bf16/fp32, so an oversized batch has no bound of its
+own beyond the generous hf_embed_timeout_s. These tests exercise the cap
+directly against HFBackend (no real model or subprocess: a real HFBackend with
+_loaded=True and a fake _runner), plus the route-level mapping to a 413.
 
-Not applicable to GGUF (can_embed is a fixed False there, see test_hf_backend
-coverage elsewhere) or the dedicated on-device embedder (embedder.py's
-IsolatedEmbedder - a separate, purpose-built path, out of scope for this cap).
+Not applicable to GGUF (can_embed is a fixed False there) or the dedicated
+on-device embedder (embedder.py's IsolatedEmbedder, a separate, purpose-built
+path).
 """
 
 import logging
@@ -109,12 +107,10 @@ class TestCharCountCap:
         assert str(EMBED_MAX_CHARS_DEFAULT) in msg
 
     def test_aggregate_across_many_small_texts_is_rejected(self):
-        # No single text is anywhere near the cap, but the SUM is - proves the
-        # check is on TOTAL characters across the batch, not a per-text length.
-        # per_text is chosen so the char total (212_500) exceeds
-        # EMBED_MAX_CHARS_DEFAULT (200_000) while count (250) stays under
-        # EMBED_MAX_TEXTS_DEFAULT (256) - otherwise the text-count cap would
-        # trip first and this would not exercise the char check at all.
+        # No single text is near the cap, but the SUM is: the check is on TOTAL
+        # characters across the batch, not per-text length. per_text is chosen
+        # so the char total (212_500) exceeds EMBED_MAX_CHARS_DEFAULT (200_000)
+        # while count (250) stays under EMBED_MAX_TEXTS_DEFAULT (256).
         backend = _loaded_backend(_PoisonRunner())
         count = 250
         per_text = 850
@@ -197,9 +193,8 @@ class FakeEngine:
         pass
 
     def embed(self, texts):
-        # Simulates what a real HFBackend.embed() does for an oversized batch -
-        # this test is about the ROUTE's exception-to-HTTP mapping, independent
-        # of the backend-level cap logic covered above.
+        # Simulates what a real HFBackend.embed() does for an oversized batch;
+        # this test covers the ROUTE's exception-to-HTTP mapping.
         raise EmbedBatchTooLargeError(
             f"Too many texts in one /v1/embeddings request: {len(texts)} "
             f"(max {EMBED_MAX_TEXTS_DEFAULT}). Split the batch across multiple "

@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Defensive return-code guards on the llama.cpp text path.
 
-Two ctypes call sites trusted the native return code after their resize-and-
-retry: token_to_piece_bytes sliced buf.raw[:n] with a possibly still-negative
-n (garbage bytes instead of an error), and _apply_model_template treated a
-zero-length render as success (an empty prompt instead of the ChatML
-fallback). A correct runtime never hits either, but a genuinely bad decode or
-template must surface or fall back, not silently produce garbage (rule 5)."""
+Two ctypes call sites must not trust the native return code after their
+resize-and-retry: token_to_piece_bytes must not slice buf.raw[:n] with a
+still-negative n (garbage bytes instead of an error), and
+_apply_model_template must not treat a zero-length render as success (an empty
+prompt instead of the ChatML fallback). A correct runtime never hits either,
+but a genuinely bad decode or template must surface or fall back, not silently
+produce garbage."""
 
 from unittest.mock import MagicMock, patch
 
@@ -133,21 +134,17 @@ class TestApplyTemplateEmptyRenderGuard:
 
 
 class TestApplyTemplateFallbackIsSurfaced:
-    """RAG-VISION-1: llama_chat_apply_template is not a real Jinja engine - it
+    """llama_chat_apply_template is not a real Jinja engine - it
     pattern-matches against ~54 hardcoded template signatures in llama.cpp and
     returns -1 for anything it does not recognize (e.g. moondream2 and other
-    non-mainstream VLMs). The ChatML fallback used to be completely silent -
-    no log, no error - so a model fed an out-of-distribution prompt it was
-    never fine-tuned on gave no signal why its output degenerated. Confirmed
-    root cause of moondream2 producing garbage/hallucinated RAG image
-    descriptions during a RELEASE.md verification pass.
+    non-mainstream VLMs). The ChatML fallback must not be silent: a model fed
+    an out-of-distribution prompt it was never fine-tuned on otherwise gives no
+    signal why its output degenerated.
 
-    The debug-log assertions below were the ORIGINAL, and only, test for this
-    fix (PR #705) - and they were insufficient: debuglog.logger's file handler
-    only exists under --debug, so a real user never saw this warning despite
-    it "logging a warning" here successfully. The fix now also RETURNS the
-    reason (asserted below) so a caller can propagate it to a channel visible
-    without --debug; see tests/test_chatml_fallback_visibility.py for the
+    A debug-log warning alone does not reach the user, because debuglog.logger's
+    file handler only exists under --debug. _apply_model_template also RETURNS
+    the reason (asserted below) so a caller can propagate it to a channel
+    visible without --debug; tests/test_chatml_fallback_visibility.py covers the
     full worker -> runner -> backend -> console path this return value feeds."""
 
     _MSGS = [{"role": "user", "content": "hi"}]
@@ -191,14 +188,11 @@ class TestApplyTemplateFallbackIsSurfaced:
 
 class TestFallbackReasonReachesTheInstance:
     """create_chat_completion (and _generate_image, identical two-line shape)
-    must actually RECORD the reason _apply_model_template returns onto
-    self.chat_template_fallback_reason - that attribute is the only thing
-    GgufWorker's chatml_fallback_reason property reads, so a broken link here
-    would silently defeat the whole visibility fix despite every other test
-    in this file and in test_chatml_fallback_visibility.py passing (neither
-    of those exercises this exact link: the return-guard tests call
-    _apply_model_template directly, and the visibility tests fake the runner
-    below the LlamaCpp layer entirely)."""
+    must RECORD the reason _apply_model_template returns onto
+    self.chat_template_fallback_reason: that attribute is the only thing
+    GgufWorker's chatml_fallback_reason property reads. No other test covers
+    this link - the return-guard tests call _apply_model_template directly, and
+    the visibility tests fake the runner below the LlamaCpp layer entirely."""
 
     def _bare_llama(self) -> LlamaCpp:
         return make_bare_llama(_model_ptr=111, _ctx_ptr=222)

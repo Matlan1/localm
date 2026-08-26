@@ -3,9 +3,9 @@
 this machine, so ggml's directory-scan loaders (and localm's own RTLD_GLOBAL
 preload) can never simultaneously map two tiers whose identically-named global
 symbols would otherwise collide. See the module's own docstring for the full
-mechanism and the live reproduction that found it.
+mechanism.
 
-Real .so files can't be fabricated here, so `_probe_score` (the isolated
+Real .so files cannot be fabricated here, so `_probe_score` (the isolated
 subprocess that calls a real candidate's own `ggml_backend_score()`) is
 monkeypatched to canned per-candidate verdicts; everything downstream of that
 - file layout, marker contents, locking, fast-path behaviour - is exercised for
@@ -137,8 +137,8 @@ def test_highest_scoring_candidate_wins_and_losers_are_renamed(lib_dir, monkeypa
     assert "libggml-cpu-haswell.so" in names        # winner: untouched name
     assert "_unused-libggml-cpu-alderlake.so" in names
     assert "_unused-libggml-cpu-zen4.so" in names
-    # The exact bug this module exists to prevent: after selection, ggml's own
-    # directory-scan pattern must find exactly ONE CPU-tier candidate.
+    # After selection, ggml's own directory-scan pattern finds exactly ONE
+    # CPU-tier candidate.
     assert [p.name for p in cbs._candidates(lib_dir)] == ["libggml-cpu-haswell.so"]
 
 

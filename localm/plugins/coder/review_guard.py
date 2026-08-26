@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Review guard: flag coder edits that a passing check cannot vouch for.
+"""Review guard: flag coder edits that a passing check cannot vouch for.
 
 A coding agent can make a green check meaningless by editing the check itself -
 rewriting a test's assertions to match new (possibly wrong) behaviour, or
-weakening a CI / linter config so the gate stops failing. A test suite that goes
-green over rewritten assertions proves nothing. This module classifies the files
-a session changed into "tests" and "ci_config" so the CLI can surface them for a
-human to review by hand, rather than trusting the green (R19, agentic code
-review). It does not block anything - it only makes the edit visible.
+weakening a CI / linter config so the gate stops failing. This module classifies
+the files a session changed into "tests" and "ci_config" so the CLI can surface
+them for a human to review by hand. It does not block anything - it only makes
+the edit visible.
 
-Pure and dependency-free so it is trivially unit-testable; the Agent supplies the
-changed-file list (``Agent.changed_files()``).
+Pure and dependency-free, so it is trivially unit-testable; the Agent supplies
+the changed-file list (``Agent.changed_files()``).
 """
 
 from __future__ import annotations
@@ -23,9 +21,9 @@ _TEST_SUFFIXES = (
     ".test.mjs", ".spec.mjs",
 )
 
-# CI / lint / format config by exact filename. pyproject.toml is deliberately NOT
-# here: it also holds dependencies and project metadata, so flagging every edit to
-# it would be noise. Files here exist primarily to define a gate.
+# CI / lint / format config by exact filename. pyproject.toml is NOT here: it
+# also holds dependencies and project metadata, so flagging every edit to it
+# would be noise. Files here exist primarily to define a gate.
 _CI_CONFIG_NAMES = frozenset({
     ".gitlab-ci.yml", ".travis.yml", "azure-pipelines.yml",
     ".pre-commit-config.yaml", ".pre-commit-config.yml",

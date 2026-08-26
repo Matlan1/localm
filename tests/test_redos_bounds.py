@@ -1,35 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Superlinear-backtracking bounds for the regexes that run on remote text.
 
-Guards the six ``py/polynomial-redos`` findings closed by the 2026-07-28 CodeQL
-triage (WS5). Each pattern below is applied to attacker-controlled input:
+Each pattern below is applied to attacker-controlled input:
 
   * ``textguard.neutralise`` runs on the body of an arbitrary URL fetched by
     ``POST /api/web/fetch`` (``max_chars`` up to 60,000) and on every RAG chunk.
   * ``parser.parse_tool_calls`` runs on raw model output, which a poisoned
     document or page can steer.
   * the coder's session transcript re-runs the tool_call pattern over EVERY
-    stored assistant message at teardown, so one poisoned response used to
-    re-hang the export on every later close.
+    stored assistant message at teardown.
 
-Two kinds of assertion, and BOTH matter:
+Two kinds of assertion:
 
-  * wall-clock bounds - the actual defect. Pre-fix baselines, measured on this
-    project's venv under the box-wide test lock (min of n samples; a sample can
-    only be inflated by interference, never deflated):
-        textguard._FRAME_RE   66.3s  at the 60,000-char fetch ceiling
-        parser._RE_FENCE      95.9s  at 100,000 tabs
-        parser._RE_XML         7.0s  at 2,000 spaces (cubic - 20,000 never ran)
-        session._TC_RE         5.5s  at 2,000 spaces
-        parser._RE_VARIANT     2.1s  at 5,000 marker repetitions
-    Post-fix, every one of those inputs costs between 0.0000s and 0.0051s. The
-    0.5s budget therefore sits two to five orders of magnitude clear of both
-    sides, which is what keeps it meaningful on a loaded box without ever being
-    a flaky-by-design timer.
-  * semantic regression - a bounded regex that also stops matching real input is
-    a regression, not a fix. Every pattern keeps a paired "still matches"
+  * wall-clock bounds. Every guarded input costs between 0.0000s and 0.0051s,
+    so the 0.5s budget sits orders of magnitude clear of both sides.
+  * semantic regression - every pattern keeps a paired "still matches"
     assertion, and the fence rewrite is pinned by a differential fuzz against
-    the exact pattern it replaced.
+    the pattern it replaced.
 """
 
 from __future__ import annotations
@@ -48,8 +35,7 @@ from localm.plugins.coder.parser import (
     parse_tool_calls, strip_tool_calls, strip_xml_tool_calls)
 from localm.textguard import _FRAME_RE, neutralise
 
-# Generous on purpose: see the module docstring. The smallest pre-fix baseline
-# among the cases below was 2.08s and the largest was 95.9s.
+# The bounded patterns finish orders of magnitude inside this.
 BUDGET = 0.5
 
 
@@ -62,29 +48,21 @@ def _timed(fn, *a, **kw):
 def _timed_cpu(fn, *a, **kw):
     """Like _timed, but measures CPU time (time.process_time), not wall-clock.
 
-    Wall-clock elapsed time includes time this process spent DESCHEDULED while
-    an unrelated process on the same box used the CPU - exactly the shared-load
-    contention this box's test coordinator has to account for once targeted
-    test runs go concurrent. CPU time only counts cycles actually spent
-    executing this process, so a sibling process hogging a core cannot inflate
-    it (an O(n) fix stays fast in CPU time even under heavy scheduling
-    contention; only true CPU starvation for the WHOLE run - not touched here -
-    would move it, and that would show as a near-total stall, not a partial
-    slowdown)."""
+    CPU time only counts cycles actually spent executing this process, so a
+    sibling process hogging a core cannot inflate it."""
     start = time.process_time()
     result = fn(*a, **kw)
     return result, time.process_time() - start
 
 
 # ---------------------------------------------------------------------------
-#  Wall-clock bounds (the CodeQL witnesses, verbatim)
+#  Wall-clock bounds
 # ---------------------------------------------------------------------------
 
 def test_neutralise_bounded_on_frame_marker_prefix():
-    """alert 194 - ``'<'`` then a long run of spaces. 60,000 is the ceiling
+    """``'<'`` then a long run of spaces. 60,000 is the ceiling
     POST /api/web/fetch itself accepts via max_chars, so this IS the route's
-    worst case, not a synthetic one. Measured baseline 66.3s, all of it event-loop
-    outage because neutralise() used to run inline in the async handler."""
+    worst case, not a synthetic one."""
     hostile = "<" + " " * 60_000
     out, elapsed = _timed(neutralise, hostile)
     assert elapsed < BUDGET, f"neutralise took {elapsed:.2f}s on 60k spaces"
@@ -92,19 +70,14 @@ def test_neutralise_bounded_on_frame_marker_prefix():
     assert out == hostile
 
 
-# Alert 189 reports TWO witness clauses, not one. Both are asserted: a prescribed
-# fix derived from a single witness is exactly what made alert 190 ship looking
-# complete. Only two alerts in the repo carry a compound message and both are in
-# this file, so this is the last place the mistake can hide.
+# Two witness clauses, asserted separately rather than collapsed into one.
 _XML_WITNESS_PREFIXES = ["<tool_call>", "<tool_call>a"]
 
 
 @pytest.mark.parametrize("prefix", _XML_WITNESS_PREFIXES)
 def test_parse_tool_calls_bounded_on_xml_wrapper_prefix(prefix):
-    """alerts 189/192/193 - a ``<tool_call>`` opener then a long run of spaces.
-    Cubic pre-fix: 0.08 / 0.62 / 7.03s at 500 / 1000 / 2000 spaces for witness 1,
-    so 20,000 would not have finished inside this test run at all. Witness 2 is
-    the same defect with a far smaller constant (0.0095s at 2,000)."""
+    """A ``<tool_call>`` opener then a long run of spaces. Witness 2 is the same
+    shape with a far smaller constant."""
     hostile = prefix + " " * 20_000
     calls, elapsed = _timed(parse_tool_calls, hostile)
     assert elapsed < BUDGET, (
@@ -123,35 +96,15 @@ def _best(fn, text, samples=5):
 def test_xml_witnesses_do_not_grow_superlinearly(prefix):
     """Compares the COST RATIO across a 10x input, not two absolute bounds.
 
-    This has to be a ratio. An absolute "both under BUDGET" check cannot tell
-    linear from quadratic here, because the fixed pattern is so far under the
-    budget that a hypothetically quadratic one would still fit inside it: ~0.0002s
-    at the 1x size scales to ~0.08s at 20x, comfortably under 0.5s, and the
-    assertion would pass on exactly the bug it claims to exclude. (An earlier
-    draft of this test made that mistake.)
-
-    10x input: linear costs ~10x, quadratic ~100x. The 30x bound sits between them
-    with 3x of margin either side.
-
-    MEASURED on this project's venv, which is how the constants were set rather
-    than guessed:
-        '<tool_call>'   200k = 9.16ms   2M = 92.86ms   ratio 10.1x
-        '<tool_call>a'  200k = 0.41ms   2M =  3.83ms   ratio  9.3x
-    Both linear. A quadratic implementation would land near 0.92s and 41ms
-    respectively, so the 30x bound separates them either way.
+    10x input: linear costs ~10x, quadratic ~100x. The 30x bound sits between
+    them with 3x of margin either side.
 
     The absolute floor guards only against a base too small to divide by, and it
-    MUST stay below ``30 * base`` or it silently swallows the bug. An earlier draft
-    used 0.05s: fine for the first witness (30*base = 0.275s) but fatal for the
-    second (30*base = 0.012s), where the floor would have become the threshold and
-    passed a 41ms quadratic. 0.005s is below both.
+    MUST stay below ``30 * base``.
 
-    Deliberately NO absolute budget assertion here. At these sizes ordinary LINEAR
-    work legitimately approaches 0.1s - the marker-variant pass still walks every
-    marker and every space once, which is linear but not free - so an
-    absolute bound would go red on correct code. BUDGET belongs at the witness
-    sizes, where the other tests apply it; superlinearity is what this test is for,
-    and a ratio is the only thing that measures it.
+    NO absolute budget assertion here: at these sizes ordinary LINEAR work
+    approaches 0.1s. BUDGET belongs at the witness sizes, where the other tests
+    apply it.
     """
     base = _best(parse_tool_calls, prefix + " " * 200_000)
     ten_x = _best(parse_tool_calls, prefix + " " * 2_000_000)
@@ -163,9 +116,9 @@ def test_xml_witnesses_do_not_grow_superlinearly(prefix):
 def test_parse_tool_calls_bounded_on_many_unterminated_openers():
     """The case a single-opener witness does NOT catch: thousands of ``<tool_call>``
     openers and no closer anywhere, so a lazy body scans to end-of-text once per
-    opener. That is quadratic independently of the adjacent-quantifier problem,
-    and it survived the first attempt at this fix (2.21s) until the opener/closer
-    pairing landed. Same shape as the fence's second CodeQL witness."""
+    opener. That is quadratic independently of the adjacent-quantifier problem;
+    only the opener/closer pairing bounds it. Same shape as the fence's second
+    witness."""
     hostile = "<tool_call>" * 5_000
     calls, elapsed = _timed(parse_tool_calls, hostile)
     assert elapsed < BUDGET, f"parse_tool_calls took {elapsed:.2f}s on 5k openers"
@@ -173,8 +126,8 @@ def test_parse_tool_calls_bounded_on_many_unterminated_openers():
 
 
 def test_parse_tool_calls_bounded_on_unterminated_variant_markers():
-    """alert 191 - repeated ``<tool_call>{{`` with no closing brace anywhere, so
-    every marker used to start a scan to end-of-text. Baseline 2.08s."""
+    """Repeated ``<tool_call>{{`` with no closing brace anywhere, so every
+    marker is a candidate for a scan to end-of-text."""
     hostile = "<tool_call>{{" * 5_000
     calls, elapsed = _timed(parse_tool_calls, hostile)
     assert elapsed < BUDGET, f"parse_tool_calls took {elapsed:.2f}s on variant markers"
@@ -182,9 +135,8 @@ def test_parse_tool_calls_bounded_on_unterminated_variant_markers():
 
 
 def test_parse_tool_calls_bounded_on_fence_tab_run():
-    """alert 190, first witness - ``'```'`` then a long run of tabs, against the
-    opener's two adjacent ``[ \\t]*`` quantifiers. Baseline 95.9s (1.36 / 7.22 /
-    26.74s at 12.5k / 25k / 50k tabs)."""
+    """``'```'`` then a long run of tabs, against the opener's two adjacent
+    ``[ \\t]*`` quantifiers."""
     hostile = "```" + "\t" * 100_000
     calls, elapsed = _timed(parse_tool_calls, hostile)
     assert elapsed < BUDGET, f"parse_tool_calls took {elapsed:.2f}s on 100k tabs"
@@ -192,11 +144,10 @@ def test_parse_tool_calls_bounded_on_fence_tab_run():
 
 
 def test_parse_tool_calls_bounded_on_repeated_fence_openers():
-    """alert 190, second witness - many fence openers with no closer after the
-    first few characters. This one is a MANY-START-POSITIONS quadratic, not an
-    adjacent-quantifier one: de-ambiguating the lang group does not touch it
-    (0.08 / 0.28 / 1.10 / 5.03s at 1k / 2k / 4k / 8k), only the opener/closer
-    pairing does. Sized past the point the old form exceeded the budget."""
+    """Many fence openers with no closer after the first few characters. A
+    MANY-START-POSITIONS quadratic, not an adjacent-quantifier one:
+    de-ambiguating the lang group does not touch it, only the opener/closer
+    pairing does."""
     hostile = "```\n" + "```\na" * 8_000
     calls, elapsed = _timed(parse_tool_calls, hostile)
     assert elapsed < BUDGET, f"parse_tool_calls took {elapsed:.2f}s on repeated openers"
@@ -216,11 +167,6 @@ def test_parse_tool_calls_bounded_on_doubled_brace_run():
 # ---------------------------------------------------------------------------
 #  Structural guards - no clock involved, so these cannot go flaky under load
 # ---------------------------------------------------------------------------
-#
-# A wall-clock threshold is a weak guard on a shared box: it drifts, and the
-# temptation when it goes red is to loosen it until it guards nothing. These
-# assert the SHAPE of the fix instead, and hold identically on an idle box and a
-# saturated one.
 
 class _CountingPattern:
     """Records the start offset of every search, and delegates."""
@@ -235,10 +181,8 @@ class _CountingPattern:
 
 
 def test_pairing_abandons_the_scan_after_one_failed_closer_search():
-    """THE defect, stated structurally. The old lazy body re-scanned to
-    end-of-text once per opener, so 5,000 unterminated openers meant 5,000 full
-    scans. Pairing must issue exactly ONE closer search and then stop, because a
-    closer search that failed from this opener cannot succeed from a later one."""
+    """Pairing must issue exactly ONE closer search and then stop: a closer
+    search that failed from this opener cannot succeed from a later one."""
     hostile = "<tool_call>" * 5_000
     opener = _CountingPattern(_RE_XML_OPEN)
     closer = _CountingPattern(_RE_XML_CLOSE)
@@ -269,13 +213,10 @@ def test_pairing_searches_never_go_backwards():
 def test_frame_marker_tolerance_is_not_bounded(gap):
     """The whitespace tolerance must survive the ReDoS fix INTACT.
 
-    An earlier revision bounded this at ``\\s{0,8}`` and a test here asserted the
-    non-match at nine spaces - enshrining the weakening as intent. That was
-    backwards. Nothing in the codebase parses the closing fence (the code-side
-    checks all test ``startswith('<tool_result')`` on the OUTER tag), so the only
-    consumer is the MODEL, a fuzzy reader. Any finite bound is a bypass an
-    attacker reaches by typing one more space, and the bound bought nothing: the
-    de-ambiguated form is linear without it.
+    Nothing in the codebase parses the closing fence (the code-side checks all
+    test ``startswith('<tool_result')`` on the OUTER tag), so the only consumer
+    is the MODEL. Any finite whitespace bound is a bypass an attacker reaches by
+    typing one more space, and the de-ambiguated form is linear without one.
     """
     assert _FRAME_RE.search("<" + " " * gap + "/tool_result>") is not None
     assert _FRAME_RE.search("<" + " " * gap + "/" + " " * gap
@@ -284,13 +225,11 @@ def test_frame_marker_tolerance_is_not_bounded(gap):
 
 def test_frame_marker_defanging_is_unchanged_from_the_prefix_pattern():
     """The de-ambiguated pattern must accept the same language as the ambiguous
-    one it replaced - that is the whole claim, so it is fuzzed rather than eyeballed.
+    one it replaced, so it is fuzzed rather than eyeballed.
 
-    The alphabet includes RUNS of whitespace, not just single characters. A fuzz
-    over single characters shows 0 divergences even for the bounded version,
-    because random short strings essentially never contain nine consecutive
-    spaces - which is exactly how the bounded revision passed a 200,000-case fuzz
-    while silently dropping the control.
+    The alphabet includes RUNS of whitespace, not just single characters: random
+    short strings essentially never contain nine consecutive spaces, so a fuzz
+    over single characters shows 0 divergences even for a bounded version.
     """
     rnd = random.Random(20260728)
     alphabet = ["<", "/", " ", "  ", " " * 9, " " * 30, "\t", "\n", "\r",
@@ -304,12 +243,9 @@ def test_frame_marker_defanging_is_unchanged_from_the_prefix_pattern():
 def test_variant_body_is_brace_matched_not_pattern_matched():
     """The marker-variant body is delimited by BRACE BALANCE, not by a pattern.
 
-    This assertion is the reverse of the one it replaces, deliberately. The first
-    fix tempered a regex so the body could not span a marker - which bounded the
-    cost and silently dropped a real case, since the coder editing its own parser
-    docs emits a write_file whose CONTENT contains ``<tool_call>``. A
-    string-aware brace scan has no such trade: it knows the marker is inside a
-    JSON string, so the call is recovered AND the scan stays bounded.
+    A string-aware brace scan knows a marker inside a JSON string is part of the
+    body, so a call whose CONTENT contains ``<tool_call>`` is recovered AND the
+    scan stays bounded.
     """
     ordinary = list(_iter_marker_variant_calls('<|tool_call>{"a": 1}<tool_call|>'))
     assert len(ordinary) == 1 and ordinary[0][3] == '{"a": 1}'
@@ -322,13 +258,11 @@ def test_variant_body_is_brace_matched_not_pattern_matched():
 
 
 # ---------------------------------------------------------------------------
-#  Fires-control - proof the budget still catches a genuinely slow path
+#  The budget still catches a genuinely slow path
 # ---------------------------------------------------------------------------
 
-# The exact PRE-FIX patterns, in one place: they are both the fires-control below
-# and the differential-fuzz oracle further down. A budget that never fails on
-# these would be guarding nothing, which is how a timing assertion quietly rots
-# into decoration.
+# The legacy patterns, in one place: they drive both the slow-path checks below
+# and the differential-fuzz oracle further down.
 _LEGACY_FRAME = re.compile(r"<(\s*/?\s*(?:tool_result|untrusted_content))",
                            re.IGNORECASE)
 _LEGACY_VARIANT = re.compile(
@@ -353,19 +287,14 @@ _RE_FENCE_LEGACY = re.compile(
      lambda s: _LEGACY_FRAME.sub(r"&lt;\1", s),
      lambda s: _FRAME_RE.sub(r"&lt;\1", s),
      lambda n: "<" + " " * n, 15_000, 240_000),
-    # Alert 189's FIRST witness. Pre-fix 7.03s at n=2000, so it fires at once.
+    # The FIRST witness clause; slow at n=2000, so it fires at once.
     ("parser._RE_XML (witness 1)",
      lambda s: [m.span() for m in _RE_XML_LEGACY.finditer(s)],
      lambda s: list(_iter_xml_tool_calls(s)),
      lambda n: "<tool_call>" + " " * n, 1_500, 200_000),
-    # Alert 189's SECOND witness. Asserted separately rather than assumed covered
-    # by the first, and that turned out to matter: one character before the
-    # whitespace run drives the legacy pattern down a completely different path.
-    # MEASURED pre-fix at n=2000: witness 1 costs 7.03s, witness 2 costs 0.0095s -
-    # a 740x difference. Both are genuinely superlinear (witness 2 grows ~4x per
-    # doubling) but witness 2 needs n=24,000 to reach the budget, so it gets a much
-    # higher cap. At the old 24,000 cap it fired exactly AT the cap, which on a
-    # faster box would have failed as "the budget is guarding nothing".
+    # The SECOND witness clause, asserted separately: one character before the
+    # whitespace run drives the legacy pattern down a different path, so it needs
+    # n=24,000 rather than n=2,000 to reach the budget and gets a higher cap.
     ("parser._RE_XML (witness 2)",
      lambda s: [m.span() for m in _RE_XML_LEGACY.finditer(s)],
      lambda s: list(_iter_xml_tool_calls(s)),
@@ -384,11 +313,9 @@ def test_budget_fires_on_the_prefix_pattern_and_not_on_the_fixed_one(
     """Grows the witness until the PRE-FIX pattern blows the budget, then checks
     the FIXED pattern is still far under it at that very same size.
 
-    Growing rather than hard-coding a size is what keeps this honest in both
-    directions: on a slow or loaded box it fires on the first try, and on a much
-    faster future box it keeps doubling instead of reporting a false green. The
-    superlinearity is what makes the search terminate quickly - each doubling is
-    4x or 8x the work.
+    The size is grown rather than hard-coded: on a slow or loaded box it fires
+    on the first try, and on a faster box it keeps doubling. Each doubling is 4x
+    or 8x the work, so the search terminates quickly.
     """
     size = base
     while size <= cap:
@@ -498,13 +425,10 @@ def test_multiple_fenced_blocks_are_all_found():
 
 
 def test_session_transcript_uses_the_parser_splitter():
-    """session.py must not carry its own copy of the tool_call regex - that
-    duplicate was the reason a poisoned response re-hung the transcript export
-    forever after, and two copies drift. The primary splitter moved from
-    strip_xml_tool_calls to strip_tool_calls (the superset that also
-    recognises the fenced and bare-JSON call shapes), so the identity check
-    below moved with it; the structural guards against a private regex are
-    unchanged."""
+    """session.py must not carry its own copy of the tool_call regex. The
+    primary splitter is strip_tool_calls (the superset that also recognises the
+    fenced and bare-JSON call shapes), which is what the identity check below
+    asserts; the rest are structural guards against a private regex."""
     import pathlib
 
     from localm.plugins.coder import parser as parser_mod
@@ -569,10 +493,9 @@ def test_strip_tool_calls_matches_strip_xml_tool_calls_on_xml_only_text():
     ("no calls here", [], "no calls here"),
     ('x<TOOL_CALL>{"a":1}</TOOL_CALL>y<tool_call>{"b":2}</tool_call>z',
      [(None, '{"a":1}'), (None, '{"b":2}')], "xyz"),
-    # ZERO-LENGTH body. The replaced regexes used ``.*?``, so this was a real
-    # match for them. Searching the closer from opener.end()+1 skipped it and
-    # paired the opener with a LATER closer, swallowing the prose and the next
-    # genuine call into one unparseable body.
+    # ZERO-LENGTH body. The closer is searched from opener.end(), so the opener
+    # pairs with the immediately-following closer rather than a LATER one, and the
+    # prose and the next genuine call are not swallowed into one unparseable body.
     ("<tool_call></tool_call>tail", [(None, "")], "tail"),
     ('<tool_call></tool_call>prose<tool_call>{"a":1}</tool_call>',
      [(None, ""), (None, '{"a":1}')], "prose"),
@@ -586,10 +509,8 @@ def test_strip_xml_tool_calls_splits_calls_from_prose(content, calls, clean):
 
 
 # The regex that actually lived in agent/session.py, with a STAR body. The XML
-# fuzz above uses the PARSER's old pattern, which had a PLUS body - so it cannot
-# see a zero-length-body divergence. That gap let a real transcript regression
-# through a green suite: the one regex whose behaviour changed was the one the
-# oracle did not model.
+# fuzz above uses the PARSER's old pattern, which had a PLUS body and so cannot
+# express a zero-length-body divergence.
 _LEGACY_SESSION_TC = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 
 
@@ -597,10 +518,9 @@ def test_strip_matches_the_deleted_session_regex_under_fuzz():
     """Differential fuzz for the SESSION splitter specifically.
 
     Compared only on inputs without the ``name=`` form and without uppercase
-    tags, because there the new splitter is a deliberate SUPERSET (the old
-    private regex was case-sensitive and had no name= support, so those blocks
-    used to survive as raw XML). Everywhere else it must agree exactly, and the
-    zero-gap ``<tool_call></tool_call>`` is included in the alphabet on purpose.
+    tags, where the new splitter is a SUPERSET of the legacy regex (which was
+    case-sensitive and had no name= support). Everywhere else it must agree
+    exactly, and the zero-gap ``<tool_call></tool_call>`` is in the alphabet.
     """
     rnd = random.Random(4242)
     alphabet = ["<tool_call>", "</tool_call>", "<tool_call></tool_call>",
@@ -632,24 +552,23 @@ _XML_FUZZ_ALPHABET = ["<tool_call>", "</tool_call>", '<tool_call name="a">',
 
 
 def test_xml_pairing_matches_the_legacy_regex_under_fuzz():
-    """The rewrite is a COST change, and this pins how far that is literally true.
+    """Pins how far the rewrite is span-identical to the pattern it replaced.
 
     The legacy pattern's leading ``\\s*`` was GREEDY, so when the text between an
     opener and its nearest closer was entirely whitespace it could not use that
     closer (the lazy body still needed one character), and it skipped ahead to a
     LATER closer, swallowing everything in between. The pairing takes the nearest
-    closer. So two properties, both fuzzed, rather than one blanket equality:
+    closer. So two properties are fuzzed rather than one blanket equality:
 
       * absent a whitespace-only block, the spans are byte-identical - and spans
         are what split_response and the transcript depend on;
       * a call the legacy pattern recovered is ALWAYS still recovered. The
-        divergent legacy match starts with ``</tool_call>`` and so never parsed
-        as JSON anyway, while its oversized span could swallow a real call
-        further on - which is why the pairing recovers strictly more, never less.
+        divergent legacy match starts with ``</tool_call>`` and never parsed as
+        JSON, so the pairing recovers strictly more, never less.
 
-    Body text is compared stripped because the legacy pattern kept the flanking
-    whitespace outside its body group; every consumer strips it (_try_parse_body's
-    first line, and strip_xml_tool_calls).
+    Body text is compared stripped: the legacy pattern kept the flanking
+    whitespace outside its body group and every consumer strips it
+    (_try_parse_body's first line, and strip_xml_tool_calls).
     """
     rnd = random.Random(20260728)
     saw_blank = saw_calls = 0
@@ -674,8 +593,7 @@ def test_xml_pairing_matches_the_legacy_regex_under_fuzz():
         assert all(c in got_calls for c in legacy_calls), \
             f"the pairing LOST a call the legacy pattern found: {text!r}"
 
-    # The corpus must actually reach both branches, or the assertions above are
-    # asserting nothing (a fuzz that never generates a tool call proves nothing).
+    # The corpus reaches both branches.
     assert saw_blank > 0, "fuzz never produced a whitespace-only block"
     assert saw_calls > 0, "fuzz never produced a parseable tool call"
 
@@ -693,11 +611,9 @@ def test_fence_pairing_matches_the_legacy_regex_under_fuzz():
         assert list(_iter_fenced_blocks(text)) == legacy, f"diverged on {text!r}"
 
 
-# The witnesses are built by a factory and the params are NAMED. Parametrizing
-# over the literal 100,000-character strings puts them in the pytest node id,
-# which the autouse tmp_path fixture then tries to turn into a directory name -
-# 24 setup/teardown errors and a 3.1 MB log, from a test whose assertions were
-# all fine.
+# The witnesses are built by a factory and the params are NAMED: a literal
+# 100,000-character string in the pytest node id would become a directory name
+# under the autouse tmp_path fixture.
 @pytest.mark.parametrize("pattern_name, pattern", [
     ("fence_open", _RE_FENCE_OPEN), ("fence_close", _RE_FENCE_CLOSE),
     ("xml_open", _RE_XML_OPEN), ("xml_close", _RE_XML_CLOSE),
@@ -721,16 +637,9 @@ def test_pairing_halves_are_individually_linear(
 #  The marker-variant body: brace-matched, not pattern-matched
 # ---------------------------------------------------------------------------
 #
-# The `<|tool_call>` finetune dialect used to be one regex. Every regex form of
-# it forced a choice between two failures, which is why it is now a scan:
-#   - a lazy `\{.*?\}` body scans to end-of-text from EVERY marker when no
-#     closing brace follows (quadratic: 2.08s on 5,000 reps of '<tool_call>{{'),
-#   - and tempering it to stop at the next marker fixes that but silently drops
-#     a body that legitimately CONTAINS a marker.
-# A brace-matched, string-aware scan has neither problem: it knows the marker is
-# inside a JSON string. The first attempt at that scan was ALSO quadratic (19.3s,
-# worse than the regex) because it walked forward per marker; the single-pass
-# brace map is what makes it linear.
+# The `<|tool_call>` finetune dialect is a scan rather than a regex. A
+# brace-matched, string-aware scan keeps a body that legitimately CONTAINS a
+# marker, and a single-pass brace map keeps it linear.
 
 _LEGACY_VARIANT = re.compile(
     r"<\|?/?tool_call\|?>\s*(?:call:(?P<name>\w+)\s*)?(?P<body>\{.*?\})"
@@ -743,12 +652,8 @@ _LEGACY_VARIANT = re.compile(
     "a closing marker alone: <tool_call|>",
 ])
 def test_variant_body_may_contain_a_tool_call_marker(content):
-    """The case the tempered regex dropped, and the reason it matters here.
-
-    Ask the coder to edit parser.py's own module docstring - which really does
-    carry these markers - or its test fixtures, and it emits a write_file whose
-    CONTENT contains one. That is ordinary work in this repo, not an exotic
-    input, so the parser has to survive it."""
+    """A write_file whose CONTENT contains a ``<|tool_call>`` marker (editing
+    parser.py's own module docstring, or its test fixtures) must still parse."""
     import json as _json
     body = _json.dumps({"path": "parser.py", "content": content})
     calls = parse_tool_calls(f"<|tool_call>call:write_file{body}<tool_call|>")
@@ -760,18 +665,13 @@ def test_variant_body_may_contain_a_tool_call_marker(content):
 def test_variant_scan_never_loses_a_call_the_legacy_regex_recovered():
     r"""Differential fuzz against the pre-fix pattern, compared on ACCEPTED CALLS.
 
-    Not on raw spans, and the difference is the finding rather than a convenience:
-    the old regex's "body" was never a balanced object. Its lazy ``\{.*?\}`` ran
-    from a ``{`` to whatever ``}`` happened to precede a marker, so it produced
-    bodies like ``{"b": {"c": 2}}}`` (an extra brace) and ``{"a": 1} {"b": 2}``
-    (two objects). Those never parsed as JSON, so they were never calls. Holding
-    the replacement to span-equality would be demanding bug-compatibility with
-    text the old code could not use either.
+    Not on raw spans: the legacy regex's "body" was never a balanced object. Its
+    lazy ``\{.*?\}`` ran from a ``{`` to whatever ``}`` happened to precede a
+    marker, so it produced bodies like ``{"b": {"c": 2}}}`` (an extra brace) and
+    ``{"a": 1} {"b": 2}`` (two objects), neither of which parsed as JSON.
 
-    The property that actually matters is that nothing REAL is lost, so that is
-    what is asserted. The alphabet deliberately includes ``use {`` to open: an
-    unmatched brace in prose is what broke an earlier global-brace-map attempt,
-    and without that token the fuzz reported clean while losing calls.
+    The asserted property is that nothing REAL is lost. The alphabet includes
+    ``use {`` to open, so an unmatched brace in prose is part of the fuzz.
     """
     rnd = random.Random(20260729)
     alphabet = ["<|tool_call>", "<tool_call|>", "<tool_call>", "</tool_call>",
@@ -817,7 +717,7 @@ def test_brace_matched_variant_pass_stays_linear(witness, size):
 
 
 def test_marker_variant_stays_linear_when_none_of_many_markers_balance():
-    """The gap none of the witnesses above actually exercise.
+    """The gap none of the witnesses above exercise.
 
     Every witness in ``test_brace_matched_variant_pass_stays_linear`` hits
     ``_object_end_from``'s O(1) short-circuit: ``"<tool_call>{{" * n`` and
@@ -829,19 +729,13 @@ def test_marker_variant_stays_linear_when_none_of_many_markers_balance():
     This witness forces exactly that: many markers, each opening an object that
     never balances, with a single stray ``}`` far away at the very end so
     ``last_close`` is a large, real value. Each marker's balance scan then runs
-    all the way through ``last_close`` and fails, and the pre-fix recovery
-    (``pos = opener.end()``) retried the SAME scan from the very next marker -
-    O(n) work per marker, O(n^2) overall. Measured pre-fix on this project's
-    venv: 0.09s at n=500, 6.4s at n=4000 (~4x per doubling, i.e. quadratic).
+    all the way through ``last_close`` and fails; a recovery that retried the
+    SAME scan from the next marker would be O(n) work per marker, O(n^2)
+    overall.
 
-    Asserted on CPU time (_timed_cpu), not wall-clock: this test can now run
-    concurrently with other targeted test-slot work on this box (the test
-    coordinator's budget model allows it), and a wall-clock bound would be
-    flaky under that shared load. CPU time only counts cycles this process
-    actually executed, so contention from a sibling process cannot inflate it.
-    The fixed version should cost roughly 0.02-0.05s of CPU time, so 2.0s
-    leaves a two-orders-of-magnitude margin while still catching the 6+s
-    regression."""
+    Asserted on CPU time (_timed_cpu), not wall-clock, so contention from a
+    sibling process cannot inflate it. The fixed version costs roughly
+    0.02-0.05s of CPU time against a 2.0s bound."""
     hostile = ("<tool_call>{" * 4_000) + "}"
     calls, cpu_elapsed = _timed_cpu(parse_tool_calls, hostile)
     assert cpu_elapsed < 2.0, (
@@ -852,35 +746,22 @@ def test_marker_variant_stays_linear_when_none_of_many_markers_balance():
 
 
 # ---------------------------------------------------------------------------
-#  Regression: a REAL call recovered by an earlier version of this scan must
-#  still be recovered, not just "the scan stays fast"
+#  A REAL call recovered by an earlier version of this scan is still recovered
 # ---------------------------------------------------------------------------
 #
-# The fix above (rescan-budget cap replacing the unconditional "skip to
-# last_close+1") was needed because the unconditional skip shipped a real
-# correctness regression alongside the perf fix: a failed scan from an EARLIER
-# marker running all the way through last_close does NOT prove no LATER
-# marker can balance - a scan restarted at a later marker resets its own
-# depth to 0, so it can reach 0 again well before last_close even though the
-# earlier marker's scan, carrying that marker's own leftover depth, never
-# did. Measured directly on this repo (bisected against 3a649bbb^, the commit
-# immediately before #895): an unclosed canonical ``<tool_call>`` followed by
-# a well-formed one later in the SAME response went from 1 call recovered to
-# 0. Reported against qwen2.5-coder-1.5b-instruct - a "default" family model
-# per prompts.py, taught ONLY the canonical ``<tool_call>`` XML wrapper (not
-# the ``<|tool_call>`` finetune dialect _iter_marker_variant_calls exists
-# for) - so this pass is also the safety net _iter_xml_tool_calls's strict
-# opener/closer pairing relies on whenever an earlier unclosed tag steals a
-# later call's closing tag (see _pair_delimited: a closer search that finds
-# ANY later ``</tool_call>`` pairs with it regardless of which opener it
-# structurally belongs to, so pass 1 alone mis-reads this exact shape).
+# A failed scan from an EARLIER marker running all the way through last_close
+# does NOT prove no LATER marker can balance: a scan restarted at a later marker
+# resets its own depth to 0, so it can reach 0 again well before last_close.
+# This pass is also the safety net _iter_xml_tool_calls's strict opener/closer
+# pairing relies on whenever an earlier unclosed tag steals a later call's
+# closing tag (see _pair_delimited).
 
 def test_marker_variant_recovers_a_later_call_after_an_earlier_one_fails_to_balance():
     """The mangled ``<|tool_call>`` dialect: an earlier malformed attempt must
     not suppress a later, independent, well-formed one in the same response."""
     text = (
         '<|tool_call>call:write_file{"path": "x.py", "content": "def f():\\n'
-        '    pass'  # deliberately truncated: opens more braces than it closes
+        '    pass'  # truncated: opens more braces than it closes
         '\n\nLet me try that again.\n'
         '<|tool_call>call:run_tests{"runner": "pytest"}<tool_call|>\n'
     )
@@ -891,12 +772,10 @@ def test_marker_variant_recovers_a_later_call_after_an_earlier_one_fails_to_bala
 
 
 def test_xml_wrapper_recovers_via_marker_fallback_after_an_earlier_unclosed_tag():
-    """The shape actually reported: a 'default'-family model (prompts.py) is
-    taught ONLY the canonical ``<tool_call>`` XML wrapper, never the
-    ``<|tool_call>`` dialect - so THIS is the path real small-model traffic
-    exercises. An earlier turn (or an earlier attempt in the same turn) that
-    opened ``<tool_call>`` without closing it must not cost a later,
-    well-formed ``<tool_call>...</tool_call>`` its execution."""
+    """A 'default'-family model (prompts.py) is taught ONLY the canonical
+    ``<tool_call>`` XML wrapper, never the ``<|tool_call>`` dialect. An earlier
+    attempt that opened ``<tool_call>`` without closing it must not cost a
+    later, well-formed ``<tool_call>...</tool_call>`` its execution."""
     text = (
         "Let me read the file first.\n"
         "<tool_call>\n"
@@ -914,12 +793,10 @@ def test_xml_wrapper_recovers_via_marker_fallback_after_an_earlier_unclosed_tag(
 
 
 def test_marker_variant_rescan_budget_covers_realistic_repeated_failures():
-    """The cap that keeps the above fix linear (_MAX_EXPENSIVE_MARKER_RESCANS)
-    must not be so tight that an ordinary struggling small model - a handful
-    of botched attempts before it gets the format right, not thousands - loses
-    the call it finally got right. 10 failed attempts is already far more than
-    _MAX_TOOL_REPAIRS (2) lets a real session accumulate ACROSS turns; this
-    pins the budget stays generous within a SINGLE response too."""
+    """_MAX_EXPENSIVE_MARKER_RESCANS must cover a handful of botched attempts
+    before the model gets the format right. 10 failed attempts is more than
+    _MAX_TOOL_REPAIRS (2) lets a session accumulate ACROSS turns; this pins that
+    the budget stays generous within a SINGLE response too."""
     failed_attempt = '<|tool_call>call:write_file{"path": "x.py", "content": "unterminated'
     text = ("\n\n".join([failed_attempt] * 10)
             + '\n\n<|tool_call>call:run_tests{"runner": "pytest"}<tool_call|>\n')
@@ -930,21 +807,13 @@ def test_marker_variant_rescan_budget_covers_realistic_repeated_failures():
 
 
 def test_marker_variant_drops_a_call_beyond_the_rescan_budget_by_design():
-    """States the boundary of the fix above explicitly, so it is a documented
-    design property rather than a gap left for someone to discover later:
-    _MAX_EXPENSIVE_MARKER_RESCANS is a BOUND, not a full fix. Beyond it, this
-    pass exhausts its retry budget and falls back to the fast (lossy)
-    last_close+1 skip - a well-formed call past the budget is STILL dropped,
-    exactly like on unpatched HEAD, just further out.
+    """_MAX_EXPENSIVE_MARKER_RESCANS is a BOUND. Beyond it, this pass exhausts
+    its retry budget and falls back to the fast (lossy) last_close+1 skip, so a
+    well-formed call past the budget IS dropped.
 
-    This is a deliberate, stated trade-off: no genuine model turn gets
-    anywhere near this many failed attempts in one response (see
-    test_marker_variant_rescan_budget_covers_realistic_repeated_failures for
-    the realistic bound this fix DOES cover - 10, already far more than
-    _MAX_TOOL_REPAIRS=2 lets a real session accumulate ACROSS whole turns).
-    This input is adversarial by construction, the same class of input
-    test_marker_variant_stays_linear_when_none_of_many_markers_balance uses
-    to pin the performance side of the same trade-off.
+    The realistic bound the rescan budget does cover is pinned by
+    test_marker_variant_rescan_budget_covers_realistic_repeated_failures; this
+    input is adversarial by construction.
     """
     from localm.plugins.coder.parser import _MAX_EXPENSIVE_MARKER_RESCANS
     failed_attempt = '<|tool_call>call:write_file{"path": "x.py", "content": "unterminated'
@@ -964,18 +833,12 @@ def test_marker_variant_rescan_budget_keeps_cost_linear_not_quadratic():
 
     The property that must hold is: total cost is bounded by
     ``_MAX_EXPENSIVE_MARKER_RESCANS`` full rescans (a CONSTANT), not by one
-    rescan per marker (the #895 regression, O(n) rescans of up to O(n) each -
-    quadratic). That means cost must scale LINEARLY with input size once the
-    budget is the same, not quadratically. Checked as a ratio rather than a
-    fixed wall/CPU budget so it stays meaningful if either
-    _MAX_EXPENSIVE_MARKER_RESCANS or the witness size is retuned later: a 4x
-    input increase should cost roughly 4x (linear), not roughly 16x
-    (quadratic) - measured directly on this project's venv, quiet box:
-    4,000->16,000 markers (4x) cost 0.11s->0.42s (3.9x); 16,000->64,000 (4x)
-    cost 0.42s->1.69s (4.0x). Asserted on CPU time (_timed_cpu), matching the
-    convention #895 itself established for these tests: targeted runs on this
-    box now execute concurrently, so a wall-clock bound would be flaky under
-    sibling load.
+    rescan per marker (O(n) rescans of up to O(n) each - quadratic). Cost must
+    therefore scale LINEARLY with input size once the budget is the same.
+    Checked as a ratio rather than a fixed wall/CPU budget, so it stays
+    meaningful if either _MAX_EXPENSIVE_MARKER_RESCANS or the witness size is
+    retuned: a 4x input increase should cost roughly 4x, not roughly 16x.
+    Asserted on CPU time (_timed_cpu), so sibling load cannot inflate it.
     """
     small_n, big_n = 4_000, 16_000
     _, small_cpu = _timed_cpu(
@@ -993,30 +856,18 @@ def test_marker_variant_rescan_budget_keeps_cost_linear_not_quadratic():
 
 
 # --------------------------------------------------------------------------- #
-#  gbnf.TOOL_CALL_TRIGGER - the lazy-grammar trigger (GitHub #928, #833)
-#
-#  A SEVENTH pattern of the same class, and the reason it was not in the
-#  2026-07-28 sweep is structural rather than an oversight: TOOL_CALL_TRIGGER is
-#  never compiled or run through Python's `re` in production. It is a bare
-#  string marshaled through ctypes into llama.cpp's native std::regex, so
-#  CodeQL's `py/polynomial-redos` - a Python-level query - cannot see it at all.
-#  Any regex string handed to native code is invisible to that whole query class.
-#
-#  llama.cpp appends every generated token to `grammar.trigger_buffer` with NO
-#  SIZE CAP and re-runs the whole pattern over the whole buffer on EVERY token
-#  until a trigger matches (src/llama-grammar.cpp, llama_grammar_accept_impl),
-#  so a quadratic pattern makes the generation-total cost cubic. Measured on the
-#  repetitive markdown-table output that provoked it in the field:
-#
-#      buffer     old pattern      this pattern
-#       5,700       243 ms           0.061 ms
-#      11,400       975 ms           0.008 ms
-#      22,800     4,100 ms           0.007 ms
-#
-#  The separation is five to six orders of magnitude, so an ABSOLUTE budget is
-#  the right instrument here (unlike the #895 test above, whose fixed-vs-broken
-#  gap was small enough to need a ratio). CPU time, not wall clock: this is
-#  pure CPU-bound regex work and targeted runs share the box.
+#  gbnf.TOOL_CALL_TRIGGER - the lazy-grammar trigger                          #
+#                                                                             #
+#  TOOL_CALL_TRIGGER is never compiled or run through Python's `re`: it is    #
+#  a bare string marshaled through ctypes into llama.cpp's native             #
+#  std::regex, so a Python-level query cannot see it at all.                  #
+#                                                                             #
+#  llama.cpp appends every generated token to `grammar.trigger_buffer`        #
+#  with NO SIZE CAP and re-runs the whole pattern over the whole buffer on    #
+#  EVERY token until a trigger matches (src/llama-grammar.cpp,                #
+#  llama_grammar_accept_impl), so a quadratic pattern makes the               #
+#  generation-total cost cubic. The budget here is ABSOLUTE, measured in      #
+#  CPU time rather than wall clock.                                           #
 # --------------------------------------------------------------------------- #
 
 _TRIGGER_ROW = "| localm/inference/backends/llamacpp/_runner.py | 1234 |\n"
@@ -1043,13 +894,10 @@ def test_tool_call_trigger_does_not_backtrack_on_long_untriggered_output():
 
 
 def test_tool_call_trigger_still_captures_the_tag_itself():
-    """The bound is worthless if the pattern stops meaning what it meant.
-
-    llama.cpp feeds the grammar from CAPTURE GROUP 1, and TOOL_CALLS_ONLY's
+    """llama.cpp feeds the grammar from CAPTURE GROUP 1, and TOOL_CALLS_ONLY's
     first literal is "<tool_call>", so group 1 MUST still start at the tag. A
-    "faster" rewrite that captures only what FOLLOWS the tag passes the budget
-    above and silently breaks tool calling outright - which is exactly the fix
-    that was proposed for #928 before this assertion existed.
+    rewrite that captures only what FOLLOWS the tag passes the budget above and
+    breaks tool calling outright.
     """
     from localm.inference.gbnf import TOOL_CALL_TRIGGER
     body = '\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>'

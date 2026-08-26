@@ -3,24 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
-// A media element does NOT throw and does NOT reject when its src is refused -
-// it fires an `error` EVENT on itself. So a try/catch wrapped around
-// `player.src = url` is structurally unable to see the failure.
-//
-// That is not hypothetical. Found live 2026-08-13: the GUI's own CSP had no
-// media-src directive, so every blob: URL fed to a <video> was refused with
-// "Media load rejected by URL safety check". The success path still ran to the
-// end - the button still flipped to "hide" - and the user got a dead black
-// player, no toast, and no clue. A step that failed while reporting success.
-//
-// The CSP itself is fixed and guarded server-side by
-// tests/test_security_headers.py::test_media_and_fetch_of_blob_urls_are_permitted.
-// This is the OTHER half: whatever the cause - CSP, a truncated file, a codec
-// the browser will not take - a media load that fails must SAY SO.
-//
-// Asserts on the TOAST TEXT rather than on "no exception was thrown", because
-// "no exception" was true both before and after the fix and would pass either
-// way.
+// A media element fires an `error` event on itself when its src is refused; it
+// does not throw or reject. reportMediaLoadFailure listens for that event and
+// turns it into a toast, then runs the caller's cleanup.
 
 test("a media element whose src is refused produces a user-visible toast", () => {
   const { window } = loadAppWithPages({});
@@ -34,10 +19,8 @@ test("a media element whose src is refused produces a user-visible toast", () =>
   try {
     const player = window.document.createElement("video");
     fn(player, "the clip");
-    // Stand in for what the browser reports on a refused source. jsdom does not
-    // implement media loading, so the element's own error path is driven
-    // directly - the contract under test is "an error event becomes a toast",
-    // not jsdom's media stack.
+    // jsdom does not implement media loading, so the element's error state is
+    // set and the error event dispatched directly.
     Object.defineProperty(player, "error", {
       value: { code: 4, message: "MEDIA_ELEMENT_ERROR: Media load rejected by URL safety check" },
       configurable: true,

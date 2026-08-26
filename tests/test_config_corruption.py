@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A config.json that parses as valid JSON but is NOT an object (a list, a bare
-string, a number, null) used to be silently ignored -> defaults, discarding the
-user's saved settings with no warning. (A genuinely unparseable file DID warn via
-_read_json; only the valid-JSON-wrong-shape case was silent.)
+string, a number, null) resolves to defaults, discarding the user's saved
+settings. A genuinely unparseable file warns via _read_json; the
+valid-JSON-wrong-shape case would otherwise be silent.
 
-`_merge_stored_config` now surfaces that discard once per process, while a MISSING
-file stays the benign silent default (AUD-CFGNONDICT)."""
+`_merge_stored_config` surfaces that discard once per process, while a MISSING
+file stays the benign silent default."""
 
 import pytest
 
@@ -80,17 +80,12 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
     replacing every setting the user had while the caller reported success.
 
     These assert on the FILE before the exception, and catch by hand rather
-    than with `pytest.raises`, deliberately: as a context manager `pytest.raises`
-    fails at the end of its `with` block, so a regression reports "DID NOT RAISE
-    ConfigUnreadable" and never reaches the file check. That is a proxy, and a
-    proxy invites adjusting the assertion. Catching by hand lets the data
-    assertion speak first, so a regression reports that the user's config was
-    destroyed - which cannot be talked away. (Measured: the first version of
-    these tests used `pytest.raises` and reported exactly the useless message.)
+    than with `pytest.raises`: as a context manager `pytest.raises` fails at the
+    end of its `with` block, so a regression reports "DID NOT RAISE
+    ConfigUnreadable" and never reaches the file check.
 
-    Distinct from the valid-JSON-wrong-shape case above, which is deliberately
-    still tolerated: a JSON string or list holds nothing recoverable, whereas an
-    unreadable file may be hiding settings that still exist.
+    Distinct from the valid-JSON-wrong-shape case above, which is still
+    tolerated.
     """
 
     def test_update_config_refuses_and_leaves_the_file_alone(self, cfg_home):
@@ -111,8 +106,8 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
             "an unreadable config.json was OVERWRITTEN; every user setting "
             "(including net_mode and llama_runtime_pin) would be gone")
         assert raised is not None, "update_config did not refuse"
-        # Names the file so it is actionable, never the path: this message can
-        # reach an HTTP error body via inference/routes/config.py.
+        # Names the file, never the path: this message can reach an HTTP error
+        # body via inference/routes/config.py.
         assert "config.json" in str(raised)
         assert str(cfg_home) not in str(raised)
 
@@ -157,7 +152,6 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
 
         got = json.loads(p.read_text(encoding="utf-8"))
         # 8192, not the 4096 DEFAULT: _user_delta drops a value equal to the
-        # default, so asserting on the default would assert on something that
-        # can never appear in the file.
+        # default, so the default can never appear in the file.
         assert got["n_ctx"] == 8192
         assert got["net_mode"] == "off", "the .bak's real settings were lost"

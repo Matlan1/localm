@@ -1,23 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression coverage for the prefill/decode boundary logging added to
+"""Regression coverage for the prefill/decode boundary logging in
 LlamaCpp._generate (llama.py, runs inside the isolated GGUF worker) and
-ModelRunner.chat_stream (_runner.py, runs in the parent). See dev-notes/
-generation-path-logging-instrumentation-2026-08-12.md for the full design:
-between "model loaded" and either a token or a corpse, this code path used
-to emit nothing at any level, so a crash mid-generation could not be placed
-in prefill vs decode.
+ModelRunner.chat_stream (_runner.py, runs in the parent). Between "model loaded"
+and either a token or a corpse, this code path emits markers so a crash
+mid-generation can be placed in prefill vs decode.
 
 Two independent test classes, because the two files are instrumented for two
-different audiences: llama.py's markers only reach a bug report once --debug
-is on (they run inside the isolated child process), while _runner.py's
-markers reach the always-on ring buffer unconditionally (they run in the
-parent). Each class drives the REAL method under test - a mocked native
-`api` layer for llama.py (there is no real GGUF model here), real
-multiprocessing.Queue objects plus a fake process-liveness stand-in and a
-thread playing the child's protocol by hand for _runner.py, mirroring
-test_kv_cache.py's TestInferenceLock and test_runner_stream_timeouts.py's
-_make_runner/_fake_child patterns respectively (both already the established
-patterns for driving these two methods without a real native model).
+different audiences: llama.py's markers only reach a bug report once --debug is
+on (they run inside the isolated child process), while _runner.py's markers reach
+the always-on ring buffer unconditionally (they run in the parent). Each class
+drives the REAL method under test - a mocked native `api` layer for llama.py
+(there is no real GGUF model here), and real multiprocessing.Queue objects plus a
+fake process-liveness stand-in and a thread playing the child's protocol by hand
+for _runner.py.
 """
 
 import logging
@@ -90,8 +85,7 @@ def _messages(records) -> str:
 class TestLlamaCppGenerateBoundaryLogging:
     def test_normal_generation_logs_all_boundaries_in_order(self, monkeypatch, caplog):
         # Interval patched down so 6 mocked tokens produce visible checkpoints
-        # without needing 50 real loop iterations - the interval's own value
-        # is not the property under test, the CHECKPOINTING behaviour is.
+        # without needing 50 real loop iterations.
         monkeypatch.setattr(llama_mod, "_DECODE_PROGRESS_INTERVAL", 2)
         llm = _bare_llama()
         llm._tokenizer.is_eog.return_value = False
@@ -119,9 +113,7 @@ class TestLlamaCppGenerateBoundaryLogging:
         assert "aborted" not in joined
 
         # Decode progress is coarse (interval=2 over 6 tokens -> checkpoints
-        # at 2, 4, 6) AND specifically DEBUG, not INFO - the ring buffer's
-        # fixed 400-record budget is shared with everything else the server
-        # logs, so only the boundary markers are affordable at INFO.
+        # at 2, 4, 6) and logged at DEBUG, not INFO.
         progress = [r for r in caplog.records
                     if "gguf generate: decode progress" in r.getMessage()]
         assert len(progress) == 3
@@ -130,8 +122,7 @@ class TestLlamaCppGenerateBoundaryLogging:
                       if "gguf generate: decode progress" not in r.getMessage()]
         assert boundaries and all(r.levelname == "INFO" for r in boundaries)
 
-        # Order matters: a reader must be able to tell WHERE a silent death
-        # would have landed from the sequence, not just presence.
+        # The ORDER of the boundary markers, not just their presence.
         order = [i for i, m in enumerate(msgs) if any(
             key in m for key in ("prefill starting", "prefill complete",
                                   "entering decode loop", "generate: complete"))]
@@ -151,9 +142,8 @@ class TestLlamaCppGenerateBoundaryLogging:
 
         joined = _messages(caplog.records)
         assert "gguf generate: prefill starting, 3 prompt token(s)" in joined
-        # The exact defect this instrumentation fixes: a failure must not
-        # look identical to a silent hang. "starting" with no "complete" and
-        # an explicit "aborted" line is the whole point.
+        # A failure logs "starting" with no "complete", plus an explicit
+        # "aborted" line, so it does not read as a silent hang.
         assert "gguf generate: prefill complete" not in joined
         assert "gguf generate: entering decode loop" not in joined
         assert ("gguf generate: aborted (exception) during prefill, "
@@ -185,11 +175,9 @@ class TestLlamaCppGenerateBoundaryLogging:
 
 
 class TestLlamaCppGenerateImageBoundaryLogging:
-    """Same scheme, same three cases, for the OTHER live generation path in
-    this file (_generate_image) - see the module docstring on _generate_image
-    itself for why this path needed covering too: the real crash log this
-    whole change was validated against was a vision-model load, so leaving
-    _generate_image dark would have reproduced the exact gap being fixed."""
+    """Same scheme, same three cases, for the OTHER live generation path in this
+    file (_generate_image). A vision-model load reaches this path instead of
+    _generate, so leaving it dark would leave the same gap the markers close."""
 
     def test_normal_generation_logs_all_boundaries_in_order(self, monkeypatch, caplog):
         monkeypatch.setattr(llama_mod, "_DECODE_PROGRESS_INTERVAL", 2)
@@ -278,8 +266,7 @@ class TestLlamaCppGenerateImageBoundaryLogging:
 # ---------------------------------------------------------------------------
 
 class _FakeProc:
-    """Stands in for the worker process's liveness check only - same shape
-    as test_runner_stream_timeouts.py's _AliveProc, plus a crash-like
+    """Stands in for the worker process's liveness check only, plus a crash-like
     exitcode so _death_report()/_exit_reason() have something to decode."""
 
     def __init__(self):
@@ -346,8 +333,7 @@ class TestModelRunnerChatStreamBoundaryLogging:
                 "finish_reason=stop") in joined
 
         # Decode progress is coarse (interval=2 over 4 chunks -> checkpoints
-        # at 2 and 4) AND specifically DEBUG, not INFO - see
-        # _STREAM_PROGRESS_INTERVAL for the ring-buffer-budget reasoning.
+        # at 2 and 4) and logged at DEBUG, not INFO.
         progress = [r for r in caplog.records
                     if "gguf worker: decode progress" in r.getMessage()]
         assert len(progress) == 2

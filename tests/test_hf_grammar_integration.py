@@ -2,14 +2,14 @@
 """REAL grammar-constrained-decoding test for the HuggingFace backend.
 
 No mocks: a tiny ungated causal LM (sshleifer/tiny-gpt2, full GPT-2 tokenizer)
-is loaded for real under transformers 5, and we assert that a GBNF/EBNF grammar
-passed through ``HFBackend.chat_stream`` actually constrains the generated
-tokens via xgrammar. The negative assertion (same prompt, no grammar -> NOT a
-legal value) is what proves the grammar caused the constraint, not the model.
+is loaded for real under transformers 5, and a GBNF/EBNF grammar passed through
+``HFBackend.chat_stream`` must actually constrain the generated tokens via
+xgrammar. The negative assertion (same prompt, no grammar -> NOT a legal value)
+is what proves the grammar caused the constraint, not the model.
 
 Marked @integration so the default `pytest -m "not integration"` skips it (it
-downloads ~2.5 MB on first run and needs the optional [grammar] extra). A mock
-here would be theater - the whole point is that the masking is exercised for real.
+downloads a few MB on first run and needs the optional [grammar] extra). A mock
+here would prove nothing: the property is that the masking runs for real.
 """
 
 from __future__ import annotations
@@ -23,19 +23,15 @@ pytestmark = pytest.mark.integration
 
 _MODEL = "sshleifer/tiny-gpt2"
 # tiny-gpt2 ships no chat template; this trivial one (concatenate message
-# contents) lets chat_stream's apply_chat_template run. It is prompt plumbing
-# only - it has nothing to do with the grammar masking under test.
+# contents) lets chat_stream's apply_chat_template run.
 _MINIMAL_CHAT_TEMPLATE = "{% for m in messages %}{{ m['content'] }}\n{% endfor %}"
 
 
 @pytest.fixture(scope="module")
 def hf_backend(tmp_path_factory):
     # exc_type=ImportError on all three: each can raise a plain ImportError
-    # (not ModuleNotFoundError) for a reason other than "not installed" - e.g.
-    # transformers' own internal tokenizers version-gate, or a version-clashed
-    # xgrammar/torch build. pytest 9.1 narrowed importorskip's default to
-    # ModuleNotFoundError only, so without this these hard-fail/error instead
-    # of skipping on exactly the case this skip exists for.
+    # (not ModuleNotFoundError) for a reason other than "not installed", and
+    # pytest 9.1 narrowed importorskip's default to ModuleNotFoundError only.
     pytest.importorskip("torch", exc_type=ImportError)
     pytest.importorskip("transformers", exc_type=ImportError)
     pytest.importorskip("xgrammar", exc_type=ImportError)
@@ -48,15 +44,12 @@ def hf_backend(tmp_path_factory):
 
     from localm.inference.backends.hf import HFBackend
 
-    # The chat_template can no longer be poked onto a live tokenizer object
-    # after load(): the real tokenizer now lives inside HFBackend's isolated
-    # child process (see the thread-pool-exhaustion fix), not directly
-    # reachable from this test's process. Inject it at the SOURCE instead -
-    # tokenizer_config.json's own "chat_template" key, which
-    # AutoTokenizer.from_pretrained reads at load time regardless of which
-    # process calls it - into a COPY of the snapshot (never the shared HF hub
-    # cache directory snapshot_download returned: mutating that would leak
-    # across every other test/use of this cached model on the machine).
+    # The chat_template cannot be poked onto a live tokenizer object after
+    # load(): the real tokenizer lives inside HFBackend's isolated child
+    # process. Inject it at the SOURCE instead - tokenizer_config.json's own
+    # "chat_template" key, which AutoTokenizer.from_pretrained reads at load
+    # time - into a COPY of the snapshot, never the shared HF hub cache
+    # directory snapshot_download returned.
     model_dir = tmp_path_factory.mktemp("tiny_gpt2_with_chat_template")
     shutil.copytree(local_dir, model_dir, dirs_exist_ok=True)
     config_path = model_dir / "tokenizer_config.json"
@@ -89,7 +82,7 @@ def test_grammar_constrains_output_to_choice(hf_backend):
         f"grammar did not constrain output: {constrained!r}"
     )
     # Without the grammar the (gibberish) tiny model must NOT land on a legal
-    # value - otherwise the test above would pass even with masking disabled.
+    # value.
     assert unconstrained not in ("yes", "no"), (
         f"unconstrained output coincidentally legal ({unconstrained!r}); "
         "negative test is inconclusive"

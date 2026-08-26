@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Post-restart health watchdog: verify a just-applied localm update actually came
-back up, and roll it back automatically if it did not (LM-DA-011).
+back up, and roll it back automatically if it did not.
 
 ``localm/updater.py``'s ``spawn_health_watchdog()`` launches this DETACHED right
 before the server re-execs into a freshly swapped build (``_do_restart`` in
 ``localm/inference/http_server.py``). By the time it runs, the file swap has
 ALREADY happened, so this script executes from the NEW (possibly broken) build's
-copy on disk - exactly the same constraint ``scripts/rollback_update.py`` was built
-to survive, and this script follows the identical philosophy: stdlib-only, ZERO
-``localm`` package imports, so a broken new build cannot break the thing meant to
-detect it.
+copy on disk. It is stdlib-only, with ZERO ``localm`` package imports, so a
+broken new build cannot break the thing meant to detect it.
 
 It polls the restarted instance's own unauthenticated ``GET /whoami`` (never
-``/health``, which 503s whenever no model is loaded yet and would false-positive a
-perfectly good build into a rollback) until it answers with the expected VERSION,
-or a bounded timeout elapses. On timeout it loads ``scripts/rollback_update.py`` -
-a sibling file, by file path - and calls its ``main(["--yes"], install_root=...)``
-to restore the previous build, reusing that already-tested recovery mechanics
-rather than duplicating it.
+``/health``, which 503s whenever no model is loaded yet) until it answers with
+the expected VERSION, or a bounded timeout elapses. On timeout it loads
+``scripts/rollback_update.py`` - a sibling file, by file path - and calls its
+``main(["--yes"], install_root=...)`` to restore the previous build.
 
-It NEVER reports a rollback that did not happen as success (do-not-hide-problems):
-three distinct exit codes distinguish "came back up healthy" from "rolled back" from
-"rollback itself failed", and only the middle two ever touch the install.
+A rollback that did not happen is NEVER reported as success: three distinct exit
+codes distinguish "came back up healthy" from "rolled back" from "rollback
+itself failed", and only the middle two ever touch the install.
 
 Run standalone for manual testing:
     python scripts/update_watchdog.py --host 127.0.0.1 --port 8642 \\
@@ -51,8 +47,8 @@ DEFAULT_REQUEST_TIMEOUT_S = 3.0
 
 
 def _log(log_path: Optional[Path], msg: str) -> None:
-    """Timestamped trace line to stdout and, best-effort, *log_path*. Logging must
-    never be the reason the watchdog itself fails, so a write error is swallowed."""
+    """Timestamped trace line to stdout and, best-effort, *log_path*. A write
+    error is swallowed."""
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     print(line)
     if log_path is None:
@@ -66,14 +62,6 @@ def _log(log_path: Optional[Path], msg: str) -> None:
 
 
 def _insecure_ssl_context() -> ssl.SSLContext:
-    # This script deliberately imports nothing from localm (so a broken new build
-    # can't break the thing meant to detect it), so it has no way to obtain the
-    # locally-generated TLS CA (localm/tls.py) to verify against - and does not
-    # need one: this is a loopback liveness/version probe of the instance's own
-    # just-restarted self, not a security-sensitive channel. Same trust posture
-    # /health and /whoami themselves already have (unauthenticated, on the public
-    # route allowlist) - reachability + the exact expected version string IS the
-    # check; TLS identity adds nothing here.
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -87,28 +75,8 @@ def probe_once(url: str, timeout: float) -> Optional[dict]:
     try:
         ctx = _insecure_ssl_context() if url.startswith("https://") else None
         req = urllib.request.Request(url, headers={"User-Agent": "localm-update-watchdog"})
-        # NEVER route this through an HTTP proxy. We are probing THIS machine's own
-        # just-restarted instance at a host:port we were handed - a proxy makes no
-        # sense for that, and honouring one is actively dangerous here: a user with
-        # http_proxy set (a corporate network, or any of the tools that export it)
-        # would have every probe fail, so a PERFECTLY HEALTHY restart reads as
-        # unhealthy and the watchdog ROLLS BACK A GOOD UPDATE. urlopen()'s default
-        # opener honours those variables, and `urllib.request.proxy_bypass` does NOT
-        # exempt 127.0.0.1 (measured: False on this box), so localhost is not
-        # special-cased for us.
-        #
-        # It also removes a cross-test poisoning route that made this script's own
-        # tests non-deterministic on CI. urlopen() builds its module-global _opener
-        # ONCE and caches it for the process lifetime, capturing the proxy
-        # environment as it was at that moment - so a test that sets http_proxy to a
-        # dead port and makes a request leaves every later urlopen() in that worker
-        # broken, and monkeypatch unsetting the variable does NOT undo it (measured:
-        # still fails afterwards). An explicit opener sidesteps the global entirely.
-        #
-        # The TLS context has to ride on an HTTPSHandler rather than urlopen's
-        # `context=` kwarg, which opener.open() does not accept - dropping it would
-        # silently re-enable certificate verification against the self-signed cert a
-        # local TLS bind uses, and every https probe would fail instead.
+        # ProxyHandler({}) disables proxy use for this request. opener.open()
+        # takes no context= kwarg, so the TLS context rides on an HTTPSHandler.
         handlers = [urllib.request.ProxyHandler({})]
         if ctx is not None:
             handlers.append(urllib.request.HTTPSHandler(context=ctx))
@@ -125,10 +93,9 @@ def wait_for_healthy(url: str, expect_version: str, *, total_timeout: float,
                      poll_interval: float, request_timeout: float,
                      log_path: Optional[Path]) -> bool:
     """Poll *url* until it answers with ``version == expect_version`` or
-    *total_timeout* elapses. A single wrong-version or unreachable response is NOT
-    a failure - the old process may still be answering briefly right after the
-    restart request, and the new one may not have bound the port yet - so this
-    keeps retrying until the deadline, only ever succeeding early."""
+    *total_timeout* elapses. A single wrong-version or unreachable response is
+    NOT a failure: polling continues until the deadline and only ever succeeds
+    early."""
     deadline = time.monotonic() + total_timeout
     attempt = 0
     while True:
@@ -150,9 +117,9 @@ def wait_for_healthy(url: str, expect_version: str, *, total_timeout: float,
 
 def _load_rollback_module(install_root: Path):
     """Load scripts/rollback_update.py BY FILE PATH (a sibling of this script),
-    mirroring how that script itself loads localm/_apply_update.py - so a broken
-    localm package cannot stop the rollback. Returns the module, or None if it
-    cannot be loaded (caller then reports manual-recovery guidance)."""
+    so a broken localm package cannot stop the rollback. Returns the module, or
+    None if it cannot be loaded (the caller then reports manual-recovery
+    guidance)."""
     path = install_root / "scripts" / "rollback_update.py"
     if not path.is_file():
         return None
@@ -163,7 +130,7 @@ def _load_rollback_module(install_root: Path):
         spec.loader.exec_module(mod)
         return mod
     except Exception:
-        return None   # a corrupt helper -> manual-recovery path, never a false success
+        return None
 
 
 def _invoke_rollback(install_root: Path, log_path: Optional[Path]) -> int:
@@ -204,8 +171,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     install_root = args.install_root.resolve()
-    # An IPv6 host needs brackets inside a URL authority, or the parser cannot
-    # tell the address's colons from the port separator.
+    # Bracket an IPv6 host so the URL authority parses.
     _host = args.host
     if ":" in _host and not _host.startswith("["):
         _host = f"[{_host}]"

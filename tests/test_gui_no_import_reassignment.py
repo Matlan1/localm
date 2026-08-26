@@ -1,21 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LBUG-VIEWS regression: a GUI ES module must never REASSIGN a name it imports.
+"""A GUI ES module must never REASSIGN a name it imports.
 
 ES module import bindings are read-only. ``import { X } from "./m.js"; X = ...``
 throws ``TypeError: Assignment to constant variable`` in the REAL browser and
-aborts the function mid-way. Two such reassignments shipped and broke the app:
+aborts the function mid-way. The jsdom harness STRIPS import/export into ONE
+shared scope, where the same reassignment silently works, so the JS suite cannot
+see it.
 
-  * settings-perf.js reassigned the imported ``VIEWS`` in rebuildViews(), so the
-    throw aborted renderNav() right after the plugin nav buttons were appended:
-    VIEWS stayed at CORE_VIEWS, _applyActiveClasses (which iterates VIEWS) could
-    never toggle a plugin view active, and every plugin tab (Coder / Images /
-    Music / Video / Knowledge / Jobs) rendered an empty page / did not switch.
-  * chat.js reassigned the imported ``webAskSession`` when clearing the session.
-
-Neither was caught by the JS suite because the jsdom harness STRIPS import/export
-into ONE shared scope, where the reassignment silently works. Only the real ESM
-browser fails. This static check reads the GUI modules as text and fails if any
-reassigns a name it imports; mutate a shared object in place (``VIEWS.length = 0;
+This static check reads the GUI modules as text and fails if any reassigns a
+name it imports; mutate a shared object in place (``VIEWS.length = 0;
 VIEWS.push(...)``) or add a setter in the owning module instead.
 """
 
@@ -74,7 +67,7 @@ def test_no_gui_module_reassigns_an_imported_binding():
 
 
 def test_detector_catches_a_planted_reassignment():
-    """Guard the guard: the detector must flag an obvious import-reassignment."""
+    """The detector flags an obvious import-reassignment."""
     bad = 'import { VIEWS } from "./tabs.js";\nfunction f(){ VIEWS = [1,2]; }\n'
     assert _reassigns(_strip_comments(bad), "VIEWS") is True
     # ...but NOT an in-place mutation or a local shadow or a comparison.

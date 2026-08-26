@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Model routes: list, registry detail, and explicit load/unload.
 
-Extracted verbatim from create_app(); behavior unchanged. Reads the live engine
-and inference semaphore from the http_server module globals (a model swap that
-reassigns them is reflected here).
+Reads the live engine and inference semaphore from the http_server module
+globals, so a model swap that reassigns them is reflected here.
 """
 
 from __future__ import annotations
@@ -44,10 +43,7 @@ def register(app: FastAPI, ctx) -> None:
                 "created":  now,
                 "owned_by": "localm",
                 "loaded":   loaded,
-                # Which model is the ACTIVE one (the default routing target and
-                # the one an attaching client should report as loaded). Without
-                # this a consumer cannot tell the active model from the merely
-                # first-listed one (AUDIT-HIGH-4).
+                # True for the active model: the default routing target.
                 "active":   name == _hs._active_model_name,
             })
             
@@ -67,16 +63,8 @@ def register(app: FastAPI, ctx) -> None:
 
         # If it is the default startup model but not in registry, provide a virtual entry
         if entry is None and _hs._default_model_name == model_id:
-            # abspath, because the startup path is whatever the operator typed on
-            # the command line and `localm serve ../models/foo.gguf` is a normal
-            # invocation. _entry_path (correctly) reads a stored path carrying a
-            # '..' component as malformed, which would blank this virtual entry's
-            # path and size for a perfectly good running model. Normalising here
-            # keeps that rule strict for the REGISTRY - where a '..' really does
-            # mean the file was hand-edited or planted - without punishing a
-            # relative CLI argument. os.path.abspath, not resolve(): it strips
-            # '..' against the cwd with no filesystem call and no symlink
-            # traversal, so this stays off the syscall path entirely.
+            # os.path.abspath, not resolve(): strips '..' against the cwd with no
+            # filesystem call and no symlink traversal.
             _startup = getattr(_hs._engine, "model_path", "")
             entry = {"path": os.path.abspath(_startup) if _startup else "",
                      "source": "startup"}
@@ -84,45 +72,26 @@ def register(app: FastAPI, ctx) -> None:
         if entry is None:
             raise HTTPException(404, f"Model not registered: {model_id}")
 
-        # A non-dict registry value (a hand-edited / cross-version corrupt entry) is
-        # not a usable model record: 404 rather than a 500 from entry.get(...) below.
-        # A dict entry with a missing / null / non-string / empty path is still
-        # rendered as a pathless model (see the empty-path guard below and
-        # test_model_detail_empty_path_does_not_walk_cwd), never a Path(None)/Path(int)
-        # crash. Mirrors #562's _entry_path registry hardening.
+        # A non-dict registry value is not a usable model record: 404, not a 500
+        # from entry.get(...) below. A dict entry with a missing / null /
+        # non-string / empty path is still rendered as a pathless model.
         if not isinstance(entry, dict):
             raise HTTPException(404, f"Model not registered: {model_id}")
 
         # _entry_path -> None for a missing / null / non-string / empty path; treat
-        # that as pathless ("") so the `if path:` guard below scrubs it (exactly like
-        # the virtual startup entry) instead of Path(None)/Path(int) raising a 500.
+        # that as pathless ("") so the `if path:` guard below scrubs it.
         epath = _entry_path(entry)
         path = epath if epath is not None else ""
         p = Path(path)
         size = None
-        # Tri-state; None -> the key is omitted below. It stays None for a
-        # PATHLESS entry (nothing to inspect), and also for the VIRTUAL startup
-        # entry synthesised above, which is by definition absent from
-        # ``registry`` - so the lookup finds no record and correctly answers
-        # "unknown". Do NOT "fix" that by splicing the virtual entry into the
-        # registry view: it carries no model_type, so it would miss the llm
-        # gate and come back as a confident False for a model whose projector
-        # nobody looked for - the precise collapse this tri-state exists to
-        # prevent. No pill is the right answer for a row we cannot check.
+        # Tri-state; None omits the key below. Stays None for a pathless entry and
+        # for the virtual startup entry, which is absent from ``registry``.
         vision = None
-        # Only stat/walk a REAL path. An empty path (a virtual startup entry, or a
-        # malformed registry row) makes Path("") resolve to "." -> the server's CWD,
-        # whose is_dir() is True and rglob("*") walks the entire working tree: an
-        # aggregate-size info leak plus a filesystem-walk DoS. The path field below
-        # is already scrubbed to "" for an empty path; guard the size branch to match.
+        # Only stat/walk a real path: Path("") resolves to "." and would walk the
+        # server's CWD.
         if path:
-            # Off the event loop. This is an `async def` and the path comes out of
-            # registry.json, not from this handler, so the syscalls below are
-            # unbounded in both directions: rglob("*") walks an entire directory
-            # tree, and a UNC path blocks in the Windows SMB redirector (minutes
-            # against an unroutable host, plus an outbound authentication attempt
-            # from the server process when it IS reachable). Inline, either one
-            # stalls every request this server is serving, not just this one.
+            # Runs off the event loop; the syscalls below are unbounded (rglob("*")
+            # walks a whole directory tree, a UNC path blocks in the SMB redirector).
             def _measure() -> int | None:
                 try:
                     if p.is_file():
@@ -133,10 +102,9 @@ def register(app: FastAPI, ctx) -> None:
                     pass
                 return None
 
-            # Both blocking probes in ONE executor hop. model_vision_capability
-            # stats the same registry-supplied path, may glob its folder for an
-            # mmproj sibling and may read a small JSON, so it is the same
-            # unbounded-syscall class as _measure and must not run on the loop.
+            # Both blocking probes in one executor hop. model_vision_capability
+            # stats the same path, may glob its folder for an mmproj sibling and
+            # may read a small JSON, so it must not run on the loop either.
             def _probe() -> tuple:
                 from localm.model_manager import model_vision_capability
                 return _measure(), model_vision_capability(model_id, reg=registry)
@@ -145,18 +113,15 @@ def register(app: FastAPI, ctx) -> None:
             size, vision = await loop.run_in_executor(get_plugin_executor(), _probe)
         aliases = sorted(
             n for n, e in registry.items()
-            # Skip a malformed sibling: a non-dict entry's .get would AttributeError,
-            # so one corrupt sibling must not crash a healthy model's detail lookup.
+            # Skip a non-dict sibling entry: its .get would AttributeError.
             if isinstance(e, dict) and e.get("path") == path and n != model_id
         )
         out = {
             "id": model_id,
             "object": "model",
             "owned_by": "localm",
-            # Basename only; never leak the absolute path. Normalise backslashes
-            # to "/" first so the guarantee holds for a Windows-style path even on
-            # POSIX, where Path(...).name would not split on "\\" and would leak
-            # the whole directory (registry entries can carry either separator).
+            # Basename only, never the absolute path. Backslashes are normalised to
+            # "/" first so a Windows-style path also splits correctly on POSIX.
             "path": Path(str(path).replace("\\", "/")).name if path else "",
             "source": entry.get("source", ""),
             "sha256": entry.get("sha256"),
@@ -166,20 +131,13 @@ def register(app: FastAPI, ctx) -> None:
             "loaded": model_id in _hs._engines and _hs._engines[model_id].loaded,
             "model_type": entry.get("model_type", "llm"),
         }
-        # The "llm" above is a DEFAULT, not a recorded fact, and the default is
-        # kept because it is load-bearing for runtime candidacy. Say which one it
-        # is, so the detail view can read "not set" instead of asserting a type
-        # nobody chose - and so it cannot contradict the Models-page tab the row
-        # was opened from. Emitted only when there is nothing recorded, same
-        # omit-rather-than-null shape as `vision` immediately below.
+        # The "llm" above is a default, not a recorded fact. This flag is emitted
+        # only when the entry records no model_type.
         from localm.model_manager import has_recorded_model_type
         if not has_recorded_model_type(entry):
             out["model_type_recorded"] = False
-        # true / false / KEY ABSENT. Absent means "could not inspect the
-        # model's files", which is NOT the same claim as false and must not be
-        # rendered as one - see model_vision_capability's docstring. Omitting
-        # rather than sending null also leaves the payload byte-identical for
-        # any client predating this field.
+        # true / false / key absent. Absent means the model's files could not be
+        # inspected, which is not the same claim as false.
         if vision is not None:
             out["vision"] = vision
         return out
@@ -260,13 +218,8 @@ def register(app: FastAPI, ctx) -> None:
 
         engine = await _hs.get_engine(name)
         status = "already_loaded" if already else "loaded"
-        # gpu_layers_offloaded/gpu_layers_total/degraded, when the backend can
-        # report them: a model too big to fully fit VRAM still loads (the
-        # backend's own sizing deliberately defers to a partial/zero GPU
-        # offload rather than refusing - see llamacpp/_sizing.py), and without
-        # this a caller cannot tell that "loaded" apart from a full GPU load
-        # (AGENTS.md rule 5 - a silent downgrade must not report unqualified
-        # success).
+        # Adds gpu_layers_offloaded/gpu_layers_total/degraded when the backend can
+        # report them, so a partial GPU offload is distinguishable from a full one.
         return {"status": status, "model": engine.display_name,
                 **_hs._gpu_placement_fields(engine)}
 

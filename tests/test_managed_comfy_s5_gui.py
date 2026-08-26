@@ -8,10 +8,9 @@ NOT exercised here - the heavy `localm comfy setup` CLI is stubbed so the endpoi
 test is fast and asserts only the DISPATCH contract (a job id is returned, going to
 the existing setup entry point) plus the status read and the removal.
 
-Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
-(decision 8: opt-in `localm comfy setup` + a GUI button, off by default). Builds on
-S1 (#483) helpers in localm/media/managed_comfy.py and the S2 (#486) copy entry
-point; this slice adds ONLY the GUI/HTTP surface and calls those entry points.
+The feature is opt-in (`localm comfy setup` plus a GUI button) and off by default.
+This slice adds ONLY the GUI/HTTP surface and calls the S1 helpers in
+localm/media/managed_comfy.py and the S2 copy entry point.
 """
 
 from __future__ import annotations
@@ -29,8 +28,7 @@ from localm.plugins.gui.web import attach_gui
 # --------------------------------------------------------------------------- #
 #  Isolation: a throwaway LOCALM_HOME wired through both the lazy home_dir()   #
 #  AND the import-frozen config paths, so load_config and managed_comfy path   #
-#  resolution agree on the same tmp dir (see S1's test + memory note "Test     #
-#  home isolation (import-time)").                                             #
+#  resolution agree on the same tmp dir.                                       #
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def home(tmp_path, monkeypatch):
@@ -49,7 +47,7 @@ def _install_managed() -> mc.ManagedComfyPaths:
     """Minimal on-disk layout that makes is_managed_comfy_installed() true, using the
     module's OWN path accessors so the test is platform-agnostic (the venv
     interpreter path differs on Windows vs POSIX). Includes the completion
-    marker (#621 follow-up - main.py + venv alone means "still installing")."""
+    marker: main.py + venv alone means "still installing"."""
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)
@@ -108,8 +106,8 @@ def test_setup_dispatches_job_and_does_not_block(home, app, no_subprocess):
     assert len(no_subprocess) == 1, no_subprocess
     args = no_subprocess[0]["args"]
     assert args[:2] == ["comfy", "setup"], args
-    # Default is a clean start: the safe non-interactive default is not to copy
-    # the user's custom nodes (decision 3).
+    # Default is a clean start: the safe non-interactive default does not copy
+    # the user's custom nodes.
     assert "--no-custom-nodes" in args
 
 
@@ -189,19 +187,16 @@ def test_remove_is_honest_noop_when_nothing_installed(home, app):
     with TestClient(app) as client:
         r = client.post("/api/comfy/remove")
     assert r.status_code == 200, r.text
-    # Honest: report that nothing was there, not a claimed success of a real delete
-    # (rule 5: do not dress up a no-op as a completed removal).
+    # Honest: report that nothing was there, not a claimed success of a real
+    # delete.
     assert r.json().get("status") == "noop"
 
 
 # --------------------------------------------------------------------------- #
-#  GET /api/comfy/managed-status : the richer "state" field                    #
-#  (was previously a dead end: is_managed_comfy_installed()=False here does    #
-#  NOT mean the checkout dir is absent - an abandoned setup attempt leaves one #
-#  behind, and the OLD status response could not tell that apart from a       #
-#  clean "not set up" - the Settings page showed a Set-up button that would    #
-#  just 409 "already exists", with no Remove button offered either since that  #
-#  only appears once installed=True. #653-follow-up.)                         #
+#  GET /api/comfy/managed-status : the richer state field                      #
+#                                                                             #
+#  is_managed_comfy_installed()=False does NOT mean the checkout dir is absent: #
+#  an abandoned setup attempt leaves one behind, and state tells the two apart. #
 # --------------------------------------------------------------------------- #
 
 def test_status_state_not_installed_when_nothing_exists(home, app):
@@ -314,13 +309,8 @@ def test_repair_never_touches_the_managed_models_folder(home, app, no_subprocess
 
 
 # --------------------------------------------------------------------------- #
-#  POST /api/comfy/update : the path that did not exist until now              #
+#  POST /api/comfy/update                                                      #
 # --------------------------------------------------------------------------- #
-# Before this route, the GUI declared exactly four managed-comfy routes -
-# managed-status, setup, repair, remove - and update_managed_comfy() had exactly one
-# caller, the CLI. So a GUI-only user could INSTALL a managed ComfyUI and could never
-# UPDATE one, and the honest non-git refusal inside update_managed_comfy() was
-# unreachable from the GUI not because it was hidden but because the whole path was.
 
 def _install_managed_at(commit: str, *, git: bool = True) -> mc.ManagedComfyPaths:
     """An installed managed ComfyUI whose marker records *commit*, optionally without
@@ -344,8 +334,8 @@ def test_update_dispatches_the_cli_job_and_does_not_block(home, app, no_subproce
     assert r.json().get("job_id") == "job123"
     assert len(no_subprocess) == 1, no_subprocess
     # Dispatched to the EXISTING CLI entry point, not a re-implementation: the
-    # rollback-on-failure contract lives in update_managed_comfy() and must stay the
-    # single owner of it.
+    # rollback-on-failure contract lives in update_managed_comfy(), which stays
+    # its single owner.
     assert no_subprocess[0]["args"] == ["comfy", "update"], no_subprocess[0]["args"]
     assert no_subprocess[0]["kind"] == "comfy-update"
 
@@ -369,11 +359,10 @@ def test_update_defaults_to_not_reinstalling_requirements(home, app, no_subproce
 
 
 def test_update_forwards_commit(home, app, no_subprocess):
-    """S8 (PARITY-AUDIT-CLI-GUI-2026-08-19 #17): `--commit` was CLI-only, an
-    advanced/testing knob to update to a specific ComfyUI commit instead of the
-    shipped pin. Not validated here - update_managed_comfy() owns checking out
-    whatever it is given and reports a bad ref honestly through the job's own
-    output, same split as the non-git refusal above."""
+    """`--commit` is an advanced/testing knob to update to a specific ComfyUI
+    commit instead of the shipped pin. Not validated here - update_managed_comfy()
+    owns checking out whatever it is given and reports a bad ref honestly through
+    the job's own output, the same split as the non-git refusal above."""
     _install_managed_at("oldcommit")
     with TestClient(app) as client:
         r = client.post("/api/comfy/update", params={"commit": "abc123def"})
@@ -465,9 +454,9 @@ def test_status_reports_up_to_date_at_the_shipped_pin(home, app):
 
 
 def test_status_unreadable_marker_is_unknown_not_up_to_date(home, app):
-    """A marker we cannot parse must report UNKNOWN (null), never False. Collapsing
-    'could not look' into 'no update' hides a genuinely available update - the exact
-    two-outcomes-into-one shape rule 5 forbids."""
+    """A marker that cannot be parsed must report UNKNOWN (null), never False.
+    Collapsing 'could not look' into 'no update' hides a genuinely available
+    update."""
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = _install_managed()
     (paths.root / MARKER_FILENAME).write_text("{not json at all", encoding="utf-8")

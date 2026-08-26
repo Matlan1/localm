@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Longitudinal memory verification harness (memory fix campaign, P2: the
-campaign's own DONE oracle - see dev-notes/memory-fix-campaign/PLAN.md section 4).
+"""Longitudinal memory verification harness.
 
 An N-session SCRIPTED SIMULATION that replays real chat sessions through the REAL
 memory pipeline - real MemoryStore, real run_consolidation/synthesize_memory
@@ -19,17 +18,17 @@ sessions rather than in a single shot:
      paraphrase recalls with the semantic signal active;
   5. per-session episodic capture: one episode per session, watermarked so
      a re-run with no new session adds zero;
-  6. no '<think' substring ever reaches the store (C1 regression guard).
+  6. no '<think' substring ever reaches the store.
 
 No mocks of the pipeline under test - only the OUTER HTTP/CLI plumbing is
 skipped (session files are written directly in the exact on-disk shape
 AuditLog produces, which is what a real second server run would create).
 
-@integration + @real_gguf (same precedent as test_gguf_smoke_integration.py) so
-the default `pytest -m "not integration"` full-suite run is unaffected; run this
-explicitly with `pytest -m real_gguf tests/test_memory_longitudinal_harness.py -v`
-(the GPU is a shared resource, so serialise this against any other GPU
-workload on the same machine before running it). Skips cleanly (never fails) when the native runtime or
+@integration + @real_gguf, so the default `pytest -m "not integration"` run is
+unaffected; run this explicitly with
+`pytest -m real_gguf tests/test_memory_longitudinal_harness.py -v`. The GPU is a
+shared resource, so serialise this against any other GPU workload on the same
+machine before running it. Skips cleanly (never fails) when the native runtime or
 network is unavailable.
 """
 
@@ -43,19 +42,15 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_gguf]
 
-# Default chat model: PLAN.md's own "non-thinking baseline" pick for this campaign
-# (small, reliable enough at 4-way ADD/UPDATE/DELETE/NO_OP JSON decisions to be a
-# stable regression harness - a 135M model was tried first and was too unreliable
-# at the decide-JSON task to be a non-flaky default).
+# Default chat model: a small non-thinking baseline, reliable enough at the 4-way
+# ADD/UPDATE/DELETE/NO_OP JSON decision to be a stable regression harness.
 _CHAT_REPO = "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
 _CHAT_FILE = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 
-# Optional override: a real THINKING-family GGUF path (e.g. the maintainer's
-# Mythos-nano.Q8_0.gguf), so the think-stripping assertion is exercised
-# non-vacuously (a raw <think> block is actually produced and actually stripped),
-# not just trivially satisfied by a model that never emits one. No default path
-# here (AGENTS.md rule 1: no machine-specific absolute paths) - set the env var
-# to point at a real file to opt in; unset runs the portable default model.
+# Optional override: a path to a real THINKING-family GGUF, so the
+# think-stripping assertion is exercised non-vacuously (a raw <think> block is
+# actually produced and actually stripped). No default path: set the env var to
+# point at a real file to opt in, unset runs the portable default model.
 _THINKING_MODEL_ENV = "LOCALM_TEST_THINKING_MODEL"
 
 
@@ -86,16 +81,7 @@ def chat_backend(native_runtime):
     from localm.inference.backends.gguf import GgufBackend
     # CPU-only (n_gpu_layers=0): this harness tests the memory PIPELINE's logic,
     # not GPU inference performance, and a 0.5B model is fast enough on CPU for a
-    # handful of short prompts - this alone justifies CPU-only regardless of the
-    # note below. Loading (with GPU offload OR CPU-only - both were observed to
-    # crash) can hit a separate, real native-abort risk in
-    # llama_load_model_from_file itself; CPU-only was NOT confirmed to reduce
-    # that risk (no controlled comparison was actually done - do not assume it
-    # helps without re-measuring). See dev-notes/memory-fix-campaign/
-    # worklog-harness-elated.md "Found: a second native-abort class" for the
-    # full account and why it is NOT fixed here (needs subprocess-isolating the
-    # model load itself, a much larger change than the VRAM-probe daemon;
-    # tracked as its own follow-up, task_fb0b68f4).
+    # handful of short prompts.
     be = GgufBackend(path, n_ctx=4096, n_gpu_layers=0)
     try:
         be.load()
@@ -202,12 +188,9 @@ def _write_session(sessions_dir, name: str, user_text: str, assistant_raw: str,
 
 # --------------------------------------------------------------------------- #
 #  Bounded-store seeding: decayed synthetic clutter + one user-typed marker,  #
-#  added via the REAL store.add() so prune()'s decay-eviction path fires for  #
-#  real on the very first consolidation round (F8: prune runs even on a       #
-#  zero-fact round), archiving to .forgotten.jsonl (F4) while the user fact   #
-#  survives. The cap-eviction (N_MAX) edge is already unit-tested elsewhere   #
-#  (test_memory_f4_dataloss.py / test_memory_f8_forgetting_vectors.py); this  #
-#  harness only proves the decay path fires on a real end-to-end run.        #
+#  added via the REAL store.add() so prune()'s decay-eviction path fires on   #
+#  the first consolidation round, archiving to .forgotten.jsonl while the     #
+#  user-typed fact survives.                                                  #
 # --------------------------------------------------------------------------- #
 
 _CLUTTER_COUNT = 15
@@ -276,8 +259,8 @@ def test_longitudinal_memory_compounds_across_sessions(
     all_records = final_store.all()
     all_text = " ".join(r.text for r in all_records).lower()
 
-    # 6. No '<think' substring EVER reaches the store (C1 regression guard),
-    #    regardless of which model is in use.
+    # 6. No '<think' substring EVER reaches the store, regardless of which model
+    #    is in use.
     assert "<think" not in all_text, \
         f"a raw scratchpad reached the store: {[r.text for r in all_records if '<think' in r.text.lower()]}"
 
@@ -312,20 +295,14 @@ def test_longitudinal_memory_compounds_across_sessions(
         assert r.meta.get("session"), f"episode missing source-session tag: {r.meta}"
 
     # 2. The paraphrased contradiction (Berlin -> Munich): the NEW information
-    #    must never be lost (a Munich-mentioning durable fact must exist -
-    #    semantic kind only, an episodic session summary legitimately mentions
-    #    the topic too and is not itself a contradiction signal). Calibrated
-    #    against REAL runs with this small model (2 independent real-model runs):
-    #    perfect single-record resolution is NOT asserted here - consolidate.py's
-    #    own documented guardrail ("prefer ADD over UPDATE when the model is
-    #    unsure: keeping both is safe, a wrong UPDATE silently loses a true
-    #    fact") means a low-confidence small model legitimately keeps multiple
-    #    ADDs instead of collapsing to one; F9's actual guarantee under test is
-    #    that the paraphrase reaches the semantic decide() step at all (proven
-    #    by the store growing to more than one location record - a genuinely
-    #    unrelated ADD would not even do that), not that a weak model's decision
-    #    is always the sharpest one. Losing the new information entirely would
-    #    be the real regression this guards against.
+    #    must never be lost - a Munich-mentioning durable fact must exist,
+    #    semantic kind only, since an episodic session summary legitimately
+    #    mentions the topic too. Perfect single-record resolution is NOT
+    #    asserted: consolidate.py prefers ADD over UPDATE when the model is
+    #    unsure, so a low-confidence small model legitimately keeps multiple
+    #    ADDs instead of collapsing to one. What is asserted is that the
+    #    paraphrase reaches the semantic decide() step at all, shown by the
+    #    store growing to more than one location record.
     location_hits = [r for r in all_records
                      if r.kind == "semantic"
                      and ("berlin" in r.text.lower() or "munich" in r.text.lower())]
@@ -335,7 +312,7 @@ def test_longitudinal_memory_compounds_across_sessions(
         f"{[r.text for r in location_hits]}\nper-session results: {results}")
 
     # 1. + 4. Recall compounds and is recalled SEMANTICALLY; off-topic queries
-    #    inject nothing (F12 absolute relevance gate, real bge cosine values).
+    #    inject nothing (absolute relevance gate, real bge cosine values).
     diag_on = {}
     on_topic_hits = final_store.recall(
         "Where does the user currently live, and what editor do they use for coding?",
@@ -354,19 +331,8 @@ def test_longitudinal_memory_compounds_across_sessions(
         f"got {[r.text for r in off_topic_hits]}")
 
     # Think-stripping non-vacuous check: only meaningful when a real thinking
-    # model was actually used (LOCALM_TEST_THINKING_MODEL); otherwise this is
-    # a no-op (the default model never emits a think block to strip). NOTE:
-    # this block was removed and then RESTORED during development - an early,
-    # single-run comparison suggested its mere presence (unexecuted, during an
-    # EARLIER fixture's setup) somehow correlated with the separate
-    # llama_load_model_from_file native-abort bug (task_fb0b68f4), but that
-    # comparison was confounded (a second, unrelated edit changed at the same
-    # time) and did not hold up: every later run with this block ALREADY
-    # removed still crashed just as often. Removing it bought nothing, so it
-    # is back - do not remove it again without a genuinely controlled A/B
-    # comparison (same file, only this block differing, several runs each
-    # side) showing it actually helps; see worklog-harness-elated.md for the
-    # full account of the earlier, unjustified removal.
+    # model was actually used (LOCALM_TEST_THINKING_MODEL); otherwise this is a
+    # no-op, since the default model never emits a think block to strip.
     if getattr(chat_backend, "_harness_is_thinking", False):
         assert think_seen["hit"], (
             "LOCALM_TEST_THINKING_MODEL was set but no raw completion ever "

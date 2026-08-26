@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The applied GPU-split status display (maintainer follow-up to the auto-split
-feature #772): the split distribution actually applied to the loaded model -
-auto free-VRAM-proportional, pinned, or the equal fallback - was visible only
-in the INFO log / bug-report ring buffer. It is now recorded parent-side at
-load time (GgufBackend.applied_gpu_split), exposed on GET /api/models as
-``active_gpu_split`` for the ACTIVE model, and rendered in the sidebar's
-loaded-model status (tests-js/model-split-line.test.mjs).
+"""The applied GPU-split status display: the split distribution actually applied
+to the loaded model - auto free-VRAM-proportional, pinned, or the equal fallback
+- is recorded parent-side at load time (GgufBackend.applied_gpu_split), exposed
+on GET /api/models as ``active_gpu_split`` for the ACTIVE model, and rendered in
+the sidebar's loaded-model status.
 
-The recording mirrors the exact resolution the worker's apply_gpu_split will
-perform (auto override when computed, else the config ratios, else equal -
-through the same resolve_gpu_split validation), normalized to shares summing
-1.0. GGUF-backend only: the HF backend's device_map="auto" placement is
-torch-internal and not recorded (the route simply omits the key)."""
+The recording mirrors the resolution the worker's apply_gpu_split performs (auto
+override when computed, else the config ratios, else equal, through the same
+resolve_gpu_split validation), normalized to shares summing 1.0. GGUF-backend
+only: the HF backend's device_map="auto" placement is torch-internal and not
+recorded, and the route omits the key."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -28,8 +26,7 @@ GB = 1024 ** 3
 
 @pytest.fixture
 def gui_app():
-    """Minimal attach_gui harness, mirroring tests/test_gui.py's gui_app
-    (module-local there, so replicated rather than imported)."""
+    """Minimal attach_gui harness."""
     app = FastAPI()
 
     async def switch_model(name):
@@ -53,9 +50,9 @@ def _backend(tmp_path):
 
 def _load(backend):
     # discover.list_gpus is stubbed by _cfg() (always called before _load() in
-    # this file) - it now backs both resolve_gpu_split's bare-list validation
-    # call AND GgufBackend._load_native's own before/after VRAM-display reads
-    # (see gguf.py, #960), so no separate _vram_levels patch is needed here.
+    # this file) - it backs both resolve_gpu_split's bare-list validation call
+    # and GgufBackend._load_native's own before/after VRAM-display reads, so no
+    # separate _vram_levels patch is needed here.
     with patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                "spawn_and_load",
                return_value={"n_layers": 1, "kv_bytes_per_token": 0,
@@ -71,12 +68,11 @@ class TestBackendRecordsAppliedSplit:
             "localm.config.load_config",
             lambda: {**base, "gpu_split_indices": indices,
                      "gpu_split_ratios": ratios})
-        # Must tolerate BOTH callers: resolve_gpu_split's own bare list_gpus()
-        # call (validating configured indices) and GgufBackend._load_native's
+        # Tolerates BOTH callers: resolve_gpu_split's own bare list_gpus() call
+        # (validating configured indices) and GgufBackend._load_native's
         # list_gpus(return_status=True, wait_for_inflight=True) VRAM-display
-        # reads (#960) - a zero-arg-only double would TypeError on the latter.
-        # These entries carry no "total", so _load_native's print loop skips
-        # them (display content is out of scope for this file's tests).
+        # reads. These entries carry no "total", so _load_native's print loop
+        # skips them.
         monkeypatch.setattr(
             discover, "list_gpus",
             lambda **kw: ([{"index": 0}, {"index": 1}], "ok")
@@ -109,9 +105,7 @@ class TestBackendRecordsAppliedSplit:
 
     def test_equal_fallback_recorded(self, tmp_path, monkeypatch):
         """Auto declined (unmeasurable) with no pinned ratios: the loader
-        applies the equal split, and the display must say so rather than
-        showing nothing - the user configured a split and deserves to see
-        what it actually did."""
+        applies the equal split, and that is what gets recorded."""
         self._cfg(monkeypatch, indices=[0, 1])
         monkeypatch.setattr(discover, "resolve_auto_split_ratios",
                             lambda *a, **k: None)
@@ -130,9 +124,8 @@ class TestBackendRecordsAppliedSplit:
         assert b.applied_gpu_split is None
 
     def test_degraded_split_records_none(self, tmp_path, monkeypatch):
-        """A split that resolve_gpu_split collapses (stale index, single
-        survivor) applies NO split at load - recording one would display a
-        distribution that does not exist."""
+        """A split that resolve_gpu_split collapses (a stale index, a single
+        survivor) applies NO split at load, and records none."""
         self._cfg(monkeypatch, indices=[0, 5])
         monkeypatch.setattr(discover, "resolve_auto_split_ratios",
                             lambda *a, **k: None)
@@ -142,10 +135,9 @@ class TestBackendRecordsAppliedSplit:
 
 
 class TestModelsRouteExposesActiveSplit:
-    """GET /api/models carries active_gpu_split for the ACTIVE model's engine
-    (absent when there is no split, no backend recording, or no active
-    model) - the sidebar's 30s model refresh is the natural carrier, no new
-    endpoint or poll."""
+    """GET /api/models carries active_gpu_split for the ACTIVE model's engine,
+    and omits it when there is no split, no backend recording, or no active
+    model. The sidebar's 30s model refresh is what carries it."""
 
     def _client(self, gui_app, monkeypatch, split):
         import localm.inference.http_server as hs

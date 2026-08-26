@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - models sidebar selector (split from app.js). Classic script: it
-   shares the one global lexical environment with the other app/* and
-   pages/* scripts, so every cross-section reference resolves by bare
-   name exactly as before. */
+/* localm GUI - models sidebar selector. */
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+// --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
 import { $, GIB, authHeaders, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
@@ -13,62 +10,45 @@ import { refreshPerfEstimate } from "./settings-perf.js";
 export const modelSelect = $("model-select");
 export const sidebarUnloadBtn = $("sidebar-unload-btn");
 
-// ADR-0008 U4: tracks whether the status pill is CURRENTLY showing a caller's
-// deliberate busy state (e.g. switchModel's "loading X…"), so refreshModels()'s
-// periodic "ok" write does not clobber it - the pre-existing race this fix closes.
-// Generic on purpose (any future busy-setter is covered), not tied to one
-// specific caller.
+// Whether the status pill is currently showing a caller's busy state (e.g.
+// switchModel's "loading X…"). refreshModels()'s periodic "ok" write is gated on
+// this so it does not clobber one.
 let _statusBusy = false;
 
-// docs/gui-design.md rule 6: state renders as a .job-state pill, not a bare
-// colored dot. busy maps to st-running (accent) rather than a bespoke yellow -
-// "loading/unloading" is the same "work in progress" semantic job-state already
-// uses for st-running elsewhere (e.g. the activity pill).
+// State renders as a .job-state pill; busy maps to st-running.
 const STATUS_STATE_CLASS = { ok: "st-ok", busy: "st-running", err: "st-error" };
 
 export function setStatus(state, text) {
   _statusBusy = state === "busy";
   $("status-text").className = "job-state " + (STATUS_STATE_CLASS[state] || "");
   $("status-text").textContent = text;
-  // The pill is HIDDEN for "ok" only, because that is the one state whose text
-  // the dropdown directly above already shows: "ok" carries the active model's
-  // name, or "no model" - and the select renders exactly that, including its
-  // explicit disabled "No model loaded" placeholder when nothing is active. Two
-  // controls saying the same thing is noise, so "ok" renders as the select
-  // alone.
+  // The pill is hidden for "ok" alone: the dropdown above already renders the
+  // active model's name, or its disabled "No model loaded" placeholder. "busy"
+  // and "err" stay visible - neither is expressible in the select, and "err" is
+  // the only surface for "server unreachable", "load failed", "unload failed",
+  // "models unavailable (HTTP n)" and "page out of date".
   //
-  // "busy" and "err" STAY VISIBLE and must never be folded into this (rule 5:
-  // we do not hide problems). Neither is derivable from the select: "busy" is a
-  // transient "loading X…"/"unloading X…" the select cannot express, and "err"
-  // is the ONLY surface for "server unreachable", "load failed", "unload
-  // failed", "models unavailable (HTTP n)" and "page out of date". Hiding the
-  // whole element would delete the load-failure report, not just a duplicate.
-  //
-  // The text/class are written FIRST and unconditionally, so a hidden pill
+  // The text and class are written first and unconditionally, so a hidden pill
   // still holds the last state for anything that reads it.
   const box = $("model-status");
   if (box) box.hidden = state === "ok";
 }
 
 // Live hardware monitor in the status bar (CPU/RAM/VRAM/GPU). Renders whatever
-// /api/stats reports; any section the box can't measure is simply absent (no
-// psutil -> no CPU/RAM). The "AMD -> no GPU%" caveat that used to sit here is
-// gone: AMD boards report GPU load through the card's own activity sensor.
-// VRAM shows used/total when the used figure is known, and an explicitly
-// labelled "N GB total" when it is not - never a bare total, which reads as a
-// full card.
+// /api/stats reports; any section the box cannot measure is simply absent (no
+// psutil -> no CPU/RAM). VRAM shows used/total when the used figure is known,
+// and an explicitly labelled "N GB total" when it is not.
 export function renderHwStats(data) {
   const el = $("hw-stats");
   if (!el) return;
   const gib = (b) => (b / GIB).toFixed(1);
-  // Each metric is its own <span> so the VRAM figure can carry a subtle fullness
-  // colour. The colour rides ONLY on a trustworthy used/total (the backend sends
-  // `used` only for a fresh, device-global reading - see sysstats._vram); a
-  // total-only reading gets no colour, since there is nothing to be "full" of.
+  // Each metric is its own <span> so the VRAM figure can carry a fullness
+  // colour. That colour is applied only to a used/total reading (the backend
+  // sends `used` only for a fresh, device-global one - see sysstats._vram); a
+  // total-only reading gets none.
   const spans = [];
   // `metric` pins the span to a GRID COLUMN in CSS (load left, memory right).
-  // Without it the layout would depend on where the row happens to wrap, and a
-  // missing metric would slide the rest sideways - see the .hw-stats rule.
+  // See the .hw-stats rule.
   const add = (metric, text, cls) => {
     const s = document.createElement("span");
     s.textContent = text;
@@ -77,30 +57,22 @@ export function renderHwStats(data) {
     spans.push(s);
   };
   // ORDER: CPU, RAM, GPU, VRAM - two pairs, each "load, then memory", laid out
-  // as a real 2x2 GRID (system on row 1, graphics card on row 2) rather than a
-  // row that happens to wrap after two. Each span is pinned to its column by
-  // `data-metric`, so an ABSENT metric leaves its cell empty instead of pulling
-  // the next one into the wrong column - which matters here because absence is
-  // routine, not exceptional: no psutil means no CPU/RAM, and an AMD card
-  // reports no GPU%.
+  // as a 2x2 grid (system on row 1, graphics card on row 2). Each span is pinned
+  // to its column by `data-metric`, so an absent metric leaves its cell empty
+  // instead of pulling the next one into the wrong column.
   if (data && data.cpu && typeof data.cpu.percent === "number")
     add("cpu", `CPU ${Math.round(data.cpu.percent)}%`);
-  // RAM as used/total GB, matching the VRAM figure it now sits above - a bare
-  // percentage next to "3.6/16.0 GB" was the odd one out, and the absolute
-  // number is what tells you whether another model will fit. sysstats sends
+  // RAM as used/total GB, matching the VRAM figure below it. sysstats sends
   // used/total/percent together or omits `ram` entirely; the percent branch is
-  // the fallback for an older server or a proxy returning a partial payload.
+  // the fallback for a partial payload.
   if (data && data.ram) {
     const r = data.ram;
     if (r.used != null && r.total) add("ram", `RAM ${gib(r.used)}/${gib(r.total)} GB`);
     else if (typeof r.percent === "number") add("ram", `RAM ${Math.round(r.percent)}%`);
   }
-  // The aggregate GPU% is emitted ONLY on a single-card board. /api/stats sends
-  // one system-wide figure (nvidia-smi, NVIDIA only) with no card attribution, so
-  // on a multi-card board it can neither be placed beside a specific card nor
-  // given a row of its own without implying it belongs to one. The per-card rows
-  // below replace it with something that IS attributable; this is a swap for
-  // better information, not a hidden metric.
+  // The aggregate GPU% is emitted ONLY on a single-card board: /api/stats sends
+  // one system-wide figure (nvidia-smi, NVIDIA only) with no card attribution.
+  // On a multi-card board the per-card rows below stand in for it.
   const multi = !!(data && data.vram && Array.isArray(data.vram.devices)
                    && data.vram.devices.length > 1);
   if (!multi && data && data.gpu && typeof data.gpu.percent === "number")
@@ -111,35 +83,29 @@ export function renderHwStats(data) {
   };
   if (data && data.vram && data.vram.total) {
     const v = data.vram;
-    // MULTI-GPU: one row PER CARD, never the combined figure alone. The
-    // aggregate is actively misleading per-card - 22/48 GB reads as comfortable
-    // while card 0 sits at 20/24. The backend sends `devices` only when there
-    // is more than one, so the single-card path below is untouched.
+    // MULTI-GPU: one row PER CARD, never the combined figure alone. The backend
+    // sends `devices` only when there is more than one card, so the single-card
+    // path below is unaffected.
     if (multi) {
       v.devices.forEach((d, i) => {
         const label = d.index == null ? `GPU${i}` : `GPU${d.index}`;
         // Column 1 carries the card's IDENTITY, not a utilisation percent:
         // /api/stats reports gpu.percent as ONE system-wide figure (nvidia-smi,
-        // NVIDIA only), so printing it beside a specific card would attribute
-        // whole-board load to that card. The label is true; a borrowed percent
-        // would not be.
+        // NVIDIA only), which belongs to no single card.
         add("gpu", label);
         if (d.used != null) {
           add("vram", `${gib(d.used)}/${gib(d.total)} GB`, `vram-usage ${band(d.used, d.total)}`);
         } else {
-          // "total" is LOAD-BEARING, not decoration. Without it this renders
-          // "16.0 GB" under a VRAM label that means used/total everywhere else,
-          // so a card with nothing resident reads as a card that is completely
-          // full - the exact inverse of the truth. Two different meanings must
-          // never share one label with nothing to tell them apart.
+          // The "total" word is required: the VRAM label means used/total
+          // everywhere else, so a bare figure would read as a full card.
           add("vram", `${gib(d.total)} GB total`);
         }
       });
     } else if (v.used != null) {
       add("vram", `VRAM ${gib(v.used)}/${gib(v.total)} GB`, `vram-usage ${band(v.used, v.total)}`);
     } else {
-      // See the per-card branch above: unqualified, this reads as "16 GB IN USE"
-      // while nothing is loaded.
+      // The "total" word is required here for the same reason as the per-card
+      // branch above.
       add("vram", `VRAM ${gib(v.total)} GB total`);
     }
   }

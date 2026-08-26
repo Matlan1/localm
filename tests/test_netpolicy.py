@@ -54,10 +54,8 @@ class TestNetworkMode:
         assert network_mode() == "ask"
 
     def test_config_read_failure_resolves_off(self, monkeypatch, caplog):
-        # HON-2: an unreadable config must NOT silently downgrade an explicit
-        # net_mode="off" kill switch to "ask" (fail-open). It fails SAFE to
-        # "off" and surfaces a warning; erring toward no network, never toward
-        # more.
+        # An unreadable config must NOT downgrade an explicit net_mode="off"
+        # kill switch to "ask". It resolves to "off" and surfaces a warning.
         def boom():
             raise OSError("config unreadable")
         monkeypatch.setattr("localm.config.load_config", boom)
@@ -183,11 +181,11 @@ class TestCheckUrl:
         check_url("https://does-not-exist.example/")   # fetch will fail later
 
     def test_config_read_failure_refuses_regardless_of_env_mode(self, monkeypatch):
-        # LM-DA-046: net_mode and net_deny/net_allow must come from ONE config
-        # read. Before the fix, LOCALM_NET_MODE=allow short-circuited the mode
-        # check before the config was ever touched, so a config-read failure
-        # resolved to an empty net_deny/net_allow instead of a refusal - a host
-        # the owner explicitly denied would have been let straight through.
+        # net_mode and net_deny/net_allow come from ONE config read: an env
+        # LOCALM_NET_MODE=allow must not short-circuit the mode check before the
+        # config is touched, or a config-read failure would resolve to an empty
+        # net_deny/net_allow instead of a refusal, letting an explicitly denied
+        # host through.
         monkeypatch.setenv("LOCALM_NET_MODE", "allow")
         monkeypatch.setattr(
             "socket.getaddrinfo",
@@ -336,9 +334,9 @@ class TestHtmlToText:
         assert isinstance(html_to_text("<div><p>ok<"), str)
 
     def test_void_meta_link_in_head_do_not_swallow_body(self):
-        # Regression: <meta> and <link> are void (no end tag). They must not
-        # leave the skip counter stuck > 0, which previously dropped the entire
-        # <body> so html_to_text returned "" for every real HTML page.
+        # <meta> and <link> are void (no end tag). They must not leave the skip
+        # counter stuck > 0, which would drop the entire <body> and make
+        # html_to_text return "" for every real HTML page.
         text = html_to_text(
             "<html><head>"
             "<meta charset='utf-8'>"

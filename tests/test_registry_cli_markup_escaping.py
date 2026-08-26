@@ -4,11 +4,7 @@ Ollama-manifest digest shown by `localm/model_manager/registry.py`'s
 console.print()/Table calls must survive verbatim - Rich's Console.print()
 parses "[...]" in ANY interpolated string as markup, not just inside a
 call's own literal [style] tags, and Table.add_row() cells parse markup the
-same way. Reproduced directly against this venv's rich (see
-dev-notes/RAG-CLI-MARKUP-ESCAPING-2026-08-20.md and
-tests/test_rag_cli_markup_escaping.py, which fixed the identical pattern in
-rag.py/errors.py first, and tests/test_models_cli_markup_escaping.py, which
-fixed it one layer up in localm/cli/models.py):
+same way. Rich renders these as:
 
     Console().print('report[draft].txt')       -> prints "report.txt"
     Console().print('notes[bold red].md')      -> prints "notes.md"
@@ -28,8 +24,7 @@ verbatim (POST /api/models/remove).
 These tests call registry.py's functions directly (not through CliRunner):
 none of them need a running server or a real HuggingFace API response, and a
 direct call exercises the exact code under test without click/CliRunner
-overhead - the same approach test_model_rename.py's own `fake_registry`
-fixture (mirrored here) already uses for this module.
+overhead.
 
 Two bracket shapes are used throughout, matching the reference files' own
 constants and the two distinct Rich failure modes: BRACKET_DROP (an
@@ -211,9 +206,9 @@ class TestSetModelTypeMarkupEscaping:
         assert BRACKET_STYLE in out, f"the unknown name must survive verbatim: {out!r}"
 
     def test_invalid_type_shows_bracketed_value_verbatim(self, fake_registry, capsys):
-        # The confirmed high-priority gap: new_type used to go through !r,
-        # which does NOT protect against Rich markup (verified empirically:
-        # repr() only escapes quotes/backslashes, "[" and "]" pass through).
+        # new_type is not passed through !r, which does NOT protect against Rich
+        # markup: repr() escapes quotes and backslashes only, and "[" and "]"
+        # pass through.
         store, models_dir = fake_registry
         store["m"] = {"path": str(_mkfile(models_dir, "m.gguf"))}
         ok = mm.set_model_type("m", BRACKET_DROP)
@@ -468,8 +463,7 @@ class TestResolveOllamaManifestMarkupEscaping:
 
     def test_malformed_digest_survives_verbatim(self, tmp_path, capsys):
         # digest is REMOTE-authored (the whole point of this branch is that it
-        # failed the safe-charset check), so it must be escaped. Previously
-        # shown via !r, which does not protect against Rich markup.
+        # failed the safe-charset check), so it must be escaped.
         digest = f"sha256:not-hex-{BRACKET_DROP}"
         manifest_dir = self._manifest_dir(tmp_path, digest)
         result = mm._resolve_ollama_manifest(manifest_dir)

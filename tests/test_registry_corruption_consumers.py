@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A malformed registry.json entry must never crash the REMAINING registry
-consumers that #562 left unguarded.
+"""A malformed registry.json entry must never crash a registry consumer.
 
-#562 added the shared `_entry_path()` helper (exported from
-`localm.model_manager`) and routed registry.py's own consumers + the MCP
-`list_models` through it, so a single JSON-valid-but-wrong-shape entry is SKIPPED
-or shown corrupt rather than crashing. But four other registry-iterating consumers
-still crashed on the same entry (plus a fifth, same-file lookup found while
-completing the sweep). Each test below drives the real consumer with a good model
-plus one malformed sibling and asserts it does not 500 / raise.
+The shared `_entry_path()` helper (exported from `localm.model_manager`) is what
+registry.py's own consumers and the MCP `list_models` route through, so a single
+JSON-valid-but-wrong-shape entry is SKIPPED or shown corrupt rather than
+crashing. Five other registry-iterating consumers reach the same entry. Each
+test below drives the real consumer with a good model plus one malformed sibling
+and asserts it does not 500 or raise.
 
-Sites covered (see dev-notes/registry-corruption-consumers-2026-07-11.md):
+Sites covered:
   1. GET /api/models            (plugins/gui/routes/models.py list loop)
   2. GET /v1/models/{id}        (inference/routes/models.py model_detail)
   3. _pull_hf_snapshot dedup    (model_manager/pull.py "same repo?" scan)
@@ -29,8 +27,8 @@ from localm.inference.http_server import create_app
 from localm.plugins.gui.web import attach_gui
 
 # The shapes a hand-edited / half-written / cross-version registry.json can take.
-# Kept identical to tests/test_model_dedup.py::BAD_ENTRIES (the #562 matrix) so
-# the two suites cover the exact same adversarial inputs.
+# Kept identical to tests/test_model_dedup.py::BAD_ENTRIES so the two suites cover
+# the exact same adversarial inputs.
 BAD_ENTRIES = {
     "string_entry": "oops",                            # not a dict at all
     "null_entry": None,                                # null value
@@ -132,8 +130,8 @@ def _inf_client():
 def test_model_detail_malformed_entry_never_500(bad_key, bad_val):
     """Site 2: model_detail on a corrupt id must never 500. A non-dict / null value
     is 404 (not a usable model record); a dict with a missing / null / non-string /
-    empty path renders as a pathless model (path="", size None) - the same BUG-3
-    contract that test_model_detail_empty_path_does_not_walk_cwd pins down."""
+    empty path renders as a pathless model (path="", size None), the same contract
+    test_model_detail_empty_path_does_not_walk_cwd pins down."""
     client = _inf_client()
     reg = {"good": _GOOD, bad_key: bad_val}
     with patch("localm.config.load_registry", return_value=reg):
@@ -150,8 +148,8 @@ def test_model_detail_malformed_entry_never_500(bad_key, bad_val):
 @pytest.mark.parametrize("bad_key,bad_val", _BAD)
 def test_model_detail_good_model_with_malformed_sibling(bad_key, bad_val):
     """The `aliases` scan iterates EVERY entry, so a malformed SIBLING must not
-    crash a detail lookup for a healthy model (non-dict sibling -> AttributeError
-    pre-fix)."""
+    crash a detail lookup for a healthy model (a non-dict sibling raises
+    AttributeError unguarded)."""
     client = _inf_client()
     reg = {"good": _GOOD, bad_key: bad_val}
     with patch("localm.config.load_registry", return_value=reg):
@@ -236,8 +234,8 @@ def test_pull_hf_dedup_survives_bad_path_on_matching_source(tmp_path, monkeypatc
 def test_scan_comfy_models_survives_malformed_entry(tmp_path, monkeypatch,
                                                     bad_key, bad_val):
     """Site 4: the launch/GUI-button scan builds existing_paths from every entry;
-    a null entry (`"path" in None`) or a null/int path (`Path(...)`) once crashed
-    the whole scan. It must complete (nothing to add here) instead."""
+    a null entry (`"path" in None`) or a null/int path (`Path(...)`) crashes the
+    whole scan unguarded. It must complete (nothing to add here) instead."""
     import localm.model_manager.scan as scan_mod
 
     workdir = tmp_path / "comfy"

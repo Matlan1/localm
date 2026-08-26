@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Import-time diagnostics must survive until a log handler exists.
 
-Regression cover for the dud fix that shipped in #637: the
-`except ImportError` branch of `_wire_plugin_cli_entries` was given a
-`logger.debug(...)` that could NEVER emit, because the function runs at
-module-import time - before Click invokes main() to install the ring buffer and
+The `except ImportError` branch of `_wire_plugin_cli_entries` runs at
+module-import time, before Click invokes main() to install the ring buffer and
 before any enable_debug(). At that moment the localm logger has no handler and
-inherits the root's WARNING level, so a DEBUG record is dropped AT THE CALL.
+inherits the root's WARNING level, so a `logger.debug(...)` record is dropped AT
+THE CALL.
 
-These tests deliberately do NOT use caplog: caplog attaches a root handler and
-forces level 0, which MASKS the exact production condition (no handler, level
-inherited from root) that made the original fix dead code. A caplog-based test
-would have false-passed on the broken code.
+These tests do NOT use caplog: caplog attaches a root handler and forces level
+0, which masks the production condition under test (no handler, level inherited
+from root).
 """
 import logging
 
@@ -22,11 +20,9 @@ import pytest
 def pristine_logging(monkeypatch):
     """Reproduce the REAL import-time logging state, and restore it afterwards.
 
-    Getting this exactly right IS the test: the window being reproduced is "no
-    handler on the localm logger, level NOTSET so the root's WARNING is what is
-    in force". Two traps make a naive reset silently wrong, and both were found
-    by this file's own precondition assert failing in a full-suite run while
-    passing standalone:
+    The window being reproduced is "no handler on the localm logger, level
+    NOTSET so the root's WARNING is what is in force". Two things make a naive
+    reset silently wrong:
 
     1. logging.Logger.isEnabledFor() MEMOISES its answer per level in
        Logger._cache, and only setLevel()/_clear_cache() invalidate it. Assigning
@@ -38,8 +34,7 @@ def pristine_logging(monkeypatch):
        test left it set, enable_debug() returns the OLD path without opening a
        new log, and assertions read the wrong file.
 
-    Note this deliberately does NOT use caplog, which attaches a root handler and
-    forces level 0 - that would mask the very condition under test.
+    Does NOT use caplog, which attaches a root handler and forces level 0.
     """
     from localm import debuglog
     root = logging.getLogger()
@@ -71,8 +66,7 @@ class TestDeferLog:
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         from localm import debuglog
 
-        # The precondition IS the point: a DEBUG record must be dropped in this
-        # state, or the test is not reproducing the import-time window.
+        # Precondition: a DEBUG record is dropped in this state.
         assert not debuglog.logger.isEnabledFor(logging.DEBUG), (
             "precondition: a DEBUG record must be dropped in this state - if this "
             "fails the test is no longer reproducing the import-time window"
@@ -111,10 +105,9 @@ class TestPluginCliWiringDiagnostic:
     def test_broken_plugin_cli_import_is_recorded_not_silent(self, monkeypatch):
         """A first-party plugin CLI that fails to import must leave a trace.
 
-        Drives the REAL _wire_plugin_cli_entries() with a forced ImportError and
-        asserts the diagnostic lands in the deferred queue - i.e. it is recorded
-        through a mechanism that actually works at import scope, rather than a
-        logger.debug() that is dropped on the floor.
+        Drives the REAL _wire_plugin_cli_entries() with a forced ImportError
+        and asserts the diagnostic lands in the deferred queue, the mechanism
+        that works at import scope.
         """
         import importlib
 

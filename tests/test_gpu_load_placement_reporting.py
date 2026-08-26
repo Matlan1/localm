@@ -1,18 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""AGENTS.md rule 5: POST /v1/models/load reported unqualified success even
-when the backend's own sizing (_auto_gpu_layers, llamacpp/_sizing.py)
-deferred to a partial or zero GPU offload (a model too big to fully fit VRAM
-still loads, deliberately, but entirely on CPU or split CPU/GPU) - the API
-caller had no way to tell that apart from a full GPU load.
+"""POST /v1/models/load must not report unqualified success when the backend's
+own sizing (_auto_gpu_layers, llamacpp/_sizing.py) settled on a partial or zero
+GPU offload. A model too big to fully fit VRAM still loads, entirely on CPU or
+split CPU/GPU, and the API caller has to be able to tell that apart from a full
+GPU load.
 
-GgufBackend now records gpu_layers_offloaded/gpu_layers_total in
-_load_native (mirroring how applied_gpu_split is recorded, see
-test_gpu_split_status_display.py, whose _load() helper this borrows), so
-Engine.gpu_placement (tests/test_engine.py), switch_engine's returned dict,
-and the /v1/models/load response (tests/test_http_server.py) can all report
-it. This file tests the backend-level recording itself: the exact arithmetic
-against the model's TRUE layer count reported back by the native worker this
-load, not a re-guess.
+GgufBackend records gpu_layers_offloaded/gpu_layers_total in _load_native, the
+same way applied_gpu_split is recorded, so Engine.gpu_placement, switch_engine's
+returned dict and the /v1/models/load response can all report it. This file
+covers the backend-level recording: the arithmetic against the model's TRUE
+layer count reported back by the native worker for this load.
 """
 
 import asyncio
@@ -46,9 +43,8 @@ def _load(backend, *, n_layers):
 class TestBackendRecordsGpuPlacement:
     def test_full_offload_sentinel_resolves_to_true_total_not_degraded(self, tmp_path):
         # n_gpu_layers=99 ("everything") is the sentinel the loader hands
-        # llama.cpp when the whole model fits - the true count only becomes
-        # known from the worker's response, so the recorded "offloaded" must
-        # be the real total, not the raw 99 sentinel.
+        # llama.cpp when the whole model fits; the recorded "offloaded" count is
+        # the real total from the worker's response, not the raw sentinel.
         b = _backend(tmp_path, n_gpu_layers=99)
         b.effective_gpu_layers = 99
         _load(b, n_layers=32)
@@ -57,9 +53,8 @@ class TestBackendRecordsGpuPlacement:
 
     def test_auto_sized_partial_offload_recorded_against_true_total(self, tmp_path):
         # _auto_gpu_layers resolved a partial count (e.g. 12 of 32) before the
-        # native call - that exact number, not the sentinel, is what
-        # llama.cpp was actually handed and is the ground truth once the load
-        # has succeeded.
+        # native call; that number, not the sentinel, is what llama.cpp was
+        # handed.
         b = _backend(tmp_path, n_gpu_layers=99, n_gpu_layers_auto=True)
         b.effective_gpu_layers = 12
         _load(b, n_layers=32)
@@ -67,9 +62,7 @@ class TestBackendRecordsGpuPlacement:
         assert b.gpu_layers_offloaded == 12
 
     def test_zero_offload_recorded_as_zero_not_none(self, tmp_path):
-        # The extreme end of the same fallback: the whole model ran on CPU.
-        # Must be the concrete int 0, not None (which would mean "unknown"),
-        # so a caller can distinguish "definitely zero" from "can't tell".
+        # The whole model ran on CPU: the concrete int 0, not None ("unknown").
         b = _backend(tmp_path, n_gpu_layers=99, n_gpu_layers_auto=True)
         b.effective_gpu_layers = 0
         _load(b, n_layers=32)
@@ -77,11 +70,9 @@ class TestBackendRecordsGpuPlacement:
         assert b.gpu_layers_offloaded == 0
 
     def test_explicit_partial_choice_also_recorded(self, tmp_path):
-        # An explicit -g 24 (n_gpu_layers_auto off, or auto on but the user
-        # left an explicit non-99 value) is honoured verbatim by
-        # _effective_gpu_layers and is JUST AS INVISIBLE to an HTTP API
-        # caller as the auto case (the caller never sees the server's config)
-        # - so it is reported the same way, not specially exempted.
+        # An explicit -g 24 (n_gpu_layers_auto off, or auto on with an explicit
+        # non-99 value) is honoured verbatim by _effective_gpu_layers and is
+        # reported the same way as the auto case.
         b = _backend(tmp_path, n_gpu_layers=24, n_gpu_layers_auto=False)
         b.effective_gpu_layers = 24
         _load(b, n_layers=32)
@@ -89,9 +80,8 @@ class TestBackendRecordsGpuPlacement:
         assert b.gpu_layers_offloaded == 24
 
     def test_offloaded_never_exceeds_true_total(self, tmp_path):
-        # A stale/assumed effective_gpu_layers larger than the model's real
-        # layer count (e.g. resolved against _ASSUMED_LAYERS before the true
-        # count was known) must clamp to the true total, not overreport.
+        # An effective_gpu_layers larger than the model's real layer count (e.g.
+        # resolved against _ASSUMED_LAYERS) clamps to the true total.
         b = _backend(tmp_path, n_gpu_layers=99, n_gpu_layers_auto=True)
         b.effective_gpu_layers = 40   # larger than the true 32
         _load(b, n_layers=32)
@@ -99,10 +89,8 @@ class TestBackendRecordsGpuPlacement:
         assert b.gpu_layers_offloaded == 32
 
     def test_unknown_true_total_leaves_total_none(self, tmp_path, monkeypatch):
-        # The worker's response carries no n_layers (defensively handled) and
-        # nothing was cached from a prior load - the true count is genuinely
-        # unknowable this load, so gpu_layers_total must stay None rather
-        # than fabricate a number.
+        # The worker's response carries no n_layers and nothing was cached from a
+        # prior load, so gpu_layers_total stays None.
         monkeypatch.setattr(GgufBackend, "_cached_layer_count", lambda self: None)
         b = _backend(tmp_path, n_gpu_layers=99, n_gpu_layers_auto=True)
         b.effective_gpu_layers = 12
@@ -112,15 +100,14 @@ class TestBackendRecordsGpuPlacement:
                    return_value={"kv_bytes_per_token": 0, "supports_images": False}):
             b._load_native()
         assert b.gpu_layers_total is None
-        # Partial (< the "everything" sentinel) is still an absolute count we
-        # were given, even without a known total to compare it against.
+        # Partial (below the "everything" sentinel) is an absolute count even
+        # with no known total to compare it against.
         assert b.gpu_layers_offloaded == 12
 
     def test_unknown_true_total_and_full_sentinel_leaves_offloaded_none(
             self, tmp_path, monkeypatch):
-        # The one case with genuinely nothing to report: "everything" was
-        # requested (99) and the true count can't be learned this load
-        # either, so there is no way to say whether that was 1 layer or 100.
+        # "Everything" (99) was requested and the true count cannot be learned
+        # this load, so there is nothing to report.
         monkeypatch.setattr(GgufBackend, "_cached_layer_count", lambda self: None)
         b = _backend(tmp_path, n_gpu_layers=99, n_gpu_layers_auto=False)
         b.effective_gpu_layers = 99

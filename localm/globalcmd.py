@@ -2,28 +2,25 @@
 """Install / uninstall an OPTIONAL global ``localm`` command - without ever
 breaking anything already on the user's machine.
 
-Rule zero of this project: never damage the user's existing setup. So:
-
-- ``setx PATH ...`` is BANNED here. It truncates the per-user PATH at 1024
-  characters and SILENTLY corrupts it (it prints "SUCCESS" while eating the
-  rest); it has wiped real users' PATHs and broke the GitHub Desktop installer.
-  On Windows we edit the per-user PATH through the registry (``winreg``, no
-  truncation), append our ONE directory only if absent (idempotent), and
-  broadcast the change so new shells pick it up.
-- We never put the venv's ``Scripts``/``bin`` directory on PATH: it carries
+- ``setx PATH ...`` is BANNED here: it truncates the per-user PATH at 1024
+  characters and SILENTLY corrupts it, printing "SUCCESS" while eating the
+  rest. On Windows the per-user PATH is edited through the registry
+  (``winreg``, no truncation), our ONE directory is appended only if absent
+  (idempotent), and the change is broadcast so new shells pick it up.
+- The venv's ``Scripts``/``bin`` directory NEVER goes on PATH: it carries
   ``python``/``pip`` and would SHADOW the user's own tools. Only a directory
   holding a single ``localm`` shim goes on PATH.
-- On Linux we drop a symlink in ``~/.local/bin`` (already on PATH by
-  convention; pip / pipx / uv use it) and touch a shell rc only if that dir is
-  not yet on PATH.
-- If a DIFFERENT ``localm`` already resolves, we do not clobber it - we append
-  ours (lowest precedence) and report the conflict so the caller can tell the
-  user. Every change is recorded (by install_manifest) for an exact, reversible
-  uninstall.
+- On Linux a symlink goes in ``~/.local/bin`` (already on PATH by convention;
+  pip / pipx / uv use it) and a shell rc is touched only if that dir is not yet
+  on PATH.
+- A DIFFERENT ``localm`` that already resolves is never clobbered: ours is
+  appended (lowest precedence) and the conflict is reported so the caller can
+  tell the user. Every change is recorded (by install_manifest) for an exact,
+  reversible uninstall.
 
 Windows puts the shim in ``<clone>/bin`` (inside the clone, so it travels with
-the install); Linux uses the conventional ``~/.local/bin`` symlink. Both are the
-idiomatic per-OS choice and both are fully reversible.
+the install); Linux uses the conventional ``~/.local/bin`` symlink. Both are
+fully reversible.
 """
 
 from __future__ import annotations
@@ -75,12 +72,7 @@ def _norm(p) -> str:
 def path_dirs(path_value: Optional[str] = None) -> list:
     """The directories ON PATH, lexically normalised, in search order.
 
-    LEXICAL on purpose - no ``resolve()``, no stat, no filesystem I/O of any
-    kind. The question being asked is "is this directory one of the PATH
-    entries", which is a string question; resolving every entry would realpath
-    and stat real system directories on every call, for nothing. (``resolve()``
-    is not a read-only operation - it hits the filesystem - so anything that can
-    be decided lexically is decided lexically first.)"""
+    LEXICAL: no ``resolve()``, no stat, no filesystem I/O of any kind."""
     raw = os.environ.get("PATH", "") if path_value is None else path_value
     return [_norm(e.strip().strip('"')) for e in _split_path(raw) if e.strip()]
 
@@ -89,26 +81,15 @@ def existing_localm(our_shim: Path, clone_root=None) -> Optional[str]:
     """If a DIFFERENT ``localm`` already resolves FROM PATH, return its path so
     the caller can ask the user what to do. Returns None when there is none.
 
-    Three things are deliberately NOT a conflict:
+    Three things are NOT a conflict:
 
     - our own shim (so re-running setup never reports one);
     - anything inside this clone (``clone_root``);
-    - a hit whose directory is not actually on PATH.
-
-    The last two exist because of a real, every-install false positive.
-    ``shutil.which`` on Windows searches the CURRENT DIRECTORY before PATH
-    (mirroring cmd.exe, gated on the ``NoDefaultCurrentDirectoryInExePath``
-    behaviour), setup runs this with the cwd set to the clone, and the clone
-    SHIPS its own ``localm.bat``. So the plain call found OUR OWN launcher and
-    reported it as somebody else's command - on every Windows install - after
-    which setup quietly demoted itself behind a rival that did not exist.
-    Passing ``path=`` does not help: the current-directory insert happens
-    whether or not a search path was supplied."""
+    - a hit whose directory is not actually on PATH."""
     found = shutil.which("localm")
     if not found:
         return None
-    # Lexical rejections first - no filesystem I/O, and they cover the false
-    # positive that made this necessary.
+    # Lexical rejections first: no filesystem I/O.
     absolute = os.path.abspath(found)          # cwd-relative -> absolute, no I/O
     if clone_root is not None:
         root = _norm(clone_root)
@@ -187,11 +168,8 @@ def _win_read_system_path() -> str:
     """The RAW machine PATH, read-only. ``""`` when it cannot be read.
 
     Windows composes a new process's PATH as SYSTEM entries first, then USER
-    entries. So a ``localm`` sitting in the system PATH can NEVER be out-ordered
-    by an edit to the user PATH - and we only ever edit the user PATH (writing
-    the machine one needs admin, and rule zero here is never damage the user's
-    setup). We read it purely so we can say that plainly instead of promising a
-    priority we cannot deliver."""
+    entries, so a ``localm`` sitting in the system PATH can NEVER be out-ordered
+    by an edit to the user PATH - and only the user PATH is ever edited here."""
     try:
         import winreg
 
@@ -215,10 +193,8 @@ def conflict_outranks_user_path(conflict: str) -> bool:
 def _win_path_add(dir_str: str, prepend: bool = False) -> bool:
     """Put *dir_str* on the USER PATH. Returns True if PATH changed.
 
-    Registry write, no ``setx``, every existing entry preserved. With
-    *prepend*, our directory is moved to the FRONT of the user PATH (that is
-    what "make this install's localm the one that runs" means, and it is only
-    ever done because the user asked for it at the prompt)."""
+    Registry write, no ``setx``, every existing entry preserved. With *prepend*,
+    the directory is moved to the FRONT of the user PATH."""
     value, regtype = _win_read_user_path()
     entries = _split_path(value)
     present = [i for i, e in enumerate(entries) if _same_dir(e, dir_str)]
@@ -276,14 +252,11 @@ def _posix_ensure_on_path(bindir: Path, prepend: bool = False):
     - ``(False, None)`` - already on PATH (nothing to do).
     - ``(True, None)``  - an rc was edited (or ~/.profile created) successfully.
     - ``(False, <str>)`` - *bindir* is NOT on PATH but every shell-rc edit failed
-      (unwritable / root-owned / immutable dotfiles). This is the case the caller
-      MUST NOT report as "already on PATH": we could not persist the change, so
-      *note* names the manual step. A note, not a raise - startup must not abort
-      over a PATH nicety (module header: never a silent false success)."""
-    # With *prepend* the rc line is written even when bindir is already on
-    # PATH: that line puts it FIRST, which is the only way to out-rank a
-    # `localm` an earlier PATH entry already provides. Only ever reached
-    # because the user picked it at the conflict prompt.
+      (unwritable / root-owned / immutable dotfiles). A caller must not report
+      that as "already on PATH"; *note* names the manual step. A note, not a
+      raise."""
+    # With *prepend* the rc line is written even when bindir is already on PATH,
+    # since that line puts it first.
     if _posix_on_path(bindir) and not prepend:
         return False, None
     line = f'\n{_RC_MARK}\nexport PATH="$HOME/.local/bin:$PATH"\n'
@@ -306,9 +279,8 @@ def _posix_ensure_on_path(bindir: Path, prepend: bool = False):
         except OSError:
             pass
     if not edited:
-        # Reached only when bindir is NOT on PATH (we passed the early return) and
-        # every rc edit AND the ~/.profile fallback failed: we truly could not add
-        # it. Surface the truth so main() does not print "already on PATH".
+        # Reached only when bindir is NOT on PATH and every rc edit AND the
+        # ~/.profile fallback failed.
         return False, (f"could not add {bindir} to your PATH (could not edit your "
                        "shell startup files); add it manually")
     return True, None
@@ -328,9 +300,8 @@ def install(clone_root, precedence: str = "append") -> dict:
 
     *precedence* is ``"append"`` (default - behind anything already there, so
     nothing that currently works changes) or ``"prepend"`` (this install's
-    command wins). It is the USER'S answer to the conflict prompt in ``main``,
-    never a guess made here: deciding it for them is the bug this parameter
-    exists to remove."""
+    command wins). It carries the user's answer to the conflict prompt in
+    ``main``."""
     clone_root = Path(clone_root)
     d = bin_dir(clone_root)
     shim = shim_path(clone_root)
@@ -401,14 +372,9 @@ def ask_conflict(conflict: str, clone_root, assume_yes: bool = False,
                  ask=None) -> str:
     """Ask which ``localm`` should run. Returns 'priority' | 'keep' | 'skip'.
 
-    This exists because the old behaviour DECIDED: it added this install behind
-    whatever it found, announced that the other one wins "until you reorder
-    PATH", and called that done. Reordering PATH is exactly the thing the user
-    was asking us to do, and nobody was asked which they wanted.
-
-    The DEFAULT is still 'keep' - pressing Enter changes nothing about a command
-    that already works (module rule zero). Non-interactive callers get 'keep'
-    too, and are told so rather than being silently prompted into a hang."""
+    The DEFAULT is 'keep', so pressing Enter changes nothing about a command
+    that already works. A non-interactive caller gets 'keep' too, and is told
+    so rather than being prompted into a hang."""
     out = []
     out.append("  [!] A different 'localm' command already exists:")
     out.append(f"        {conflict}")
@@ -478,8 +444,8 @@ def main(argv=None) -> int:
         print(shim_path(args.root))
         return 0
     if args.cmd == "install":
-        # Detect the conflict and ASK before touching anything: precedence is
-        # decided by the answer, so it cannot be asked after the fact.
+        # Detect the conflict and ask before touching anything: precedence is
+        # decided by the answer.
         try:
             conflict = existing_localm(shim_path(args.root), args.root)
         except Exception:
@@ -495,9 +461,8 @@ def main(argv=None) -> int:
         try:
             res = install(args.root, precedence=precedence)
         except Exception as e:
-            # A real failure (cannot write the shim / edit PATH): report it clearly
-            # and exit nonzero so the installer records NOTHING - the manifest must
-            # never claim an install that did not happen (rules 6 + 11).
+            # A real failure (cannot write the shim / edit PATH): report it and
+            # exit nonzero, so the installer records nothing in the manifest.
             print(f"  [!] Could not add the global command: {e}")
             return 1
         # Report what was DONE, per the answer given - never a generic claim.
@@ -519,17 +484,15 @@ def main(argv=None) -> int:
             return 0
         note = res.get("path_note")
         if note:
-            # The shim was created but we could NOT put its dir on PATH. Do not
-            # claim it "was already on PATH" (false); tell the user the truth and
-            # the manual step. Still exit 20 (installed, PATH not modified by us) so
-            # the manifest records the shim without a --path-modified it did not do.
+            # The shim was created but its dir could NOT be put on PATH: report
+            # the manual step, and still exit 20 (installed, PATH not modified)
+            # so the manifest records the shim without --path-modified.
             print(f"  [!] Global command created, but {note}.")
             print("      Add that directory to your PATH, then open a new terminal.")
             return 20
         # Installed, and PATH was already set (a re-run, or the dir was present).
-        # Exit 20 tells setup to record the command WITHOUT --path-modified, so the
-        # manifest never claims to have changed a PATH it did not, and uninstall
-        # will not take a dir off PATH that we did not put there.
+        # Exit 20 tells setup to record the command WITHOUT --path-modified, so
+        # uninstall will not take a dir off PATH it did not add.
         print("  'localm' is available (its directory was already on PATH). "
               "Open a new terminal if it is not found yet.")
         return 20

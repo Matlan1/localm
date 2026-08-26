@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Search results show what a model IS - architecture family, MoE-ness,
-// parameter count - on top of #990's type badge. All three are display-only
-// fields discover.py attaches to a classified row (see dev-notes/ADR-0005);
-// these tests cover the rendering in discRepoRow, not the server-side fields
-// (that is tests/test_discover.py::TestArchitectureMoeParamCount). Same
-// harness/fetch-mock style as models-discover-type-scoped.test.mjs.
-
+// Covers discRepoRow's rendering of the architecture, MoE and param-count fields.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
@@ -44,10 +38,8 @@ test("discover-arch-moe: a confirmed-MoE result shows architecture + a solid MoE
 });
 
 test("discover-arch-moe: a name-inferred MoE result is visibly weaker than a confirmed one", async () => {
-  // Live-verified counter-example (ADR-0005): TheBloke/Mixtral-8x7B-v0.1-GGUF
-  // is real MoE but its architecture header says 'llama', not anything
-  // containing 'moe' - discover.py falls back to the repo-name pattern and
-  // marks it 'likely', never 'confirmed'.
+  // an architecture header of 'llama' with an MoE repo name: the server marks
+  // this 'likely', never 'confirmed'
   const payload = { query: "", vram: {}, hf_backend_available: true, results: [
     { id: "TheBloke/Mixtral-8x7B-v0.1-GGUF", downloads: 900, likes: 50, updated: "",
       formats: ["gguf"], detected_type: "llm",
@@ -82,8 +74,7 @@ test("discover-arch-moe: a result with no MoE evidence shows no MoE badge (never
 });
 
 test("discover-arch-moe: a legacy/untyped result (no architecture/moe/param_count keys) renders none of the new badges", async () => {
-  // Mirrors the server-side contract: model_types=None never attaches these
-  // fields, so the GUI must not invent them from an absent key either.
+  // model_types=None attaches none of these fields
   const payload = { query: "", vram: {}, hf_backend_available: true, results: [
     { id: "org/legacy-result", downloads: 1, likes: 0, updated: "", formats: ["gguf"] },
   ] };
@@ -130,8 +121,7 @@ test("discover-arch-moe: no legend when nothing on screen needs it", async () =>
 });
 
 test("discover-arch-moe: these badges are purely additive - every result still renders regardless", async () => {
-  // The TRAP the coordinator flagged: none of this may become a filter. Two
-  // results, wildly different metadata completeness, both must appear.
+  // two results with different metadata completeness
   const payload = { query: "", vram: {}, hf_backend_available: true, results: [
     { id: "org/rich-metadata", downloads: 1, likes: 0, updated: "", formats: ["gguf"],
       detected_type: "llm", architecture: "mixtral", moe: "confirmed", param_count: 46_700_000_000 },

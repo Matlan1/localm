@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The explicit-unload paths must honor the in-flight-request pin (AUDIT-CRIT-1).
+"""The explicit-unload paths honor the in-flight-request pin.
 
-A request pins its engine (`active_requests > 0`) for its whole lifetime; the
-VRAM-eviction loop and the idle-unload loop both skip a pinned engine so it is
-never unloaded out from under an in-flight request. `unload_all_models` and
-`unload_one_model` (the owner `/v1/models/unload` route and the sibling-instance
-cooperate-unload) did NOT check the pin - they would unload a model a streaming
-request was mid-generation on, report the VRAM as "freed" (a lie: the request
-immediately reloads it), and race a use-after-unload. These tests pin that they
-now skip a pinned engine, consistent with the other eviction paths.
+A request pins its engine (`active_requests > 0`) for its whole lifetime, and
+the VRAM-eviction loop and the idle-unload loop both skip a pinned engine.
+`unload_all_models` and `unload_one_model` (the owner `/v1/models/unload` route
+and the sibling-instance cooperate-unload) skip one too, so a model a streaming
+request is mid-generation on is never unloaded and reported as freed.
 """
 
 import asyncio

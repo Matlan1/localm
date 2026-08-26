@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """STAGE S4 (version-pin lifecycle + localm patch set + `localm comfy update`).
 
-Design decision 7 (dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md): localm
-pins a known-good ComfyUI commit and carries a small set of localm-owned patches on
-top of it (direct core edits, since this is localm's OWN ComfyUI). The pin advances
-only DELIBERATELY, via `localm comfy update`, which re-applies the patch set.
+localm pins a known-good ComfyUI commit and carries a small set of localm-owned
+patches on top of it (direct core edits, since this is localm's OWN ComfyUI). The
+pin advances only via `localm comfy update`, which re-applies the patch set.
 
 Three oracles, each with a built-in negative case so it fails on known-bad work:
 
@@ -38,7 +37,7 @@ from localm.media import managed_comfy as mc
 
 
 # --------------------------------------------------------------------------- #
-#  Throwaway LOCALM_HOME (same wiring as the S1/S2/S3 `home` fixture).         #
+#  Throwaway LOCALM_HOME.                                                     #
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def home(tmp_path, monkeypatch):
@@ -54,11 +53,11 @@ def home(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  Fixture source bodies (the EXACT shapes the T1 shim targets).              #
+#  Fixture source bodies.                                                     #
 # --------------------------------------------------------------------------- #
 
-# The upstream buggy body: the bare `.__func__` access is what breaks on a node
-# whose FUNCTION resolves to a plain function (core VAEDecodeAudio / ACE-Step).
+# The upstream buggy body: the bare `.__func__` access breaks on a node whose
+# FUNCTION resolves to a plain function (core VAEDecodeAudio / ACE-Step).
 _BUGGY_SRC = '''\
 import asyncio
 
@@ -174,7 +173,7 @@ def test_apply_patches_makes_fragile_func_tolerant_and_it_works(tmp_path):
     assert func.status == cp.APPLIED
 
     patched = target.read_text(encoding="utf-8")
-    # The task-specified tolerant shape (same change the T1 shim makes in memory).
+    # The task-specified tolerant shape.
     assert "attr = getattr(type_obj, func)" in patched
     assert 'method = attr.__func__ if hasattr(attr, "__func__") else attr' in patched
     # It must still parse.
@@ -308,10 +307,9 @@ def _commit_all(workdir: Path, msg: str) -> str:
 
 def _make_fake_venv(root: Path) -> None:
     """A placeholder venv interpreter + completion marker so
-    is_managed_comfy_installed() reads True (S4's update never rebuilds the
-    venv; it only moves the git source + patches). The marker is included
-    because #621's fix made it load-bearing - main.py + venv alone now reads
-    as "still installing", not "installed"."""
+    is_managed_comfy_installed() reads True (S4's update never rebuilds the venv;
+    it only moves the git source + patches). The marker is load-bearing: main.py
+    plus a venv alone reads as "still installing", not "installed"."""
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
@@ -333,9 +331,7 @@ def test_provision_fresh_applies_localm_patches(home, tmp_path, monkeypatch):
 
     # provision_fresh computes comfy_torch_spec() BEFORE install_torch=False is
     # consulted (it needs the spec either way), so on a real NVIDIA box this
-    # would otherwise shell out to the real nvidia-smi via the new Blackwell
-    # detection - deterministic regardless of the test-running machine's own
-    # hardware.
+    # would otherwise shell out to the real nvidia-smi.
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
 
     # A minimal fake ComfyUI git repo: main.py + the fragile core file, no reqs.
@@ -443,12 +439,11 @@ def test_update_rolls_back_on_failure(home, tmp_path):
 
 @pytest.mark.skipif(not _git_available(), reason="git not on PATH")
 def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypatch):
-    """MEDIUM honesty fix: when a mid-update failure triggers rollback and the git
-    source IS restored but the localm patch set cannot be re-applied on it, update must
-    NOT report a clean rollback - the failed re-apply is surfaced in the returned
-    message (rule 5: a safety step that fails never claims success). Before the fix the
-    rollback's apply_patches outcomes were discarded, so the user was told the prior
-    install was restored 'exactly as it was' while it was actually left UNPATCHED (the
+    """When a mid-update failure triggers rollback and the git source IS restored
+    but the localm patch set cannot be re-applied on it, update must NOT report a
+    clean rollback: the failed re-apply is surfaced in the returned message.
+    Discarding the rollback's apply_patches outcomes would tell the user the prior
+    install was restored 'exactly as it was' while it was left UNPATCHED (the
     __func__ fix gone, ACE-Step music broken)."""
     from localm.media import managed_comfy_update as upd
     from localm.media import comfy_patches as cp
@@ -550,11 +545,9 @@ def test_cli_update_dispatches_to_updater(cli_runner, monkeypatch):
 #  SINGLE-FLIGHT: only one update may mutate the checkout at a time            #
 # --------------------------------------------------------------------------- #
 # update_managed_comfy is a long MUTATION of one working tree (fetch, checkout,
-# patch, and on failure a rollback checkout + patch). It had no lock, which was safe
-# only by accident of having exactly ONE caller (the CLI). The GUI Update route
-# (#1201) made it two, and the GUI one runs `python -m localm comfy update` as a
-# CHILD PROCESS - so the contenders are separate interpreters and an in-process
-# threading.Lock (managed_comfy._remove_lock's shape) would guard nothing.
+# patch, and on failure a rollback checkout + patch). The GUI Update route runs
+# `python -m localm comfy update` as a CHILD PROCESS, so the contenders are
+# separate interpreters and an in-process threading.Lock would guard nothing.
 
 def _lock_dir():
     from localm.media import managed_comfy_update as upd
@@ -597,7 +590,7 @@ def test_update_refuses_while_a_LIVE_holder_owns_the_lock(home, monkeypatch):
     assert res.status == "busy", res.status
     assert "already running" in res.message
     assert str(os.getpid()) in res.message, "name the holder so the user can check"
-    # The decisive assertion: it refused BEFORE touching the tree.
+    # It refused BEFORE touching the tree.
     assert ran == [], "a refused update must not run a single git command"
 
 

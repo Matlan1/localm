@@ -2,22 +2,22 @@
 """spawn_agent: serialised like the destructive tool it is, and confined like its
 parent.
 
-Two independent holes, both fixed in the same pass (work item A1):
+Two independent properties:
 
-1. The spawn_agent ToolDef carried no ``destructive=True``, so ``_execute_tools``
-   batched consecutive spawn_agent calls into a ThreadPoolExecutor. Two spawns in
-   ONE model turn therefore ran children CONCURRENTLY in the SAME cwd, breaking
-   the invariant ``_execute_tools``' own docstring states ("destructive calls are
-   always run alone, in order, to avoid unintended interactions"). Worse, the
-   batch carries a 120s deadline whose pool is abandoned with
-   ``shutdown(wait=False)``: a timed-out child kept writing to the tree while
-   ``_absorb_child_state`` mutated the parent's state.
+1. The spawn_agent ToolDef must carry ``destructive=True``. Without it
+   ``_execute_tools`` batches consecutive spawn_agent calls into a
+   ThreadPoolExecutor, so two spawns in ONE model turn run children CONCURRENTLY
+   in the SAME cwd, breaking the invariant ``_execute_tools``' own docstring
+   states ("destructive calls are always run alone, in order, to avoid unintended
+   interactions"). The batch also carries a 120s deadline whose pool is abandoned
+   with ``shutdown(wait=False)``, so a timed-out child keeps writing to the tree
+   while ``_absorb_child_state`` mutates the parent's state.
 
-2. The child Agent was built with the parent's auto_approve / dry_run /
-   always_confirm / confirm_handler / mode / restricted / disabled_tools, but NOT
-   its ``scope``. ``scope`` and ``restricted`` are independent request fields and
+2. The child Agent must inherit the parent's ``scope`` as well as its auto_approve
+   / dry_run / always_confirm / confirm_handler / mode / restricted /
+   disabled_tools. ``scope`` and ``restricted`` are independent request fields and
    spawn_agent is only disabled for a RESTRICTED session, so an owner working
-   under ``--scope`` spawned a child with no path confinement at all.
+   under ``--scope`` would otherwise spawn a child with no path confinement.
 
 The concurrency tests drive the REAL ``_execute_tools`` and detect overlap with a
 ``threading.Barrier``: if the two calls run in parallel both reach the barrier and

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Background sub-agents: non-blocking delegation that keeps every safety
-property the synchronous path has (work item C3).
+property the synchronous path has.
 
 ``spawn_agent`` runs its child to completion INSIDE the parent's tool call, so a
 10-turn child costs the parent all of that wall-clock time doing nothing.
@@ -9,9 +9,8 @@ worker thread, in its OWN git worktree.
 
 Several tests here assert that something did NOT happen (no confirmation, no
 launch, no foreign hunk, no race). Every one of those is paired with a sibling
-showing the SAME detector FIRING on a case where it DOES happen - otherwise a
-detector that is broken or observing nothing passes green forever and the
-absence proves only that nobody was looking.
+showing the SAME detector FIRING on a case where it DOES happen, so a detector
+that is broken or observing nothing cannot pass green.
 """
 
 from __future__ import annotations
@@ -102,7 +101,7 @@ def _drain_all(timeout=20.0):
 
 
 # --------------------------------------------------------------------------- #
-#  1. Non-blocking - the whole point                                           #
+#  1. Non-blocking                                                            #
 # --------------------------------------------------------------------------- #
 
 class TestNonBlocking:
@@ -123,8 +122,6 @@ class TestNonBlocking:
             elapsed = time.time() - t0
             assert res.ok, res.output
             assert started.wait(timeout=10), "child never started"
-            # The dispatch returned while the child is provably still inside
-            # run_task - not merely "quickly".
             assert elapsed < 2.0, f"dispatch took {elapsed:.2f}s"
             job_id = res.output.split("as ")[1].split(",")[0]
             poll = tool_check_agent_job(repo, job_id)
@@ -175,7 +172,7 @@ class TestParity:
 
 
 # --------------------------------------------------------------------------- #
-#  3. Concurrency cap - explicit refusal, never a silent queue                  #
+#  3. Concurrency cap                                                         #
 # --------------------------------------------------------------------------- #
 
 class TestCap:
@@ -196,8 +193,6 @@ class TestCap:
             third = tool_spawn_agent_background(repo, "t", name="gamma",
                                                 _parent_agent=parent)
             assert not third.ok
-            # A CLEAR error the model can act on, naming what is in the way -
-            # not a silent queue that looks like it started.
             assert "limit is full" in third.output
             assert "alpha" in third.output and "beta" in third.output
             release.set()
@@ -280,19 +275,18 @@ class TestAbsorptionOrdering:
             # Now the parent takes its turn boundary explicitly.
             notes = parent._drain_background_agents()
         assert notes, "the finished job produced no note for the model"
-        # Even AFTER absorbing, the child's file never enters the parent's map -
-        # it lives in another tree (see the fabricated-diff test below).
+        # After absorbing, the child's file is not in the parent's map.
         assert set(parent._changed_files) == {"parent_file.txt"}
 
     def test_SIBLING_the_same_observer_DOES_see_a_worker_thread_mutation(self, repo):
         """Live detector. If the observer above cannot notice a worker thread
         writing to parent._changed_files, its 'no race' result is meaningless.
-        Here a deliberately misbehaving child does exactly that, and the SAME
-        assertion must fail."""
+        Here a misbehaving child does exactly that, and the SAME assertion must
+        fail."""
         done = threading.Event()
 
         def _misbehaving(self, task):
-            # The bug this design exists to prevent: absorbing from the worker.
+            # Absorb from the worker thread.
             self.parent._changed_files["snuck_in.txt"] = {
                 "original": None, "writes": 1, "last_tool": "write_file"}
             done.set()
@@ -311,7 +305,7 @@ class TestAbsorptionOrdering:
 
 
 # --------------------------------------------------------------------------- #
-#  5. Confirmation: refuse to launch, never self-approve                       #
+#  5. Confirmation: refuse to launch                                          #
 # --------------------------------------------------------------------------- #
 
 class TestConfirmationGate:
@@ -438,7 +432,7 @@ class TestReviewerBoundary:
                 repo, "t", name="rv", _parent_agent=parent).ok
             _drain_all()
             parent._drain_background_agents()
-        # This string IS what loop.py:381 hands to reviewer.review_feedback.
+        # This string is what loop.py hands to reviewer.review_feedback.
         assert "child_only.txt" not in parent.session_diff()
 
     def test_SIBLING_that_same_string_DOES_carry_the_parents_own_hunks(self, repo):
@@ -473,8 +467,7 @@ class TestScopeInheritance:
 
     def test_background_child_rejects_a_path_outside_the_parent_scope(self, repo):
         """BEHAVIOUR, not the kwarg. Asserting child.scope == parent.scope only
-        proves a value was copied, not that enforcement runs on this path - it
-        would have passed on pre-#781 code for the wrong reason."""
+        proves a value was copied, not that enforcement runs on this path."""
         child = self._capture_child(repo, scope="src/**")
         res = child._execute_tool(
             _call("write_file", path="secrets.txt", content="x"), interactive=False)
@@ -499,8 +492,9 @@ class TestScopeInheritance:
         assert "coder-child-" in str(child.cwd)
 
     def test_background_child_inherits_role_narrowing(self, repo):
-        """#786's role must reach this construction path too - a background
-        reviewer that came back full-capability is the bug roles exist to stop."""
+        """The role narrowing must reach this construction path too: a
+        background reviewer that came back full-capability is what roles exist
+        to stop."""
         captured = {}
 
         def _capture(self, task):
@@ -516,7 +510,7 @@ class TestScopeInheritance:
             _drain_all()
         child = captured["child"]
         assert child.role == "reviewer"
-        # and the narrowing is REAL, not just recorded
+        # the narrowing is applied, not merely recorded
         res = child._execute_tool(
             _call("write_file", path="x.txt", content="x"), interactive=False)
         assert not res.ok, "a reviewer role child could still write files"
@@ -662,8 +656,6 @@ class TestDestructiveAsymmetry:
         res = parent._execute_tool(
             _call("check_agent_job", job_id="job_nope"), interactive=False)
         assert asked == [], "a read-only poll asked for confirmation"
-        # ...and it REALLY RAN: without this, a call blocked some other way would
-        # also satisfy the assertion above.
         assert "job_nope" in res.output
 
         res2 = parent._execute_tool(
@@ -761,23 +753,18 @@ def test_background_agent_tools_are_registered_and_unscoped():
 class TestLateWriteCannotFlipATerminalJob:
     """The AgentJob half of the abandoned-child invariant.
 
-    ``dispatch_parallel``'s ``_ChildOutcome`` needed a seal added for this
-    (tools/parallel.py). This path already holds the equivalent guard - ``_watch``
-    and ``kill`` both re-check ``state != "running"`` while holding the job lock
-    before calling ``_finish``, and the worker publishes ``_outcome`` under that
-    same lock - so these are REGRESSION tests pinning behaviour that is already
-    correct, not a second bug being fixed. They are here because the guard is one
-    unremarkable early-return away from being deleted, and because a background
-    sub-agent cannot be preempted: its worker genuinely does outlive the terminal
-    verdict, so the window is real on this path too.
+    ``_watch`` and ``kill`` both re-check ``state != "running"`` while holding
+    the job lock before calling ``_finish``, and the worker publishes
+    ``_outcome`` under that same lock. A background sub-agent cannot be
+    preempted: its worker genuinely outlives the terminal verdict, so the window
+    is real on this path.
     """
 
     def _hung_job(self, monkeypatch, release: threading.Event):
         """A registered agent job whose child blocks until *release*."""
         from localm.plugins.coder import background as bg
 
-        # A kill's two grace periods are 3s each by default; nothing here is
-        # waiting on a real process, so shorten them to keep the test quick.
+        # Shorten the kill's two grace periods (3s each by default).
         monkeypatch.setattr(bg, "_KILL_GRACE", 0.15)
 
         class _HungChild:
@@ -796,8 +783,7 @@ class TestLateWriteCannotFlipATerminalJob:
         release = threading.Event()
         job = self._hung_job(monkeypatch, release)
         try:
-            # The parent gives up on it: a terminal verdict is recorded and the
-            # model is entitled to have been told about it already.
+            # The parent gives up on it: a terminal verdict is recorded.
             outcome = job.kill()
             assert job.state != "running", f"kill left the job {job.state}"
             terminal_state, terminal_error = job.state, job.error

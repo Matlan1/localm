@@ -125,10 +125,9 @@ class TestUploadRoute:
             assert r.status_code == 413
 
     def test_oversized_rejected_before_decode(self, upload_app):
-        # SEC (CWE-400): the per-file cap is checked on the base64 STRING length
-        # BEFORE decoding, so an oversized payload is never materialized. A valid
-        # base64-alphabet string over the char cap is refused with 413 (a length
-        # check), not decoded.
+        # The per-file cap is checked on the base64 STRING length BEFORE
+        # decoding, so an oversized payload is never materialized: a valid
+        # base64-alphabet string over the char cap is refused with 413.
         with TestClient(upload_app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
             over = "A" * 40_000_001         # valid alphabet, one char over the cap
@@ -138,8 +137,8 @@ class TestUploadRoute:
             assert r.status_code == 413, r.text
 
     def test_non_host_scoped_key_can_upload(self, tmp_path, monkeypatch):
-        # THE POINT: a scoped rag key with NO host filesystem access can still
-        # upload from its own device (no fs gate, no path confinement).
+        # A scoped rag key with NO host filesystem access can still upload from
+        # its own device (no fs gate, no path confinement).
         from localm.plugins.engine import PluginManager
         from localm.plugins.gui.web import attach_gui
         localm = tmp_path / ".localm"
@@ -203,18 +202,11 @@ class TestBodySizeGuard:
 
     def test_chunked_body_without_content_length_still_capped(
             self, tmp_path, monkeypatch):
-        # AUD-CHUNKED regression (finding 2, 2026-07-09 audit): the
-        # Content-Length check above is bypassed entirely by
-        # Transfer-Encoding: chunked, which never sends a Content-Length at
-        # all - live-verified pre-fix to buffer a 250MB body into ~5.9GB of
-        # process memory from one unauthenticated connection via the
-        # CORS-exempt /v1/chat/completions route. A generator body drives
-        # TestClient's ASGI transport to omit Content-Length and use chunked
-        # transfer, the same as a real chunked POST (confirmed:
-        # request.headers["transfer-encoding"] == "chunked" and no
-        # content-length key reaches the app in this mode) - so this exercises
-        # the SAME streaming-cap code path the live exploit did, not just the
-        # Content-Length fast path already covered above.
+        # Transfer-Encoding: chunked never sends a Content-Length, so the check
+        # above does not apply to it. A generator body drives TestClient's ASGI
+        # transport to omit Content-Length and use chunked transfer, the same as
+        # a real chunked POST, so this exercises the streaming-cap code path
+        # rather than the Content-Length fast path covered above.
         import localm.inference.http_server as hs
         import localm.config as cfg
         localm = tmp_path / ".localm"

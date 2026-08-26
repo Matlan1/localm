@@ -86,11 +86,9 @@ def _warn_unfinished_background(agent) -> None:
     except Exception:
         return
 
-    # Completions evicted before any drain saw them. Silence here would look
-    # exactly like "nothing else finished", which is the one thing this warning
-    # exists to prevent. Its OWN try, after the drain: drain_finished CONSUMES,
-    # so a failure folded into the same try would discard completions already
-    # handed over.
+    # Completions evicted before any drain saw them. Its OWN try, after the drain:
+    # drain_finished CONSUMES, so a failure folded into the same try would discard
+    # completions already handed over.
     try:
         lost = registry.take_dropped_undrained("agent")
     except Exception:
@@ -275,9 +273,8 @@ def main(
       localcoder --online --model gpt-4o "review this code"
       localcoder --anthropic --model claude-opus-4-5 "add tests"
     """
-    # The coder is an optional plugin (Phase 3); it ships uninstalled. Running
-    # `localm coder` / `localcoder` before it is installed+enabled gets a clear
-    # refusal rather than a half-working agent.
+    # The coder is an optional plugin and ships uninstalled. Running localm coder
+    # or localcoder before it is installed and enabled gets a clear refusal.
     from localm.plugins.engine import PluginManager
     if not PluginManager(None).is_active("coder"):     # installed (on disk) AND enabled
         click.echo(
@@ -290,8 +287,7 @@ def main(
     work_dir = Path(cwd).resolve() if cwd else Path.cwd()
 
     # Episodic-memory management: list or clear the lessons stored for this
-    # project, then exit (no model/server needed). Transparency: the user can
-    # always see and wipe what the coder remembers about a project.
+    # project, then exit. Needs no model or server.
     if _handle_episode_flags(work_dir, show_episodes, forget_episodes,
                              forget_episode_id, show_archive, restore_episode_id):
         return
@@ -302,8 +298,7 @@ def main(
         sys.exit(2 if ci else 1)
 
     # Resolve CI defaults, project config (.localcoder/config.toml), the session
-    # mode + privacy setup, and the LLM gen kwargs (split out of main; see
-    # _resolve_session_config).
+    # mode plus privacy setup, and the LLM gen kwargs.
     model, max_turns, yes, always_confirm, session_mode, gen_kw = (
         _resolve_session_config(
             work_dir, model, max_turns, max_tokens, temperature, seed, yes,
@@ -311,13 +306,13 @@ def main(
 
     # The in-loop exit-code oracle is for INTERACTIVE sessions (this REPL and the
     # GUI). A one-shot TASK keeps its own outer loop (--until, below), so the two
-    # never both run and the check is never executed twice per iteration.
+    # never both run.
     session_verify = None
     if not task and not no_verify:
         session_verify = verify_cmd or _detect_verify(work_dir)
     elif task and verify_cmd and not until_cmd:
-        # Do not accept a flag and quietly not use it: say which one runs a
-        # one-shot task's check.
+        # Name the flag that does run a one-shot task's check, rather than
+        # accepting this one and quietly not using it.
         print_warning(
             "--verify applies to an interactive session; a one-shot TASK is "
             f"verified with --until. Re-run with: --until '{verify_cmd}'")
@@ -328,14 +323,9 @@ def main(
         force_new, work_dir, ci)
 
     # --native-tools asked for a protocol the chosen server does not implement.
-    # Say so instead of letting it look applied: localm's own /v1/chat/completions
-    # declares no `tools`/`tool_choice` fields, so the request body carrying them
-    # is accepted and the fields are dropped, and the run proceeds on the XML
-    # tool-call convention exactly as if the flag had never been passed. Nothing
-    # breaks, which is precisely why the silence was the problem - the user has
-    # no way to tell an honoured flag from an ignored one. Not an error: the
-    # session is fine, and localm's grammar-constrained tool calls are the
-    # equivalent guarantee on this path (AGENTS.md rule 5).
+    # localm's own /v1/chat/completions declares no tools/tool_choice fields, so a
+    # request body carrying them is accepted and the fields dropped, and the run
+    # proceeds on the XML tool-call convention. Warned, not an error.
     if native_tools and not getattr(backend, "supports_native_tools", True):
         print_warning(
             "--native-tools was ignored: this server does not implement the "
@@ -344,23 +334,19 @@ def main(
             "it). Use --native-tools with --url against a server that does, "
             "e.g. Ollama.")
 
-    # Opt-in episodic consolidation needs a model, so unlike the other episode
-    # flags it runs after the backend is up. Still a one-shot: consolidate, report,
-    # exit - it never piggybacks on a normal session.
+    # Opt-in episodic consolidation needs a model, so it runs after the backend is
+    # up. One-shot: consolidate, report, exit.
     if consolidate_episodes:
         _run_episode_consolidation(work_dir, backend)
         return
 
-    # R19a: an unattended one-shot (`localcoder "task"`) auto-approves file writes
-    # so it can run without a TTY - but shell (arbitrary code execution) and the
-    # network tools must NOT be silently auto-run. Require confirmation for
-    # run_shell unless the user explicitly passed --yes; a non-interactive run has
-    # no way to confirm, so the gate in execution.py fails CLOSED (denied). This
-    # makes confirm-on-shell the effective default for the one-shot CLI.
+    # An unattended one-shot auto-approves file writes so it can run without a TTY,
+    # but shell and network tools are not silently auto-run. run_shell requires
+    # confirmation unless --yes was passed, and a non-interactive run cannot
+    # confirm, so the gate in execution.py fails CLOSED.
     if task and not yes:
-        # run_shell_background is the same capability as run_shell (arbitrary code
-        # execution, just without the wait), so it MUST carry the same gate - a
-        # background variant left out here would be an unconfirmed-RCE bypass of it.
+        # run_shell_background is the same capability as run_shell, just without
+        # the wait, so it carries the same gate.
         always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)
         print_warning(
             "Unattended one-shot: run_shell is code execution and the web tools "
@@ -409,11 +395,9 @@ def main(
                 success  = agent.last_run_ok
 
             # A one-shot run has no NEXT turn, so a background sub-agent that is
-            # still going (or that finished after the last turn) never reaches the
-            # turn-boundary drain - and this process is about to exit, taking its
-            # daemon threads with it. Say so plainly instead of exiting quietly on
-            # work the user asked for: the committed branch survives, the running
-            # child does not.
+            # still going never reaches the turn-boundary drain, and this process is
+            # about to exit with its daemon threads. Report it: the committed branch
+            # survives, the running child does not.
             _warn_unfinished_background(agent)
 
             if output_format == "json":
@@ -426,8 +410,8 @@ def main(
                 }
                 sys.stdout.write(_json.dumps(result, indent=2) + "\n")
 
-            # Goal mode: a failed verification is a real non-zero exit (the whole
-            # point is a pass/fail oracle), not only under --ci.
+            # Goal mode: a failed verification is a real non-zero exit, not only
+            # under --ci.
             if (until_cmd or ci) and not success:
                 sys.exit(1)
         else:
@@ -435,14 +419,10 @@ def main(
             print_banner(backend.model_id, work_dir,
                          file_count=agent._project_map.file_count(),
                          session_mode=session_mode)
-            # Notify if an interrupted session is waiting. checkpoint_info() is
-            # a read-only probe (NOT agent.load_checkpoint(), which - since
-            # NEW-CODER-RESUME-DESTROYS-SESSIONS keyed the checkpoint on this
-            # agent's own id - would claim the most recent saved session's
-            # identity as a side effect of merely checking it exists, so
-            # typing a plain message afterward (never /resume) would delete
-            # then silently overwrite THAT session instead of starting fresh
-            # under this agent's own id).
+            # Notify if an interrupted session is waiting. checkpoint_info() is a
+            # read-only probe; agent.load_checkpoint() would CLAIM the most recent
+            # saved session's identity as a side effect of merely checking it
+            # exists.
             from ..agent.checkpoint import checkpoint_info
             info = checkpoint_info(work_dir)
             if info and info.get("unreadable"):
@@ -513,33 +493,28 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
         if ep is not None:
             click.echo(f"Restored episode {ep.id}: {ep.lesson or ep.summary}")
             if not store.last_restore_archive_ok:
-                # The lesson IS live again, so this is a caveat and not a failure -
-                # but staying quiet would hide that the archive still lists it.
+                # The lesson IS live again, so this is a caveat and not a failure.
                 click.echo(
                     "Note: the archive could not be updated, so this lesson is "
                     "also still listed by --episodes-archive. Re-run this command "
                     "once the archive is writable to tidy that up.", err=True)
             if any(e.id == ep.id for e in store.last_evicted):
-                # It came back and went straight out again at the cap: saying only
-                # "Restored" would be a claim the next read contradicts.
+                # It came back and went straight out again at the cap.
                 click.echo(
                     "Note: the store is at its episode cap and this lesson ranked "
                     "lowest, so it was dropped again immediately (a recovery copy "
                     "was kept). Forget a lesson you no longer need first, with "
                     "--forget-episode.", err=True)
         elif not store.last_forgotten_ok:
-            # The archive EXISTS but could not be read, so "no such id" would be a
-            # claim we cannot make: the episode may well be sitting in there,
-            # recoverable, and a retry once the file is readable would find it.
-            # Rule 5 - do not report a clean negative for a step that failed.
+            # The archive EXISTS but could not be read, so no-such-id cannot be
+            # claimed: the episode may still be in there, recoverable.
             click.echo(
                 f"Could not read the episode archive for {work_dir}, so episode "
                 f"{restore_episode_id} could not be looked up. The archive file "
                 f"exists ({store.archive_path.name}); it may be locked by another "
                 f"process. Nothing was changed - try again.", err=True)
-            # Non-zero: the lookup did not happen. Exiting 0 would tell a script
-            # the same thing a genuine "no such episode" does, which is the very
-            # collapse this branch exists to undo.
+            # Non-zero: the lookup did not happen, which a script must be able to
+            # tell apart from a genuine no-such-episode.
             sys.exit(1)
         else:
             click.echo(f"No archived episode with id {restore_episode_id}.", err=True)
@@ -644,12 +619,8 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
     try:
         proj_cfg = load_project_config(work_dir)
     except ProjectConfigUnreadable as e:
-        # REFUSE rather than start with the file's settings silently dropped.
-        # Two of them are safety settings: always_confirm (below) is what makes
-        # shell tools still prompt under --yes, and mode = "privacy" is what
-        # keeps a transcript off disk. Starting anyway would run the session
-        # WITHOUT protections the user believes they configured, so a typo would
-        # silently disarm them. Refusing costs one edit and is recoverable.
+        # Refuse rather than start with the file's settings silently dropped: it
+        # can set always_confirm and mode = "privacy", both safety settings.
         print_error(
             f"Project config could not be read: {e}\n"
             f"Fix the file or remove it, then run again. It is not ignored, "
@@ -665,8 +636,7 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
         if _cfg_max_tokens is not None:
             max_tokens = int(_cfg_max_tokens)
         else:
-            # No explicit value: a per-model default (e.g. more room for a
-            # thinking model's <think> + answer), else the baseline cap.
+            # No explicit value: a per-model default, else the baseline cap.
             from localm.plugins.coder.harness_profiles import cli_max_tokens
             max_tokens = cli_max_tokens(model)
     if temperature is None and "temperature" in proj_cfg:
@@ -674,8 +644,8 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
     if seed is None and "seed" in proj_cfg:
         seed = int(proj_cfg["seed"])
     if seed is not None and provider == "anthropic":
-        # Say so instead of sending an unknown field to the Messages API and
-        # letting the run look reproducible when nothing pinned it.
+        # The Anthropic Messages API has no seed parameter, so the flag is dropped
+        # and reported.
         print_warning(
             "--seed is ignored with --anthropic: the Anthropic Messages API has "
             "no seed parameter, so this run is not reproducible.")
@@ -723,18 +693,14 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     """Build the LLM backend for the chosen provider / explicit URL / offline path.
     Returns backend. Split out of main; exits
     (2 under --ci, else 1) on a missing required option or a failed server start."""
-    # Live-attribute access so a test patching cli.make_localm_backend is honoured
-    # (the name moved into this submodule when cli.py became a package).
+    # Live-attribute access so a test patching cli.make_localm_backend is honoured.
     make_localm_backend = _cli.make_localm_backend
 
-    # AUTH-ATTACH: whether the caller actually chose *api_key* (a real
-    # -k/--api-key or $LOCALM_API_KEY) rather than it sitting at its literal
-    # placeholder default "localm" - the same distinction _explicit() draws in
-    # plugins/gui/cli.py, widened to also count ENVIRONMENT (the option's own
-    # envvar) as explicit, not just COMMANDLINE. Needed below: an unset
-    # --api-key must never override an explicit user choice (hard-won rule),
-    # but it also must never be sent as-is to a keyed server, since "localm"
-    # authenticates nothing real.
+    # Whether the caller actually chose *api_key* (a real -k/--api-key or
+    # $LOCALM_API_KEY) rather than it sitting at its literal placeholder default
+    # "localm". ENVIRONMENT counts as explicit, not just COMMANDLINE. An unset
+    # --api-key must never override an explicit user choice, and must never be
+    # sent as-is to a keyed server.
     from click.core import ParameterSource
     _api_key_explicit = (
         click.get_current_context().get_parameter_source("api_key")
@@ -769,11 +735,9 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
             )
             sys.exit(2 if ci else 1)
 
-        # H6 phase 6: attach to the localm already running for this project dir
-        # instead of starting a second server that loads its own model. This is
-        # the "one server handles chat + coder" fix - see the credential
-        # resolution just below (_api_key_explicit / resolve_bearer_token) for
-        # how it authenticates without a guessed key.
+        # Attach to the localm already running for this project dir instead of
+        # starting a second server that loads its own model. The credential
+        # resolution just below authenticates the attach.
         attached = None
         if not (force_new or no_server):
             try:
@@ -785,14 +749,11 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 _tgt = None
             if _tgt:
                 # Authenticate with the user's EXPLICIT key (--api-key /
-                # $LOCALM_API_KEY) when they gave one; otherwise resolve the
-                # same credential `localm run` uses for its own attach - the
-                # owner key when this install has one configured, else the
-                # discovered instance's own attach token in open mode
-                # (auth.resolve_bearer_token). Without this, an unset
-                # --api-key falls through to its literal placeholder
-                # "localm", which authenticates nothing and 401s against any
-                # keyed server (checkup 2026-08-11 item 12).
+                # $LOCALM_API_KEY) when they gave one; otherwise resolve the same
+                # credential localm run uses for its own attach: the owner key when
+                # this install has one configured, else the discovered instance's
+                # own attach token in open mode. The placeholder "localm" 401s
+                # against any keyed server.
                 attach_key = api_key
                 if not _api_key_explicit:
                     from localm.auth import resolve_bearer_token
@@ -812,11 +773,8 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 srv_port = port or 8642
                 # api_key's click default is the literal placeholder "localm"
                 # (always truthy), so forwarding it as-is would short-circuit
-                # make_localm_backend's own env/auth.key resolution before it
-                # ever runs. Forward "" (its own "nothing explicit" sentinel)
-                # when the user gave no real key, so a server keyed via
-                # `localm key generate` (persisted to auth.key, no env var)
-                # still authenticates (checkup 2026-08-11 item 12).
+                # make_localm_backend's own env/auth.key resolution. Forward "",
+                # its own nothing-explicit sentinel, when the user gave no real key.
                 attach_key = api_key if _api_key_explicit else ""
                 backend = make_localm_backend(model, port=srv_port, api_key=attach_key)
             else:
@@ -826,11 +784,10 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 from localm import instances
                 from localm.config import PortInUseError, home_dir, pick_port
 
-                # An explicit --port that's already busy is refused by `localm gui`
-                # itself (it prints "Port N is already in use..." to its OWN console
-                # and exits - see #740). This process never reads that console, so
-                # check up front and surface the same real reason here instead of
-                # waiting out the attach-timeout below.
+                # An explicit --port that is already busy is refused by localm gui
+                # in its OWN console, which this process never reads, so check up
+                # front and surface the real reason here instead of waiting out the
+                # attach timeout below.
                 if port:
                     try:
                         pick_port(port, host="127.0.0.1")
@@ -852,16 +809,11 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 env = os.environ.copy()
                 env["LOCALM_OWN_CONSOLE"] = "1"
                 kwargs["env"] = env
-                # A HEADLESS caller (MCP's run_coder_task, CI, a script - stdin
-                # is not a TTY) has no desktop for a new console window, so the
-                # child's real startup error (e.g. gui's "Model not found: X",
-                # reproduced live 2026-07-21) died in a window nobody could see
-                # while this process could only report "exit code 1". Capture
-                # the child's output to a LOG FILE instead - a PIPE would
-                # deadlock a healthy long-lived server once the OS buffer fills
-                # with its normal request logging, a file cannot - read its
-                # tail back on early exit, and point at the file otherwise. A
-                # TTY run keeps today's visible console window.
+                # A HEADLESS caller (stdin is not a TTY) has no desktop for a new
+                # console window, so the child's output goes to a LOG FILE: a PIPE
+                # would deadlock a long-lived server once the OS buffer fills with
+                # its normal request logging, a file cannot. The tail is read back
+                # on an early exit. A TTY run keeps the visible console window.
                 headless = not sys.stdin.isatty()
                 child_log_path = None
                 child_log = None
@@ -874,9 +826,8 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                     kwargs["stdout"] = child_log
                     kwargs["stderr"] = subprocess.STDOUT
                     if sys.platform == "win32":
-                        # No console at all (nothing would be visible anyway);
-                        # a fresh process group so the server outlives this
-                        # CLI, mirroring start_new_session on POSIX.
+                        # No console at all; a fresh process group so the server
+                        # outlives this CLI, mirroring start_new_session on POSIX.
                         kwargs["creationflags"] = (
                             subprocess.DETACHED_PROCESS
                             | subprocess.CREATE_NEW_PROCESS_GROUP)
@@ -905,9 +856,9 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 try:
                     proc = subprocess.Popen(cmd, **kwargs)
                     if child_log is not None:
-                        # The child holds its own handle from here; closing
-                        # ours flushes anything buffered so the early-exit
-                        # read below sees everything written so far.
+                        # The child holds its own handle from here; closing ours
+                        # flushes anything buffered before the early-exit read
+                        # below.
                         child_log.close()
                     _tgt = None
                     for _ in range(40):
@@ -959,8 +910,8 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
 
 def _warn_sensitive_changes(agent: Agent) -> None:
     """Surface test / CI-config edits so a green check over rewritten tests is
-    reviewed, not trusted (R19, agentic code review). Best-effort: never let this
-    advisory break the session."""
+    reviewed, not trusted. Best-effort: never let this advisory break the
+    session."""
     try:
         from ..review_guard import classify_sensitive_changes, render_warning
         message = render_warning(classify_sensitive_changes(agent.changed_files()))
@@ -973,10 +924,10 @@ def _warn_sensitive_changes(agent: Agent) -> None:
 def console_main() -> None:
     """The ``localcoder`` console-script entry point (pyproject [project.scripts]).
 
-    Guards that we are inside the project venv, then runs the coder command. Kept
+    Guards that this is inside the project venv, then runs the coder command. Kept
     SEPARATE from ``main`` so the ``localm coder`` route and the test suite invoke
     the command directly, without the venv gate; only a stray global ``localcoder``
-    (a separate ``pip install``) hits it (NEW-J / NEW-J-CODER)."""
+    (a separate ``pip install``) hits it."""
     from localm._venvguard import require_venv
     require_venv()
     main()

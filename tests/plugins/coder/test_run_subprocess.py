@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.plugins.coder.tools.base.run_subprocess - the canonical
-subprocess-execution primitive (CODER-2) shared by tools/shell.py, tools/git.py,
-and cli/goal.py. Each caller's own behavior is covered by its own test file
-(test_tools_shell.py, test_git_tools.py, test_tools_timeout_partial.py); this
-file tests run_subprocess itself, directly."""
+subprocess-execution primitive shared by tools/shell.py, tools/git.py and
+cli/goal.py. Each caller's own behaviour is covered where that caller is tested;
+this file drives run_subprocess itself, directly."""
 
 import subprocess
 from unittest.mock import MagicMock, patch
@@ -62,9 +61,7 @@ class TestShellWrapMode:
 
         launched = captured["argv"]
         if sys.platform == "win32":
-            # A raw command line, not ["cmd", "/C", command]: an argv list is
-            # rendered by list2cmdline, whose MSVCRT-style \" escaping cmd.exe
-            # misreads, which broke every quoted path. See base.platform_shell.
+            # The command is passed as a raw command line, not an argv list.
             assert launched == "cmd /C echo hi && echo bye"
         else:
             assert launched[0] == "/bin/sh" and launched[1] == "-c"

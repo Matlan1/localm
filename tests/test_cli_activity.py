@@ -2,18 +2,9 @@
 """`localm status` must say what a running server is DOING, and must never say
 "nothing" on the evidence of not having found out.
 
-ADR-0008 U5. Before this, no CLI command asked a running server anything about
-its work: `localm ps` and `localm status` rendered only the on-disk instance
-registry, which is written at process start and carries no activity fields at
-all, so a terminal could not see a model pull that the server was streaming to
-a browser tab at that moment.
-
-The whole risk in adding it is the failure path. "I asked and nothing is
-running" and "I could not ask" are different claims, and a command that printed
-the first when the second happened would be a fresh instance of exactly the
-defect this ADR exists to remove - a confident statement resting on an
-unanswered question. So the states are kept apart at the seam (read_activity
-returns which one occurred) and every one of them is pinned below.
+"I asked and nothing is running" and "I could not ask" are separate states:
+`read_activity` reports which one occurred, and these tests pin each state at
+that seam together with what `_print_activity` renders for it.
 """
 
 from __future__ import annotations
@@ -90,13 +81,13 @@ def test_an_empty_list_is_a_real_answer(monkeypatch):
     assert body["operations"] == []
 
 
-# --------------------------------------------------------- #953 attach token
+# -------------------------------------------------------------- attach token
 
 def test_instance_token_used_when_no_api_key(monkeypatch):
     """A genuinely open server has no API key to send, so the caller's only
     proof of being a local process is the instance's own attach token (the
-    0600 registry file's 'token' field) - without it, #953's B1/B2/E3 defect
-    reappears (a wrong "needs a key" 403 on the default, keyless install)."""
+    0600 registry file's 'token' field). Without it the default, keyless
+    install answers a wrong "needs a key" 403."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}
 
@@ -126,8 +117,8 @@ def test_api_key_still_wins_over_instance_token(monkeypatch):
 
 
 def test_no_instance_token_and_no_key_sends_no_auth_header(monkeypatch):
-    """Unchanged pre-fix behaviour when the caller genuinely has neither (e.g.
-    an older client, or a direct-path run with no registry entry)."""
+    """No header at all when the caller genuinely has neither (an older client, or
+    a direct-path run with no registry entry)."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}
 
@@ -141,17 +132,16 @@ def test_no_instance_token_and_no_key_sends_no_auth_header(monkeypatch):
 
 
 def test_unauthorized_reads_as_blindness_not_an_optional_tip(monkeypatch, capsys):
-    """#953 (grader 2): the pre-fix wording ("This server needs an API key...")
-    reads as a hardening suggestion, not what B1/B2 proved it actually is - a
-    genuine inability to answer, identical whether the server is busy or idle.
-    Must match the SAME "could not ask" framing the unreachable branch uses,
-    not lead with the requirement."""
+    """Wording like "This server needs an API key..." reads as a hardening
+    suggestion. What a 401/403 here actually means is an inability to answer,
+    identical whether the server is busy or idle, so the message must use the
+    SAME "could not ask" framing the unreachable branch uses instead of leading
+    with the requirement."""
     _patch(monkeypatch, resp=_Resp(401, {}))
     _print_activity("http", 1234)
     out = _out(capsys)
     assert "could not ask this server what it is doing" in out.lower()
-    # The old framing led with the requirement rather than the failure -
-    # pinned as absent so it cannot silently return.
+    # The requirement-first wording is pinned as absent.
     assert "this server needs an api key" not in out.lower()
 
 
@@ -234,14 +224,9 @@ def test_a_missing_server_clock_suppresses_the_age_rather_than_faking_one(
     _print_activity("http", 1234)
     out = _out(capsys)
     assert "P" in out
-    # Assert against the OPERATION's own line, not the whole output. The
-    # original form was `"h" not in out.replace("http", "")` over everything
-    # printed - which reads as strict and is really a one-letter substring
-    # match, so any unrelated line containing an "h" fails it while the
-    # property under test still holds. It broke the day `_print_activity`
-    # gained a "Cancel one with localm cancel <id>" footer, on the "h" in
-    # "with". The property is unchanged and the second assertion makes it
-    # sharper: the age this fixture WOULD have produced is named outright.
+    # Assert against the OPERATION's own line, not the whole output: any
+    # unrelated line containing an "h" would fail a whole-output match. The
+    # second assertion names the age this fixture would otherwise produce.
     op_line = next(ln for ln in out.splitlines() if "running" in ln)
     assert "h" not in op_line, (
         f"invented an age with no reference clock: {op_line!r}")
@@ -259,7 +244,7 @@ def test_age_formatting(secs, want):
 
 
 def test_a_negative_or_absent_age_renders_as_nothing():
-    """Clock skew can make now - created_at negative. Print nothing rather than
-    "-3s", which reads as a real measurement of something impossible."""
+    """Clock skew can make now - created_at negative. Print nothing, never "-3s",
+    which reads as a real measurement of something impossible."""
     assert _fmt_age(-3) == ""
     assert _fmt_age(None) == ""

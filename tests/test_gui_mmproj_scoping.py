@@ -1,16 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """plugins/gui/cli.py's _make_engine closes over the gui/serve command's own
 --mmproj CLI value for the SERVER'S ENTIRE LIFETIME, and switch_model reuses
-that same closure for every subsequent model switch. So --mmproj X applied to
-a startup model bled into every later switch: an unrelated model got X too,
-and a model with its OWN correctly-recorded projector had it silently
-overridden by X. See dev-notes/FINDING-gui-mmproj-closure-bleed-2026-08-05.md
-(main checkout) for how this was found and why porting the cli/chat.py
---mmproj-persistence fix here first would have made it permanent instead of
-fixing it.
+that same closure for every subsequent model switch. Unscoped, --mmproj X given
+for a startup model reaches every later switch: an unrelated model gets X too,
+and a model with its OWN correctly-recorded projector has it overridden by X.
 
-The fix scopes --mmproj to the model it was given for at startup; every other
-name falls through to its own registry lookup exactly as if --mmproj had
+--mmproj is therefore scoped to the model it was given for at startup; every
+other name falls through to its own registry lookup exactly as if --mmproj had
 never been given.
 """
 import asyncio
@@ -60,7 +56,7 @@ class _FakeEngine:
 def three_models(tmp_path, monkeypatch):
     """model-a (the startup model, no own mmproj), model-b (switch target, no
     own mmproj), model-c (switch target WITH its own correctly-recorded
-    projector - the honest #957 auto-attach association)."""
+    projector)."""
     def _gguf(name):
         f = tmp_path / name
         f.write_bytes(b"GGUF" + b"\x00" * 64)

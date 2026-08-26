@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The Settings "Changelog" card: the "Show changelog" button fetches
-// GET /api/changelog and renders the full version history (newest first) in the
-// shared modal via the same DOMPurify markdown path as chat. marked/DOMPurify are
-// identity-stubbed in the harness, so the raw markdown lands verbatim in #modal.
+// "Show changelog" fetches GET /api/changelog and renders the version history in
+// the shared modal. marked/DOMPurify are identity-stubbed in the harness, so the
+// raw markdown lands verbatim in #modal.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -43,7 +42,7 @@ test("Changelog: 'Show changelog' fetches /api/changelog and renders version his
   assert.equal(calls[0], "GET", "it GETs /api/changelog");
   const modal = doc.getElementById("modal");
   assert.notEqual(modal.style.display, "none", "the changelog modal opened");
-  // Full history, newest first: both the newest and an older release section show.
+  // Both the newest and an older release section are present.
   assert.match(modal.textContent, /\[Unreleased\]/);
   assert.match(modal.textContent, /\[0\.1\.0\]/);
   assert.match(modal.textContent, /First tagged release\./);

@@ -1,22 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#953: the server "appears frozen" during "Synthesize now" - not appearance,
-the event loop actually stalls. Measured in the reporter's log: `POST
-/api/memory/consolidate -> 200 (4853 ms, loop_lag=5.34s)` - loop_lag EXCEEDS the
-request duration, so the 2.5s /api/stats heartbeat that drives every live GUI
-indicator was starved before the request even finished.
+"""`POST /api/memory/consolidate` must not stall the event loop.
 
-Every other mutating route in plug.py wraps its body in _off_loop (see BUG #648:
-a memory write can resolve the shared embedder, which can trigger a VRAM swap
-lasting minutes). memory_consolidate was the one exception: it drove a full
-blocking LLM generation (complete() -> engine.chat_stream) straight on the
-`async def` route body, with no `await` until the very end - so once started,
-nothing else on the event loop gets a turn until it returns.
-
-Fix: wrap the body in the existing _off_loop helper, same as every sibling route.
-
-Negative case: without the fix, a concurrent asyncio task standing in for the
-/api/stats heartbeat never gets scheduled while the blocking chat_stream call is
-in flight, because the coroutine has no await point to yield at.
+It drives a full blocking LLM generation (complete() -> engine.chat_stream), so
+like every other mutating route in plug.py it wraps its body in _off_loop. Run
+inline on the `async def` route body there is no await point until the very end,
+so nothing else on the loop - including the 2.5s /api/stats heartbeat that
+drives every live GUI indicator - gets a turn until it returns.
 """
 
 from __future__ import annotations
@@ -114,12 +103,10 @@ def test_consolidate_calls_the_model_off_the_event_loop_thread(home, monkeypatch
 
 
 def test_consolidate_pins_the_engine_busy_for_the_whole_call(home, monkeypatch):
-    """F9: memory_consolidate's synthesize_memory call must be wrapped in
-    driving_engine, or idle-unload cannot tell this route apart from a bare
-    engine() access and can unload the model mid-consolidation on a quiet
-    server. Checked from OUTSIDE, at the actual chat_stream() call, so a
-    forgotten/misplaced wrap fails this test regardless of implementation
-    detail."""
+    """memory_consolidate's synthesize_memory call is wrapped in
+    driving_engine, so idle-unload can tell this route apart from a bare
+    engine() access and does not unload the model mid-consolidation. Checked
+    from OUTSIDE, at the actual chat_stream() call."""
     from localm.inference import http_server as hs
     eng = _StubEngine(_facts_reply())
     monkeypatch.setattr(plug, "_live_engine", lambda: eng)
@@ -141,15 +128,10 @@ def test_consolidate_pins_the_engine_busy_for_the_whole_call(home, monkeypatch):
 
 
 def test_event_loop_stays_responsive_while_consolidate_is_in_flight(home, monkeypatch):
-    """Not just "did the loop get a turn eventually" (too easy to satisfy by
-    accident, e.g. if the blocking call happens to start before the heartbeat's
-    first tick lands, on wall-clock timing that says nothing about the fix) - hold
-    the blocking call open for a fixed, generous window and confirm the heartbeat
-    keeps ticking roughly on schedule DURING it. Pre-fix, the whole window is
-    spent stuck inside the inline chat_stream() call with no await point to
-    yield at, so nothing else - not even this test's own driver - runs until it
-    returns; post-fix the executor thread runs it in parallel and the loop stays
-    free the whole time."""
+    """Holds the blocking call open for a fixed, generous window and confirms
+    the heartbeat keeps ticking roughly on schedule DURING it, rather than
+    asking only whether the loop got a turn eventually. The executor thread runs
+    the blocking call in parallel and the loop stays free the whole time."""
     started = threading.Event()
     release = threading.Event()
     eng = _SlowEngine(started, release, _facts_reply())
@@ -180,9 +162,8 @@ def test_event_loop_stays_responsive_while_consolidate_is_in_flight(home, monkey
 
         reached_blocking_call = await _wait_until(started.is_set)
         # Hold the blocking call open for a fixed real-time window and let the
-        # heartbeat run freely during it - this is the actual measurement, not
-        # "was there at least one tick anywhere" (which a lucky scheduling order
-        # can satisfy even when the loop is blocked for the rest of the window).
+        # heartbeat run freely during it: the tick COUNT over that window is the
+        # measurement, not whether any tick happened at all.
         await asyncio.sleep(HOLD_SECONDS)
         ticks_during_hold = len(ticks)
 
@@ -194,9 +175,9 @@ def test_event_loop_stays_responsive_while_consolidate_is_in_flight(home, monkey
     reached_blocking_call, ticks_during_hold = asyncio.run(_drive())
 
     assert reached_blocking_call, "consolidate never reached the blocking model call"
-    # Generous lower bound (well under the ~15 ticks a free loop should manage in
-    # 0.3s) to absorb scheduling jitter under load, while still being far above
-    # the 0 ticks a frozen loop would produce.
+    # Generous lower bound (well under the ~15 ticks a free loop manages in
+    # 0.3s) to absorb scheduling jitter, still far above the 0 ticks a frozen
+    # loop would produce.
     assert ticks_during_hold >= EXPECTED_TICKS / 3, (
         f"only {ticks_during_hold} heartbeat tick(s) landed in a {HOLD_SECONDS}s "
         f"window where a free loop should manage ~{EXPECTED_TICKS:.0f} - the event "

@@ -59,8 +59,8 @@ def test_inlet_injects_relevant_memory(home):
 
 def test_inlet_inserts_system_message_when_none(home):
     plug._chat_store().add(MemoryRecord(text="User is called Sam", source="user"))
-    # A relevant query (shares the content word "called") clears the recall gate;
-    # an all-stopword query like "who am I" would not, absent an embedder.
+    # A relevant query (shares the content word called) clears the recall gate;
+    # an all-stopword query would not, absent an embedder.
     messages = [{"role": "user", "content": "what am I called"}]
     out = plug._memory_inlet(messages, _ctx())
     assert out[0]["role"] == "system" and "Sam" in out[0]["content"]
@@ -87,7 +87,7 @@ def test_inlet_best_effort_never_raises(home, monkeypatch):
     monkeypatch.setattr(plug, "_chat_store", boom)
     messages = [{"role": "system", "content": "sys"},
                 {"role": "user", "content": "hi"}]
-    # must swallow and return None, never propagate (the turn continues)
+    # swallows and returns None rather than propagating, so the turn continues
     assert plug._memory_inlet(messages, _ctx()) is None
     assert messages[0]["content"] == "sys"
 
@@ -198,8 +198,8 @@ def test_consolidate_requires_model(client):
 
 
 # --------------------------------------------------------------------------- #
-#  F12b: pending-correction routes over the REAL ASGI app (mounting + methods  #
-#  + status codes), independent of the model (memory-audit [9]).              #
+#  Pending-correction routes over the REAL ASGI app (mounting + methods        #
+#  + status codes), independent of the model.                                  #
 # --------------------------------------------------------------------------- #
 
 def _seed_correction(home):
@@ -301,9 +301,9 @@ def test_episodic_record_is_recalled(home):
 # --------------------------------------------------------------------------- #
 #  End-to-end: the REAL plugin engine + chat pipeline                          #
 # --------------------------------------------------------------------------- #
-# Proves register(host) actually mounts /api/memory AND registers the memory
-# inlet on the kernel pipeline, and that a /v1/chat/completions turn gets the
-# remembered facts injected server-side (what the SPA no longer does client-side).
+# register(host) mounts /api/memory and registers the memory inlet on the
+# kernel pipeline, and a /v1/chat/completions turn gets the remembered facts
+# injected server-side.
 
 def _capturing_engine(captured):
     from unittest.mock import MagicMock
@@ -339,15 +339,13 @@ def test_end_to_end_memory_inlet_via_real_pipeline(tmp_path, monkeypatch):
     captured: dict = {}
     app = create_app(_capturing_engine(captured))
     assert isinstance(app.state.chat_pipeline, ChatPipeline)
-    # Memory is an OPT-IN plugin now (off by default): enable it so its /api/memory
-    # routes and recall inlet hook are live - the realistic "user turned memory on"
-    # path. Enabling live-registers the router + hooks on the running app.
+    # Memory is an opt-in plugin, off by default. Enabling it live-registers its
+    # router and hooks on the running app.
     mgr = app.state.plugin_manager
     mgr.install("memory")
     mgr.enable("memory")
-    # Open-mode management routes (POST /api/memory/*) require the per-process shell
-    # token as a bearer; the GUI shell injects it. Present it here so this exercises
-    # the real gate too.
+    # Open-mode management routes (POST /api/memory/*) require the per-process
+    # shell token as a bearer; the GUI shell injects it.
     shell = getattr(app.state, "shell_token", None)
     hdr = {"Authorization": f"Bearer {shell}"} if shell else {}
     with TestClient(app) as c:

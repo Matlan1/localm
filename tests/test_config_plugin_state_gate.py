@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""PATCH /v1/config must not be a back door into plugin state (finding X8).
+"""PATCH /v1/config must not be a back door into plugin state.
 
 `plugins` and `plugins_enabled` are HIDDEN, engine-managed container keys:
 validate_update has no schema for what is inside them, so the HIDDEN branch
@@ -7,13 +7,12 @@ stores them verbatim. Their REAL write surfaces validate the value and enforce a
 stronger permission:
 
   - POST /v1/tts/config          - owner (ADMIN) required for library/wasm_paths,
-                                   the script every browser imports (#793),
+                                   the script every browser imports,
   - POST /v1/media/config/<name> - owner required for launch_cmd/api_url,
   - POST /api/plugins/<n>/enable - the plugins:admin scope.
 
 Without a gate on the generic route, a non-owner `config:write` key writes the
-same state directly and skips all of that - so the generic route outranks the
-specific one. That is the escalation X8 describes: set
+same state directly and skips all of that. The escalation: set
 config["plugins"]["tts"]["library"] to a remote URL and tts.js does
 `await import(...)` on it in the GUI origin.
 
@@ -29,8 +28,8 @@ from localm.inference.http_server import create_app
 
 OWNER_KEY = "owner-admin-key-x8-0001"
 
-# The X8 payload, verbatim from the review: an absolute URL discards the base in
-# `new URL(cfg.library, import.meta.url)`, so tts.js would import remote code.
+# An absolute URL discards the base in `new URL(cfg.library, import.meta.url)`,
+# so tts.js would import remote code.
 EVIL_LIBRARY = "https://evil.example/x.js"
 
 
@@ -64,8 +63,8 @@ def _scoped(key):
 
 
 def _stored(c, key):
-    """The value as the OWNER sees it (the scoped key can read it too; reading is
-    deliberately not gated - X8 is an escalation on WRITE)."""
+    """The value as the OWNER sees it. The scoped key can read it too; only
+    WRITE is gated."""
     return c.get("/v1/config", headers=_owner()).json().get(key)
 
 
@@ -82,10 +81,8 @@ def test_scoped_key_cannot_write_the_plugins_subtree(app_env):
                      json={"plugins": {"tts": {"library": EVIL_LIBRARY}}})
     assert denied.status_code == 403, denied.text
     assert "owner" in denied.text.lower()
-    # Refused means NOT WRITTEN - a 403 that still persisted the value would be
-    # the same vulnerability with a worse error message. Compared against the
-    # value BEFORE the attempt rather than against empty, so this keeps testing
-    # the real property even if something else later populates the block.
+    # Refused means NOT WRITTEN. Compared against the value BEFORE the attempt
+    # rather than against empty.
     after = _stored(c, "plugins")
     assert after == before, "a refused write must leave the plugin block untouched"
     assert EVIL_LIBRARY not in str(after), \
@@ -99,7 +96,7 @@ def test_scoped_key_cannot_toggle_plugins_enabled(app_env):
     c, scoped = app_env
     # Compare against the value BEFORE the attempt, not against empty: startup
     # enables the always-on chat plugin, so this key is legitimately non-empty in
-    # a running app. "Refused" means UNCHANGED, which is the property that matters.
+    # a running app. Refused means UNCHANGED.
     before = _stored(c, "plugins_enabled")
     denied = c.patch("/v1/config", headers=_scoped(scoped),
                      json={"plugins_enabled": ["chat", "coder"]})
@@ -112,8 +109,8 @@ def test_scoped_key_cannot_toggle_plugins_enabled(app_env):
 
 
 def test_the_refusal_names_the_key_and_points_at_the_real_surface(app_env):
-    """AGENTS.md rule 5: a refusal must say what was refused and where to go, not
-    fail opaquely (this is the error a legitimate integrator will hit)."""
+    """A refusal must say what was refused and where to go, not fail
+    opaquely."""
     c, scoped = app_env
     denied = c.patch("/v1/config", headers=_scoped(scoped),
                      json={"plugins": {"tts": {"voice": "am_onyx"}}})
@@ -151,14 +148,12 @@ def test_an_ordinary_setting_still_works_for_the_scoped_key(app_env):
 
 
 def test_scoped_key_cannot_repoint_the_bug_report_upload_url(app_env):
-    """Found sweeping X8 rather than in the review, and the sharper half of it.
-
-    `bugreport_upload_url` is HIDDEN, but HIDDEN is not a gate: it has no coercion
-    branch, so validate_update stored whatever it was handed. It also ships with a
-    REAL default, so it is a live channel - "Send to maintainer" POSTs the
-    collected diagnostics plus whatever the user typed to it. A non-owner
-    config:write key re-pointing it would exfiltrate the next bug report. Now
-    admin_only, so it is refused on the same gate as the rag_* roots."""
+    """`bugreport_upload_url` is HIDDEN, but HIDDEN is not a gate: it has no
+    coercion branch, so validate_update stores whatever it is handed. It ships
+    with a REAL default, so it is a live channel - "Send to maintainer" POSTs
+    the collected diagnostics plus whatever the user typed to it, and a
+    non-owner config:write key re-pointing it would exfiltrate the next bug
+    report. It is admin_only, refused on the same gate as the rag_* roots."""
     c, scoped = app_env
     denied = c.patch("/v1/config", headers=_scoped(scoped),
                      json={"bugreport_upload_url": "https://evil.example/collect"})
@@ -166,17 +161,14 @@ def test_scoped_key_cannot_repoint_the_bug_report_upload_url(app_env):
     got = c.get("/v1/config", headers=_owner()).json()
     assert "evil.example" not in str(got.get("bugreport_upload_url")), \
         "the refused endpoint must not have been persisted"
-    # The owner can still configure the channel (this is a WHO gate, not a removal).
+    # The owner can still configure the channel: this is a WHO gate.
     ok = c.patch("/v1/config", headers=_owner(),
                  json={"bugreport_upload_url": "https://reports.example/api"})
     assert ok.status_code == 200, ok.text
 
 
 def test_reading_plugin_state_is_not_gated(app_env):
-    """X8 is an escalation on WRITE. The read side is deliberately unchanged, so
-    a config:read caller still sees the values (nothing reads them off
-    GET /v1/config today, but silently narrowing reads would be a wider change
-    than the finding)."""
+    """Only WRITE is gated: a config:read caller still sees the values."""
     c, scoped = app_env
     assert c.patch("/v1/config", headers=_owner(),
                    json={"plugins_enabled": ["chat"]}).status_code == 200
@@ -185,7 +177,7 @@ def test_reading_plugin_state_is_not_gated(app_env):
 
 
 # --------------------------------------------------------------------------- #
-#  The tts route's own behavior is untouched (#793 still holds)                #
+#  The tts route's own behavior is untouched                                   #
 # --------------------------------------------------------------------------- #
 
 def test_tts_route_gate_is_unchanged_by_the_config_gate(app_env):
@@ -223,12 +215,11 @@ def test_the_validator_still_rejects_a_remote_library_for_the_owner(app_env):
 def _verbatim_hidden_keys():
     """Every HIDDEN core key that hands a hostile value straight back.
 
-    PROBED, not inferred. The obvious guard - "HIDDEN with a list/dict default" -
-    is WRONG, and quietly so: the tail of the HIDDEN branch in _validate_one is a
-    bare `return val`, reached by ANY hidden field that has no dedicated coercion
-    branch above it, whatever its default's type. bugreport_upload_url and
-    update_url have str/None defaults and still return a dict unchanged. Asking
-    the validator what it actually does is the only guard that cannot drift."""
+    PROBED, not inferred. "HIDDEN with a list/dict default" is the wrong guard:
+    the tail of the HIDDEN branch in _validate_one is a bare `return val`,
+    reached by ANY hidden field with no dedicated coercion branch above it,
+    whatever its default's type. bugreport_upload_url and update_url have
+    str/None defaults and still return a dict unchanged."""
     from localm import settings_schema as ss
     hostile = {"evil": "payload"}
     out = set()
@@ -270,19 +261,15 @@ def test_the_verbatim_set_is_exactly_what_we_think_it_is():
         "update_url",               # admin_only: the update channel base
         "update_token",
         # admin_only: which llama.cpp build setup-llama installs. Stored verbatim
-        # like the rest of this set, so the owner gate is what keeps a non-owner
-        # out - but being owner-gated is NOT the whole story here, because the
-        # value is interpolated into a GitHub API path and a download URL. It is
-        # therefore ALSO validated ON READ (is_safe_tag, in setup_llama's
-        # pinned_tag/runtime_history), which is the check that covers a
-        # hand-edited config.json too - something no route can police.
+        # like the rest of this set. The value is interpolated into a GitHub API
+        # path and a download URL, so it is ALSO validated ON READ (is_safe_tag,
+        # in setup_llama's pinned_tag/runtime_history), which covers a
+        # hand-edited config.json.
         "llama_runtime_pin",
     }
-    # MEASURED, not assumed, because "HIDDEN with a container default" is exactly
-    # the wrong guard this helper's docstring warns about: llama_runtime_history
-    # is deliberately ABSENT above. It has a list-coercion branch, so a non-list
-    # is rejected ("expected a list") and list elements are stringified - so it
-    # never reaches the bare `return val` tail and is not a passthrough.
+    # llama_runtime_history is ABSENT above: it has a list-coercion branch, so a
+    # non-list is rejected (expected a list) and list elements are stringified,
+    # and it never reaches the bare `return val` tail.
     from localm import settings_schema as ss
     with pytest.raises(ValueError, match="expected a list"):
         ss.validate_update({"llama_runtime_history": {"evil": "payload"}})
@@ -296,8 +283,8 @@ def test_key_presets_is_not_a_passthrough():
     from localm import settings_schema as ss
     assert "key_presets" not in _verbatim_hidden_keys()
     # The rejected value must be something is_valid_scope really rejects. A bare
-    # identifier like "not-a-scope" is ACCEPTED on purpose (a plugin owns the
-    # scope named after it, and "-" normalises to "_"), so it proves nothing here.
+    # identifier is ACCEPTED (a plugin owns the scope named after it, and a dash
+    # normalises to an underscore).
     with pytest.raises(ValueError, match="unknown scope"):
         ss.validate_update({"key_presets": [{"name": "x", "scopes": ["not a scope"]}]})
     # ... and a legitimate preset still round-trips.
@@ -319,25 +306,16 @@ def test_engine_managed_is_not_admin_only():
 
 
 # --------------------------------------------------------------------------- #
-#  The gate is exercised END TO END, for EVERY gated key (REC-MEDIA-CMD sweep) #
+#  The gate is exercised END TO END, for EVERY gated key                       #
 # --------------------------------------------------------------------------- #
 #
-# tests/test_settings_schema.py pins WHICH keys carry admin_only. That is set
-# membership, and set membership cannot detect a gate that stopped consulting
-# the set: delete the `locked = admin_only_keys() & set(body)` check in
-# routes/config.py and every membership assertion still passes while the flags
-# do nothing. These two tests are the other half - they drive the real route.
-#
-# They also assert the VALUE IS UNCHANGED, not merely that the status was 403.
-# Those are different claims: a 403 proves the REQUEST was refused, only the
-# unchanged value proves the WRITE did not happen. Today the gate sits before
-# update_config() so a write cannot occur, but that is an ordering fact a future
-# refactor could change; asserting the value pins the property, not the ordering.
+# These drive the real route. They assert the VALUE IS UNCHANGED, not merely
+# that the status was 403: a 403 proves the REQUEST was refused, only the
+# unchanged value proves the WRITE did not happen.
 
 # A value that is hostile in kind for any field. The gate runs on the RAW body
-# BEFORE validate_update (routes/config.py, "Checked on the RAW body before
-# validation"), so a non-owner is refused up front whatever the value is - which
-# is exactly why one sentinel can cover every gated key regardless of its widget.
+# BEFORE validate_update (routes/config.py), so a non-owner is refused up front
+# whatever the value is, and one sentinel covers every gated key.
 _HOSTILE = "x-owned-by-the-attacker"
 
 
@@ -345,9 +323,8 @@ def test_every_admin_only_key_is_refused_end_to_end_and_nothing_is_written(app_e
     """A non-owner config:write key must get 403 from the REAL route for EVERY
     admin_only key, and must not change the stored value.
 
-    Data-driven over admin_only_keys() on purpose: a key gains the flag and is
-    covered here automatically, with no second list to keep in sync. A per-key
-    hand-written test would be the thing that silently fails to grow."""
+    Data-driven over admin_only_keys(), so a key that gains the flag is covered
+    here automatically with no second list to keep in sync."""
     from localm import settings_schema as ss
     c, scoped = app_env
     problems = []
@@ -364,16 +341,12 @@ def test_every_admin_only_key_is_refused_end_to_end_and_nothing_is_written(app_e
 
 
 def test_the_403_gate_is_selective_not_a_blanket_refusal(app_env):
-    """FIRES-CONTROL for the test above, and it is not optional.
+    """The control for the test above.
 
-    Without it, that test passes vacuously in the two ways it is most likely to
-    break: if the scoped key never actually held config:write, or if the route
-    refused every PATCH for an unrelated reason, then EVERY key would 403 and the
-    assertion would go green while proving nothing about admin_only.
-
-    So prove the same key, on the same client, in the same session, CAN write an
-    UNGATED field. If this ever fails, the sibling test's greenness is
-    meaningless and must not be trusted."""
+    The same key, on the same client, in the same session, must be able to write
+    an UNGATED field. Without that, the sibling test would go green if the
+    scoped key never held config:write, or if the route refused every PATCH for
+    an unrelated reason."""
     from localm import settings_schema as ss
     c, scoped = app_env
     assert "temperature" not in ss.admin_only_keys(), \

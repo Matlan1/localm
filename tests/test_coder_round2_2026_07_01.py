@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 round-2 inference/coder cluster.
+"""Inference/coder behaviour:
 
-  REC-CODER-MODE-TOML  - effective_mode('coder', cwd) honors .localcoder/config.toml
-  REC-CODER-FAMILY     - detect_model_family matches substrings / resolved repo ids
-  REC-CODER-LOOPBREAK  - the coder aborts on repeated identical (scaffold) responses
+  - effective_mode('coder', cwd) honors .localcoder/config.toml
+  - detect_model_family matches substrings / resolved repo ids
+  - the coder aborts on repeated identical (scaffold) responses
 """
 
 from unittest.mock import patch
 
 
-# --------------------------------------------------------------------------- #
-#  REC-CODER-MODE-TOML
-# --------------------------------------------------------------------------- #
 
 def test_effective_mode_coder_reads_project_toml(tmp_path, monkeypatch):
     from localm.audit import effective_mode, SessionMode
@@ -30,9 +27,6 @@ def test_effective_mode_coder_toml_absent_is_safe(tmp_path, monkeypatch):
     assert isinstance(effective_mode("coder", cwd=tmp_path), SessionMode)
 
 
-# --------------------------------------------------------------------------- #
-#  REC-CODER-FAMILY
-# --------------------------------------------------------------------------- #
 
 def test_detect_family_substring_and_repo_id():
     from localm.plugins.coder.prompts import detect_model_family
@@ -43,9 +37,6 @@ def test_detect_family_substring_and_repo_id():
     assert detect_model_family("llama-3.1-8b") == "default"
 
 
-# --------------------------------------------------------------------------- #
-#  REC-CODER-LOOPBREAK
-# --------------------------------------------------------------------------- #
 
 def _make_agent(tmp_path, backend=None, **kwargs):
     from localm.plugins.coder.agent import Agent
@@ -69,55 +60,23 @@ def test_repeated_response_breaker_aborts(tmp_path):
     with patch.object(agent, "_call_llm", return_value=fixed):
         result = agent.run_task("do the thing")
     # WHICH breaker tripped, asserted on STATE rather than on the message text.
-    # DELIBERATELY FIRST: pytest stops at the first failure, so whichever
-    # assertion leads is the one that speaks. Leading with the prose check made
-    # a neutralised breaker report `assert 'circuit breaker' in '[max_turns=12
-    # reached]'`, which is true but is a statement about the MESSAGE and let the
-    # state line go unexercised. Leading with the state gives `assert 0 >= 4` -
-    # a statement about the breaker itself.
-    #
-    # This line asserted the exact run of words "repeated the same response"
-    # until 2026-08-12, and it sat red on master for weeks: ci.yml carries no
-    # pull_request or push trigger, so the full suite runs neither per PR nor
-    # per merge, and this test is in nobody's targeted selection.
-    #
-    # THE REWORD WAS NOT COSMETIC, which is the reason not to simply re-assert
-    # the new phrase. #1179 replaced the exact-consecutive detector with a
-    # SIMILARITY-based one (_REPEAT_SIMILARITY), so the responses no longer
-    # have to be identical, and "essentially" was added to say so. The
-    # sentence therefore tracks the detector's semantics and will keep moving
-    # as that is retuned. An exact-phrase assertion against a message that
-    # describes an evolving algorithm is a standing trap; re-arming it on the
-    # newer phrase only postpones the same red.
-    #
     # _repeat_response_count is incremented in exactly ONE place (the
     # repeated-scaffold breaker in agent/loop.py) and run_task does not reset
-    # it, so after the call it is a precise, reword-immune record that THIS
-    # breaker fired. That distinction is load-bearing rather than pedantic:
-    # loop.py has THREE messages beginning "[circuit breaker:" - this one, the
-    # per-tool failure streak, and the global error streak - so the prose check
-    # below cannot tell them apart and this line is the only thing that can.
-    # Comparing against the constant rather than a literal keeps it correct if
-    # the threshold is retuned.
-    #
-    # Deliberately NOT loose prose: an assertion weak enough to survive any
-    # rewording is usually also weak enough to pass when the breaker never
-    # fires at all. Both directions are fires-controlled - reword the message
-    # so neither "repeated" nor "same response" survives and this still passes;
-    # neutralise the breaker and it goes red on THIS line.
+    # it, so after the call it records that THIS breaker fired. loop.py has
+    # three messages beginning "[circuit breaker:", so the prose check below
+    # cannot tell them apart. Compared against the constant, not a literal.
     from localm.plugins.coder.agent.constants import _REPEAT_RESPONSE_ABORT
     assert agent._repeat_response_count >= _REPEAT_RESPONSE_ABORT - 1
-    # And the user actually got a breaker message. "circuit breaker" is the
-    # stable prefix all three share, so this says "something was reported",
-    # not which - the line above is what identifies it.
+    # A breaker message reached the user. "circuit breaker" is the prefix all
+    # three share, so this says something was reported, not which.
     assert "circuit breaker" in result.lower()
     # It stopped well before the turn ceiling.
     assert agent._turns < 12
 
 
 def test_family_enrichment_uses_registry_source(tmp_path, monkeypatch):
-    # An opaque alias whose registry source is a gemma repo must classify as gemma
-    # (the enrichment reads the registry entry's "source", not the (path,hint) tuple).
+    # An opaque alias whose registry source is a gemma repo classifies as gemma:
+    # the enrichment reads the registry entry's "source", not the (path,hint) tuple.
     import localm.model_manager as mm
     monkeypatch.setattr(
         mm, "load_registry",

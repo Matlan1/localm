@@ -15,11 +15,10 @@ plugin's own per-plugin comfy_blk override - are suppressed entirely while
 the managed ComfyUI instance is active (comfy_target == "own" and installed;
 see managed_comfy.managed_comfy_active). A per-plugin value set before the
 user ever touched comfy_target, or before switching it back to "own", reads
-identically to a deliberate override and used to silently defeat managed
-routing (NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). Only
+identically to an intentional override, so it is suppressed as well. Only
 comfy_target == "user" lets any of these three fields win - "own" means own.
 
-Per-plugin output containment (FAC-3): the shared ``generate_music`` has no
+Per-plugin output containment: the shared ``generate_music`` has no
 ``comfy_output_dir`` parameter, so the only way to feed it this plugin's own
 output dir is the ``COMFY_OUTPUT_DIR`` env var that ``comfy._comfy_output_root``
 resolves from. The backend therefore publishes the per-plugin value on that env
@@ -69,25 +68,25 @@ def settings(full_config: dict) -> dict:
     block, warning = media_config.resolve_config("music", full_config)
     comfy_blk = block.get("comfy") if isinstance(block.get("comfy"), dict) else {}
     backend_name = block.get("backend", "comfy")
-    # We do not hide problems: when the configured backend cannot be loaded the
-    # job still falls back to comfy (best-effort), but say so instead of silently
-    # pretending the chosen backend is active.
+    # When the configured backend cannot be loaded the job still falls back to
+    # comfy (best-effort), and the warning says so instead of reporting the
+    # chosen backend as active.
     warning = media_config.combine_warnings(
         warning, media_config.backend_unavailable_warning(__package__, backend_name))
-    # NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD: when the managed
-    # ComfyUI instance is selected ("own"), neither the per-plugin comfy.*
-    # fields nor the legacy global launch_cmd/workdir keys may be honoured -
-    # any of them defeats ensure_comfy()'s managed-routing branch, which only
-    # engages when the caller passes NOTHING. _comfy.default_api_url() itself
-    # resolves to the managed instance's URL whenever own_active is True.
+    # When the managed ComfyUI instance is selected ("own"), neither the
+    # per-plugin comfy.* fields nor the legacy global launch_cmd/workdir keys
+    # may be honoured - any of them defeats ensure_comfy()'s managed-routing
+    # branch, which only engages when the caller passes NOTHING.
+    # _comfy.default_api_url() itself resolves to the managed instance's URL
+    # whenever own_active is True.
     own_active = managed_comfy_active(full_config)
     api_url = ("" if own_active else comfy_blk.get("api_url")) \
         or _comfy.default_api_url()
     # Sanitise the RESOLVED url: a per-plugin comfy.api_url short-circuits
     # before default_api_url()'s guard, so an admin-set link-local/metadata
-    # host would otherwise reach the outbound comfy calls (CHK-COMFY-APIURL).
-    # The _checked variant also surfaces a guard fallback through this
-    # settings() warning channel instead of only the debug log (rule 5).
+    # host would otherwise reach the outbound comfy calls. The _checked variant
+    # also surfaces a guard fallback through this settings() warning channel
+    # instead of only the debug log.
     api_url, url_warning = _comfy.sanitize_comfy_url_checked(api_url.rstrip("/"))
     warning = media_config.combine_warnings(warning, url_warning)
     launch_cmd = "" if own_active else (
@@ -148,10 +147,9 @@ def _comfy_model_roles(s: dict, roles: list) -> dict:
     localm registry's ``model_type`` slice and to the roles the plugin declared
     through ``host.register_model_role``.
 
-    The backend owns this seam (rather than the route) because resolving which
-    models exist IS backend work: a future non-ComfyUI backend for this media
-    type implements this one function and the route, the GUI and the role
-    contract are unchanged.
+    This seam lives in the backend rather than the route: a future non-ComfyUI
+    backend for this media type implements this one function, and the route, the
+    GUI and the role contract are unchanged.
 
     One ComfyUI round trip and one registry read per call - both blocking, so the
     caller runs it off the event loop exactly as it already does for
@@ -174,7 +172,7 @@ def _comfy_generate(s: dict, tags: str, out_path: Path, *,
     if delete_outputs is None:
         delete_outputs = s.get("delete_outputs", False)
     # generate_music has no comfy_output_dir param; feed the per-plugin value
-    # through the env var its containment step resolves from (FAC-3).
+    # through the env var its containment step resolves from.
     with _comfy_output_dir_env(s.get("output_dir") or None):
         return _music_gen.generate_music(
             tags, out_path,
@@ -201,7 +199,7 @@ _COMFY_REF = SimpleNamespace(
 )
 
 
-# --- backend facade: dispatch to the configured backend (the I1 seam) --------
+# --- backend facade: dispatch to the configured backend ----------------------
 # Shared with the image/video plugins - see media_config.make_backend_facade.
 
 _facade = media_config.make_backend_facade(__package__, _COMFY_REF)

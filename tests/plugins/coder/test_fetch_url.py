@@ -330,10 +330,8 @@ class TestPolicyEnforcement:
         assert "hi" in result.output
 
     def test_localhost_blocked_by_default(self):
-        # Changed with the netpolicy rework: loopback/private targets are an
-        # SSRF surface (the localm API itself, ComfyUI, router admin pages)
-        # and are refused unless net_allow_private is set. The error message
-        # names the escape hatch.
+        # Loopback and private targets are refused unless net_allow_private is
+        # set; the error message names that setting.
         with patch("requests.get") as m, \
              patch("socket.getaddrinfo", return_value=_LOOPBACK_DNS):
             r = _call("http://127.0.0.1:8642/health")

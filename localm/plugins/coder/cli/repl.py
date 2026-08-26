@@ -240,11 +240,9 @@ def _handle_command(raw: str, agent: Agent) -> bool:
                     f"[dim]({e['turns']} turns{changed}, {when})[/dim]")
 
     elif cmd == "resume":
-        # No id -> the most recent (unchanged zero-argument default); an id
-        # from /sessions resumes that SPECIFIC one instead - several
-        # interrupted sessions can now coexist in one project rather than the
-        # newer one silently having erased the others (NEW-CODER-RESUME-
-        # DESTROYS-SESSIONS).
+        # No id -> the most recent (the zero-argument default); an id from
+        # /sessions resumes that SPECIFIC one, so several interrupted sessions
+        # can coexist in one project.
         ckpt = agent.load_checkpoint(arg or None)
         if ckpt is None:
             if arg:
@@ -284,14 +282,14 @@ def _handle_command(raw: str, agent: Agent) -> bool:
 
 
 def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
-    """The second half of the /command dispatch, split out of _handle_command: the
-    changed-files / diff / compact / memory / save / export / scope commands and
-    the unknown-command fallback. Returns False (none of these exit the REPL); the
-    bool return keeps a uniform signature with _handle_command."""
+    """The second half of the /command dispatch: the changed-files / diff /
+    compact / memory / save / export / scope commands and the unknown-command
+    fallback. Always returns False (none of these exit the REPL), keeping a
+    uniform signature with _handle_command."""
     if cmd == "changes":
         files = agent.changed_files()
-        # Delegated work lives in another tree, so it is deliberately absent from
-        # changed_files(). The footer is how it stays discoverable ("" if none).
+        # Delegated work lives in another tree and is absent from
+        # changed_files(); the footer is where it shows up ("" if none).
         from ..delegated import footer_for
         delegated = footer_for(agent)
         if not files:
@@ -326,12 +324,10 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             console.print(delegated)
 
     elif cmd == "bg":
-        # "/bg", not "/jobs": an installed jobs plugin already owns that noun for
-        # SCHEDULED recurring jobs (localm job ..., the GUI Jobs tab, /api/jobs),
-        # and those are a completely disjoint list from this session's background
-        # work. "/tasks" would be worse still - "task" is already this coder's own
-        # core noun (localcoder [TASK], run_task, --task). /bg matches the shell
-        # mental model (jobs/bg/fg) and collides with neither.
+        # "/bg", not "/jobs": an installed jobs plugin owns that noun for
+        # SCHEDULED recurring jobs (localm job ..., the GUI Jobs tab,
+        # /api/jobs), which are a disjoint list from this session's background
+        # work.
         from ..background import get_registry
         registry = get_registry()
         rows = registry.list_status()
@@ -363,9 +359,8 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                     console.print(
                         f"  [cyan]{r['id']}[/cyan]  {r['kind']:<6} "
                         f"{r['label']}  {flag}{r['state']}{extra and ' - ' + extra}[/]")
-        # The table is bounded, so a long session outgrows it. Say what fell off -
-        # but say it per KIND, because the two do not mean the same thing and
-        # rendering both as an alarm would cry wolf on every long session.
+        # The table is bounded, so a long session outgrows it. What fell off is
+        # reported per KIND.
         dropped = dict(registry.dropped_undrained_by_kind)
         lost_agents = dropped.pop("agent", 0)
         if lost_agents:

@@ -16,8 +16,7 @@ from localm.plugins.mcpserver.server import (
 )
 
 # A UNC path at a non-routable RFC5737 documentation address (TEST-NET-1), so
-# even a total failure of the fix cannot dial a real host - same address
-# test_admin_fs_routes.py uses for the same reason.
+# even a total failure of the fix cannot dial a real host.
 _UNC = r"\\192.0.2.1\share"
 _UNC_FWD = "//192.0.2.1/share"
 _DEVICE = r"\\.\PhysicalDrive0"
@@ -75,10 +74,10 @@ def _stub_engine_factory(model_name):
     engine.chat_stream.side_effect = lambda messages, **kw: iter(
         [f"reply-from-{model_name}"])
     engine.embed.return_value = [[0.1, 0.2]]
-    # Mirror the real Engine's victim-safety attributes (engine.py:181-188). A
-    # bare MagicMock answers every getattr with a truthy Mock, so an idle stub
-    # would read as "serving 1 request, mid-unload" to the eviction policy and
-    # never be evictable - the stub has to model the contract it stands in for.
+    # Mirror the real Engine's victim-safety attributes. A bare MagicMock
+    # answers every getattr with a truthy Mock, so an idle stub would read as
+    # "serving 1 request, mid-unload" to the eviction policy and never be
+    # evictable.
     engine.active_requests = 0
     engine.unloading = False
     return engine
@@ -213,11 +212,10 @@ class TestProtocol:
 
 
 class TestToolAnnotations:
-    """MCP tool annotations (audit finding C). Confirmation for destructive
-    tools belongs at the CLIENT, so the server must DECLARE intent via the
-    standard MCP annotations (destructiveHint / readOnlyHint) in tools/list.
-    Without this, an MCP client has no signal that remove_model / uninstall_plugin
-    delete files."""
+    """MCP tool annotations. Confirmation for destructive tools belongs at the
+    CLIENT, so the server DECLARES intent via the standard MCP annotations
+    (destructiveHint / readOnlyHint) in tools/list. Without them an MCP client
+    has no signal that remove_model / uninstall_plugin delete files."""
 
     def _annotations_by_name(self, server):
         return {t["name"]: t.get("annotations")
@@ -309,9 +307,8 @@ class TestToolCalls:
         assert "m1" in resp["result"]["content"][0]["text"]
 
     def test_list_models_survives_malformed_entries(self):
-        # One malformed entry must not blank / crash the whole MCP listing: the
-        # good model still lists and each bad entry is shown as corrupt (mirrors
-        # the CLI's resilience so a hand-edited registry stays inspectable).
+        # One malformed entry does not blank or crash the whole MCP listing: the
+        # good model still lists and each bad entry is shown as corrupt.
         server, _ = _server()
         bad_reg = {
             "good": {"path": "x", "source": "local"},
@@ -363,11 +360,11 @@ class TestEngineCache:
         assert second is not None
 
     def test_switch_release_detected_via_combined_split_capacity(self):
-        """AUDIT-GPU-SPLIT-1: the switch's before/after free-VRAM delta must be
-        measured against discover.vram_capacity() (combined split capacity),
-        not just the single main GPU - a model that frees VRAM mostly on a
-        NON-main split device must still be detected as released within the
-        real (not mocked) wait_for_vram_release poll."""
+        """The switch's before/after free-VRAM delta must be measured against
+        discover.vram_capacity() (combined split capacity), not just the single
+        main GPU: a model that frees VRAM mostly on a NON-main split device must
+        still be detected as released within the real (not mocked)
+        wait_for_vram_release poll."""
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         GB = 1024 ** 3
@@ -401,11 +398,10 @@ class TestEngineCache:
             f"10GB) alone never would: {logged}")
 
     def test_process_scoped_no_rise_logs_could_not_confirm_not_did_not_rise(self):
-        """#697 follow-up: on a Windows/AMD process-scoped reading, the model-switch
-        VRAM check must NOT log the false 'did not rise'. The reading is blind to the
-        previous model's VRAM (it lives in an isolated worker), so a no-rise there
-        proves nothing - the same rule-5 defect the /v1/models/unload paths were
-        fixed for, which this path had left unwired (it dropped the scope)."""
+        """On a Windows/AMD process-scoped reading, the model-switch VRAM check
+        must NOT log the false 'did not rise'. The reading is blind to the
+        previous model's VRAM (it lives in an isolated worker), so a no-rise
+        there proves nothing."""
         from localm.config import load_config as real_load_config
         from localm.discover import GPU_PROBE_OK
         GB = 1024 ** 3
@@ -446,8 +442,8 @@ class TestEngineCache:
         assert cache._engine is None
 
     def test_shutdown_reports_a_failed_unload_instead_of_swallowing_it(self):
-        """A native free that failed is exactly what leaves VRAM pinned after
-        exit; silence there makes it unexplainable (AGENTS.md rule 5)."""
+        """A native free that failed is what leaves VRAM pinned after exit, so
+        shutdown must report it rather than staying silent."""
         cache = _resident_cache()
         with _fits(), _sized():
             a = cache.get("a")
@@ -475,11 +471,7 @@ class TestEngineCache:
 class TestEngineCacheMultiResidency:
     """
     Parity with the HTTP server: a second model that provably fits loads
-    ALONGSIDE the first instead of evicting it (C1 of the 2026-07-22 ledger).
-
-    The MCP cache used to be single-resident by construction, so these are the
-    tests that would have failed before the change - see
-    test_both_models_stay_resident_when_they_fit, which is the whole point.
+    ALONGSIDE the first instead of evicting it.
     """
 
     def test_both_models_stay_resident_when_they_fit(self):
@@ -904,7 +896,7 @@ class TestMcpCliGate:
             monkeypatch.setattr(sys, "platform", plat)
             out = CliRunner().invoke(main, ["--print-config"]).output
             assert expected in out, f"{plat}: expected {expected!r} in output"
-        # the macOS path must NOT be the windows one (catches a hardcode regression)
+        # the macOS path must NOT be the windows one
         monkeypatch.setattr(sys, "platform", "darwin")
         assert "%APPDATA%" not in CliRunner().invoke(main, ["--print-config"]).output
 
@@ -915,7 +907,7 @@ class TestMcpCliGate:
 
 class TestStdioRobustness:
     def test_batch_array_is_handled_not_crashed(self):
-        """BUG-12: a JSON-RPC batch array must be processed element by element."""
+        """A JSON-RPC batch array must be processed element by element."""
         server, _ = _server()
         batch = json.dumps([
             {"jsonrpc": "2.0", "id": 1, "method": "ping"},
@@ -927,7 +919,7 @@ class TestStdioRobustness:
         assert ids == {1, 2}
 
     def test_scalar_and_null_lines_do_not_crash(self):
-        """BUG-12: a bare scalar / null parses but is not a request object."""
+        """A bare scalar / null parses but is not a request object."""
         server, _ = _server()
         stdout = io.StringIO()
         server.run_stdio(stdin=io.StringIO('123\n"hi"\ntrue\nnull\n'), stdout=stdout)
@@ -953,7 +945,7 @@ class TestGenerateImageSafety:
 
     @pytest.mark.parametrize("arg_key", ["output_path", "input_image"])
     def test_path_confined_to_home(self, tmp_path, arg_key):
-        """SEC-7: an output_path/input_image outside the localm data dir is refused."""
+        """An output_path/input_image outside the localm data dir is refused."""
         server, _ = _server()
         outside = str(tmp_path / "evil.png")        # sibling of LOCALM_HOME (.localm)
         with patch("localm.image_gen.comfy.generate_image") as mock_gen:
@@ -986,10 +978,9 @@ class TestGenerateImageSafety:
         "somefile.exe:hidden.gguf", "sub/somefile.exe:hidden.gguf",
     ])
     def test_output_path_reserved_characters_are_rejected(self, bad):
-        """Same NTFS Alternate Data Stream class #1068 fixed for model
-        filenames - the OLD _confine closure had no character check at all,
-        so a colon stayed confined (containment held) while opening a
-        hidden stream behind an apparently-empty sibling."""
+        """An NTFS Alternate Data Stream name is rejected: a colon stays
+        confined, so a containment check alone still opens a hidden stream
+        behind an apparently-empty sibling."""
         server, _ = _server()
         with patch("localm.image_gen.comfy.generate_image") as mock_gen:
             r = self._call(server, {"prompt": "x", "output_path": bad})
@@ -1030,12 +1021,11 @@ class TestGenerateImageSafety:
         """An MCP client is usually an LLM steerable by injected content, and
         input_image is READ and then UPLOADED to ComfyUI - which
         sanitize_comfy_url permits to be a LAN or public host over plaintext
-        http. Confining that read to the data dir was far too wide: the data dir
-        IS the credential store. auth.key is the plaintext owner key.
+        http. The data dir IS the credential store - auth.key is the plaintext
+        owner key - so confining the read to the data dir is not enough.
 
-        Named by file rather than "some path outside", because inside-the-data-
-        dir is precisely the case the old confinement allowed. A test that only
-        proves an outside path is refused passes on the unfixed code."""
+        Named by file, not "some path outside": inside-the-data-dir is the case
+        under test."""
         from localm.config import home_dir
         server, _ = _server()
         home = home_dir()
@@ -1080,7 +1070,7 @@ class TestGenerateImageSafety:
         ("log", True),
     ])
     def test_mode_controls_sidecar(self, monkeypatch, mode, expected_write_sidecar):
-        """BUG-14: privacy mode must pass write_sidecar=False to generate_image."""
+        """Privacy mode must pass write_sidecar=False to generate_image."""
         monkeypatch.setenv("LOCALM_MODE", mode)
         server, _ = _server()
         with patch("localm.image_gen.comfy.generate_image",
@@ -1089,9 +1079,9 @@ class TestGenerateImageSafety:
         assert mock_gen.call_args.kwargs.get("write_sidecar") is expected_write_sidecar
 
     def test_privacy_mode_deletes_comfy_output_copy(self, monkeypatch):
-        """Privacy mode must also delete ComfyUI's own on-disk output copy
-        (it embeds the full prompt/workflow as PNG metadata) - not just
-        suppress the sidecar. See CONSOLIDATED-FINDINGS item 2."""
+        """Privacy mode must also delete ComfyUI's own on-disk output copy,
+        which embeds the full prompt and workflow as PNG metadata, not just
+        suppress the sidecar."""
         monkeypatch.setenv("LOCALM_MODE", "privacy")
         server, _ = _server()
         with patch("localm.image_gen.comfy.generate_image",
@@ -1108,7 +1098,7 @@ class TestGenerateImageSafety:
         assert not mock_gen.call_args.kwargs.get("delete_outputs")
 
     def test_generate_image_keeps_stdout_clean(self, capsys):
-        """BUG-11: comfy progress output must go to stderr, not the JSON-RPC stdout."""
+        """Comfy progress output must go to stderr, not the JSON-RPC stdout."""
         server, _ = _server()
 
         def noisy(*a, **k):
@@ -1123,12 +1113,11 @@ class TestGenerateImageSafety:
 
 
 class TestChatEmbedStdoutSafety:
-    """BUG-11: chat/embed/pull_model's own engines.get() call (a fresh model
-    load, e.g. the first turn of a new MCP session) must not leak native
-    load-time diagnostics onto the JSON-RPC stdout stream either - the same
-    bug class TestGenerateImageSafety covers above, missed here because the
-    risky call is engines.get() itself rather than a separately-patchable
-    module function."""
+    """chat/embed/pull_model's own engines.get() call (a fresh model load, e.g.
+    the first turn of a new MCP session) must not leak native load-time
+    diagnostics onto the JSON-RPC stdout stream. Same class as
+    TestGenerateImageSafety above, but the risky call is engines.get() itself
+    rather than a separately-patchable module function."""
 
     def _noisy_engines(self, default_model="stub-model"):
         def noisy_factory(model_name):
@@ -1237,10 +1226,11 @@ class TestModelDiscoveryTools:
         mock_fit.assert_called_once_with(4_000_000_000, 8_000_000_000)
 
     def test_list_model_files_fit_reflects_combined_split_capacity(self):
-        """AUDIT-GPU-SPLIT-1: the MCP list_model_files tool must weigh fit
-        against discover.vram_capacity()'s COMBINED split capacity, not just
-        vram_info()'s single main-GPU number - a file too big for one GPU
-        alone but that fits split across a configured 2-GPU split must fit."""
+        """The MCP list_model_files tool weighs fit against
+        discover.vram_capacity()'s COMBINED split capacity, not just
+        vram_info()'s single main-GPU number: a file too big for one GPU
+        alone but that fits split across a configured 2-GPU split reports
+        "fits"."""
         server, _ = _server()
         # need ~= 15e9*1.1 + 1.5e9 = 18e9: exceeds the 16 GB main GPU alone,
         # but fits under 0.85 * the 24 GB combined split.
@@ -1322,10 +1312,9 @@ class TestModelDiscoveryTools:
         assert "loaded" in r["result"]["content"][0]["text"]
         mock_pull.assert_called_once_with("owner/repo:m.Q4_K_M.gguf", name="m")
         assert engines._loaded_name == "m"
-        # AGENTS.md rule 5: "loaded ... ready to use" must mean an actual
-        # backend load, not just cache registration - engines.get() alone
-        # deliberately leaves the engine resident-but-unloaded (see
-        # EngineCache.get()'s "resident but not loaded" branch below).
+        # "loaded ... ready to use" must mean an actual backend load, not just
+        # cache registration - engines.get() alone leaves the engine
+        # resident-but-unloaded.
         engines._engines["m"].load.assert_called_once()
 
     def test_pull_model_load_false_skips_loading(self):
@@ -1366,10 +1355,9 @@ class TestModelDiscoveryTools:
         assert "no GPU memory" in r["result"]["content"][0]["text"]
 
     def test_pull_model_load_step_failure_is_distinguished_from_pull_failure(self):
-        """Distinct from the case above: there get() itself raises. Here
-        get() succeeds (construction + cache registration), and the actual
-        .load() call - the step this fix added, previously never invoked by
-        pull_model at all - is what fails."""
+        """Distinct from the case above, where get() itself raises. Here get()
+        succeeds (construction plus cache registration) and the .load() call is
+        what fails."""
         def failing_load_factory(name):
             engine = _stub_engine_factory(name)
             engine.load.side_effect = RuntimeError("no GPU memory")
@@ -1425,9 +1413,8 @@ class TestRunCoderTask:
         assert r["result"]["isError"] is True
         assert missing_field in r["result"]["content"][0]["text"]
 
-    # kept separate from the missing-field cases above: this arg dict is
-    # complete, so it exercises a different code path (existing-but-invalid
-    # cwd) rather than the missing-required-field check.
+    # This arg dict is complete, so it exercises the existing-but-invalid cwd
+    # path rather than the missing-required-field check above.
     def test_nonexistent_cwd_is_error(self, coder_active, tmp_path):
         server, _ = _server()
         r = self._call(server, {"task": "x", "cwd": str(tmp_path / "nope")})
@@ -1448,9 +1435,8 @@ class TestRunCoderTask:
         assert _unc_calls(seen) == []
 
     def test_successful_run_parses_json_payload(self, coder_active, tmp_path):
-        # Real `--output-format json` pretty-prints (indent=2, multi-line) - a
-        # single-line json.dumps() here would silently hide the exact bug this
-        # parsing once had (see test_console_messages_before_json_are_ignored).
+        # Real `--output-format json` pretty-prints (indent=2, multi-line), so a
+        # single-line json.dumps() here would not exercise the same parsing.
         server, _ = _server()
         payload = {"success": True, "response": "done: added type hints",
                    "turns": 3, "total_tokens": 512}
@@ -1465,28 +1451,23 @@ class TestRunCoderTask:
         assert "add type hints" in cmd
         assert "--cwd" in cmd and str(tmp_path) in cmd
         assert "--output-format" in cmd and "json" in cmd
-        assert "--yes" not in cmd            # default off (R19a fail-closed)
+        assert "--yes" not in cmd            # default off
         # The subprocess's OWN OS cwd must also be the task dir, not just the
-        # --cwd flag: if the coder auto-spawns a background server (no instance
-        # running yet), it identifies "this project" by ITS OWN inherited
-        # working directory. Passing --cwd alone registers the auto-spawned
-        # server under the WRONG project root, so attach-back never finds it.
+        # --cwd flag: if the coder auto-spawns a background server, it identifies
+        # "this project" by ITS OWN inherited working directory, so --cwd alone
+        # registers the auto-spawned server under the wrong project root.
         assert mock_run.call_args.kwargs["cwd"] == str(tmp_path)
 
     def test_subprocess_env_pins_the_servers_home_and_code(self, coder_active, tmp_path):
         """The coder chain re-resolves BOTH the localm data home and (via
         `-m`'s cwd-first sys.path) the localm PACKAGE from ambient state at
-        every process boundary - and this handler deliberately runs the child
-        in the TASK's directory (the cwd assertion above). A server whose own
-        home came from ITS cwd (the contained-default fallback - exactly the
-        documented `localm mcp` source-checkout offload setup) therefore
-        handed the chain a DIFFERENT, empty home: a model registered via
-        pull_model did not exist there, and the coder's auto-started server
-        died with 'Model not found' (exit 1) into an invisible console
-        (reproduced live 2026-07-21). The handler must pin ITS OWN resolved
-        identity into the child env: LOCALM_HOME (same data home), and
-        PYTHONSAFEPATH + a PYTHONPATH entry for its own package root (same
-        code, regardless of what a task directory happens to contain)."""
+        every process boundary, and this handler runs the child in the TASK's
+        directory (the cwd assertion above). A server whose own home came from
+        ITS cwd would otherwise hand the chain a different, empty home. The
+        handler must pin ITS OWN resolved identity into the child env:
+        LOCALM_HOME (same data home), plus PYTHONSAFEPATH and a PYTHONPATH entry
+        for its own package root (same code, whatever the task directory
+        contains)."""
         import os
         from pathlib import Path
         import localm as _pkg
@@ -1546,12 +1527,10 @@ class TestRunCoderTask:
         assert "created hello.txt" in r["result"]["content"][0]["text"]
 
     def test_console_messages_after_json_are_ignored(self, coder_active, tmp_path):
-        """The mirror of the before-json guard above, found live 2026-07-22
-        driving the REAL chain end to end: with the coder session in
+        """The mirror of the before-json guard above: with the coder session in
         `--mode full`, "Session transcript saved -> <path>" prints AFTER the
-        --output-format json dump, and parsing "from the last lone '{' to the
-        end of stdout" choked on that trailing text - reporting a fully
-        successful task (success: true in the payload) as an error."""
+        --output-format json dump, and a successful task must not be reported as
+        an error because of that trailing text."""
         server, _ = _server()
         payload = {"success": True, "response": "IDENTITY-FIX-OK", "turns": 1,
                    "total_tokens": 1988}
@@ -1711,10 +1690,8 @@ class TestNewToolCalls:
         assert "successfully installed and enabled" in resp["result"]["content"][0]["text"]
 
     def test_install_plugin_reports_dependency_install_failure(self):
-        # Same defect class as pull_model's load-failure distinction: the tool
-        # must not report a blanket "successfully installed" when the plugin's
-        # declared pip extras actually failed to install (AGENTS.md rule 5 - a
-        # failed step must never be reported as success).
+        # The tool must not report a blanket "successfully installed" when the
+        # plugin's declared pip extras actually failed to install.
         from localm.plugins.deps import InstallResult
         server, _ = _server()
         fail_result = InstallResult(ok=False, failed=["voice-lib>=1.0"],
@@ -1758,9 +1735,7 @@ class TestNewToolCalls:
         # PluginManager.uninstall() returns False (not an exception) when the
         # installed directory could not actually be removed - a locked file, an
         # AV hold, or a permission denial, all reachable on Windows. A bare
-        # "successfully uninstalled" in that case is the same discard-the-bool
-        # defect the checkup honesty audit found in the HTTP/GUI route: rule 5
-        # forbids reporting success for a step that did not complete.
+        # "successfully uninstalled" there reports a step that did not complete.
         server, _ = _server()
         with patch("localm.plugins.engine.PluginManager.is_installed", return_value=True), \
              patch("localm.plugins.engine.PluginManager.uninstall", return_value=False) as mock_uninstall:

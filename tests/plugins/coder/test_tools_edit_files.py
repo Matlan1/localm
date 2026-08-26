@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""edit_files - the multi-file exact-string batch edit (WORKITEMS B3).
+"""edit_files - the multi-file exact-string batch edit.
 
 The contract worth testing is ATOMICITY: a batch either applies completely or
 leaves every target byte-identical to how it started. Two distinct failure
@@ -10,8 +10,8 @@ points have to hold that line:
 - a FAILED WRITE partway through the batch. The already-written files must be
   restored from the pre-batch snapshots.
 
-Both are tested against real files on disk and asserted on BYTES, not on the
-tool's own report - a tool that says "rolled back" is not evidence that it did.
+Both are tested against real files on disk and asserted on BYTES, never on the
+tool's own report.
 """
 
 from unittest.mock import patch
@@ -57,7 +57,7 @@ class TestBatchApply:
         assert (project / "a.py").read_text(encoding="utf-8") == "import mid\nvalue = 99\n"
 
     def test_second_edit_sees_the_first_edits_text(self, project):
-        # Chained on the SAME text: only works if edits compose in memory.
+        # Chained on the SAME text: edits compose in memory.
         r = tool_edit_files(project, [
             {"path": "a.py", "old": "import old", "new": "import mid"},
             {"path": "a.py", "old": "import mid", "new": "import new"},
@@ -144,8 +144,8 @@ class TestAllOrNothing:
             assert (project / name).read_bytes() == original, f"{name} not restored"
 
     def test_a_failed_rollback_is_reported_never_claimed_clean(self, project):
-        """RULE 5: if the restore itself fails, the tool must say so - a caller
-        told 'rolled back' while a file holds a partial edit is the worst case."""
+        """If the restore itself fails, the tool must say so: a caller told
+        'rolled back' while a file holds a partial edit is the worst case."""
         real_write_text = type(project).write_text
 
         def failing_write_text(self, *args, **kwargs):
@@ -163,7 +163,7 @@ class TestAllOrNothing:
         assert r.ok is False
         assert "rollback ITSELF failed" in r.output
         assert "a.py" in r.output
-        # And the file really is left changed - the warning is not a false alarm.
+        # The file is left changed.
         assert (project / "a.py").read_text(encoding="utf-8").startswith("import new")
 
     def test_missing_file_rejects_the_whole_batch(self, project):
@@ -191,10 +191,9 @@ class TestValidation:
         assert (project / "a.py").read_bytes() == before
 
     def test_miss_shows_the_closest_snippet_hint(self, project):
-        # A GENUINE miss (a token that is not in the file) still shows the
-        # closest-snippet hint. A whitespace-only variant is no longer a miss
-        # (see test_whitespace_only_variant_matches below), so the miss here is
-        # a real token difference, not just different spacing.
+        # A miss (a token that is not in the file) still shows the closest-snippet
+        # hint. A whitespace-only variant is not a miss, so this is a real token
+        # difference rather than different spacing.
         r = tool_edit_files(project, [
             {"path": "a.py", "old": "import  older", "new": "import new"},
         ])
@@ -203,9 +202,8 @@ class TestValidation:
         assert "import old" in r.output
 
     def test_whitespace_only_variant_matches(self, project):
-        # `old` differs from the file ("import old") only in spacing. edit_files
-        # tolerates that (unique match) so the coder is not blocked by a snippet
-        # it reconstructed with a different amount of whitespace.
+        # `old` differs from the file ("import old") only in spacing; edit_files
+        # tolerates that as a unique match.
         r = tool_edit_files(project, [
             {"path": "a.py", "old": "import  old", "new": "import new"},   # 2 spaces
         ])

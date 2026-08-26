@@ -66,13 +66,8 @@ def _child_identity_env() -> dict:
     running code's location when nothing is configured, and ``-m`` puts the
     child's cwd first on ``sys.path``, where a ``localm/`` directory in that
     cwd (any other checkout) silently swaps which CODE runs. run_coder_task
-    deliberately runs its child in the TASK's directory (see its cwd comment),
-    so a server whose own home came from ITS location - exactly the documented
-    "run ``localm mcp`` from a source checkout" setup - handed the coder chain
-    a DIFFERENT, empty home: a model registered moments earlier via pull_model
-    did not exist there, and the coder's auto-started server died with "Model
-    not found" (exit 1) into a console window an MCP client never sees
-    (reproduced live 2026-07-21).
+    runs its child in the TASK's directory, so without this a server whose own
+    home came from ITS location hands the coder chain a different, empty home.
 
     LOCALM_HOME pins the data home; PYTHONSAFEPATH stops ``-m`` from putting
     the child's cwd on ``sys.path``; the PYTHONPATH entry keeps this server's
@@ -103,12 +98,9 @@ def _redirect_consoles_to_stderr() -> None:
     _engine_mod.console = err
     _gguf_mod.console = err
     _mm_mod.console = err
-    # BUG-11: _sizing's own module-level console (the "ctx auto" sizing note
-    # printed during GgufBackend's preflight, BEFORE the model process is even
-    # spawned - i.e. still in THIS process) was missing from this list, which
-    # is how chat/embed's first-load leak got past this redirect in the first
-    # place. The per-call _quiet_stdout() guards added at each risky call site
-    # are the belt; this is the suspenders.
+    # _sizing's own module-level console prints the "ctx auto" sizing note
+    # during GgufBackend's preflight, BEFORE the model process is even spawned -
+    # i.e. still in THIS process.
     _sizing_mod.console = err
     try:
         import localm.inference.backends.llamacpp.llama as _llama_mod
@@ -127,33 +119,30 @@ class EngineCache:
     Lazy, per-model engine cache. Multi-resident, on the shared policy.
 
     Models stay loaded ALONGSIDE each other whenever free VRAM provably allows
-    it, matching the HTTP server rather than the single-model cache this used to
-    be. Both servers ask the same module (``inference.residency``) the same two
+    it. Both servers ask the same module (``inference.residency``) the same two
     questions - may this load with zero eviction, and if not who is the safe
-    victim - so the two cannot drift apart again.
+    victim.
 
-    The conservative half is unchanged and load-bearing: stacking needs a fresh,
-    measurable reading that clears the requirement plus headroom with no split
-    shortfall. On a box that cannot measure VRAM, on an inconclusive probe, or
-    for a model whose footprint cannot be read, this falls straight back to the
-    old single-resident behaviour (evict, wait for the free to land, then load).
-    A wrong PERMIT here is a native OOM or a driver hang, not a tidy error.
+    Stacking needs a fresh, measurable reading that clears the requirement plus
+    headroom with no split shortfall. On a box that cannot measure VRAM, on an
+    inconclusive probe, or for a model whose footprint cannot be read, this
+    falls back to single-resident behaviour (evict, wait for the free to land,
+    then load). A wrong PERMIT here is a native OOM or a driver hang, not a tidy
+    error.
     """
 
     def __init__(self, default_model: Optional[str] = None,
                  engine_factory: Optional[Callable] = None) -> None:
         self.default_model = default_model
         # Display name -> engine, plus usage order (least-recently-used FIRST,
-        # MRU last) - the same shape http_server keeps in _engines/_engines_lru.
+        # MRU last).
         self._engines: Dict[str, Any] = {}
         self._lru: list = []
         # Injection point for tests - real factory builds a localm Engine
         self._factory = engine_factory or self._build_engine
 
     # ---- back-compat views over the multi-resident state -------------------
-    # _engine/_loaded_name predate multi-residency and still read naturally as
-    # "the model in use", so they are kept as MRU views rather than churning
-    # every call site (_backend_can_embed, the stdio shutdown, tests).
+    # _engine and _loaded_name read the most-recently-used resident.
 
     @property
     def _engine(self):
@@ -172,20 +161,17 @@ class EngineCache:
         """True only for the model the OPERATOR named when starting this server.
 
         ``default_model`` comes from the ``--model`` flag / the LOCALM_MODEL
-        environment variable, i.e. from the person who launched the process, so a
-        filesystem path is legitimate there and gating it would break
-        ``localm mcp --model <path>``. Every OTHER name arrives in a tool call
-        from the MCP client, which is normally an LLM that can be steered by
-        content it was asked to summarise - so a name from that source is treated
-        as hostile input and must be a registered one."""
+        environment variable, so a filesystem path is legitimate there. Every
+        OTHER name arrives in a tool call from the MCP client and is treated as
+        hostile input: it must be a registered one."""
         return bool(model_name) and model_name == self.default_model
 
     def _build_engine(self, model_name: str):
         from localm.inference.engine import Engine
         from localm.model_manager import get_model_info, unregistered_model_error
-        # Checked here as well as in resolve_model because _build_engine is also
-        # reachable directly (and is the injection point tests replace), so the
-        # gate must not depend on having come through resolve_model.
+        # Gated here as well as in resolve_model: _build_engine is also
+        # reachable directly, so the gate must not depend on having come
+        # through resolve_model.
         trusted = self._operator_supplied(model_name)
         if not trusted:
             bad = unregistered_model_error(model_name)
@@ -231,16 +217,10 @@ class EngineCache:
                     and getattr(engine, "unloading", False) is not True):
                 self._touch(name)      # already resident: never evict to reuse
                 return engine
-            # Resident but NOT loaded, so it holds no VRAM yet. Returning it
-            # here would skip the gate entirely and let the caller's
-            # chat_stream() call load() on top of whatever else is resident -
-            # a permit-direction hole, which is why http_server's own fast path
-            # carries the same `.loaded` check (http_server.py:372). It is
-            # reachable: pull_model calls get() and nothing else, leaving a
-            # constructed-but-unloaded engine parked in the cache, and the
-            # free-VRAM probe cannot see a model that has not loaded.
-            # Gate it, then hand back the SAME object so the pulled engine is
-            # reused rather than silently replaced.
+            # Resident but NOT loaded, so it holds no VRAM yet and the
+            # free-VRAM probe cannot see it. Run the gate, then hand back the
+            # SAME object so the pulled engine is reused rather than silently
+            # replaced.
             self._make_room_for(name)
             self._touch(name)
             return engine
@@ -269,9 +249,8 @@ class EngineCache:
             model_footprint_bytes, required_vram_bytes)
         try:
             from localm.model_manager import get_model_info
-            # Operator-supplied default may be a path (see _operator_supplied);
-            # a client name may not, and returns None here = "cannot prove the
-            # fit" = single-resident, which is the safe direction.
+            # Operator-supplied default may be a path; a client name may not,
+            # and returns None here.
             info = get_model_info(
                 name, allow_direct_path=self._operator_supplied(name))
             if info is None:
@@ -279,9 +258,8 @@ class EngineCache:
             path, _hint = info
             return required_vram_bytes(model_footprint_bytes(path))
         except Exception as e:
-            # Falls back to single-resident, so this is safe - but it is also
-            # exactly the kind of silent degradation rule 5 is about, so it is
-            # traceable in the debug log rather than invisible.
+            # Falls back to single-resident; logged so the degradation is
+            # traceable rather than invisible.
             from localm.debuglog import logger
             logger.debug("mcp: could not size %s, assuming it needs the card "
                          "to itself: %s", name, e)
@@ -296,13 +274,11 @@ class EngineCache:
         from localm.inference.residency import (
             DEFAULT_HEADROOM_BYTES, fits_alongside_residents)
         try:
-            # Same deadline the HTTP server's gate uses, for the same reason:
-            # THIS caller's correctness depends on waiting out a cold ROCm/CUDA
-            # init. The first load after an MCP server starts is precisely that
-            # cold case, and a timed-out probe here does not merely slow things
-            # down - it reads as "unmeasurable" and drops us to single-resident.
-            # No executor hop is needed (unlike http_server): this process is
-            # synchronous, so there is no event loop for the probe to stall.
+            # The same deadline the HTTP server's gate uses: the probe must be
+            # able to wait out a cold ROCm/CUDA init, since a timed-out probe
+            # reads as "unmeasurable" and drops to single-resident. No executor
+            # hop, unlike http_server: this process is synchronous, so there is
+            # no event loop for the probe to stall.
             v_info, probe_status = vram_capacity(
                 return_status=True, deadline=discover._GPU_PROBE_CLI_DEADLINE,
                 wait_for_inflight=True)
@@ -314,9 +290,8 @@ class EngineCache:
                 shortfall = gpu_split_shortfall(required + DEFAULT_HEADROOM_BYTES)
             # PROCESS-scoped readings are blind to every OTHER resident model
             # (each lives in its own isolated worker subprocess), so they can
-            # only over-report free space - never trusted for the PERMIT
-            # decision, exactly like the HTTP server's own admission gate. See
-            # residency.fits_alongside_residents's is_process_scoped docstring.
+            # only over-report free space and are never trusted for the PERMIT
+            # decision.
             return fits_alongside_residents(
                 free_vram=v_info.get("free"), vram_required=required,
                 probe_ok=probe_ok, shortfall=shortfall,
@@ -332,18 +307,15 @@ class EngineCache:
         try:
             from localm.inference.engine import _is_gguf
             from localm.model_manager import get_model_info
-            # Instance method (was static) so it can tell the operator's own
-            # --model path from a client-supplied name, same split as _size_for.
+            # Tells the operator's own --model path from a client-supplied name.
             info = get_model_info(
                 name, allow_direct_path=self._operator_supplied(name))
             return bool(info) and _is_gguf(info[0])
         except Exception:
-            # Fail CLOSED. This only decides whether to run the per-device split
-            # check, which is a REFUSE-direction guard - so "unknown" must mean
-            # RUN it, not skip it. Skipping is precisely how a per-device
-            # shortfall gets admitted on a box that does have a split
-            # configured, and running it costs nothing on a box that does not
-            # (gpu_split_shortfall returns [] when no split resolves).
+            # Fail CLOSED: this only decides whether to run the per-device split
+            # check, a REFUSE-direction guard, so "unknown" must mean RUN it,
+            # not skip it. gpu_split_shortfall returns [] when no split
+            # resolves.
             return True
 
     def _make_room_for(self, name: str) -> None:
@@ -352,7 +324,7 @@ class EngineCache:
 
         Returns as soon as the model may load alongside what is already there,
         which on a measurable box with headroom is immediately and with zero
-        eviction - the whole point of the parity fix.
+        eviction.
         """
         from localm.config import load_config
         from localm.inference import residency
@@ -362,11 +334,10 @@ class EngineCache:
         required = self._model_required_bytes(name)
         while self._lru:
             over_cap = residency.exceeds_resident_cap(self._lru, name, cap)
-            # Only probe when the cap is satisfied: a GPU probe can wait out a
-            # cold driver init, and being over cap already means we need room
-            # regardless of what VRAM says. vram_ok stays None to record that
-            # we did NOT measure this pass - which the message below relies on,
-            # so it never reports a shortfall nobody observed (rule 5).
+            # Only probe when the cap is satisfied: being over cap already means
+            # room is needed regardless of what VRAM says. vram_ok stays None to
+            # record that this pass did NOT measure, which the message below
+            # relies on so it never reports a shortfall nobody observed.
             vram_ok = None
             if not over_cap:
                 vram_ok = self._fits_alongside(name, required)
@@ -377,11 +348,6 @@ class EngineCache:
             if victim is None:
                 # Nothing evictable (all pinned, or all busy). Load anyway and
                 # SAY the policy was missed, rather than pretending it held.
-                # Refusing is not the better option here: a stdio tool call has
-                # no useful "try later", and for the CAP case the HTTP server
-                # makes the same call for the same reason - a cap is a user
-                # preference, not a safety constraint, so it must never cost a
-                # load (or a sibling instance's models) when VRAM is fine.
                 reasons = []
                 if over_cap:
                     reasons.append("the resident cap")
@@ -407,21 +373,14 @@ class EngineCache:
             return
         _log(f"evicting {victim} to make room for {loading}")
         from localm.vram import _live_free_vram_bytes, _vram_free_reading
-        # SEED the wait with the reading even when the probe was not fresh,
-        # and poll with the live-only reader - exactly as the three
-        # http_server unload paths do, and NOT the other way round. The two
-        # ends need opposite things from a stale probe: for the 'before'
-        # SEED, None means "do not wait at all" (wait_for_vram_release
-        # short-circuits on before_bytes=None), so seeding it from the
-        # live-only reader would silently drop the driver-hang guard below to
-        # a 0-second no-op on any box whose probe merely ran slow. For the
-        # 'after' POLL, None correctly means "cannot verify". Freshness is
-        # carried separately, for the REPORT, not the wait.
-        # scope IS used, for the same reason the /v1/models/unload report needs
-        # it: a process-scoped reading (Windows/AMD, blind to the model in its
-        # isolated worker) genuinely CANNOT observe the free rising after unload,
-        # so "did not rise" would be a false claim, not a backable one. It is
-        # folded into the verdict below, not just the report.
+        # SEED the wait with the reading even when the probe was not fresh, and
+        # poll with the live-only reader, NOT the other way round: for the
+        # 'before' SEED, None means "do not wait at all" (wait_for_vram_release
+        # short-circuits on before_bytes=None), while for the 'after' POLL None
+        # means "cannot verify". Freshness is carried separately, for the
+        # REPORT, not the wait. scope is folded into the verdict below, not just
+        # the report: a process-scoped reading (blind to the model in its
+        # isolated worker) CANNOT observe the free rising after unload.
         before_free, before_fresh, before_scope = _vram_free_reading()
         try:
             engine.unload()
@@ -429,31 +388,27 @@ class EngineCache:
             # Unload is best-effort (we still load the new model), but a
             # cleanup failure must be visible, not silently swallowed.
             _log(f"warning: failed to unload {victim}: {e}")
-        # The native unload's VRAM free is asynchronous - loading the next
-        # model before it lands can exceed total VRAM and hang the GPU
-        # driver (the same TDR risk the /v1/models/unload endpoint guards
-        # against; see vram.wait_for_vram_release). before_free is None only
-        # when VRAM is not measurable AT ALL (a CPU-only box), in which case
-        # there is nothing to wait for and this is a no-op, as before.
+        # The native unload's VRAM free is asynchronous - loading the next model
+        # before it lands can exceed total VRAM and hang the GPU driver.
+        # before_free is None only when VRAM is not measurable AT ALL (a
+        # CPU-only box), in which case there is nothing to wait for and this is
+        # a no-op.
         from localm.discover import FREE_SCOPE_DEVICE
         from localm.vram import wait_for_vram_release
         released, _final = wait_for_vram_release(
             _live_free_vram_bytes, before_bytes=before_free)
         backable = before_fresh and before_scope == FREE_SCOPE_DEVICE
         if released is False and backable:
-            # Fresh AND device-global on both ends: "did not rise" is a claim we
-            # can back. A process-scoped reading is excluded here precisely
-            # because it cannot see the model's VRAM in its isolated worker, so a
-            # no-rise there proves nothing (it falls to the honest branch below).
+            # Fresh AND device-global on both ends: "did not rise" is a claim
+            # that can be backed. A process-scoped reading cannot see the
+            # model's VRAM in its isolated worker and falls to the branch below.
             _log(f"warning: VRAM free did not rise after unloading "
                  f"{victim} within the timeout - loading {loading} anyway")
         elif before_free is not None and (released is None or not backable):
             # Either end came off a timed-out/busy probe, OR the reading is
             # process-scoped (blind to the worker's VRAM), so whether the free
             # landed is unknown. Say that rather than the "did not rise" claim
-            # above, which a reading we never took - or one that cannot see the
-            # freed memory - cannot support (rule 5). The wait still ran; only the
-            # verdict is withheld.
+            # above. The wait still ran; only the verdict is withheld.
             _log(f"warning: could not confirm the VRAM free after unloading "
                  f"{victim} (no live GPU reading) - loading "
                  f"{loading} anyway")
@@ -468,10 +423,9 @@ class EngineCache:
             try:
                 engine.unload()
             except Exception as e:
-                # Process teardown, so nothing downstream can act on this - but
-                # a native free that failed is exactly what leaves VRAM pinned
-                # after exit, and swallowing it silently is how that becomes
-                # unexplainable. stderr only; stdout belongs to the protocol.
+                # Process teardown, so nothing downstream can act on this, but a
+                # native free that failed leaves VRAM pinned after exit. stderr
+                # only; stdout belongs to the protocol.
                 _log(f"warning: failed to unload {name} at shutdown: {e}")
 
 
@@ -481,17 +435,16 @@ def _text_result(text: str, is_error: bool = False) -> dict:
 
 @contextlib.contextmanager
 def _quiet_stdout():
-    """MCP-1: redirect stdout to stderr for the duration of the block, so a
-    downstream call's stray prints never corrupt the JSON-RPC frame stream on
-    stdout. Eight tool handlers below repeated this identical guard."""
+    """Redirect stdout to stderr for the duration of the block, so a downstream
+    call's stray prints never corrupt the JSON-RPC frame stream on stdout."""
     with contextlib.redirect_stdout(sys.stderr):
         yield
 
 
 def _run_mgr_action(mgr, fn, *, plugin: str):
-    """MCP-2: call fn(mgr) inside the stdout-quieting guard, mapping
-    KeyError/ValueError the same way install/enable/disable/uninstall_plugin
-    all did. Returns the mapped error _text_result, or None on success."""
+    """Call fn(mgr) inside the stdout-quieting guard, mapping KeyError to a
+    "no such plugin" result and ValueError to its own message. Returns the
+    mapped error _text_result, or None on success."""
     with _quiet_stdout():
         try:
             fn(mgr)
@@ -509,17 +462,16 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
     if the engine object is not yet instantiated/cached."""
     if getattr(engines, "_factory", None) != getattr(engines, "_build_engine", None):
         try:
-            # BUG-11: a custom factory can be a real engine builder (tests
-            # normally inject a stub, but nothing enforces that), so guard the
-            # same as chat()/embed()/pull_model() below.
+            # A custom factory can be a real engine builder, so guard the same
+            # as chat()/embed()/pull_model() below.
             with _quiet_stdout():
                 backend = getattr(engines.get(None), "_backend", None)
             return getattr(backend, "can_embed", True) is not False
         except Exception as e:
-            # Probe failed: assume embeddable (do not hide the embed tool on a
-            # transient error), but log so a real capability bug is traceable
-            # (AGENTS.md rule 5). Logger writes to the debug file/stderr, never
-            # stdout, so the JSON-RPC frame stream stays clean.
+            # Probe failed: assume embeddable rather than hide the embed tool on
+            # a transient error, and log so a real capability bug is traceable.
+            # The logger writes to the debug file/stderr, never stdout, so the
+            # JSON-RPC frame stream stays clean.
             from localm.debuglog import logger
             logger.debug("mcp: embed-capability probe (custom factory) failed, "
                          "assuming embeddable: %s", e)
@@ -541,8 +493,8 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
             if str(path).lower().endswith(".gguf"):
                 return False
     except Exception as e:
-        # Registry probe failed: assume embeddable rather than hide the tool, but
-        # log the cause (AGENTS.md rule 5). Debug logger stays off stdout.
+        # Registry probe failed: assume embeddable rather than hide the tool,
+        # and log the cause. The debug logger stays off stdout.
         from localm.debuglog import logger
         logger.debug("mcp: embed-capability probe (registry) failed, assuming "
                      "embeddable: %s", e)
@@ -550,19 +502,17 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
 
 
 def _coder_available() -> bool:
-    """True when the coder plugin is installed on disk AND enabled - matches the
-    same check `localm coder` itself does before accepting a task (see
-    plugins/coder/cli/_main.py), so the tool is only advertised when a call
-    would actually work."""
+    """True when the coder plugin is installed on disk AND enabled, the same
+    check `localm coder` itself does before accepting a task."""
     try:
         from localm.plugins.engine import PluginManager
         return PluginManager(None).is_active("coder")
     except Exception as e:
-        # Fails CLOSED (hide the coder tool) so a call that could not work is not
-        # advertised - but that means an installed+enabled coder VANISHES from the
-        # tool list if this probe raises (e.g. unreadable plugin config). Log the
-        # cause so that is diagnosable, not a silent disappearance (AGENTS.md rule
-        # 5). Debug logger writes to file/stderr, never the JSON-RPC stdout.
+        # Fails CLOSED (hide the coder tool), so an installed+enabled coder
+        # VANISHES from the tool list if this probe raises (e.g. unreadable
+        # plugin config). The cause is logged so that is diagnosable, not a
+        # silent disappearance. The debug logger writes to file/stderr, never
+        # the JSON-RPC stdout.
         from localm.debuglog import logger
         logger.debug("mcp: coder-availability probe failed, hiding coder tool: %s", e)
         return False
@@ -576,11 +526,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         prompt = args.get("prompt", "")
         if not prompt:
             return _text_result("'prompt' is required", is_error=True)
-        # BUG-11: engines.get() can trigger a fresh model load, and a GGUF load
-        # prints native sizing/context diagnostics (e.g. the "ctx auto" note)
-        # straight to stdout - the same stream the JSON-RPC frames travel on.
-        # Every other handler that can load a model already guards this; chat
-        # and embed (below) were the two that did not.
+        # engines.get() can trigger a fresh model load, and a GGUF load prints
+        # native sizing/context diagnostics (e.g. the "ctx auto" note) straight
+        # to stdout - the same stream the JSON-RPC frames travel on.
         with _quiet_stdout():
             engine = engines.get(args.get("model"))
         messages = []
@@ -598,15 +546,13 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         """What any running localm server on this machine is doing.
 
         This MCP server is a SEPARATE PROCESS from the HTTP/GUI server and
-        shares no memory with it, so the only way to answer is to find the
-        running instances on disk and ask each one over HTTP. That is why this
-        tool exists at all: a pull started from the browser is invisible here
-        otherwise, and an agent that cannot see it will happily start a second.
+        shares no memory with it, so it finds the running instances on disk and
+        asks each one over HTTP.
 
-        The states are kept apart deliberately. "No server is running" is not
-        "nothing is running" - there is nothing to ask. "Could not reach it" is
-        not "it is idle". Only a server that actually answered can report an
-        empty list, and only that case says nothing is running.
+        The states are kept apart. "No server is running" is not "nothing is
+        running" - there is nothing to ask. "Could not reach it" is not "it is
+        idle". Only a server that actually answered can report an empty list,
+        and only that case says nothing is running.
         """
         from localm import instances
         from localm.config import home_dir
@@ -614,8 +560,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
         # include_token=True: this call ASKS each discovered instance over HTTP
         # (an internal, non-display use), so it needs the attach token a
-        # genuinely open (keyless) instance's middleware requires (#953) - never
-        # do this for anything a human reads (e.g. `localm ps`, which keeps the
+        # genuinely open (keyless) instance's middleware requires. Never do this
+        # for anything a human reads (e.g. `localm ps`, which keeps the
         # default-stripped snapshot()).
         rows = instances.snapshot(home_dir(), include_token=True)
         if not rows:
@@ -639,11 +585,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 lines.append(f"{where}: could not be reached ({payload}); "
                              f"its activity is unknown.")
             elif state == "unauthorized":
-                # #953: match the "could not be X" register the other failure
-                # branches already use, not a "needs a key" requirement
-                # statement - the latter reads as an optional hardening tip
-                # rather than what this actually is: this process genuinely
-                # cannot tell what the server is doing right now.
+                # Matches the "could not be X" register the other failure
+                # branches use, not a "needs a key" requirement statement: this
+                # process cannot tell what the server is doing right now.
                 lines.append(f"{where}: could not be asked (it requires an "
                              f"API key this process does not have); its "
                              f"activity is unknown.")
@@ -671,7 +615,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                         bits.append(f"{pct:.0f}%")
                     created = op.get("created_at")
                     # Age against the SERVER's clock; this process may not
-                    # share it, and a wrong duration is worse than none.
+                    # share it.
                     if isinstance(now, (int, float)) and isinstance(created, (int, float)):
                         bits.append(f"{int(max(0, now - created))}s elapsed")
                     lines.append(f"  - {label} [{', '.join(bits)}]")
@@ -692,15 +636,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 # remove_model tool). Guards a hand-edited/half-written registry.
                 lines.append(f"{name}  [corrupt]  (malformed registry entry)")
                 continue
-            # These stats run INLINE on purpose. The sibling HTTP handlers
-            # (/api/models, /v1/models/{id}) push the same per-row filesystem work
-            # into the plugin executor because they are `async def` and a blocking
-            # syscall there stalls every other request the server is serving. This
-            # dispatcher has no event loop to protect: MCPStdioServer.run_stdio is
-            # a synchronous `for line in stdin` loop and handle() is a plain def,
-            # so a thread hop would only move the block, not remove it - the caller
-            # is already waiting on this one reply. What keeps a pathological row
-            # (a UNC path that blocks in the SMB redirector) out of this loop is
+            # These stats run INLINE: this dispatcher has no event loop to
+            # protect, since MCPStdioServer.run_stdio is a synchronous
+            # `for line in stdin` loop and handle() is a plain def, so a thread
+            # hop would only move the block. What keeps a pathological row (a
+            # UNC path that blocks in the SMB redirector) out of this loop is
             # the REGISTRATION gate, not a probe here.
             p = Path(epath)
             if p.is_dir():
@@ -715,12 +655,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
     def system_stats(args: dict) -> dict:
         from localm.sysstats import system_stats as _stats
-        # A ONE-SHOT call, unlike the GUI's repeating ~2.5s poll: without
-        # wait_first_vram, the "Live ... VRAM" promise below silently omits
-        # VRAM on a cold first call while the background probe is still
-        # running, because there is no later poll here to pick up the
-        # landed reading. Safe to block on it - MCP stdio serves one
-        # request at a time with no event loop to stall (see run_stdio).
+        # A ONE-SHOT call, unlike the GUI's repeating poll: without
+        # wait_first_vram the "Live ... VRAM" promise below omits VRAM on a cold
+        # first call while the background probe is still running, because there
+        # is no later poll here to pick up the landed reading. MCP stdio serves
+        # one request at a time with no event loop to stall.
         return _text_result(json.dumps(_stats(wait_first_vram=True)))
 
     def search_models(args: dict) -> dict:
@@ -756,22 +695,15 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 "'name' is required - pick a short registry name for this model",
                 is_error=True)
         # `repo` is an MCP-CLIENT-supplied string, not a path the local user
-        # picked - is_unc_or_device_path's "remote value" contract applies:
+        # picked, so is_unc_or_device_path's "remote value" contract applies:
         # refuse UNC/device syntax unconditionally, BEFORE the
-        # Path(repo).exists() sink below ever runs. That sink is the
-        # vulnerability: on Windows it dials SMB and auto-authenticates for a
-        # UNC target, and can stall for minutes inline in this handler - see
-        # pathsafe.reject_unsafe_path_string's docstring for the measured cost.
+        # Path(repo).exists() sink below ever runs. On Windows that sink dials
+        # SMB and auto-authenticates for a UNC target, and can stall for minutes
+        # inline in this handler.
         #
-        # DELIBERATELY NOT gated on os.name, unlike reject_unsafe_path_string's
-        # `//`-form check (that function's docstring: the os.name gate is the
-        # POLICY for a path the LOCAL user picked, e.g. a folder-picker value,
-        # where a legitimate POSIX path can start with `//`). `repo` has no
-        # such legitimate case: no real HuggingFace repo id contains a
-        # backslash or starts with `//`, on any platform, so refusing it
-        # unconditionally costs nothing and gives one invariant to test
-        # instead of "secure on Windows, permissive-on-Linux" - and this
-        # server does in fact run on Windows, where the sink is live.
+        # NOT gated on os.name, unlike reject_unsafe_path_string's `//`-form
+        # check: no real HuggingFace repo id contains a backslash or starts with
+        # `//`, on any platform.
         #
         # The message does not echo `repo` back, unlike the local-add message
         # below: this string never reached a safe-to-display check.
@@ -780,17 +712,14 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 "'repo' looks like a filesystem path (UNC or device syntax), not "
                 "a HuggingFace repo id. pull_model downloads a model by repo id "
                 "(e.g. 'owner/name').", is_error=True)
-        # A LOCAL PATH IS NOT A PULL, and letting a client "pull" one turns this
-        # tool into a registry-WRITE primitive: pull_model treats an existing path
-        # as a local add (see pull.py's is_local_path branch), registering an
-        # arbitrary directory under a client-chosen name. That name is then a
-        # registered model, so it sails through the membership check and resolves
-        # via the REGISTRY branch of get_model_info - around the direct-path gate
-        # entirely. It also works with net_mode=off, and even a REFUSED add still
-        # probes the path (config.json read, rglob, sha256), which is the sink set
-        # this gate exists to keep client input away from. An MCP client pulls from
-        # HuggingFace; registering something already on this disk is `localm add`,
-        # a deliberate local action.
+        # A LOCAL PATH IS NOT A PULL. pull_model treats an existing path as a
+        # local add, registering an arbitrary directory under a client-chosen
+        # name; that name is then a registered model, so it passes the
+        # membership check and resolves via the REGISTRY branch of
+        # get_model_info rather than the direct-path gate. A refused add still
+        # probes the path (config.json read, rglob, sha256). An MCP client pulls
+        # from HuggingFace; registering something already on this disk is
+        # `localm add`.
         try:
             if Path(repo).expanduser().exists():
                 return _text_result(
@@ -804,11 +733,10 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
         from localm.model_manager.pull import pull_model as _pull
 
-        # pull_model()'s progress bars/messages print via a rich Console (module-
-        # level singleton in model_manager/_shared.py, imported by value into
-        # pull.py at load time - patching model_manager's own re-exported name
-        # would miss it). redirect_stdout catches it regardless of which Console
-        # instance is in play, same defense generate_image uses above.
+        # pull_model()'s progress bars/messages print via a rich Console (a
+        # module-level singleton in model_manager/_shared.py, imported by value
+        # into pull.py at load time). redirect_stdout catches it regardless of
+        # which Console instance is in play.
         with _quiet_stdout():
             try:
                 ok = _pull(spec, name=name)
@@ -822,17 +750,16 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result(f"pulled and registered as {name!r} (not loaded)")
 
         try:
-            # BUG-11: this load, like chat()/embed()'s, can print native sizing
-            # diagnostics straight to stdout - the download above was already
-            # guarded, but this post-download load step was not.
+            # This load, like chat()/embed()'s, can print native sizing
+            # diagnostics straight to stdout.
             #
             # engines.get() only constructs/registers the Engine and runs the
-            # VRAM-eviction gate (EngineCache.get(), engine.py) - it does NOT
-            # call Engine.load(), so the backend stays unloaded until some
-            # later caller (normally chat_stream()'s lazy-load path) touches
-            # it. The tool's own description promises "load it - blocks until
-            # ready", so pull_model must call .load() itself rather than
-            # leaving a resident-but-unloaded engine parked in the cache.
+            # VRAM-eviction gate - it does NOT call Engine.load(), so the
+            # backend stays unloaded until some later caller (normally
+            # chat_stream()'s lazy-load path) touches it. The tool's own
+            # description promises "load it - blocks until ready", so pull_model
+            # calls .load() itself rather than leaving a resident-but-unloaded
+            # engine parked in the cache.
             with _quiet_stdout():
                 engine = engines.get(name)
                 engine.load()
@@ -842,13 +769,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 is_error=True)
         msg = f"pulled, registered, and loaded {name!r} - ready to use"
         # gpu_placement is None whenever the backend cannot report per-layer
-        # placement for this engine (see Engine.gpu_placement) - never fabricate
-        # a degraded warning without evidence a load actually happened. When it
-        # IS known and partial/zero, say so: a model too big to fully fit VRAM
-        # still loads (the backend's own sizing deliberately defers to a
-        # partial/zero GPU offload rather than refusing), and a bare "loaded"
-        # would hide that from an MCP client the same way the HTTP route's did
-        # (AGENTS.md rule 5).
+        # placement for this engine - never fabricate a degraded warning without
+        # evidence a load actually happened. When it IS known and partial/zero,
+        # say so: a model too big to fully fit VRAM still loads, because the
+        # backend's own sizing defers to a partial/zero GPU offload rather than
+        # refusing.
         placement = getattr(engine, "gpu_placement", None)
         if placement and placement.get("degraded"):
             msg += (f" ({placement['gpu_layers_offloaded']}/"
@@ -862,7 +787,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             texts = [texts]
         if not texts:
             return _text_result("'texts' is required (string or list)", is_error=True)
-        # BUG-11: see chat() above - a fresh embedder load can print to stdout too.
+        # A fresh embedder load can print to stdout too, like chat() above.
         with _quiet_stdout():
             engine = engines.get(args.get("model"))
         try:
@@ -885,23 +810,17 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         def _confine(raw: str, label: str):
             """Keep an MCP OUTPUT path inside the localm data dir - this tool is
             driven by an LLM client, so an arbitrary output_path could overwrite
-            anything on disk (SEC-7).
+            anything on disk.
 
-            WRITE targets only. ``input_image`` deliberately does NOT use this:
-            confining a READ to the data dir is far too wide, because the data
-            dir is the credential store (auth.key is the plaintext owner key,
-            plus auth.json, sessions.json, rag/, coder/). See below.
+            WRITE targets only. ``input_image`` does NOT use this: confining a
+            READ to the data dir is far too wide, because the data dir is the
+            credential store (auth.key is the plaintext owner key, plus
+            auth.json, sessions.json, rag/, coder/).
 
-            Delegates to ``pathsafe.confined_absolute_or_under`` (the same
-            primitive coder/tools/base.py's ``_confine`` now uses - this
-            closure and that function were two independent copies of the
-            same shape) rather than a hand-rolled resolve()+is_relative_to().
-            The UNC/device guard this closure already carried is now inside
-            the shared primitive; it additionally closes an NTFS Alternate
-            Data Stream / short-name-alias gap this closure never had.
-            Every rejection reason is folded into the SAME message (never
-            echoing the client-supplied string back - matching this
-            closure's existing convention for the plain out-of-home case)."""
+            Delegates to ``pathsafe.confined_absolute_or_under``, which carries
+            the UNC/device guard and additionally closes an NTFS Alternate Data
+            Stream / short-name-alias gap. Every rejection reason is folded into
+            the SAME message, never echoing the client-supplied string back."""
             expanded = str(Path(raw).expanduser())
             try:
                 return pathsafe.confined_absolute_or_under(home, expanded)
@@ -915,12 +834,12 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                    else home / "mcp-images" / f"mcp-{int(time.time())}.png")
             # input_image is a READ that is then UPLOADED to ComfyUI, over an
             # api_url sanitize_comfy_url permits to be a LAN or public host on
-            # plaintext http - so it is read-AND-TRANSMIT, and the data dir is
-            # exactly the wrong boundary for it. Same policy the image/video HTTP
-            # routes use (uploads inbox + the generated-media galleries), via the
-            # non-HTTP entry point so a refusal becomes an error REPLY here
-            # rather than an HTTPException escaping the stdio handler.
-            # InputImageRefused is a ValueError, so the existing except catches it.
+            # plaintext http, so it is read-AND-TRANSMIT and the data dir is the
+            # wrong boundary for it. Same policy the image/video HTTP routes use
+            # (uploads inbox + the generated-media galleries), via the non-HTTP
+            # entry point so a refusal becomes an error REPLY here rather than an
+            # HTTPException escaping the stdio handler. InputImageRefused is a
+            # ValueError, so the existing except catches it.
             input_p = (_media_paths.check_input_image(args["input_image"])
                        if args.get("input_image") else None)
         except ValueError as e:
@@ -929,7 +848,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         is_privacy = effective_mode("mcp") == SessionMode.PRIVACY
         # comfy.generate_image builds its own rich Console / Progress on stdout;
         # the JSON-RPC frame stream lives on stdout too, so route any stray
-        # output to stderr or it corrupts the protocol (BUG-11).
+        # output to stderr or it corrupts the protocol.
         with _quiet_stdout():
             ok, message = gen_img(
                 prompt, out,
@@ -951,10 +870,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         if not cwd:
             return _text_result("'cwd' is required (the project directory to work in)",
                                  is_error=True)
-        # `cwd` is MCP-client-supplied, same as pull_model's `repo` above (see
-        # the --model comment below: "the client also chooses cwd") - refuse
-        # UNC/device syntax unconditionally, BEFORE is_dir() below ever runs.
-        # is_dir() dials SMB for a UNC target exactly like exists() does.
+        # `cwd` is MCP-client-supplied, same as pull_model's `repo` above:
+        # refuse UNC/device syntax unconditionally, BEFORE is_dir() below ever
+        # runs. is_dir() dials SMB for a UNC target exactly like exists() does.
         if is_unc_or_device_path(cwd):
             return _text_result(
                 "'cwd' must be a local directory path, not a UNC or device path.",
@@ -963,23 +881,19 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         if not cwd_path.is_dir():
             return _text_result(f"cwd is not a directory: {cwd_path}", is_error=True)
 
-        # Shells out to the already-tested `localm coder` single-shot CLI rather
-        # than reconstructing Agent/backend wiring in-process: it reuses the CLI's
-        # own project-config resolution and instance attach/spawn logic verbatim,
+        # Shells out to the `localm coder` single-shot CLI, which reuses the
+        # CLI's own project-config resolution and instance attach/spawn logic,
         # and keeps this MCP server's own EngineCache (used by chat/embed) from
         # fighting the coder's separate server process over the same model load.
         cmd = [sys.executable, "-m", "localm", "coder", task,
                "--cwd", str(cwd_path), "--output-format", "json"]
         if args.get("model"):
-            # A MODEL NAME FROM A CLIENT IS NOT OPERATOR INPUT, even though it is
-            # about to become argv. The coder CLI spawns `localm gui <model>` when
-            # no instance is attached for this cwd, and that positional reaches the
-            # startup resolver, which opts into allow_direct_path because a human
-            # typed it. Here a human did not: this string came from an MCP tool
-            # call, and the client also chooses `cwd`, so it can select the spawn
-            # branch at will. Without this check the gate is laundered through our
-            # own command line - "it is a command line" only implies "an operator
-            # typed it" when we are not the one building it.
+            # A MODEL NAME FROM A CLIENT IS NOT OPERATOR INPUT, even though it
+            # is about to become argv. The coder CLI spawns `localm gui <model>`
+            # when no instance is attached for this cwd, and that positional
+            # reaches the startup resolver, which opts into allow_direct_path.
+            # This string came from an MCP tool call, and the client also
+            # chooses `cwd`, so it can select the spawn branch at will.
             from localm.model_manager import unregistered_model_error
             bad = unregistered_model_error(args["model"])
             if bad:
@@ -987,9 +901,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             cmd += ["--model", args["model"]]
         if args.get("max_turns") is not None:
             cmd += ["--max-turns", str(args["max_turns"])]
-        # Default OFF (matches the CLI's own R19a fail-closed default): without
-        # this, file writes still happen but run_shell is denied for lack of a
-        # TTY to confirm it. Opt in per call once the task is known to need it.
+        # Default OFF, matching the CLI's own fail-closed default: without this,
+        # file writes still happen but run_shell is denied for lack of a TTY to
+        # confirm it.
         if args.get("yes"):
             cmd.append("--yes")
         timeout = args.get("timeout_seconds") or 900
@@ -1002,24 +916,22 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             # this and the auto-spawned server registers under the MCP server's
             # own directory instead, so the coder's own attach-back lookup can
             # never find it (looks like a timeout; it is a project-root mismatch).
-            # env=_child_identity_env(): that same deliberate cwd change must
-            # NOT drag the child onto a different data home or different localm
-            # code - see the helper's docstring for the live-reproduced failure.
+            # env=_child_identity_env(): that cwd change must NOT drag the child
+            # onto a different data home or different localm code.
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                                   cwd=str(cwd_path), env=_child_identity_env())
         except subprocess.TimeoutExpired:
             return _text_result(f"coder task timed out after {timeout}s", is_error=True)
 
         # --output-format json pretty-prints with indent=2 (multi-line), and
-        # console messages print to stdout BOTH BEFORE it ("attached to
-        # running server", the auto-start banner) AND AFTER it (`--mode
-        # full`'s "Session transcript saved -> <path>", found live 2026-07-22
-        # reporting a fully successful task as an error) - so the JSON is
-        # neither the whole stdout nor anchored to either end. Find each line
-        # that is a lone "{" (the JSON dict is always non-empty, so indent=2
-        # always opens it on its own line), newest first, and raw_decode from
-        # there: unlike json.loads, raw_decode stops at the object's closing
-        # brace and tolerates whatever trailing console text follows it.
+        # console messages print to stdout BOTH BEFORE it ("attached to running
+        # server", the auto-start banner) AND AFTER it (`--mode full`'s "Session
+        # transcript saved -> <path>") - so the JSON is neither the whole stdout
+        # nor anchored to either end. Find each line that is a lone "{" (the
+        # JSON dict is always non-empty, so indent=2 always opens it on its own
+        # line), newest first, and raw_decode from there: unlike json.loads,
+        # raw_decode stops at the object's closing brace and tolerates whatever
+        # trailing console text follows it.
         stdout = proc.stdout.strip()
         payload = None
         if stdout:
@@ -1047,17 +959,14 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         from localm.config import load_registry, update_config
         from localm.inference.embedder import (KNOWN_EMBEDDING_MODELS,
                                           resolve_embedding_model_path)
-        # `model` is a free-form string chosen by the MCP CLIENT, which is
-        # normally an LLM steerable by injected content, and this writes the
-        # admin_only `embedding_model` key (a file this process opens). stdio
-        # gives no principal to gate on - the client already runs as the owner -
-        # so the gate here is on the VALUE: a known key or a registered model
-        # name only, never a raw path. Pointing the setting at an arbitrary GGUF
-        # stays available to the owner through `localm setup-embeddings` and the
-        # GUI, both genuinely owner-driven; what this removes is a path chosen by
-        # text the model read. Refuse loudly rather than silently ignoring the
-        # argument, so a caller is never told a selection took effect when it
-        # did not (AGENTS.md rule 5).
+        # `model` is a free-form string chosen by the MCP CLIENT, and this
+        # writes the admin_only `embedding_model` key. stdio gives no principal
+        # to gate on, so the gate here is on the VALUE: a known key or a
+        # registered model name only, never a raw path. Pointing the setting at
+        # an arbitrary GGUF stays available to the owner through
+        # `localm setup-embeddings` and the GUI. Refuse loudly rather than
+        # silently ignoring the argument, so a caller is never told a selection
+        # took effect when it did not.
         if model:
             if model not in KNOWN_EMBEDDING_MODELS and model not in load_registry():
                 return _text_result(
@@ -1088,10 +997,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
         The MCP server keeps its own residents (chat, embed and the coder tool
         all load through ``engines``), so this process can be the very thing
-        holding the file open while it deletes it. That is not a race: it is
-        deterministic, and it is the most likely way this tool destroys a
-        model, because the agent that just chatted with one is the same agent
-        that asks to remove it.
+        holding the file open while it deletes it.
         """
         from localm.model_manager.registry import engine_holding_model_file
         candidates = [
@@ -1115,10 +1021,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         # the models dir, and nothing downstream of here asks whether anything
         # is still using it: model_manager.remove_model is the same code path
         # `localm rm` runs, with no server and no engine map in front of it.
-        # The GUI's remove route guards exactly this before spawning that
-        # command; this tool did not. Both holders are checked here - the
-        # engines resident in this process, and any running server - and either
-        # one refuses.
+        # Both holders are checked here - the engines resident in this process,
+        # and any running server - and either one refuses.
         hold = _local_hold(model, reg)
         if hold is not None:
             if hold.reason is None:
@@ -1195,15 +1099,12 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             if with_deps and mgr.plugin_missing_deps(plugin):
                 dep_result = mgr.install_plugin_deps(plugin)
         if dep_result is not None and not dep_result.ok:
-            # Left ENABLED rather than rolled back: this matches the CLI's own
-            # `plugin install` behaviour (cli/plugins.py's _install_deps /
-            # plugin_install_engine), which also leaves a plugin installed on a
-            # dep failure and points the operator at retrying the extras later -
-            # consistent handling beats inventing a new rollback policy just for
-            # the MCP path. But a caller told "successfully installed" has no
-            # reason to suspect it is degraded, so the failure must be SURFACED,
-            # never swallowed (AGENTS.md rule 5): folded into the reply below,
-            # plus a warning here since this reply is the only place it is seen.
+            # Left ENABLED rather than rolled back, matching the CLI's own
+            # `plugin install` behaviour, which also leaves a plugin installed
+            # on a dep failure and points the operator at retrying the extras
+            # later. The failure is SURFACED rather than swallowed: folded into
+            # the reply below, plus a warning here since this reply is the only
+            # place it is seen.
             from localm.debuglog import logger
             logger.warning("install_plugin(%s): pip extras failed to install: %s",
                             plugin, dep_result.error)
@@ -1244,12 +1145,10 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         delete_data = args.get("delete_data", False)
         from localm.plugins.engine import PluginManager
         mgr = PluginManager(None)
-        # Bypasses _run_mgr_action (unlike install/enable/disable above): those
-        # three have nothing worth reading from fn(mgr)'s return value, but
-        # uninstall()'s bool is the only signal that the installed directory (a
-        # locked file, an AV hold, a permission denial) actually came off disk -
-        # discarding it is how the GUI/HTTP route was found to always report
-        # success (checkup honesty audit 2026-08-11). Read it here instead.
+        # Bypasses _run_mgr_action (unlike install/enable/disable above):
+        # uninstall()'s bool is the only signal that the installed directory
+        # actually came off disk (a locked file, an AV hold, a permission
+        # denial), so it is read here.
         was_installed = mgr.is_installed(plugin)
         with _quiet_stdout():
             try:
@@ -1369,9 +1268,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         },
     }
 
-    # Only advertise embed when the active backend can actually produce vectors
-    # (FAC-6). The handler still degrades gracefully if invoked anyway, but a
-    # tool that always errors should not appear in tools/list.
+    # Only advertise embed when the active backend can actually produce vectors.
+    # The handler still degrades gracefully if invoked anyway.
     if _backend_can_embed(engines):
         tools["embed"] = {
             "description": "Compute embedding vectors for one or more texts with a local model.",
@@ -1568,8 +1466,8 @@ class MCPStdioServer:
                          "description": spec["description"],
                          "inputSchema": spec["inputSchema"]}
                 # MCP tool annotations (destructiveHint / readOnlyHint / title):
-                # emit them only when a tool declares them, so clients can decide
-                # when to confirm a destructive call. Dropped before this.
+                # emitted only when a tool declares them, so clients can decide
+                # when to confirm a destructive call.
                 if spec.get("annotations"):
                     entry["annotations"] = spec["annotations"]
                 listed.append(entry)
@@ -1640,7 +1538,6 @@ def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
     try:
         server.run_stdio()
     finally:
-        # Every resident engine, not just the most recent one: the cache went
-        # multi-resident, and freeing one of N would leave the rest holding
-        # VRAM past exit.
+        # Every resident engine, not just the most recent one: freeing one of N
+        # would leave the rest holding VRAM past exit.
         engines.unload_all()

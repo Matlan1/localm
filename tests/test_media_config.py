@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Media-plugin config resolution: the opt-in "use config from" share-config,
-its cycle-prevention, and source-unavailable fallback. Backend-agnostic - this
-only exercises localm.plugins.media_config dict logic."""
+its cycle-prevention, and source-unavailable fallback. Exercises
+localm.plugins.media_config dict logic only."""
 
 from localm.plugins import media_config as mc
 
 
 def _cfg(plugins, enabled=None):
-    # "installed" is physical disk presence in the new model, so tests pass the
-    # active set explicitly to resolve_config(active=...) rather than via config.
+    # The active set is passed explicitly to resolve_config(active=...); this
+    # only builds the installed/enabled config shape.
     return {"plugins": plugins, "plugins_enabled": enabled or list(plugins)}
 
 
@@ -26,9 +26,9 @@ def test_share_resolves_to_source_block():
     })
     block, warn = mc.resolve_config("music", cfg, active={"image", "music"})
     assert warn is None
-    # music now reflects image's backend, not its own
+    # music reflects image's backend, not its own
     assert block["comfy"]["api_url"] == "http://image"
-    assert block["use_config_from"] == "image"   # marker preserved for the UI
+    assert block["use_config_from"] == "image"   # marker preserved
 
 
 def test_share_never_mutates_sharer_own_block():
@@ -38,13 +38,13 @@ def test_share_never_mutates_sharer_own_block():
     }
     cfg = _cfg(plugins)
     mc.resolve_config("music", cfg, active={"image", "music"})
-    # the stored block is untouched: toggling sharing off restores own values
+    # the stored block is untouched
     assert plugins["music"]["comfy"]["api_url"] == "http://own-music"
 
 
 def test_returned_block_is_deep_copy():
-    """Mutating the resolved block (even nested sub-dicts) must not corrupt the
-    stored config - the guarantee behind 'sharer values are never cleared'."""
+    """Mutating the resolved block, nested sub-dicts included, must not corrupt
+    the stored config."""
     plugins = {"image": {"comfy": {"api_url": "http://image"}}}
     cfg = _cfg(plugins)
     block, _ = mc.resolve_config("image", cfg)
@@ -67,8 +67,8 @@ def test_resolved_share_block_is_deep_copy_of_source():
 
 
 def test_source_installed_but_disabled_falls_back():
-    """Two-axis: a source that is installed but DISABLED is not active, so the
-    sharer must fall back to its own config (not silently use a dormant source)."""
+    """A source that is installed but DISABLED is not active, so the sharer falls
+    back to its own config."""
     cfg = _cfg({
         "image": {"comfy": {"api_url": "http://image"}},
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
@@ -119,7 +119,7 @@ def test_would_cycle_detects_transitive():
         "music": {"use_config_from": "video"},
         "video": {"use_config_from": "image"},
     })
-    # image<-...; setting image.use_config_from=music would close image->music->video->image
+    # setting image.use_config_from=music would close image->music->video->image
     assert mc.would_cycle("image", "music", cfg) is True
 
 

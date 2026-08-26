@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""KEY-SCOPE-3 (security review finding): the scheduled-jobs plugin bound every
-route to the `jobs` scope but had NO per-principal isolation, so any jobs-scoped
-key could read/edit/delete/run EVERY principal's jobs - and could run an owner's
-shell-enabled coder job (reaching run_shell with no coder:full/owner key, a
-crown-jewel invariant break).
+"""The scheduled-jobs plugin isolates jobs per principal on top of the `jobs`
+scope.
 
-Fix: bind each job to its creator (owner = principal_id), gate every per-job route
-on job_owner_ok (404 on mismatch), filter the list to the caller's own, AND
-re-check shell capability against the CALLER when running a job on demand (so an
-unowned/legacy opt-in job can never be triggered into run_shell by a plain jobs
-key). The autonomous scheduler path is unchanged.
+Each job is bound to its creator (owner = principal_id); every per-job route is
+gated on job_owner_ok (404 on mismatch), the list is filtered to the caller's
+own, and shell capability is re-checked against the CALLER when running a job on
+demand, so an unowned or legacy opt-in job cannot be triggered into run_shell by
+a plain jobs key. The autonomous scheduler path is unaffected.
 """
 
 from pathlib import Path

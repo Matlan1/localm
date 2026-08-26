@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The plugin catalog offers a "Refresh" button on every installed first-party
-// plugin: a localm upgrade ships newer plugin code, but the installed copy keeps
-// shadowing it until refreshed. Clicking it POSTs /api/plugins/<name>/refresh.
+// plugin. Clicking it POSTs /api/plugins/<name>/refresh.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -67,8 +66,8 @@ test("installed first-party plugins get a Refresh button; available + protected 
 });
 
 test("an installed third-party (non-builtin) plugin gets no Refresh button", async () => {
-  // The catalog renders only builtins, and the Refresh button is further guarded
-  // on p.builtin - a third-party install is never offered a store refresh.
+  // The catalog renders only builtins, and the Refresh button is further
+  // guarded on p.builtin.
   const payload = pluginsPayload();
   payload.plugins.push({
     name: "custom", label: "Custom", builtin: false, installed: true,

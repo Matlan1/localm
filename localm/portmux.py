@@ -1,49 +1,36 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Same-port HTTP -> HTTPS handling for network binds (NET-1 follow-up).
+"""Same-port HTTP -> HTTPS handling for network binds.
 
 When localm binds past loopback it serves HTTPS (built-in TLS, see ``tls.py``).
 A browser that opens the plain ``http://`` URL on that port then speaks cleartext
-to a TLS socket, the handshake fails, and the user just sees a bare "connection
-reset" - not seamless. This module makes that case graceful WITHOUT a reverse
-proxy: it owns the public listening socket, peeks the first byte of every
-connection, and either
+to a TLS socket, the handshake fails, and the user sees a bare "connection
+reset". This module handles that case WITHOUT a reverse proxy: it owns the public
+listening socket, peeks the first byte of every connection, and either
 
   * TLS (the handshake starts with byte ``0x16``) -> transparently relays the
     raw bytes to an internal loopback uvicorn that terminates TLS and serves the
-    app (TLS still terminates at uvicorn; we only shuffle bytes), or
+    app (TLS still terminates at uvicorn; this module only shuffles bytes), or
   * plaintext (an HTTP request) -> answers with a ``308`` redirect to the
-    ``https://`` URL plus a small HTML catch page, so opening ``http://`` either
-    redirects automatically or at least explains itself.
+    ``https://`` URL plus a small HTML catch page.
 
 BOTH BINDS COME THROUGH HERE, INCLUDING THE PLAIN-HTTP LOOPBACK DEFAULT. The TLS
 path relays to an internal TLS uvicorn as described above; the plain-HTTP path
 runs the SAME first-byte peek (``_serve_async_plain``) so a client that wrongly
 opens a TLS connection on this HTTP port is closed cleanly at the socket layer
 instead of feeding a ClientHello into uvicorn's HTTP parser. Any setup failure
-falls back to a direct ``uvicorn.run``, so neither working path is put at risk by
-this convenience.
+falls back to a direct ``uvicorn.run``.
 
-**CONSEQUENCE, and it is the reason this paragraph is worth reading: the app
-never sees the client's socket.** Every accepted connection is relayed over a
-fresh internal loopback connection, so the peer uvicorn reports is PORTMUX'S OWN
-socket, owned by the server process. Any local-identity or peer-credential
-reasoning at the app layer is therefore invalid - not merely imprecise. Measured
-2026-08-11 through this entry point: the peer resolved to the SERVER'S OWN pid on
-4/4 requests from separate client processes, never to the client. A check built
-on it would answer "trusted" for every caller while appearing to ask. Evidence
-and method: ``dev-notes/PEER-CREDENTIAL-FEASIBILITY-2026-08-11.md``.
+**CONSEQUENCE: the app never sees the client's socket.** Every accepted
+connection is relayed over a fresh internal loopback connection, so the peer
+uvicorn reports is PORTMUX'S OWN socket, owned by the server process, and
+resolves to the SERVER'S OWN pid rather than the client's. Any local-identity or
+peer-credential reasoning at the app layer is therefore invalid, not merely
+imprecise: a check built on it would answer "trusted" for every caller while
+appearing to ask.
 
-That is safe for what the server actually does, because nothing trusts
-``request.client.host`` for a security decision - the loopback/network split is
-made from the configured bind host (see ``gui/web.py`` and
-``http_server.py``'s ``bind_host`` gates). It is NOT a licence to add such a
-check later.
-
-This paragraph previously said the opposite ("used ONLY on a TLS bind ... loopback
-is plain HTTP and never reaches here"). That was accurate when written and stopped
-being true when the plain-HTTP peek was added below. Kept as a note because the
-wrong version is the kind a reader CHECKS and then trusts, so the correction is
-worth more than the space it takes.
+Nothing trusts ``request.client.host`` for a security decision - the
+loopback/network split is made from the configured bind host (see ``gui/web.py``
+and ``http_server.py``'s ``bind_host`` gates) - and no such check may be added.
 """
 
 from __future__ import annotations
@@ -58,16 +45,14 @@ from typing import Optional
 from localm.netlisten import create_listen_socket
 
 # Child of the "localm" logger so records flow through its handlers (the debug
-# file handler + the fd-2-stable console handler from debuglog #220).
+# file handler and the fd-2-stable console handler).
 _log = logging.getLogger("localm.portmux")
 
-# A TLS record (and therefore the ClientHello that opens any HTTPS connection)
-# begins with the handshake content-type byte 0x16. A plaintext HTTP request
-# begins with an ASCII method letter ("G", "P", ...). One byte distinguishes them.
+# A TLS record begins with the handshake content-type byte 0x16; a plaintext
+# HTTP request begins with an ASCII method letter. One byte distinguishes them.
 _TLS_FIRST_BYTE = 0x16
 
-# Accept only a sane Host header before reflecting it into a redirect, so a
-# crafted Host cannot turn the redirect into an open redirect / header smuggle.
+# Host header shapes accepted before being reflected into a redirect:
 # host[:port] for a DNS name or IPv4, or [v6]:port for IPv6.
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d+)?$")
 _HOST6_RE = re.compile(r"^\[[0-9A-Fa-f:]+\](:\d+)?$")
@@ -88,10 +73,9 @@ def run_server(
 ) -> None:
     """Serve *app* on ``(host, port)``, blocking until interrupted.
 
-    Without TLS this is a plain ``uvicorn.run`` (the loopback default - unchanged).
-    With TLS it serves HTTPS and also catches a plain-HTTP request on the same
-    port with an https redirect (issue 8), falling back to a direct TLS bind if
-    the demultiplexer cannot start.
+    Without TLS this is a plain ``uvicorn.run``. With TLS it serves HTTPS and
+    also catches a plain-HTTP request on the same port with an https redirect,
+    falling back to a direct TLS bind if the demultiplexer cannot start.
 
     Pure transport: mDNS name advertising lives in the CLI that also prints the
     reachable URLs (``localm serve`` / ``localm gui``), so the advertised name and
@@ -101,18 +85,9 @@ def run_server(
     import uvicorn
 
     from localm import bugreport
-    # SRV-3: report a prior HARD crash (the last run died without a clean
-    # shutdown - native fault / OS kill / force-closed window) now, then arm the
-    # crash guard so THIS run is caught the same way if it dies hard. Disarmed in
-    # the finally on a clean exit so a normal stop is never reported as a crash.
-    # instance_id (set on app.state by instances.advertise(), which always runs
-    # before this) scopes the marker to THIS instance, so a second instance
-    # sharing the same LOCALM_HOME is never mistaken for a crash - see
-    # bugreport.py's per-instance-scoping note. *app* is a generic ASGI
-    # callable here, not guaranteed to be a FastAPI instance with a `.state`
-    # (test_portmux.py drives this with a bare ASGI function) - getattr on
-    # app itself first, so a plain callable degrades to no instance_id
-    # instead of raising AttributeError before the server ever binds.
+    # Report a prior hard crash, then arm the crash guard for this run. Disarmed
+    # in the finally on a clean exit. instance_id scopes the marker to this
+    # instance. *app* is a generic ASGI callable, so .state is read via getattr.
     instance_id = getattr(getattr(app, "state", None), "instance_id", None)
     bugreport.check_and_report_prior_crash()
     bugreport.arm_crash_guard(context={"host": host, "port": port,
@@ -121,22 +96,15 @@ def run_server(
 
     try:
         if not ssl_certfile:
-            # Plain-HTTP bind (the loopback default, or a network bind without
-            # TLS). Front it with the SAME first-byte peek the TLS path uses, so a
-            # client that wrongly opens a TLS/HTTPS connection on this HTTP port -
-            # a browser that cached an HTTPS upgrade for this address (HSTS, a
-            # service worker, or HTTPS-First/Only mode) - is handled at the socket
-            # layer (closed cleanly, surfaced once) instead of feeding a TLS
-            # ClientHello into uvicorn's HTTP parser, which rejects every such
-            # connection as an "Invalid HTTP request" (the R45 console flood).
+            # Plain-HTTP bind. Fronted with the same first-byte peek the TLS path
+            # uses, so a TLS connection opened on this HTTP port is closed at the
+            # socket layer instead of reaching uvicorn's HTTP parser.
             try:
                 asyncio.run(_serve_async_plain(app, host, port, log_level))
             except KeyboardInterrupt:
                 pass
             except Exception:   # pragma: no cover - defensive fallback
-                # Never leave the user without a server because the peek layer
-                # failed: fall back to a direct uvicorn.run (the flood would then
-                # recur, which is no worse than before this layer existed).
+                # Fall back to a direct uvicorn.run if the peek layer fails.
                 import traceback
                 traceback.print_exc()
                 _run_uvicorn_on_socket(uvicorn, app, host, port,
@@ -149,9 +117,7 @@ def run_server(
         except KeyboardInterrupt:
             pass
         except Exception:   # pragma: no cover - defensive fallback
-            # Never leave the user without a server because the convenience layer
-            # failed: fall back to a direct TLS bind. The http-typo case then just
-            # is not caught, which is no worse than before this module existed.
+            # Fall back to a direct TLS bind if the peek layer fails.
             import traceback
             traceback.print_exc()
             _run_uvicorn_on_socket(uvicorn, app, host, port,
@@ -167,16 +133,14 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
     """The last-resort direct uvicorn bind, on a socket built the same way the
     normal path builds it.
 
-    ``uvicorn.run(host=..., port=...)`` would reach asyncio's create_server and
-    silently re-apply IPV6_V6ONLY, so this fallback - which exists so a failure
-    in the peek layer never leaves the user without a server - would quietly
-    serve IPv6 only on a ``::`` bind, contradicting the URLs already printed.
-    ``Server.run(sockets=[...])`` takes the prepared socket instead, so the
-    reachable set is the same on the degraded path as on the normal one.
+    ``uvicorn.run(host=..., port=...)`` reaches asyncio's create_server and
+    silently re-applies IPV6_V6ONLY, which would serve IPv6 only on a ``::``
+    bind and contradict the URLs already printed. ``Server.run(sockets=[...])``
+    takes the prepared socket instead, so the reachable set is the same on the
+    degraded path as on the normal one.
 
-    If even the socket cannot be built, fall back to uvicorn's own binding
-    rather than leaving the user with nothing: an IPv6-only server is worse than
-    a dual-stack one and far better than no server, and the reason is logged."""
+    If even the socket cannot be built, this falls back to uvicorn's own binding
+    and logs a warning naming the failure."""
     config_kwargs = dict(app=app, log_level=log_level)
     if ssl_certfile:
         config_kwargs.update(ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
@@ -200,10 +164,10 @@ def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
     (``asyncio.streams.StreamReaderProtocol`` just does ``loop.create_task(res)``
     and drops it) - so a connection still blocked in ``_relay``/``_pump`` at
     shutdown is invisible to ``Server.wait_closed()`` (which only waits for the
-    LISTENING socket to stop accepting, never for handler tasks already
-    running) and gets silently destroyed mid-flight when the event loop tears
-    down ("Task was destroyed but it is pending!", issue #963/portmux:209-212).
-    Tracking the Task ourselves lets shutdown cancel and await it instead."""
+    LISTENING socket to stop accepting, never for handler tasks already running)
+    and is destroyed mid-flight when the event loop tears down ("Task was
+    destroyed but it is pending!"). Tracking the Task here lets shutdown cancel
+    and await it instead."""
     task = asyncio.ensure_future(coro)
     inflight.add(task)
     task.add_done_callback(inflight.discard)
@@ -246,10 +210,9 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
     def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         _track_conn_task(inflight, _handle_conn(reader, writer, internal_port, port))
 
-    # Family-aware, dual-stack-where-it-matters listening socket. NOT
-    # `start_server(host=..., port=...)`: asyncio forces IPV6_V6ONLY on every
-    # AF_INET6 socket it builds, which would turn `-H ::` into an IPv6-only
-    # server. See netlisten.create_listen_socket for the measurement.
+    # Family-aware listening socket, not start_server(host=..., port=...):
+    # asyncio forces IPV6_V6ONLY on every AF_INET6 socket it builds, which would
+    # make `-H ::` IPv6-only.
     _lsock = create_listen_socket(host, port)
     try:
         demux = await asyncio.start_server(_on_conn, sock=_lsock)
@@ -257,7 +220,7 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         _lsock.close()
         raise
 
-    # SRV-6: Ensure Windows event loop wakes up to process Ctrl+C
+    # Keeps the Windows event loop waking up so it can process Ctrl+C.
     wakeup_task = None
     if sys.platform == "win32":
         async def _wakeup():
@@ -271,12 +234,9 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         if wakeup_task:
             wakeup_task.cancel()
         demux.close()
-        # Cancel the in-flight connections BEFORE wait_closed(), not after: on
-        # this asyncio version Server.wait_closed() blocks until every accepted
-        # connection's protocol has detached (_active_count reaches 0), which
-        # never happens on its own for a connection parked mid-_relay/_pump -
-        # calling it first would deadlock shutdown forever on exactly the
-        # connection this function exists to clean up.
+        # Cancel in-flight connections BEFORE wait_closed(): it blocks until every
+        # accepted connection has detached, which never happens on its own for one
+        # parked mid-_relay/_pump.
         await _cancel_inflight_conns(inflight)
         try:
             await demux.wait_closed()
@@ -312,10 +272,9 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
         _track_conn_task(
             inflight, _handle_conn_plain(reader, writer, internal_port, port, state))
 
-    # Family-aware, dual-stack-where-it-matters listening socket. NOT
-    # `start_server(host=..., port=...)`: asyncio forces IPV6_V6ONLY on every
-    # AF_INET6 socket it builds, which would turn `-H ::` into an IPv6-only
-    # server. See netlisten.create_listen_socket for the measurement.
+    # Family-aware listening socket, not start_server(host=..., port=...):
+    # asyncio forces IPV6_V6ONLY on every AF_INET6 socket it builds, which would
+    # make `-H ::` IPv6-only.
     _lsock = create_listen_socket(host, port)
     try:
         demux = await asyncio.start_server(_on_conn, sock=_lsock)
@@ -323,7 +282,7 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
         _lsock.close()
         raise
 
-    # SRV-6: Ensure Windows event loop wakes up to process Ctrl+C
+    # Keeps the Windows event loop waking up so it can process Ctrl+C.
     wakeup_task = None
     if sys.platform == "win32":
         async def _wakeup():
@@ -337,10 +296,7 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
         if wakeup_task:
             wakeup_task.cancel()
         demux.close()
-        # See _serve_async's matching comment: cancel in-flight connections
-        # BEFORE wait_closed(), which on this asyncio version blocks until
-        # every accepted connection has detached - never true on its own for
-        # one parked mid-_relay/_pump.
+        # Cancel in-flight connections BEFORE wait_closed(); see _serve_async.
         await _cancel_inflight_conns(inflight)
         try:
             await demux.wait_closed()
@@ -354,18 +310,15 @@ async def _handle_conn_plain(reader, writer, internal_port, public_port, state) 
     closed cleanly and noted; anything else is a real HTTP connection and is
     relayed to the internal uvicorn unchanged.
 
-    One try/finally around the WHOLE body (not just the part after the first
-    byte) - this task can now be cancelled for real, by :func:`_cancel_inflight_conns`
-    on shutdown, and cancellation can land anywhere including inside the initial
-    ``readexactly``. A finally scoped to only the second half left that case
-    (and any other exception raised before it) with the writer never closed,
-    leaking the transport to a GC __del__ warning instead of a clean close."""
+    One try/finally around the WHOLE body, not just the part after the first
+    byte: this task can be cancelled by :func:`_cancel_inflight_conns` on
+    shutdown, and cancellation can land anywhere including inside the initial
+    ``readexactly``, which must still close the writer."""
     try:
         first = await reader.readexactly(1)
         if first[0] == _TLS_FIRST_BYTE:
-            # We cannot complete a TLS handshake on a plain-HTTP port, so just
-            # close: an HTTPS-First browser then falls back to http://. The cause
-            # is surfaced once (not muted) without a per-connection flood.
+            # A TLS handshake cannot be completed on a plain-HTTP port, so the
+            # connection is closed and the cause surfaced once.
             _note_tls_on_http(public_port, state)
         else:
             await _relay(first, reader, writer, internal_port)
@@ -378,15 +331,13 @@ async def _handle_conn_plain(reader, writer, internal_port, public_port, state) 
 def _note_tls_on_http(public_port, state) -> None:
     """Surface a wrong-scheme (HTTPS-on-the-HTTP-port) connection honestly without
     flooding: one prominent notice with the cause + fix, the rest counted at debug
-    level. The first notice is written to a STABLE stderr duplicate so it is immune
-    to the model-load fd-2 redirect (writing through the live stderr during that
-    window is exactly what turns a benign reject into the WinError-6 cascade we are
-    eliminating)."""
+    level. The first notice is written to a STABLE stderr duplicate so it is
+    immune to the model-load fd-2 redirect; writing through the live stderr during
+    that window turns a benign reject into a WinError-6 cascade."""
     state["count"] += 1
     if state["warned"]:
-        # Already surfaced once this run; keep counting in the debug log only so a
-        # persistent browser does not flood the console (the file handler, when in
-        # debug mode, still records every occurrence - nothing is hidden).
+        # Already surfaced once this run; further occurrences are counted at debug
+        # level only.
         try:
             _log.debug("TLS handshake on the plain-HTTP port %d again (count=%d)",
                        public_port, state["count"])
@@ -412,10 +363,8 @@ def _note_tls_on_http(public_port, state) -> None:
 async def _handle_conn(reader, writer, internal_port, public_port) -> None:
     """Peek the first byte and route: TLS -> relay to uvicorn, else -> redirect.
 
-    One try/finally around the WHOLE body - see :func:`_handle_conn_plain`'s
-    docstring for why: this task is now really cancellable on shutdown, and a
-    finally scoped to only the second half left the initial ``readexactly``
-    uncovered."""
+    One try/finally around the WHOLE body, including the initial ``readexactly``
+    - see :func:`_handle_conn_plain`."""
     try:
         first = await reader.readexactly(1)
         if first[0] == _TLS_FIRST_BYTE:
@@ -492,10 +441,9 @@ async def _redirect_to_https(first, c_reader, c_writer, public_port) -> None:
 
     location = None
     if _HOST_RE.match(host_header) or _HOST6_RE.match(host_header):
-        # The client reached us ON public_port; if the Host header omits the port
-        # (a non-compliant client), append it so the redirect targets the right
-        # port - these binds use a non-standard port, so a bare host would resolve
-        # to :443 and fail. IPv6 keeps its port after the closing bracket.
+        # Append the port when the Host header omits it, so the redirect targets
+        # this non-standard port rather than :443. IPv6 keeps its port after the
+        # closing bracket.
         bracketed = host_header.startswith("[")
         has_port = ("]:" in host_header) if bracketed else (":" in host_header)
         authority = host_header if has_port else f"{host_header}:{public_port}"
@@ -560,11 +508,11 @@ _stable_resolved = False
 
 def _get_stable_stream():
     """A duplicate of stderr taken ONCE (cached) so it is immune to the model-load
-    fd-2 juggling that the llama.cpp backend uses to silence native output (the
-    same mechanism debuglog #220 uses for the console mirror). MUST be resolved
-    early, while fd 2 is the real console - resolving it lazily during a redirect
-    window would duplicate the redirected fd and lose the output. Returns None
-    when stderr has no duplicable fd (a detached process); callers fall back."""
+    fd-2 juggling the llama.cpp backend uses to silence native output (the same
+    mechanism debuglog uses for the console mirror). MUST be resolved early, while
+    fd 2 is the real console - resolving it lazily during a redirect window would
+    duplicate the redirected fd and lose the output. Returns None when stderr has
+    no duplicable fd (a detached process); callers fall back."""
     global _stable_stream, _stable_resolved
     if not _stable_resolved:
         _stable_resolved = True
@@ -581,10 +529,9 @@ def _safe_notice(msg: str) -> None:
 
     Writing a log line through the LIVE stderr during the model-load fd-2 redirect
     window raises OSError [WinError 6] on Windows, and Python's logging then prints
-    a multi-line '--- Logging error ---' traceback per line - the exact cascade we
-    are removing. A failure to emit the courtesy hint must never take down the
-    server, so the write is best-effort - the connection itself is already handled
-    correctly by the caller."""
+    a multi-line '--- Logging error ---' traceback per line. A failure to emit the
+    courtesy hint must never take down the server, so the write is best-effort;
+    the connection itself is already handled by the caller."""
     try:
         stream = _get_stable_stream() or sys.stderr
         stream.write("WARNING " + msg + "\n")
@@ -597,13 +544,13 @@ def _harden_uvicorn_logging() -> None:
     """Point uvicorn's console log handlers at the same stable stderr duplicate.
 
     uvicorn configures its own loggers (uvicorn / uvicorn.error / uvicorn.access)
-    with StreamHandlers on the LIVE sys.stderr. During the model-load fd-2 redirect
-    window those writes raise WinError 6 and cascade into '--- Logging error ---'
-    tracebacks (R45). Redirecting the handlers to a stable fd-2 duplicate makes
-    uvicorn's own warnings/errors survive that window instead of crashing the
-    logger - the records are still emitted (this fixes WHERE they are written, it
-    never drops one). Resolves the stable stream early (fd 2 still clean here, at
-    server startup). Best-effort and idempotent."""
+    with StreamHandlers on the LIVE sys.stderr. During the model-load fd-2
+    redirect window those writes raise WinError 6 and cascade into
+    '--- Logging error ---' tracebacks. Redirecting the handlers to a stable fd-2
+    duplicate makes uvicorn's own warnings/errors survive that window; this
+    changes WHERE they are written and drops none of them. Resolves the stable
+    stream early, while fd 2 is still clean at server startup. Best-effort and
+    idempotent."""
     stable = _get_stable_stream()
     if stable is None:
         return

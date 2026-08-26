@@ -2,22 +2,20 @@
 """scripts/check_hygiene.py check 7: no module-level import cycles between the
 top-level units under localm/.
 
-Why a cycle check rather than a declared tier map: localm has no declared
-layering, and two readers auditing the same tree derived different "upward edge"
-counts (2 and 7) because each invented a map, four of the seven being artifacts of
-one map omitting modules. Acyclicity needs no map and no allowlist, and the two
-shapes a tier map must carve out - an entry point, and unordered peers - are legal
-by construction because neither can form a cycle.
+Acyclicity rather than a declared tier map: localm has no declared layering, and
+acyclicity needs no map and no allowlist. The two shapes a tier map would have to
+carve out - an entry point, and unordered peers - are legal by construction,
+because neither can form a cycle.
 
 These tests pin the things that make the check worth having: it FIRES on a real
-cycle (a check that has never been red proves nothing), it does NOT fire on the
-entry-point and peer shapes, and it ignores function-local imports, which are the
-deliberate, standard way to break a cycle in Python. They also pin the two things
-a cycle can hide behind that the check must still SEE: a RELATIVE import
-(``from ..x import y``), resolved to its absolute target rather than skipped, and
-an eager import inside a module-level ``try:``/``if:`` body, which runs during
-import exactly like a bare top-level statement despite being indented - unlike a
-``def``/``class`` body nested inside one of them, which stays genuinely deferred.
+cycle, it does NOT fire on the entry-point and peer shapes, and it ignores
+function-local imports, which are the standard way to break a cycle in Python.
+They also pin the two things a cycle can hide behind that the check must still
+SEE: a RELATIVE import (``from ..x import y``), resolved to its absolute target
+rather than skipped, and an eager import inside a module-level ``try:``/``if:``
+body, which runs during import exactly like a bare top-level statement despite
+being indented - unlike a ``def``/``class`` body nested inside one of them, which
+stays genuinely deferred.
 """
 
 import ast
@@ -62,8 +60,8 @@ def test_module_level_cycle_is_detected(tmp_path, monkeypatch):
     joined = "\n".join(problems)
     assert "import cycle" in joined
     assert "inference" in joined and "plugins" in joined
-    # The report must be ACTIONABLE: it has to name both closing edges with a
-    # file:line, not merely announce that a cycle exists.
+    # The report names both closing edges with a file:line, not merely that a
+    # cycle exists.
     assert "inference/engine.py:1" in joined, joined
     assert "plugins/engine.py:1" in joined, joined
 
@@ -91,8 +89,8 @@ def test_three_unit_cycle_is_detected(tmp_path, monkeypatch):
 def test_entry_point_importing_downward_is_legal(tmp_path, monkeypatch):
     """localm/__main__.py -> localm.cli is a source node, never a cycle.
 
-    This is the shape that forces an exception list into any hand-written tier
-    map, and the reason this check is acyclicity instead.
+    This is the shape that would force an exception list into a hand-written
+    tier map.
     """
     ch = _load_check_hygiene()
     _pkg(tmp_path, {
@@ -150,7 +148,7 @@ def test_self_import_within_a_unit_is_not_a_cycle(tmp_path, monkeypatch):
 
 def test_unparseable_file_is_reported_not_skipped(tmp_path, monkeypatch):
     """A file the gate cannot read is one it cannot vouch for. Silently treating
-    it as edge-free would let a cycle hide behind a syntax error (rule 5)."""
+    it as edge-free would let a cycle hide behind a syntax error."""
     ch = _load_check_hygiene()
     _pkg(tmp_path, {"inference/broken.py": "def (\n"})
     monkeypatch.setattr(ch, "REPO", tmp_path)
@@ -171,9 +169,9 @@ def test_absent_localm_package_is_not_an_error(tmp_path, monkeypatch):
 
 def test_relative_import_cycle_is_detected(tmp_path, monkeypatch):
     """A cycle built entirely from relative imports (``from ..x.y import z``) must
-    be caught exactly like an absolute one. Before this fix, ``node.level == 0``
-    silently skipped every relative import, so a cycle built only out of them was
-    invisible to the graph."""
+    be caught exactly like an absolute one. A graph that keys on ``node.level ==
+    0`` skips every relative import, so a cycle built only out of them is
+    invisible to it."""
     ch = _load_check_hygiene()
     _pkg(tmp_path, {
         "inference/engine.py": "from ..plugins.engine import PluginEngine\n",
@@ -216,11 +214,11 @@ def test_relative_self_import_within_a_unit_is_not_a_cycle(tmp_path, monkeypatch
 
 
 def test_resolve_relative_import_is_package_vs_plain_module(tmp_path, monkeypatch):
-    """Direct unit test of the resolver's arithmetic (diff-review-discipline: test
-    the relation, not just a literal). Same ``own_module`` string, same level-1
-    import, two different answers depending on ``is_package`` - because a
-    package's ``__init__.py`` IS its own package, while a plain module of the same
-    dotted name is a LEAF one level further down (its package is its parent)."""
+    """Direct unit test of the resolver's arithmetic, asserting the relation
+    rather than a literal. Same ``own_module`` string, same level-1 import, two
+    different answers depending on ``is_package`` - because a package's
+    ``__init__.py`` IS its own package, while a plain module of the same dotted
+    name is a LEAF one level further down (its package is its parent)."""
     ch = _load_check_hygiene()
     node = ast.parse("from .x import y\n").body[0]
     # localm/plugins/__init__.py: __package__ == "localm.plugins" itself.

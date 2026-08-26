@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Session auth routes: HttpOnly cookie + CSRF for the browser GUI.
 
-Extracted verbatim from create_app(); behavior unchanged. The session cookie
-names, max age, and the token/CSRF helpers live on the http_server module and are
-referenced via ``_hs.`` so external importers still find them there.
+The session cookie names, max age, and the token/CSRF helpers live on the
+http_server module and are referenced via ``_hs.`` so external importers still
+find them there.
 """
 
 from __future__ import annotations
@@ -48,9 +48,8 @@ def register(app: FastAPI, ctx) -> None:
         if held is None:
             raise HTTPException(401, "Invalid API key")
         # Mint an OPAQUE server-side session; the cookie carries the session id,
-        # never the raw key (so rolling the key no longer logs the browser out and
-        # the durable secret never sits in a cookie jar). The scope/identity/
-        # fs-access snapshot is taken now so the session stays valid across a roll.
+        # never the raw key. The scope/identity/fs-access snapshot is taken now, so
+        # the session stays valid across a key roll.
         from localm import scopes as S, sessions
         from localm.auth import _hash_key, _is_owner_key, fs_access_for, rag_roots_for
         fs = "host" if S.ADMIN in held else fs_access_for(presented, "none")
@@ -59,13 +58,12 @@ def register(app: FastAPI, ctx) -> None:
         # per-key list, exactly like effective_rag_roots resolves it live.
         rag_roots = [] if S.ADMIN in held else rag_roots_for(presented, [])
         # Record WHETHER THE OWNER KEY minted this session, while that is still
-        # provable. key_hash freezes the key's VALUE, and an owner-key roll
-        # deliberately leaves sessions alive, so afterwards the frozen hash matches
-        # neither the new owner key nor any keystore entry - identical to a REVOKED
-        # scoped key, which is why the owner's own scheduled jobs silently lost
-        # shell (REG-509). _is_owner_key is a constant-time plaintext compare
-        # against the live owner key: a POSITIVE proof that reads no keystore, so a
-        # corrupt auth.json cannot flip it, and holding ADMIN cannot earn it.
+        # provable. key_hash freezes the key's VALUE, and an owner-key roll leaves
+        # sessions alive, so afterwards the frozen hash matches neither the new
+        # owner key nor any keystore entry - identical to a REVOKED scoped key.
+        # _is_owner_key is a constant-time plaintext compare against the live owner
+        # key: a POSITIVE proof that reads no keystore, so a corrupt auth.json
+        # cannot flip it, and holding ADMIN cannot earn it.
         sid = sessions.create(scopes=held, key_hash=_hash_key(presented),
                               fs_access=fs, rag_roots=rag_roots,
                               owner_key_minted=_is_owner_key(presented))
@@ -94,17 +92,16 @@ def register(app: FastAPI, ctx) -> None:
                 "Missing or invalid CSRF token. Send the session's csrf token "
                 "(from GET /api/session) in the X-CSRF-Token header.")
         # Real, server-side logout: drop the session row so the cookie value can
-        # never be replayed (deleting the cookie alone left a valid server session).
+        # never be replayed.
         warnings: list[str] = []
         if source == "cookie" and token:
             from localm import sessions
             if sessions.revoke(token) is None:
                 # The store write failed, so the session id is STILL VALID on the
                 # server. Clearing the cookie below stops this browser using it,
-                # but that is exactly the "deleting the cookie alone" state the
-                # server-side revocation exists to improve on, so reporting a
-                # clean sign-out here would be the rule-5 lie. sessions.revoke
-                # has already warned to the local log with the reason.
+                # but the session survives, so this does not report a clean
+                # sign-out. sessions.revoke has already logged the failure and
+                # its cause locally.
                 warnings.append(sessions.REVOKE_FAILURE_LABEL)
         secure = request.url.scheme == "https"
         response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True, secure=secure, samesite="strict")
@@ -124,7 +121,7 @@ def register(app: FastAPI, ctx) -> None:
         derived token in X-CSRF-Token. After this call any_key_configured() returns
         False (assuming no LOCALM_API_KEY env var and an empty keystore), and all
         subsequent web UI requests that rely on the session cookie will fail auth and
-        be redirected to the key gate by the client (Task 3: CSRF-post-clear).
+        be redirected to the key gate by the client.
         """
         _, source = _request_token(request)
         if source == "cookie" and not _csrf_ok(request):
@@ -136,11 +133,9 @@ def register(app: FastAPI, ctx) -> None:
         failed = clear_api_key()
         # The key that minted every current session is gone; those sessions carry
         # their own ADMIN scope snapshot, so they MUST be revoked or a leftover
-        # cookie would keep full access after the key was cleared (would defeat the
-        # clear). Sign out everywhere - and READ THE RESULT: revoke_all returns None
-        # when the store could not be written, which is a failed sign-out, not an
-        # empty store. Discarding it is what made this route claim a completed clear
-        # while every session stayed live.
+        # cookie would keep full access after the key was cleared. Sign out
+        # everywhere - and READ THE RESULT: revoke_all returns None when the store
+        # could not be written, which is a failed sign-out, not an empty store.
         from localm import sessions
         revoked = sessions.revoke_all()
         secure = request.url.scheme == "https"
@@ -150,30 +145,24 @@ def register(app: FastAPI, ctx) -> None:
         response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True,
                                secure=secure, samesite="strict")
         from localm.debuglog import logger as _dbg
-        # Rule 5: a security step that failed must never report success. BOTH
-        # halves of this route are such a step, and each can fail on its own:
-        # a surviving auth.key/keystore still grants access, and a surviving
-        # ADMIN session cookie still grants access. So "cleared" is true only
-        # when BOTH completed. Previously the session half was not read at all,
-        # and the comment here asserted "the sessions ARE revoked either way"
-        # as established fact - it was an unmeasured premise, not a proof, and
-        # it is deleted rather than worked around because a false invariant
-        # comment is worse than no comment: it is what the docs were written
-        # from. Reported honestly rather than raised - a 500 would imply
+        # A security step that failed must never report success. BOTH halves of
+        # this route are such a step, and each can fail on its own: a surviving
+        # auth.key/keystore still grants access, and a surviving ADMIN session
+        # cookie still grants access. So "cleared" is true only when BOTH
+        # completed. Reported honestly rather than raised - a 500 would imply
         # NOTHING had happened, when typically one half did.
         #
         # ONLY path-free labels go on the wire. clear_api_key also returns
-        # "path" (an absolute filesystem path, which carries the account name -
-        # rule 2) and "error" (raw OS exception text - py/stack-trace-exposure);
-        # sessions.REVOKE_FAILURE_LABEL is path-free for the same reason. Those
-        # other fields are for the LOCAL CLI and the local log only.
+        # "path" (an absolute filesystem path, which carries the account name)
+        # and "error" (raw OS exception text); sessions.REVOKE_FAILURE_LABEL is
+        # path-free for the same reason. Those other fields are for the LOCAL
+        # CLI and the local log only.
         #
-        # Nothing is logged HERE for the credential half, on purpose - this is
-        # not a silenced warning. clear_api_key already warns to THIS SAME
-        # logger once per thing it could not remove (localm/auth.py, the OSError
-        # handlers), and those lines carry the path and the OS error, so they
-        # are strictly more informative than anything this route could add.
-        # sessions.revoke_all warns for its own half on the same logger.
+        # Nothing is logged HERE for the credential half: clear_api_key already
+        # warns to THIS SAME logger once per thing it could not remove
+        # (localm/auth.py, the OSError handlers), and those lines carry the path
+        # and the OS error. sessions.revoke_all warns for its own half on the
+        # same logger.
         warnings = [f["what"] for f in failed]
         if revoked is None:
             warnings.append(sessions.REVOKE_FAILURE_LABEL)
@@ -193,39 +182,31 @@ def register(app: FastAPI, ctx) -> None:
         ``{"key": "<value>"}`` persists that exact one. An empty or whitespace
         ``key`` GENERATES rather than clearing, so this route can never drop the
         server to open mode by accident - ``/api/auth/key/clear`` is the only way
-        out of protected mode, and it is a separate, deliberate action.
+        out of protected mode.
 
         The active key is returned so the caller can show it once. That discloses
         nothing new to THIS caller: an ADMIN principal can already read the owner
         key from ``GET /api/pairing/qr``.
 
-        OWNER-GATED AND REMOTE-CAPABLE, deliberately. This is the posture decision
-        the route exists to record, so it is written here rather than left implicit:
+        OWNER-GATED AND REMOTE-CAPABLE:
 
-        * ``scopes.ADMIN``, NOT the ``config:write`` its sibling clear route takes,
-          and NOT ``keys:admin``. Clearing REMOVES a credential; setting INSTALLS
-          one the caller chose. A merely config:write or keys:admin holder POSTing
-          ``{"key": "<a value I know>"}`` would promote itself to owner in a single
-          call, so the lower bar next door is not a precedent to copy here.
-        * NOT loopback-only. The only pre-existing rolling path is a side effect of
-          the first-key lockout guard in ``routes/keys.py``, gated on
-          ``is_loopback_host`` and therefore absent on a network bind - i.e. absent
-          from exactly the deployment where an admin needs to rotate a leaked
-          credential (it is False for ``0.0.0.0``). Reaching this route already
-          requires the owner credential, so it grants no authority the caller does
-          not already hold, and rotation is the DEFENSIVE act of the party holding
-          it. Backstop if a stolen owner cookie is used to roll the key:
-          ``localm key recover``, run locally on the server machine, which is
-          precisely what that command is for.
+        * Requires ``scopes.ADMIN``, NOT the ``config:write`` its sibling clear
+          route takes, and NOT ``keys:admin``. Clearing REMOVES a credential;
+          setting INSTALLS one the caller chose, so a merely config:write or
+          keys:admin holder POSTing ``{"key": "<a value I know>"}`` would promote
+          itself to owner in a single call.
+        * NOT loopback-only. Reaching this route already requires the owner
+          credential, so it grants no authority the caller does not already hold.
+          The backstop against a stolen owner cookie rolling the key is
+          ``localm key recover``, run locally on the server machine.
 
         CSRF needs no check here: ``_enforce_request`` already requires a valid
         ``X-CSRF-Token`` for any cookie-sourced unsafe method.
 
         Browser sessions are NOT revoked, matching ``localm key generate`` and
-        ``localm key set`` exactly. That is ``regenerate_key``'s documented design
-        (sessions are decoupled from the key value so a roll does not sign the GUI
-        out), and it is the whole premise of rotating from a browser. The command
-        that DOES revoke is ``localm key recover``, the local compromise path.
+        ``localm key set``: sessions are decoupled from the key value so a roll
+        does not sign the GUI out. The command that DOES revoke is ``localm key
+        recover``, the local compromise path.
         """
         from localm import auth
         payload = {}
@@ -249,24 +230,20 @@ def register(app: FastAPI, ctx) -> None:
             except ValueError as e:
                 # set_api_key refuses a key that is too short or uses characters an
                 # HTTP Authorization header cannot carry. That is caller input, so
-                # it is a 400; letting the ValueError escape would surface as a 500
-                # and read as a server fault the user should report as a bug. The
-                # previous key is untouched on this path.
+                # it is a 400, not a 500. The previous key is untouched on this path.
                 raise HTTPException(400, str(e)) from e
             key = requested.strip()
         else:
             key = auth.regenerate_key()
 
-        # RULE 5, and the reason this returns a shape rather than a bare 200.
         # READ THE KEY BACK rather than assuming the write decided the outcome.
         # Two different things can make a "successful" rotation a no-op on the
         # credential the server actually accepts, and they need different words:
         #
         #  1. LOCALM_API_KEY outranks the file (auth.get_api_key), so under that
         #     env var the new key is genuinely on disk and the server still accepts
-        #     the OLD environment one. Telling someone rotating a leaked credential
-        #     that they are safe here is the exact rule-5 lie. The CLI says the same
-        #     thing through _note_env_override.
+        #     the OLD environment one. The CLI says the same thing through
+        #     _note_env_override.
         #  2. Anything else that leaves the read-back disagreeing with what was just
         #     written is an unexplained failure, and is reported as one rather than
         #     blamed on an env var that is not set.
@@ -290,9 +267,8 @@ def register(app: FastAPI, ctx) -> None:
         # first key from the local GUI would orphan the browser that just did it.
         # On the open -> protected transition from a loopback bind, hand THIS
         # browser an opaque owner session (the id in the cookie, never the key).
-        # Loopback + open-mode only, exactly as next door: a network bind already
-        # required a key up front, so this never fires there and grants no
-        # authority the local user did not already hold via the shell token.
+        # Loopback + open-mode only: a network bind already required a key up
+        # front, so this never fires there.
         if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
             from localm import sessions
             # owner_key_minted is PROVEN, not assumed: _is_owner_key re-compares

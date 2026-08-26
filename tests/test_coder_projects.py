@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The coder project registry, and above all what it must NOT record.
-
-The privacy test comes first on purpose. It is the rule the whole module exists
-under, and a registry that quietly recorded a privacy-mode project would defeat
-that mode while every other signal said it was honoured.
+"""The coder project registry, and above all what it must NOT record: a
+privacy-mode project is never written here.
 """
 
 import json
@@ -18,9 +15,8 @@ def _isolated_store(tmp_path, monkeypatch):
     """Point home_dir at a throwaway directory.
 
     Patched where `projects` RESOLVES it (localm.config.home_dir), not on the
-    projects module: the functions import it inside the call, so patching a name on
-    `projects` would leave the real home untouched and the test would write into the
-    developer's actual data directory while appearing to pass.
+    projects module: the functions import it inside the call, so patching a name
+    on `projects` would leave the real home untouched.
     """
     import localm.config as cfg
     monkeypatch.setattr(cfg, "home_dir", lambda: tmp_path)
@@ -29,20 +25,18 @@ def _isolated_store(tmp_path, monkeypatch):
 
 
 class TestPrivacyModeIsNeverRecorded:
-    """THE rule of this module. Not configurable, so there is no arm where it is."""
+    """Privacy mode is never recorded, and that is not configurable."""
 
     def test_a_privacy_session_writes_no_entry(self, tmp_path):
         assert projects.record_project(tmp_path, "privacy") is False
         assert projects.list_projects() == []
-        # And nothing at all on disk: an empty list file is still a file whose
-        # existence says a coder session happened here.
+        # And nothing at all on disk: not even an empty list file.
         assert not (tmp_path / "coder-projects.json").exists()
 
     @pytest.mark.parametrize("spelling", ["privacy", "PRIVACY", "Privacy", " privacy "])
     def test_the_refusal_does_not_depend_on_spelling(self, spelling, tmp_path):
-        # The CLI accepts the mode case-insensitively, so a differently-cased value
-        # reaching here must not become recordable. This is the exact shape that
-        # turns a hard rule into one that holds "usually".
+        # The CLI accepts the mode case-insensitively, so a differently-cased
+        # value reaching here is still not recordable.
         assert projects.record_project(tmp_path, spelling) is False
         assert projects.list_projects() == []
 
@@ -63,9 +57,8 @@ class TestPrivacyModeIsNeverRecorded:
 
 class TestRecording:
     def test_log_and_full_are_both_recorded(self, tmp_path):
-        # Both persist SOMEWHERE, so both are legitimately part of "what have I
-        # worked on" - the difference between them is where the transcript lands,
-        # which is not this module's business.
+        # Both persist SOMEWHERE, so both are part of "what have I worked on";
+        # only where the transcript lands differs.
         for mode in ("log", "full"):
             d = tmp_path / mode
             d.mkdir()
@@ -107,9 +100,7 @@ class TestListing:
         gone.rmdir()
 
         got = projects.list_projects()
-        # RETURNED, not filtered: the user's memory of the project outlives the
-        # directory, and silently dropping the row hides a fact rather than
-        # reporting it. The caller can say "moved or deleted".
+        # RETURNED, not filtered: the caller can say "moved or deleted".
         assert len(got) == 1
         assert got[0]["available"] is False
 
@@ -124,8 +115,7 @@ class TestListing:
 
     def test_a_corrupt_store_does_not_break_a_session(self, tmp_path):
         (tmp_path / "coder-projects.json").write_text("{not json", encoding="utf-8")
-        # Reported (a warning is logged) but never raised: refusing to start coding
-        # because a convenience file is malformed is the wrong altitude.
+        # Reported (a warning is logged) but never raised.
         assert projects.list_projects() == []
         d = tmp_path / "p"
         d.mkdir()

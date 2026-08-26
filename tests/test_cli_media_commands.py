@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """`localm image` / `localm music` / `localm video` (localm/cli/media.py) privacy
-parity: the identical GUI/API plugin routes fold privacy mode into BOTH
+parity with the GUI/API plugin routes: privacy mode folds into BOTH
 write_sidecar (prompt sidecar suppressed) AND delete_outputs (ComfyUI's own
-on-disk output copy - which embeds the full prompt/workflow as PNG metadata,
-per localm/image_gen/comfy.py - is removed). These CLI commands only wired up
-write_sidecar, leaving ComfyUI's own copy (and any img2img source image) on
-disk indefinitely in privacy mode. See dev-notes/checkup/CONSOLIDATED-FINDINGS
-item 2.
+on-disk output copy, which embeds the full prompt/workflow as PNG metadata per
+localm/image_gen/comfy.py, plus any img2img source image, is removed).
 """
 
 from contextlib import ExitStack
@@ -69,9 +66,8 @@ class TestImageCmdPrivacy:
 
     def test_retry_path_also_deletes_outputs_in_privacy_mode(self):
         """image_cmd builds the retry call as a SEPARATE lambda from the
-        initial call (unlike music/video, which reuse one closure) - the
-        exact shape of drift this bug came from. Force the retry path and
-        confirm the fix was applied there too."""
+        initial call, unlike music/video, which reuse one closure. Forces the
+        retry path and asserts the same privacy handling there."""
         calls = []
 
         def fake_gen(*a, **kwargs):

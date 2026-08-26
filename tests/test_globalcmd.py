@@ -42,10 +42,9 @@ def fake_path(monkeypatch):
 # --------------------------- the setx guard ------------------------------- #
 
 def test_path_edited_via_registry_not_setx():
-    """PATH is edited through the Windows registry (winreg), never by shelling out
-    to `setx` (which truncates + corrupts the user PATH). Enforced structurally:
-    the module spawns NO external process for a PATH edit. (The docstring names
-    setx on purpose, to say it is banned, so we assert on mechanism not the word.)"""
+    """PATH is edited through the Windows registry (winreg), never by shelling
+    out to `setx` (which truncates and corrupts the user PATH). Enforced
+    structurally: the module spawns NO external process for a PATH edit."""
     src = Path(gc.__file__).read_text(encoding="utf-8")
     assert "import subprocess" not in src         # no shelling out at all
     assert ("os." + "system") not in src          # concat avoids a scanner false-positive
@@ -187,9 +186,9 @@ def test_posix_ensure_on_path_already_on_path_has_no_note(monkeypatch, tmp_path)
 
 
 def test_install_cli_surfaces_path_edit_failure(monkeypatch, capsys):
-    """main() must NOT claim 'already on PATH' when the shim was created but its
-    dir could not be added to PATH; it prints the manual-add note and still exits
-    20 (installed, PATH not modified by us). Negative-tests the false success."""
+    """main() must NOT claim 'already on PATH' when the shim was created but
+    its dir could not be added to PATH; it prints the manual-add note and still
+    exits 20 (installed, PATH not modified by us)."""
     monkeypatch.setattr(gc, "install", lambda root, precedence="append": {
         "path_dir": "/home/u/.local/bin", "shim": "s", "path_modified": False,
         "conflict": None,

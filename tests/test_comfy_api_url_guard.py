@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-COMFY-APIURL: a link-local / cloud-metadata comfy_api_url is refused so an
-ADMIN-set api_url cannot turn the comfy control calls into an SSRF probe of cloud
+"""A link-local / cloud-metadata comfy_api_url is refused so an ADMIN-set
+api_url cannot turn the comfy control calls into an SSRF probe of cloud
 metadata. Loopback / LAN / public are allowed - a real ComfyUI runs on any."""
 
 from localm.media import comfy_client as c
@@ -34,11 +34,9 @@ def test_default_api_url_keeps_lan_config(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# CHK-COMFY-APIURL residual: the image/music/video PLUGIN backends resolved
-# api_url as `comfy.api_url or [comfy_api_url or] default_api_url()`, so a
-# per-plugin (or the global) api_url short-circuited BEFORE default_api_url()'s
-# own guard and reached the outbound comfy calls unsanitised. settings() must
-# sanitise the RESOLVED value, closing that bypass on every media plugin.
+# settings() sanitises the RESOLVED api_url on every media plugin, so a
+# per-plugin or global api_url cannot reach the outbound comfy calls by
+# short-circuiting default_api_url()'s own guard.
 # --------------------------------------------------------------------------- #
 
 from localm.plugins.builtin.image import backend as _image_backend    # noqa: E402
@@ -85,9 +83,8 @@ def test_image_settings_keeps_lan_per_plugin_api_url(monkeypatch):
 
 
 def test_sanitize_fails_closed_on_unparseable_url(caplog):
-    # HONESTY-0702: urlparse raises "Invalid IPv6 URL" on an unclosed bracket.
-    # The guard used to swallow that and return the URL UNCHECKED (silent fail
-    # open); it must refuse (fail closed) and say why in the log.
+    # urlparse raises "Invalid IPv6 URL" on an unclosed bracket. The guard
+    # refuses (fail closed) and logs why.
     import logging
     with caplog.at_level(logging.WARNING, logger="localm"):
         assert c.sanitize_comfy_url("http://[::1") == _LOOPBACK

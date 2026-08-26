@@ -1,26 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Role presets for spawned sub-agents: a focused mission plus a narrowed toolset.
 
-A parent delegating "review this diff" wants a reviewer, not a second full agent.
-Before this existed, ``spawn_agent`` handed the child the parent's whole toolset,
-so a child asked only to read and judge could still ``write_file``, ``run_shell``
-and ``git_push``. A role fixes both halves at once: the mission text tells the
-model what it is for, and ``allowed_tools`` is the set the child is actually left
-holding.
+A role sets two things at once: the mission text tells the model what it is for,
+and ``allowed_tools`` is the set the child is left holding.
 
 THE INVARIANT: a role only ever REMOVES capability. It is applied as
 ``disabled_tools | (everything_registered - allowed_tools)`` (see
 ``Agent._apply_role_toolset``), a union with what the parent already forbade, so
 a role can never hand back a tool the parent disabled or that a restricted,
-shareable session forbids. Narrowing is a subset operation, never a substitution.
+shareable session forbids.
 
-The allowlists follow the reasoning already written for ``SAFE_RESTRICTED_TOOLS``
-(tools/registry.py): the excluded tools are the ones that execute code
-(run_shell/run_tests, where a planted conftest runs), run git hooks
-(git_commit/git_push), reach the network (fetch_url/web_search), or disclose
-secrets (read_env). Because the set is an ALLOWLIST, a newly added tool - and
-every dynamically registered MCP/plugin/skill tool - is denied to a role by
-default rather than silently inherited.
+The allowlists exclude the tools that execute code (run_shell/run_tests, where a
+planted conftest runs), run git hooks (git_commit/git_push), reach the network
+(fetch_url/web_search), or disclose secrets (read_env). Because the set is an
+ALLOWLIST, a newly added tool - and every dynamically registered
+MCP/plugin/skill tool - is denied to a role by default rather than inherited.
 """
 
 from __future__ import annotations
@@ -38,8 +32,7 @@ class RolePreset:
     allowed_tools: frozenset[str]  # the ONLY tools this role may call
 
 
-# Building blocks. Named so a role reads as a sum of capabilities and a reviewer
-# demonstrably has no write capability in its definition, not merely in prose.
+# Building blocks: each role's allowed_tools is a union of these sets.
 _READ_ONLY = frozenset({
     "read_file", "list_dir", "tree", "grep", "search_files",
 })
@@ -96,15 +89,13 @@ ROLE_PRESETS: dict[str, RolePreset] = {
 def resolve_role(name: str | None) -> RolePreset | None:
     """The preset for ``name``, or None when no role was requested.
 
-    Raises ValueError on an unrecognised name. Falling back to "no role" would
-    silently hand the child the parent's FULL toolset - the exact over-capable
-    child this module exists to prevent - so a typo fails loudly instead.
+    Raises ValueError on an unrecognised name rather than falling back to "no
+    role", which would hand the child the parent's FULL toolset.
     """
     if name is None:
         return None
-    # A model can emit anything for an argument. Coercing a non-string here (say
-    # {"role": 123} or a list) would guess at intent; raising the SAME clear
-    # ValueError keeps the fail-closed path single and tells it what to send.
+    # A non-string argument (say {"role": 123} or a list) raises the same
+    # ValueError rather than being coerced.
     if not isinstance(name, str):
         raise ValueError(
             f"unknown role {name!r}: role must be a string. "
@@ -113,8 +104,7 @@ def resolve_role(name: str | None) -> RolePreset | None:
     key = name.strip().lower()
     if not key:
         return None
-    # Accept the underscore spelling too: a model that has seen "test_writer"
-    # elsewhere in the tool schema should not be punished for the separator.
+    # The underscore spelling ("test_writer") resolves too.
     key = key.replace("_", "-")
     preset = ROLE_PRESETS.get(key)
     if preset is None:

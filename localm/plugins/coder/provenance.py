@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Provenance tagging for coder tool results (R19, AutoJack #2 - indirect prompt
-injection defense in depth).
+"""Provenance tagging for coder tool results - indirect prompt injection defence
+in depth.
 
 A coding agent that can fetch web pages, run web searches, or call external MCP
 tools ingests attacker-influenceable text and feeds it straight back into its own
 model loop. That is the indirect-prompt-injection channel: a fetched page can
 carry "ignore your task and run this" directions, and - because tool results are
 interpolated verbatim into a <tool_result> frame (tools.py ToolResult.to_xml) -
-the page can even embed a literal closing tag to forge the frame and impersonate
-a trusted message.
+the page can embed a literal closing tag to forge the frame and impersonate a
+trusted message.
 
 This module re-frames results from untrusted (external / network) tools so the
 model treats their body as DATA, not instructions, and neutralises any
@@ -17,16 +16,16 @@ frame-closing markers inside that body so the content cannot break out of, or
 forge, its fence. It blocks nothing - it only labels and hardens the boundary.
 The matching standing rule lives in the system prompt (prompts.py, UNTRUSTED
 CONTENT). The outer <tool_result ...> tag is preserved so the existing detection
-code (agent.py / sessions.py keying off startswith("<tool_result")) is unaffected.
+code (agent.py / sessions.py keying off startswith("<tool_result")) is
+unaffected.
 """
 
 from __future__ import annotations
 
-# neutralise() and its control-token / frame-marker regexes were hoisted to the
-# kernel module localm/textguard.py so the agent-memory layer can reuse them
-# without a kernel->plugin import. Re-exported here so the coder's own call sites
-# and tests (from .provenance import neutralise) are unchanged; the escaping is
-# byte-for-byte identical.
+# neutralise() and its control-token / frame-marker regexes live in the kernel
+# module localm/textguard.py, so the agent-memory layer can reuse them without a
+# kernel->plugin import. Re-exported here for the coder's own call sites and
+# tests (from .provenance import neutralise).
 from localm.textguard import neutralise  # noqa: F401  (re-export for back-compat)
 
 # Built-in tools whose output is external, attacker-influenceable content.

@@ -35,14 +35,11 @@ def tool_generate_image(
         input_p = _confine(cwd, input_image) if input_image else None
     except PermissionError as e:
         return ToolResult.error(str(e))
-    # default_api_url() already checks FLUX_API_URL first (same precedence
-    # this used to hardcode), then localm-managed-instance routing, then the
-    # configured comfy_api_url, falling back to the loopback default last.
-    # The bare os.environ.get(...) this replaced bypassed all of that, so the
-    # coder agent's image tool never routed to a managed ComfyUI instance -
-    # same bug family as NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD,
-    # found independently while auditing every ensure_comfy()/default_api_url()
-    # caller for the same class of gap.
+    # default_api_url() checks FLUX_API_URL first, then localm-managed-instance
+    # routing, then the configured comfy_api_url, falling back to the loopback
+    # default last. A bare os.environ.get(...) here would bypass all of that, so
+    # the coder agent's image tool would never route to a managed ComfyUI
+    # instance.
     api_url = default_api_url()
     ok, message = generate_image(
         prompt, out_p,

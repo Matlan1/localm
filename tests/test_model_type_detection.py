@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Branch A: deterministic model type-detection, the 'unknown' sentinel, and the
+"""Deterministic model type-detection, the 'unknown' sentinel, and the
 lone-.safetensors parent-dir scan.
 
-Each of these fails on pre-Branch-A master (it is the negative that proves the
-change is real):
-  * pull's HF classifier matches tags EXACTLY, never by substring (MED-15: a tag
-    that merely CONTAINS 'lora'/'vae' no longer misclassifies), and returns
-    'unknown' - not a silent 'llm' - when no hard signal resolves;
+  * pull's HF classifier matches tags EXACTLY, never by substring (a tag that
+    merely CONTAINS 'lora'/'vae' must not misclassify), and returns 'unknown' -
+    not a silent 'llm' - when no hard signal resolves;
   * add_local records a deterministically-detected type, and 'unknown' (not 'llm')
     for an HF dir with no hard signal in config.json;
   * a lone .safetensors beside a config.json + tokenizer registers the DIRECTORY as
@@ -31,10 +29,10 @@ from localm.model_manager.pull import _hf_pipeline_tag_to_type
 
 
 def _backdate(path, seconds=60):
-    """Set path's mtime `seconds` in the past, so sync_models_dir's R45
-    settle check (localm.model_manager.gguf._gguf_recently_written) reads it
-    as settled rather than possibly still mid-copy - these tests are about
-    type detection, not the settle window, and would otherwise flake on the
+    """Set path's mtime `seconds` in the past, so sync_models_dir's settle
+    check (localm.model_manager.gguf._gguf_recently_written) reads it as
+    settled rather than possibly still mid-copy - these tests are about type
+    detection, not the settle window, and would otherwise flake on the
     write-then-immediately-sync timing."""
     old = time.time() - seconds
     os.utime(path, (old, old))
@@ -74,7 +72,7 @@ def _hf_dir(root, name, *, architectures=None, adapter=False):
 
 
 # --------------------------------------------------------------------------- #
-#  pull.py HF classifier: exact tag match (MED-15) + unknown sentinel          #
+#  pull.py HF classifier: exact tag match + unknown sentinel                   #
 # --------------------------------------------------------------------------- #
 
 def _patch_hf(monkeypatch, payload):
@@ -83,15 +81,14 @@ def _patch_hf(monkeypatch, payload):
 
 
 def test_hf_tag_substring_does_not_misclassify(monkeypatch):
-    # 'exploration' CONTAINS 'lora' as a substring (...p-LORA-tion...). Exact matching
-    # must NOT call this repo a LoRA. On master the substring check returns 'lora'.
+    # 'exploration' CONTAINS 'lora' as a substring (...p-LORA-tion...). Exact
+    # matching must NOT call this repo a LoRA.
     _patch_hf(monkeypatch, {"pipeline_tag": "text-generation", "tags": ["exploration"]})
     assert _hf_pipeline_tag_to_type("owner/repo") == "llm"
 
 
 def test_hf_vae_substring_does_not_misclassify(monkeypatch):
-    # A tag merely CONTAINING 'vae' as a substring must not be read as a VAE. On
-    # master `"vae" in "vae-experiments".lower()` is True and returns 'vae'.
+    # A tag merely CONTAINING 'vae' as a substring must not be read as a VAE.
     _patch_hf(monkeypatch, {"pipeline_tag": None, "tags": ["vae-experiments"]})
     assert _hf_pipeline_tag_to_type("owner/repo") == "unknown"
 
@@ -129,13 +126,9 @@ def test_hf_image_is_diffusion(monkeypatch):
 
 
 def test_hf_diffusion_lora_precedence(monkeypatch):
-    # XLabs-AI/flux-RealismLora (real repo, captured live): pipeline_tag=
-    # text-to-image (inherited from its FLUX base model) AND an exact 'lora'
-    # tag on the SAME repo. The tag must win - classify_hf_metadata checks it
-    # before the diffusion pipeline_tag branch. This is the fix for a real
-    # pre-existing bug: every diffusion LoRA on HF carries its base model's
-    # image pipeline_tag, so checking pipeline_tag first misclassified every
-    # one of them as a full diffusion-unet checkpoint instead of a lora.
+    # XLabs-AI/flux-RealismLora: pipeline_tag=text-to-image (inherited from its
+    # FLUX base model) AND an exact 'lora' tag on the same repo. The tag wins -
+    # classify_hf_metadata checks it before the diffusion pipeline_tag branch.
     _patch_hf(monkeypatch, {
         "pipeline_tag": "text-to-image", "library_name": "diffusers",
         "tags": ["diffusers", "lora", "Stable Diffusion", "image-generation",
@@ -150,15 +143,15 @@ def test_hf_diffusion_lora_precedence(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_lone_safetensors_beside_config_registers_directory(tmp_path, isolated_home):
-    # A .safetensors is not itself loadable; beside a config.json + tokenizer it is
-    # part of an HF model dir -> register the DIRECTORY (master rejects the file).
+    # A .safetensors is not itself loadable; beside a config.json + tokenizer it
+    # is part of an HF model dir -> register the DIRECTORY.
     d = _hf_dir(tmp_path, "my-llm", architectures=["LlamaForCausalLM"])
     weight = d / "model.safetensors"
     assert mm.add_local(str(weight)) is True
     reg = mm.load_registry()
     assert "my-llm" in reg
     assert Path(reg["my-llm"]["path"]).is_dir()      # the dir, not the bare file
-    assert reg["my-llm"]["model_type"] == "llm"      # A1 detection from architectures
+    assert reg["my-llm"]["model_type"] == "llm"      # detected from architectures
 
 
 def test_lone_safetensors_without_config_precise_reject(tmp_path, isolated_home, monkeypatch):
@@ -192,14 +185,14 @@ def test_add_local_hf_dir_adapter_is_lora(tmp_path, isolated_home):
 
 
 def test_add_local_hf_dir_no_arch_is_unknown(tmp_path, isolated_home):
-    # No hard signal in config.json -> 'unknown', never a silent 'llm' (master: 'llm').
+    # No hard signal in config.json -> 'unknown', never a silent 'llm'.
     d = _hf_dir(tmp_path, "mystery", architectures=None)
     assert mm.add_local(str(d)) is True
     assert mm.load_registry()["mystery"]["model_type"] == "unknown"
 
 
 def test_add_local_gguf_still_llm(tmp_path, isolated_home):
-    # Guard: a bare .gguf is a llama.cpp text model -> stays 'llm' (no regression).
+    # Guard: a bare .gguf is a llama.cpp text model -> stays 'llm'.
     f = tmp_path / "plain.gguf"
     f.write_bytes(b"GGUF\x00\x00\x00\x00plain")
     assert mm.add_local(str(f)) is True
@@ -207,7 +200,7 @@ def test_add_local_gguf_still_llm(tmp_path, isolated_home):
 
 
 # --------------------------------------------------------------------------- #
-#  A2: unknown is runnable-by-name but never auto-picked as the chat default   #
+#  unknown is runnable-by-name but never auto-picked as the chat default       #
 # --------------------------------------------------------------------------- #
 
 def test_is_auto_chat_eligible():
@@ -215,11 +208,9 @@ def test_is_auto_chat_eligible():
     assert is_auto_chat_eligible({"model_type": "llm"}) is True
     assert is_auto_chat_eligible({}) is True                       # legacy entry = llm
     assert is_auto_chat_eligible({"model_type": "unknown"}) is False
-    # An 'embedding' entry must never be auto-picked as the default CHAT model
-    # (it loads via a dedicated embeddings-mode context, not the causal chat
-    # path) - a real risk now that setup-embeddings can register one into the
-    # main registry, making an embedding-only registry a plausible first-run
-    # state (adversarial review finding, confirmed by live reproduction).
+    # An 'embedding' entry must never be auto-picked as the default CHAT model:
+    # it loads via a dedicated embeddings-mode context, not the causal chat path,
+    # and setup-embeddings can register one into the main registry.
     assert is_auto_chat_eligible({"model_type": "embedding"}) is False
 
 
@@ -237,9 +228,8 @@ def test_unknown_not_auto_selected_but_runnable_by_name(monkeypatch):
 
 def test_embedding_not_auto_selected_but_runnable_by_name(monkeypatch):
     # Same guarantee as the 'unknown' case above, for 'embedding': an
-    # embedding-only registry must not auto-load one of them as the chat
-    # model (it would fail or serve nonsense via the causal chat path), but
-    # it stays runnable when named explicitly.
+    # embedding-only registry must not auto-load one of them as the chat model,
+    # but it stays runnable when named explicitly.
     from localm.plugins.mcpserver.server import EngineCache
     reg = {"zeta-embed": {"path": "x", "model_type": "embedding"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: reg)
@@ -266,7 +256,7 @@ def test_autopick_prefers_llm_over_embedding(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  A2: type is mutable (set_model_type helper + CLI)                           #
+#  Type is mutable (set_model_type helper + CLI)                               #
 # --------------------------------------------------------------------------- #
 
 def test_set_model_type_changes_and_validates(tmp_path, isolated_home):
@@ -313,11 +303,11 @@ def test_cli_set_type_command(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  Branch A-embedding: a distinct 'embedding' MODEL_TYPES value, detected      #
-#  from HARD GGUF metadata (general.architecture / *.pooling_type), never a   #
-#  filename guess. Covers gguf.py (gguf_embedding_signal), registry.py        #
-#  (_detect_local_model_type + sync_models_dir), pull.py (the HF pipeline_tag #
-#  classifier + the post-download auto-upgrade), and cli/models.py (--type).  #
+#  A distinct 'embedding' MODEL_TYPES value, detected from HARD GGUF metadata  #
+#  (general.architecture / *.pooling_type), never a filename guess. Covers     #
+#  gguf.py (gguf_embedding_signal), registry.py (_detect_local_model_type +    #
+#  sync_models_dir), pull.py (the HF pipeline_tag classifier + the             #
+#  post-download auto-upgrade) and cli/models.py (--type).                     #
 # --------------------------------------------------------------------------- #
 
 def _build_gguf_bytes(architecture: str, extra_kv: "dict | None" = None) -> bytes:
@@ -377,10 +367,10 @@ def test_gguf_embedding_signal_llama_no_pooling_false(tmp_path):
 
 
 def test_gguf_embedding_signal_qwen3_pooling_type_true(tmp_path):
-    # The decoder-reuse case from the real bug report (Qwen3-Embedding-8B-Q8_0.gguf):
-    # general.architecture stays "qwen3" (identical to the chat variant), but a
-    # pooling-configured export carries a "<arch>.pooling_type" key the chat
-    # variant never writes - that key alone is the signal.
+    # The decoder-reuse case: general.architecture stays qwen3 (identical to the
+    # chat variant), but a pooling-configured export carries a
+    # <arch>.pooling_type key the chat variant never writes - that key alone is
+    # the signal.
     f = tmp_path / "qwen3-embed.gguf"
     f.write_bytes(_build_gguf_bytes("qwen3", {"qwen3.pooling_type": "1"}))
     assert gguf_embedding_signal(f) is True
@@ -395,18 +385,12 @@ def test_gguf_embedding_signal_truncated_file_no_crash(tmp_path):
 
 
 def test_gguf_embedding_signal_bert_survives_huge_vocab_truncation(tmp_path):
-    # Adversarial-review regression (confirmed by live reproduction before the
-    # fix): general.architecture="bert" resolves EARLY in the KV walk, but a
-    # real embedding model's tokenizer vocab array (multilingual models like
-    # bge-m3 carry 250k+ tokens) can push the file's metadata block past the
-    # bounded probe read. Before the fix, the loop kept scanning for a
-    # pooling_type key it would never need (architecture alone is already
-    # definitive) until the huge array ran the parse past the probe bound,
-    # which raised and discarded the ALREADY-RESOLVED architecture - silently
-    # misclassifying a huge multilingual embedding GGUF as 'llm'. The fix
-    # breaks out of the KV walk as soon as EITHER signal is definitively known
-    # and preserves whatever was already resolved if a later key does trip a
-    # parse error, so this must return True regardless of what follows.
+    # general.architecture=bert resolves EARLY in the KV walk, but a real
+    # embedding model's tokenizer vocab array (multilingual models like bge-m3
+    # carry 250k+ tokens) can push the metadata block past the bounded probe
+    # read. The KV walk breaks out as soon as EITHER signal is definitively known
+    # and preserves whatever was already resolved if a later key trips a parse
+    # error, so this returns True regardless of what follows.
     buf = bytearray()
     buf += b"GGUF"
     buf += struct.pack("<I", 3)              # version 3
@@ -453,11 +437,9 @@ def test_add_local_gguf_bert_architecture_is_embedding(tmp_path, isolated_home):
 
 
 def test_add_local_full_gguf_llama_architecture_still_llm(tmp_path, isolated_home):
-    # Regression guard distinct from test_add_local_gguf_still_llm above: that
-    # test's blob is UNPARSEABLE (no real kv block), exercising the "parse
-    # failed -> no signal -> llm" fallback. This one is a fully valid GGUF whose
-    # metadata DOES parse (a real architecture, no pooling key) - proving the
-    # negative path through the real parser, not just the fallback.
+    # A fully valid GGUF whose metadata DOES parse (a real architecture, no
+    # pooling key), driving the negative path through the real parser rather than
+    # the parse-failed fallback.
     f = tmp_path / "my-chat-model.gguf"
     f.write_bytes(_build_gguf_bytes("llama"))
     assert mm.add_local(str(f)) is True
@@ -542,14 +524,12 @@ def test_pull_model_explicit_llm_type_not_overridden(tmp_path, isolated_home, mo
 
 
 # --------------------------------------------------------------------------- #
-#  Branch A-mmproj: a distinct 'mmproj' MODEL_TYPES value, detected from HARD  #
-#  GGUF metadata (general.architecture == "clip"), never a filename guess.    #
-#  Covers gguf.py (gguf_is_mmproj), registry.py (_detect_local_model_type +    #
-#  sync_models_dir) and pull.py (the post-download auto-upgrade). Reproduces   #
-#  the reported bug: `localm pull ... --mmproj ...` deliberately leaves the    #
-#  projector unregistered on disk (it is not a standalone model), but          #
-#  sync_models_dir used to pick it back up as a plain 'llm' - offering "use"   #
-#  on a file that cannot load as a standalone chat model.                      #
+#  A distinct 'mmproj' MODEL_TYPES value, detected from HARD GGUF metadata     #
+#  (general.architecture == clip), never a filename guess. Covers gguf.py      #
+#  (gguf_is_mmproj), registry.py (_detect_local_model_type + sync_models_dir)  #
+#  and pull.py (the post-download auto-upgrade). `localm pull ... --mmproj`    #
+#  leaves the projector unregistered on disk, and sync_models_dir must not     #
+#  pick it back up as a plain 'llm'.                                           #
 # --------------------------------------------------------------------------- #
 
 # ---------------------------- gguf_is_mmproj ------------------------------- #
@@ -611,12 +591,10 @@ def test_sync_models_dir_discovers_mmproj_gguf(isolated_home):
 # --------------------------------- pull_model ------------------------------ #
 
 def test_pull_model_auto_upgrades_gguf_to_mmproj(tmp_path, isolated_home, monkeypatch):
-    # Mirrors test_pull_model_auto_upgrades_gguf_to_embedding: pull_model's
-    # default model_type="auto" resolves a bare *.gguf spec to 'llm' up front,
-    # but _pull_gguf_file then probes the freshly-downloaded file's OWN
-    # metadata and upgrades an auto-resolved 'llm' to 'mmproj' when the bytes
-    # say so - the same classifier gap as sync_models_dir, reached instead by
-    # a direct pull of a projector file (no --mmproj co-pull involved).
+    # pull_model's default model_type=auto resolves a bare *.gguf spec to 'llm'
+    # up front, and _pull_gguf_file then probes the freshly-downloaded file's OWN
+    # metadata and upgrades an auto-resolved 'llm' to 'mmproj' when the bytes say
+    # so, reached here by a direct pull of a projector file.
     import huggingface_hub
     import requests
 
@@ -707,9 +685,9 @@ def test_setup_embeddings_registers_once_not_twice(isolated_home, monkeypatch):
     fake = emb_dir / "bge-small-en-v1.5-q4_k_m.gguf"
     fake.write_bytes(_build_gguf_bytes("bert"))
 
-    # Stub the DOWNLOADER (the environment), not the sync logic under test -
-    # same pattern as test_cli_setup_embeddings_msg.py, but the fake file sits
-    # under <home>/models/embeddings so the registry-sync branch fires.
+    # Stub the DOWNLOADER (the environment), not the sync logic under test; the
+    # fake file sits under <home>/models/embeddings so the registry-sync branch
+    # fires.
     monkeypatch.setattr(embedder, "resolve_embedding_model_path",
                         lambda allow_download=True: str(fake))
 
@@ -730,17 +708,12 @@ def test_setup_embeddings_registers_once_not_twice(isolated_home, monkeypatch):
     assert set(reg2) == set(reg1)
 
 
-# --------------- F8-PERSIST-ARCH-AND-EXPERT-COUNT-ON-REGISTRY --------------- #
-# A local model's registry entry now carries its own header's architecture and
-# MoE expert_count, captured once at registration - the same real signal the
-# HuggingFace search page already shows for a remote repo (#990/#1001), now
-# available for an already-registered model too instead of only ever being a
-# name guess. expert_count=0 is a real, CONFIRMED fact (the header was read and
-# genuinely has no experts) and must stay written and distinct from an entry
-# that was never checked at all (the key absent entirely) - collapsing the two
-# would show a real MoE model as confirmed-dense the moment a caller defaulted
-# a missing field to 0. See gguf.gguf_registry_metadata's own docstring for the
-# measured cost (a real 6.6 GB model: ~205ms for the one read this needs).
+# --------------- Architecture and expert count on the registry ------------- #
+# A local model's registry entry carries its own header's architecture and MoE
+# expert_count, captured once at registration. expert_count=0 is a CONFIRMED
+# fact (the header was read and genuinely has no experts) and stays written and
+# distinct from an entry that was never checked at all (the key absent
+# entirely).
 
 def _build_gguf_bytes_with_expert_count(architecture: str, expert_count: int) -> bytes:
     """Like _build_gguf_bytes, but writes a REAL uint32 '<architecture>.expert_count'
@@ -844,8 +817,8 @@ class TestAddLocalPersistsArchAndExpertCount:
 
 class TestSyncModelsDirBackfillsArchAndExpertCount:
     def test_sync_backfills_a_pre_existing_entry_missing_the_fields(self, isolated_home):
-        # Simulates an entry registered before this feature existed: written
-        # directly via _register with no architecture/expert_count kwargs.
+        # A registry entry lacking architecture/expert_count, written directly
+        # via _register with neither kwarg.
         dest = isolated_home / "models" / "legacy-moe.gguf"
         dest.write_bytes(_build_gguf_bytes_with_expert_count("qwen3moe", 8))
         mm._register("legacy-moe", dest, "local", model_type="llm")

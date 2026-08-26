@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#617 follow-up: the bug-report log tail must survive an arbitrary amount of
-routine activity following the actual error, and must not bury a real error
-report under repeated "all is well" polling lines.
+"""The bug-report log tail must survive an arbitrary amount of routine activity
+following the actual error, and must not bury a real error report under
+repeated "all is well" polling lines.
 
 localm._log_digest replaces the old blind last-N-lines cut with a digest that
 keeps every WARNING+/traceback record from the whole run and collapses runs of
@@ -61,11 +61,10 @@ class TestIsErrorRecord:
         assert ld.is_error_record(rec)
 
     def test_unleveled_continuation_with_native_crash_signal_counts_as_an_error(self):
-        # Raw native (ggml/CUDA/HIP) stderr is appended with no leveled prefix
-        # of its own (debuglog.py's dedup_native_stderr()/_write_debug()), so
-        # it always lands as a CONTINUATION of whatever benign record precedes
-        # it - here a routine DEBUG poll. Neither line contains the literal
-        # Python traceback marker.
+        # Raw native (ggml/CUDA/HIP) stderr is appended with no leveled prefix of
+        # its own, so it lands as a CONTINUATION of whatever benign record precedes
+        # it - here a routine DEBUG poll. Neither line contains the literal Python
+        # traceback marker.
         rec = {"level": "DEBUG", "logger": "localm", "lines": [
             "2026-07-13 15:25:39,000 DEBUG   localm: GET /api/stats -> 200 (7 ms)",
             "CUDA error: operation not permitted when stream is capturing",
@@ -82,10 +81,10 @@ class TestIsErrorRecord:
         assert not ld.is_error_record(rec)
 
     def test_signal_in_the_leveled_header_line_itself_does_not_trigger(self):
-        # The header line's own message came through a real "TIMESTAMP LEVEL
-        # NAME:" prefix, so its content is already correctly judged by
-        # rec["level"] - the broadened scan only applies to lines that never
-        # passed that check (continuations, or a level=="" record).
+        # The header line's own message came through a real "TIMESTAMP LEVEL NAME:"
+        # prefix, so its content is judged by rec["level"]; the broadened scan only
+        # applies to lines that never passed that check (continuations, or a
+        # level=="" record).
         rec = {"level": "DEBUG", "logger": "localm", "lines": [
             "2026-07-13 15:25:39,000 DEBUG   localm: 0 errors in the last batch",
         ]}
@@ -103,8 +102,8 @@ class TestCollapseNearDuplicates:
         assert "repeated" not in digest
 
     def test_long_runs_of_near_duplicates_collapse(self):
-        # The exact shape from issue #617: same request/status, different
-        # timestamps and latency numbers every couple of seconds.
+        # Same request/status, different timestamps and latency numbers every
+        # couple of seconds.
         text = "\n".join(
             _polling_line(f"2026-07-13 15:25:{20+i:02d}", 6 + i % 2, 0.2 + i / 100)
             for i in range(6)
@@ -125,9 +124,8 @@ class TestCollapseNearDuplicates:
 
 class TestAllErrorsSurviveArbitraryTrailingNoise:
     def test_error_survives_a_huge_amount_of_later_polling(self):
-        # Reproduces the #617 near-miss: the error would be pushed out of a
-        # fixed-size tail by enough subsequent routine activity. Simulate far
-        # more trailing noise than the old 120-line window ever allowed.
+        # The error would be pushed out of a fixed-size tail by enough subsequent
+        # routine activity, so simulate a large amount of trailing noise.
         error_block = (
             "2026-07-13 15:24:50,000 ERROR   localm: model load failed\n"
             "Traceback (most recent call last):\n"
@@ -136,7 +134,7 @@ class TestAllErrorsSurviveArbitraryTrailingNoise:
         )
         noise = "\n".join(
             _polling_line(f"2026-07-13 15:{30+i//60:02d}:{i%60:02d}", 7, 0.2)
-            for i in range(2000)   # ~16x the old 120-line window
+            for i in range(2000)   # well past any fixed tail window
         )
         digest = ld.build_digest(error_block + noise)
         assert "RuntimeError: Native llama runtime failed to load" in digest
@@ -159,13 +157,10 @@ class TestNativeCrashContinuationSurvives:
     append has no "TIMESTAMP LEVEL NAME:" prefix, so parse_records() always
     attaches it as a CONTINUATION of whatever record precedes it - almost
     always a routine DEBUG-level poll given how dense e.g. GET /api/stats
-    logging is in a real log. Before this fix, such a record silently
-    inherited the benign DEBUG level and was swept into collapse_records'
-    near-duplicate collapsing, and even the one surviving instance of a
-    collapsed run kept only its first line - so the crash text vanished
-    from the digest entirely, with no "omitted" notice, violating the
-    module's own "never drops an error record silently" guarantee. See the
-    #928 bug report investigation."""
+    logging is in a real log. Such a record must not inherit the benign DEBUG
+    level and be swept into collapse_records' near-duplicate collapsing, which
+    keeps only the first line of the one surviving instance and would drop the
+    crash text from the digest with no "omitted" notice."""
 
     def test_unformatted_cuda_crash_line_survives_dense_polling_noise(self):
         lines = [_polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2 + i / 100)
@@ -179,13 +174,11 @@ class TestNativeCrashContinuationSurvives:
         assert "repeated 20x" in digest
 
     def test_unrecognized_unleveled_continuation_still_not_collapsed_away(self):
-        # Even a continuation that matches none of the known crash-signal
-        # words must never be silently folded into a run of otherwise near-
-        # duplicate polling records: record_template() hashes the WHOLE
-        # record (continuation lines included), so this one record's uniquely
-        # different continuation gives it a template that matches none of its
-        # neighbors. With no run to join (run_len == 1, below
-        # _MIN_RUN_TO_COLLAPSE), it is emitted expanded, not folded away.
+        # A continuation that matches none of the known crash-signal words is not
+        # folded into a run of otherwise near-duplicate polling records:
+        # record_template() hashes the WHOLE record (continuation lines included),
+        # so this record's uniquely different continuation gives it a template that
+        # matches none of its neighbors. With run_len == 1 it is emitted expanded.
         lines = [_polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2 + i / 100)
                   for i in range(40)]
         lines.insert(20, "some totally novel native diagnostic line, no known keyword")
@@ -193,20 +186,11 @@ class TestNativeCrashContinuationSurvives:
         assert "some totally novel native diagnostic line, no known keyword" in digest
 
     def test_benign_multiline_near_duplicates_still_collapse_well_and_keep_content(self):
-        # Real near-miss caught in review: an earlier draft of this fix simply
-        # excluded every multi-line (continuation-carrying) record from
-        # collapsing, to be safe. Measured against exactly this shape - dense
-        # upstream "CUDA Graph id N reused" native spam (see
-        # dedup_native_stderr's own docstring) attaching as a continuation of
-        # routine polling records, alternating between two ids - that
-        # exclusion defeated collapsing almost entirely: 200 such records
-        # produced ~6000 chars and 55 uncollapsed repeats instead of one
-        # collapsed line, reintroducing exactly the noise this module exists
-        # to remove, on the very reports (a CUDA-crashing box) that most need
-        # it removed. record_template() hashing the whole record fixes this
-        # correctly: these 200 records ARE genuine near-duplicates end to end
-        # (numbers masked), so they collapse - and the survivor keeps its own
-        # full content, so the repeated native line is not simply lost either.
+        # Dense upstream "CUDA Graph id N reused" native spam attaching as a
+        # continuation of routine polling records, alternating between two ids.
+        # record_template() hashes the whole record, so these 200 records are
+        # genuine near-duplicates end to end (numbers masked) and collapse, and the
+        # survivor keeps its own full content.
         lines = []
         for i in range(200):
             base = _polling_line(f"2026-07-13 15:{25 + i // 60:02d}:{i % 60:02d}", 7,
@@ -219,9 +203,7 @@ class TestNativeCrashContinuationSurvives:
 
     def test_record_template_reflects_continuation_content_not_just_the_header(self):
         # Two records sharing an identical (masked) header but DIFFERENT
-        # continuation content must not be treated as near-duplicates of each
-        # other - that is what silently discarded a differing continuation
-        # under the pre-fix, header-only template.
+        # continuation content are not near-duplicates of each other.
         header = "2026-07-13 15:25:20,000 DEBUG   localm: GET /api/stream -> 200 (7 ms)"
         rec_a = {"level": "DEBUG", "logger": "localm",
                   "lines": [header, "CUDA Graph id 5 reused"]}
@@ -235,21 +217,10 @@ class TestNativeCrashContinuationSurvives:
         assert ld.record_template(rec_a) != ld.record_template(rec_c)
 
     def test_known_tradeoff_unrecognized_differing_numeric_continuations_still_collapse(self):
-        # THIS TEST PASSES TODAY, asserting CURRENT, ACCEPTED behavior (see
-        # record_template's docstring) - it is not a "should eventually pass
-        # once X is added" placeholder. On POSIX, 137 and 139 are
-        # 128 + SIGKILL and 128 + SIGSEGV, so the two unleveled continuation
-        # lines this test collapses together stand for "the OOM killer took
-        # the worker" and "the worker segfaulted" - two different faults, read
-        # as one fault twice. That is the accepted trade-off: the alternative
-        # (disabling number-masking for continuation lines) was measured too
-        # and it breaks the CUDA-Graph-id collapsing this fix exists to keep
-        # working (see the sibling test above).
-        #
-        # A RED here means someone changed the masking behavior, on purpose
-        # or not. That is a trade-off decision to make again with full
-        # knowledge of what it costs (see record_template's docstring) - NOT
-        # a regression to chase back to green by construction alone.
+        # On POSIX, 137 and 139 are 128 + SIGKILL and 128 + SIGSEGV, so the two
+        # unleveled continuation lines collapsed together here stand for two
+        # different faults read as one fault twice. Number-masking stays on for
+        # continuation lines; the sibling test above depends on it.
         lines = []
         for i in range(6):
             base = _polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2 + i / 100)
@@ -257,17 +228,15 @@ class TestNativeCrashContinuationSurvives:
             lines.append(base + f"\nnative worker exit code {code}")
         digest = ld.build_digest("\n".join(lines))
         assert "repeated 6x" in digest
-        # Exactly one of the two values survives (the module never drops the
-        # kept instance's own real content) - which one is an implementation
-        # detail (the last record in the run), not a guarantee to pin.
+        # Exactly one of the two values survives; which one (the last record in the
+        # run) is not pinned here.
         assert ("137" in digest) != ("139" in digest), (
             "expected exactly one of the two masked-equal values to survive")
 
     def test_crash_line_survives_even_as_the_very_first_content_with_no_prior_record(self):
-        # If the debug log file itself starts mid-crash (no leveled record
-        # came before it at all), parse_records gives it level == "" and it
-        # must still be recognized rather than only being checked when it is
-        # a continuation of something else.
+        # If the debug log file itself starts mid-crash (no leveled record came
+        # before it at all), parse_records gives it level == "" and it is still
+        # recognized.
         text = ("CUDA error: operation not permitted when stream is capturing\n"
                 + "\n".join(_polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2)
                             for i in range(10)))
@@ -291,13 +260,13 @@ class TestBudgetFitting:
 
 
 class TestContentNeverLeaks:
-    """#961: a bug report must never carry chat content. Before this fix, a
-    content-bearing debug record (the raw model reply, a memory-embed content
-    snippet, a web-tool query) that happened to contain a signal word
-    (error/exception/...) was PROMOTED to ERROR status by is_error_record and
-    kept verbatim - the opposite of withheld, and prioritized over genuine
-    errors when the digest is over budget. These records must be dropped
-    before that classification ever runs, regardless of their content."""
+    """A bug report must never carry chat content. A content-bearing debug
+    record (the raw model reply, a memory-embed content snippet, a web-tool
+    query) that contains a signal word (error/exception/...) would otherwise be
+    PROMOTED to ERROR status by is_error_record and kept verbatim, and
+    prioritized over genuine errors when the digest is over budget. These
+    records are dropped before that classification runs, whatever they
+    contain."""
 
     def test_raw_model_output_withheld_even_when_it_contains_error_text(self):
         text = (
@@ -314,23 +283,18 @@ class TestContentNeverLeaks:
         assert "there was an error in your code" not in digest
         # The genuine, unrelated error survives.
         assert "RuntimeError: Native llama runtime failed to load" in digest
-        # The redaction is disclosed, not silent (AGENTS.md rule 5). 2, not
-        # 1: the lone "request served" line right after the content marker is
-        # ALSO withheld, because _drop_content_records cannot yet trust it is
-        # not itself still part of the content write (see its own docstring) -
-        # a single trailing record is never enough evidence to resynchronize.
+        # The redaction is disclosed, not silent. 2, not 1: the lone "request
+        # served" line right after the content marker is ALSO withheld, because
+        # _drop_content_records cannot yet trust it is not itself still part of the
+        # content write.
         assert "2 debug record(s) withheld" in digest
 
     def test_embedded_header_lookalike_line_inside_the_reply_does_not_escape(self):
-        # Adversarial-review finding: parse_records has no way to know a
-        # multi-line content write's true extent (debuglog.py's writer adds
-        # no boundary marker). If the model's OWN reply text contains a line
-        # shaped like localm's own log header - entirely plausible from a
-        # coding assistant quoting/discussing a real log line, or from
-        # untrusted web content a job tool fetched - parse_records used to
-        # split the content write into two records right there, and the
-        # SECOND fragment's header (attacker/model-controlled text) matched
-        # none of the markers, escaping _drop_content_records entirely.
+        # parse_records has no way to know a multi-line content write's true extent
+        # (debuglog.py's writer adds no boundary marker). If the model's OWN reply
+        # text contains a line shaped like localm's own log header, parse_records
+        # splits the content write into two records there, and the SECOND fragment's
+        # header matches none of the markers.
         text = (
             "2026-07-13 15:24:51,000 DEBUG   localm: raw model output:\n"
             "Sure, here is an example log line:\n"
@@ -344,10 +308,10 @@ class TestContentNeverLeaks:
         assert "debug record(s) withheld" in digest
 
     def test_embedded_header_lookalike_survives_only_after_genuine_resync(self):
-        # The flip side of the fix above: operational usefulness must
-        # recover once genuine traffic (3+ mutually near-duplicate records,
-        # the same signal collapse_records already trusts) resumes after a
-        # content write, even though the immediate next line(s) are withheld.
+        # Operational usefulness recovers once genuine traffic (3+ mutually
+        # near-duplicate records, the same signal collapse_records already trusts)
+        # resumes after a content write, even though the immediate next lines are
+        # withheld.
         text = (
             "2026-07-13 15:24:50,000 DEBUG   localm: jobs web tool: web_search "
             "{'query': 'my private medical condition'}\n"
@@ -360,11 +324,10 @@ class TestContentNeverLeaks:
         assert "debug record(s) withheld" in digest
 
     def test_truncated_tail_starting_mid_content_is_withheld_via_start_tainted(self):
-        # Adversarial-review finding: bugreport.py's _recent_log_tail
-        # truncates a huge log file to its last N bytes before ever calling
-        # build_digest, so the surviving text can start mid-way through a
-        # content write with NO header at all (parse_records gives it
-        # level=="" - the "file starts mid-record" branch). Without
+        # bugreport.py's _recent_log_tail truncates a huge log file to its last N
+        # bytes before ever calling build_digest, so the surviving text can start
+        # mid-way through a content write with NO header at all (parse_records gives
+        # it level=="" - the "file starts mid-record" branch). Without
         # start_tainted, that severed fragment is trusted immediately.
         text = ("my actual secret chat reply continues here with password=hunter2\n"
                "2026-07-13 15:24:53,000 INFO    localm: request served\n")
@@ -394,12 +357,9 @@ class TestContentNeverLeaks:
         assert "debug record(s) withheld" not in digest
 
     def test_web_tool_args_withheld_and_bare_tool_name_alone_is_also_withheld(self):
-        # A SINGLE trailing bare-tool-name record right after the marker is
-        # NOT enough evidence to resynchronize (see
-        # test_embedded_header_lookalike_survives_only_after_genuine_resync
-        # for the case where enough genuine traffic DOES follow) - it is
-        # exactly as forgeable as the marker line itself, so it is withheld
-        # too rather than naively trusted.
+        # A SINGLE trailing bare-tool-name record right after the marker is NOT
+        # enough evidence to resynchronize - it is exactly as forgeable as the
+        # marker line itself, so it is withheld too.
         text = (
             "2026-07-13 15:24:50,000 DEBUG   localm: jobs web tool: web_search "
             "{'query': 'my private medical condition'}\n"
@@ -411,9 +371,8 @@ class TestContentNeverLeaks:
         assert "2 debug record(s) withheld" in digest
 
     def test_web_tool_args_marker_distinguishes_content_from_name_only_directly(self):
-        # is_content_record itself (independent of the tainted-resync
-        # integration behavior above) must still tell the two message shapes
-        # apart - the structural "{" after the tool name is the signal.
+        # is_content_record tells the two message shapes apart; the structural "{"
+        # after the tool name is the signal.
         assert ld.is_content_record(
             {"level": "DEBUG", "logger": "localm", "lines": [
                 "2026-07-13 15:24:50,000 DEBUG   localm: jobs web tool: web_search "
@@ -441,12 +400,9 @@ class TestContentNeverLeaks:
         assert not ld.is_content_record({"level": "", "logger": "", "lines": []})
 
     def test_content_notice_budget_is_reserved_not_squeezed_out_when_over_budget(self):
-        # diff-review-discipline: prove the ARITHMETIC, not just that the
-        # notice happens to show up. content_notice's reservation
-        # (len(notice) + 1) must compose with the pre-existing error/benign
-        # budget math in _fit_budget rather than being squeezed out by it -
-        # the notice is exactly as important to never silently drop as the
-        # "N errors omitted" notice it sits next to.
+        # content_notice's reservation (len(notice) + 1) composes with the
+        # pre-existing error/benign budget math in _fit_budget rather than being
+        # squeezed out by it.
         error_block = "2026-07-13 15:24:50,000 ERROR   localm: the actual failure\n"
         content_block = ("2026-07-13 15:24:51,000 DEBUG   localm: raw model output:\n"
                          "this is the secret reply\n")
@@ -459,29 +415,23 @@ class TestContentNeverLeaks:
         assert "the actual failure" in digest
         assert "secret reply" not in digest
         assert ld._content_withheld_notice(1) in digest
-        # The reservation guarantees the total never exceeds max_chars even
-        # with the notice included - it is additive with the existing
-        # per-error "leave room for the notice" (80-char) reservation, not
-        # competing with it for the same bytes.
+        # The reservation keeps the total within max_chars even with the notice
+        # included; it is additive with the existing per-error 80-char reservation,
+        # not competing with it for the same bytes.
         assert len(digest) <= max_chars
 
 
 class TestNativeLineRunCollapsesWithinOneRecord:
-    """#958/#952: a long run of unleveled native (ggml/CUDA/HIP) stderr has no
+    """A long run of unleveled native (ggml/CUDA/HIP) stderr has no
     "TIMESTAMP LEVEL NAME:" prefix of its own, so it always glues onto ONE
-    record as continuation lines (parse_records has no other choice) - never
-    a run of multiple RECORDS for collapse_records' record-level collapse to
-    fold. A real report's entire tail was ~70 copies of one native line for
-    exactly this reason."""
+    record as continuation lines - never a run of multiple RECORDS for
+    collapse_records' record-level collapse to fold."""
 
     def test_giant_run_of_near_duplicate_native_lines_collapses_within_one_record(self):
-        # HUNDREDS of consecutive unleveled lines, not the favourable
-        # interleaving in TestNativeCrashContinuationSurvives (one native line
-        # PER SEPARATE leveled record, which already collapses via the
-        # existing RECORD-level mechanism and could never reproduce this bug).
-        # Here there is exactly ONE leveled header, so parse_records glues
-        # every one of these 300 lines onto that SAME record as its
-        # continuation lines - the giant-single-record shape #952 actually hit.
+        # HUNDREDS of consecutive unleveled lines, not one native line per separate
+        # leveled record. There is exactly ONE leveled header here, so parse_records
+        # glues every one of these 300 lines onto that SAME record as continuation
+        # lines.
         header = "2026-07-13 15:25:20,000 DEBUG   localm: GET /api/stream -> 200 (7 ms)"
         spam = [f"ggml_cuda: buffer pool alloc {1000+i} bytes" for i in range(300)]
         text = "\n".join([header] + spam)
@@ -491,25 +441,20 @@ class TestNativeLineRunCollapsesWithinOneRecord:
         assert len(digest) < len(text) / 10
 
     def test_native_run_with_no_leading_leveled_header_still_collapses(self):
-        # The realistic shape of a REAL captured log's tail once trimmed to
-        # the failure region: no leveled record at all, just hundreds of raw
-        # native lines in a row (parse_records' "file starts mid-record"
-        # branch glues them all into ONE level=="" record).
+        # The tail of a real captured log trimmed to the failure region: no leveled
+        # record at all, just hundreds of raw native lines in a row (parse_records'
+        # "file starts mid-record" branch glues them all into ONE level=="" record).
         spam = [f"ggml_cuda: buffer pool alloc {1000+i} bytes" for i in range(250)]
         digest = ld.build_digest("\n".join(spam))
         assert digest.count("ggml_cuda: buffer pool alloc") == 1
         assert "repeated 250x" in digest
 
     def test_realistic_captured_log_shape_hundreds_of_mixed_native_lines(self):
-        # Mirrors an actual captured log's tail (per #952's own report and
-        # this module's own dedup_native_stderr commentary): a handful of
-        # genuine leveled records, then HUNDREDS of consecutive raw native
-        # lines alternating between two real ggml/CUDA message shapes with no
-        # timestamp of their own - not a synthetic one-line-per-record
-        # fixture. Both native message shapes must still be found (the
-        # survivor keeps its own real content) and the digest must shrink by
-        # an order of magnitude, exactly the property #952 needed and the
-        # favourable-interleaving fixture could never exercise.
+        # A handful of genuine leveled records, then HUNDREDS of consecutive raw
+        # native lines alternating between two real ggml/CUDA message shapes with no
+        # timestamp of their own. Both native message shapes must still be found
+        # (the survivor keeps its own real content) and the digest must shrink by an
+        # order of magnitude.
         lines = [
             "2026-07-13 15:24:10,000 INFO    localm: model load: gemma-3 on vulkan",
             "2026-07-13 15:24:11,000 DEBUG   localm: GET /api/stats -> 200 (7 ms, loop_lag=0.20s)",
@@ -532,21 +477,15 @@ class TestNativeLineRunCollapsesWithinOneRecord:
         assert "repeated" not in digest
 
     def test_error_record_repeated_lines_now_also_collapse(self):
-        """#958/#952 (measured 2026-08-05): the ORIGINAL version of this test
-        asserted the opposite - that an error-classified record's lines
-        "must stay verbatim... line-level collapsing only ever applies to
-        BENIGN records". That was the bug, not a design boundary: collapse_records
-        called _collapse_line_runs on every benign branch but skipped it
-        entirely for is_error_record's branch, so a long run of near-
-        duplicate native (ggml/CUDA/HIP) stderr glued onto a WARNING/ERROR
-        header - not just a benign one - survived fully uncollapsed. A real
-        production report measured 122 such lines / 3123 chars from exactly
-        this gap. "Errors are kept verbatim" still holds after this fix: the
-        header and one real instance of every distinct line survive; only a
-        genuinely-repeating run (same text once numbers are masked, same as
-        the benign path) folds to a repeat count - see
-        test_error_record_with_distinct_lines_stays_fully_verbatim below for
-        the case this must NOT touch."""
+        """_collapse_line_runs applies to an ERROR-classified record too, so a
+        long run of near-duplicate native (ggml/CUDA/HIP) stderr glued onto a
+        WARNING/ERROR header collapses like the benign path.
+
+        "Errors are kept verbatim" still holds: the header and one real
+        instance of every distinct line survive, and only a genuinely-repeating
+        run (same text once numbers are masked) folds to a repeat count - see
+        test_error_record_with_distinct_lines_stays_fully_verbatim below for the
+        case this must NOT touch."""
         header = "2026-07-13 15:25:20,000 WARNING localm: GPU probe degraded"
         # Differs only by a masked number, exactly like the benign fixtures
         # above - a genuine near-duplicate run, not distinct diagnostic content.

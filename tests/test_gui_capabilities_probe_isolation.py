@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI capability probes are INDEPENDENT (ADR-0008 sweep).
+"""GUI capability probes are INDEPENDENT.
 
 `/api/capabilities` reports whether three optional features are configured: the
-bug-report upload channel, the read-only issues view, and the update banner. Two
-of them shared a single try block:
+bug-report upload channel, the read-only issues view, and the update banner. A
+single try block around two of them:
 
     try:
         from localm import issue_tracker, updater
@@ -13,11 +13,9 @@ of them shared a single try block:
         issues_avail = update_avail = False
 
 `issue_tracker.available()` and `updater.available()` read INDEPENDENT endpoints,
-so a raise in the first left `update_avail` False having never called
-`updater.available()` at all. A user then silently stopped being offered updates
-because an unrelated issues probe broke - one feature's failure answering for
-another, which is the same collapse-two-outcomes-into-one shape as the rest of
-this sweep.
+so a raise in the first leaves `update_avail` False having never called
+`updater.available()` at all, and a user silently stops being offered updates
+because an unrelated issues probe broke.
 
 Failing CLOSED is right (hiding a control that might not work beats offering one
 that errors). Failing closed on BEHALF OF A FEATURE THAT WAS NEVER PROBED is not.
@@ -86,9 +84,9 @@ def test_a_failing_probe_fails_closed():
 
 
 def test_a_failing_probe_is_recorded(caplog):
-    """Fail-closed is correct; fail-closed in TOTAL silence is not (rule 5). The
-    reason must be discoverable, at debug rather than warning because this runs
-    on every capability fetch and a broken probe would otherwise flood."""
+    """Fail-closed is correct; fail-closed in TOTAL silence is not. The reason
+    must be discoverable, at debug rather than warning because this runs on every
+    capability fetch and a broken probe would otherwise flood."""
     import logging
     with caplog.at_level(logging.DEBUG, logger="localm"):
         sysroutes._probe_available("issues view", _boom)
@@ -124,7 +122,7 @@ def test_each_wrapper_calls_its_own_module(fn, module, attr, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  THE LOAD-BEARING ONE: the property at the ROUTE, not at the helper          #
+#  The property at the ROUTE, not at the helper                                #
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture
@@ -157,12 +155,12 @@ def caps_app(tmp_path, monkeypatch):
 
 def test_a_broken_issues_probe_does_not_withdraw_the_update_banner(
         caps_app, monkeypatch):
-    """The actual user-visible regression, driven through the REAL route.
+    """The user-visible regression, driven through the REAL route.
 
     The helper tests above cannot catch this on their own: they exercise
-    _probe_available directly, so restoring the old shared try block would not
-    flip any of them. This one goes through /api/capabilities, so it fails if the
-    two probes are ever bundled again."""
+    _probe_available directly, so restoring the shared try block would not flip
+    any of them. This one goes through /api/capabilities, so it fails if the two
+    probes are ever bundled again."""
     from fastapi.testclient import TestClient
 
     from localm import issue_tracker, updater

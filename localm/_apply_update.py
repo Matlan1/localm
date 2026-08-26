@@ -6,7 +6,7 @@ the post-swap deps/runtime step run by ``updater.apply``) fails partway.
 Runs ONLY from an explicit user action (``localm update`` / the GUI "Update now"
 button), NEVER automatically. The swap runs in-process inside ``updater.apply()``
 and the caller restarts afterwards (the CLI tells the user; the server re-execs).
-LM-DA-011: the server's automatic restart (``_do_restart`` in
+The server's automatic restart (``_do_restart`` in
 ``localm/inference/http_server.py``) spawns a DETACHED helper process right
 before re-exec'ing (``updater.spawn_health_watchdog()`` ->
 ``scripts/update_watchdog.py``) that polls the relaunched build's own
@@ -29,33 +29,19 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
-# Top-level entries an update NEVER replaces: the venv, the data dir, version
-# control, and agent/local-only trees. The build zip should not contain these
-# anyway, but excluding them defensively means a swap can never clobber the user's
-# models/config/sessions or the .venv even if a zip is mispackaged.
+# Top-level entries an update never replaces: the venv, the data dir, version
+# control, and agent/local-only trees.
 NEVER_TOUCH = frozenset({
     ".venv", "venv", ".git", ".github", "home", ".localcoder", "issues", "qa",
     "dev-notes", "scratch", "node_modules", ".claude", "__pycache__",
     "localm-home.cfg", ".localm-venv", ".pytest_cache", ".ruff_cache",
 })
 
-# Sub-tree paths (install-root-relative, POSIX) that are LOCAL INSTALL STATE living
-# INSIDE an otherwise-shipped top-level tree, and so must survive a swap exactly like
-# NEVER_TOUCH protects whole top-level entries - but at finer granularity than a
-# top-level name.
-#
-# The native llama.cpp binaries that ``localm setup-llama`` provisions into the
-# runtime wheel's ``lib/`` are the motivating case. They are gitignored, so a release
-# build.zip carries only the empty scaffold; a blunt whole-tree replace of ``runtime/``
-# would therefore DELETE the provisioned .dll/.so and swap in the empty scaffold,
-# breaking inference until the user manually re-runs ``localm setup-llama``. Worse,
-# while localm is RUNNING the loaded DLLs are file-locked on Windows, so deleting them
-# mid-swap raises WinError 32 and can strand a half-applied tree (the rollback then
-# also trips on the same lock). Leaving these binaries untouched fixes both: they
-# persist across an update, and the swap never trips over a locked file. The REST of
-# ``runtime/`` (its scaffold source) still updates normally. This is the sub-tree
-# analogue of ``.venv`` being NEVER_TOUCH: setup creates it on a fresh install, and an
-# in-place update must not clobber it.
+# Install-root-relative POSIX sub-tree paths that survive a swap, at finer
+# granularity than a NEVER_TOUCH top-level name. The native llama.cpp binaries
+# under the runtime wheel's lib/ are local install state: a whole-tree replace
+# of runtime/ would delete them and swap in the empty scaffold. The rest of
+# runtime/ still updates normally.
 PRESERVE_WITHIN = ("runtime/localm_llama_runtime/lib",)
 
 
@@ -90,7 +76,7 @@ def _copy_into(src, dst, name) -> None:
     any PRESERVE_WITHIN sub-tree. A merge, not a replace: *dst* may already exist and
     its preserved sub-trees are left exactly as they are (never read, written, or
     deleted, so a locked provisioned binary is never disturbed). *name* is the
-    top-level entry, used to build install-root-relative paths for the preserve test."""
+    top-level entry, which builds install-root-relative paths for the preserve test."""
     src, dst = Path(src), Path(dst)
     dst.mkdir(parents=True, exist_ok=True)
     for s in src.rglob("*"):
@@ -115,11 +101,10 @@ def _prune(dst, name, *, keep_src=None) -> list:
     Returns a list of human-readable strings, one per FILE that was meant to be removed
     but could NOT be (its unlink raised - e.g. a Windows AV lock on a freshly written
     file). Such a file is left behind STALE, so the caller must SURFACE it rather than
-    report success over it (we do not hide problems): ``rollback()`` folds these into
-    its RuntimeError, ``apply_files()`` logs them. A dir that will not rmdir is NOT
-    reported: the only dirs we attempt to remove are already-empty ones, and a
-    non-empty (or locked) dir left behind strands no functional state - keeping it is
-    the benign ancestor-protection case, not a failure."""
+    report success over it: ``rollback()`` folds these into its RuntimeError,
+    ``apply_files()`` logs them. A dir that will not rmdir is NOT reported: the only
+    dirs attempted are already-empty ones, and a non-empty (or locked) dir left behind
+    strands no functional state."""
     dst = Path(dst)
     keep_src = Path(keep_src) if keep_src is not None else None
     errors = []
@@ -131,9 +116,8 @@ def _prune(dst, name, *, keep_src=None) -> list:
             continue
         try:
             if d.is_dir():
-                # rmdir ONLY an already-empty dir; a non-empty one is deliberately kept
-                # (it still holds a preserved sub-tree or its ancestors). This is the
-                # documented ancestor-protection case, not a failure.
+                # rmdir only an already-empty dir; a non-empty one still holds a
+                # preserved sub-tree or its ancestors and is kept.
                 if not any(d.iterdir()):
                     d.rmdir()
             else:
@@ -142,11 +126,9 @@ def _prune(dst, name, *, keep_src=None) -> list:
             continue   # already gone (a race) is the desired end state, not a failure
         except OSError as e:
             if d.is_dir():
-                # An empty-dir rmdir that still failed (lock/permissions) is benign for
-                # pruning - a leftover empty dir strands nothing - so keep swallowing it.
+                # A failed empty-dir rmdir strands nothing; keep pruning.
                 continue
-            # A FILE we intended to remove but could not stays behind stale: surface it
-            # so apply()/rollback() never report success over a stale file.
+            # A file we could not remove stays behind stale, so report it.
             errors.append(f"remove {rel}: {e}")
     return errors
 
@@ -192,15 +174,15 @@ def _unsafe_member(name: str) -> bool:
 def _unsafe_swap_name(name) -> bool:
     """True if *name* is not usable as a top-level swap/rollback entry.
 
-    Stricter than :func:`_unsafe_member`, and for a different reason. A swap name
-    must be exactly ONE component living directly inside the install, because
-    every caller does ``installed / name`` and then rmtree/unlink/copy on the
-    result. ``_unsafe_member`` only answers "would this ESCAPE the extraction
-    root", which is a narrower question, and three shapes slip past it:
+    Stricter than :func:`_unsafe_member`. A swap name must be exactly ONE
+    component living directly inside the install, because every caller does
+    ``installed / name`` and then rmtree/unlink/copy on the result.
+    ``_unsafe_member`` only answers "would this ESCAPE the extraction root",
+    which is a narrower question, and three shapes slip past it:
 
     * ``""`` and ``"."`` do not escape - they COLLAPSE. ``Path(install) / ""``
-      is the install dir itself (verified on 3.12), so ``shutil.rmtree`` on it
-      deletes the entire installation. Escape is not the only way to be lethal.
+      is the install dir itself, so ``shutil.rmtree`` on it deletes the entire
+      installation.
     * A NESTED name (``a/b``) reaches a path the swap set never describes.
     * A ``NEVER_TOUCH`` name is by definition not part of any swap: swap_entries
       excludes them, so a manifest naming one is poisoned by construction. This
@@ -298,11 +280,8 @@ def apply_files(staged_root, installed, names) -> None:
             _copy_into(src, dst, name)
             prune_errs = _prune(dst, name, keep_src=src)
             if prune_errs:
-                # A stale file the new build DROPPED could not be removed after the merge
-                # (e.g. a Windows AV lock on a freshly written file). It is left behind;
-                # that is non-fatal for the forward apply (an extra file, not a broken
-                # tree), so we LOG it rather than escalate a best-effort prune into a
-                # failed update - but we never swallow it silently (do not hide problems).
+                # A stale file the new build dropped could not be removed. Logged
+                # rather than failing the update: an extra file, not a broken tree.
                 _debug_warn("update apply: could not remove %d stale file(s) under %r "
                             "after merge: %s", len(prune_errs), name,
                             "; ".join(prune_errs[:6]))
@@ -327,28 +306,16 @@ def rollback(backup_dir, installed, names) -> None:
     trips over a locked binary.
 
     Raises RuntimeError listing any restore operation that FAILED, so a failed
-    rollback is NEVER silently reported as a success (we do not hide problems). The
-    backup dir is left intact for manual recovery. Best-effort: it attempts every
-    name even if one fails, then reports the collected failures."""
+    rollback is NEVER reported as a success. The backup dir is left intact for manual
+    recovery. Best-effort: it attempts every name even if one fails, then reports the
+    collected failures."""
     backup_dir, installed = Path(backup_dir), Path(installed)
     errors = []
     for name in names:
-        # The names can come from <home>/updates/applied_names.json, which is a
-        # plain file in the data dir: until here it was only type-checked as
-        # list[str], so a poisoned entry (a "../.." traversal, or a
-        # drive-qualified absolute name) reached `installed / name` and then
-        # rmtree/unlink. This module already
-        # rejects exactly those shapes for zip members in _unsafe_member; the
-        # manifest path simply omitted the check. _unsafe_swap_name adds the
-        # collapse/nesting/NEVER_TOUCH cases that a pure escape test misses (see
-        # its docstring). Reject, do NOT silently skip:
-        # the entry is recorded as an error so the RuntimeError below reports it
-        # and the backup is kept (we do not hide problems).
-        #
-        # Checked HERE rather than in each caller because this is the choke point
-        # both reach - scripts/rollback_update.py (stdlib-only, loads this module
-        # by file path) and localm.updater.rollback - so a future caller cannot
-        # bypass it.
+        # The names can come from <home>/updates/applied_names.json, a plain file
+        # in the data dir, so a poisoned entry would reach `installed / name` and
+        # then rmtree/unlink. Rejected and recorded as an error, never skipped
+        # silently. Checked here because it is the choke point both callers reach.
         if _unsafe_swap_name(name):
             errors.append(f"refused unsafe name from the update manifest: {name!r}")
             continue
@@ -357,10 +324,8 @@ def rollback(backup_dir, installed, names) -> None:
             if dst.exists():
                 if dst.is_dir():
                     if _name_has_preserved(name):
-                        # Strip the scaffold, keep provisioned binaries. Any file it
-                        # cannot remove is a real rollback failure - fold it in so the
-                        # RuntimeError below reports it (never a stale file under a
-                        # silent rolled_back:True).
+                        # Strip the scaffold, keep provisioned binaries. A file that
+                        # cannot be removed is folded in as a rollback failure.
                         errors.extend(_prune(dst, name))
                     else:
                         shutil.rmtree(dst)
@@ -398,8 +363,7 @@ def swap_with_backup(staged_root, installed, backup_dir) -> list:
         try:
             rollback(backup_dir, installed, names)
         except Exception as rb:
-            # Both the swap AND the recovery failed - surface both; never pretend the
-            # tree is intact. The backup dir is kept for manual restore.
+            # Both the swap and the recovery failed; the backup dir is kept.
             raise RuntimeError(
                 f"update swap failed ({swap_err}) AND rollback also failed ({rb}); "
                 f"the install may be inconsistent - restore from {backup_dir}") from swap_err
@@ -414,37 +378,13 @@ def post_swap_command(klass: str, backend: Optional[str] = None) -> Optional[lis
     if klass == "deps":
         return ["uv", "pip", "install", "-p", ".venv", "-e", ".[coder,voice,monitor]"]
     if klass == "runtime":
-        # A bare "localm" argv[0] resolves back to the launcher exe itself when running
-        # as the default native LocaLM.exe build (Windows same-directory command
-        # resolution), which then mis-invokes and rolls the whole update back. Always
-        # re-invoke through the current interpreter, matching every other
-        # self-invocation site (setup_llama.py, applaunch.py, http_server.py, ...).
-        #
-        # --force: `classify()` only ever escalates to "runtime" class when the
-        # release manifest DECLARES the native binaries need re-provisioning
-        # (updater.classify's docstring: "taken from the release manifest's
-        # needs, never auto-detected"). Without --force, setup-llama's own
-        # "already provisioned" guard short-circuits on ANY already-present
-        # library and returns immediately - so this class re-provisioned
-        # NOTHING and the update still reported success (NEW-UPDATE-RUNTIME-
-        # CLASS-IS-A-NO-OP). --force is safe to add unconditionally: a runtime
-        # already in use (a loaded model's DLL) is refused by setup-llama's own
-        # _clear_target_or_refuse BEFORE anything is deleted (RuntimeInUseError
-        # -> a non-zero exit), which this function's caller (updater.apply)
-        # already treats as a post-swap failure and rolls back the CODE swap -
-        # the existing rollback path was already correct, it just never used
-        # to be exercised because the re-provision never used to be attempted.
-        #
-        # --yes: this argv is run as a detached subprocess with no one watching
-        # its stdin (updater.apply's `run(cmd)` inherits the caller's stdin,
-        # which may be a real console the user is not looking at - they are
-        # watching the browser's "Downloading and applying..." status). Without
-        # --yes, --force newly reaches code paths that used to be unreachable
-        # while the "already provisioned" guard always returned first - notably
-        # _cuda_setup_dialogue's "Continue with CUDA anyway?" click.confirm(),
-        # which is gated on assume_yes alone (not on an isatty check) and would
-        # otherwise hang the update indefinitely waiting on input nothing will
-        # ever supply.
+        # Re-invoke through the current interpreter: a bare "localm" argv[0]
+        # resolves back to the LocaLM.exe launcher itself on Windows.
+        # --force: setup-llama's "already provisioned" guard would otherwise
+        # short-circuit and re-provision nothing. A runtime in use is still
+        # refused by _clear_target_or_refuse before anything is deleted.
+        # --yes: this runs as a detached subprocess with nothing on stdin, and
+        # --force reaches a click.confirm() that would otherwise hang.
         return [sys.executable, "-m", "localm", "setup-llama",
                 "--backend", backend or "vulkan", "--force", "--yes"]
     return None

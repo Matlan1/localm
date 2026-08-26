@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 plugin/RAG-lifecycle backlog cluster.
+"""Plugin and RAG lifecycle:
 
-  REC-ONFIRSTUSE      - on_first_use fires once, at first activation, persisted
-  REC-PLUGIN-REQUIRES - enable refuses an unmet dep; uninstall cascade-disables dependents
-  REC-RAG-EMBED-PARITY - `rag add --embed` embeds at index time (GUI parity)
+  - on_first_use fires once, at first activation, and is persisted
+  - enable refuses an unmet dep; uninstall cascade-disables dependents
+  - `rag add --embed` embeds at index time (GUI parity)
 """
 
 import textwrap
@@ -68,7 +68,7 @@ def _mgr(env):
 
 
 # --------------------------------------------------------------------------- #
-#  REC-ONFIRSTUSE
+#  on_first_use
 # --------------------------------------------------------------------------- #
 
 def test_on_first_use_fires_once_and_is_persisted(env):
@@ -87,7 +87,7 @@ def test_on_first_use_fires_once_and_is_persisted(env):
 
 
 # --------------------------------------------------------------------------- #
-#  REC-PLUGIN-REQUIRES
+#  plugin requires
 # --------------------------------------------------------------------------- #
 
 def test_enable_refuses_when_a_required_plugin_is_missing(env):
@@ -126,7 +126,7 @@ def test_uninstalling_a_dependency_cascades_disable_to_dependents(env):
 
 
 # --------------------------------------------------------------------------- #
-#  REC-RAG-EMBED-PARITY
+#  rag embed parity
 # --------------------------------------------------------------------------- #
 
 def test_rag_add_embed_flag_passes_embed_fn(env, monkeypatch):
@@ -165,7 +165,7 @@ def test_rag_add_embed_flag_passes_embed_fn(env, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  REC-RAG-REPAIR-EMBED - `rag repair` must not SILENTLY strip embeddings
+#  `rag repair` must not SILENTLY strip embeddings
 # --------------------------------------------------------------------------- #
 
 def _fake_repair_collection(monkeypatch, ragcli, *, has_vectors, captured):

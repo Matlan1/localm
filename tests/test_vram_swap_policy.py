@@ -187,11 +187,11 @@ class TestDecideMediaSwap:
                                  read_free=lambda: 4 * GB) is True
 
     def test_default_read_free_is_split_aware(self, monkeypatch):
-        """AUDIT-GPU-SPLIT-1: with no read_free override (the real call sites
-        in image/music/video plug.py all omit it), the default must weigh a
-        media job against COMBINED split capacity, not just the single main
-        GPU - otherwise a split-configured machine needlessly swaps the chat
-        model out even when the split already covers the media job."""
+        """With no read_free override (the real call sites in image/music/video
+        plug.py all omit it), the default must weigh a media job against
+        COMBINED split capacity, not just the single main GPU - otherwise a
+        split-configured machine needlessly swaps the chat model out even when
+        the split already covers the media job."""
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         monkeypatch.setattr(
@@ -280,18 +280,19 @@ class TestMediaTransportSwapGate:
         monkeypatch.setattr(mod, "ensure_comfy", lambda *a, **k: (True, "ok"))
         monkeypatch.setattr(mod, "_localm_unload",
                             lambda *a, **k: unload_calls.append(1))
-        # The unload now runs AFTER the workflow is built and the model preflight
-        # passes (so a bad model fails BEFORE the costly unload - I3). Make preflight
-        # a no-op and the queue submit fail fast, so the transport reaches the unload
-        # (when swap=True) and then returns without needing a live ComfyUI.
+        # The unload runs AFTER the workflow is built and the model preflight
+        # passes, so a bad model fails BEFORE the costly unload. Make preflight a
+        # no-op and the queue submit fail fast, so the transport reaches the
+        # unload (when swap=True) and then returns without needing a live
+        # ComfyUI.
         monkeypatch.setattr(mod, "preflight_models", lambda *a, **k: (True, ""))
 
         def _no_comfy(*a, **k):
             raise urllib.error.URLError("no comfy")
 
-        # The transports route ComfyUI calls through comfy_client._comfy_urlopen
-        # (CHK-COMFY-REDIRECT), which builds its own opener and never calls the
-        # top-level urllib.request.urlopen - that is the seam to patch.
+        # The transports route ComfyUI calls through comfy_client._comfy_urlopen,
+        # which builds its own opener and never calls the top-level
+        # urllib.request.urlopen - that is the seam to patch.
         monkeypatch.setattr(comfy_client, "_comfy_urlopen", _no_comfy)
 
     def test_swap_true_unloads(self, monkeypatch, modpath, func, first_arg):

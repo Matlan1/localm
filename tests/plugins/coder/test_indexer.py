@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """ProjectMap.build: directory pruning, bounded collection, and a wall-clock
-deadline so a coder session pointed at a huge root (Z:\\) cannot appear to hang
-(CODER-1). The old build did sorted(root.rglob("*")) - it materialised and
-sorted the WHOLE tree (descending into node_modules / .git / system dirs) before
-the file cap was ever checked.
+deadline so a coder session pointed at a huge root cannot appear to hang. A
+``sorted(root.rglob("*"))`` materialises and sorts the WHOLE tree (descending
+into node_modules / .git / system dirs) before the file cap is ever checked.
 
 Also mark_dirty() / _rescan_if_dirty(): the stat-diff + listdir reconciliation
 that keeps the map from going stale after a run_shell write (which - unlike
@@ -86,16 +85,10 @@ def test_deadline_none_disables_the_cap(tmp_path):
 
 
 # ------------------- _index_deadline() reads the registered setting -------- #
-#
-# coder_index_timeout is now a real DEFAULT_CONFIG/CORE_FIELDS setting (was
-# previously read ad hoc off raw config with no registered default, so
-# `localm config coder_index_timeout 30` failed with "unknown config key" -
-# the value could only be changed by hand-editing config.json).
 
 def test_index_deadline_uses_the_default_from_config(monkeypatch):
-    # _index_deadline() imports load_config LOCALLY (`from localm.config import
-    # load_config` inside the function), so the patch target is the source
-    # (localm.config.load_config), not the checkpoint module's namespace.
+    # _index_deadline() imports load_config locally, so the patch target is the
+    # source (localm.config.load_config), not the checkpoint module's namespace.
     from localm.plugins.coder.agent.checkpoint import _index_deadline
     from localm.config import DEFAULT_CONFIG
     monkeypatch.setattr("localm.config.load_config", lambda: dict(DEFAULT_CONFIG))
@@ -120,9 +113,7 @@ def test_index_deadline_zero_or_negative_disables_it(monkeypatch):
 
 
 def test_index_deadline_falls_back_on_malformed_value(monkeypatch):
-    # A hand-edited or stale config.json could carry a non-numeric value; this
-    # must never raise (the docstring's own guarantee) - fall back to the
-    # built-in default instead.
+    # A non-numeric value falls back to the built-in default instead of raising.
     from localm.plugins.coder.agent.checkpoint import _index_deadline
     from localm.plugins.coder.indexer import _BUILD_DEADLINE_S
     monkeypatch.setattr("localm.config.load_config",
@@ -145,17 +136,16 @@ def test_build_records_mtime_and_size(tmp_path):
 
 
 def test_file_summary_mtime_size_default_when_omitted(tmp_path):
-    # Existing positional/keyword construction that predates these fields must
-    # keep working - both are defaulted, ordered after `symbols`.
+    # Both new fields are defaulted and ordered after `symbols`, so construction
+    # without them still works, positionally or by keyword.
     fs = FileSummary(path=tmp_path / "x.py", lang="python", lines=1)
     assert fs.mtime == 0.0
     assert fs.size == 0
 
 
 def test_rescan_is_a_noop_until_marked_dirty(tmp_path):
-    # Editing a tracked file WITHOUT mark_dirty() must not be picked up - the
-    # flag is what gates the rescan; an unconditional check-every-read would
-    # defeat the entire point (a cheap read on an untouched map).
+    # Editing a tracked file without mark_dirty() is not picked up: the flag is
+    # what gates the rescan.
     f = tmp_path / "a.py"
     f.write_text("x = 1\n", encoding="utf-8")
     pm = ProjectMap.build(tmp_path)
@@ -227,10 +217,9 @@ def test_rescan_respects_gitignore_for_new_files(tmp_path):
 
 
 def test_rescan_does_not_discover_a_brand_new_directory(tmp_path):
-    # Documented limitation (_rescan_if_dirty's own docstring): only a
-    # directory that ALREADY has a tracked file is listdir()-ed, so a file
-    # inside a directory created from scratch by run_shell needs a full
-    # reindex() - contrasted here against the one-level case that DOES work.
+    # Only a directory that ALREADY has a tracked file is listdir()-ed, so a file
+    # inside a directory created from scratch by run_shell needs a full reindex().
+    # Contrasted here against the one-level case that does work.
     (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
     pm = ProjectMap.build(tmp_path)
 
@@ -246,21 +235,19 @@ def test_rescan_does_not_discover_a_brand_new_directory(tmp_path):
 
 
 def test_rescan_skips_new_file_discovery_on_a_capped_build(tmp_path):
-    """Live finding on the real repo: build() truncated at 300 of 1000+
-    matching files, so a directory with one tracked file could hold dozens
-    more that were NEVER candidates - a listdir sweep cannot tell those apart
-    from a file run_shell genuinely just created, and treating them the same
-    silently grew the map past max_files a little more on every dirty read
-    (measured: 79 "new" files, 45ms, on one rescan of this repo alone).
-    files_capped gates exactly that pass off; the stat-diff pass for already-
-    tracked files is unaffected, since a tracked file's own stat is
+    """build() truncates at max_files, so a directory with one tracked file can
+    hold dozens more that were NEVER candidates. A listdir sweep cannot tell
+    those apart from a file run_shell genuinely just created, and treating them
+    the same grows the map past max_files a little more on every dirty read.
+    files_capped gates exactly that pass off; the stat-diff pass for
+    already-tracked files is unaffected, since a tracked file's own stat is
     meaningful either way.
 
-    Spies on refresh_file directly, not just the outcome, so the GATE is what
-    is under test: without files_capped this is exactly the call the spy
-    would record for z.py. (The touched-a.py edit is what makes this a REAL
-    rescan rather than a no-op - mark_dirty() alone never triggers one; only
-    the next read, here pm.file_count(), does.)"""
+    Spies on refresh_file directly, not just the outcome, so the GATE is what is
+    under test: without files_capped this is exactly the call the spy would
+    record for z.py. (The touched-a.py edit is what makes this a REAL rescan
+    rather than a no-op - mark_dirty() alone never triggers one; only the next
+    read, here pm.file_count(), does.)"""
     sub = tmp_path / "pkg"
     sub.mkdir()
     (sub / "a.py").write_text("def old():\n    pass\n", encoding="utf-8")
@@ -271,8 +258,7 @@ def test_rescan_skips_new_file_discovery_on_a_capped_build(tmp_path):
     assert pm.files[0].path.name == "a.py"   # "a.py" sorts first; z.py is the excluded one
 
     # A genuinely NEW file in the same known directory, plus an edit to the
-    # already-tracked one (so the rescan has real work to do - z.py must stay
-    # undiscovered BECAUSE of files_capped, not because nothing ran at all).
+    # already-tracked one, so the rescan has real work to do.
     (sub / "brand_new.py").write_text("new = 1\n", encoding="utf-8")
     (sub / "a.py").write_text("def old():\n    pass\n\ndef added():\n    pass\n",
                                encoding="utf-8")
@@ -313,9 +299,7 @@ def test_many_mark_dirty_calls_before_one_read_cost_one_rescan(tmp_path):
 
 
 def test_file_count_also_triggers_the_rescan(tmp_path):
-    # to_context_string and file_count are independent read paths - both must
-    # self-heal, since a caller may read either one first (e.g. the CLI's
-    # /history command reads file_count without ever rebuilding the prompt).
+    # to_context_string and file_count are independent read paths; both self-heal.
     f = tmp_path / "a.py"
     f.write_text("a = 1\n", encoding="utf-8")
     pm = ProjectMap.build(tmp_path)
@@ -328,22 +312,13 @@ def test_file_count_also_triggers_the_rescan(tmp_path):
 # --------------------------------------------------------------------------- #
 #  Cross-session cache: save_cache() / load_cached_and_reconcile()            #
 #                                                                              #
-#  MEASURED (dev-notes, "coder project-map caching"): build() on the real     #
-#  localm repo (300/1000+ files, capped) takes ~360-450ms; reconciling a      #
-#  cached map via _rescan_if_dirty() takes ~15-30ms - 13-25x faster, using    #
-#  the SAME reconciliation logic the mark_dirty()/_rescan_if_dirty() tests    #
-#  above already exercise, not a new invalidation heuristic.                 #
-#                                                                              #
-#  The cache file itself lives under ``tmp_path / ".cache"`` in every test    #
-#  below - a HIDDEN directory, so build()'s own dot-dir pruning (see          #
-#  test_prunes_skip_hidden_and_gitignored_dirs above) keeps it out of the     #
-#  scanned tree, matching production (the real cache lives under              #
-#  HOME/checkpoints/<digest>/, never inside the project it describes).        #
-#  Placing it anywhere else inside the scanned root is NOT equivalent: a      #
-#  cache file sitting in a directory reconciliation already treats as         #
-#  "known" (has a tracked file) gets discovered by the new-file listdir       #
-#  sweep and silently added to the map as if it were project source - a       #
-#  self-contamination bug found and fixed here, not a hypothetical.          #
+#  The cache file lives under ``tmp_path / ".cache"`` in every test below, a  #
+#  HIDDEN directory, so build()'s dot-dir pruning keeps it out of the scanned #
+#  tree, matching production (the real cache lives under                      #
+#  HOME/checkpoints/<digest>/, never inside the project it describes). A      #
+#  cache file in a directory reconciliation already treats as "known" gets    #
+#  discovered by the new-file listdir sweep and added to the map as if it     #
+#  were project source.                                                       #
 # --------------------------------------------------------------------------- #
 
 def test_save_cache_then_load_reconcile_round_trips_unchanged(tmp_path):
@@ -433,7 +408,7 @@ def test_load_reconcile_returns_none_for_a_corrupt_cache(tmp_path):
 
 def test_load_reconcile_returns_none_for_wrong_shape(tmp_path):
     """A future-version or hand-edited cache with the wrong fields must fall
-    back to a full build(), never raise and never be trusted (rule 5)."""
+    back to a full build(), never raise and never be trusted."""
     cache = tmp_path / ".cache" / "cache.json"
     cache.parent.mkdir(parents=True)
     cache.write_text('{"version": 2, "files": []}', encoding="utf-8")
@@ -452,12 +427,10 @@ def test_load_reconcile_returns_none_for_a_different_root(tmp_path):
 
 def test_load_reconcile_returns_none_when_older_than_max_age(tmp_path):
     """A cache older than max_age_s is rejected. Backdates cached_at directly
-    (rather than asserting elapsed real time > 0.0) because time.time() on
-    this platform resolves via GetSystemTimeAsFileTime() at ~15.6ms
-    granularity (MEASURED: back-to-back time.time() calls return the exact
-    same value) - a save-then-load round trip this fast can complete inside
-    one tick, making elapsed == 0.0 and racing a max_age_s=0.0 bound instead
-    of testing the staleness check."""
+    rather than asserting elapsed real time > 0.0, because time.time() on this
+    platform resolves via GetSystemTimeAsFileTime() at ~15.6ms granularity: a
+    save-then-load round trip can complete inside one tick, making elapsed == 0.0
+    and racing a max_age_s=0.0 bound instead of testing the staleness check."""
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     cache = tmp_path / ".cache" / "cache.json"
     ProjectMap.build(tmp_path).save_cache(cache)
@@ -481,9 +454,8 @@ def test_save_cache_is_atomic_no_tmp_file_left_behind(tmp_path):
 def test_save_cache_never_raises_on_write_failure(tmp_path):
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     pm = ProjectMap.build(tmp_path)
-    # A path whose PARENT is a FILE, not a directory: mkdir(parents=True) must
-    # fail, and save_cache must swallow that (best-effort, rule 5 - a caching
-    # failure must never break the session that hit it) rather than raise.
+    # A path whose PARENT is a FILE, not a directory: mkdir(parents=True) fails
+    # and save_cache swallows that rather than raising.
     blocker = tmp_path / "blocker"
     blocker.write_text("x", encoding="utf-8")
     pm.save_cache(blocker / "sub" / "cache.json")   # must not raise

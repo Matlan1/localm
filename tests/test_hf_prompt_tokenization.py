@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HF backend prompt tokenization: no double-BOS (U-1).
+"""HF backend prompt tokenization: no double-BOS.
 
 ``apply_chat_template(tokenize=False)`` already emits the model's BOS (Gemma
 ``<bos>``, Llama-3 ``<|begin_of_text|>``, Mistral ``<s>``). Re-tokenizing that
@@ -9,10 +9,8 @@ chat path must re-tokenize with ``add_special_tokens=False`` (matching what
 ``apply_chat_template(tokenize=True)`` does internally and the count_tokens path).
 
 Tests HFWorker (``_hf_worker.py``), not the HFBackend proxy (``hf.py``):
-tokenization/chat-template logic runs only in the isolated child process now
-(see the thread-pool-exhaustion fix), so this in-process, no-subprocess unit
-test targets the class that actually owns that logic - HFWorker's chat_stream
-body is unchanged from what HFBackend's used to be, just moved.
+tokenization and chat-template logic run only in the isolated child process, so
+this in-process, no-subprocess unit test targets the class that owns them.
 """
 
 from unittest.mock import MagicMock
@@ -22,11 +20,8 @@ import pytest
 
 def test_chat_tokenization_suppresses_double_bos(monkeypatch):
     # exc_type=ImportError: transformers raises a plain ImportError (not
-    # ModuleNotFoundError) when its OWN internal tokenizers version-gate fails
-    # (a mismatched transitive pin, not a "not installed" case) - pytest 9.1
-    # narrowed importorskip's default to ModuleNotFoundError only, so without
-    # this the test hard-fails instead of skipping on exactly the case this
-    # skip exists for.
+    # ModuleNotFoundError) when its OWN internal tokenizers version-gate fails,
+    # and importorskip's default covers ModuleNotFoundError only.
     pytest.importorskip("transformers", exc_type=ImportError)
     import transformers
 
@@ -55,11 +50,10 @@ def test_chat_tokenization_suppresses_double_bos(monkeypatch):
 
     # chat_stream's own `from transformers import StoppingCriteriaList, ...`
     # triggers transformers' lazy-module loader to import
-    # generation/stopping_criteria.py, which does a fresh `import torch` - the
+    # generation/stopping_criteria.py, which does a fresh `import torch`. The
     # importorskip above guards a DIFFERENT, unrelated transformers ImportError
-    # and does not cover this. Same known-doomed DLL-identity conflict as
-    # test_doctor_hf_backend_usable.py's guard, placed here (immediately before
-    # the call that actually triggers it) rather than at the importorskip site.
+    # and does not cover this, so the guard sits immediately before the call that
+    # triggers it.
     from localm.inference.backends.llamacpp import _loader
     if _loader.native_lib_loaded():
         pytest.skip("llama.cpp's native runtime is already loaded in this "

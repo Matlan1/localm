@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-SETUP-NOBACKEND regression: setup-llama's load-test must report a FAILED
-provision when the native runtime LOADS but registers ZERO compute backends.
+"""setup-llama's load-test must report a FAILED provision when the native runtime
+LOADS but registers ZERO compute backends.
 
-Before this fix, ``_native_loads_ok()`` ran ``load_lib()`` in a subprocess and
-checked only ``returncode == 0``. ``load_lib()`` does not raise when no ggml
-compute backend registers - it logs a warning and returns the handle - so a build
-that loads yet cannot compute ("no backends are loaded") exited 0 and setup
-reported SUCCESS. ``_provision_with_fallback`` then never offered the working
-Vulkan/CPU fallback, and the user only discovered the broken runtime at the first
-model load, with the real cause (no registered backend) already lost. That is the
-AGENTS.md rule-5 anti-pattern ("it did not crash, so it is fine") at setup level.
+``load_lib()`` does not raise when no ggml compute backend registers - it logs a
+warning and returns the handle - so a build that loads yet cannot compute exits 0
+under a returncode-only check, and setup would report SUCCESS.
 
-The fix load-tests with ``compute_backends_available()`` and treats a load with no
-backend (subprocess exit 88) as a failure with a clear reason, distinct from a
-clean computing load (0) and a genuine load crash (non-zero + native traceback).
+``_native_loads_ok()`` load-tests with ``compute_backends_available()`` and treats
+a load with no backend (subprocess exit 88) as a failure with a clear reason,
+distinct from a clean computing load (0) and a genuine load crash (non-zero plus
+a native traceback).
 """
 
 from __future__ import annotations
@@ -71,14 +67,9 @@ def test_subprocess_spawn_error_is_reported(monkeypatch):
 
 
 def test_multiline_load_error_reports_cause_not_hint(monkeypatch):
-    # Issue #451 regression. load_lib() raises a MULTI-LINE RuntimeError whose
-    # FIRST line is the real dlopen cause and whose trailing lines are
-    # re-provision hints. _native_loads_ok() must surface the CAUSE, not blindly
-    # take splitlines()[-1] (a hint line: "localm setup-llama --backend amd-rocm
-    # --force ..."). Before the fix the reported detail WAS that hint, so
-    # setup-llama's reason read "cpu ... still failed to load (<a command>)" -
-    # hiding the actual "libgomp.so.1: cannot open shared object file" cause
-    # (AGENTS.md rule 5).
+    # load_lib() raises a MULTI-LINE RuntimeError whose FIRST line is the real
+    # dlopen cause and whose trailing lines are re-provision hints.
+    # _native_loads_ok() surfaces the cause, not splitlines()[-1].
     err = (
         "Traceback (most recent call last):\n"
         '  File "run.py", line 1, in <module>\n'
@@ -99,9 +90,8 @@ def test_multiline_load_error_reports_cause_not_hint(monkeypatch):
 
 
 def test_informative_error_line_falls_back_to_last_line():
-    # Non-traceback output (no recognisable exception header): keep the old
-    # best-effort behaviour of returning the last non-empty line, and a safe
-    # default for empty output.
+    # Non-traceback output (no recognisable exception header): return the last
+    # non-empty line, and a safe default for empty output.
     assert setup_llama._informative_error_line(
         "noise line\nactual tail") == "actual tail"
     assert setup_llama._informative_error_line("") == "library failed to load"

@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A key's name, id, filesystem paths, and error/warning text shown by the
-`key` CLI must survive verbatim - Rich's ``Console.print()`` (and, confirmed
-empirically against this venv's rich, ``Table.add_row()`` too) parses
-``[...]`` in ANY interpolated string as markup, not just inside a command's
-own literal ``[style]`` tags. Reproduced directly against this venv's rich:
+`key` CLI must survive verbatim - Rich's ``Console.print()``, and
+``Table.add_row()`` too, parse ``[...]`` in ANY interpolated string as markup,
+not just inside a command's own literal ``[style]`` tags:
 
     Console().print('report[draft].txt')       -> prints "report.txt"
     Console().print('notes[bold red].md')      -> prints "notes.md"
@@ -17,15 +16,11 @@ NAME (``key create <name>``), which ``create_key()`` only strips and never
 restricts to a safe character class, and for a ``--rag-root`` folder path,
 which ``norm_rag_roots()`` treats the same way.
 
-Some sites are genuinely provably-safe today (a generated key/id's charset,
-the ``--fs-access`` ``click.Choice``, a validated scope) and are escaped
-anyway as defense-in-depth, matching how PR #1463 escaped rag.py's
-already-validated collection names. Those sites are exercised here by
-monkeypatching the value that would normally be safe (the same technique
-test_rag_cli_markup_escaping.py's TestLockMessageEscaping uses to force a
-message a fixture cannot otherwise produce), to prove the escape() wrapper
-at that print site actually works rather than only trusting the upstream
-guarantee to hold forever.
+Some sites are provably safe today (a generated key/id's charset, the
+``--fs-access`` ``click.Choice``, a validated scope) and are escaped anyway.
+Those sites are exercised here by monkeypatching the value that would normally
+be safe, so the escape() wrapper at that print site is proven rather than the
+upstream guarantee assumed.
 """
 
 from __future__ import annotations
@@ -35,9 +30,8 @@ from click.testing import CliRunner
 
 from localm.cli import main
 
-# One name Rich DROPS outright, one it consumes as a (bogus) style tag - the
-# two distinct failure shapes, same convention as
-# test_rag_cli_markup_escaping.py's BRACKET_DROP_NAME / BRACKET_STYLE_NAME.
+# One name Rich DROPS outright, one it consumes as a (bogus) style tag: the
+# two distinct failure shapes.
 BRACKET_DROP = "[draft]"
 BRACKET_STYLE = "[bold red]"
 
@@ -53,16 +47,14 @@ def runner(cli_runner, monkeypatch):
 def bracketed_home_runner(tmp_path, monkeypatch):
     """A cli_runner (conftest.py) equivalent whose LOCALM_HOME directory NAME
     itself contains a bracket pair, so any path built from home_dir()
-    (key_file(), sessions_file()) naturally exercises the bug without
-    fabricating anything. Own copy rather than a variant of the shared
-    fixture, since it needs a non-default home dir name."""
+    (key_file(), sessions_file()) exercises the bug without fabricating
+    anything."""
     home = tmp_path / f"data{BRACKET_DROP}"
     home.mkdir(parents=True, exist_ok=True)
     import localm.config as cfg
-    # rich.console.Console() reads COLUMNS at construction time; without it, a
-    # non-tty width default (80) hard-wraps mid-word inside the long pytest
-    # basetemp paths these tests assert on - see test_rag_cli_docs_rmdoc.py /
-    # test_rag_cli_markup_escaping.py's identical fixture.
+    # rich.console.Console() reads COLUMNS at construction time; without it a
+    # non-tty width default of 80 hard-wraps mid-word inside the long pytest
+    # basetemp paths these tests assert on.
     monkeypatch.setenv("COLUMNS", "300")
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setattr(cfg, "HOME_DIR", home)
@@ -76,10 +68,9 @@ def bracketed_home_runner(tmp_path, monkeypatch):
 
 class TestKeyShowMarkupEscaping:
     def test_reveal_shows_bracketed_key_verbatim(self, runner, monkeypatch):
-        """get_api_key() reads LOCALM_API_KEY directly - unlike `key set`,
-        this path bypasses set_api_key's _KEY_CHARSET gate entirely (see
-        auth.py's own docstring), so this is exploitable today, not merely
-        defense-in-depth."""
+        """get_api_key() reads LOCALM_API_KEY directly: unlike `key set`, this
+        path bypasses set_api_key's _KEY_CHARSET gate entirely, so it is
+        reachable today rather than defense-in-depth."""
         forced = f"owner-secret-key{BRACKET_STYLE}-padding-1234567890"
         monkeypatch.setenv("LOCALM_API_KEY", forced)
         r = runner.invoke(main, ["key", "show", "--reveal"])
@@ -88,10 +79,9 @@ class TestKeyShowMarkupEscaping:
 
     def test_masked_preview_shows_bracketed_prefix_verbatim(self, runner, monkeypatch):
         """_mask_key() shows only key[:4] + '...' + key[-4:], so the bracket
-        pair must fit ENTIRELY inside that 4-char window to reach Rich's
-        parser as a complete "[...]" tag - a longer tag like '[draft]' gets
-        truncated to '[dra' (no closing bracket) and passes through
-        unchanged either way, which would make this test unable to fail."""
+        pair must fit ENTIRELY inside that 4-char window to reach Rich's parser
+        as a complete "[...]" tag. A longer tag like '[draft]' is truncated to
+        '[dra', with no closing bracket, and passes through unchanged."""
         from localm.cli.keys import _mask_key
         forced = "[dr]restofthekeypaddingtoreach1234567890abcdef"
         monkeypatch.setenv("LOCALM_API_KEY", forced)
@@ -108,10 +98,9 @@ class TestKeyShowMarkupEscaping:
 class TestKeyGenerateMarkupEscaping:
     def test_generated_key_survives_verbatim_if_it_ever_contained_brackets(
             self, runner, monkeypatch):
-        """generate_key()'s charset (secrets.token_urlsafe) can never actually
-        produce '[...]' - defense-in-depth. Forcing regenerate_key()'s return
-        value proves the escape() wrapper at this print site works, rather
-        than only trusting that charset guarantee to hold forever."""
+        """generate_key()'s charset (secrets.token_urlsafe) can never produce
+        '[...]', so this is defense-in-depth: forcing regenerate_key()'s return
+        value proves the escape() wrapper at this print site works."""
         from localm import auth
         forced = f"forced-owner-key{BRACKET_STYLE}-padding-1234567890"
         monkeypatch.setattr(auth, "regenerate_key", lambda nbytes=32: forced)
@@ -123,19 +112,15 @@ class TestKeyGenerateMarkupEscaping:
 class TestKeySetMarkupEscaping:
     def test_masked_preview_survives_verbatim_if_charset_gate_is_bypassed(
             self, runner, monkeypatch):
-        """The normal path can never reach this print with a bracketed key -
-        set_api_key's _KEY_CHARSET gate raises first (see test_key_cli.py's
-        test_set_refuses_non_ascii_key_and_states_allowed_chars). Bypassing
-        that gate here is defense-in-depth: it proves the escape() wrapper
-        at THIS print site still holds if the upstream guarantee is ever
-        loosened."""
+        """The normal path can never reach this print with a bracketed key:
+        set_api_key's _KEY_CHARSET gate raises first. Bypassing that gate here
+        proves the escape() wrapper at THIS print site holds on its own."""
         from localm import auth
         from localm.cli.keys import _mask_key
-        # _mask_key() shows only key[:4] + '...' + key[-4:] - the bracket pair
-        # must fit ENTIRELY inside that 4-char window to reach Rich's parser
-        # as a complete tag (see key_show's identical note above); a bracket
-        # placed mid-string would be truncated away by the mask itself,
-        # making this test unable to fail regardless of escaping.
+        # _mask_key() shows only key[:4] + '...' + key[-4:], so the bracket
+        # pair must fit ENTIRELY inside that 4-char window to reach Rich's
+        # parser as a complete tag. A bracket placed mid-string is truncated
+        # away by the mask itself.
         forced = "[dr]restofthekeypaddingtoreach1234567890abcdef"
         monkeypatch.setattr(auth, "set_api_key", lambda key: None)
         expected = _mask_key(forced)
@@ -225,9 +210,9 @@ class TestKeyCreateMarkupEscaping:
             f"{r.output!r}")
 
     def test_bracketed_rag_root_survives_verbatim(self, runner):
-        """norm_rag_roots() only de-dupes and strips whitespace - a --rag-root
-        value is never restricted to a safe character class, so this is
-        exploitable today, same as the key name above."""
+        """norm_rag_roots() only de-dupes and strips whitespace, so a
+        --rag-root value is never restricted to a safe character class and this
+        is reachable today, like the key name above."""
         root = f"C:/docs/{BRACKET_STYLE}"
         r = runner.invoke(main, ["key", "create", "scoped",
                                  "--scope", "rag", "--rag-root", root])
@@ -238,12 +223,12 @@ class TestKeyCreateMarkupEscaping:
 
     def test_unknown_scope_error_shows_bracketed_scope_verbatim(self, runner):
         """create_key() raises ValueError('Unknown scope(s): {bad}') with the
-        caller's raw --scope text - that text FAILED validation, so it is not
-        restricted to any safe character class. (No colon in this fixture:
-        Rich's Console ALSO substitutes ':shortcode:' text as emoji - a real,
-        separate, unescaped display issue rich.markup.escape() does not
-        address - and 'not:a:scope' collides with the ':a:' shortcode. That is
-        out of scope for this bracket-markup fix; noted for a follow-up.)"""
+        caller's raw --scope text, which FAILED validation and is not restricted
+        to any safe character class.
+
+        No colon in this fixture: Rich's Console also substitutes ':shortcode:'
+        text as emoji, which rich.markup.escape() does not address, and
+        'not:a:scope' collides with the ':a:' shortcode."""
         bad_scope = f"not-real-scope{BRACKET_DROP}"
         r = runner.invoke(main, ["key", "create", "x", "--scope", bad_scope])
         assert r.exit_code == 1, r.output
@@ -253,11 +238,9 @@ class TestKeyCreateMarkupEscaping:
 
     def test_plugin_dependency_warning_survives_verbatim(self, runner, monkeypatch):
         """scope_deps_warnings() draws from an installed plugin's own manifest
-        fields (name/scope), which are not restricted to a safe character
-        class - forced directly here (same technique
-        test_rag_cli_markup_escaping.py's TestLockMessageEscaping uses)
-        rather than fabricating a real installed plugin with a bracketed
-        manifest."""
+        fields (name/scope), which are not restricted to a safe character class.
+        Forced directly rather than by fabricating a real installed plugin with
+        a bracketed manifest."""
         from localm.plugins.engine import PluginManager
         warning = f"key grants 'models:read' but demo{BRACKET_STYLE} is not installed"
         monkeypatch.setattr(PluginManager, "scope_deps_warnings",
@@ -300,11 +283,10 @@ class TestKeyListMarkupEscaping:
 
 class TestKeyRmMarkupEscaping:
     def test_revoked_confirmation_shows_bracketed_id_verbatim(self, runner, monkeypatch):
-        """key_id is an unvalidated CLI argument - auth.revoke_key() only ever
+        """key_id is an unvalidated CLI argument, and auth.revoke_key() only
         compares it by equality against stored (always-hex) ids, so a real id
-        can never contain brackets. Forced True here to prove the escape()
-        wrapper on the success message works for whatever text a caller
-        passes, not only for what the store happens to contain today."""
+        can never contain brackets. Forced True here so the escape() wrapper on
+        the success message is proven for whatever text a caller passes."""
         from localm import auth
         bracketed_id = f"totally-made-up-id{BRACKET_DROP}"
         monkeypatch.setattr(auth, "revoke_key", lambda key_id: True)

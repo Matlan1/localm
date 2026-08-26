@@ -2,8 +2,7 @@
 """GUI device-pairing routes: render a scan-to-save QR for the owner key or for a
 freshly-minted scoped key.
 
-Extracted verbatim from attach_gui(); behavior unchanged. The hand-built QR-SVG
-helper is a nested function in register(), exactly as it was nested in attach_gui.
+The hand-built QR-SVG helper is a nested function inside register().
 """
 
 from __future__ import annotations

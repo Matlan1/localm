@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The chat request body sent modelSelect.value verbatim with no fallback to the
-// model actually active/loaded in the engine (modelCache.active - already used
-// elsewhere client-side, e.g. the chat header and the sendChat empty-model
-// guard). If the <select> is ever empty or desynced from the real active model
-// (e.g. the dropdown has not been (re)populated yet), this sent a literal empty
-// string and let the server 400 - which then silently wiped the on-screen error
-// (see chat-error-render.test.mjs), producing a completely unrecoverable-looking
-// failure. This proves the request now falls back to modelCache.active.
+// The chat request body's model field: modelSelect.value when the dropdown has
+// a selection, modelCache.active when it is empty or desynced.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -30,16 +24,13 @@ test("a desynced empty model-select falls back to modelCache.active in the reque
   const { impl, calls } = _fetchRecorder();
   const { window } = loadApp({ fetchImpl: impl });
   window.maybeCompactConversation = async () => {};
-  window.readSSE = async () => {};   // no tokens needed for this assertion
+  window.readSSE = async () => {};
   const doc = window.document;
   doc.getElementById("p-speak").checked = false;
   doc.getElementById("p-memory").checked = false;
   doc.getElementById("p-web").checked = false;
 
-  // The real active model is known client-side (e.g. REG-471's immediate
-  // publish on switchModel), but the <select> itself has no options yet - a
-  // real desync, not a contrived one: model-select starts empty in index.html
-  // until refreshModels() populates it.
+  // model-select starts empty in index.html until refreshModels() populates it.
   runScript(window, "modelCache.active = 'my-real-model';");
   assert.equal(doc.getElementById("model-select").value, "",
     "precondition: the dropdown is desynced/empty");

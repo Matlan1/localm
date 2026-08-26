@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 inference/coder-behavior backlog cluster.
+"""Inference and coder-behaviour regression tests.
 
-  AUD-SPLITTHINK     - split_think is linear (no O(n^2) buffer re-slice)
-  REC-CODER-GUI-PATH - the coder system prompt home-anchors the cwd (no username leak)
-  REC-CODER-CWD-LEAK - launcher.json persists a home-anchored coder_dir, not absolute
+  - split_think is linear (no O(n^2) buffer re-slice)
+  - the coder system prompt home-anchors the cwd (no username leak)
+  - launcher.json persists a home-anchored coder_dir, not an absolute one
 """
 
 import time
@@ -13,7 +13,7 @@ import pytest
 
 
 # --------------------------------------------------------------------------- #
-#  AUD-SPLITTHINK
+#  ThinkSplitter
 # --------------------------------------------------------------------------- #
 
 def test_split_think_basic_cases():
@@ -28,8 +28,7 @@ def test_split_think_basic_cases():
 
 def test_split_think_linear_on_pathological_input():
     from localm.textnorm import split_think
-    # 50k unmatched <think> openers: the old ThinkSplitter re-sliced its buffer
-    # per tag (O(n^2)) and would take seconds+; the linear scan is near-instant.
+    # 50k unmatched <think> openers; the linear scan finishes near-instantly.
     text = "<think>" * 50000 + "answer"
     start = time.perf_counter()
     content, reasoning = split_think(text)
@@ -40,7 +39,7 @@ def test_split_think_linear_on_pathological_input():
 
 
 # --------------------------------------------------------------------------- #
-#  REC-CODER-GUI-PATH
+#  The coder system prompt home-anchors the cwd
 # --------------------------------------------------------------------------- #
 
 def test_display_cwd_home_anchors():
@@ -59,7 +58,7 @@ def test_coder_prompt_does_not_leak_absolute_home_path():
 
 
 # --------------------------------------------------------------------------- #
-#  REC-CODER-CWD-LEAK
+#  The launcher home-anchors the cwd
 # --------------------------------------------------------------------------- #
 
 def _load_launcher():
@@ -69,8 +68,7 @@ def _load_launcher():
     path = str(root / "launcher.pyw")
     # .pyw is a recognized Python source suffix only on Windows; on POSIX
     # spec_from_file_location cannot infer a loader and returns None, so pass an
-    # explicit SourceFileLoader (mirrors tests/test_launcher_phase3.py) to load it
-    # on every platform.
+    # explicit SourceFileLoader to load it on every platform.
     loader = importlib.machinery.SourceFileLoader("launcher_pyw", path)
     spec = importlib.util.spec_from_file_location("launcher_pyw", path, loader=loader)
     mod = importlib.util.module_from_spec(spec)

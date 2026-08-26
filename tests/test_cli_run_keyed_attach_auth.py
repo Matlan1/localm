@@ -8,17 +8,15 @@ per-instance registry token (a random per-process secret with no keystore
 entry). ``_principal_from_token`` (http_server.py) resolves a header-sourced
 bearer via ``auth.verify()`` only, which has no notion of instance tokens at
 all - so once ANY owner key is configured, presenting the raw instance token
-as ``Authorization: Bearer <instance_token>`` always 401s. Pre-fix,
-``cli/chat.py``'s ``run()`` sent exactly that value straight into
-``remote_model_status``/``HttpEngine``, so `localm run` printed "connected
-... (no second model load)" and then died with a 401 on any keyed install
-(checkup 2026-08-11 item 12).
+as ``Authorization: Bearer <instance_token>`` always 401s. Sending that value
+straight into ``remote_model_status``/``HttpEngine`` makes `localm run` print
+"connected ... (no second model load)" and then die with a 401 on any keyed
+install.
 
-Same shape already fixed for ``self_request`` / ``cli/models.py``'s
-``unload_cmd``/``stop_cmd`` / ``media/comfy_client.py``'s ``_localm_unload``
-(see tests/test_localm_unload_auth.py) via ``auth.resolve_bearer_headers``;
-this file covers the two attach sites in ``cli/chat.py`` that were never
-swept into that fix, at two levels:
+The same shape applies to ``self_request`` / ``cli/models.py``'s
+``unload_cmd``/``stop_cmd`` / ``media/comfy_client.py``'s ``_localm_unload``,
+all of which go through ``auth.resolve_bearer_headers``; this file covers the
+two attach sites in ``cli/chat.py``, at two levels:
 
   - a REAL uvicorn server, keyed, proving the actual HTTP round trip succeeds
     with the resolved credential and 401s with the raw instance token alone
@@ -57,8 +55,7 @@ def _wait_sync(cond, want=True, timeout: float = 6.0) -> bool:
 def _real_keyed_server(owner_key: str):
     """A real uvicorn instance with an owner key configured, and
     app.state.instance_token set the way instances.advertise() sets it in
-    production - mirrors test_localm_unload_auth.py's open-mode helper,
-    applied here to the keyed case."""
+    production - the open-mode helper's shape, applied to the keyed case."""
     auth.set_api_key(owner_key)
     app = create_app(None)
     app.state.instance_token = "wrong-instance-token-should-never-auth"
@@ -87,9 +84,9 @@ def _shutdown(server, th):
 
 class TestRealKeyedServerAttachAuth:
     def test_raw_instance_token_401s_control(self):
-        """CONTROL: the pre-fix value (the raw instance token, unresolved) is
-        refused by the real server - proves the positive test below is really
-        about credential RESOLUTION, not a permissive server."""
+        """CONTROL: the raw instance token, unresolved, is refused by the real
+        server - proves the positive test below is really about credential
+        RESOLUTION, not a permissive server."""
         app, port, server, th = _real_keyed_server("e2e-owner-key-0123456789")
         try:
             import requests
@@ -147,10 +144,9 @@ class TestRealKeyedServerAttachAuth:
 
 @pytest.fixture
 def patched(monkeypatch):
-    """Stub only the network seam (attach discovery, the /v1/models probe,
-    and the HTTP engine class) exactly like test_cli_run_model_conflict.py -
-    the credential SELECTION logic under test (auth.get_api_key() +
-    resolve_bearer_token) runs for real."""
+    """Stub only the network seam (attach discovery, the /v1/models probe, and
+    the HTTP engine class) - the credential SELECTION logic under test
+    (auth.get_api_key() + resolve_bearer_token) runs for real."""
     fake_target = {"base_url": "http://127.0.0.1:8642/v1", "token": "raw-instance-token"}
     engine_spy = MagicMock(name="HttpEngine")
     captured = {}

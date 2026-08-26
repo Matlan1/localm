@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """`localm serve` must REFUSE a keyless network bind, matching `localm gui`.
 
-Regression guard for the 2026-06-20 security review (serve-vs-gui fail-open
-asymmetry): `serve -H 0.0.0.0` with no API key previously only WARNED and then
-served the OpenAI API - plus any enabled plugin routes (e.g. the coder agent's
-history) - unauthenticated to the whole LAN. It now refuses unless --insecure is
-passed, and the refusal happens before any model work (fail fast).
+`serve -H 0.0.0.0` with no API key would serve the OpenAI API - plus any enabled
+plugin routes, e.g. the coder agent's history - unauthenticated to the whole
+LAN. It refuses unless --insecure is passed, and the refusal happens before any
+model work.
 """
 
 from pathlib import Path

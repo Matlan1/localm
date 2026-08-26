@@ -1,35 +1,32 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Parent-side response-queue isolation for llamacpp/_runner.py's ModelRunner
-(HON-02).
+"""Parent-side response-queue isolation for llamacpp/_runner.py's ModelRunner.
 
 One ``GgufBackend`` (a module-level singleton per model in http_server.py) holds
-ONE ``ModelRunner`` with ONE shared ``self._resp_q``. Two PARENT threads used to
-consume that queue with no arbitration: a live ``chat_stream`` drive on the
-stream's producer thread, and a ``count_tokens`` / ``count_messages_tokens`` RPC
-on an executor thread (token counting runs OUTSIDE the per-model generation
-semaphore - the prompt count fires before ``async with sem`` and the completion
-count after it releases). A count RPC in flight during another request's stream
-could ``resp_q.get()`` an envelope meant for the stream: a stolen ``("chunk",..)``
+ONE ``ModelRunner`` with ONE shared ``self._resp_q``, and two PARENT threads can
+reach it: a live ``chat_stream`` drive on the stream's producer thread, and a
+``count_tokens`` / ``count_messages_tokens`` RPC on an executor thread (token
+counting runs OUTSIDE the per-model generation semaphore - the prompt count fires
+before ``async with sem`` and the completion count after it releases). Without
+arbitration a count RPC in flight during another request's stream can
+``resp_q.get()`` an envelope meant for the stream: a stolen ``("chunk",..)``
 drops a token, a stolen ``("done",..)`` spins the stream to its 120s ceiling, and
 a delayed reply trips the simple command's 30s timeout, which kills the worker
 mid-generation and misreports it as a native fault.
 
-The fix serialises parent-side queue use with a per-ModelRunner lock, held across
-a whole stream drive and per simple command; token counts acquire it NON-blocking
+Parent-side queue use is serialised with a per-ModelRunner lock, held across a
+whole stream drive and per simple command; token counts acquire it NON-blocking
 and raise :class:`RunnerBusy` (the caller falls back to its documented chars/4
-heuristic) rather than queue behind a live generation.
+heuristic) instead of queueing behind a live generation.
 
-These tests exercise the REAL ModelRunner parent-side code that broke
-(``chat_stream`` / ``count_tokens`` / ``_simple_request`` / ``_q_lock``) over real
-thread-safe queues and real threads. Only the leaf worker - the child GgufWorker
-dispatch loop, which was always serial and was never the defect - is replaced by
-a protocol-faithful in-process thread, so the tests need no native runtime or
-model while still driving the exact code under test (not a mock of it). The race
-being guarded is entirely parent-side (two threads arbitrating one
-``resp_q.get()``), which is identical whether the transport is a
-``multiprocessing.Queue`` or the ``queue.Queue`` used here; both deliver each
-enqueued item to exactly one getter and raise the same ``queue.Empty`` on the
-timeout path ModelRunner polls.
+These tests exercise the REAL ModelRunner parent-side code (``chat_stream`` /
+``count_tokens`` / ``_simple_request`` / ``_q_lock``) over real thread-safe queues
+and real threads. Only the leaf worker - the child GgufWorker dispatch loop, which
+is strictly serial - is replaced by a protocol-faithful in-process thread, so the
+tests need no native runtime or model. The race being guarded is entirely
+parent-side (two threads arbitrating one ``resp_q.get()``), which is identical
+whether the transport is a ``multiprocessing.Queue`` or the ``queue.Queue`` used
+here; both deliver each enqueued item to exactly one getter and raise the same
+``queue.Empty`` on the timeout path ModelRunner polls.
 """
 
 import queue
@@ -63,9 +60,9 @@ def _fake_worker(req_q, resp_q, ctrl_q, *, chunks, gate=None, gate_after=1,
                  count_value=7, chunk_delay=0.0):
     """Protocol-faithful, strictly serial stand-in for the child's dispatch loop
     (``_runner_main``): reads req_q one command at a time and answers on resp_q
-    with the same tagged envelopes. It is deliberately serial - exactly like the
-    real worker - so the ONLY concurrency the tests exercise is the PARENT-side
-    arbitration of resp_q, which is the code that broke.
+    with the same tagged envelopes. Strictly serial, exactly like the real worker,
+    so the ONLY concurrency the tests exercise is the PARENT-side arbitration of
+    resp_q.
 
     On ``chat_stream`` it emits each of *chunks* as a ``("chunk", tok)`` then a
     ``("done", ...)``. If *gate* is given, it blocks on it after emitting
@@ -135,14 +132,13 @@ def _wait_until(pred, timeout=5.0, interval=0.005) -> bool:
 
 
 def test_token_count_declines_immediately_during_active_stream():
-    """The core HON-02 guarantee: while a stream is being driven on the runner, a
-    concurrent token count must decline AT ONCE (RunnerBusy -> heuristic) instead
-    of blocking behind it or stealing its envelopes - and the stream must arrive
-    intact.
+    """While a stream is being driven on the runner, a concurrent token count must
+    decline AT ONCE (RunnerBusy -> heuristic) instead of blocking behind it or
+    stealing its envelopes - and the stream must arrive intact.
 
-    Pre-fix (no parent-side lock) count_tokens would block in ``resp_q.get()``
-    behind the parked worker, so the counting thread would still be alive after
-    the join timeout: that is the RED this asserts against."""
+    Without a parent-side lock count_tokens blocks in ``resp_q.get()`` behind the
+    parked worker, so the counting thread is still alive after the join
+    timeout."""
     gate = threading.Event()
     chunks = ["A", "B", "C", "D"]
     r, wt = _make_runner_with_fake_worker(chunks=chunks, gate=gate, gate_after=1)
@@ -265,17 +261,17 @@ def test_multiple_concurrent_counts_decline_and_stream_arrives_intact():
 
 
 def test_check_grammar_declines_during_active_stream():
-    """Regression guard for the HON-02 review finding: validate_grammar ->
-    ModelRunner.check_grammar is invoked SYNCHRONOUSLY on the server's async event
-    loop (routes/chat.py, before the per-model semaphore), so it must NOT block
-    behind a live stream - that would freeze the whole event loop for the full
-    duration of a concurrent same-model generation. While a stream is parked
-    mid-flight holding _q_lock, check_grammar must decline promptly (RunnerBusy),
-    leaving the caller to defer validation to generation time (where a malformed
-    grammar still raises the same clean InvalidGrammarError).
+    """validate_grammar -> ModelRunner.check_grammar is invoked SYNCHRONOUSLY on
+    the server's async event loop (routes/chat.py, before the per-model
+    semaphore), so it must NOT block behind a live stream - that would freeze the
+    whole event loop for the full duration of a concurrent same-model generation.
+    While a stream is parked mid-flight holding _q_lock, check_grammar must
+    decline promptly (RunnerBusy), leaving the caller to defer validation to
+    generation time (where a malformed grammar still raises the same clean
+    InvalidGrammarError).
 
-    Pre-fix (blocking acquire) the check_grammar thread would still be alive after
-    the join timeout - the RED this asserts against."""
+    With a blocking acquire the check_grammar thread is still alive after the join
+    timeout."""
     gate = threading.Event()
     chunks = ["A", "B", "C"]
     r, wt = _make_runner_with_fake_worker(chunks=chunks, gate=gate, gate_after=1)

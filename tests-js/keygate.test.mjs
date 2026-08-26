@@ -3,34 +3,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages } from "./harness.mjs";
 
-// NET-1: over a network bind the SPA boots without a key (the loopback key is
-// never auto-seeded to remote clients). The boot must show an IN-PAGE key gate
-// so a phone/LAN client can enter a key - NOT window.prompt(), which mobile/PWA
-// browsers suppress (leaving a blank page). These tests pin that behaviour.
+// Over a network bind the SPA boots without a key and shows an in-page key gate
+// rather than window.prompt().
 
 const tick = () => new Promise((r) => setTimeout(r, 100));
 
-// Wait for the SIGNAL, not for a guessed number of ticks. Same shape as the
-// waitFor in backend-hint / gpu-index-space-hint / instance-id, with a longer
-// default because the boot paths exercised here are a CHAIN of awaited fetches
-// (bootAuthProbe -> refreshCsrf -> capsReady/clientPluginsReady/convReady ->
-// showView -> onViewShown -> the page's own reads), and every one of them sleeps
-// NET_MS on purpose (see the long note above NET_MS).
-//
-// A fixed `await tick(); await tick();` is a guess at that chain's total wall
-// time, and it was MEASURED wrong: on a loaded box 200 ms can elapse without the
-// intervening macrotasks having run, so the last call in the chain had not been
-// issued yet when the assertion read the list. Interleaved control on 2026-08-19
-// (alternating runs, so load hits both arms equally): clean master failed 1 of
-// 20 runs on the AUTHED restore case below, with the assertion CORRECT and only
-// the wait too short.
-//
-// Do NOT "fix" that by raising NET_MS or adding ticks: that trades one arbitrary
-// timing constant for another, and NET_MS is load-bearing for what these tests
-// express (an instant mock makes them pass against the UNFIXED code - measured).
-// The timeout here is a FAILURE BOUND, not a delay: a healthy boot satisfies the
-// predicate in a fraction of it, and a boot that genuinely drops the restore
-// still goes red, on the same assertion, with the same message.
+// Polls until fn() is true. The timeout is a failure bound, not a delay: the
+// boot paths here are a chain of awaited fetches that each sleep NET_MS.
 const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(fn, timeout = 2000) {
   const end = Date.now() + timeout;
@@ -97,13 +76,11 @@ test("NET-1: over HTTPS an UNTRUSTED CA (SW failed to register) offers the Insta
   const cert = window.document.getElementById("key-gate-cert");
   const link = window.document.getElementById("key-gate-cert-link");
   assert.ok(cert, "#key-gate-cert exists in the shell");
-  // Trust is unknown until SW registration resolves; we now OFFER the cert in that
-  // state too. On a phone (Firefox, a clicked-through cert) the heuristic often
-  // stays unknown, and hiding it there stranded the user on a self-signed cert
-  // with no way to download it. Only a CONFIRMED-trusted CA hides the step.
+  // Trust is unknown until SW registration resolves, and the cert is offered in
+  // that state too. Only a confirmed-trusted CA hides the step.
   assert.notEqual(cert.style.display, "none",
     "unknown trust over HTTPS still offers the certificate (mobile must not be stranded)");
-  // SW failed to register => the local CA is not trusted yet => offer the install.
+  // SW registration failed, so the CA is untrusted and the install is offered.
   window.__swFailed = true;
   window.updateKeyGateCertStep();
   assert.notEqual(cert.style.display, "none", "cert link shown when the CA is untrusted over HTTPS");
@@ -123,12 +100,9 @@ test("SEAMLESS: over HTTPS a TRUSTED CA (SW registered) HIDES the cert step - no
 });
 
 test("the cert step surfaces a Firefox-specific note ONLY on Firefox", async () => {
-  // Firefox uses its own certificate store and ignores the Windows/OS one, so a
-  // system install leaves the warning here - the exact case the user hit. The step
-  // must call this out, but only for Firefox (Chrome/Edge use the OS store).
   const { window } = loadApp({ fetchImpl: keyless401, url: "https://192.168.0.5:8651/" });
   await tick();
-  window.__swFailed = true;   // untrusted CA over HTTPS -> the cert step is shown
+  window.__swFailed = true;   // untrusted CA over HTTPS: the cert step is shown
   const ff = window.document.getElementById("key-gate-cert-ff");
   assert.ok(ff, "#key-gate-cert-ff exists in the shell");
 
@@ -147,7 +121,7 @@ test("the cert step surfaces a Firefox-specific note ONLY on Firefox", async () 
 test("NET-1: over plain HTTP the cert link stays hidden (loopback dev gate)", async () => {
   const { window } = loadApp({ fetchImpl: keyless401, url: "http://localhost:8642/" });
   await tick();
-  // Even if SW registration "failed", there is no CA to install over plain HTTP.
+  // There is no CA to install over plain HTTP.
   window.__swFailed = true;
   window.updateKeyGateCertStep();
   const cert = window.document.getElementById("key-gate-cert");
@@ -203,10 +177,10 @@ const _safeFetch = async () => ({ ok: true, status: 200,
 test("scanSupported: offered wherever a camera can open, not only with BarcodeDetector", async () => {
   const { window } = loadApp({ fetchImpl: _safeFetch });
   await tick();
-  // No camera API -> hidden (e.g. an insecure context).
+  // No camera API: hidden.
   assert.equal(window.scanSupported(), false);
-  // A camera + getUserMedia is enough; the jsQR fallback covers decoding even
-  // with no BarcodeDetector (Firefox / Brave / Opera / iOS Safari).
+  // getUserMedia alone is enough; the jsQR fallback covers decoding without a
+  // native BarcodeDetector.
   Object.defineProperty(window.navigator, "mediaDevices",
     { value: { getUserMedia() {} }, configurable: true });
   assert.equal("BarcodeDetector" in window, false, "no native detector in this env");
@@ -248,8 +222,7 @@ test("NET-1 hard gate: a working (200) boot reveals the app and hides the gate",
 test("S2: authHeaders sends the in-memory CSRF token and no localStorage bearer", async () => {
   const { window } = loadApp({ fetchImpl: allOk });
   await tick();
-  // The CSRF token is DERIVED from the session server-side and stashed in memory
-  // (fetched from GET /api/session), NOT read from a cookie that could desync.
+  // The CSRF token comes from GET /api/session and is held in memory.
   window.__LOCALM_CSRF__ = "tok123";
   const h = window.authHeaders();
   assert.equal(h["X-CSRF-Token"], "tok123", "CSRF token echoed from the in-memory session token");
@@ -257,16 +230,15 @@ test("S2: authHeaders sends the in-memory CSRF token and no localStorage bearer"
 });
 
 test("S3: once a session exists, authHeaders drops the shell-token bearer", async () => {
-  // Open mode (loopback shell token, no session): the shell token is the
-  // management credential and rides the Authorization header.
+  // Open mode: the shell token is the credential and rides the Authorization
+  // header.
   const { window } = loadApp({ fetchImpl: allOk, shellToken: "SHELLXYZ" });
   await tick();
   window.__LOCALM_CSRF__ = "";     // boot's refreshCsrf found no session token
   const open = window.authHeaders();
   assert.equal(open["Authorization"], "Bearer SHELLXYZ", "open mode sends the shell bearer");
   assert.ok(!("X-CSRF-Token" in open), "no CSRF token before a session exists");
-  // Session established (e.g. right after minting the first key): the header MUST
-  // NOT carry the now-dead shell token, which would win server-side and 401.
+  // Session established.
   window.__LOCALM_CSRF__ = "tok999";
   const authed = window.authHeaders();
   assert.equal(authed["X-CSRF-Token"], "tok999", "session mode echoes the CSRF token");
@@ -295,15 +267,6 @@ test("AUTH-2: both API-key inputs get a show/hide reveal toggle", async () => {
   }
 });
 
-// P1a (COORDINATOR-DISPATCH-2026-08-11): several boot-time functions
-// (refreshKbSelect/refreshPersonas/refreshMemory/refreshVoiceStatus/
-// loadClientPlugins/refreshPluginCommands/setupPerfCard/startHwStats/
-// reattachSessions/reattachActivity, plus the two setInterval polls) used to
-// sit at the top level of init.js, past the end of the async boot IIFE - an
-// async IIFE that is never awaited does not block the module body that
-// follows it, so a keyless (401) client fired every one of them, with a
-// bearer/session header, before the key gate ever showed. They now run
-// sequenced behind bootAuthProbe() inside that same IIFE.
 test("P1a: a keyless (401) boot fires ONLY the one auth probe - zero other " +
      "/api requests before the key gate is shown", async () => {
   const calls = [];
@@ -345,41 +308,12 @@ test("P1a: an authenticated (200) boot still fires the normal boot-time /api " +
   assert.equal(window.__localmLocked, false, "sanity check: this boot is unlocked");
 });
 
-// P1a, SECOND HALF. The three boot-restore branches (`?shared=`, `?pull=`/
-// `?view=`, and the saved-view fallback) stayed at the top level of init.js
-// after the first half shipped, each wrapped in `setTimeout(..., 0)` and
-// guarded on `window.__localmLocked`. A 0 ms timer is a MACROTASK queued during
-// module evaluation, so it runs BEFORE bootAuthProbe's `await fetch(...)`
-// resolves - the flag is still `undefined` there, and `undefined` fails OPEN in
-// both polarities that were used. So a keyless client reached showView(), which
-// calls window.onViewShown -> pages/dispatch.js -> the whole page's
-// authenticated reads, before the key gate ever appeared.
-//
-// These use loadAppWithPages, not loadApp, ON PURPOSE. The existing P1a test
-// above cannot fail on any of this in TWO independent ways: loadApp injects
-// only app/*, so window.onViewShown is undefined and a firing showView() issues
-// zero fetches; and it seeds no query string and no localStorage, so none of
-// the three branches is even reachable. A fixture whose value space cannot
-// intersect the defect's trigger space reads as covered while being unable to
-// go red.
-// THE FETCH MUST BE SLOW, AND THAT IS THE WHOLE EXPERIMENT - do not "simplify"
-// it back to an immediately-resolved value. Every other mock in this file
-// returns an already-resolved promise, which settles on the MICROTASK queue. A
-// `setTimeout(..., 0)` is a MACROTASK, and microtasks all run first - so with an
-// instant mock, bootAuthProbe resolves and lockUI() sets window.__localmLocked
-// BEFORE the deep-link timer ever fires, and the old `if (window.__localmLocked)
-// return;` guard reads `true` and correctly bails. The fixture would then pass
-// on the UNFIXED code (measured: it did - all four cases green against pre-fix
-// init.js) while the browser does the opposite, because a real network round
-// trip resolves LONG after a 0 ms timer.
-//
-// Delaying the mock past one macrotask turn restores the real ordering: the
-// timer fires first, reads `undefined`, and fails open. This is a third,
-// independent way this fixture could not express the defect, on top of the two
-// named above (no trigger seeded, no onViewShown loaded) - and the only one that
-// survives fixing those, so it is the one that decides whether these tests mean
-// anything.
-const NET_MS = 25;   // > the 0 ms deep-link timer, like any real round trip
+// These cases load the page scripts as well: window.onViewShown, which the boot
+// restore path ends in, is installed only by pages/dispatch.js. The mock fetch
+// must resolve a macrotask turn LATER than the 0 ms deep-link timer, matching a
+// real round trip; an immediately-resolved mock settles on the microtask queue
+// and reverses that ordering.
+const NET_MS = 25;   // > the 0 ms deep-link timer
 const keylessCounting = (calls) => async (url) => {
   calls.push(String(url));
   await new Promise((r) => setTimeout(r, NET_MS));
@@ -417,22 +351,16 @@ for (const [label, opts] of [
 
 test("P1a: an AUTHED boot still restores ?view=settings - the fix must sequence " +
      "the restore behind the probe, not drop it", async () => {
-  // The trap this pins: flipping the guards to `window.__localmLocked === false`
-  // would pass every locked case above and silently break the healthy one, since
-  // the 0 ms timer still precedes unlockUI() and the flag is `undefined` then
-  // too. Only moving the block behind the awaited `authed` satisfies both.
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(String(url));
-    await new Promise((r) => setTimeout(r, NET_MS));   // see the note above
+    await new Promise((r) => setTimeout(r, NET_MS));   // see NET_MS above
     return { ok: true, status: 200, text: async () => "",
              json: async () => ({ models: [], active: "", items: [], conversations: [] }) };
   };
   const { window } = loadAppWithPages({ fetchImpl, url: "http://localhost:8642/?view=settings" });
 
-  // Assert on a URL ONLY the settings page fetches. Matching "/api/models"
-  // would prove nothing here: bootAuthProbe fetches it, and so does the 30 s
-  // poll, so it is present whether or not the restore ran.
+  // /api/uploads is fetched only by the settings page.
   assert.ok(await waitFor(() => calls.some((u) => u.startsWith("/api/uploads"))),
     "the settings view was actually entered (refreshUploadsList ran)");
   assert.equal(window.__localmLocked, false, "sanity check: this boot is unlocked");

@@ -1,23 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RAG data-robustness hardening found by an adversarial hostile-input sweep.
 
-Seven distinct bugs, each independently reproduced before the fix:
+Seven distinct bugs:
 
-B1  _extract_docx `<w:t>` run extraction was O(n^2) backtracking (a tiny docx with
-    many unclosed <w:t> openers pinned a CPU for minutes).
+B1  _extract_docx `<w:t>` run extraction backtracked quadratically (a tiny docx
+    with many unclosed <w:t> openers pinned a CPU).
 B2  _extract_tar_members called sorted(getmembers()), materialising every member of
-    a compressed tarball BEFORE the member cap applied (a .tgz of 500k empty members
-    ran ~22s, far under the size cap).
+    a compressed tarball BEFORE the member cap applied, so a .tgz of hundreds of
+    thousands of empty members ran far under the size cap.
 B3  Collection._expand walked with rglob(), which follows Windows NTFS junctions
     (is_symlink() is False for them), so a self-referential junction looped forever.
 B4  _extract_ipynb caught only json.JSONDecodeError, so deeply-nested JSON raised
-    RecursionError past the guard -> HTTP 500.
+    RecursionError past the guard and answered HTTP 500.
 B5  Collection._load appended chunk lines with no shape check, so a non-dict or
     missing-"text" line crashed query()/remove_doc()/add_paths() and stats() lied.
 B6  A non-finite (NaN/inf) embedding component made _cosine return nan; the blended
-    score dropped the chunk from results with no surfaced degrade reason (rule 5).
+    score dropped the chunk from results with no surfaced degrade reason.
 B7  chunk_text recorded a paragraph's pos one line too low when preceded by an odd
-    number of blank lines (the citation pointed at a blank line).
+    number of blank lines, so the citation pointed at a blank line.
 """
 
 import io
@@ -37,7 +37,7 @@ from localm.rag.extract import ExtractError, extract_bytes
 
 
 # --------------------------------------------------------------------------- #
-#  B1 - docx <w:t> extraction must be linear, not O(n^2)                       #
+#  docx <w:t> extraction must be linear, not O(n^2)                            #
 # --------------------------------------------------------------------------- #
 def _docx(document_xml: str) -> bytes:
     buf = io.BytesIO()
@@ -47,10 +47,9 @@ def _docx(document_xml: str) -> bytes:
 
 
 def test_docx_many_unclosed_wt_openers_is_fast():
-    # 100k <w:t> openers with NO closers: the old lazy `(.*?)</w:t>` rescanned to
-    # end-of-paragraph per opener - O(n^2), minutes of CPU. The linear `[^<]*`
-    # finishes fast; with no closers there is genuinely no text, so a clean
-    # ExtractError is the correct FAST outcome (what matters is it does not hang).
+    # 100k <w:t> openers with NO closers. The linear `[^<]*` finishes fast; with
+    # no closers there is genuinely no text, so a clean ExtractError is the
+    # correct fast outcome.
     body = "<w:document><w:body><w:p>" + ("<w:t>x" * 100_000) + "</w:p></w:body></w:document>"
     t0 = time.time()
     try:
@@ -90,7 +89,7 @@ def test_docx_run_text_with_gt_and_entities():
 
 
 # --------------------------------------------------------------------------- #
-#  B2 - compressed-tar member-count bomb must be bounded, not materialised     #
+#  compressed-tar member-count bomb must be bounded, not materialised          #
 # --------------------------------------------------------------------------- #
 def _tgz_many_empty_members(n: int) -> bytes:
     import tarfile
@@ -104,12 +103,9 @@ def _tgz_many_empty_members(n: int) -> bytes:
 
 
 def test_compressed_tar_member_scan_is_capped(monkeypatch):
-    # DETERMINISTIC guard (timing at 60k members did not discriminate - pre-fix
-    # getmembers() was still only ~1.4s there). The fix's essence is "read at most
-    # MAX_ARCHIVE_MEMBERS headers, never getmembers() the whole archive". Count the
-    # per-member header reads (TarFile.next): the lazy scan stops at the cap; the
-    # old sorted(getmembers()) read EVERY member. Shrink the cap so the test stays
-    # tiny.
+    # Counts the per-member header reads (TarFile.next): the lazy scan stops at
+    # the cap rather than getmembers()-ing the whole archive. The cap is shrunk
+    # so the test stays tiny.
     import tarfile
     monkeypatch.setattr(extract, "MAX_ARCHIVE_MEMBERS", 50)
     data = _tgz_many_empty_members(5_000)
@@ -123,8 +119,8 @@ def test_compressed_tar_member_scan_is_capped(monkeypatch):
     monkeypatch.setattr(tarfile.TarFile, "next", counting_next)
     out = extract_bytes(data, "bomb.tgz")
     assert isinstance(out, str)
-    # Bounded to ~the cap (a couple past it for the break check), NOWHERE near the
-    # 5000 members that getmembers() would have parsed.
+    # Bounded to about the cap (a couple past it for the break check), nowhere
+    # near the 5000 members getmembers() would have parsed.
     assert calls["n"] <= 200, (
         f"scanned {calls['n']} member headers for a {50}-cap - getmembers() "
         "materialised the whole archive")
@@ -143,14 +139,14 @@ def test_small_tarball_still_extracts():
 
 
 # --------------------------------------------------------------------------- #
-#  B3 - the indexing walk must not loop on a Windows junction                  #
+#  the indexing walk must not loop on a Windows junction                       #
 # --------------------------------------------------------------------------- #
 @pytest.mark.skipif(sys.platform != "win32", reason="NTFS junctions are Windows-only")
 def test_indexing_walk_skips_junction_loops(tmp_path, monkeypatch):
     # BRANCHING junctions: a single self-referential junction is depth-capped by
-    # Windows itself (rglob finishes in ~0.1s), so it does NOT exercise the bug.
-    # Two junctions per directory make rglob's descent EXPONENTIAL (pre-fix >20s);
-    # _walk_files skips reparse points and scandirs each real dir exactly once.
+    # Windows itself, so it does not exercise the walk. Two junctions per directory
+    # make rglob's descent exponential; _walk_files skips reparse points and
+    # scandirs each real dir exactly once.
     import os as _os
     from pathlib import Path
     d = tmp_path / "docs"
@@ -173,14 +169,13 @@ def test_indexing_walk_skips_junction_loops(tmp_path, monkeypatch):
     monkeypatch.setattr(store_mod.os, "scandir", counting_scandir)
     c = Collection("kb", base=tmp_path / "rag").create()
     files = c._expand([str(d)])
-    # Each REAL directory is scanned once; the junctions are never descended, so
-    # the walk cannot blow up (pre-fix rglob would scandir exponentially and hang).
+    # Each REAL directory is scanned once; the junctions are never descended.
     assert calls["n"] <= 5, f"walk scandir'd {calls['n']} dirs - junctions were followed"
     assert any(Path(f).name == "real.txt" for f in files), "real file must be indexed"
 
 
 # --------------------------------------------------------------------------- #
-#  B4 - deeply-nested JSON in a notebook must not escape as RecursionError     #
+#  deeply-nested JSON in a notebook must not escape as RecursionError          #
 # --------------------------------------------------------------------------- #
 def test_deeply_nested_ipynb_json_is_clean_error():
     payload = ('{"a":' * 6000 + "1" + "}" * 6000).encode()
@@ -196,7 +191,7 @@ def test_normal_ipynb_still_extracts():
 
 
 # --------------------------------------------------------------------------- #
-#  B5 - a malformed chunks.jsonl line must not brick the collection           #
+#  a malformed chunks.jsonl line must not brick the collection                #
 # --------------------------------------------------------------------------- #
 def _seed(tmp_path, text="the quick brown fox jumps over the lazy dog"):
     base = tmp_path / "rag"
@@ -230,8 +225,7 @@ def test_malformed_chunk_line_warning_logs_once_per_process(tmp_path, caplog):
     request for a collection with any corrupt lines at all. Must warn on the
     first Collection() for this directory and stay silent on a second one for
     the SAME directory/count, matching the sibling _note_vector_degrade
-    warn-once pattern (test_rag.py's test_malformed_vectors_json_degrades_
-    not_crashes). self.corrupt must still be set on EVERY load regardless -
+    warn-once pattern. self.corrupt must still be set on EVERY load regardless -
     only the duplicate LOG LINE is suppressed, not the actual state."""
     base = _seed(tmp_path)
     chunks_file = base / "kb" / "chunks.jsonl"
@@ -254,9 +248,8 @@ def test_malformed_chunk_line_warning_logs_once_per_process(tmp_path, caplog):
 def test_malformed_chunk_line_warning_still_fires_for_a_different_collection(tmp_path, caplog):
     """The dedup key must include the collection directory - two DIFFERENT
     collections each having their own corruption must both be reported, never
-    collapsed into "one warning covers every collection" (the coordinator's
-    explicit caution: a flood fix must not hide a genuinely broken SECOND
-    collection behind the first one's already-logged warning)."""
+    collapsed into "one warning covers every collection", which would hide a
+    genuinely broken SECOND collection behind the first one's warning."""
     (tmp_path / "one").mkdir()
     (tmp_path / "two").mkdir()
     base1 = _seed(tmp_path / "one")
@@ -304,7 +297,7 @@ def test_valid_meta_docs_map_preserved_on_chunk_corruption(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  B6 - a non-finite embedding must degrade to BM25, never drop a chunk        #
+#  a non-finite embedding must degrade to BM25, never drop a chunk             #
 # --------------------------------------------------------------------------- #
 def test_nan_embedding_does_not_silently_drop_chunk(tmp_path):
     base = tmp_path / "rag"
@@ -349,7 +342,7 @@ def test_nan_in_vectors_json_degrades_with_reason(tmp_path):
     vf = base / "kb" / "vectors.json"
     vf.write_text('{"dim": 3, "vectors": [[1.0, NaN, 0.0]]}', encoding="utf-8")
     c2 = Collection("kb", base=base)
-    # Must still answer (degraded to BM25) and SURFACE the reason, not silently
+    # Must still answer (degraded to BM25) and SURFACE why, not silently
     # score NaN.
     assert c2.query("mitochondria"), "must still answer lexically"
     assert c2.stats()["vector_degrade_reason"], "non-finite vectors must be surfaced"
@@ -370,7 +363,7 @@ def test_nan_query_embedding_degrades_not_empties(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  B7 - chunk pos must be the true 1-based start line, incl. odd blank gaps    #
+#  chunk pos must be the true 1-based start line, incl. odd blank gaps         #
 # --------------------------------------------------------------------------- #
 def _section(name):
     # >CHUNK_CHARS so each section lands in its OWN chunk carrying its own pos
@@ -387,7 +380,7 @@ def _pos_of(chunks, marker):
 
 def test_chunk_pos_correct_with_odd_blank_line_gaps():
     # ALPHA on line 1; BETA after a 3-newline gap -> line 4; GAMMA after another
-    # 3-newline gap -> line 7. The off-by-one bug reported BETA=3, GAMMA=6.
+    # 3-newline gap -> line 7.
     text = _section("ALPHA") + "\n\n\n" + _section("BETA") + "\n\n\n" + _section("GAMMA")
     chunks = chunk_text(text)
     assert _pos_of(chunks, "ALPHA") == 1
@@ -396,8 +389,8 @@ def test_chunk_pos_correct_with_odd_blank_line_gaps():
 
 
 def test_chunk_pos_correct_with_even_blank_gaps():
-    # Control: even-numbered blank gaps were already correct and must stay so.
-    # FIRST=1; SECOND after a 2-nl gap -> line 3; THIRD after a 4-nl gap -> line 7.
+    # Even-numbered blank gaps: FIRST on line 1; SECOND after a 2-nl gap -> line 3;
+    # THIRD after a 4-nl gap -> line 7.
     text = _section("FIRST") + "\n\n" + _section("SECOND") + "\n\n\n\n" + _section("THIRD")
     chunks = chunk_text(text)
     assert _pos_of(chunks, "FIRST") == 1

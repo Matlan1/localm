@@ -1,21 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """HuggingFace Transformers native worker - supports text-only and multimodal
 models. Runs ONLY inside the isolated child process spawned by
-``_hf_runner.py`` (see that module's docstring for why): every native call
-here (tokenizer regex, `model.generate()`, a torch forward pass) is
+``_hf_runner.py`` (see that module's docstring): every native call here
+(tokenizer regex, `model.generate()`, a torch forward pass) is
 uninterruptible from Python, so the process boundary is what makes a hang or
-a native abort containable without taking the server down with it - the
-identical rationale as ``backends/llamacpp/_worker.py``'s ``GgufWorker`` (PR
-#606) and ``embedder.py``'s ``GGUFEmbedder`` (the isolated on-device
-embedder).
+a native abort containable without taking the server down with it - the same
+arrangement as ``backends/llamacpp/_worker.py``'s ``GgufWorker`` and
+``embedder.py``'s ``GGUFEmbedder``.
 
-This class does NOT inherit ``BaseBackend`` - unlike the old in-process
-``HFBackend`` it replaces, it is never handed to a caller expecting that
-public contract; only the parent-side proxy in ``hf.py`` is (mirrors
-``GgufWorker``, which is likewise a plain class alongside its
-``VramSizingMixin``, not a ``BaseBackend``). Behavior is otherwise UNCHANGED
-from the class this was moved from - see ``hf.py`` for what changed on the
-parent side.
+This class does NOT inherit ``BaseBackend``; only the parent-side proxy in
+``hf.py`` is handed to a caller expecting that public contract (mirroring
+``GgufWorker``, likewise a plain class alongside its ``VramSizingMixin``).
 
 Tested with:
   - Gemma4UnifiedForConditionalGeneration (text + image + audio)
@@ -40,12 +35,9 @@ def _require_torch():
         return torch
     except ImportError:
         # logger.error, not console.print: this runs inside the isolated
-        # child process (see the module docstring) - the child's stdout is
-        # not the server's own console, so a console.print here would be
-        # written where no one reads it. The raise below still carries this
-        # message back to the parent as the RPC error envelope either way;
-        # this also puts it in the debug log for a from-the-server-side
-        # diagnosis (e.g. via `localm doctor`).
+        # child process (see the module docstring), whose stdout is not the
+        # server's own console. The raise below carries this message back to
+        # the parent as the RPC error envelope.
         logger.error("torch not installed. Install for AMD GPU: "
                      "uv pip install -e '.[gpu]'")
         raise
@@ -54,30 +46,22 @@ def _require_torch():
 def _trust_remote_code_enabled() -> bool:
     """Whether transformers may import and execute a model directory's own .py.
 
-    Config-driven and DEFAULT OFF (config key ``hf_trust_remote_code``, owner-only
-    to set). This flag used to be hard-coded ON at every from_pretrained call in
-    this module, which meant loading a model directory executed whatever
-    Python that directory shipped, via its ``auto_map`` (CodeQL alert 49). A model
-    name that reached this backend from an untrusted caller therefore gave remote
-    code execution as the server user; `localm pull owner/repo` also downloaded a
-    repo's .py, so the file could arrive entirely legitimately and run on load.
+    Config-driven and DEFAULT OFF (config key ``hf_trust_remote_code``,
+    owner-only to set). When on, loading a model directory executes whatever
+    Python that directory ships, via its ``auto_map``.
 
-    A second copy of this exact function lives in the PARENT proxy (``hf.py``),
-    used by ``_check_custom_code_allowed`` there - the REFUSAL decision now runs
-    in the parent, before a child is ever spawned (see hf.py's load() for why),
-    but this class still needs the same boolean here for the
-    ``trust_remote_code=`` kwarg every ``from_pretrained`` call below takes.
-    Kept as two small, independent copies rather than one cross-imported
-    between parent and child modules - mirrors how ``_hf_runner.py`` already
-    chooses not to cross-import from ``llamacpp/_runner.py`` for the identical
-    "isolation layers mirror each other, they do not couple" reason.
+    A second copy of this function lives in the PARENT proxy (``hf.py``), used
+    by ``_check_custom_code_allowed`` there: the REFUSAL decision runs in the
+    parent, before a child is ever spawned, while this class needs the same
+    boolean for the ``trust_remote_code=`` kwarg every ``from_pretrained`` call
+    below takes. Two independent copies, not one cross-import.
     """
     try:
         from localm.config import load_config
         return bool(load_config().get("hf_trust_remote_code", False))
     except Exception as e:
-        # Fail CLOSED: an unreadable config must never be read as permission to
-        # execute a model's bundled code. Logged rather than silent (rule 5).
+        # Fail CLOSED: an unreadable config is never read as permission to
+        # execute a model's bundled code. Logged rather than silent.
         logger.debug("hf: could not read hf_trust_remote_code, assuming off: %s", e)
         return False
 
@@ -99,33 +83,23 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     """Build the ``device_map`` (+ optional ``max_memory``) load kwargs for a
     CUDA load, honouring ``gpu_split_indices`` / ``main_gpu_index`` the same
     way the GGUF backend's native params do (see
-    ``discover.apply_gpu_split`` / ``discover.apply_main_gpu``) - closing a
-    real gap where this backend used to hardcode ``device_map="auto"``
-    regardless of either setting, so "Main GPU = 1" silently did nothing for
-    an HF (transformers) load:
+    ``discover.apply_gpu_split`` / ``discover.apply_main_gpu``):
 
     - 2+ valid ``gpu_split_indices`` -> ``"auto"`` sharded ONLY across those
       devices. Any GPU id absent from ``max_memory`` is excluded from
-      accelerate's auto-shard - the standard technique for restricting
-      ``device_map="auto"`` to a device subset.
+      accelerate's auto-shard.
     - no split, but a valid ``main_gpu_index`` -> ``"auto"`` confined to that
       ONE device by the same technique (its id is the only GPU in
-      ``max_memory``), instead of auto-sharding across every visible card.
-    - neither configured -> ``"auto"`` across every visible device, exactly
-      today's default (existing installs see no behavior change).
+      ``max_memory``).
+    - neither configured -> ``"auto"`` across every visible device.
 
-    Every ``max_memory`` we build also carries a ``"cpu"`` budget, because
-    passing a max_memory at all suppresses the one accelerate would otherwise
-    build for itself: ``accelerate.utils.get_max_memory()`` populates a "cpu"
-    entry from ``psutil.virtual_memory().available`` ONLY when the caller passes
-    no dict. Without it, weights that do not fit the chosen GPU(s) are mapped to
-    "disk" (verified against the real ``infer_auto_device_map``), which then
-    needs an ``offload_folder`` and errors without one. With it, the overflow
-    spills to CPU exactly as plain "auto" does - the graceful degradation an
-    oversized HF model has always relied on, and which the GGUF backend keeps
-    too (n_gpu_layers is auto-sized to free VRAM and llama.cpp holds the rest in
-    system RAM). REG-528: confining the model to the user's chosen device must
-    not also mean refusing to load it.
+    Every ``max_memory`` built here also carries a ``"cpu"`` budget: passing a
+    max_memory at all suppresses the one accelerate would otherwise build for
+    itself (``accelerate.utils.get_max_memory()`` populates a "cpu" entry from
+    ``psutil.virtual_memory().available`` ONLY when the caller passes no dict).
+    Without it, weights that do not fit the chosen GPU(s) are mapped to "disk",
+    which needs an ``offload_folder`` and errors without one. With it, the
+    overflow spills to CPU exactly as plain "auto" does.
     """
     from localm.config import load_config
     from localm.discover import resolve_gpu_split, resolve_main_gpu_index
@@ -166,10 +140,9 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
         budget = _free_minus_headroom(idx)
         if budget is None:
             # No readable free VRAM means no budget to build, so there is no way
-            # to express "this device, with CPU overflow". Honour the user's
-            # explicit selection anyway by pinning (never silently ignore it),
-            # but say so: this is the one path with no CPU fallback, so an
-            # oversized model here still OOMs (rule 5 - do not hide it).
+            # to express "this device, with CPU overflow". The explicit selection
+            # is honoured by pinning, and reported: this is the one path with no
+            # CPU fallback, so an oversized model here still OOMs.
             logger.warning(
                 "main_gpu_index=%s is configured but its free VRAM could not be "
                 "read; pinning the whole model to that device. A model larger "
@@ -205,8 +178,9 @@ class _SafeGrammarProcessor:
     thread - which crashes the thread and hangs the HTTP request indefinitely.
 
     The grammar compiles fine, so the build-time soft-degrade cannot catch this;
-    the failure only surfaces on the first token's logits call. We catch it there,
-    warn once, and pass logits through unchanged for the rest of the generation.
+    the failure only surfaces on the first token's logits call. It is caught
+    there, warned about once, and logits pass through unchanged for the rest of
+    the generation.
     """
 
     def __init__(self, inner):
@@ -221,11 +195,8 @@ class _SafeGrammarProcessor:
         except Exception as e:
             # logger.warning, not console.print: this runs inside the isolated
             # child process (see this module's docstring), whose stdout is not
-            # guaranteed to share the parent's encoding - a rich/Unicode print
-            # from the child hard-failed exactly this way during real-model
-            # verification (a plain "Model loaded" checkmark line raised
-            # UnicodeEncodeError against the child's inherited Windows
-            # 'charmap' stdout codec). The debug log is UTF-8 regardless.
+            # guaranteed to share the parent's encoding. The debug log is UTF-8
+            # regardless.
             logger.warning(
                 "grammar constraint disabled mid-generation (%s: %s); "
                 "continuing without constraint", type(e).__name__, e)
@@ -238,9 +209,8 @@ def _eos_token_ids(model, tokenizer) -> set:
     criteria would halt generation on for *model* - see ``EosTokenCriteria``
     / ``_get_stopping_criteria`` in transformers/generation/utils.py, which
     reads ``generation_config.eos_token_id`` (an int, a list, or unset).
-    Read the SAME source of truth rather than re-deriving it, so this can
-    never disagree with what the built-in criteria actually stopped on.
-    Falls back to the tokenizer's own ``eos_token_id`` for a checkpoint whose
+    Reads the SAME source of truth rather than re-deriving it. Falls back to
+    the tokenizer's own ``eos_token_id`` for a checkpoint whose
     generation_config leaves it unset."""
     raw = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
     if raw is None:
@@ -262,13 +232,12 @@ class _FinishReasonObserver:
     end-of-generation token always wins over the length budget - "length"
     is reported only when the budget ran out with no EOG ever produced).
 
-    Verified against transformers 5.13.1's ``_sample`` loop
-    (generation/utils.py): a new token is appended to ``input_ids`` via
-    ``torch.cat`` BEFORE ``stopping_criteria`` is called, so ``input_ids``
-    already includes it on every call - the delta from the length seen on
-    the FIRST call is exactly the count of new tokens generated so far, for
-    both decoder-only and encoder-decoder ``input_ids`` conventions, with no
-    need to know the prompt length in advance.
+    In transformers' ``_sample`` loop (generation/utils.py) a new token is
+    appended to ``input_ids`` via ``torch.cat`` BEFORE ``stopping_criteria``
+    is called, so ``input_ids`` already includes it on every call: the delta
+    from the length seen on the FIRST call is exactly the count of new tokens
+    generated so far, for both decoder-only and encoder-decoder ``input_ids``
+    conventions, with no need to know the prompt length in advance.
     """
 
     def __init__(self, eos_token_ids: set) -> None:
@@ -300,15 +269,8 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
     ``localm.inference.gbnf`` for ready-made JSON / tool-call grammars.
 
     Returns a one-element ``LogitsProcessorList``, or ``None`` when no grammar was
-    requested at all. It NEVER returns ``None`` to mean "I gave up on the grammar":
-    a grammar that cannot be applied RAISES.
-
-    That is the fix for NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED. Both failure arms
-    below used to log and return ``None``, so generation ran UNCONSTRAINED while the
-    caller got a normal 200 it could not tell from a grammar-conformant answer - and
-    the log line never reaches the caller, because this whole module runs in the
-    isolated worker CHILD. "Soft-degrade" was the wrong contract for a constraint
-    the caller explicitly asked for (AGENTS.md rule 5).
+    requested at all. It NEVER returns ``None`` to mean "I gave up on the
+    grammar": a grammar that cannot be applied RAISES.
 
     Both raises are marshalled back as CLEAN refusals by ``_hf_runner``'s tagged
     error envelope, so neither kills the worker or leaves the model in an unknown
@@ -328,10 +290,9 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
     except ImportError:
         # Normally unreachable: HFBackend.supports_grammar is False without the
         # extra, so the up-front check in the chat routes already refused this
-        # request (#1215). Reaching it anyway means the parent's check was
-        # bypassed or the install changed under a live worker - so raise the same
-        # error that check would have, rather than quietly generating text that
-        # ignores the grammar.
+        # request. Reaching it anyway means the parent's check was bypassed or
+        # the install changed under a live worker, and the same error that check
+        # would have raised is raised here.
         raise GrammarUnsupportedError(GRAMMAR_UNSUPPORTED_MESSAGE)
     try:
         vocab = getattr(getattr(model, "config", None), "vocab_size", None)
@@ -339,11 +300,10 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         compiled = xgr.GrammarCompiler(info).compile_grammar(grammar)
         return LogitsProcessorList([_SafeGrammarProcessor(LogitsProcessor(compiled))])
     except Exception as e:   # malformed grammar, tokenizer mismatch, etc.
-        # Mirrors the GGUF backend exactly: llama.py raises InvalidGrammarError when
-        # the native GBNF parser rejects a grammar (a NULL sampler), which the route
-        # turns into a clean 400 naming the grammar as the thing to fix. A grammar
-        # xgrammar cannot compile is the same event on the other backend, so it gets
-        # the same answer instead of a silent unconstrained 200.
+        # Mirrors the GGUF backend: llama.py raises InvalidGrammarError when the
+        # native GBNF parser rejects a grammar (a NULL sampler), which the route
+        # turns into a 400 naming the grammar as the thing to fix. A grammar
+        # xgrammar cannot compile gets the same answer.
         raise InvalidGrammarError(
             f"grammar could not be compiled ({type(e).__name__}: {e})") from e
 
@@ -354,29 +314,26 @@ class _CancelCriteria:
     as GgufBackend's ctrl_q relay into llama.cpp's native progress-callback
     hook, built on the hook transformers actually exposes instead.
 
-    Verified directly against transformers' generation/utils.py: the decode
-    loop calls every StoppingCriteria in ``stopping_criteria=`` once per
-    generated token, right after that token is pushed onto the streamer
+    transformers' decode loop (generation/utils.py) calls every
+    StoppingCriteria in ``stopping_criteria=`` once per generated token, right
+    after that token is pushed onto the streamer
     (``unfinished_sequences = unfinished_sequences & ~stopping_criteria(...)``),
     so setting *cancel_event* stops generation within one extra token rather
     than waiting for max_new_tokens or a full process kill. See
     _hf_runner.py's module docstring for how the event gets set from a
     parent-process disconnect.
 
-    Deliberately does NOT subclass ``transformers.StoppingCriteria`` - that
-    would force ``from transformers import StoppingCriteria`` at MODULE
-    IMPORT time, which is exactly the eager transformers/torch import this
-    file avoids everywhere else (see ``_declared_generative``'s docstring:
-    importing transformers pulls in torch, which conflicts with an
-    already-loaded llama.dll in the same process). Verified this is safe:
-    ``StoppingCriteriaList.__call__`` and ``_merge_criteria_processor_list``
-    (transformers' generation/utils.py) call/compare criteria purely by duck
+    Does NOT subclass ``transformers.StoppingCriteria``, which would force
+    ``from transformers import StoppingCriteria`` at MODULE IMPORT time - the
+    eager transformers/torch import this file avoids everywhere else (see
+    ``_declared_generative``'s docstring). ``StoppingCriteriaList.__call__``
+    and ``_merge_criteria_processor_list`` call/compare criteria purely by duck
     typing (``criteria(input_ids, scores, **kwargs)`` / ``type(custom) is
-    type(default)``) - the only ``isinstance(..., StoppingCriteria)`` in the
-    whole generate() path only selects a warning message's wording for a
-    type COLLISION with a built-in criterion, which this class's unique type
-    never triggers. Mirrors ``_SafeGrammarProcessor`` above, which duck-types
-    ``LogitsProcessor`` for the identical reason.
+    type(default)``); the only ``isinstance(..., StoppingCriteria)`` in the
+    generate() path selects a warning message's wording for a type COLLISION
+    with a built-in criterion, which this class's unique type never triggers.
+    Mirrors ``_SafeGrammarProcessor`` above, which duck-types
+    ``LogitsProcessor``.
 
     __call__ must return a torch.BoolTensor of shape (batch_size,) -
     StoppingCriteriaList.__call__ ORs every criterion's result together
@@ -397,10 +354,9 @@ class _CancelCriteria:
 # transformers' naming convention for a GENERATIVE task head. A checkpoint whose
 # declared architecture ends in one of these generates text; anything else (the
 # bare ``*Model`` encoders: BertModel, XLMRobertaModel, NomicBertModel,
-# T5EncoderModel, DistilBertModel, MPNetModel) is an encoder that embeds. See
-# HFWorker._declared_generative for why this is matched by name rather than by
-# importing transformers, and tests/test_hf_embed_integration.py for the test that
-# pins this list against transformers' own GenerationMixin.
+# T5EncoderModel, DistilBertModel, MPNetModel) is an encoder that embeds.
+# Matched by name rather than by importing transformers - see
+# HFWorker._declared_generative.
 _GENERATIVE_ARCH_SUFFIXES = (
     "ForCausalLM",
     "LMHeadModel",
@@ -458,11 +414,9 @@ class HFWorker:
     def load(self) -> None:
         # The custom-code refusal (_check_custom_code_allowed) and the
         # tokenizer.json ReDoS gate (validate_tokenizer_json) both run in the
-        # PARENT now, BEFORE this class is ever constructed - see hf.py's
-        # load(). Neither needs torch/transformers or anything only the child
-        # can see, so gatekeeping them there means a refused model never pays
-        # the cost of spawning a child at all. This method only still needs
-        # the boolean for the trust_remote_code= kwarg below.
+        # PARENT, BEFORE this class is ever constructed - see hf.py's load().
+        # This method only needs the boolean for the trust_remote_code= kwarg
+        # below.
         trust_remote_code = _trust_remote_code_enabled()
         torch = _require_torch()
         tr = _require_transformers()
@@ -476,16 +430,11 @@ class HFWorker:
         # logger.debug throughout load(), never console.print: this runs
         # inside the isolated child process (see this module's docstring),
         # whose stdout inherits whatever codepage the spawn gave it rather
-        # than the parent's own console configuration - a rich/Unicode print
-        # from the child (the final "Model loaded" checkmark this method
-        # used to end with) hard-failed with UnicodeEncodeError against a
-        # 'charmap' stdout during real-model verification. The debug log is
-        # UTF-8 regardless of what the child's stdout is. User-facing status
-        # ("Model loaded", the final device/vram summary) is now printed by
-        # the PARENT proxy (hf.py's HFBackend.load()) from this method's
-        # returned/cached metadata, mirroring GgufBackend's own load() -
-        # GgufWorker (the GGUF equivalent of this class) has zero
-        # console.print calls anywhere, for the identical reason.
+        # than the parent's own console configuration. The debug log is UTF-8
+        # regardless. User-facing status ("Model loaded", the final
+        # device/vram summary) is printed by the PARENT proxy (hf.py's
+        # HFBackend.load()) from this method's returned/cached metadata,
+        # mirroring GgufBackend's own load().
         logger.debug("hf load: device=%s", device)
         if device == "cuda":
             dm = device_map_kwargs["device_map"]
@@ -525,10 +474,10 @@ class HFWorker:
             self._is_multimodal = has_image or has_audio
             self._tokenizer = getattr(self._processor, "tokenizer", self._processor)
         except Exception as e:
-            # Fall back to plain tokenizer. This is intentional for text-only
-            # models (no processor to load), but a logged failure here may mean
-            # a genuine multimodal model lost its image/audio capability, so
-            # surface it rather than swallowing it silently.
+            # Fall back to plain tokenizer. Expected for text-only models (no
+            # processor to load), but a logged failure here may mean a genuine
+            # multimodal model lost its image/audio capability, so it is
+            # surfaced rather than swallowed.
             logger.warning(
                 "processor load failed (%s: %s); falling back to text-only tokenizer",
                 type(e).__name__, e,
@@ -577,13 +526,10 @@ class HFWorker:
         if device == "xpu":
             # The model loaded on CPU (device_map "cpu" above); move it to the Intel
             # GPU explicitly. device_map="auto" is unreliable on consumer Arc (many
-            # parts do not implement the free-memory query accelerate needs), so we
-            # place the whole model with .to("xpu") rather than auto-sharding it.
+            # parts do not implement the free-memory query accelerate needs), so the
+            # whole model is placed with .to("xpu") rather than auto-sharded.
             # A single-device "cpu" map attaches no accelerate hook, so this .to()
-            # moves the whole model (verified vs accelerate dispatch_model + the HF
-            # Intel-Arc guide). PENDING real-Arc verification (dev box is AMD): that
-            # this move, and the model.device-based input placement in chat_stream/
-            # embed, actually run on the Intel GPU end to end.
+            # moves the whole model.
             try:
                 self._model = self._model.to("xpu")
             except Exception as e:
@@ -607,9 +553,9 @@ class HFWorker:
                 self.context_capacity = max_pos
 
         # VRAM usage after load - debug log only (see the note at the top of
-        # this method for why). The final "Model loaded" user-facing line
-        # (with its device/vram summary) is printed by the PARENT proxy
-        # after this method returns successfully - see hf.py.
+        # this method). The final "Model loaded" user-facing line (with its
+        # device/vram summary) is printed by the PARENT proxy after this method
+        # returns successfully - see hf.py.
         if device == "cuda":
             try:
                 for i in range(torch.cuda.device_count()):
@@ -712,7 +658,7 @@ class HFWorker:
                 # Surface under --debug (mirroring count_tokens above): the
                 # super() return below is then a heuristic ESTIMATE, not an
                 # exact count, so context-budgeting downstream is trusting an
-                # approximation. Never a silent pass (rule 5).
+                # approximation. Never a silent pass.
                 logger.debug(
                     "chat-template token count failed (%s); using heuristic estimate",
                     type(e).__name__,
@@ -735,28 +681,20 @@ class HFWorker:
         """Whether the CHECKPOINT declares a generative architecture, or None when
         it declares none.
 
-        The checkpoint's own ``config.architectures`` is the reliable signal, NOT
-        the class ``load()`` happened to pick. ``load()`` tries
+        The checkpoint's own ``config.architectures`` is the signal, NOT the
+        class ``load()`` happened to pick. ``load()`` tries
         ``AutoModelForCausalLM`` BEFORE ``AutoModel``, and transformers registers
         the pure-encoder families in ``MODEL_FOR_CAUSAL_LM_MAPPING_NAMES``
-        (verified on transformers 5.12.1: bert -> BertLMHeadModel, roberta ->
-        RobertaForCausalLM, xlm-roberta, electra). So a real embedding checkpoint
-        declaring ``["BertModel"]`` - bge-small, all-MiniLM, e5, bge-m3, i.e.
-        localm's OWN default embedding model - loads as ``BertLMHeadModel`` and
-        answers ``can_generate()`` True despite being an encoder that embeds
-        perfectly well. Asking the loaded class is therefore the wrong question.
+        (bert -> BertLMHeadModel, roberta -> RobertaForCausalLM, xlm-roberta,
+        electra), so an embedding checkpoint declaring ``["BertModel"]``
+        (bge-small, all-MiniLM, e5, bge-m3) loads as ``BertLMHeadModel`` and
+        answers ``can_generate()`` True while being an encoder that embeds.
 
         Matched on transformers' task-head NAMING convention rather than by
-        resolving the class, deliberately: resolving would mean importing
-        transformers here, and that import pulls in torch, whose ROCm init
-        (``rocm_sdk.preload_libraries``) dies with ``OSError: [WinError 127]``
-        in any process that already loaded the bundled llama.dll (reproduced
-        2026-07-15). This property must not be the thing that triggers that, and
-        it never needs to: it only ever runs on an already-loaded model.
-        ``test_declared_arch_suffixes_match_transformers_own_generation_mixin``
-        pins the convention against ``GenerationMixin`` - transformers' own
-        definition of "this generates" - so a naming change upstream fails a test
-        instead of silently misrouting a model.
+        resolving the class: resolving would mean importing transformers here,
+        and that import pulls in torch, whose ROCm init
+        (``rocm_sdk.preload_libraries``) fails with ``OSError: [WinError 127]``
+        in any process that already loaded the bundled llama.dll.
         """
         archs = getattr(getattr(self._model, "config", None), "architectures", None)
         if not archs:
@@ -773,22 +711,17 @@ class HFWorker:
 
         Mean-pooling a chat decoder's last hidden states returns healthy,
         non-zero, plausible-looking vectors that nevertheless cannot separate
-        related from unrelated text. Measured 2026-07-15 against this repo's own
-        embedding path: Qwen2.5-0.5B's max UNRELATED cosine (0.7523) EXCEEDS its
-        min RELATED cosine (0.7518), so NO threshold splits the two, versus
-        bge-small's +0.29 margin. That is decoder anisotropy (no contrastive
-        training objective), not a pooling artifact: LAST-token pooling was
-        measured too and scored WORSE. Reporting a decoder as embedding-capable
-        is what let Engine.embed silently serve those vectors to /v1/embeddings
-        and RAG instead of the dedicated embedder.
+        related from unrelated text: a decoder's max UNRELATED cosine can exceed
+        its min RELATED cosine, so no threshold splits the two. That is decoder
+        anisotropy (no contrastive training objective), not a pooling artifact -
+        LAST-token pooling scores worse still.
 
         Unloaded -> True ("unknown, load to find out"): the capability is only
         knowable once the weights are in, and answering False here would stop
         routes/chat.py from ever loading a genuine HF embedding model. The
         parent-side proxy re-checks this once, right after load, and caches it
-        (see hf.py) - unlike the old in-process class, Engine.embed can no
-        longer re-check it live on every call, since this class now lives in
-        a child process.
+        (see hf.py); Engine.embed cannot re-check it live, since this class runs
+        in a child process.
         """
         model = self._model
         if model is None:
@@ -799,14 +732,14 @@ class HFWorker:
         if declared is not None:
             return not declared              # the checkpoint's own word (see above)
         # Nothing declared and nothing resolvable: fall back to what the loaded
-        # class says about itself. Weaker (it is the very signal the encoder
-        # families defeat above), but with no declared architecture it is the only
-        # evidence there is - and an undeclared checkpoint is not one of them.
+        # class says about itself. Weaker (it is the signal the encoder families
+        # defeat above), but with no declared architecture it is the only
+        # evidence there is.
         can_generate = getattr(model, "can_generate", None)
         if not callable(can_generate):
             # Not a transformers PreTrainedModel (or a version without the API):
-            # absence of proof is not proof of an embedder. Prefer the dedicated
-            # embedder over silently pooling what may be a chat decoder (rule 5).
+            # absence of proof is not proof of an embedder, so the dedicated
+            # embedder is preferred over pooling what may be a chat decoder.
             logger.debug(
                 "HF model %s declares no architecture and exposes no "
                 "can_generate(); treating it as NOT an embedding model",
@@ -827,8 +760,7 @@ class HFWorker:
         Works for any AutoModel-style ENCODER that outputs hidden states; for
         dedicated sentence-transformer models that expose `.encode()`, that
         method is preferred. Callers must gate on ``can_embed`` above: this is
-        NOT a valid embedding path for a chat decoder (see that docstring for
-        the measurements).
+        NOT a valid embedding path for a chat decoder.
         """
         import torch
         tokenizer = self._tokenizer
@@ -882,15 +814,9 @@ class HFWorker:
         # xgrammar has no trigger/lazy mode, and a lazy request must not silently
         # become a STRICT constraint either (a strict grammar stalls thinking
         # models). Both remaining options - drop it, or enforce it strictly - give
-        # the caller something other than what it asked for, so REFUSE instead.
+        # the caller something other than what it asked for, so this REFUSES.
         #
-        # This used to drop the grammar behind a DEBUG line, described at the time
-        # as "the same soft-degrade contract as everywhere else on this backend".
-        # That contract is what NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED was filed
-        # against: a caller that asked for constrained output got unconstrained
-        # output and a 200, and DEBUG in an isolated worker child reaches nobody.
-        #
-        # Normally unreachable - HFBackend refuses lazy in validate_grammar (a
+        # Normally unreachable: HFBackend refuses lazy in validate_grammar (a
         # clean 400 before either response is committed) AND again in chat_stream
         # before the runner is touched. This is the third line of defence, for a
         # caller driving HFWorker directly; _hf_runner marshals it back as a clean
@@ -1035,15 +961,13 @@ class HFWorker:
         # generate()'s own decode loop see it and stop within one extra
         # token - see _hf_runner.py's module docstring for the full
         # mechanism. cancel_event=None (the default, e.g. any direct or
-        # standalone caller) preserves the exact prior unconstrained behavior.
+        # standalone caller) leaves generation unconstrained.
         # APPENDED to gen_kwargs["stopping_criteria"] (already carrying
         # finish_observer, added unconditionally above) rather than replacing
-        # it - StoppingCriteriaList evaluates every criterion it holds
+        # it: StoppingCriteriaList evaluates every criterion it holds
         # (StoppingCriteriaList.__call__ ORs them together), so both the
-        # finish-reason observer and the cancel check must run on every
-        # decode step. Overwriting the list here would silently disable
-        # finish_observer on every real production call, since the parent
-        # (_hf_runner.py's dispatch loop) always passes a cancel_event.
+        # finish-reason observer and the cancel check run on every decode
+        # step.
         if cancel_event is not None:
             gen_kwargs["stopping_criteria"].append(_CancelCriteria(cancel_event))
 

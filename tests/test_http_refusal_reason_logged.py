@@ -1,28 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A refused request must record WHY, not just the status.
 
-The 0.1.4 release candidate produced this, at DEBUG, as the complete record of
-a user-visible chat failure:
+A debug log line of the form
 
     DEBUG   localm: POST /v1/chat/completions -> 400 (9 ms, loop_lag=0.00s)
 
-Status and timing and nothing else. The HTTPException detail - the one field
-that says which check refused the request - reached only the client, so the
-cause was unrecoverable from the log and two separate diagnoses of that single
-line reached opposite wrong answers. AGENTS.md rule 5: a user-facing failure
-whose cause cannot be learned from a debug log is a hidden problem.
+is status and timing and nothing else. The HTTPException detail - the one field
+that says which check refused the request - reaches only the client, so the
+cause is unrecoverable from the log.
 
-FIXTURE PREMISE (diff-review-discipline.md item 19): these tests assert that
-``debug_enabled()`` is genuinely ON, because that is the condition the bug lived
-in - the complaint was never "no log without --debug", it was "--debug was on
-and STILL said nothing". A fixture that left debug off could not express the
-failing case and would pass no matter what the handler did.
+FIXTURE PREMISE: these tests assert that ``debug_enabled()`` is genuinely ON,
+because that is the condition the bug lives in - the failure is not "no log
+without --debug", it is "--debug is on and STILL says nothing". A fixture that
+left debug off could not express the failing case and would pass no matter what
+the handler did.
 
 Both an EARLY refusal (before the engine is resolved) and a LATE one (past
-get_engine and past the chat pipeline) are covered. The real 0.1.4 refusal was a
-late one - its log line was preceded by the memory plugin's inlet record, which
-proves the request had already reached the pipeline - so a test that only ever
-exercised an early refusal would miss the shape that actually happened.
+get_engine and past the chat pipeline) are covered: a test that only exercised
+an early refusal would miss the late shape, whose log line is preceded by the
+memory plugin's inlet record.
 """
 
 from __future__ import annotations
@@ -105,8 +101,7 @@ def test_early_refusal_records_the_reason(_debug_on, client_no_model, caplog):
     detail = r.json()["detail"]
     lines = _refusal_lines(caplog)
     assert lines, "a refused request logged no reason at all"
-    # Assert the DETAIL itself, not merely that some line was emitted: that is
-    # what fails if the handler ever logs a placeholder instead of the cause.
+    # Assert the DETAIL itself, not merely that some line was emitted.
     assert any(detail in line for line in lines), (
         f"the 400's detail {detail!r} never reached the log; got {lines!r}")
     assert any("/v1/chat/completions" in line and "400" in line for line in lines)

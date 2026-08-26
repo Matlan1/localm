@@ -262,7 +262,7 @@ def test_uninstall_reverses_global_command(tmp_path, monkeypatch):
 
 def test_v1_manifest_still_uninstalls(tmp_path):
     # An OLD schema-1 manifest (no v2 keys) must still uninstall cleanly (missing
-    # keys read as absent), so upgrading the installer never strands a v1 install.
+    # keys read as absent).
     lib = _v2_lib(tmp_path)
     (lib / "llama.dll").write_text("x", encoding="utf-8")
     im.manifest_path(tmp_path).write_text(json.dumps({

@@ -2,10 +2,10 @@
 """Config update validation (localm.settings_schema.validate_update) and its two
 consumers: the `localm config` CLI command and PATCH /v1/config.
 
-Before the shared validator, both call sites wrote any key/any type with no
-checking: `localm config bogus x` persisted an unknown key, a scalar clobbered a
-list key (plugins_enabled / net_allow), and PATCH {net_deny: null} silently wiped
-the SSRF deny-list (P0-6 / SEC-2 / BUG-3).
+Without the shared validator both call sites write any key of any type with no
+checking: `localm config bogus x` persists an unknown key, a scalar clobbers a
+list key (plugins_enabled / net_allow), and PATCH {net_deny: null} silently wipes
+the SSRF deny-list.
 """
 
 from unittest.mock import patch
@@ -44,21 +44,16 @@ class TestValidateUpdate:
             ss.validate_update({"n_ctx": True})
 
     def test_gpu_layers_out_of_range(self):
-        # n_gpu_layers had min=0 but no max, so an absurd value (1111) sailed
-        # through to the native layer and surfaced as a misleading "repair
-        # llama" error. It now has a ceiling.
+        # n_gpu_layers has a ceiling, so an absurd value never reaches the native
+        # layer.
         with pytest.raises(ValueError, match="above the maximum"):
             ss.validate_update({"n_gpu_layers": 1111})
         assert ss.validate_update({"n_gpu_layers": 99}) == {"n_gpu_layers": 99}
 
     def test_n_ctx_out_of_range(self):
-        # n_ctx/n_ctx_max/n_ctx_grow had a floor but no ceiling, so an absurd
-        # value sailed unbounded to the native ctypes layer. Same defect as
-        # n_gpu_layers above.
-        #
-        # ACCEPT a real long-context value first: this assertion is what goes
-        # red if the ceiling is set too tight, and a ceiling that breaks real
-        # models is worse than no ceiling.
+        # n_ctx/n_ctx_max/n_ctx_grow have a ceiling as well as a floor. A real
+        # long-context value is accepted first, so a too-tight ceiling goes red
+        # here.
         assert ss.validate_update({"n_ctx": 131072}) == {"n_ctx": 131072}
         with pytest.raises(ValueError, match="above the maximum"):
             ss.validate_update({"n_ctx": 10**18})
@@ -75,7 +70,7 @@ class TestValidateUpdate:
         # `localm config main_gpu_index 1` arrives as the string "1" (HIDDEN
         # widgets skip the generic number coercion, so this key is
         # special-cased); PATCH /v1/config from the GUI sends a native JSON
-        # int. Both must be stored as a real int.
+        # int. Both are stored as a real int.
         result = ss.validate_update({"main_gpu_index": value})
         assert result == {"main_gpu_index": 1}
         assert isinstance(result["main_gpu_index"], int)
@@ -96,9 +91,9 @@ class TestValidateUpdate:
             ss.validate_update({"main_gpu_index": True})
 
     def test_main_gpu_index_rejects_index_above_sanity_ceiling(self):
-        # LM-DA-017: main_gpu_index had min=0 but no max, unlike the sibling
-        # gpu_split_indices field - an out-of-range value sailed through to
-        # the same ctypes.c_int32 main_gpu field. Now has the same ceiling.
+        # main_gpu_index has the same ceiling as the sibling gpu_split_indices
+        # field, so an out-of-range value never reaches the ctypes.c_int32
+        # main_gpu field.
         with pytest.raises(ValueError, match="above the maximum"):
             ss.validate_update({"main_gpu_index": 500_000})
 
@@ -145,10 +140,9 @@ class TestValidateUpdate:
             ss.validate_update({"gpu_split_indices": ["abc"]})
 
     def test_gpu_split_indices_rejects_index_above_sanity_ceiling(self):
-        # CHK-GPUSPLIT-ALLOC: an unbounded index drives an unbounded ctypes
-        # allocation in discover.apply_gpu_split (a raw tensor_split buffer
-        # sized to the highest configured index) - must be rejected at write
-        # time, not just degraded later.
+        # An unbounded index drives an unbounded ctypes allocation in
+        # discover.apply_gpu_split (a raw tensor_split buffer sized to the
+        # highest configured index), so it is rejected at write time.
         with pytest.raises(ValueError, match="above the maximum"):
             ss.validate_update({"gpu_split_indices": [0, 500_000]})
 
@@ -172,8 +166,8 @@ class TestValidateUpdate:
             ss.validate_update({"gpu_split_ratios": [-0.1, 0.5]})
 
     def test_gpu_split_ratios_rejects_non_finite(self):
-        # A non-finite ratio would cross straight into the native tensor_split
-        # ctypes buffer (discover.apply_gpu_split) with no downstream check.
+        # A non-finite ratio is rejected before it reaches the native
+        # tensor_split ctypes buffer (discover.apply_gpu_split).
         with pytest.raises(ValueError, match="finite"):
             ss.validate_update({"gpu_split_ratios": [1.0, float("inf")]})
         with pytest.raises(ValueError, match="finite"):
@@ -203,7 +197,7 @@ class TestValidateUpdate:
             "net_allow": ["a.com", "b.com"]}
 
     def test_list_key_null_is_rejected_not_wiped(self):
-        # SEC-2: net_deny:null must NOT silently become null (SSRF block wipe)
+        # net_deny:null must NOT silently become null (SSRF block wipe)
         with pytest.raises(ValueError, match="a value is required"):
             ss.validate_update({"net_deny": None})
 
@@ -232,10 +226,9 @@ class TestValidateUpdate:
             "cors_origins": origins}
 
     def test_gpu_split_neighbor_contract_unaffected_by_cors_fix(self):
-        # Guards against a wrong fix shape: tightening the shared _to_str_list
-        # helper itself (instead of the cors_origins branch alone) would break
-        # these two callers, which depend on its str()-coercion of a native
-        # JSON list of numbers before _to_number parses each token.
+        # These two callers depend on the shared _to_str_list helper's
+        # str()-coercion of a native JSON list of numbers before _to_number
+        # parses each token.
         assert ss.validate_update({"gpu_split_indices": [0, 1]}) == {
             "gpu_split_indices": [0, 1]}
         result = ss.validate_update({"gpu_split_ratios": [0.6, 0.4]})
@@ -255,10 +248,8 @@ class TestValidateUpdate:
             ss.validate_update({"plugins_enabled": "chat"})
 
     def test_coder_index_timeout_settable(self):
-        # Previously read directly off raw config (checkpoint._index_deadline)
-        # but never registered in DEFAULT_CONFIG/CORE_FIELDS, so `localm config
-        # coder_index_timeout 30` raised "unknown config key" - the only way to
-        # set it was hand-editing config.json. Now a real, schema-backed field.
+        # coder_index_timeout is a real schema-backed field, so `localm config
+        # coder_index_timeout 30` works.
         assert ss.validate_update({"coder_index_timeout": "30"}) == {
             "coder_index_timeout": 30}
         with pytest.raises(ValueError, match="below the minimum"):
@@ -281,14 +272,14 @@ class TestValidateUpdate:
 
     def test_pathlist_rejects_credential_dir(self, tmp_path):
         # A folder whose path contains a credential dir name (.ssh) can never be
-        # indexed, so it is refused at save time with a clear error (not silently
-        # stored then ignored at index time).
+        # indexed, so it is refused at save time with a clear error rather than
+        # stored and ignored later.
         bad = tmp_path / ".ssh" / "keys"
         with pytest.raises(ValueError, match="credential"):
             ss.validate_update({"rag_allowed_roots": [str(bad)]})
 
     def test_pathlist_null_rejected_not_wiped(self):
-        # Like the LIST keys (SEC-2): null must not silently blank the list.
+        # Like the LIST keys: null must not silently blank the list.
         with pytest.raises(ValueError, match="a value is required"):
             ss.validate_update({"rag_allowed_roots": None})
 
@@ -302,14 +293,14 @@ class TestValidateUpdate:
 
 
 def test_plugins_key_is_in_default_config_and_schema():
-    # FAC-1: per-plugin config namespace now has a documented home
+    # the per-plugin config namespace
     assert DEFAULT_CONFIG.get("plugins") == {}
     field_keys = {f.key for f in ss.CORE_FIELDS}
     assert "plugins" in field_keys
 
 
 # --------------------------------------------------------------------------- #
-#  `localm config` CLI (BUG-3) - via the CliRunner harness
+#  `localm config` CLI - via the CliRunner harness
 # --------------------------------------------------------------------------- #
 
 class TestConfigCli:
@@ -453,8 +444,8 @@ class TestGpusCli:
     def test_timeout_reports_retry_not_no_torch(self, cli_runner, monkeypatch):
         """A GPU probe that overruns the deadline (a cold ROCm/CUDA driver init)
         must be reported as a TIMEOUT with a retry hint, NOT as 'no torch / no
-        GPU'. Misattributing a slow cold probe to 'no torch' is exactly the
-        rule-5 bug this fixes (torch IS installed; a warm retry works)."""
+        GPU'. torch IS installed and a warm retry works, so 'no torch' is a false
+        claim."""
         import threading
         from localm.cli import main
 
@@ -479,17 +470,13 @@ class TestGpusCli:
 
     @staticmethod
     def _flat(output):
-        # Rich's console wraps long lines to the render width, which can split
-        # "free VRAM reading unavailable" across a line break in captured
-        # output; collapsing all whitespace makes the substring check robust
-        # to wherever that wrap lands.
+        # Rich's console wraps long lines to the render width, so collapse all
+        # whitespace before the substring check.
         return " ".join(output.split())
 
-    # cli/models.py's `gpus` command used to print an untrusted `free` figure
-    # anyway, with only a dim caveat beside it (AGENTS.md rule 5: a caveat
-    # beside a wrong number is not a correction). It must now OMIT the free
-    # figure entirely and say so plainly - these cover both dimensions
-    # (device/process free_scope, and fresh/stale probe status).
+    # The `gpus` command omits the free VRAM figure entirely and says so. These
+    # cover both dimensions: device/process free_scope, and fresh/stale probe
+    # status.
     def test_process_scoped_free_is_omitted(self, cli_runner):
         from localm.cli import main
         gpus = [{**self._GPUS[0], "free_scope": FREE_SCOPE_PROCESS}]
@@ -558,7 +545,7 @@ class TestGpusCli:
 
 
 # --------------------------------------------------------------------------- #
-#  PATCH /v1/config (SEC-2 / FAC-1) - via TestClient
+#  PATCH /v1/config - via TestClient
 # --------------------------------------------------------------------------- #
 
 class TestPatchConfig:
@@ -584,7 +571,7 @@ class TestPatchConfig:
         assert r.status_code == 400
 
     def test_net_deny_null_rejected_not_wiped(self, client):
-        # SEC-2: clobbering net_deny to null removes SSRF blocks - must 400
+        # clobbering net_deny to null removes SSRF blocks - must 400
         r = client.patch("/v1/config", json={"net_deny": None})
         assert r.status_code == 400
         # and net_deny stays its list default
@@ -602,7 +589,7 @@ class TestPatchConfig:
         assert got["n_ctx"] == 8192 and got["mode"] == "log"
 
     def test_plugins_dict_accepted(self, client):
-        # FAC-1: per-plugin config round-trips (was 400 "Unknown config keys: plugins")
+        # per-plugin config round-trips
         r = client.patch("/v1/config", json={"plugins": {"image": {"comfy": {"output_dir": "x"}}}})
         assert r.status_code == 200
         got = client.get("/v1/config").json()
@@ -621,12 +608,9 @@ class TestPatchConfig:
 
 
 # --------------------------------------------------------------------------- #
-#  /v1/config instance_id (AUD-INSTANCEID)                                    #
-#                                                                              #
-#  A stable per-data-directory id, so the GUI can tell a normal restart of    #
-#  THIS install apart from a different install that happens to share the     #
-#  browser origin (localStorage is scoped by origin, not by data directory)  #
-#  and never render/upload a foreign install's cached conversations.         #
+#  /v1/config instance_id: a stable per-data-directory id, so the GUI can tell
+#  a restart of THIS install apart from a different install sharing the browser
+#  origin, and never renders a foreign install's cached conversations.
 # --------------------------------------------------------------------------- #
 
 class TestConfigInstanceId:
@@ -715,9 +699,8 @@ class TestInstanceIdUnit:
         assert first == second, "never regenerated on a normal restart"
 
     def test_recovers_from_empty_marker_file(self, tmp_path, monkeypatch):
-        # A zero-byte / corrupt marker (a truncated write) must not crash the
-        # caller - a fresh id is minted and persisted (rule 5: do not hide the
-        # corruption path behind a crash, but also do not brick the server).
+        # A zero-byte / corrupt marker (a truncated write) does not crash the
+        # caller: a fresh id is minted and persisted.
         import localm.config as cfg
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
         marker = tmp_path / "instance_id.txt"
@@ -733,6 +716,5 @@ class TestGpuLayersCliRange:
         from localm.cli import main
         result = cli_runner.invoke(main, ["run", "-g", "1111", "dummy-model"])
         assert result.exit_code != 0
-        # The IntRange ceiling (1000) appears in the error only post-fix; pre-fix
-        # the bare type=int accepted 1111 and failed later on model resolution.
+        # The IntRange ceiling (1000) appears in the error message.
         assert "1000" in result.output

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for pre-dispatch context capacity guard and worker survival on context ceiling.
 
-Guards issue #1464 / NEW-PRE-DISPATCH-CHECK-PROMPT:
+Two guards:
 1. routes/chat.py checks counted prompt tokens against engine.context_capacity()
    before dispatch, rejecting oversized requests with HTTP 413 Payload Too Large
    instead of passing them to the native backend worker.

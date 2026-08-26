@@ -1,10 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R44: conversation compaction was lossy - it discarded everything but the last
-// 4 turns, sliced each older message mid-word (feeding half-words like "REA" to
-// the summariser), and could re-feed a jumbled summary. The fix keeps recent
-// turns by token budget, truncates the summariser input at word boundaries with
-// reasoning stripped, and sanitises the returned summary.
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
@@ -98,8 +92,8 @@ test("F5: compaction archives (not silently deletes) branches anchored in the su
   const { window } = loadApp({ fetchImpl: impl });
   runScript(window, "chat.ctxMax = 160;");
   const conv = makeConv(20);
-  // Give every message a stable id, then park an alternative timeline anchored
-  // at an OLD message (index 2) that compaction will summarise away.
+  // give every message a stable id, then park an alternative timeline anchored
+  // at an old message that compaction summarises away
   conv.messages.forEach((m) => window.msgId(m));
   conv.branches = [{
     parent: conv.messages[1].id,
@@ -111,9 +105,9 @@ test("F5: compaction archives (not silently deletes) branches anchored in the su
   }];
   const ok = await window.compactConversation(conv);
   assert.equal(ok, true);
-  // The unreachable fork record is gone from navigation...
+  // the unreachable fork record is gone from navigation
   assert.equal((conv.branches || []).length, 0, "dangling fork record dropped");
-  // ...but its alternative content is archived, not silently destroyed.
+  // its alternative content is archived
   const archived = JSON.stringify(conv.droppedBranches || []);
   assert.match(archived, /an alternative timeline I explored/,
     "the summarised-away branch content was archived for recovery");

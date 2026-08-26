@@ -2,13 +2,6 @@
 // The Workflow panel's model picker once it consumes what a plugin declares
 // through host.register_model_role plus localm's own registry slice
 // (localm/plugins/gui/static/pages/workflow.js).
-//
-// Three properties, each of which was a real gap before:
-//   * a dropdown says WHAT it is, without losing the raw field name;
-//   * "I have this registered, ComfyUI is not offering it" is surfaced, and on
-//     the not-installed row too - which is where it matters most;
-//   * an unreachable ComfyUI is no longer a dead end: the registry answers need
-//     no ComfyUI, so they are still shown.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -99,8 +92,6 @@ test("a registered model ComfyUI is not offering is surfaced with what to do", a
 });
 
 test("the hint LEADS with the exact file when the workflow's own file is registered", async () => {
-  // "you HAVE this file, it is in the wrong folder" is a different and much
-  // stronger message than "you have other files of this kind".
   const unsatisfied = { ...VAE_SLOT, current: "ae.safetensors", installed: false, options: [] };
   const box = await render({
     reachable: true, api_url: "u", slots: [unsatisfied], loras: [],
@@ -121,8 +112,7 @@ test("the hint LEADS with the exact file when the workflow's own file is registe
 });
 
 test("the registry-only hint also renders on a slot ComfyUI has NOTHING for", async () => {
-  // The path that skips the <select> entirely. Hanging the hint off the happy
-  // path only would drop it exactly where "you already have one" matters most.
+  // A slot with no options skips the <select> entirely.
   const empty = { ...VAE_SLOT, current: "nowhere.safetensors", options: [], installed: false };
   const box = await render({
     reachable: true, api_url: "u", slots: [empty], loras: [],
@@ -201,11 +191,7 @@ test("an unreachable ComfyUI with no declared roles is unchanged from before", a
 });
 
 test("a dropdown never displays a file other than the one the workflow will use", async () => {
-  // Found by running the real app: the Wan workflow asks for wan2.2_vae, the
-  // ComfyUI in front of it only had ae.safetensors, and with no matching
-  // <option> the browser silently showed ae.safetensors as if it were selected
-  // - while Generate would still have sent wan2.2_vae. A picker that disagrees
-  // with what runs is worse than one that admits it cannot offer the file.
+  // The workflow's current file is not among the options ComfyUI offers.
   const mismatched = {
     ...VAE_SLOT, current: "wan2.2_vae.safetensors",
     options: ["ae.safetensors"], installed: false,

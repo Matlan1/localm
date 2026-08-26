@@ -1,50 +1,40 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """_stream_hiding_tool_calls (context.py) - the live streaming hider shared by
-the CLI's interactive terminal and the GUI's event-sink "token" events
-(CODER-3: one implementation, both surfaces).
+the CLI's interactive terminal and the GUI's event-sink "token" events (one
+implementation, both surfaces).
 
-Extended 2026-07-30 to also hide a call written in one of parser.py's OTHER
-recognised shapes (an explicit ```tool_call/```tool_code fence, or a
-name-gated ```json/bare fence) - previously only the unconditional
-<tool_call>/<|tool_call> wrapper family was hidden here, so a fenced call
-streamed to BOTH the terminal and the GUI as plain visible text and then
-executed for real once the full response arrived (the leak this file's
-sibling, test_assistant_text_correction.py, covers from the GUI-correction
-side). This file is also the first DIRECT coverage of the hider itself - the
-existing <tool_call> marker path had no dedicated test before this; the
-canonical-XML cases below are a regression baseline for it, not just for the
-new fence handling.
+It hides a call written in any of parser.py's recognised shapes: the
+unconditional <tool_call>/<|tool_call> wrapper family, an explicit
+```tool_call/```tool_code fence, and a name-gated ```json/bare fence. A fenced
+call that is not hidden streams to BOTH the terminal and the GUI as plain
+visible text and then executes for real once the full response arrives.
 
-A second design pass, same day: name-gated fences were originally decided by
-BUFFERING THE WHOLE BODY to the fence close, then running the real parse. A
-legitimate large ```json example (the model showing what a call looks like,
-or just unrelated JSON data) paid for that buffering even though it was
-never going to be hidden - streaming would visibly "freeze then burst" for
-anything JSON-shaped. _NameKeyGate (context.py) now decides INCREMENTALLY,
-scanning the object's top-level keys as they arrive (correctly skipping
-non-"name" keys of any JSON type - string, number, bool, null, nested
-object/array - so "name" is found wherever it appears, not only as the
-first key) and releasing the moment the answer is knowable: as soon as a
-"name" value's accumulated prefix can no longer match any registered tool,
-or once the object closes having found no "name" key at all. TestReleaseLatency
-below is the class that turns "streams normally" into a checkable number
-per the reasoning in coder-display-vs-execution-two-detectors (project
-memory) - see that file for why a huge object with NO "name" key at all is
-inherently NOT fast (you cannot know a key is absent without scanning past
-every key that IS present), only the common "name present, wrong value" and
+Name-gated fences are decided INCREMENTALLY, not by buffering the whole body to
+the fence close: a legitimate large ```json example (the model showing what a
+call looks like, or just unrelated JSON data) would otherwise pay for that
+buffering even though it is never going to be hidden, and streaming would
+visibly "freeze then burst" for anything JSON-shaped. _NameKeyGate (context.py)
+scans the object's top-level keys as they arrive - correctly skipping
+non-"name" keys of any JSON type (string, number, bool, null, nested
+object/array), so "name" is found wherever it appears, not only as the first
+key - and releases the moment the answer is knowable: as soon as a "name"
+value's accumulated prefix can no longer match any registered tool, or once the
+object closes having found no "name" key at all. TestReleaseLatency below turns
+"streams normally" into a checkable number. A huge object with NO "name" key at
+all is inherently NOT fast (a key cannot be known absent without scanning past
+every key that IS present); only the common "name present, wrong value" and
 "name absent from an otherwise short object" shapes are.
 
-TestChunkBoundarySweep exists because the FIRST version of the incremental
-design shipped a real bug caught only by sweeping many chunk sizes: a
-4-step sequence (skip whitespace, expect ':', skip whitespace, look at the
-value) was one state that assumed all 4 steps completed before ever
-returning "need more data". A call that paused right after consuming the
-colon resumed by re-checking "is the next character a colon" against a
-character that came AFTER the colon already consumed - invisible at
-whole-string or 1-char-at-a-time delivery, real at other chunk sizes. Each
-of those 4 steps is its own persistent state now (see _advance_name_key_gate's
-docstring). The general lesson stands: sweep chunk sizes when testing
-anything that decides incrementally, never trust one lucky delivery pattern.
+TestChunkBoundarySweep exists because an incremental design is easy to get
+wrong at a chunk boundary: a 4-step sequence (skip whitespace, expect ':', skip
+whitespace, look at the value) written as ONE state assumes all 4 steps
+complete before it can ever return "need more data", so a call that pauses
+right after consuming the colon resumes by re-checking "is the next character a
+colon" against a character that came AFTER the colon already consumed -
+invisible at whole-string or 1-char-at-a-time delivery, real at other chunk
+sizes. Each of those 4 steps is its own persistent state (see
+_advance_name_key_gate's docstring). Sweep chunk sizes when testing anything
+that decides incrementally; never trust one lucky delivery pattern.
 """
 
 import time
@@ -69,8 +59,7 @@ def _release_latency(text, tool_names=None):
     """Feed `text` one character at a time; return how many characters had
     been PULLED FROM THE PIECE ITERATOR by the moment the first non-hidden
     output is yielded (None if the whole text stays hidden - e.g. a real
-    call with no surrounding narration). This is the number the PR body's
-    latency claims are measured with, not a guess."""
+    call with no surrounding narration)."""
     consumed = [0]
 
     def counting_pieces():
@@ -90,8 +79,7 @@ def _release_latency(text, tool_names=None):
 # ---------------------------------------------------------------------------
 
 class TestCanonicalMarkerBaseline:
-    """No dedicated test covered this before; a regression guard for the
-    already-shipped behaviour this change must not disturb."""
+    """Hiding of the canonical ``<tool_call>`` marker path."""
 
     def test_xml_tool_call_fully_hidden(self):
         shown, hidden = _hide([
@@ -301,13 +289,11 @@ class TestKeyOrderIndependence:
 
 class TestChunkBoundarySweep:
     """Every case below is fed through EVERY chunk size in the sweep, not just
-    one - a single fixed split point is exactly how the real bug here shipped
-    unnoticed: whole-string and 1-char-at-a-time delivery both passed, but
-    3-char chunks did not, because a fence header ending precisely at a chunk
-    boundary (the header line complete, but the body's first byte not yet in
-    the buffer) was wrongly judged "not gate-able" and released instead of
-    waiting one more piece. Fixed in context.py; this sweep is what should
-    have caught it, and is what must keep catching its like."""
+    one. A single fixed split point hides real defects: whole-string and
+    1-char-at-a-time delivery can both pass while 3-char chunks do not,
+    because a fence header ending precisely at a chunk boundary (the header
+    line complete, but the body's first byte not yet in the buffer) is wrongly
+    judged "not gate-able" and released instead of waiting one more piece."""
 
     _CASES = [
         pytest.param(
@@ -421,24 +407,10 @@ class TestFenceBodyCapGivesUp:
             while True:
                 yield '"a": 1,'
 
-        # Shrink the cap (same idiom as the sibling adversarial test above)
-        # rather than timing a real 2,000,000-char accumulation. The property
-        # here is that the cap FIRES against a generator that never ends - a
-        # broken cap HANGS, it does not run slowly - and that property is just
-        # as well proven at 50 chars as at two million, in microseconds instead
-        # of seconds.
-        #
-        # The wall-clock bound below is a coarse slowness guard, NOT a hang
-        # detector - an earlier version of this comment claimed the latter and was
-        # wrong. If the cap never fires, next(gen) never returns on an infinite
-        # generator, so `elapsed` is never computed and the assertion never runs:
-        # that failure shows up as the TEST hanging until pytest or CI kills it,
-        # never as this line failing. The real teeth here are the len(chunk) check
-        # below, which is what actually proves the release was bounded.
-        #
-        # The old 3.0s bound was measured against the real cap: 0.6s on an idle dev
-        # box but 7.5s (ubuntu) and 8.3s (windows) on shared runners under -n auto,
-        # so it had roughly 5x headroom locally and none where it gates a merge.
+        # Shrink the cap rather than accumulate a real 2,000,000 chars: the
+        # property under test is that the cap fires against a generator that
+        # never ends. The wall-clock bound below is a coarse slowness guard; the
+        # len(chunk) check is what proves the release was bounded.
         monkeypatch.setattr(_ContextMixin, "_MAX_PENDING_FENCE_BODY", 50)
         gen = _ContextMixin._stream_hiding_tool_calls(
             infinite_filler(), tool_names={"run_tests"})
@@ -452,16 +424,12 @@ class TestFenceBodyCapGivesUp:
 
 
 class TestReleaseLatency:
-    """Turns "streams normally" into a checkable number, per the box
-    coordinator's instruction: "the number, in the PR body, is the claim -
-    checkable; 'streaming is unaffected' is not." Each assertion is a real
-    upper bound measured against the actual code, not a description.
+    """Upper bounds on how many characters buffer before the gate releases.
 
-    A real tool call's narration IS eventually hidden entirely (no separate
-    "release" ever happens for the call span itself - _release_latency
-    returns None for a body with nothing else around it), so these all use
-    a body that is NOT a call, where "release" is exactly the interesting
-    event.
+    A real tool call's narration is hidden entirely - no separate "release"
+    happens for the call span itself, and _release_latency returns None for
+    a body with nothing else around it - so these all use a body that is NOT
+    a call, where "release" is the observable event.
     """
 
     TOOLS = {"run_tests", "read_file", "write_file"}
@@ -477,11 +445,9 @@ class TestReleaseLatency:
         assert lat <= 25, f"released after {lat} of {len(text)} chars - too slow"
 
     def test_no_name_key_in_a_short_object_releases_at_its_close(self):
-        """No "name" key anywhere: cannot be known until the object itself
-        closes (a fundamental limit - you cannot know a key is absent
-        without scanning past every key that IS present) - but that is
-        still well BEFORE the fence's own closing backticks, and nowhere
-        near buffering the whole fence as the old design did."""
+        """No "name" key anywhere: the absence is only known once the object
+        itself closes, since every key present has to be scanned past first.
+        Release still happens before the fence's own closing backticks."""
         obj = '{"users": [1, 2, 3], "count": 3}'
         text = "```json\n" + obj + "\n```"
         lat = _release_latency(text, tool_names=self.TOOLS)
@@ -490,10 +456,9 @@ class TestReleaseLatency:
         assert lat < len(text), "must release before the fence's own close, not just at it"
 
     def test_large_json_with_no_name_key_is_bounded_by_the_object_not_the_whole_response(self):
-        """The honest, measured version of "a 400-line JSON example streams
-        normally": for an object with NO "name" key, release happens once
-        that object closes - proportional to the OBJECT's size, not to
-        however much unrelated text follows it in the same response."""
+        """For an object with NO "name" key, release happens once that object
+        closes - proportional to the OBJECT's size, not to however much
+        unrelated text follows it in the same response."""
         big_obj = '{"items": ' + str(list(range(2000))) + "}"
         text = "```json\n" + big_obj + "\n```" + ("\nmore narration after. " * 50)
         lat = _release_latency(text, tool_names=self.TOOLS)
@@ -514,8 +479,8 @@ class TestReleaseLatency:
 
     def test_a_real_call_is_never_released_early(self):
         """Control: the positive case must NOT show this fast-release
-        behaviour - a genuine call stays fully hidden (no separate visible
-        chunk at all), same as before this whole design pass."""
+        behaviour - a genuine call stays fully hidden, with no separate
+        visible chunk at all."""
         text = '```json\n{"name": "run_tests", "args": {}}\n```'
         lat = _release_latency(text, tool_names=self.TOOLS)
         assert lat is None, f"a real call must never release early, got {lat}"
@@ -610,8 +575,7 @@ class TestCallLLMInteractiveHidesFence:
 
 
 class TestCallLLMEventSinkHidesFence:
-    """The GUI path: this alone used to be the only place the (incomplete)
-    hiding applied. Kept as a companion to the interactive test above so a
+    """The GUI path. Kept as a companion to the interactive test above so a
     future change to one branch cannot silently stop covering the other."""
 
     def test_json_fence_call_never_emitted_as_a_token_event(self, tmp_path):

@@ -1,22 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression: the media-gen VRAM unload must authenticate and verify TLS.
+"""The media-gen VRAM unload must authenticate and verify TLS.
 
 The chat model is unloaded before a ComfyUI media gen by POSTing
 ``/v1/models/unload`` on the local server. That endpoint requires the
-models-write scope, so the call must carry the LOCALM_API_KEY bearer token;
+models-write scope, so the call must carry the LOCALM_API_KEY bearer token,
 and on a built-in-TLS (https) loopback self-call it must trust the install's
-own CA. An earlier version used a bare ``urllib`` POST with neither, so the
-unload silently 401'd / SSL-failed, the chat model stayed resident, and the
-media model loaded on top of it and hung the GPU driver (AMD TDR).
+own CA. Without either, the unload 401s or SSL-fails, the chat model stays
+resident, and the media model loads on top of it.
 
-Also covers the OPEN-MODE (keyless) fallback: this was the fifth site of the
-credential-precedence class fixed alongside self_request (#1114) and
-cli/models.py's unload_cmd/stop_cmd (#1121) - _localm_unload read only
-LOCALM_API_KEY from the environment and had no instance_token parameter at
-all, so a genuinely open server's own fallback unload could never
-authenticate. TestUnloadRealHttpOpenMode drives the real _origin_guard gate,
-mirroring tests/test_vram_handover_open_mode_auth.py's proof for the primary
-(vram.unload_chat_for_media) path.
+Also covers the OPEN-MODE (keyless) fallback: with no key configured,
+_localm_unload sends the caller's own instance_token instead.
+TestUnloadRealHttpOpenMode drives the real _origin_guard gate.
 """
 
 import asyncio
@@ -88,9 +82,8 @@ def test_unload_swallows_failure(monkeypatch):
 
 
 def test_unload_uses_instance_token_when_no_key_configured(monkeypatch):
-    """#1121-class fix: in open (keyless) mode, the caller's own instance
-    token is sent in place of a key - mirrors self_request's
-    test_open_mode_uses_instance_token_when_no_key_configured."""
+    """In open (keyless) mode the caller's own instance token is sent in place
+    of a key."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}
 
@@ -134,10 +127,9 @@ def _wait_sync(cond, want=True, timeout: float = 6.0) -> bool:
 
 
 def _real_open_mode_server():
-    """A real uvicorn instance, open (keyless) mode, with app.state.instance_token
-    set the way instances.advertise() sets it in production - mirrors
-    test_vram_handover_open_mode_auth.py's helper for the primary VRAM-handover
-    path, applied here to the fallback unload."""
+    """A real uvicorn instance, open (keyless) mode, with
+    app.state.instance_token set the way instances.advertise() sets it in
+    production."""
     app = create_app(None)
     app.state.instance_token = "test-instance-token-abcdef123456"
 
@@ -178,9 +170,8 @@ class TestUnloadRealHttpOpenMode:
             _shutdown(server, th)
 
     def test_no_token_still_403s_and_returns_none(self, monkeypatch):
-        """Sanity/negative: the gate is not bypassable by omitting the
-        credential either - proves the previous test's success is really
-        about the instance_token, not the gate being permissive."""
+        """Negative control: omitting the credential does not bypass the
+        gate."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         app, port, server, th = _real_open_mode_server()
         try:

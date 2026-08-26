@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Restart/stop must not leak the embedder worker (REG-650).
+"""Restart/stop must not leak the embedder worker.
 
 _do_shutdown and _do_restart skip releasing the embedder while a request is
-mid-embed(), on the premise that "the worker is a daemon child, so it is still
-reclaimed when this process exits". That premise is FALSE on exactly the two
-paths those functions take:
+mid-embed(). A daemon child is NOT reclaimed on the two paths those functions
+take:
 
   - _do_shutdown ends at os._exit(0), and _do_restart at os.execv(). Both
     bypass atexit - and multiprocessing's daemon-child reclamation IS an atexit
@@ -12,18 +11,8 @@ paths those functions take:
     same PID and replaces only THIS process's image; it never touches the
     separate `localm-embedder-worker` child.
 
-Verified live (2026-07-15) with a real daemon child blocked on a queue, exactly
-like the real worker: reclaimed on a normal interpreter exit, but SURVIVES both
-os._exit and os.execv. So a restart mid-index left the worker orphaned with its
-model resident in VRAM, and the restarted server spawned a second one beside it;
-a "stopped" server left a GPU-resident zombie, defeating that path's stated goal
-of freeing ALL resident VRAM.
-
-The existing pin tests (test_embedder_unload_honors_pin.py) only assert that
-reset_embedder was NOT called - they bless the skip and never check that the
-worker is actually reclaimed, and they monkeypatch os._exit/os.execv to raise
-before any real teardown runs, so no test ever spawned a real child across a
-real exit.
+So a restart mid-index would leave the worker orphaned with its model resident
+in VRAM, and a "stopped" server would leave a GPU-resident zombie.
 """
 
 from __future__ import annotations
@@ -57,7 +46,7 @@ def _isolated_embedder_with(runner, *, active):
 
 
 # --------------------------------------------------------------------------- #
-# The real property: a REAL worker process is actually dead afterwards.
+# A real worker process is dead afterwards.
 # --------------------------------------------------------------------------- #
 
 def test_release_for_exit_kills_a_real_busy_worker_process():
@@ -69,8 +58,7 @@ def test_release_for_exit_kills_a_real_busy_worker_process():
     try:
         assert runner.is_alive(), "worker did not start"
         proc = runner._proc
-        # Pinned: a request is mid-embed(), which is exactly when the old code
-        # skipped the release entirely and leaked this process.
+        # A request is mid-embed().
         emb._EMBEDDER = _isolated_embedder_with(runner, active=1)
 
         assert emb.release_for_exit() is True
@@ -83,10 +71,10 @@ def test_release_for_exit_kills_a_real_busy_worker_process():
 
 
 def test_release_for_exit_never_takes_the_load_lock():
-    """The whole point of this function (REG-650 follow-up): every other way to
-    make the release decision - active_requests(), reset_embedder() - takes
-    _LOCK, which get_embedder() holds for the FULL duration of an embedding-model
-    load. A stop or restart during a load must not block on it.
+    """Every other way to make the release decision - active_requests(),
+    reset_embedder() - takes _LOCK, which get_embedder() holds for the FULL
+    duration of an embedding-model load. A stop or restart during a load must
+    not block on it.
 
     Holds _LOCK from another thread (exactly as an in-progress load does) and
     requires the release to complete anyway."""
@@ -155,13 +143,11 @@ def pinned(monkeypatch):
 def test_stop_during_an_embedder_load_does_not_hang(monkeypatch):
     """The exit path must never block on the embedder's load lock.
 
-    get_embedder() holds _LOCK for a whole embedding-model load. The release
-    guard used to be `if active_requests() == 0`, and active_requests() takes
-    _LOCK - so a stop issued mid-load blocked on the guard, hung the shutdown the
-    user asked for, and never reached the worker teardown (leaking exactly the
-    VRAM-resident worker REG-650 fixed). Note _EMBEDDER is still None mid-load,
-    so the idle branch's reset_embedder() - which also takes _LOCK - was the one
-    taken.
+    get_embedder() holds _LOCK for a whole embedding-model load, and
+    active_requests() takes _LOCK too, so a guard built on it would block a stop
+    issued mid-load and never reach the worker teardown. _EMBEDDER is still None
+    mid-load, so the idle branch's reset_embedder() - which also takes _LOCK -
+    is the one taken.
     """
     monkeypatch.setattr(hs, "_engine", None)
     monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
@@ -230,10 +216,8 @@ def test_do_restart_reaps_the_pinned_embedder_worker(pinned, monkeypatch):
 
 def test_idle_embedder_is_closed_politely(monkeypatch):
     """An IDLE worker still gets the polite shutdown command (so the child frees
-    the model cleanly), just without taking the load lock: the exiting process
-    has no use for reset_embedder()'s singleton clearing, and reaching for it is
-    what made this path able to hang (see test_stop_during_an_embedder_load_
-    does_not_hang)."""
+    the model cleanly), without taking the load lock: the exiting process has no
+    use for reset_embedder()'s singleton clearing."""
     runner = _RecordingRunner()
     monkeypatch.setattr(emb, "_EMBEDDER", _isolated_embedder_with(runner, active=0))
     monkeypatch.setattr(hs, "_engine", None)

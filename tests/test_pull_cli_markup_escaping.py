@@ -34,24 +34,17 @@ ANSI SGR code, making an injected style directly observable - must NOT
 contain the ANSI code the injected style would produce. console.print()
 itself is never mocked away: only the module's `console` name is swapped for
 a recording Console, so Rich's own markup parser still runs for real on the
-(escaped) f-string the fix produces. Verified empirically before writing
-these assertions that an UNESCAPED site produces the inverse: the payload is
-NOT found verbatim in plain output, and the injected ANSI code IS present in
-styled output.
+(escaped) f-string the fix produces. An UNESCAPED site produces the inverse:
+the payload is NOT found verbatim in plain output, and the injected ANSI code
+IS present in styled output.
 
 Plain-corruption sites (the interpolated value sits outside any open tag, so
 a crafted value cannot escape into someone else's span, but can still lose
 its own brackets or open unstyled fake tags of its own) follow the
-established BRACKET_DROP/BRACKET_STYLE convention from
-tests/test_rag_cli_markup_escaping.py and its siblings.
+BRACKET_DROP/BRACKET_STYLE convention used across the markup-escaping tests.
 
 The network layer (huggingface_hub, requests, localm.netpolicy) is mocked to
-hand back attacker-controlled values, matching the mocking conventions
-already used by tests/test_pull_mmproj_autofetch.py,
-tests/test_hf_endpoint_pinned.py and tests/test_url_pull_resume.py - no
-console.print() test file for pull.py existed before this one (checked:
-tests/test_pull_success_report_resilience.py exercises _report_success's own
-resilience, not markup escaping).
+hand back attacker-controlled values.
 """
 
 from __future__ import annotations
@@ -87,11 +80,11 @@ _INJECT_MARKER = "PWNED-MARKER"
 # surrounding tag first (_tag_injection_payload), "47" renders alone
 # ("\x1b[47m"); when it merely OPENS without closing
 # (_tag_injection_payload_no_slash), Rich MERGES it with whatever style was
-# already active ("\x1b[33;47m" alongside an open [yellow], etc.) - confirmed
-# empirically both shapes occur in this file's real sites. A fixed-string
-# search for "\x1b[47m" alone misses the merged form and would silently pass
-# on genuine injection - the exact "test that cannot fail" trap this regex
-# exists to avoid.
+# already active ("\x1b[33;47m" alongside an open [yellow], etc.) - both
+# shapes occur in this file's real sites. A fixed-string search for
+# "\x1b[47m" alone misses the merged form and would silently pass on genuine
+# injection - the exact "test that cannot fail" trap this regex exists to
+# avoid.
 _INJECT_ANSI_RE = re.compile(r"\x1b\[[0-9;]*47(;[0-9]+)*m")
 
 
@@ -110,7 +103,7 @@ def _tag_injection_payload_no_slash() -> str:
     every real Rich CLOSING tag needs. Injection is still real without one:
     a bare "[style]" OPENS a new span that is simply never closed, which
     still applies real styling to (and swallows, in the plain export) the
-    marker text - confirmed empirically before writing this fixture."""
+    marker text."""
     return f"evilname[{_INJECT_STYLE}]{_INJECT_MARKER}"
 
 
@@ -202,7 +195,7 @@ def _wire_hf_hub_download(monkeypatch, content: bytes = b"GGUF"):
 
 @pytest.fixture()
 def url_env(tmp_path, monkeypatch):
-    """Mirrors tests/test_url_pull_resume.py's fixture of the same name."""
+    """A models dir with the disk-space and dir-creation checks stubbed out."""
     models = tmp_path / "models"
     models.mkdir()
     monkeypatch.setattr(mm, "MODELS_DIR", models)
@@ -266,7 +259,7 @@ class TestPullGgufFileTagInjection:
 
     def test_filename_tag_injection_blocked(
             self, rich_capture, fake_registry, monkeypatch):
-        # filename is confined by _safe_models_filename before this print, so
+        # filename is confined by _safe_models_filename ahead of this print, so
         # it can never carry a real closing '[/...]' tag - the no-slash
         # payload (open-without-close) is the exploitable shape here.
         _wire_hf_hub_download(monkeypatch)
@@ -441,13 +434,13 @@ class TestPullHfSnapshotTagInjection:
 class TestPullHfSnapshotBracketDrop:
     # No "Already downloaded" bracket-drop case here: the message at that
     # site shows _pull_hf_snapshot's OWN model_name, which is always
-    # _sanitize_name()-derived (A-Za-z0-9._- only) before this print, so a
-    # bracket cannot reach it - it is escaped anyway as defense-in-depth
-    # (see the source comment), but a bracket-survival test on a value that
-    # is stripped before it ever arrives would pass whether or not escape()
-    # ran, which is not a meaningful regression test. _pull_gguf_file's own
-    # "Already downloaded" case (TestPullGgufFileBracketDrop above) covers
-    # the same message shape with a genuinely unsanitized filename instead.
+    # _sanitize_name()-derived (A-Za-z0-9._- only) by the time it reaches this
+    # print, so a bracket cannot reach it - it is escaped anyway as
+    # defense-in-depth, but a bracket-survival test on a value that is
+    # stripped before it ever arrives would pass whether or not escape() ran.
+    # _pull_gguf_file's own "Already downloaded" case
+    # (TestPullGgufFileBracketDrop above) covers the same message shape with a
+    # genuinely unsanitized filename instead.
 
     def test_sha256_not_supported_message_survives_verbatim(
             self, rich_capture, fake_registry):
@@ -564,7 +557,7 @@ class TestPullUrlBracketDrop:
         # COMPLETE bracket tag must fit inside that slice, or an unescaped
         # site would pass this assertion for the wrong reason (a dangling,
         # unterminated '[' is left as literal text by Rich's own parser
-        # regardless of escaping - confirmed empirically while writing this).
+        # regardless of escaping).
         bad_sha = "[bold red]" + "c" * 40
         assert "[bold red]" in bad_sha[:16], "payload must fit its own tag in the visible slice"
         _wire_http(monkeypatch, 4, _resp(200, b"GGUF"))

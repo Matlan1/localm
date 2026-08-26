@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F9 regression suite (memory-audit 2026-07-02): a PARAPHRASED contradiction
-must reach the ADD/UPDATE/DELETE decision instead of blind-accumulating.
+"""A PARAPHRASED contradiction must reach the ADD/UPDATE/DELETE decision instead
+of blind-accumulating.
 
-Pre-fix, consolidation matched candidates against existing records by difflib
-text ratio only, so 'User lives in Berlin' vs 'User moved to Munich' (ratio
-~0.45) blind-ADDed a second, conflicting record. With an embedder present, the
-semantic matcher now routes cosine-near candidates to the LLM decide step.
+Matching candidates against existing records by difflib text ratio alone puts
+'User lives in Berlin' vs 'User moved to Munich' at ratio ~0.45, which blind-ADDs
+a second, conflicting record. With an embedder present, the semantic matcher
+routes cosine-near candidates to the LLM decide step.
 """
 
 from __future__ import annotations
@@ -97,8 +97,8 @@ def test_unrelated_fact_still_blind_adds(tmp_path, allow_writes):
 
 
 def test_no_embedder_keeps_lexical_only_behavior(tmp_path, allow_writes):
-    # Without an embedder, the paraphrase is not caught (documented limitation),
-    # and nothing crashes: it blind-ADDs as before.
+    # Without an embedder the paraphrase is not caught, and nothing crashes: it
+    # blind-ADDs.
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User lives in Berlin", source="synth"))
 
@@ -113,11 +113,10 @@ def test_no_embedder_keeps_lexical_only_behavior(tmp_path, allow_writes):
 
 
 def test_synth_cannot_semantically_override_user_fact(tmp_path, allow_writes):
-    # The user-fact guardrail still holds through the semantic path: a synth
-    # candidate that semantically matches a user fact cannot silently UPDATE/DELETE
-    # it. Post-F12b a HIGH-confidence contradiction is no longer a silent NO_OP - it
-    # is surfaced as a PENDING CORRECTION for the user to accept/reject - but the
-    # trusted record itself is left untouched here (never auto-overwritten).
+    # The user-fact guardrail holds through the semantic path: a synth candidate
+    # that semantically matches a user fact cannot silently UPDATE or DELETE it.
+    # A HIGH-confidence contradiction is surfaced as a PENDING CORRECTION and the
+    # trusted record is left untouched.
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User lives in Berlin", source="user",
                        importance=0.8), embed_fn=_fake_embed)
@@ -133,7 +132,7 @@ def test_synth_cannot_semantically_override_user_fact(tmp_path, allow_writes):
     # The user's Berlin fact is protected (unchanged, not overwritten, not deleted)
     # and the synth Munich claim is NOT blind-added alongside it.
     assert texts == ["User lives in Berlin"]
-    # ...but the contradiction is surfaced for review (F12b [9]), not swallowed.
+    # ...but the contradiction is surfaced for review, not swallowed.
     assert res["proposed"] == 1
     assert len(s.corrections()) == 1
 

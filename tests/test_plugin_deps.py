@@ -2,10 +2,9 @@
 """Unit tests for localm.plugins.deps - the host-side pip-extra installer.
 
 Covers the resolver (extra -> requirement strings from metadata), the
-already-satisfied check, and install orchestration including the NEGATIVE paths
-required by the spec: a failing installer surfaces the real error (never reports
-success), and a pip that exits 0 but does not actually provide the package is
-still reported failed.
+already-satisfied check, and install orchestration including the NEGATIVE paths:
+a failing installer surfaces the real error and never reports success, and a pip
+that exits 0 without actually providing the package is still reported failed.
 """
 
 import subprocess

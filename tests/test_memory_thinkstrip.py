@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F1 regression suite for memory-audit-2026-07-02 critical C1: thinking-model
-reasoning output must never reach any memory-forming store, and its presence
-must never silently zero a pipeline.
+"""Thinking-model reasoning output must never reach any memory-forming store, and
+its presence must never silently zero a pipeline.
 
-Real-behavior tests: every test drives the actual production code path with a
-deterministic fake ``complete``/engine that emits the exact failure shapes the
-audit captured live on a thinking model (scratchpad before JSON, braces inside
-the scratchpad, all-reasoning truncated replies)."""
+Every test drives the actual production code path with a deterministic fake
+``complete``/engine emitting the shapes a thinking model produces: scratchpad
+before JSON, braces inside the scratchpad, all-reasoning truncated replies."""
 
 from __future__ import annotations
 
@@ -54,8 +52,8 @@ def test_strip_think_idempotent():
 # ------------------------------------------------------- extraction parsing #
 
 def test_extract_parses_json_behind_think_block():
-    # Live failure shape: braces inside <think> broke the first-{-to-last-}
-    # scavenge and extraction returned zero facts.
+    # Braces inside <think> break the first-{-to-last-} scavenge and extraction
+    # returns zero facts.
     facts = extract(lambda p: THINK_JSON, SESSION)
     assert [f["text"] for f in facts] == ["User prefers metric units"]
 
@@ -79,8 +77,8 @@ def test_parse_json_object_strips_think_itself():
 # ------------------------------------------------------------ episodic path #
 
 def test_summarize_session_skips_think_opener_line():
-    # Live failure shape: the first raw line was the think opener and got
-    # stored verbatim as a durable episodic record.
+    # The first raw line is the think opener; it must not be stored verbatim as a
+    # durable episodic record.
     raw = "<think>We need to produce a one-sentence summary...</think>\n" \
           "Discussed the greenhouse controller project."
     assert summarize_session(lambda p: raw, SESSION) == \
@@ -109,8 +107,8 @@ def test_consolidation_never_stores_think_text(tmp_path, monkeypatch):
 
 
 def test_store_regression_no_think_substring_via_episode(tmp_path):
-    # The exact live-captured poisoning: episodic record beginning "<think>We
-    # need to produce..." must be impossible now.
+    # An episodic record beginning "<think>We need to produce..." must be
+    # impossible.
     store = MemoryStore("owner", "chat", root=tmp_path)
     summ = summarize_session(lambda p: THINK_ONLY, SESSION)
     if summ:                       # must not happen; guard the assert below
@@ -237,11 +235,10 @@ if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
 
 
-# ---------------------------------------------------- F5 episodic quality gate #
+# -------------------------------------------------------- episodic quality gate #
 
 def test_summarize_session_rejects_prompt_echo():
-    # The audit's non-thinking baseline stored a verbatim prompt echo as an
-    # episode; the gate must drop it.
+    # A verbatim prompt echo stored as an episode; the gate must drop it.
     from localm.memory.consolidate import summarize_session
     echo = "Summarise in ONE short sentence what the user and the assistant did"
     assert summarize_session(lambda p: echo, SESSION) == ""
@@ -273,9 +270,9 @@ def test_summarize_session_skips_bad_line_takes_good_one():
 
 
 def test_summarize_session_accepts_natural_the_conversation_opener():
-    # F5 grader follow-up: "The conversation focused on..." is a legitimate
-    # summary opener and must NOT be dropped (only the echo-specific
-    # "the conversation below/above/is" forms are rejected).
+    # "The conversation focused on..." is a legitimate summary opener and must NOT
+    # be dropped (only the echo-specific "the conversation below/above/is" forms
+    # are rejected).
     from localm.memory.consolidate import summarize_session
     good = "The conversation focused on the sensor polling loop design."
     assert summarize_session(lambda p: good, SESSION) == good
@@ -289,7 +286,7 @@ def test_summarize_session_still_rejects_conversation_echo():
 
 def test_summarize_session_rejects_json_blob():
     # A model that returns JSON for the episode prompt must not have that blob
-    # stored as a durable episodic record (F7 hardening).
+    # stored as a durable episodic record.
     from localm.memory.consolidate import summarize_session
     blob = '{"facts": [{"fact": "x", "confidence": 0.9}]}'
     assert summarize_session(lambda p: blob, SESSION) == ""

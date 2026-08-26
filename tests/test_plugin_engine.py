@@ -55,10 +55,9 @@ def _ping(name):
 
 
 def test_plugin_config_is_confined_to_own_block(env):
-    """Plugin isolation (security-by-design LM-DA): a plugin's Host config r/w is
-    CONFINED to its own block. It cannot read or tamper with another plugin's
-    persisted config, even though plugins are trusted at install time
-    (compartmentalisation / least privilege)."""
+    """Plugin isolation: a plugin's Host config r/w is CONFINED to its own block.
+    It cannot read or tamper with another plugin's persisted config, even though
+    plugins are trusted at install time."""
     from unittest.mock import MagicMock
 
     from localm.config import load_config, save_config
@@ -93,10 +92,9 @@ def test_plugin_config_is_confined_to_own_block(env):
 
 
 def test_register_chat_hook_is_traceable(env):
-    """Security-by-design LM-DA-SEC-02: a chat hook sees/transforms every chat turn,
-    an otherwise-invisible capability. Its registration must be SURFACED (which
-    plugin hooked which phase) so an unexpected/compromised plugin hook is
-    discoverable, not silent."""
+    """A chat hook sees and transforms every chat turn, an otherwise-invisible
+    capability. Its registration is SURFACED (which plugin hooked which phase) so
+    an unexpected or compromised plugin hook is discoverable, not silent."""
     from unittest.mock import MagicMock
 
     from localm.plugins.engine import PluginHost
@@ -152,14 +150,14 @@ def test_discover_and_parse(env):
     assert specs["alpha"].version == "2.1.0"
     assert specs["alpha"].scope == "alpha"
     assert specs["alpha"].surface.tab_id == "alpha"
-    # a clean manifest produces no unknown-key warning (LM-DA-007)
+    # a clean manifest produces no unknown-key warning
     assert "alpha" not in mgr._discover_errors
 
 
 def test_unknown_manifest_key_warned_but_plugin_loads(env):
-    """LM-DA-007: a misspelled/unknown key in [plugin] or [surface] must be
-    surfaced (it means a tab, client module, or flag quietly never
-    materialises) but must NOT block the plugin - surface, do not escalate."""
+    """A misspelled or unknown key in [plugin] or [surface] must be surfaced (it
+    means a tab, client module, or flag quietly never materialises) but must NOT
+    block the plugin - surface, do not escalate."""
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _make_plugin(plugins, "alpha", _ping("alpha"),
@@ -178,9 +176,9 @@ def test_unknown_manifest_key_warned_but_plugin_loads(env):
 
 
 def test_host_scope_methods_fail_loudly(env):
-    """LM-DA-008: the host has no request context, so has_scope/require_scope
-    cannot actually check anything. They must raise instead of silently
-    allowing - a plugin guard built on a silent no-op can never fire."""
+    """The host has no request context, so has_scope/require_scope cannot check
+    anything. They must raise instead of silently allowing - a plugin guard built
+    on a silent no-op can never fire."""
     from unittest.mock import MagicMock
 
     from localm.plugins.engine import PluginHost
@@ -229,9 +227,8 @@ def test_on_install_hook_fires(env):
 
 def test_hook_failure_is_reported_and_does_not_block_install(env, caplog):
     """A lifecycle hook that RAISES stays best-effort (the install completes),
-    but it must not be SILENT (AGENTS.md rule 5). _invoke_hook used to swallow
-    with a bare `pass`, so an on_install / on_first_use failure was invisible at
-    every level, including debug.
+    but it must not be SILENT: the plugin, the hook name and the underlying
+    error are logged.
 
     WARNING is the load-bearing part of the assertion, not an incidental level:
     the always-on recent-activity ring a bug report dumps is INFO+
@@ -378,13 +375,11 @@ def test_uninstall_builtin_stays_in_catalog(env):
 
 
 def test_uninstall_reports_degraded_result_when_rmtree_fails(env, caplog, monkeypatch):
-    """A locked/permission-denied installed dir must not be silently swallowed
-    (AGENTS.md rule 5): _remove_installed_dir's ``except OSError: pass`` used to
-    log nothing and uninstall() unconditionally returned ``was_installed`` (True)
-    regardless of whether the directory was actually removed. Real failure mode:
-    an AV hold or a still-open file handle on Windows leaves shutil.rmtree
-    raising OSError while the directory (and its code/data) stays on disk - the
-    caller must be told, both via a WARNING log and via the return value."""
+    """A locked or permission-denied installed dir must not be silently
+    swallowed. An AV hold or a still-open file handle on Windows leaves
+    shutil.rmtree raising OSError while the directory (and its code and data)
+    stays on disk - the caller is told, both via a WARNING log and via the
+    return value, rather than getting an unconditional ``was_installed``."""
     import logging
     import shutil
     from pathlib import Path
@@ -455,8 +450,7 @@ def test_delete_data_rejects_parent_traversal(tmp_path, monkeypatch):
     (victim / "keep.txt").write_text("important", encoding="utf-8")
     # A refused delete is a FAILURE, not a silent no-op: the caller (uninstall())
     # must be able to tell "nothing needed deleting" apart from "deletion was
-    # refused for safety", or a --delete-data request that hits this guard would
-    # be reported as having succeeded (rule 5).
+    # refused for safety".
     assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
     assert victim.exists() and (victim / "keep.txt").exists()
 
@@ -479,9 +473,9 @@ def test_delete_data_deletes_legit_subdir(tmp_path, monkeypatch):
 
 
 def test_delete_data_reports_failure_when_rmtree_fails(tmp_path, monkeypatch):
-    """A locked/permission-denied data directory must not be silently swallowed
-    (AGENTS.md rule 5): the old code's ``except OSError: pass`` returned None
-    either way, so a caller had no way to tell a real failure from success."""
+    """A locked or permission-denied data directory must not be silently
+    swallowed. An ``except OSError: pass`` that returns None either way leaves a
+    caller with no way to tell a real failure from success."""
     import shutil
     from pathlib import Path
     mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
@@ -502,11 +496,9 @@ def test_delete_data_reports_failure_when_rmtree_fails(tmp_path, monkeypatch):
 
 
 def test_uninstall_delete_data_reports_degraded_result_on_failure(tmp_path, monkeypatch, caplog):
-    """uninstall(delete_data=True) must fold a failed data deletion into its
-    returned bool, not just the installed-dir removal. Before the fix,
-    uninstall() ignored _delete_plugin_data's outcome entirely (it had none to
-    ignore - the function returned None), so a locked data directory reported a
-    bare True success while the data stayed on disk."""
+    """uninstall(delete_data=True) folds a failed data deletion into its
+    returned bool, not just the installed-dir removal, so a locked data
+    directory cannot report a bare True success while the data stays on disk."""
     import logging
     import shutil
     from pathlib import Path
@@ -645,12 +637,10 @@ def _flaky_then_ok(name, marker_path):
 def test_load_failure_after_partial_register_leaves_nothing_live(env, tmp_path):
     """A plugin whose register() mounts a route and a chat hook, then raises,
     must leave NEITHER live: the engine reporting "not loaded" must be true,
-    not just claimed. Before the fix, _load() propagated the exception straight
-    out of register() without ever calling host.unmount(), so the route stayed
-    reachable and the chat hook kept firing on every turn while self._loaded
-    never got the entry - a partial state unreachable for cleanup. A retry
-    (enable() called again) must not stack a second copy on top of the first
-    failed attempt's remnants either."""
+    not just claimed. _load() calls host.unmount() before propagating the
+    exception, so no route stays reachable and no chat hook keeps firing while
+    self._loaded holds no entry. A retry (enable() called again) must not stack
+    a second copy on top of the first failed attempt's remnants either."""
     from localm.inference.chat_pipeline import ChatPipeline
     from localm.plugins.engine import PluginManager
 
@@ -720,11 +710,10 @@ def test_install_rolls_back_on_load_failure(env):
     behind - install loads first and only persists on success.
 
     The plugin here is ALREADY on disk in the installed root, so install() never
-    copied it, and its directory is now deliberately left alone: deleting a
-    directory this call did not create is the data-loss bug fixed alongside
-    this (a case-variant id did exactly that to a real plugin). This test
-    therefore pins the CONFIG rollback only. The copy-we-did-create case is
-    test_install_rolls_back_a_copy_it_created, which is the fires-control."""
+    copied it, and its directory is left alone: install must never delete a
+    directory it did not create. This test therefore pins the CONFIG rollback
+    only. The copy-we-did-create case is
+    test_install_rolls_back_a_copy_it_created."""
     from localm.config import load_config
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
@@ -908,11 +897,9 @@ def test_attach_engine_http_install_lifecycle(env, monkeypatch):
 
 def test_uninstall_http_reports_failure_when_removal_incomplete(env, monkeypatch):
     """The route must not report {"status": "uninstalled"} when uninstall()
-    itself reports a degraded (False) result. Before the fix, the route called
-    manager.uninstall(...) and discarded its return value entirely, so it
-    always replied 200 "uninstalled" even when the plugin's files could not
-    actually be removed from disk (a locked file, an AV hold, a permission
-    denial)."""
+    itself reports a degraded (False) result - a locked file, an AV hold or a
+    permission denial that leaves the plugin's files on disk must not reply 200
+    "uninstalled"."""
     import shutil
     from pathlib import Path
 
@@ -957,10 +944,9 @@ def _make_legacy_plugin(root, name, *, exports='["tool_hello"]'):
 
 
 def test_external_plugin_http_lifecycle(env):
-    """REG-585: the GUI's External plugins card must have a live API. Install a
-    third-party folder over HTTP, see it listed as an installed non-builtin with
-    its tool exports, then remove it. Before the fix the card called the deleted
-    /v1/plugins and every one of these was a 404."""
+    """The GUI's External plugins card has a live API: install a third-party
+    folder over HTTP, see it listed as an installed non-builtin with its tool
+    exports, then remove it."""
     from localm.plugins.engine import attach_engine
     src = _make_legacy_plugin(env / "src", "myext")
     app = FastAPI()
@@ -1016,15 +1002,12 @@ def test_install_external_rejects_bad_input(env):
 
 
 # ---------------------------------------------------------------------------
-#  Plugin id confinement (CodeQL 18-44).
+#  Plugin id confinement.
 #
-#  _installed_dir()/_store_dir() used to join a caller-supplied id straight onto
-#  a root, and the id arrives unvalidated from the CLI, the MCP tools and the
-#  HTTP {name} path param. Traversal reached shutil.rmtree (install rollback),
-#  the refresh staging rename/rmtree dance, and a marker WRITE outside the
-#  plugins root. Existing coverage only tested traversal for `data_subdir`
-#  (see _delete_plugin_data above); the id itself was untested, which is how
-#  this survived.
+#  The id arrives unvalidated from the CLI, the MCP tools and the HTTP {name}
+#  path param, and _installed_dir()/_store_dir() join it onto a root. Traversal
+#  reaches shutil.rmtree (install rollback), the refresh staging rename/rmtree
+#  dance, and a marker WRITE outside the plugins root.
 # ---------------------------------------------------------------------------
 
 def _traversal_roots(env):
@@ -1033,12 +1016,11 @@ def _traversal_roots(env):
 
     PAYLOAD SAFETY (binding for every test below that reaches rmtree/copytree):
     the escape payloads stay RELATIVE ('../outside') and every root derives from
-    tmp_path, so the blast radius is inside the fixture. This matters because a
-    NEGATIVE pass - revert the fix, prove the tests go red - deliberately runs
-    the unguarded code: nothing refuses the payload on that run, so a payload
-    naming a real location is a live deletion of it, not a test of it. tmp_path
-    is itself absolute and drive-qualified on Windows, so it exercises the
-    identical "an absolute component REPLACES the base" escape with no risk."""
+    tmp_path, so the blast radius is inside the fixture. A run with the guard
+    removed executes the unguarded code for real, so a payload naming a real
+    location would delete it. tmp_path is itself absolute and drive-qualified on
+    Windows, so it exercises the identical "an absolute component REPLACES the
+    base" escape with no risk."""
     base = env / "roots"
     store = base / "store"
     store.mkdir(parents=True)
@@ -1063,11 +1045,9 @@ def test_is_valid_plugin_name_rule():
     for good in ("chat", "coder", "my-plugin", "_x", "a1"):
         assert ok(good), good
     # PAYLOAD SAFETY: never name a REAL location in a test payload, even here.
-    # _is_valid_plugin_name is a pure string predicate and touches no
-    # filesystem, so these cannot delete anything - but a NEGATIVE pass runs the
-    # UNSAFE code for real, and this list is exactly what someone would reuse in
-    # a test that does reach the disk. A sibling lane emptied C:\Users\Public
-    # that way. Drive-qualified and absolute vectors use an unmounted letter and
+    # _is_valid_plugin_name is a pure string predicate and touches no filesystem,
+    # so these cannot delete anything, but a NEGATIVE pass runs the UNSAFE code
+    # for real. Drive-qualified and absolute vectors use an unmounted letter and
     # a synthetic root; they parse identically.
     for bad in ("", ".", "..", "../outside", "..\\outside", "a/b", "a\\b",
                 "Q:/nonexistent", "/nonexistent-root", "my plugin", "1abc",
@@ -1077,11 +1057,12 @@ def test_is_valid_plugin_name_rule():
 
 @pytest.mark.parametrize("evil", ["../outside", "..\\outside"])
 def test_install_with_traversing_id_raises_and_deletes_nothing(env, evil):
-    """PROVEN in triage: install('..\\outside') recursively DELETED a sibling of
-    the plugins root (provision early-returns on the traversed dir's own
-    plugin.toml, then the verify step's rollback rmtree's it). Both separator
-    forms must be refused; on POSIX only '../outside' actually traverses, but
-    the id is illegal - and therefore refused - on every platform."""
+    """install() with a traversing id must be refused and delete nothing:
+    unguarded, provision early-returns on the traversed dir's own plugin.toml
+    and the verify step's rollback then rmtree's it, recursively deleting a
+    sibling of the plugins root. Both separator forms must be refused; on POSIX
+    only the forward-slash form actually traverses, but the id is illegal - and
+    therefore refused - on every platform."""
     from localm.plugins.engine import PluginManager
     store, installed, sentinel = _traversal_roots(env)
     mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
@@ -1111,17 +1092,14 @@ def test_refresh_with_traversing_id_raises_and_writes_nothing(env, evil):
 
 def test_uninstall_and_enable_with_traversing_id_are_refused(env):
     """uninstall()/enable() gate on _installed_set()/_specs membership, which
-    only ever holds single-component basenames - they were NEVER the traversal
+    only ever holds single-component basenames - they are not the traversal
     sink, and this test is not a claim that they were. It pins that they keep
     refusing cleanly rather than growing a path join.
 
-    It does record one deliberate behaviour change: enable() used to answer a
-    traversing id with ValueError('...is not installed; install it first'),
-    because _resolve_missing_plugin_error's `_store_dir(name)` probe traversed
-    out of the store and found the sentinel's plugin.toml. With _store_dir
-    returning None for an illegal id it is now KeyError - the accurate answer,
-    since an illegal id can never be installed and the install hint was
-    misleading. Both are clean failures for CLI and HTTP alike."""
+    enable() answers a traversing id with KeyError, not
+    ValueError('...is not installed; install it first'): _store_dir returns None
+    for an illegal id, and an illegal id can never be installed, so the install
+    hint would be misleading. Both are clean failures for CLI and HTTP alike."""
     from localm.plugins.engine import PluginManager
     store, installed, sentinel = _traversal_roots(env)
     mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
@@ -1180,18 +1158,17 @@ def test_http_plugin_routes_404_a_traversing_name(env, monkeypatch):
         # a name that is not a path at all but still not a legal id
         assert c.post("/api/plugins/not%20an%20id/install").status_code == 404
     assert _sentinel_intact(sentinel)
-    # nothing was created under the installed root either (the POSIX assertion
-    # the docstring promises, which was previously not actually made)
+    # nothing was created under the installed root either
     assert sorted(p.name for p in installed_root.iterdir()) == before
 
 
 # ---------------------------------------------------------------------------
-#  Third-party source trees are untrusted (CodeQL 45).
+#  Third-party source trees are untrusted.
 #
 #  shutil.copytree defaults to symlinks=False, which DEREFERENCES links: a
-#  plugin shipping 'web/notes.txt -> ~/.ssh/id_rsa' had that file's CONTENTS
-#  copied into a directory localm then serves from a StaticFiles mount, before
-#  mount_static's own resolve()-based escape guard could ever see it.
+#  plugin shipping 'web/notes.txt -> ~/.ssh/id_rsa' would have that file's
+#  CONTENTS copied into a directory localm serves from a StaticFiles mount,
+#  before mount_static's own resolve()-based escape guard could see it.
 # ---------------------------------------------------------------------------
 
 def _symlink_or_skip(link, target, *, dir_link=False):
@@ -1261,18 +1238,15 @@ def test_install_external_rejects_a_directory_link_cycle(env):
 @pytest.mark.skipif(os.name != "nt",
                     reason="directory junctions are a Windows-only construct")
 def test_install_external_rejects_a_windows_junction_cycle(env):
-    """REGRESSION GUARD, and the reason the rule is 'any link' rather than 'any
-    ESCAPING link'.
+    """REGRESSION GUARD. The rule is 'any link', not 'any ESCAPING link'.
 
-    shutil.copytree deliberately DEMOTES a directory junction to a non-symlink
-    and recurses into it (stdlib shutil.py: "Special check for directory
-    junctions, which appear as symlinks but we want to recurse"), so
-    symlinks=True neither preserves a junction nor bounds a junction cycle.
-    Measured on the escape-only version of this fix: 63 nested levels copied
-    before it failed on path length. A junction also needs NO elevation to
-    create, unlike os.symlink, so it is the more reachable primitive - and
-    is_symlink() reports False for it, which is why the walk tests the
-    reparse-point attribute instead."""
+    shutil.copytree DEMOTES a directory junction to a non-symlink and recurses
+    into it (stdlib shutil.py: "Special check for directory junctions, which
+    appear as symlinks but we want to recurse"), so symlinks=True neither
+    preserves a junction nor bounds a junction cycle: an escape-only rule copies
+    nested levels until it fails on path length. A junction also needs NO
+    elevation to create, unlike os.symlink, and is_symlink() reports False for
+    it, so the walk tests the reparse-point attribute instead."""
     import _winapi
     from localm.plugins.engine import PluginManager
     src = _make_plugin(env / "src", "juncy", _ping("juncy"))
@@ -1292,24 +1266,21 @@ def test_failed_install_never_deletes_a_dir_it_did_not_create(env):
     """A legal id can still name an ALREADY-INSTALLED plugin's directory - on a
     case-insensitive filesystem 'MyTool' is 'mytool'. The id check cannot see
     that (it is a shape rule, not a uniqueness one), so the rollback must not
-    delete a directory this install never created. Before the fix this
-    destroyed the real plugin and its user data."""
+    delete a directory this install never created."""
     from localm.plugins.engine import PluginManager
     store = env / "store"; store.mkdir(parents=True, exist_ok=True)
     installed = env / "installed"
     # register() raises, so the LOAD-FAILURE rollback site is the one exercised
-    # for the exact-case name - that is the site a one-site fix would have
-    # missed, and a working plugin here would install cleanly and prove nothing.
+    # for the exact-case name; a working plugin here would install cleanly.
     real = _make_plugin(installed, "mytool",
                         'def register(host):\n    raise RuntimeError("boom")\n'
                         'def unregister():\n    pass\n')
     (real / "USER_DATA.txt").write_text("irreplaceable", encoding="utf-8")
 
     mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
-    # install() has TWO rollback sites (verify-failed and load-failed); fixing
-    # only the first still let the exact-case name delete the plugin, so all
-    # three variants are pinned. test_install_rolls_back_a_copy_it_created is
-    # the fires-control: a copy this call DID create is still rolled back.
+    # install() has TWO rollback sites (verify-failed and load-failed), so all
+    # three variants are pinned. test_install_rolls_back_a_copy_it_created covers
+    # a copy this call DID create still being rolled back.
     for variant in ("MyTool", "mytool", "MYTOOL"):
         with pytest.raises((ValueError, KeyError, RuntimeError)):
             mgr.install(variant)          # no store source -> cannot succeed
@@ -1318,13 +1289,11 @@ def test_failed_install_never_deletes_a_dir_it_did_not_create(env):
 
 
 def test_remove_installed_dir_confines_without_demanding_an_identifier(env):
-    """The DELETE site confines by resolved parent, not identifier shape.
-
-    Routing it through the id check made a legitimately-installed directory
-    whose basename is not identifier-shaped (a hand-extracted 'coolplugin-1.0')
-    impossible to uninstall. The relaxation must not cost containment, so this
-    pins BOTH directions: the odd basename is removable, a traversing one is
-    still refused."""
+    """The DELETE site confines by resolved parent, not identifier shape, so a
+    legitimately-installed directory whose basename is not identifier-shaped (a
+    hand-extracted 'coolplugin-1.0') can still be uninstalled. This pins BOTH
+    directions: the odd basename is removable, a traversing one is still
+    refused."""
     from localm.plugins.engine import PluginManager
     installed = env / "installed"
     odd = _make_plugin(installed, "coolplugin-1.0", _ping("coolplugin"))

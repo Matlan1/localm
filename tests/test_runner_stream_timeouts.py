@@ -1,36 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """ModelRunner stream timeouts: slow prefill is not a stall, and a killed worker
-does not leave the backend wedged (REG-606).
+does not leave the backend wedged.
 
-Two regressions from the move to an isolated GGUF worker:
+Two properties of the isolated GGUF worker path:
 
-1. TIME-TO-FIRST-TOKEN. _STREAM_CHUNK_TIMEOUT is documented as a PER-TOKEN
-   ceiling ("real per-token latency is sub-second even on CPU"), but
-   chat_stream's deadline is armed at the top of the loop - including the FIRST
-   iteration, which has no token to wait for yet: it waits for the whole prompt
-   PREFILL. On CPU (`-g 0`), heavy partial offload, or a multi-thousand-token
-   prompt (RAG / a long document / a cold mmap cache), prefill can legitimately
-   exceed that ceiling, and the stream was killed and reported as a false
-   "Generation stalled". Retrying just re-prefills into the same wall, so such a
-   prompt failed permanently. The in-process path this replaced had no
-   wall-clock timeout at all and simply waited for the first token.
+1. TIME-TO-FIRST-TOKEN. _STREAM_CHUNK_TIMEOUT is a PER-TOKEN ceiling, but the
+   FIRST iteration of chat_stream's loop has no token to wait for yet: it waits
+   for the whole prompt PREFILL. On CPU (`-g 0`), heavy partial offload, or a
+   multi-thousand-token prompt (RAG, a long document, a cold mmap cache),
+   prefill can legitimately exceed that ceiling, so the first chunk carries its
+   own larger budget instead of being reported as "Generation stalled".
 
 2. WEDGED BACKEND AFTER A DRAIN-TIMEOUT KILL. On a mid-stream cancel whose
    drain times out, _cancel_stream_and_drain kills the worker and shutdown()
    nulls _req_q/_resp_q/_ctrl_q/_proc, then GeneratorExit is re-raised.
    GgufBackend.chat_stream catches only RuntimeError, so GeneratorExit passes
-   through WITHOUT unload(): _loaded stays True and _runner stays the dead
-   ModelRunner. Engine.chat_stream then sees loaded==True, skips its
+   through without unload() unless the backend drops its loaded state; otherwise
+   _loaded stays True with a dead _runner, Engine.chat_stream skips its
    auto-reload, and the next request hits `self._req_q.put(...)` on None ->
-   AttributeError: 'NoneType' object has no attribute 'put' - which is not a
-   RuntimeError either, so it is not caught/unloaded, and every subsequent
+   AttributeError, which is not a RuntimeError either, so every subsequent
    request to that model repeats it until the model is manually evicted.
-
-The suite missed both: the streaming tests use a tiny model with short prompts
-(first-token prefill far under the ceiling) and cancel within 3-5s (so the drain
-always confirms well before its timeout), while the unit tests mock
-spawn_and_load/chat_stream via return_value, so the real poll/timeout loop is
-never driven.
 
 These drive the REAL ModelRunner.chat_stream poll loop over REAL queues,
 substituting only the native decode (a fake child thread) and the process

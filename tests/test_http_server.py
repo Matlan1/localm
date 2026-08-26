@@ -88,7 +88,7 @@ class TestUnloadEndpoint(unittest.TestCase):
         _app = create_app(self.engine)
         self.client = TestClient(
             _app, headers={"Authorization": f"Bearer {_app.state.shell_token}"})
-        # VRAM unmeasurable by default so the C4 release-guard returns at once,
+        # VRAM unmeasurable by default so the release guard returns at once,
         # rather than polling its full timeout for VRAM a mock engine never frees.
         p = patch("localm.discover.vram_info", return_value={})
         p.start()
@@ -107,8 +107,8 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertEqual(r.json()["status"], "already_unloaded")
 
     def test_unload_reports_vram_freed_once_released(self):
-        # The C4 guard: free VRAM is low before the unload, then rises after the
-        # native free completes. The endpoint must wait for the rise and report it.
+        # The release guard: free VRAM is low before the unload, then rises after
+        # the native free completes. The endpoint waits for the rise and reports it.
         reads = iter([{"free": 10 * GB}, {"free": 20 * GB}])
         with patch("localm.discover.vram_info",
                    side_effect=lambda: next(reads, {"free": 20 * GB})):
@@ -121,17 +121,14 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertEqual(body["vram_after_bytes"], 20 * GB)
 
     def test_unload_vram_reading_marked_uncertain_on_a_stale_probe(self):
-        """Release-verify-pass bug: /v1/models/unload reported a specific
-        vram_before/after_bytes + vram_freed as fact even when the underlying
-        GPU probe had timed out and fallen back to a stale last-known-good
-        reading (confirmed via an OS-level VRAM counter that the real
-        free/use cycle worked correctly the whole time - the endpoint's OWN
-        reporting was the only thing wrong). The response must now say so."""
+        """/v1/models/unload must not report a specific
+        vram_before/after_bytes + vram_freed as fact when the underlying GPU
+        probe has timed out and fallen back to a stale last-known-good reading.
+        The response must say the reading is uncertain."""
         # A real vram_capacity() only returns a tuple when EXPLICITLY asked
-        # (return_status=True) - the bare-call polling _free() closure inside
-        # wait_for_vram_release still expects (and must keep getting) a plain
-        # dict, so the mock mirrors the real contract rather than fixing one
-        # shape regardless of how it is called.
+        # (return_status=True); the bare-call polling _free() closure inside
+        # wait_for_vram_release expects a plain dict, so the mock mirrors the
+        # real contract rather than fixing one shape regardless of the call.
         from localm.discover import GPU_PROBE_TIMEOUT
 
         def _capacity(*, return_status=False):
@@ -165,13 +162,12 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertNotIn("vram_note", body)
 
     def test_unload_release_detected_via_combined_split_capacity(self):
-        """AUDIT-GPU-SPLIT-1: the C4 release-guard's before/after free-VRAM
-        delta must be measured against discover.vram_capacity() (combined
-        split capacity), not just the single main GPU - a model that frees
-        VRAM mostly on a NON-main split device must still be detected as
-        released. If only the main GPU's free were measured here, this
-        scenario would show no rise at all and incorrectly report
-        vram_freed=False despite VRAM genuinely being freed."""
+        """The release-guard's before/after free-VRAM delta must be measured
+        against discover.vram_capacity() (combined split capacity), not just the
+        single main GPU - a model that frees VRAM mostly on a NON-main split
+        device must still be detected as released. Measuring only the main GPU's
+        free shows no rise at all here and reports vram_freed=False despite VRAM
+        genuinely being freed."""
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         states = iter([
@@ -228,8 +224,8 @@ class TestLoadEndpoint(unittest.TestCase):
 
     def test_load_omits_gpu_placement_when_backend_cannot_report_it(self):
         # Default mock (gpu_placement=None, e.g. an HF backend or a model that
-        # has never been loaded): the old response shape is unchanged, no
-        # gpu_layers_* keys fabricated without evidence.
+        # has never been loaded): no gpu_layers_* keys are fabricated without
+        # evidence.
         r = self.client.post("/v1/models/load")
         body = r.json()
         self.assertNotIn("gpu_layers_offloaded", body)
@@ -249,11 +245,10 @@ class TestLoadEndpoint(unittest.TestCase):
         self.assertFalse(body["degraded"])
 
     def test_load_reports_partial_gpu_offload_as_degraded(self):
-        # AGENTS.md rule 5: a model too big to fully fit VRAM still loads (the
-        # backend's own sizing deliberately defers to a partial/zero GPU
-        # offload rather than refusing), so the response must not read as an
-        # unqualified success - it must say how much of the model actually
-        # landed on the GPU.
+        # A model too big to fully fit VRAM still loads (the backend's own sizing
+        # defers to a partial/zero GPU offload rather than refusing), so the
+        # response must not read as an unqualified success: it says how much of
+        # the model actually landed on the GPU.
         self.engine.gpu_placement = {
             "gpu_layers_offloaded": 12, "gpu_layers_total": 32,
             "degraded": True,

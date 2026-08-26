@@ -36,7 +36,7 @@ and /bg is the background route. Until now a GUI session could not revoke its
 own auto-approve, and the workaround suggested for the others (start again with
 resume) does not exist in privacy mode, which is the DEFAULT on both surfaces.
 
-Six options that were CLI-only until now have a web form here, per the standing
+Six options that were CLI-only have a web form here, per the standing
 CLI/GUI parity rule: --estimate (the estimate route), --patch-mode (the
 patch_mode field + the two patch routes), --native-tools (the native_tools
 field, with the effective value reported back), --output-format json (the result
@@ -97,12 +97,12 @@ class CreateSessionRequest(BaseModel):
     # reproduce the same output (the CLI's --seed). A plain generation kwarg
     # alongside the two above, forwarded the same way.
     seed: int | None = None
-    resume: bool = False              # restore this cwd's saved conversation (CODER-2)
+    resume: bool = False              # restore this cwd's saved conversation
     # WHICH past conversation to restore, when several are saved for this cwd.
     # None + resume -> the most recent, unchanged. An id (from
     # /api/coder/dormant) continues that particular session instead.
     resume_checkpoint_id: str | None = None
-    custom_instructions: str | None = None   # extra system-prompt guidance (rec#584)
+    custom_instructions: str | None = None   # extra system-prompt guidance
     # Exit-code oracle: a command the HARNESS runs before a turn that changed
     # files may finish. None + auto_verify -> the project's detected check.
     # Ignored for a restricted (scoped-key) session, which has no execution.
@@ -124,9 +124,9 @@ class CreateSessionRequest(BaseModel):
     # create_session.
     native_tools: bool = False
     # WHICH model server answers this session, the web form of the CLI's
-    # --online / --anthropic / --url (ADR-0013). Per session, never global
-    # config: a global default is how a later project's source reaches a cloud
-    # provider without anyone deciding, and that failure is silent.
+    # --online / --anthropic / --url. Per session, never global config: a
+    # global default is how a later project's source reaches a cloud provider
+    # without anyone deciding, and that failure is silent.
     #   local (default) - this localm. Offline, grammar-constrained tool calls.
     #   url             - any OpenAI-compatible endpoint. On this machine
     #                     (Ollama, LM Studio, vLLM) or off it; _resolve_backend
@@ -238,7 +238,7 @@ def _principal_from_request(request: Request) -> tuple[bool, str | None]:
     # central helpers the main auth uses so a cookie session and the same key as a
     # bearer map to one principal: caller_scopes/principal_id translate a session id
     # to its scope snapshot and owning-key hash (a raw verify() would fail on a sid,
-    # making a cookie-authed owner look like a non-owner - issue A1).
+    # making a cookie-authed owner look like a non-owner).
     held = caller_scopes(request)
     if held is not None and S.ADMIN in held:
         return True, None                       # the owner key / owner session
@@ -259,12 +259,11 @@ def _get_session(request: Request, session_id: str):
 
 
 # ------------------------------------------------------------------ #
-#  Coder LLM backend selection (ADR-0013, ADR-0014)                   #
+#  Coder LLM backend selection                                       #
 # ------------------------------------------------------------------ #
 # A GUI coder session was hardwired to this localm; the terminal has had
 # --online / --anthropic / --url since the beginning. This closes that parity
-# gap. Everything below is PER SESSION - see ADR-0013 for why a global config
-# key was rejected.
+# gap. Everything below is PER SESSION.
 
 _BACKEND_MODES = ("local", "url", "openai", "anthropic")
 
@@ -286,7 +285,7 @@ def _url_leaves_machine(url: str) -> bool:
     """True when *url* points somewhere other than this machine.
 
     Uses ``bindhost.is_loopback_host``, the canonical classifier, rather than a
-    private set of literals. It differs deliberately from ``reviewer.py``'s
+    private set of literals. It differs from ``reviewer.py``'s
     ``_LOOPBACK_HOSTS`` in two places, both in the SAFE direction here:
     ``127.0.0.2`` (the whole 127.0.0.0/8 block) is correctly local, and
     ``0.0.0.0`` / an empty host are NOT treated as local. A wildcard bind
@@ -314,9 +313,9 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
 
     BLOCKING: netpolicy resolves DNS. Call this off the event loop.
 
-    The descriptor deliberately carries no credential, and neither does
-    ``info()``: a secret that round-trips to a client is a secret in a browser
-    history, a proxy log and a screenshot.
+    The descriptor carries no credential, and neither does ``info()``: a secret
+    that round-trips to a client is a secret in a browser history, a proxy log
+    and a screenshot.
     """
     mode = (req.backend or "local").strip().lower()
     if mode not in _BACKEND_MODES:
@@ -374,12 +373,11 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
     leaves = _url_leaves_machine(base)
 
     # DESTINATION policy applies only to a destination that actually leaves the
-    # machine. This is deliberately NOT the whole of check_url for every URL,
-    # and that distinction was found by running the feature rather than by
-    # reading it: check_url's public-address arm refuses loopback by default, so
-    # guarding every base URL with it made "point the coder at my own Ollama" -
-    # the single most likely use of this field - fail out of the box, with a
-    # message telling the user to set net_allow_private, a GLOBAL setting that
+    # machine. This is NOT the whole of check_url for every URL: check_url's
+    # public-address arm refuses loopback by default, so guarding every base URL
+    # with it makes "point the coder at my own Ollama" - the single most likely
+    # use of this field - fail out of the box, with a message telling the user to
+    # set net_allow_private, a GLOBAL setting that
     # would weaken the SSRF guard for genuine web fetches too.
     #
     # The calibration matches what the rest of localm already does. netpolicy
@@ -419,9 +417,9 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
     if not api_key and env_var:
         api_key = os.environ.get(env_var, "").strip()
     if not api_key and mode in ("openai", "anthropic"):
-        # Refuse now, with the reason, rather than building a session that 401s
-        # on its first message - by which point the failure reads as the
-        # provider being down rather than a key never having been supplied.
+        # Refuse now, naming the cause, rather than building a session that 401s
+        # on its first message - by which point the failure reads as the provider
+        # being down rather than a key never having been supplied.
         raise HTTPException(
             400, f"{mode} needs an API key. Enter one for this session, or set "
                  f"{env_var} before starting localm.")
@@ -447,9 +445,8 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
         notes.append(
             "This session sends your prompts and the file contents it reads to "
             f"{base}. They leave this machine.")
-    # Selecting anything but this localm loses grammar-constrained tool calls.
     # Said out loud rather than left for the user to infer from a capability
-    # they cannot see (AGENTS.md rule 5), the same way native_tools is.
+    # they cannot see, the same way native_tools is.
     if not backend.supports_grammar:
         notes.append(
             "Grammar-constrained tool calls are off for this backend; the "
@@ -510,10 +507,10 @@ async def create_session(req: CreateSessionRequest, request: Request):
         # UNC path (a real roaming-profile configuration) would otherwise
         # expand INTO a UNC string after a pre-expansion check had already
         # cleared it - the check must see the same string that reaches
-        # is_dir()/resolve(). Same guard, same reasoning, as the already-
-        # fixed run_coder_task in mcpserver/server.py (PR #893). This is the
-        # branch the OWNER (or open-mode's default-owner caller) and
-        # coder:full keys take - the `restricted` branch above already
+        # is_dir()/resolve(). Same guard as run_coder_task in
+        # mcpserver/server.py. This is the branch the OWNER (or open-mode's
+        # default-owner caller) and coder:full keys take - the `restricted`
+        # branch above already
         # ignores req.cwd entirely and uses root_dir instead, so it needs no
         # guard of its own; the MORE-trusted branch is the one that actually
         # touches the string, not the less-trusted one.
@@ -545,7 +542,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
 
     from localm.audit import effective_mode, mode_at_least_as_private, parse_mode
     # Pass the session's project dir so a per-project .localcoder/config.toml mode
-    # is honored by the GUI coder, not just the global coder_mode (REC-CODER-MODE-TOML).
+    # is honored by the GUI coder, not just the global coder_mode.
     # Resolved BEFORE the backend, not after: the privacy gate needs it to decide
     # whether this session may talk to an off-machine model at all.
     floor_mode = effective_mode("coder", cwd=cwd)
@@ -564,7 +561,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
     session_mode = req.mode or floor_mode.value
 
     loop = asyncio.get_running_loop()
-    # WHICH model server answers this session (ADR-0013). Off the event loop:
+    # WHICH model server answers this session. Off the event loop:
     # netpolicy resolves DNS for a non-local backend, and a blocking resolve in
     # an async handler stalls every request this server is serving, not just
     # this one.
@@ -581,7 +578,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # are dropped), and the session runs on localm's own grammar-constrained
     # tool-call convention instead - which is the equivalent guarantee, not a
     # downgrade. Nothing errors either way; saying nothing is what would make an
-    # ignored option indistinguishable from an applied one (AGENTS.md rule 5).
+    # ignored option indistinguishable from an applied one.
     if req.native_tools and not backend.supports_native_tools:
         notes.append(
             "native_tools was not applied: this server does not implement the "
@@ -625,8 +622,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
     ))
     session.principal = principal      # who owns this session (None = the owner)
     mgr.create(session)
-    # Optional resume (CODER-2): restore this cwd's saved conversation into the
-    # new session. Owner / coder:full only - a restricted scoped session must not
+    # Optional resume: restore this cwd's saved conversation into the new
+    # session. Owner / coder:full only - a restricted scoped session must not
     # load the owner's prior conversation. The checkpoint read runs off the loop.
     resumed = False
     if req.resume and not restricted:
@@ -752,7 +749,7 @@ async def session_estimate(session_id: str, req: EstimateRequest, request: Reque
         # The session refused the claim. A DEDICATED type, never a broad
         # RuntimeError: a model that raises RuntimeError would otherwise be
         # reported as a busy session - a fault hidden behind a status that
-        # invites a retry. Measured while writing this route's tests.
+        # invites a retry.
         raise HTTPException(
             409, "Session is closed" if e.reason == "closed"
             else "Session is busy - estimate before starting a task")
@@ -896,7 +893,7 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
     why that is a bug, not just a limitation) - the GUI's model switcher had no
     way to reach an already-running coder session at all, so it kept sending
     the ORIGINAL model on every request and could reload it right back into
-    VRAM after the user deliberately switched away from it.
+    VRAM after the user switched away from it.
 
     Same trust model as create_session's optional model switch above: a
     per-session model change repoints the ONE shared engine for EVERYONE, so a
@@ -1135,10 +1132,10 @@ async def session_delete(session_id: str, request: Request):
     # _detect_shell_changes(), which shells out to `git status --porcelain`
     # (timeout 10) plus up to two `git diff`s (timeout 15 each). Inline on this
     # async handler that froze the whole event loop, and every concurrent request
-    # with it, for the git duration (REG-594). Offload it, matching the pattern
-    # the other potentially-slow routes here already use.
+    # with it, for the git duration. Offload it, matching the pattern the other
+    # potentially-slow routes here already use.
     #
-    # Bounded (follow-up to #1057) at a bit over the ~40s worst-case git
+    # Bounded at a bit over the roughly 40s worst-case git
     # budget above. Safe against corruption: SessionManager.remove() pops
     # session_id from its dict BEFORE close() runs (sessions.py), so an
     # abandoned close() cannot race a second DELETE of the SAME id - the
@@ -1174,8 +1171,8 @@ async def coder_history(request: Request):
     is_owner, _ = _principal_from_request(request)
     if not is_owner:
         # "authorized": False lets the GUI say "sign in as the owner" instead of
-        # mislabelling this as privacy mode - the two used to be indistinguishable
-        # (issue A1).
+        # mislabelling this as privacy mode, which would be indistinguishable
+        # from it.
         return {"enabled": False, "authorized": False, "logs": []}
     from localm import audit as _audit
     from localm.audit import SessionMode, effective_mode
@@ -1223,7 +1220,7 @@ async def coder_history_entries(name: str, request: Request):
 
 @_router.get("/api/coder/resumable")
 async def coder_resumable(request: Request, cwd: str = ""):
-    """Is there a saved conversation to resume for *cwd*? (CODER-2)
+    """Is there a saved conversation to resume for *cwd*?
 
     Owner-only: resuming restores the OWNER's prior conversation, so a scoped /
     shared key is never told one exists (and create_session also refuses resume
@@ -1261,7 +1258,7 @@ async def coder_resumable(request: Request, cwd: str = ""):
 # A permanent statement, not an empty-state message. The list below is
 # INCOMPLETE by construction for anyone who uses privacy mode, and a surface
 # that only admits that when it happens to be empty reads as an excuse for a
-# short list rather than as a property of the feature (AGENTS.md rule 5).
+# short list rather than as a property of the feature.
 _PRIVACY_NOTE = "Privacy-mode sessions are never recorded and never appear here."
 
 
@@ -1369,12 +1366,9 @@ def _episode_root(cwd: str) -> Path:
     chances for one to drift, and the one that drifts is the one that stops
     refusing UNC.
 
-    Deliberately NO is_dir() check, and that is a correctness decision rather
-    than a relaxation. Lessons live under the localm data dir keyed by the
-    RESOLVED project path (measured: delete the project and its lessons are still
-    there), so a directory that has been moved or removed still has an entry -
-    and that is precisely when someone wants to reach it. Refusing on is_dir()
-    would hide it.
+    NO is_dir() check. Lessons live under the localm data dir keyed by the
+    RESOLVED project path, so a directory that has been moved or removed still
+    has an entry and stays reachable here.
 
     That leaves resolve() as the ONLY filesystem touch on a client-supplied
     string, and resolve() is required: the CLI derives the very same key by
@@ -1488,8 +1482,8 @@ async def coder_episode_forget(episode_id: str, request: Request,
                                req: EpisodeTargetRequest):
     """Drop ONE lesson from recall: ``--forget-episode``.
 
-    Reversible by design - the record is archived first - which is why this is a
-    plain POST rather than something the UI has to frighten anyone about. If the
+    Reversible - the record is archived first - so this is a plain POST rather
+    than something the UI has to frighten anyone about. If the
     archiving half failed, the lesson is still gone from recall, so that is
     reported as a caveat on a real outcome rather than swallowed.
     """
@@ -1569,9 +1563,9 @@ async def coder_episodes_clear(request: Request, req: EpisodeTargetRequest):
     """Erase ALL episodic memory for a project, archive included:
     ``--forget-episodes``.
 
-    NOT reversible, and the archive goes too on purpose: "cleared episodic
-    memory" while the lesson text still sat in a sidecar would be a privacy claim
-    that is not true. The counts are read BEFORE the erase so the response can
+    NOT reversible, and the archive goes too: "cleared episodic memory" while the
+    lesson text still sat in a sidecar would be a privacy claim that is not true.
+    The counts are read BEFORE the erase so the response can
     say what was actually destroyed - afterwards there is nothing left to count.
     """
     if not _is_owner(request):
@@ -1585,9 +1579,9 @@ async def coder_episodes_clear(request: Request, req: EpisodeTargetRequest):
         archived = len(store.forgotten())
         store.clear()
         # Read back rather than trusting the unlink. This is the one episode
-        # operation with no undo, so "erased" has to be a MEASURED claim: a
-        # partial erase that reported success would leave lesson text on disk
-        # under a privacy promise that was not kept (rule 5).
+        # operation with no undo: a partial erase leaves lesson text on disk
+        # under a privacy promise that was not kept, so it is never reported
+        # as success.
         after = EpisodeStore(root)
         remaining = len(after.all()) + len(after.forgotten())
         if remaining:
@@ -1624,16 +1618,8 @@ async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest
         from localm.plugins.coder.backends.http import HTTPBackend
         from localm.plugins.coder.episodes import EpisodeStore, consolidate
         from localm.textnorm import strip_think
-        # PINNED TO THIS LOCALM ON PURPOSE. This is the second HTTPBackend in
-        # this file and it must NOT follow a session's backend selection
-        # (ADR-0013 / ADR-0014), so do not "fix" the inconsistency with
-        # create_session:
-        #   - It rewrites the user's STORED EPISODIC MEMORY, the accumulated
-        #     lessons from every project they have used the coder on. Sending
-        #     that to a provider is a strictly larger disclosure than a single
-        #     session's prompts, and nobody asked for it.
-        #   - There is no selection to inherit anyway: this route takes an
-        #     EpisodeTargetRequest, which carries a cwd and no session id.
+        # Pinned to this localm. This HTTPBackend does NOT follow a session's
+        # backend selection, unlike the one in create_session.
         # The session ESTIMATE route builds no backend at all - it calls
         # session.run_estimate and therefore already uses the session's own
         # backend, selection included.

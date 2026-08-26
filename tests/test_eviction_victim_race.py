@@ -5,26 +5,26 @@ switch_engine picks an idle victim, then `await`s its unload (an executor call -
 an event-loop yield). During that yield a CONCURRENT remover (another API load
 that picked the SAME idle victim - get_engine loads with preempt=False so they
 coexist - or an idle/explicit unload) may have already dropped the victim from
-`_engines`/`_engines_lru`. The removal step then used a bare
-`del _engines[evict_name]` / `_engines_lru.remove(evict_name)`, which raises
-KeyError/ValueError and surfaces as an HTTP 500 with a traceback (plus a leaked
-`_inference_sems` entry). This pins the guarded removal.
+`_engines`/`_engines_lru`. A bare `del _engines[evict_name]` /
+`_engines_lru.remove(evict_name)` then raises KeyError/ValueError and surfaces
+as an HTTP 500 with a traceback (plus a leaked `_inference_sems` entry). This
+pins the guarded removal.
 
 The concurrent removal is simulated deterministically by the victim's own
 unload() dropping itself from the registry (exactly what a racing remover does
 during the same await window) and freeing enough VRAM for the incoming load.
 
-The GatedEngine tests further down pin the deeper BUG-9b follow-up: the
+The GatedEngine tests further down pin the deeper case: the
 pin-arrives-during-the-native-unload-await window itself, on every evict/unload
 path. A request pins its engine lock-free (active_requests += 1) AFTER
-get_engine's active_requests==0 check has passed (AUDIT-CRIT-1 keeps the pin
-synchronous), so a QUEUED request could pin the victim DURING the unload await and
-get it freed out from under it, then silently auto-reloaded (VRAM
-over-subscription / a tight-box 500). The fix detaches the eviction victim from
-the live registry BEFORE the free and flags the kept-registered unload paths
-`unloading`, so get_engine/switch_engine's fast paths refuse an engine that is
-being freed - WITHOUT taking the victim's own semaphore (which would reintroduce
-the two-switch lock-ordering deadlock AUDIT-CRIT-1 warns about).
+get_engine's active_requests==0 check has passed (the pin is synchronous), so a
+QUEUED request can pin the victim DURING the unload await and get it freed out
+from under it, then silently auto-reloaded (VRAM over-subscription / a tight-box
+500). The eviction victim is detached from the live registry BEFORE the free,
+and the kept-registered unload paths are flagged `unloading`, so
+get_engine/switch_engine's fast paths refuse an engine that is being freed -
+WITHOUT taking the victim's own semaphore, which would reintroduce a two-switch
+lock-ordering deadlock.
 """
 
 import asyncio
@@ -106,9 +106,8 @@ def evicting(monkeypatch):
     hs._active_model_name = None
     hs._default_model_name = None
     # Also reset by unload_one_model/unload_all_models/_idle_unload_once
-    # whenever they clear _active_model_name (see _last_active_model_name's
-    # own docstring) - a name remembered by an earlier test must not leak
-    # into this one's expectation of a clean slate.
+    # whenever they clear _active_model_name, so a name remembered by an earlier
+    # test does not leak into this one.
     hs._last_active_model_name = None
     hs._engine = None
     hs._inference_sem = None
@@ -139,11 +138,9 @@ def test_eviction_survives_victim_removed_during_unload(evicting):
 
 
 # --------------------------------------------------------------------------- #
-#  BUG-9b: the pin-arrives-during-the-native-unload-await window itself.       #
-#  Each test drives an evict/unload to a controllable STOP inside the native  #
-#  unload() (the exact TOCTOU window) and asserts the victim is not            #
-#  fast-path-pinnable there. Negative-tested: on the pre-fix code the victim   #
-#  is still loaded+registered during its own free, so the assertion fires.     #
+#  The pin-arrives-during-the-native-unload-await window.                      #
+#  Each test drives an evict/unload to a controllable STOP inside the          #
+#  native unload() and asserts the victim is not fast-path-pinnable there.     #
 # --------------------------------------------------------------------------- #
 
 
@@ -222,12 +219,9 @@ def _install(monkeypatch, engines, *, total_gb=10):
     hs._active_model_name = None
     hs._default_model_name = None
     # Also reset by unload_one_model/unload_all_models/_idle_unload_once
-    # whenever they clear _active_model_name (see _last_active_model_name's
-    # own docstring) - so a model unloaded by an EARLIER test in this file
-    # (e.g. test_idle_unload_victim_not_pinnable_during_native_free) cannot
-    # leak its remembered name into a LATER test that expects a genuinely
-    # unresolvable state, such as
-    # test_localm_request_resolving_to_no_model_is_503_not_500.
+    # whenever they clear _active_model_name, so a model unloaded by an EARLIER
+    # test in this file cannot leak its remembered name into a later test that
+    # expects a genuinely unresolvable state.
     hs._last_active_model_name = None
     hs._engine = None
     hs._inference_sem = None
@@ -268,17 +262,15 @@ def test_eviction_victim_not_pinnable_during_native_free(monkeypatch):
             hs.switch_engine("model-b", hs._engine_factory, preempt=False))
         await _wait_entered(a)
 
-        # THE INVARIANT: while the victim is being freed it must NOT be
-        # fast-path-pinnable. On the buggy code it is still loaded + registered
-        # here, so a queued get_engine would hand it back and pin a doomed engine.
+        # While the victim is being freed it is NOT fast-path-pinnable, so a
+        # queued get_engine cannot hand it back and pin a doomed engine.
         assert not _fast_path_pinnable("model-a"), (
             "victim is fast-path-pinnable while it is being freed: a queued "
             "request would pin an engine about to be unloaded out from under it")
 
-        # Drive the REAL queued-request resolution + pin during the window and
-        # prove it never ends up holding a pin on a dead engine. On the fix this
-        # either 503s (honest backpressure - the victim's VRAM is still held and
-        # nothing else is evictable) or reloads fresh; either way, no doomed pin.
+        # Drive the REAL queued-request resolution + pin during the window: it
+        # either 503s (the victim's VRAM is still held and nothing else is
+        # evictable) or reloads fresh, and never holds a pin on a dead engine.
         pinned = None
         try:
             resolved = await hs.get_engine("model-a")

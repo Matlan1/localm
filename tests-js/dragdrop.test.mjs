@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // jsdom tests for drag-and-drop file attachment on the chat view
-// (addAttachedFiles + the #view-chat drop handler in app.js). We assert the
-// observable effect - a chip appears in #attach-chips - because the underlying
-// `chat` state is module-scoped (not reachable from the test).
-
+// (addAttachedFiles + the #view-chat drop handler in app.js).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp } from "./harness.mjs";
 
 const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
-// Poll until `fn()` is truthy or timeout (FileReader.onload is async and can
-// take >20ms in the loaded-app context).
+// polls until `fn()` is truthy or the timeout expires; FileReader.onload is async
 async function waitFor(fn, timeout = 800) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {

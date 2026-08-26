@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B7: the coder agent would answer questions about the project from assumption
-(hallucinating files / APIs that do not exist) instead of reading the code first.
-The system prompt now carries an explicit grounding rule: read or search the
+"""The system prompt carries an explicit grounding rule: read or search the
 relevant files before answering a question about the project, and base every
-claim on a tool result. This holds for every model family (incl. the compressed
-small-model prompt).
+claim on a tool result. This holds for every model family, including the
+compressed small-model prompt.
 """
 
 from pathlib import Path
@@ -16,9 +14,8 @@ CWD = Path("/tmp/proj")
 
 def _grounded(text: str) -> bool:
     low = text.lower()
-    # A precise, identifiable grounding directive (not just scattered keywords):
-    # it must tell the model to read/search BEFORE answering a project question
-    # and to not answer from assumption/memory.
+    # The prompt tells the model to read or search BEFORE answering a project
+    # question, and not to answer from assumption or memory.
     return ("before answering a question about" in low
             and ("read or search" in low)
             and ("assumption" in low or "memory" in low))
@@ -35,6 +32,6 @@ def test_thinking_prompt_requires_grounding():
 
 
 def test_small_prompt_requires_grounding():
-    # The compressed small-model prompt must still ground answers.
+    # The compressed small-model prompt still grounds answers.
     p = build_system_prompt(CWD, model_name="phi-4-mini")
     assert _grounded(p), "small prompt lacks a grounding-before-answering rule"

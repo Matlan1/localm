@@ -3,27 +3,21 @@
 
 conftest's system-path guard exists because a test that reads, stats, or lists a
 REAL system location has stopped testing our code: it depends on the machine it
-runs on, and it is the same shape as the production defect it is usually written
-to cover. The coder's scope gate used to ``resolve()`` a model-supplied absolute
-path in order to REFUSE it, so refusing reached out and stat-ed whatever the model
-named (#802 for the shell warning path, and the enforcement path after it). Four
-confinement test files had to be purged of exactly that pattern.
+runs on.
 
-A guard nobody proves can fire is worth nothing, so this drives the SHIPPED guard
-end to end through real sub-pytest runs, in two halves:
+This drives the SHIPPED guard end to end through real sub-pytest runs, in two
+halves:
 
   (i)  the recording machinery, through a benign marker root inside the test's own
        tmp_path - so the fires-control never goes near a real system path itself;
   (ii) the matcher, through pure string assertions with no filesystem at all.
 
-Plus the assertion that makes the other two mean something: that the guard is
-ARMED in this very session. Without it, every test here could pass while the
-shipped guard sat inert, and "green" would mean "never ran".
+Plus the assertion that the guard is ARMED in this very session, without which
+every test here could pass while the shipped guard sat inert.
 
-The sub-runs are SUBPROCESS runs, deliberately. This session's own guard is armed
-in-process, and an in-process sub-run would record the sub-test's deliberate touch
-into the outer session's hit table - failing the fires-control test for doing
-exactly what it exists to do.
+The sub-runs are SUBPROCESS runs: this session's own guard is armed in-process,
+and an in-process sub-run would record the sub-test's deliberate touch into the
+outer session's hit table.
 """
 
 from __future__ import annotations
@@ -42,9 +36,9 @@ _REAL_CONFTEST = str(Path(__file__).parent / "conftest.py").replace("\\", "/")
 def _real_conftest_module():
     """Load the SHIPPED tests/conftest.py under its own module name.
 
-    By path rather than ``import``, so these assert against the real file rather
-    than a copy that could drift from it, and under a distinct name because the
-    generated sub-conftest is itself called ``conftest``."""
+    By path, not by ``import``, so these assert against the real file, and under
+    a distinct module name because the generated sub-conftest is itself called
+    ``conftest``."""
     spec = importlib.util.spec_from_file_location(
         "_localm_syspath_conftest", _REAL_CONFTEST)
     module = importlib.util.module_from_spec(spec)
@@ -56,9 +50,8 @@ def _with_real_conftest(pytester):
     """Point the sub-run at the REAL tests/conftest.py.
 
     Only the two names the guard needs are re-exported. A ``from conftest import
-    *`` would silently skip every underscore-prefixed name, so the guard would
-    never arrive and the sub-run would pass with nothing installed - green while
-    proving nothing.
+    *`` skips every underscore-prefixed name, so the guard would never arrive and
+    the sub-run would pass with nothing installed.
     """
     pytester.makeconftest(
         "import importlib.util as _u, sys\n"
@@ -77,10 +70,9 @@ def marker_root(tmp_path, monkeypatch):
     """A benign, disposable directory that the guard is told to treat as a system
     location, via the ADD-only extra-markers env var.
 
-    This is the whole trick that lets the guard be proven without any test going
-    near a real system path: the machinery under test is identical, only the
-    marker list differs. The env var can only ADD roots, so a sub-run can never
-    use it to weaken the shipped guard."""
+    The machinery under test is identical; only the marker list differs. The env
+    var can only ADD roots, so a sub-run can never use it to weaken the shipped
+    guard."""
     root = tmp_path / "pretend-system-root"
     (root / "sub").mkdir(parents=True)
     (root / "sub" / "thing.cfg").write_text("data\n", encoding="utf-8")
@@ -89,8 +81,7 @@ def marker_root(tmp_path, monkeypatch):
 
 
 class TestTheGuardIsActuallyArmed:
-    """The anti-theater half. If these fail, every other test in this file is
-    passing for the wrong reason."""
+    """The guard must be armed in this session."""
 
     def test_the_filesystem_entry_points_are_wrapped_in_this_session(self):
         """Not 'a guard exists somewhere' but 'this run's os.stat is the guard's'.
@@ -110,10 +101,9 @@ class TestTheGuardIsActuallyArmed:
                 "this session, so every syspath test is vacuous")
 
     def test_a_real_system_root_is_among_the_markers(self):
-        """The guard must be watching something real, derived at runtime rather
-        than hardcoded. On Windows that is %SystemRoot%; elsewhere the FHS config
-        roots. A marker list that had gone empty would make the guard inert while
-        still 'passing'."""
+        """The guard must be watching something real, derived at runtime and not
+        hardcoded. On Windows that is %SystemRoot%; elsewhere the FHS config
+        roots. An empty marker list makes the guard inert."""
         conftest = _real_conftest_module()
         roots = conftest._syspath_marker_roots()
         assert roots, "no system-path markers at all"
@@ -128,7 +118,7 @@ class TestTheGuardIsActuallyArmed:
 
 class TestTheMatcher:
     """Half (ii): pure strings, no filesystem touched at all - not even a benign
-    one. The matcher is where a subtle bug would silently narrow the guard."""
+    one."""
 
     @pytest.fixture
     def rx(self):
@@ -152,24 +142,19 @@ class TestTheMatcher:
         assert _real_conftest_module()._syspath_matches(rx, path) is expected
 
     def test_non_path_inputs_do_not_explode(self, rx):
-        """os.stat legitimately accepts an int fd, which is not a path at all. A
-        matcher that raised on one would turn the guard into a crash generator."""
+        """os.stat legitimately accepts an int fd, which is not a path at all, and
+        the matcher must not raise on one."""
         conftest = _real_conftest_module()
         assert conftest._syspath_matches(rx, 3) is False
         assert conftest._syspath_matches(rx, b"/etc/x") is True
         assert conftest._syspath_matches(None, "/etc/x") is False
 
     def test_extra_markers_can_only_add(self, monkeypatch):
-        """The env var exists for this file's fires-controls, so it must not be
-        usable to switch the guard off."""
+        """The env var can only ADD roots; it cannot switch the guard off."""
         conftest = _real_conftest_module()
         baseline = conftest._syspath_marker_roots()
-        # The var is os.pathsep-SEPARATED, so the value itself must not contain
-        # the separator. A Windows drive path survives where pathsep is ";" and
-        # splits into "d" + "/somewhere/else" where it is ":" - which is why the
-        # hardcoded "d:/somewhere/else" passed on Windows and failed on Linux.
-        # Drive paths do not exist on POSIX anyway, so the parser is correct and
-        # the fixture value is what has to be platform-appropriate.
+        # The var is os.pathsep-separated, so the value itself must not contain the
+        # separator; the fixture value has to be platform-appropriate.
         extra = "d:/somewhere/else" if os.name == "nt" else "/somewhere/else"
         assert os.pathsep not in extra, "the marker value must survive the split"
         monkeypatch.setenv("LOCALM_TEST_SYSPATH_EXTRA_MARKERS", extra)
@@ -178,11 +163,8 @@ class TestTheMatcher:
         assert extra in widened
 
     def test_extra_markers_split_on_the_platform_separator(self, monkeypatch):
-        """Two markers in one value must arrive as two roots, not one.
-
-        The bug above hid inside a single-marker case, where a wrong split still
-        left something plausible in the list. Pinning the multi-marker shape
-        makes the separator itself the thing under test.
+        """Two markers in one value must arrive as two roots, not one, so the
+        separator itself is what is under test.
         """
         conftest = _real_conftest_module()
         one = "/alpha/one" if os.name != "nt" else "y:/alpha/one"
@@ -196,10 +178,10 @@ class TestTheMatcher:
 class TestTheRecordingMachineryFires:
     """Half (i): every patched entry point, driven through a real sub-pytest run
     against a benign marker root. Parametrised over the entry points because they
-    are patched individually and any one of them could be missed - as io.open
-    nearly was (it and builtins.open are the same function object but two
-    separate module attributes: bare open() goes through one, Path.read_text()
-    through the other, so patching either alone leaves a hole)."""
+    are patched individually. io.open and builtins.open are the same function
+    object but two separate module attributes: bare open() goes through one,
+    Path.read_text() through the other, so patching either alone leaves a
+    hole."""
 
     @pytest.mark.parametrize("body,label", [
         ("os.stat(TARGET)", "os.stat"),
@@ -249,8 +231,7 @@ class TestTheRecordingMachineryFires:
 
 
 class TestTheGuardDoesNotFalsePositive:
-    """A guard that cries wolf gets silenced, so the quiet cases matter as much
-    as the loud ones."""
+    """The quiet cases: paths that must NOT be flagged."""
 
     def test_ordinary_tmp_path_work_is_fine(self, pytester, marker_root):
         _with_real_conftest(pytester)

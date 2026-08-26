@@ -1,29 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0009 P6/P7: rag-reembed and rag-upload report STRUCTURED progress
-(``Job.progress``, from PR #1102 / test_job_progress_channel.py's P5) instead of
-prose (reembed) or nothing (upload).
+"""rag-reembed and rag-upload report STRUCTURED progress (``Job.progress``)
+instead of prose (reembed) or nothing (upload).
 
-P6: ``Collection.reembed``'s batch loop already computed the exact ``n/total``
-for every batch and could only print it as prose
-(``on_progress(f"re-embedding {n}/{tot}")``, invisible to ``/api/activity``, the
-CLI and MCP). It now ALSO passes ``phase``/``done``/``total``/``unit`` as
-keywords on the SAME call, carrying the identical numbers the line text was
-built from, so ``plug._job_progress`` can forward them to ``Job.progress``
-verbatim - never a second, independent computation that could drift from what
-the line says (that drift is exactly what P5's single-derivation-point
-guarantee exists to prevent).
+``Collection.reembed``'s batch loop computes the exact ``n/total`` for every
+batch. It passes ``phase``/``done``/``total``/``unit`` as keywords on the SAME
+``on_progress`` call that carries the line text, so ``plug._job_progress``
+forwards the identical numbers the line was built from rather than deriving
+them a second time.
 
-P7: ``POST /api/rag/collections/{name}/upload`` knows the file count and the
-total DECODED byte size before any indexing work starts - the whole request is
-already base64-decoded by the time the job function runs - and reported
-neither. It now reports both as one t=0 progress event, so a client sees a real
-denominator immediately instead of silence until the first file finishes.
+``POST /api/rag/collections/{name}/upload`` knows the file count and the total
+DECODED byte size before any indexing work starts - the whole request is
+already base64-decoded by the time the job function runs - and reports both as
+one t=0 progress event, so a client sees a real denominator immediately instead
+of silence until the first file finishes.
 
-Neither call site computes a percentage itself; ``Job.progress`` is still the
-only place that divides (ADR-0008 R1 / P5), and an unknown total must still
-report ``pct: null`` rather than a fabricated 0 - covered here only at the
-point where these two units could have reintroduced that mistake; the general
-contract is test_job_progress_channel.py's.
+Neither call site computes a percentage itself; ``Job.progress`` is the only
+place that divides, and an unknown total reports ``pct: null`` rather than a
+fabricated 0.
 """
 from __future__ import annotations
 
@@ -50,7 +43,7 @@ def _collection(tmp_path, texts, dim=8):
 
 
 # --------------------------------------------------------------------------- #
-#  P6a: reembed's loop hands over numbers, not a percentage                   #
+#  reembed's loop hands over numbers, not a percentage                        #
 # --------------------------------------------------------------------------- #
 
 class TestReembedStructuredProgress:
@@ -69,20 +62,17 @@ class TestReembedStructuredProgress:
                                "unit": "chunks"}
 
     def test_never_hands_on_progress_a_precomputed_percentage(self, tmp_path):
-        """P5's whole point is that pct is derived in exactly one place
-        (Job.progress). If reembed did that division itself and passed a
-        ``pct`` kwarg along, it would reopen the four-independent-derivations
-        problem P5 exists to close - just one call site later."""
+        """pct is derived in exactly one place (Job.progress). reembed must not
+        do that division itself and pass a ``pct`` kwarg along."""
         c = _collection(tmp_path, ["a", "b", "c"], dim=8)
         calls = []
         c.reembed(embed_fn=_embedder(8), on_progress=lambda t, **kw: calls.append(kw))
         assert calls and all("pct" not in kw for kw in calls)
 
     def test_a_kwargs_tolerant_string_only_sink_still_works(self, tmp_path):
-        """Any sink reused for reembed must accept and ignore the new keywords
-        (the CLI's own reembed callback was updated the same way); this pins
-        that the contract is additive, not a breaking change to on_progress's
-        established single-string-argument callers elsewhere in store.py."""
+        """Any sink reused for reembed must accept and ignore the new keywords:
+        the contract is additive, not a breaking change to on_progress's
+        single-string-argument callers elsewhere in store.py."""
         c = _collection(tmp_path, ["a", "b"], dim=8)
         messages = []
 
@@ -94,7 +84,7 @@ class TestReembedStructuredProgress:
 
 
 # --------------------------------------------------------------------------- #
-#  P6b: plug._job_progress forwards the structured call to Job.progress       #
+#  plug._job_progress forwards the structured call to Job.progress            #
 # --------------------------------------------------------------------------- #
 
 def _job() -> Job:
@@ -137,7 +127,7 @@ class TestJobProgressWrapperForwardsReembedNumbers:
 
 
 # --------------------------------------------------------------------------- #
-#  P6c: composed end to end - reembed through a REAL Job, no HTTP needed      #
+#  Composed end to end: reembed through a REAL Job, no HTTP needed            #
 # --------------------------------------------------------------------------- #
 
 class TestReembedProgressReachesARealJobEndToEnd:
@@ -158,7 +148,7 @@ class TestReembedProgressReachesARealJobEndToEnd:
 
 
 # --------------------------------------------------------------------------- #
-#  P7: /upload reports the known file count + byte total at t=0               #
+#  /upload reports the known file count + byte total at t=0                   #
 # --------------------------------------------------------------------------- #
 
 def _b64(data: bytes) -> str:
@@ -232,22 +222,17 @@ class TestUploadReportsKnownTotalsAtJobStart:
         assert first["pct"] == 0.0, (
             "0 of a KNOWN total is a measured zero, not the fabricated-0 case "
             "P5/R1 forbids")
-        # UPDATED by ADR-0009 P7-b. This previously asserted the t=0 report
-        # SURVIVED to the listing, "since add_uploads reports nothing further" -
-        # which was true, and was the defect: a real denominator with a frozen
-        # numerator, so the bar read "0 of 2 files" for the whole run.
-        # add_uploads now ticks per item, so the listing ends at 100 and the t=0
-        # event is the FIRST of several rather than the only one. Everything
-        # above still holds and is still the point of this test: the count and
-        # the decoded byte total are known before any indexing starts.
+        # add_uploads ticks per item, so the listing ends at 100 and the t=0 event
+        # is the first of several. The known file count and the decoded byte total
+        # are reported before any indexing starts.
         assert job.summary()["pct"] == 100.0, (
             "the listing did not advance past the t=0 report")
 
     def test_byte_total_reflects_decoded_size_not_the_base64_length(
             self, tmp_path, monkeypatch):
-        """Guards the specific arithmetic mistake this unit could reintroduce:
-        base64 inflates by ~4/3, so reporting the encoded string length instead
-        of len(data) would overstate every upload's byte total by ~33%."""
+        """base64 inflates by ~4/3, so reporting the encoded string length
+        instead of len(data) would overstate every upload's byte total by
+        ~33%."""
         from fastapi.testclient import TestClient
 
         app = _upload_app(tmp_path, monkeypatch)

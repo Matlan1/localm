@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S5: localm is AGPL-3.0-or-later only. The README must not advertise a separate
-commercial license (a dual-licensing offer would require a CLA from contributors
-to be sound; the maintainer chose AGPL-only instead).
+"""localm is AGPL-3.0-or-later only. The README must not advertise a separate
+commercial license.
 """
 
 from pathlib import Path
@@ -15,6 +14,6 @@ def test_readme_states_agpl():
 
 
 def test_readme_has_no_commercial_license_offer():
-    # NEGATIVE: pre-fix the README offered "a separate commercial license".
+    # The README must not offer a separate commercial license.
     text = (ROOT / "README.md").read_text(encoding="utf-8").lower()
     assert "commercial license" not in text

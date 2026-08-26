@@ -1,21 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-COMFY-SILENT-PARTIAL-APPLY: a ComfyUI node whose weights only partly
-apply (a LoRA key mismatch, missing VAE/UNet keys, ...) is not an
-execution_error - ComfyUI logs a console warning and the run still "succeeds".
-Covers the pure capture mechanism in comfy_client.py (comfy_launch_log_path /
-comfy_console_tail_start / comfy_console_warnings_since) and its wiring into
-generate_image()'s returned message + reproducibility sidecar.
+"""A ComfyUI node whose weights only partly apply (a LoRA key mismatch, missing
+VAE/UNet keys, ...) is not an execution_error - ComfyUI logs a console warning
+and the run still "succeeds". Covers the capture mechanism in comfy_client.py
+(comfy_launch_log_path / comfy_console_tail_start /
+comfy_console_warnings_since) and its wiring into generate_image()'s returned
+message + reproducibility sidecar.
 
-Also covers three defects an adversarial review found in the first version of
-this mechanism, all fixed here: (1) comfy_launch_log_path() was one path
-shared by every localm-launched ComfyUI instance, corrupting/misattributing
-across independently-configured image/video/music instances; (2) the
-liveness-only spawned_pid() guard could not tell "still the same process" from
-"died and got relaunched under the same api_url", silently reading a truncated
-or wrong-generation log; (3) comfy_console_checked was derived from whether an
-offset was captured before submission, not from whether the read after
-polling actually happened, reintroducing the exact "checked vs could not
-check" ambiguity the field exists to eliminate.
+Three properties of that mechanism are pinned separately: comfy_launch_log_path()
+is PER-INSTANCE, so independently-configured image/video/music instances do not
+corrupt or misattribute each other's log; the guard checks process IDENTITY, not
+just liveness, so a process that died and was relaunched under the same api_url
+is not read as the same one; and comfy_console_checked is derived from whether
+the read after polling actually happened, not from whether an offset was
+captured before submission.
 """
 
 import json
@@ -84,8 +81,7 @@ class TestLaunchLogPathScoping:
 
 class TestConsoleTailStart:
     def test_none_when_not_localm_launched(self):
-        # No _remember_spawned entry for this URL - nothing to tail, and no
-        # offset should be trusted as meaningful.
+        # No _remember_spawned entry for this URL: nothing to tail.
         assert cc.comfy_console_tail_start("http://127.0.0.1:19999") is None
 
     def test_offset_and_pid_captured(self, spawned):
@@ -97,9 +93,8 @@ class TestConsoleTailStart:
         assert tail.pid == 4321
 
     def test_none_when_log_file_absent(self, spawned):
-        # spawned but nothing has ever been logged (fresh LOCALM_HOME) -
-        # .stat() raises FileNotFoundError; must fail closed to None, not an
-        # offset of 0 (0 would look like a valid, empty-so-far log).
+        # Spawned but nothing logged yet: .stat() raises FileNotFoundError and the
+        # offset must come back None, not 0.
         assert not cc.comfy_launch_log_path(spawned).exists()
         assert cc.comfy_console_tail_start(spawned) is None
 
@@ -115,8 +110,7 @@ class TestConsoleWarningsSince:
         assert cc.comfy_console_warnings_since(spawned, None) == (False, [])
 
     def test_not_localm_launched_short_circuits(self):
-        # Even given a real-looking tail token, no spawned_pid means there is
-        # no process localm can attribute it to.
+        # A real-looking tail token with no spawned_pid.
         fake_tail = cc.ComfyConsoleTail(offset=0, pid=999999)
         assert cc.comfy_console_warnings_since(
             "http://127.0.0.1:19999", fake_tail) == (False, [])
@@ -162,7 +156,7 @@ class TestConsoleWarningsSince:
         self._fresh_log(spawned)
         tail = cc.comfy_console_tail_start(spawned)
         with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
-            f.write("lora key not loaded\n")  # deliberately NOT "unet missing:"
+            f.write("lora key not loaded\n")  # not the unet missing: marker
             f.write("unet missing")            # split across the line break
             f.write("\n: on the next line, should not match\n")
         checked, warnings = cc.comfy_console_warnings_since(spawned, tail)
@@ -192,22 +186,21 @@ class TestConsoleWarningsSince:
         assert cc.comfy_console_warnings_since(spawned, tail) == (False, [])
 
     def test_relaunch_with_new_pid_yields_unchecked_not_a_false_clean(self, spawned):
-        """The MEDIUM-severity identity-check fix: the ORIGINAL process dies
-        and a DIFFERENT one gets launched for the SAME api_url before the
-        read happens (ensure_comfy's fresh "w" open truncates the log and
-        re-registers a new pid under the same _spawned_procs[api_url] key).
-        A liveness-only check ("is spawned_pid() not None") would wrongly
-        pass here and either silently under-report (seek past a truncated
-        file) or misattribute the new process's own output. The identity
-        check (tail.pid == the CURRENT spawned_pid) must catch it and report
-        unchecked, not a false all-clear."""
+        """The ORIGINAL process dies and a DIFFERENT one is launched for the
+        SAME api_url before the read happens (ensure_comfy's fresh "w" open
+        truncates the log and re-registers a new pid under the same
+        _spawned_procs[api_url] key). A liveness-only check ("is spawned_pid()
+        not None") would pass here and either under-report (seek past a
+        truncated file) or misattribute the new process's own output. The
+        identity check (tail.pid == the CURRENT spawned_pid) reports unchecked
+        instead."""
         self._fresh_log(spawned)
         tail = cc.comfy_console_tail_start(spawned)
         assert tail.pid == 4321
         with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
             f.write("lora key not loaded: a genuine warning about to be lost\n")
-        # Simulate ensure_comfy relaunching for the SAME api_url: a fresh
-        # spawn re-registers a NEW pid and (in real code) truncates the log.
+        # ensure_comfy relaunching for the same api_url: a fresh spawn registers a
+        # new pid and truncates the log.
         cc._remember_spawned(spawned, _FakeProc(pid=9999))
         cc.comfy_launch_log_path(spawned).write_bytes(b"")  # the real "w" reopen
         assert cc.comfy_console_warnings_since(spawned, tail) == (False, [])
@@ -302,12 +295,10 @@ class TestComfyConsoleWarningWiring:
         assert sidecar["lora_name"] == "bad.safetensors"
 
     def test_clean_run_never_warns(self, tmp_path, monkeypatch, spawned):
-        """The counterpart fires-control: a successful, compatible generation
-        must not spuriously warn or grow a sidecar field it never observed -
-        but MUST still record comfy_console_checked=True, distinguishing
-        "checked, found nothing" from the remote-ComfyUI "could not check"
-        case below. Collapsing those two into identical silence is exactly
-        the defect shape this project's rules call out."""
+        """A successful, compatible generation must not warn or grow a sidecar
+        field it never observed, and MUST still record
+        comfy_console_checked=True, distinguishing "checked, found nothing"
+        from the remote-ComfyUI "could not check" case below."""
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
         out = tmp_path / "art2.png"
@@ -343,9 +334,7 @@ class TestComfyConsoleWarningWiring:
         launch this ComfyUI' case (already running, or remote/LAN per
         sanitize_comfy_url). No warning either, same as the clean-run case -
         but comfy_console_checked must read False here, NOT True: this run
-        never actually looked, and a reader must be able to tell the two
-        silences apart instead of reading "no warning field" as an all-clear
-        regardless of which case produced it."""
+        never looked, and the two silences have to be distinguishable."""
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
         out = tmp_path / "art3.png"
@@ -416,8 +405,8 @@ def _fake_music_urlopen(log_path, extra_on_prompt=""):
 
 class TestMusicConsoleWarningWiring:
     """generate_music() consumes the SAME shared comfy_console_tail_start /
-    comfy_console_warnings_since as generate_image() (#1033) - image/music/
-    video share the exact submit -> poll -> fetch transport. Mirrors
+    comfy_console_warnings_since as generate_image(): image/music/video share
+    the same submit -> poll -> fetch transport. Mirrors
     TestComfyConsoleWarningWiring above, adapted to music's inline sidecar
     dict (no separate _write_music_sidecar function)."""
 
@@ -516,9 +505,8 @@ def _fake_video_urlopen(log_path, extra_on_prompt=""):
 class TestVideoConsoleWarningWiring:
     """generate_video() consumes the same shared machinery - see
     TestMusicConsoleWarningWiring's docstring. Also confirms video_gen's
-    submit path genuinely reaches comfy_submit_prompt/comfy_poll_until_done
-    (not just importing them), which was verified by inspection before this
-    unit and is exercised for real here."""
+    submit path reaches comfy_submit_prompt/comfy_poll_until_done rather than
+    merely importing them."""
 
     def test_warning_surfaces_in_message_and_sidecar(self, tmp_path, monkeypatch, spawned):
         import os

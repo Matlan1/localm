@@ -127,7 +127,7 @@ def tool_git_push(
 
 
 # --------------------------------------------------------------------------
-# Worktree helpers (used by tools/parallel.py; deliberately not registry tools)
+# Worktree helpers (used by tools/parallel.py; not registry tools)
 # --------------------------------------------------------------------------
 
 # Every worktree this feature creates is named with this prefix, so an orphan left
@@ -264,7 +264,7 @@ def git_worktree_remove(repo: Path, path: Path) -> tuple[str, bool]:
 # `git worktree prune -n -v` reports each record it WOULD drop as
 # "Removing worktrees/<name>: <reason>", where <name> is the administrative
 # record under .git/worktrees/ and derives from the worktree directory's own
-# basename. Verified against git 2.54.0.
+# basename.
 _PRUNE_RECORD_RE = re.compile(r"^Removing\s+worktrees/(?P<name>.+?):")
 
 
@@ -274,18 +274,16 @@ def git_prune_child_worktrees(repo: Path) -> tuple[str, bool]:
     `git worktree prune` takes no pathspec (`usage: git worktree prune [-n] [-v]
     [--expire <expire>]`), so a bare call drops the administrative record of
     EVERY registered worktree whose directory is currently missing - in the
-    USER's repo, not just ours. Git's own documentation names the victim: a
+    USER's repo, not just localm's. Git's own documentation names the victim: a
     worktree "stored on a portable device or network share which is not always
     mounted" is indistinguishable from an abandoned one, and recovering it needs
-    `git worktree repair`. Tidying up after our own children is not worth
-    silently discarding a user's worktree; that is the same class of bug #795
-    fixed for RAG, where an unplugged drive must not be able to destroy the index.
+    `git worktree repair`.
 
     So: ask git what it WOULD prune, and prune only when every record listed is
-    one of ours (the ``coder-child-`` prefix). Anything else, INCLUDING a line we
-    cannot parse, fails CLOSED - we skip the prune and say why. A leftover record
-    of our own is harmless and already surfaced in the dispatch report; a dropped
-    foreign record cannot be recovered from here.
+    one of ours (the ``coder-child-`` prefix). Anything else, INCLUDING a line
+    that cannot be parsed, fails CLOSED - the prune is skipped and the reason is
+    reported. A leftover record of our own is harmless and already surfaced in
+    the dispatch report; a dropped foreign record cannot be recovered from here.
 
     Returns (message, ok). ok=False means nothing was pruned and the message says
     what stopped it, for the caller to surface rather than swallow.

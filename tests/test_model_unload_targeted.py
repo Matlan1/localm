@@ -2,10 +2,9 @@
 """Targeted per-model unload (`POST /v1/models/unload?model=...` and the GUI's
 `/api/models/unload`), alongside the existing unload-everything behavior.
 
-localm can hold multiple models loaded simultaneously (`_engines`); before this,
-`/v1/models/unload` could only release ALL of them. These tests cover the new
-single-model path added for the GUI's per-row Unload button and `localm unload`,
-and confirm the old no-body "unload everything" behavior is unchanged.
+localm can hold multiple models loaded simultaneously (`_engines`). These tests
+cover the single-model path used by the GUI's per-row Unload button and
+`localm unload`, plus the no-body "unload everything" behavior.
 """
 
 from unittest.mock import MagicMock, patch
@@ -162,8 +161,8 @@ def test_unload_targeted_unregistered_model_404s(setup_multi_model):
 
 
 def test_unload_no_model_param_still_unloads_everything(setup_multi_model):
-    """The pre-existing no-body/no-param behavior (used by the image/video/music
-    plugins' unload-before-media-gen calls) must be byte-for-byte unchanged."""
+    """The no-body/no-param call (used by the image/video/music plugins'
+    unload-before-media-gen calls) unloads every loaded model."""
     app = hs.create_app(None)
     client = _authed_client(app)
     _load(client, "model-a")
@@ -256,17 +255,13 @@ def test_gui_models_list_exposes_loaded_independent_of_active(gui_app_with_engin
 #  The shared embedder's separate lifecycle also gets released                #
 #                                                                               #
 #  The embedder (localm.inference.embedder) is loaded by get_embedder(), never #
-#  through switch_engine/_engines, so unload_all_models()/unload_one_model()   #
-#  previously had zero references to it - "Unload all" only freed the chat    #
-#  engines' VRAM while a resident embedder (e.g. a large custom GGUF like     #
-#  Qwen3-Embedding-8B) stayed fully resident and unaccounted for.             #
+#  through switch_engine/_engines, so unload_all_models() and                  #
+#  unload_one_model() release it explicitly.                                   #
 # --------------------------------------------------------------------------- #
 
 def test_unload_all_releases_loaded_embedder(setup_multi_model, monkeypatch):
-    """Unload all must also release the shared embedder, not just report
-    'unloaded' while its VRAM stays resident (the reported symptom: 'Unload
-    all' only freed VRAM matching the embedding model's own footprint - the
-    chat model's VRAM WAS released, a separate resident allocation was not)."""
+    """Unload all must also release the shared embedder, not report 'unloaded'
+    while its VRAM stays resident."""
     app = hs.create_app(None)
     client = _authed_client(app)
     _load(client, "model-a")
@@ -284,10 +279,9 @@ def test_unload_all_releases_loaded_embedder(setup_multi_model, monkeypatch):
 
 
 def test_unload_all_status_unloaded_when_only_embedder_loaded(setup_multi_model, monkeypatch):
-    """No chat model is loaded at all, only the embedder - the previous bug:
-    unload_all_models() iterated only _engines (empty), saw nothing to unload,
-    and reported status 'already_unloaded' even though the embedder was never
-    touched and stayed fully resident. The honest status is 'unloaded'."""
+    """With no chat model loaded and only the embedder resident, the status is
+    'unloaded': iterating only _engines (empty) would report 'already_unloaded'
+    while the embedder stayed fully resident."""
     app = hs.create_app(None)
     client = _authed_client(app)
 
@@ -340,9 +334,8 @@ def test_unload_one_model_releases_matching_embedder(setup_multi_model, monkeypa
 
 def test_unload_one_model_leaves_non_matching_registered_model_alone(setup_multi_model, monkeypatch):
     """A registered-but-never-loaded model whose path does NOT match the
-    resident embedder stays the honest idempotent no-op - the embedder must
-    only be released when the NAME the caller targeted actually resolves to
-    it (negative control against the path-match logic false-positiving)."""
+    resident embedder stays an idempotent no-op: the embedder is released only
+    when the NAME the caller targeted resolves to it."""
     app = hs.create_app(None)
     client = _authed_client(app)
 
@@ -431,8 +424,8 @@ def test_cli_unload_targeted_passes_model_param(cli_runner, monkeypatch):
 
 def test_cli_unload_targeted_noop_reports_honestly_not_as_success(cli_runner, monkeypatch):
     """A targeted unload of a registered-but-not-loaded model is an idempotent
-    no-op server-side ("already_unloaded") - the CLI must say nothing was
-    unloaded, not claim a fake success (grading-pass finding)."""
+    no-op server-side ("already_unloaded"): the CLI must say nothing was
+    unloaded, never claim a fake success."""
     from localm.cli import main as cli_main
 
     fake_entry = {"host": "127.0.0.1", "port": 8642, "scheme": "http"}
