@@ -166,7 +166,7 @@ gpu = [
     # cap further only once transformers 5.16+ is re-verified the same way (or the win32
     # torch wheel ships distributed) - re-verify with a cold install, not the dev venv,
     # since the dev venv lags uv.lock and hid the original regression.
-    "transformers[kernels]~=5.15.0",
+    "transformers[kernels]~=5.15.1",
     # Pin the transitive tokenizers so it does not flip between resolver passes
     # (the 0.23.1 <-> 0.22.2 churn on repeated setup runs). 0.22.2 is what
     # transformers 5.12 (tokenizers<=0.23.0,>=0.22.0) resolves to.
