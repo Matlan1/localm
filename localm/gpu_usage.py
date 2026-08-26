@@ -53,6 +53,57 @@ _adl_state: Optional[dict] = None      # None = not tried yet; {} = tried and un
 _pdh_state: Optional[dict] = None
 _pdh_util_state: Optional[dict] = None
 
+# Source-selection notices already written this process, as {site: {key, ...}}.
+#
+# _notice_lock is a LEAF and must not be replaced by _lock: _lock is HELD across
+# the pairing notice in device_global_used_bytes and across the process-scoped
+# notice reached from it, and _lock is not reentrant.
+_notice_lock = threading.Lock()
+_notices_said: Dict[str, set] = {}
+# Distinct keys a single site may announce before it stops. Reaching it is
+# announced rather than going silent.
+_NOTICE_KEY_CAP = 8
+_notice_capped: set = set()
+
+
+def _notice_once(site: str, key) -> bool:
+    """Whether *site* should write its notice for *key* now: True the first time
+    this exact key is seen this process, False on a repeat.
+
+    A notice announces a SOURCE SELECTION, whose inputs do not change while the
+    process runs, so a repeat says exactly what the log already says. The key is
+    whatever part of the message varies (a reason, a device index, a bus number),
+    so a DIFFERENT selection still gets announced instead of being swallowed by
+    an earlier one.
+
+    The cap bounds a site whose key varies without limit; crossing it writes one
+    line saying so rather than silently going blind."""
+    with _notice_lock:
+        seen = _notices_said.setdefault(site, set())
+        if key in seen:
+            return False
+        if len(seen) >= _NOTICE_KEY_CAP:
+            if site in _notice_capped:
+                return False
+            _notice_capped.add(site)
+            logger.debug(
+                "gpu_usage: %s has announced %d distinct source selections this "
+                "process; further distinct ones are suppressed", site,
+                _NOTICE_KEY_CAP)
+            return False
+        seen.add(key)
+        return True
+
+
+def _reset_source_selection_notices() -> None:
+    """Test hook: forget which source-selection notices have been written, so a
+    notice one test provoked does not stay suppressed for every later test in the
+    worker. Called by :func:`discover._reset_gpu_probe_cache`, which the test
+    suite already runs around every test."""
+    with _notice_lock:
+        _notices_said.clear()
+        _notice_capped.clear()
+
 
 class _AdapterInfo(ctypes.Structure):
     """ADL's AdapterInfo. The field order and the ADL_MAX_PATH-sized char arrays are
@@ -442,7 +493,7 @@ def _known_blind_without_torch(reason: str) -> bool:
     *reason* says why torch could not be consulted, and is surfaced at debug."""
     from localm import discover as _discover
     resident = _discover.native_hip_runtime_resident()
-    if resident:
+    if resident and _notice_once("process-scoped", reason):
         logger.debug(
             "gpu_usage: raw VRAM readings in this process are process-scoped: "
             "torch is not consultable (%s) but the bundled HIP llama.cpp "
@@ -563,11 +614,12 @@ def device_global_used_bytes(gpus: list) -> Dict[int, int]:
                 # either the raw reading is the process-scoped HIP source or the
                 # detected GPU is itself an AMD card.
                 only_bus, only_used = next(iter(by_bus.items()))
-                logger.debug(
-                    "gpu_usage: pairing the single AMD adapter (bus %d) with the "
-                    "single requested GPU without a torch pci_bus_id - "
-                    "unambiguous, same only-one-candidate rule as the PDH path",
-                    only_bus)
+                if _notice_once("adapter-pairing", only_bus):
+                    logger.debug(
+                        "gpu_usage: pairing the single AMD adapter (bus %d) with "
+                        "the single requested GPU without a torch pci_bus_id - "
+                        "unambiguous, same only-one-candidate rule as the PDH path",
+                        only_bus)
                 return {gpus[0]["index"]: only_used}
             logger.debug(
                 "gpu_usage: ADL reported buses %s but none matched the detected "
@@ -603,8 +655,9 @@ def _torch_pci_bus(index) -> Optional[int]:
             with _discover._gpu_probe_lock:
                 inflight = _discover._gpu_probe_inflight
             if inflight or _discover._torch_gpu_probe_known_doomed():
-                logger.debug("gpu_usage: no pci_bus_id for device %s: torch is "
-                             "not consultable in this process", index)
+                if _notice_once("no-pci-bus-id", index):
+                    logger.debug("gpu_usage: no pci_bus_id for device %s: torch "
+                                 "is not consultable in this process", index)
                 return None
         import torch
         props = torch.cuda.get_device_properties(int(index))

@@ -773,6 +773,24 @@ def _reset_gpu_probe_cache() -> None:
         _gpu_probe_done = None
         _gpu_probe_result = None
         _gpu_probe_epoch += 1
+    # The resolved source selection has the same cross-test leak as the latches
+    # above: without this, one test's resident-HIP or rocm_sdk state would decide
+    # the answer for every later test in the worker, and the skip decision would
+    # stay announced so a later test could not observe it being made. Taken
+    # outside _gpu_probe_lock: _source_selection_lock is a leaf and nothing is
+    # ever held while acquiring it.
+    global _native_hip_resident, _rocm_sdk_present, _torch_doomed_announced
+    with _source_selection_lock:
+        _native_hip_resident = False
+        _rocm_sdk_present = None
+        _torch_doomed_announced = None
+    try:
+        from localm import gpu_usage
+        gpu_usage._reset_source_selection_notices()
+    except Exception:
+        # gpu_usage unimportable is a real bug, not an environment condition, but
+        # a test-state reset must not be the thing that raises for it.
+        logger.debug("gpu-probe reset: gpu_usage notice reset unavailable")
 
 
 def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = False,
@@ -1011,6 +1029,21 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
         return served, GPU_PROBE_TIMEOUT
 
 
+# Resolved source-selection state, guarded by _source_selection_lock. This lock is
+# a LEAF: it is never held across a call out of this block, and no other lock in
+# this module or in gpu_usage is acquired while it is held.
+#
+# _native_hip_resident: True once native_hip_runtime_resident() has answered True,
+# and never set back to False outside _reset_gpu_probe_cache.
+# _rocm_sdk_present: the find_spec("rocm_sdk") answer, or None before it is taken.
+# _torch_doomed_announced: the last _torch_gpu_probe_known_doomed() answer written
+# to the log, or None before anything has been.
+_source_selection_lock = threading.Lock()
+_native_hip_resident = False
+_rocm_sdk_present: "bool | None" = None
+_torch_doomed_announced: "bool | None" = None
+
+
 def native_hip_runtime_resident() -> bool:
     """True when llama.cpp's bundled HIP-linked runtime is resident IN THIS
     process on Windows: the native lib has been loaded (``_loader.load_lib``)
@@ -1031,25 +1064,75 @@ def native_hip_runtime_resident() -> bool:
       torch itself cannot be consulted at all (the GGUF worker).
 
     Fails closed (False) when the check itself errors: both callers treat
-    False as "no special handling", today's behavior. The glob re-resolves
-    ``runtime_binary_dir()`` at check time, which could in principle drift
-    from the dir the resident lib actually loaded from; no current caller
-    both holds a resident lib and repoints the runtime dir mid-process, so
-    that drift window is theoretical today (same note as the vulkan check)."""
+    False as "no special handling", today's behavior.
+
+    A True answer is LATCHED for the life of the process (cleared only by
+    :func:`_reset_gpu_probe_cache`), so the directory glob runs at most once per
+    process rather than on every call. The latch relies on this INVARIANT: a
+    native lib that has been loaded is never unloaded, so True never becomes
+    False. False is not latched - the lib can still load later, and the
+    ``native_lib_loaded()`` check that answers it takes no glob.
+
+    While True is latched the answer no longer re-resolves
+    ``runtime_binary_dir()``, so it can no longer drift from the dir the
+    resident lib actually loaded from."""
+    global _native_hip_resident
     import sys
     if sys.platform != "win32":
         return False
+    with _source_selection_lock:
+        if _native_hip_resident:
+            return True
     try:
         from localm.inference.backends.llamacpp import _loader
         if not _loader.native_lib_loaded():
             return False
         d = _loader.runtime_binary_dir()
-        return d is not None and any(
+        resident = d is not None and any(
             "hip" in p.name.lower() for p in d.glob(_loader._ggml_glob()))
     except Exception as e:
         logger.debug("native-HIP-resident check failed (%s); answering False",
                      type(e).__name__)
         return False
+    if resident:
+        with _source_selection_lock:
+            _native_hip_resident = True
+    return resident
+
+
+def _rocm_sdk_installed() -> bool:
+    """Whether ``rocm_sdk`` is importable, resolved once per process.
+
+    The answer is latched (cleared only by :func:`_reset_gpu_probe_cache`) so the
+    ``sys.path`` walk ``find_spec`` performs runs at most once, rather than on
+    every GPU probe. Latching relies on this INVARIANT: a package is not
+    installed or removed part-way through a process."""
+    global _rocm_sdk_present
+    with _source_selection_lock:
+        if _rocm_sdk_present is not None:
+            return _rocm_sdk_present
+    import importlib.util
+    present = importlib.util.find_spec("rocm_sdk") is not None
+    with _source_selection_lock:
+        _rocm_sdk_present = present
+    return present
+
+
+def _announce_torch_doomed(doomed: bool) -> bool:
+    """Record *doomed* as the current torch-consultability answer, and return
+    whether it CHANGED what was last announced.
+
+    True means the caller should write its log line: either nothing has been
+    announced yet, or the answer has flipped since it was. False means this
+    answer is a repeat and the line would say what the log already says.
+
+    A flip in either direction re-arms the announcement, so a decision that
+    becomes doomed for a fresh reason is never hidden by an earlier one."""
+    global _torch_doomed_announced
+    with _source_selection_lock:
+        changed = _torch_doomed_announced != doomed
+        _torch_doomed_announced = doomed
+    return changed
 
 
 def _torch_gpu_probe_known_doomed() -> bool:
@@ -1109,7 +1192,14 @@ def _torch_gpu_probe_known_doomed() -> bool:
     Fails OPEN: if the detector itself errors, the probe proceeds with its
     normal torch attempt (which catches its own failures) - detection must
     never break the working path. The skip is surfaced at debug level, not
-    silenced."""
+    silenced, the first time it is decided and again whenever the decision
+    changes; an unchanged repeat is not re-logged.
+
+    Both of the inputs that cost anything to evaluate - the resident-HIP glob
+    and the ``rocm_sdk`` ``sys.path`` walk - are resolved once per process, so
+    a caller polling this on every GPU probe re-runs neither. Only the
+    ``sys.modules`` membership test is re-evaluated, which is what lets the
+    answer still flip when torch becomes resident."""
     import sys
     if "torch" in sys.modules:
         # A resident torch (imported for real before the runtime loaded, or a
@@ -1118,17 +1208,22 @@ def _torch_gpu_probe_known_doomed() -> bool:
         # enumeration must be kept. On the doomed combo torch can never BE
         # resident - the faulted module is evicted on every attempt - so this
         # never defuses the real guard.
+        _announce_torch_doomed(False)
         return False
     try:
         if not native_hip_runtime_resident():
+            _announce_torch_doomed(False)
             return False
-        import importlib.util
-        if importlib.util.find_spec("rocm_sdk") is None:
+        if not _rocm_sdk_installed():
+            _announce_torch_doomed(False)
             return False
     except Exception as e:
         logger.debug("list_gpus: torch-conflict detector failed (%s); "
                      "proceeding with the normal torch attempt", type(e).__name__)
+        _announce_torch_doomed(False)
         return False
+    if not _announce_torch_doomed(True):
+        return True
     logger.debug(
         "list_gpus: skipping the torch GPU probe: the bundled HIP llama.cpp "
         "runtime is already loaded in this process and a ROCm (rocm_sdk) torch "
