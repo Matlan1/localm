@@ -469,6 +469,16 @@ raised while setting up the draft context. `Engine.supports_mtp` /
 `GgufBackend.supports_mtp` reflect whether MTP is actually active for the
 currently loaded model.
 
+The child reports `mtp_status` and `mtp_active` at the end of EVERY call, not
+just at load - `GgufBackend._record_mtp` takes that per-call state and, if
+`mtp_status` is one of the statuses above that mean speculation has stopped for
+the model's life, latches `supports_mtp` False from the next reply onward.
+Without this, a session whose speculation stopped hours into a conversation
+(draft context exhaustion, a failed rewind) would keep reporting the
+capability it had at load time. `mtp_active` is the narrower, per-call answer:
+False on a turn carrying an image even while `supports_mtp` stays True, since
+the same model speculates normally on its next text turn.
+
 ### Stop-string filter (`_filtered_stream`)
 
 Many models signal end-of-turn with multi-token sequences (e.g. `<|im_end|>` → 6 tokens: `<`, `|`, `im`, `_`, `end`, `|>`). `llama_vocab_is_eog` can't catch these if they aren't registered as special tokens.
