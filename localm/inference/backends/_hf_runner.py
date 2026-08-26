@@ -263,13 +263,17 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
     attach_child_logging()   # native/tokenizer failure diagnostics land in
                               # the shared debug log from this process too.
 
-    from localm._mp_spawn import (install_parent_death_watchdog,
+    from localm._mp_spawn import (ignore_interrupt_signals,
+                                   install_parent_death_watchdog,
                                    suppress_native_error_dialogs)
     install_parent_death_watchdog()   # die with the parent even on a hard kill
                                        # (End Task / force-close); daemon=True is
                                        # atexit-gated and does not cover that, so
                                        # else this worker outlives the server
                                        # holding its model in VRAM.
+    ignore_interrupt_signals()        # a console Ctrl+C reaches every process on
+                                       # the console; the parent alone decides when
+                                       # this worker stops.
     suppress_native_error_dialogs()   # a native DLL failure here (torch/CUDA/
                                        # ROCm init) must degrade to a catchable
                                        # exception, never a blocking modal dialog.

@@ -52,6 +52,11 @@ _log = logging.getLogger("localm.portmux")
 # HTTP request begins with an ASCII method letter. One byte distinguishes them.
 _TLS_FIRST_BYTE = 0x16
 
+# Seconds a stop gives in-flight responses before cancelling them, passed to
+# uvicorn as timeout_graceful_shutdown at every bind. Left unset, a stop waits
+# for the longest open response. See test_the_bound_is_short_enough_to_feel_immediate.
+GRACEFUL_SHUTDOWN_TIMEOUT = 3.0
+
 # Host header shapes accepted before being reflected into a redirect:
 # host[:port] for a DNS name or IPv4, or [v6]:port for IPv6.
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d+)?$")
@@ -141,7 +146,8 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
 
     If even the socket cannot be built, this falls back to uvicorn's own binding
     and logs a warning naming the failure."""
-    config_kwargs = dict(app=app, log_level=log_level)
+    config_kwargs = dict(app=app, log_level=log_level,
+                         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT)
     if ssl_certfile:
         config_kwargs.update(ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     try:
@@ -192,6 +198,7 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
     config = uvicorn.Config(
         app, host="127.0.0.1", port=0, log_level=log_level,
         ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT,
     )
     server = uvicorn.Server(config)
     serve_task = asyncio.ensure_future(server.serve())
@@ -253,7 +260,8 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
     cannot happen at the source."""
     import uvicorn
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level=log_level)
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level=log_level,
+                            timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT)
     server = uvicorn.Server(config)
     serve_task = asyncio.ensure_future(server.serve())
 

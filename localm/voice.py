@@ -325,12 +325,16 @@ def _worker_main(req_q, resp_q) -> None:
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     _silence_native_crash_dialogs()
 
-    from localm._mp_spawn import install_parent_death_watchdog
+    from localm._mp_spawn import (ignore_interrupt_signals,
+                                   install_parent_death_watchdog)
     install_parent_death_watchdog()   # die with the parent even on a hard kill
                                        # (End Task / force-close); daemon=True is
                                        # atexit-gated and does not cover that, so
                                        # else this STT worker outlives the server
                                        # holding its model in VRAM.
+    ignore_interrupt_signals()        # a console Ctrl+C reaches every process on
+                                       # the console; the parent alone decides when
+                                       # this worker stops.
 
     model = None
     model_name = None
