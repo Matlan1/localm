@@ -841,6 +841,37 @@ export function el(tag, className, text) {
   return node;
 }
 
+/** Reads an image file client-side and resolves a data:image/png;base64,...
+ * URI downscaled so its longest edge is at most maxSize - kept well under
+ * settings_schema.py's _AVATAR_MAX_DATA_URI_LEN regardless of the source
+ * file's size, and read entirely in-browser (no server round trip). */
+export function fileToAvatarDataUri(file, maxSize = 128) {
+  return new Promise((resolve, reject) => {
+    if (!file.type || !file.type.startsWith("image/")) {
+      reject(new Error("choose an image file"));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("could not read the file"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("could not decode the image"));
+      img.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export function autoGrow(textarea) {
   textarea.style.height = "auto";
   textarea.style.height = Math.min(textarea.scrollHeight, 220) + "px";

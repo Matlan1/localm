@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, authHeaders, clearImageProxyCache, confirmDanger, el, openModal, promptText, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, clearImageProxyCache, confirmDanger, el, fileToAvatarDataUri, openModal, promptText, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
@@ -1387,6 +1387,12 @@ export async function refreshSettingsPage() {
   await buildMediaSection(form, fields);
   if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
+  // user_avatar / model_avatar_default / model_avatar_overrides: HIDDEN
+  // schema fields (skipped from the flat loop above, same as Media's own
+  // fields), rendered here with their own picker UI instead.
+  await buildAvatarsSection(form, fields);
+  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+
   // The tts plugin's own settings block (its own section in the Plugins group).
   // Not part of the core schema: those keys live under config["plugins"]["tts"]
   // and are edited through /v1/tts/config, like the media blocks above.
@@ -1628,6 +1634,173 @@ export async function buildMediaSection(form, fields) {
   for (const name of MEDIA_PLUGIN_ORDER) {
     if (_mediaSubs[name]) renderMediaSubsection(name);
   }
+
+  form.appendChild(panel);
+}
+
+/* ---------------- Avatars (user_avatar / model_avatar_default /
+   model_avatar_overrides - HIDDEN schema fields, bespoke picker UI) -------- */
+
+/** A small avatar-picker widget: preview + emoji/glyph text input + upload +
+ * clear. The value is always either "" or a data:image/... URI (never a URL
+ * - fileToAvatarDataUri only ever produces one from a local file). Reused for
+ * user_avatar, model_avatar_default, and each per-model override row. */
+function buildAvatarPicker(initial) {
+  let value = initial || "";
+  const wrap = el("div", "avatar-picker");
+  const preview = el("div", "avatar-picker-preview");
+  const glyphInput = document.createElement("input");
+  glyphInput.type = "text";
+  glyphInput.placeholder = "emoji or short text";
+  glyphInput.maxLength = 16;
+  glyphInput.className = "avatar-picker-glyph";
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = "image/png,image/jpeg,image/gif,image/webp";
+  fileInput.hidden = true;
+  const uploadBtn = el("button", "btn-secondary", "Upload image");
+  uploadBtn.type = "button";
+  const clearBtn = el("button", "btn-secondary", "Clear");
+  clearBtn.type = "button";
+
+  function renderPreview() {
+    preview.replaceChildren();
+    if (value.startsWith("data:")) {
+      const img = document.createElement("img");
+      img.src = value;
+      preview.appendChild(img);
+      glyphInput.value = "";
+    } else {
+      preview.textContent = value;
+      glyphInput.value = value;
+    }
+  }
+
+  glyphInput.oninput = () => { value = glyphInput.value; renderPreview(); };
+  uploadBtn.onclick = () => fileInput.click();
+  fileInput.onchange = async () => {
+    const f = fileInput.files[0];
+    fileInput.value = "";
+    if (!f) return;
+    try {
+      value = await fileToAvatarDataUri(f);
+      renderPreview();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+  clearBtn.onclick = () => { value = ""; renderPreview(); };
+
+  renderPreview();
+  wrap.append(preview, glyphInput, uploadBtn, clearBtn, fileInput);
+  return { node: wrap, getValue: () => value };
+}
+
+/** One row of the per-model override list: a model-id text field beside its
+ * own avatar picker, and a remove button that detaches the row. */
+function buildAvatarOverrideRow(modelId, iconValue) {
+  const row = el("div", "avatar-override-row");
+  const idInput = document.createElement("input");
+  idInput.type = "text";
+  idInput.placeholder = "model id (exact)";
+  idInput.value = modelId || "";
+  idInput.className = "avatar-override-id";
+  const picker = buildAvatarPicker(iconValue);
+  const removeBtn = el("button", "btn-secondary", "Remove");
+  removeBtn.type = "button";
+  removeBtn.onclick = () => row.remove();
+  row.append(idInput, picker.node, removeBtn);
+  return { node: row, getModelId: () => idInput.value.trim(), getValue: picker.getValue };
+}
+
+/** The Avatars section: user_avatar / model_avatar_default /
+ * model_avatar_overrides are Widget.HIDDEN (buildSettingControl skips them,
+ * same as logo_style/gpu_split_ratios), so they get their own bespoke picker
+ * UI here instead of the generic text/number grid - a dict and an image blob
+ * do not fit any existing Widget shape. Registers into _settingsControls so
+ * the existing saveSettingsSection("avatars") PATCH /v1/config flow applies
+ * unchanged. Returns null (renders nothing) on a schema/fetch mismatch,
+ * matching the flat form's own tolerance for a field it cannot find. */
+export async function buildAvatarsSection(form, fields) {
+  const userField = (fields || []).find((f) => f.key === "user_avatar");
+  const modelField = (fields || []).find((f) => f.key === "model_avatar_default");
+  const overridesField = (fields || []).find((f) => f.key === "model_avatar_overrides");
+  if (!userField || !modelField || !overridesField) return;
+
+  let current;
+  try {
+    const r = await fetch("/v1/config", { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.statusText);
+    current = await r.json();
+  } catch (e) {
+    return;   // best-effort: skip this refresh rather than show a broken panel
+  }
+
+  const panel = el("section", "card settings-section");
+  panel.id = "settings-sec-avatars";
+  panel.dataset.sec = "avatars";
+  panel.dataset.group = "model";
+  panel.dataset.secLabel = "Avatars";
+  panel.appendChild(settingsSectionHead("Avatars", "model"));
+  panel.appendChild(el("div", "sub",
+    "A short emoji or a small uploaded image next to a turn. Always local - "
+    + "never a URL or a remote fetch. A model with nothing set here falls "
+    + "back to a generated monogram."));
+
+  const userPicker = buildAvatarPicker(current.user_avatar || "");
+  const userRow = el("div", "avatar-field-row");
+  userRow.append(el("div", "avatar-field-label", "Your icon"), userPicker.node);
+  panel.appendChild(userRow);
+
+  const modelPicker = buildAvatarPicker(current.model_avatar_default || "");
+  const modelRow = el("div", "avatar-field-row");
+  modelRow.append(el("div", "avatar-field-label", "Model icon (default)"), modelPicker.node);
+  panel.appendChild(modelRow);
+
+  const overridesBox = el("div", "avatar-overrides-box");
+  overridesBox.appendChild(el("div", "avatar-field-label", "Per-model icons"));
+  const overridesList = el("div", "avatar-overrides-list");
+  overridesBox.appendChild(overridesList);
+  const rows = [];
+  for (const [mid, icon] of Object.entries(current.model_avatar_overrides || {})) {
+    const row = buildAvatarOverrideRow(mid, icon);
+    rows.push(row);
+    overridesList.appendChild(row.node);
+  }
+  const addBtn = el("button", "btn-secondary", "Add override");
+  addBtn.type = "button";
+  addBtn.onclick = () => {
+    const row = buildAvatarOverrideRow("", "");
+    rows.push(row);
+    overridesList.appendChild(row.node);
+  };
+  overridesBox.appendChild(addBtn);
+  panel.appendChild(overridesBox);
+
+  _settingsControls = _settingsControls.filter((c) =>
+    !["user_avatar", "model_avatar_default", "model_avatar_overrides"].includes(c.field.key));
+  _settingsControls.push({ field: userField, node: userRow, read: () => userPicker.getValue() });
+  _settingsControls.push({ field: modelField, node: modelRow, read: () => modelPicker.getValue() });
+  _settingsControls.push({
+    field: overridesField, node: overridesBox,
+    read: () => {
+      const out = {};
+      for (const row of rows) {
+        if (!row.node.isConnected) continue;   // a removed row
+        const mid = row.getModelId();
+        const v = row.getValue();
+        if (mid && v) out[mid] = v;
+      }
+      return out;
+    },
+  });
+
+  const actions = el("div", "actions");
+  const save = el("button", "btn-primary", "Save Avatars");
+  save.type = "button";
+  save.onclick = () => saveSettingsSection("avatars");
+  actions.appendChild(save);
+  panel.appendChild(actions);
 
   form.appendChild(panel);
 }
