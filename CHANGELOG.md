@@ -39,11 +39,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   context all fall back to ordinary autoregressive decoding, with the reason
   recorded in the debug log.
 
-  `mtp_enabled` **defaults to off.** The draft head is not yet fed the hidden
-  state it predicts from, so it sees only the token embedding: on a real MTP
-  model fewer than one draft in ten was accepted, which does not repay the extra
-  work each token costs. The setting is there for anyone who wants to try it on
-  their own model, and the default will change once the head is driven properly.
+  The draft head is fed the hidden state it predicts from, so it now accepts
+  about half its drafts instead of about one in ten.
+
+  `mtp_enabled` **stays off by default.** Good drafts are necessary for
+  speculation to pay and not sufficient: a rejected draft still costs a
+  two-token verification, and on a small model that costs meaningfully more than
+  verifying one token, so the arithmetic comes out slightly negative. It turns
+  positive on a model large enough that the two cost about the same. Turn it on
+  and keep it if your model gets faster.
 - **A collection's individual documents can now be listed and removed from the
   terminal.** `localm rag docs NAME` shows each indexed document with its chunk
   count and whether its source file has since gone missing or was added via an

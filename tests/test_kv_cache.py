@@ -519,6 +519,17 @@ class TestMtpDraftingRespectsGrammar:
         llm = _bare_llama()
         llm._mtp_ctx_ptr = self._MTP_CTX
         llm._tokenizer.is_eog.return_value = False
+        # Drafting feeds the head the target's hidden state and is skipped when
+        # there is none, so a fixture without one exercises the fail-closed path
+        # rather than the grammar gate this class is about. The batch helpers do
+        # ctypes work that cannot run against a mock api.
+        llm._mtp_wants_h = True
+        llm._pending_h = object()
+        llm._n_embd = 4
+        llm._capture_h = lambda row=-1: True
+        llm._create_draft_batch = lambda token, pos: (
+            llm._create_batch([token], pos, logits_at_last_only=True), None, None)
+        llm._free_draft_batch = staticmethod(lambda batch, original: None)
         mock_api = self._mock_api()
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
              patch("localm.inference.backends.llamacpp.llama._build_sampler",

@@ -228,10 +228,9 @@ DEFAULT_CONFIG: dict = {
     # Enable Multi-Token Prediction (MTP) speculative decoding for models with
     # native MTP/next-n prediction heads (e.g. DeepSeek-V3/R1, Qwen MTP models).
     # True = active when model supports it; False = force standard autoregressive.
-    # Off by default: localm does not yet feed the MTP draft head the hidden state
-    # it predicts from, so the head runs on the token embedding alone and its
-    # drafts rarely survive verification.
-    # See test_mtp_default_is_off_while_the_draft_head_is_starved.
+    # Off by default: speculation only pays when verifying two tokens costs about
+    # what verifying one costs, which holds for a large model and not a small one.
+    # See test_mtp_default_is_off_until_speculation_is_measured_to_pay.
     "mtp_enabled": False,
     # VRAM (MB) that n_gpu_layers_auto/ctx_auto/_check_vram always reserve beyond
     # model weights for the GGUF backend, before deciding how many layers fit or
