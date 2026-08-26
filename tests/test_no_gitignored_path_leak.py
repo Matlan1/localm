@@ -65,12 +65,16 @@ def find_leaks(source: str, filename: str = "<string>") -> list:
     return hits
 
 
+_SELF = Path(__file__).resolve().relative_to(REPO).as_posix()
+
+
 def _tracked_python_files() -> list:
+    """Every tracked *.py file except this one."""
     out = subprocess.run(
         ["git", "ls-files", "--", "*.py"],
         cwd=REPO, capture_output=True, text=True, encoding="utf-8", check=True,
     ).stdout
-    return [rel for rel in out.splitlines() if rel.strip()]
+    return [rel for rel in out.splitlines() if rel.strip() and rel != _SELF]
 
 
 # --------------------------------------------------------------------------- #
