@@ -691,8 +691,9 @@ class TestPullModelBracketDrop:
             self, rich_capture, fake_registry, tmp_path):
         """repr()-avoidance: the value is hand-quoted with escape(), not via
         !r/repr(), so this also confirms no double-escaping artifact (a
-        literal backslash) leaks through."""
-        spec = "owner/repo"   # a bare-repo spec is NOT single-file
+        literal backslash) leaks through. Must use a BRACKETED spec, not a
+        clean literal, or this cannot distinguish escaped from unescaped."""
+        spec = f"owner/{BRACKET_STYLE}"   # not single-file: no ':', no '.gguf'
         dest_dir = tmp_path / "comfy"
 
         ok = mm.pull_model(spec, dest_dir=dest_dir)
