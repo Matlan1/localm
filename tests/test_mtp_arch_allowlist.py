@@ -183,6 +183,44 @@ def test_refresh_refuses_an_upstream_layout_it_no_longer_understands(monkeypatch
         raise AssertionError("refresh accepted an unparseable upstream layout")
 
 
+def _bench_api(tmp_path, mod, feeds, default_on):
+    """Drive the draft-head-API arm with both inputs forced."""
+    mod._runtime_feeds_the_draft_head = lambda: (feeds, "forced")
+    mod._mtp_default_enabled = lambda: default_on
+    return _bench(tmp_path, mod)
+
+
+def test_gate_fires_when_the_runtime_gains_the_draft_head_api(tmp_path):
+    """The moment a runtime can feed the draft head, the real implementation
+    becomes possible and the off-by-default decision has to be revisited. Nothing
+    else in the tree would notice that the world changed."""
+    assert _bench_api(tmp_path, _load(), feeds=True, default_on=False) == 1
+
+
+def test_gate_fires_when_mtp_defaults_on_without_the_draft_head_api(tmp_path):
+    """The state this default exists to prevent: speculation on by default while
+    the head is starved, which costs more per token than it saves."""
+    assert _bench_api(tmp_path, _load(), feeds=False, default_on=True) == 1
+
+
+def test_gate_is_quiet_in_the_state_that_actually_ships(tmp_path):
+    """API absent, default off. A gate that fired here would be turned off."""
+    assert _bench_api(tmp_path, _load(), feeds=False, default_on=False) == 0
+
+
+def test_gate_is_quiet_when_the_api_exists_and_mtp_is_on(tmp_path):
+    """The other consistent pair, so the check is about AGREEMENT rather than
+    about either value on its own."""
+    assert _bench_api(tmp_path, _load(), feeds=True, default_on=True) == 0
+
+
+def test_an_unloadable_runtime_is_not_read_as_an_absent_api(tmp_path):
+    """"Could not look" must not collapse into "looked and found nothing" - that
+    is the difference between a real absence and a broken probe."""
+    assert _bench_api(tmp_path, _load(), feeds=None, default_on=True) == 0
+    assert _bench_api(tmp_path, _load(), feeds=None, default_on=False) == 0
+
+
 def test_the_real_tree_passes_the_gate():
     """The recurrence guard itself, against the shipped source."""
     assert _load().main(["--gate"]) == 0

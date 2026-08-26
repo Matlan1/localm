@@ -62,7 +62,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         n_gpu_layers_auto: bool = False,
         vram_overhead_bytes: Optional[int] = None,
         n_cpu_moe: int = 0,
-        mtp_enabled: bool = True,
+        mtp_enabled: bool = False,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF

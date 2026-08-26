@@ -858,7 +858,7 @@ class LlamaCpp:
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
-        mtp_enabled: bool = True,
+        mtp_enabled: bool = False,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx

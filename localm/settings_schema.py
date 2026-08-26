@@ -230,8 +230,9 @@ CORE_FIELDS: list = [
                  "still loads instead of being refused. An explicit value is kept.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("mtp_enabled", Widget.TOGGLE, "Multi-Token Prediction (MTP)",
-                 "Enable speculative drafting on models trained with MTP/next-n "
-                 "prediction heads for faster inference.",
+                 "Speculative drafting on models with MTP/next-n heads. Off by "
+                 "default: this runtime cannot feed the draft head its hidden "
+                 "state, so drafts rarely land and cost more than they save.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # Trimmed to the 200-char budget; the consequence now leads. The removed
     # explanation, kept here because it is the WHY and a future reader will want
@@ -1134,9 +1135,7 @@ CORE_FIELDS: list = [
                  "Show remote images in replies (fetched by this machine)",
                  "Off by default. When on, this machine fetches the image so "
                  "the site never learns your IP or browser. It cannot stop a "
-                 "link carrying data out, so leave it off unless you need it. "
-                 "Which hosts it may reach is bounded by the Allowed domains "
-                 "list (net_allow), if you set one.",
+                 "link carrying data out, so leave it off unless you need it.",
                  # Reachable in the default keyless install regardless: the schema
                  # route treats open mode as owner (is_owner = held is None or
                  # ADMIN in held), so admin_only hides this from a SCOPED key, not

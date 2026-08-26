@@ -33,11 +33,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   generate draft tokens via a dedicated MTP draft context and verify them in
   batches on the main model graph, speeding up generation without requiring a
   separate draft model (structured or tool-calling replies generate one token
-  at a time instead). Configurable via `mtp_enabled` (default true). It engages
-  only where the runtime can genuinely build an MTP draft head: a model that
-  merely carries next-n metadata, one whose cache cannot roll back a rejected
-  draft, and a conversation that outgrows the draft context all fall back to
-  ordinary autoregressive decoding, with the reason recorded in the debug log.
+  at a time instead). It engages only where the runtime can genuinely build an
+  MTP draft head: a model that merely carries next-n metadata, one whose cache
+  cannot roll back a rejected draft, and a conversation that outgrows the draft
+  context all fall back to ordinary autoregressive decoding, with the reason
+  recorded in the debug log.
+
+  `mtp_enabled` **defaults to off.** Feeding a draft head the hidden state it
+  predicts from needs an API the bundled llama.cpp runtimes do not expose, so
+  the head sees only the token embedding: on a real MTP model fewer than one
+  draft in ten was accepted, which does not repay the extra work each token
+  costs. The setting is there for anyone who wants to measure it on their own
+  model, and the default will change when a runtime can feed the head properly.
 - **A collection's individual documents can now be listed and removed from the
   terminal.** `localm rag docs NAME` shows each indexed document with its chunk
   count and whether its source file has since gone missing or was added via an
