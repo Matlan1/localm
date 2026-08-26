@@ -192,8 +192,7 @@ class TestServerModes:
             with TestClient(app) as client:
                 r = client.post("/v1/chat/completions", json=_CHAT_BODY)
         assert r.status_code == 200
-        assert [p.name for p in tmp_path.iterdir() if p.is_file()] == []
-        assert [p.name for p in tmp_path.iterdir() if p.is_dir()] == [".localm"]
+        assert list(tmp_path.iterdir()) == []
 
     def test_log_mode_audits_exchange(self, tmp_path):
         app = _make_app(tmp_path, "log")
