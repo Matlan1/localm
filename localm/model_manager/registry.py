@@ -916,6 +916,8 @@ def vision_input_guidance(mmproj_failed: bool = False,
 
 
 def list_models(type_filter: Optional[str] = None) -> None:
+    from rich.markup import escape
+
     reg = _mm.load_registry()
     if type_filter:
         reg = models_of_type(type_filter, reg)
@@ -939,30 +941,36 @@ def list_models(type_filter: Optional[str] = None) -> None:
             # path). Show it VISIBLY so the user sees which entry is broken and
             # can drop it with `localm rm <name>` - never crash the whole listing
             # on one bad entry (extends load_registry's damaged-file guarantee).
-            table.add_row(f"[red]{name}[/red]", "[red]corrupt[/red]", "-",
+            # escape(name): a hand-edited registry.json's KEY is not restricted
+            # to a safe charset - Table.add_row() parses "[...]" the same as
+            # console.print().
+            table.add_row(f"[red]{escape(name)}[/red]", "[red]corrupt[/red]", "-",
                           "[red]-[/red]", "-",
                           "[red](malformed registry entry)[/red]")
             continue
         path = Path(epath)
-        source = str(info.get("source", "local"))
-        role = str(info.get("model_type", "llm"))
+        # source/role: read straight from the JSON entry, never re-validated at
+        # display time (only `localm set-type` validates model_type against
+        # MODEL_TYPES) - a hand-edited registry can put anything in either.
+        source = escape(str(info.get("source", "local")))
+        role = escape(str(info.get("model_type", "llm")))
 
         if path.is_dir():
             kind = "hf"
             size = "[dim]dir[/dim]"
-            name_cell = name
+            name_cell = escape(name)
         elif path.exists():
             kind = "gguf"
             b = path.stat().st_size
             size = f"{b/1024**3:.2f} GB" if b >= 1024**3 else f"{b/1024**2:.0f} MB"
-            name_cell = name
+            name_cell = escape(name)
         else:
             # File is gone: flagged (kept) unless autoprune deleted it earlier.
             kind = "[red]missing[/red]"
             size = "[red]-[/red]"
-            name_cell = f"[red]{name}[/red]"
+            name_cell = f"[red]{escape(name)}[/red]"
 
-        table.add_row(name_cell, kind, role, size, source, str(path))
+        table.add_row(name_cell, kind, role, size, source, escape(str(path)))
 
     console.print(table)
 
@@ -1023,17 +1031,28 @@ def relocate_model(name: str, new_path: str) -> bool:
     was MOVED (it shows 'missing' but is not gone, just relocated). Validates the new
     path is a real GGUF file or HF dir, updates the registry, and clears the missing
     flag. Returns True on success (REC-EXTPATH-RELOCATE)."""
+    from rich.markup import escape
+
     reg = _mm.load_registry()
     if name not in reg:
-        console.print(f"[red]No such registered model:[/red] {name}")
+        # name: the caller-supplied lookup key, not found - reachable directly
+        # from the GUI's POST /api/models/relocate with a raw req.model, no
+        # subprocess boundary.
+        console.print(f"[red]No such registered model:[/red] {escape(name)}")
         return False
     p, reason = relocate_target(new_path)
     if p is None:
-        console.print(f"[red]{reason}[/red]")
+        # reason (from relocate_target) is built from the caller's raw new_path
+        # (e.g. "Path does not exist: {p}") - also reachable via the GUI route
+        # with req.new_path, though there it lands in an HTTPException detail,
+        # never through Rich.
+        console.print(f"[red]{escape(reason)}[/red]")
         return False
     entry = reg[name]
     if not isinstance(entry, dict):
-        console.print(f"[red]Corrupt registry entry for {name}[/red]")
+        # name: confirmed a registry KEY here (name in reg above), but a
+        # hand-edited registry.json is not restricted to a safe charset.
+        console.print(f"[red]Corrupt registry entry for {escape(name)}[/red]")
         return False
     new_path = str(p.resolve())
     # Atomic read-modify-write so a concurrent registry writer (GUI thread, a
@@ -1045,7 +1064,9 @@ def relocate_model(name: str, new_path: str) -> bool:
             e["path"] = new_path
             e.pop("missing", None)          # it is present again at the new path
     _mm.update_registry(_apply)
-    console.print(f"[green]Relocated[/green] [bold]{name}[/bold] -> {p}")
+    # p: the caller-supplied, now-validated new_path, resolved - a real
+    # filesystem path the caller named, not restricted to a safe charset.
+    console.print(f"[green]Relocated[/green] [bold]{escape(name)}[/bold] -> {escape(str(p))}")
     return True
 
 
@@ -1054,12 +1075,21 @@ def set_model_type(name: str, new_type: str) -> bool:
     / vae / lora / unknown). Type is MUTABLE at any time: a bulk import or a forgotten
     ``--type`` is corrected here, not frozen at registration. Returns True on success,
     False if the model is not registered or *new_type* is not a MODEL_TYPES value."""
+    from rich.markup import escape
+
     reg = _mm.load_registry()
     if name not in reg:
-        console.print(f"[red]No such registered model:[/red] {name}")
+        # name: reachable directly from the GUI's POST /api/models/set-type
+        # with a raw req.model, no subprocess boundary.
+        console.print(f"[red]No such registered model:[/red] {escape(name)}")
         return False
     if new_type not in MODEL_TYPES:
-        console.print(f"[red]Invalid type {new_type!r}.[/red] "
+        # new_type: the caller's raw, invalid type - also reachable via the
+        # GUI route's req.model_type. repr() does NOT protect against Rich
+        # markup (verified empirically: repr() only escapes quotes/backslashes,
+        # "[" and "]" pass through untouched), so a manual quote around
+        # escape() replaces the former {new_type!r}.
+        console.print(f"[red]Invalid type '{escape(new_type)}'.[/red] "
                       f"Choose one of: {', '.join(sorted(MODEL_TYPES))}")
         return False
 
@@ -1070,7 +1100,9 @@ def set_model_type(name: str, new_type: str) -> bool:
 
     # Atomic read-modify-write so a concurrent registry writer is not clobbered.
     _mm.update_registry(_apply)
-    console.print(f"[green]Set[/green] [bold]{name}[/bold] type -> {new_type}")
+    # new_type is safe here (already checked against the fixed MODEL_TYPES set
+    # above); name is a confirmed registry key, escaped anyway (see list_models).
+    console.print(f"[green]Set[/green] [bold]{escape(name)}[/bold] type -> {new_type}")
     return True
 
 
@@ -1082,8 +1114,12 @@ def _prompt_predownload_dup(dup_names: List[str], model_name: str) -> str:
     Returns "alias", "download", or "skip". No TTY → "skip".
     """
     import click
+    from rich.markup import escape
 
-    names = ", ".join(f"'{n}'" for n in dup_names)
+    # dup_names: registry keys - not guaranteed sanitized (a hand-edited
+    # registry.json is not restricted to a safe charset). model_name is quoted
+    # only inside click.prompt() below, which does not parse Rich markup.
+    names = ", ".join(f"'{escape(n)}'" for n in dup_names)
     console.print(
         f"[yellow]You already have this exact file - registered as "
         f"{names}[/yellow] [dim](sha256 match via HF metadata)[/dim]"
@@ -1174,9 +1210,13 @@ def alias_model(existing: str, new_name: str) -> bool:
     same source, same digest). Returns False when *existing* is unknown
     or *new_name* is already taken.
     """
+    from rich.markup import escape
+
     reg = _mm.load_registry()
     if existing not in reg:
-        console.print(f"[red]Not found:[/red] {existing}")
+        # existing: reachable directly from the GUI's POST /api/models/alias
+        # with a raw req.model, no subprocess boundary.
+        console.print(f"[red]Not found:[/red] {escape(existing)}")
         return False
     # Sanitize the user-supplied new name through the SAME filter add_local /
     # pull / sync all use (GAP-CLI-1), so `localm alias real ../../evil`, an empty
@@ -1185,16 +1225,20 @@ def alias_model(existing: str, new_name: str) -> bool:
     # pass a sanitized name, so re-sanitizing is a harmless no-op for them.
     safe_name = _sanitize_name(new_name)
     if safe_name in reg:
-        console.print(f"[red]Name already in use:[/red] {safe_name}")
+        # safe_name is post-_sanitize_name (A-Za-z0-9._- only) - escaped anyway
+        # rather than relying on that charset holding across a future change.
+        console.print(f"[red]Name already in use:[/red] {escape(safe_name)}")
         return False
     # Atomic RMW (re-read inside the lock) so a concurrent writer is not lost.
     def _apply(r: dict) -> None:
         if existing in r and safe_name not in r:
             r[safe_name] = dict(r[existing])
     _mm.update_registry(_apply)
+    # existing: a confirmed registry key here, but a hand-edited registry.json
+    # is not restricted to a safe charset - escaped anyway.
     console.print(
-        f"[green]✓[/green] [bold]{safe_name}[/bold] is now an alias of "
-        f"[bold]{existing}[/bold]"
+        f"[green]✓[/green] [bold]{escape(safe_name)}[/bold] is now an alias of "
+        f"[bold]{escape(existing)}[/bold]"
     )
     return True
 
@@ -1239,16 +1283,18 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[s
     returns ``(True, notes)`` where *notes* is what
     :func:`_migrate_model_references` reports.
     """
+    from rich.markup import escape
+
     reg = _mm.load_registry()
     if old_name not in reg:
-        console.print(f"[red]Not found:[/red] {old_name}")
+        console.print(f"[red]Not found:[/red] {escape(old_name)}")
         return False, []
     safe_name = _sanitize_name(new_name)
     if safe_name == old_name:
-        console.print(f"[dim]'{old_name}' is already named '{safe_name}'[/dim]")
+        console.print(f"[dim]'{escape(old_name)}' is already named '{escape(safe_name)}'[/dim]")
         return True, []
     if safe_name in reg:
-        console.print(f"[red]Name already in use:[/red] {safe_name}")
+        console.print(f"[red]Name already in use:[/red] {escape(safe_name)}")
         return False, []
 
     # Atomic RMW (re-read inside the lock), and - unlike alias_model above -
@@ -1268,17 +1314,23 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[s
     if not moved:
         reg_now = _mm.load_registry()
         if old_name not in reg_now:
-            console.print(f"[red]Not found:[/red] {old_name}")
+            console.print(f"[red]Not found:[/red] {escape(old_name)}")
         else:
-            console.print(f"[red]Name already in use:[/red] {safe_name}")
+            console.print(f"[red]Name already in use:[/red] {escape(safe_name)}")
         return False, []
 
+    # old_name: a confirmed registry key, escaped anyway - a hand-edited
+    # registry.json is not restricted to a safe charset.
     console.print(
-        f"[green]✓[/green] Renamed [bold]{old_name}[/bold] -> [bold]{safe_name}[/bold]"
+        f"[green]✓[/green] Renamed [bold]{escape(old_name)}[/bold] -> "
+        f"[bold]{escape(safe_name)}[/bold]"
     )
     notes = _migrate_model_references(old_name, safe_name)
     for note in notes:
-        console.print(f"[dim]{note}[/dim]")
+        # note: mostly hardcoded prose, but can carry an arbitrary exception
+        # message (`{e}` from config/jobs/RAG migration failures) - escaped
+        # at this, its one print site, rather than at each notes.append().
+        console.print(f"[dim]{escape(note)}[/dim]")
     return True, notes
 
 
@@ -1365,8 +1417,11 @@ def _prompt_duplicate_action(existing_names: List[str], reason: str) -> str:
     silently create duplicate entries.
     """
     import click
+    from rich.markup import escape
 
-    names = ", ".join(f"'{n}'" for n in existing_names)
+    # existing_names: registry keys - not guaranteed sanitized. reason is
+    # always one of 3 hardcoded literals from _register_with_dedup's callers.
+    names = ", ".join(f"'{escape(n)}'" for n in existing_names)
     console.print(
         f"[yellow]This model is already registered as {names}[/yellow] "
         f"[dim]({reason})[/dim]"
@@ -1850,6 +1905,8 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
     Returns the new path of the primary file/directory (the first part, for a
     split GGUF) - the caller registers THIS path, not the original.
     """
+    from rich.markup import escape
+
     _mm.ensure_dirs()
     path = path.resolve()
     verb = "Copying" if action == "copy" else "Moving"
@@ -1865,7 +1922,9 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
             raise RuntimeError(
                 f"Not enough disk space to {action} {path} into {_mm.MODELS_DIR}"
             )
-        console.print(f"[dim]{verb} {path} to {dest}…[/dim]")
+        # path/dest: a caller-named filesystem path (add_local's path_str) -
+        # not restricted to a safe charset.
+        console.print(f"[dim]{verb} {escape(str(path))} to {escape(str(dest))}…[/dim]")
         if action == "copy":
             shutil.copytree(path, dest)
         else:
@@ -1905,7 +1964,9 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
             # operation's problem to fix; note it and continue with the rest.
             logger.debug("_store_into_models_dir: %s no longer exists, skipping", src)
             continue
-        console.print(f"[dim]{verb} {src.name} to {dest}…[/dim]")
+        # src.name/dest: a split-GGUF part or mmproj sibling filename, sourced
+        # from the caller's own filesystem - not restricted to a safe charset.
+        console.print(f"[dim]{verb} {escape(src.name)} to {escape(str(dest))}…[/dim]")
         if action == "copy":
             # Two full hashes of a multi-GB model, either side of the copy. This
             # was the longest silence in the whole store path: the "Copying ..."
@@ -1988,7 +2049,11 @@ def _register_with_dedup(
     assume success - see add_local's callers for why.
     """
     import click
+    from rich.markup import escape
 
+    # model_name: not guaranteed sanitized here - add_local passes _sanitize_name()'s
+    # output when -n is given, but otherwise a filesystem stem (p.stem, an Ollama
+    # manifest dir/tag name) that can itself carry brackets.
     reg = _mm.load_registry()
     aliases = find_aliases_by_path(p, reg)
 
@@ -1996,8 +2061,8 @@ def _register_with_dedup(
     # architecture / expert_count)
     if model_name in aliases:
         console.print(
-            f"[yellow]'{model_name}' is already registered for this exact "
-            f"file[/yellow] [dim]({p})[/dim]"
+            f"[yellow]'{escape(model_name)}' is already registered for this exact "
+            f"file[/yellow] [dim]({escape(str(p))})[/dim]"
         )
         need_sha_backfill = bool(digest) and not reg[model_name].get("sha256")
         need_mmproj_backfill = bool(mmproj) and not reg[model_name].get("mmproj")
@@ -2023,15 +2088,16 @@ def _register_with_dedup(
             _mm.update_registry(_backfill)
         others = [a for a in aliases if a != model_name]
         if others:
-            console.print(f"[dim]Also registered as: {', '.join(others)}[/dim]")
+            console.print(f"[dim]Also registered as: "
+                          f"{', '.join(escape(a) for a in others)}[/dim]")
         return True
 
     # Same name, DIFFERENT file - real conflict, never overwrite silently
     old_path = _name_collision(model_name, p, reg)
     if old_path is not None:
         console.print(
-            f"[yellow]'{model_name}' already points to a different file:"
-            f"[/yellow] {old_path}"
+            f"[yellow]'{escape(model_name)}' already points to a different file:"
+            f"[/yellow] {escape(str(old_path))}"
         )
         if sys.stdin.isatty():
             if not click.confirm(f"  Overwrite '{model_name}' with {p}?"):
@@ -2070,7 +2136,9 @@ def _register_with_dedup(
             try:
                 dest = _mm._store_into_models_dir(p, action)
             except RuntimeError as e:
-                console.print(f"[red]{e}[/red]")
+                # e: built from Path objects derived from the caller's own
+                # filesystem paths - not restricted to a safe charset.
+                console.print(f"[red]{escape(str(e))}[/red]")
                 return False
             if action == "move":
                 dest_str = str(dest.resolve())
@@ -2100,14 +2168,14 @@ def _register_with_dedup(
                     r[model_name] = entry
 
                 _mm.update_registry(_relink_and_register)
-                console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]")
+                console.print(f"[green]✓[/green] Registered [bold]{escape(model_name)}[/bold]")
                 return True
             p = dest
         # action == "register" falls through unchanged
 
     _mm._register(model_name, p, source, sha256=digest, model_type=model_type,
                   mmproj=mmproj, architecture=architecture, expert_count=expert_count)
-    console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]")
+    console.print(f"[green]✓[/green] Registered [bold]{escape(model_name)}[/bold]")
     return True
 
 
@@ -2322,9 +2390,15 @@ def engine_holding_model_file(
 
 
 def remove_model(name: str) -> None:
+    # escape(): reachable via `POST /api/models/remove`, which spawns
+    # `localm rm <model> --yes` and re-pushes its stdout into the GUI
+    # job/activity log verbatim - so every print in this function is shown
+    # inside the GUI, not just a terminal.
+    from rich.markup import escape
+
     reg = _mm.load_registry()
     if name not in reg:
-        console.print(f"[red]Not found:[/red] {name}")
+        console.print(f"[red]Not found:[/red] {escape(name)}")
         return
 
     epath = _entry_path(reg[name])
@@ -2335,7 +2409,7 @@ def remove_model(name: str) -> None:
         # registry that `localm list` / `add` would otherwise choke on - without
         # it, a single bad entry could only be cleared by hand-editing the JSON.
         _mm.update_registry(lambda r: r.pop(name, None))
-        console.print(f"[green]✓[/green] Removed corrupt entry [bold]{name}[/bold]")
+        console.print(f"[green]✓[/green] Removed corrupt entry [bold]{escape(name)}[/bold]")
         return
 
     path = Path(epath)
@@ -2346,9 +2420,9 @@ def remove_model(name: str) -> None:
     if other_aliases:
         _mm.update_registry(lambda r: r.pop(name, None))   # atomic RMW
         console.print(
-            f"[green]✓[/green] Removed [bold]{name}[/bold] "
+            f"[green]✓[/green] Removed [bold]{escape(name)}[/bold] "
             f"[dim](file kept - still registered as: "
-            f"{', '.join(other_aliases)})[/dim]"
+            f"{', '.join(escape(a) for a in other_aliases)})[/dim]"
         )
         return
 
@@ -2384,7 +2458,9 @@ def remove_model(name: str) -> None:
         if target.is_dir():
             import shutil
             shutil.rmtree(target)
-            console.print(f"[dim]Deleted {target}[/dim]")
+            # target: the on-disk path, whose filename component can come from
+            # a remote HF repo's own filenames (pull.py) - not a safe charset.
+            console.print(f"[dim]Deleted {escape(str(target))}[/dim]")
         else:
             # Split GGUF: remove every sibling part, not just the registered one
             siblings = split_gguf_parts(target.name) or [target.name]
@@ -2392,11 +2468,11 @@ def remove_model(name: str) -> None:
                 part_path = target.parent / part
                 if part_path.exists():
                     part_path.unlink()
-                    console.print(f"[dim]Deleted {part_path}[/dim]")
+                    console.print(f"[dim]Deleted {escape(str(part_path))}[/dim]")
     elif path.exists():
         console.print("[dim]Unregistered (file not deleted - lives outside <data dir>/models)[/dim]")
     _mm.update_registry(lambda r: r.pop(name, None))       # atomic RMW
-    console.print(f"[green]✓[/green] Removed [bold]{name}[/bold]")
+    console.print(f"[green]✓[/green] Removed [bold]{escape(name)}[/bold]")
 
 
 
@@ -2415,6 +2491,7 @@ def _resolve_ollama_manifest(p: Path):
     Returns None if p doesn't look like an Ollama manifest.
     """
     import json as _json
+    from rich.markup import escape
 
     try:
         if not p.is_dir():
@@ -2485,9 +2562,14 @@ def _resolve_ollama_manifest(p: Path):
                 # Rule 5: surface it. A silent `continue` here would report "not an
                 # Ollama manifest" for a manifest that IS one but carries a
                 # malformed or hostile digest, hiding the real reason.
+                # digest: REMOTE-authored (the whole point of this branch is
+                # that it failed the safe-charset check above), so it must be
+                # escaped. Quoted by hand rather than via !r/repr(): repr()
+                # does not protect against Rich markup and interacts badly
+                # with escape() in either order (see set_model_type above).
                 console.print(
                     f"[yellow]Ignoring an Ollama manifest layer with a malformed "
-                    f"digest:[/yellow] {digest!r} (expected sha256:<64 hex>)")
+                    f"digest:[/yellow] '{escape(digest)}' (expected sha256:<64 hex>)")
                 logger.debug("rejected non-conforming ollama digest %r in %s",
                              digest, tag_file)
                 continue
@@ -2503,9 +2585,14 @@ def _resolve_ollama_manifest(p: Path):
                     break
 
             if blob_path is None:
+                # blob_name is already confirmed to match _OLLAMA_BLOB_RE (hex
+                # digest only) above, so it is safe on its own merits - escaped
+                # anyway rather than relying on that guard holding. p is the
+                # caller-supplied manifest directory path.
                 console.print(
-                    f"[yellow]Ollama manifest found but blob missing:[/yellow] {blob_name}\n"
-                    f"Expected a 'blobs' sibling directory near {p}"
+                    f"[yellow]Ollama manifest found but blob missing:[/yellow] "
+                    f"{escape(blob_name)}\n"
+                    f"Expected a 'blobs' sibling directory near {escape(str(p))}"
                 )
                 return None
 
@@ -2540,6 +2627,8 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
     any transfer failed (name collision, disk space, or a copy that verified
     corrupt) - the caller reports the printed error and aborts the whole import.
     """
+    from rich.markup import escape
+
     claimed_sibling_of: dict = {}   # resolved mmproj path -> its owning model path
     for owner in first_parts:
         sib = find_sibling_mmproj(owner)
@@ -2562,7 +2651,9 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
         try:
             new_parts.append(_mm._store_into_models_dir(gguf, store))
         except RuntimeError as e:
-            console.print(f"[red]{e}[/red]")
+            # e: built from Path objects derived from the caller's own
+            # filesystem paths - not restricted to a safe charset.
+            console.print(f"[red]{escape(str(e))}[/red]")
             return None
     return new_parts
 
@@ -2661,9 +2752,11 @@ def add_local(
     rather than claimed as success, and recoverable via `localm list` / the next
     server start (sync_models_dir), just under an automatic name.
     """
+    from rich.markup import escape
+
     p = Path(path_str).resolve()
     if not p.exists():
-        console.print(f"[red]Not found:[/red] {path_str}")
+        console.print(f"[red]Not found:[/red] {escape(path_str)}")
         return False
 
     # Ollama manifest directory -> resolve to actual GGUF blob
@@ -2687,16 +2780,16 @@ def add_local(
                 conflict = _name_collision(model_name, blob_path, reg)
                 if conflict is not None:
                     console.print(
-                        f"[red]'{model_name}' already points to a different "
-                        f"file:[/red] {conflict}\nRefusing to move {blob_path} "
-                        "into place non-interactively - pick another name "
-                        "with -n."
+                        f"[red]'{escape(model_name)}' already points to a different "
+                        f"file:[/red] {escape(str(conflict))}\nRefusing to move "
+                        f"{escape(str(blob_path))} into place non-interactively - "
+                        "pick another name with -n."
                     )
                     return False
             try:
                 blob_path = _mm._store_into_models_dir(blob_path, store)
             except RuntimeError as e:
-                console.print(f"[red]{e}[/red]")
+                console.print(f"[red]{escape(str(e))}[/red]")
                 return False
         # Ollama blob filenames already ARE the sha256 digest - store it free
         digest = blob_path.name.removeprefix("sha256-") \
@@ -2714,10 +2807,10 @@ def add_local(
         if not registered and store:
             verb = "moved" if store == "move" else "copied"
             console.print(
-                f"[yellow]{blob_path} was {verb} into the models folder but "
-                f"not registered as '{model_name}'.[/yellow] It will be picked "
-                "up under an automatic name the next time models are scanned "
-                "(`localm list`, or the next server start)."
+                f"[yellow]{escape(str(blob_path))} was {verb} into the models "
+                f"folder but not registered as '{escape(model_name)}'.[/yellow] "
+                "It will be picked up under an automatic name the next time "
+                "models are scanned (`localm list`, or the next server start)."
             )
         return registered
 
@@ -2726,7 +2819,7 @@ def add_local(
     # the registry and make the loader choke on a non-model directory.
     if p in {_mm.HOME_DIR.resolve(), _mm.MODELS_DIR.resolve()}:
         console.print(
-            f"[red]That is the localm data folder, not a model:[/red] {p}\n"
+            f"[red]That is the localm data folder, not a model:[/red] {escape(str(p))}\n"
             "Point at a .gguf file or a specific model directory."
         )
         return False
@@ -2748,7 +2841,7 @@ def add_local(
             is_hf = True
         else:
             console.print(
-                f"[red]Incomplete model:[/red] {p}\n"
+                f"[red]Incomplete model:[/red] {escape(str(p))}\n"
                 "A .safetensors weight file loads only as part of a HuggingFace model "
                 "directory. Point at the model's folder (the one holding config.json "
                 "plus a tokenizer), or use a single-file .gguf."
@@ -2778,7 +2871,7 @@ def add_local(
 
     if not (is_gguf or is_hf or is_blob):
         console.print(
-            f"[red]Not a model:[/red] {p}\n"
+            f"[red]Not a model:[/red] {escape(str(p))}\n"
             "Expected a .gguf file or a HuggingFace model directory "
             "(config.json plus weights or a tokenizer)."
         )
@@ -2827,15 +2920,16 @@ def add_local(
             conflict = _name_collision(model_name, p, reg)
             if conflict is not None:
                 console.print(
-                    f"[red]'{model_name}' already points to a different "
-                    f"file:[/red] {conflict}\nRefusing to {store} {p} into "
-                    "place non-interactively - pick another name with -n."
+                    f"[red]'{escape(model_name)}' already points to a different "
+                    f"file:[/red] {escape(str(conflict))}\nRefusing to {store} "
+                    f"{escape(str(p))} into place non-interactively - pick "
+                    "another name with -n."
                 )
                 return False
         try:
             p = _mm._store_into_models_dir(p, store)
         except RuntimeError as e:
-            console.print(f"[red]{e}[/red]")
+            console.print(f"[red]{escape(str(e))}[/red]")
             return False
 
     size: Optional[int] = None
@@ -2883,8 +2977,8 @@ def add_local(
     if not registered and store:
         verb = "moved" if store == "move" else "copied"
         console.print(
-            f"[yellow]{p} was {verb} into the models folder but not "
-            f"registered as '{model_name}'.[/yellow] It will be picked up "
+            f"[yellow]{escape(str(p))} was {verb} into the models folder but not "
+            f"registered as '{escape(model_name)}'.[/yellow] It will be picked up "
             "under an automatic name the next time models are scanned "
             "(`localm list`, or the next server start)."
         )
