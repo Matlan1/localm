@@ -830,6 +830,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   skips the steps that need the command and finishes normally, and its
   closing summary says plainly which commands will not work until it is
   fixed (the graphical launcher is unaffected).
+- **`localm gui` no longer disappears without a trace when the GUI fails to
+  load.** A broken or partial install could make the GUI's own code fail to
+  import, and the command was then dropped entirely - Click answered "No
+  such command 'gui'", exactly what a typo would look like. It now tells you
+  the GUI could not be loaded and how to see the underlying error.
 
 ### Security
 - **Two more model families' role markers are now defanged in untrusted text.**
