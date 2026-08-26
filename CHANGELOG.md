@@ -12,6 +12,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A coder session started in the browser can now choose which model server
+  answers it.** The setup form offers this localm, any OpenAI-compatible URL
+  (Ollama, LM Studio, vLLM), OpenAI, or Anthropic, per session, matching the
+  choice the terminal has always had. The default is unchanged and offline.
+  Because any other choice sends your prompts and the file contents the agent
+  reads off your machine, it states that when you pick it and keeps a marker on
+  the session for as long as it runs; off-machine models are refused in privacy
+  mode, with a message naming the setting that enables them; choosing a model
+  server needs the owner key; and an API key entered for a session is kept only
+  for that session and never written to disk. A URL on your own machine counts
+  as local and works in privacy mode.
 - **Native HuggingFace AWQ model loading and inference.** HuggingFace AWQ
   (Activation-aware Weight Quantization) 4-bit checkpoints can now be loaded
   and executed natively across Windows ROCm, Linux ROCm, NVIDIA CUDA, Intel XPU,
