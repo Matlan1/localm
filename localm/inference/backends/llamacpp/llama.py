@@ -1659,7 +1659,7 @@ class LlamaCpp:
                                             # accept here is the double accept
                                             # that threw across the C ABI.
                                             # Keep MTP context KV cache in sync with accepted draft token
-                                            if self._mtp_ctx_ptr is not None:
+                                            if self._mtp_ctx_ptr is not None and self._mtp_usable:
                                                 try:
                                                     d_acc = self._create_batch([draft_token], pos + 1, logits_at_last_only=False)
                                                     api.llama_decode(self._mtp_ctx_ptr, d_acc)
@@ -1677,7 +1677,7 @@ class LlamaCpp:
                                         else:
                                             # Draft REJECTED: remove the speculative token slot at pos + 1
                                             removed = api.llama_kv_cache_seq_rm(self._ctx_ptr, 0, pos + 1, -1)
-                                            if self._mtp_ctx_ptr is not None:
+                                            if self._mtp_ctx_ptr is not None and self._mtp_usable:
                                                 api.llama_kv_cache_seq_rm(self._mtp_ctx_ptr, 0, pos + 1, -1)
                                             self._cached_tokens.append(token)
                                             pos += 1
@@ -2132,7 +2132,7 @@ class LlamaCpp:
         mtp_needs_full_prefill = False
         if prefix == 0:
             api.llama_memory_clear(mem, True)
-            if self._mtp_ctx_ptr is not None:
+            if self._mtp_ctx_ptr is not None and self._mtp_usable:
                 try:
                     mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
                     api.llama_memory_clear(mem_mtp, True)
@@ -2144,7 +2144,7 @@ class LlamaCpp:
                 # the draft cache has to drop the same range the main one did.
                 # A draft cache that cannot be trimmed is cleared and refilled
                 # from the whole prompt instead of the suffix alone.
-                if self._mtp_ctx_ptr is not None:
+                if self._mtp_ctx_ptr is not None and self._mtp_usable:
                     try:
                         mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
                         if not api.llama_memory_seq_rm(mem_mtp, 0, prefix, -1):
@@ -2159,7 +2159,7 @@ class LlamaCpp:
             else:
                 # Partial removal unsupported (e.g. SWA cache / M-RoPE) - start over
                 api.llama_memory_clear(mem, True)
-                if self._mtp_ctx_ptr is not None:
+                if self._mtp_ctx_ptr is not None and self._mtp_usable:
                     try:
                         mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
                         api.llama_memory_clear(mem_mtp, True)
@@ -2184,7 +2184,7 @@ class LlamaCpp:
                 self._cached_tokens = []
                 try:
                     api.llama_memory_clear(mem, True)
-                    if self._mtp_ctx_ptr is not None:
+                    if self._mtp_ctx_ptr is not None and self._mtp_usable:
                         mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
                         api.llama_memory_clear(mem_mtp, True)
                 except Exception:
@@ -2294,7 +2294,7 @@ class LlamaCpp:
             try:
                 mem = api.llama_get_memory(self._ctx_ptr)
                 api.llama_memory_clear(mem, True)
-                if self._mtp_ctx_ptr is not None:
+                if self._mtp_ctx_ptr is not None and self._mtp_usable:
                     try:
                         mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
                         api.llama_memory_clear(mem_mtp, True)
