@@ -1261,12 +1261,13 @@ export async function saveSettingsSection(secId) {
   }
   if (r.ok) {
     toast("Saved - engine values apply on the next model load");
-    // A save may have turned "Show remote images in replies" OFF. The route
-    // starts refusing immediately, but an already-fetched image is held in a
-    // page-lifetime blob cache, so without this the switch appears to do nothing
-    // for every image already on screen. Cleared unconditionally: it costs one
-    // refetch of visible images when the setting did not change, and reading
-    // which key moved would put a security decision behind a diff.
+    // A save may have moved "Show remote images in replies" (off / ask / on).
+    // The route re-decides immediately, but an already-fetched image is held in
+    // a page-lifetime blob cache and the reader's per-origin answers are held
+    // beside it, so without this the change appears to do nothing for every
+    // image already on screen. Both are cleared unconditionally: it costs one
+    // refetch and at most one re-ask, and reading which key moved would put a
+    // security decision behind a diff.
     clearImageProxyCache();
     refreshSettingsPage();   // re-render to reflect server-normalized values
   } else {

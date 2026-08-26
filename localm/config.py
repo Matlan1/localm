@@ -20,6 +20,85 @@ _warned_unconfigured_home = False
 # call (see _merge_stored_config).
 _warned_bad_config: set = set()
 
+# The three states of gui_proxy_remote_images, least to most permissive.
+#   off  the route refuses; a reply's remote image never leaves this machine.
+#   ask  the route refuses until the GUI has asked the reader about that
+#        ORIGIN, and re-asks it with the reader's answer. The only state that
+#        closes the channel for an arbitrary host while still showing images.
+#   on   fetch it, no question. What the pre-3-state boolean True meant.
+REMOTE_IMAGE_OFF = "off"
+REMOTE_IMAGE_ASK = "ask"
+REMOTE_IMAGE_ON = "on"
+REMOTE_IMAGE_MODES = (REMOTE_IMAGE_OFF, REMOTE_IMAGE_ASK, REMOTE_IMAGE_ON)
+# The key shipped as a TOGGLE, and there is no config migration step anywhere in
+# this file: load_config() is defaults + the stored delta, so an install that
+# switched the old boolean on still has `true` on disk. (false_option,
+# true_option) is what such a value means, and it is the ONE definition of that
+# mapping - settings_schema's SettingField.legacy_bool reads the same pair, so
+# what the file can hold and what PATCH /v1/config accepts cannot drift apart.
+REMOTE_IMAGE_LEGACY_BOOL = (REMOTE_IMAGE_OFF, REMOTE_IMAGE_ON)
+
+# gui_proxy_remote_images values already warned about, so an unreadable one is
+# surfaced once per process rather than on every load_config (see
+# _normalize_remote_image_mode).
+_warned_bad_remote_image_mode: set = set()
+
+
+def coerce_remote_image_mode(val):
+    """*val* as one of REMOTE_IMAGE_MODES, or None if it is not a shape this
+    key has ever legitimately held.
+
+    Accepts the current strings and the pre-3-state boolean (including the
+    `1`/`0` and `"true"`/`"false"` spellings a JSON or CLI client may send),
+    per REMOTE_IMAGE_LEGACY_BOOL. Returning None rather than a default keeps
+    "this is unreadable" distinguishable from "this says off", which is what
+    lets the caller decide whether to warn."""
+    false_opt, true_opt = REMOTE_IMAGE_LEGACY_BOOL
+    if isinstance(val, bool):
+        return true_opt if val else false_opt
+    if isinstance(val, int) and val in (0, 1):
+        return true_opt if val else false_opt
+    if isinstance(val, str):
+        low = val.strip().lower()
+        # An exact mode wins first: "off"/"on" are also boolean spellings, and
+        # both readings agree, but the mode is what the value IS.
+        if low in REMOTE_IMAGE_MODES:
+            return low
+        if low in ("1", "true", "yes"):
+            return true_opt
+        if low in ("0", "false", "no"):
+            return false_opt
+    return None
+
+
+def _normalize_remote_image_mode(cfg: dict) -> None:
+    """Canonicalise gui_proxy_remote_images in *cfg*, in place.
+
+    Runs on every load so a config.json written before the key became a
+    three-state setting reads as "on"/"off" everywhere - the route, the settings
+    schema, the bug report and `localm config` all go through load_config(), so
+    normalising here is the whole migration. save_config() writes the user delta
+    from the loaded dict, so the file heals itself on the next save.
+
+    An UNREADABLE value falls back to "off" and says so once. Failing closed is
+    the safe direction for a key that decides whether rendering a reply makes an
+    outbound request, and saying so is the difference between a fallback and a
+    hidden problem: without the warning a typo in config.json would silently
+    turn a feature the owner had switched on back off."""
+    raw = cfg.get("gui_proxy_remote_images")
+    mode = coerce_remote_image_mode(raw)
+    if mode is not None:
+        cfg["gui_proxy_remote_images"] = mode
+        return
+    cfg["gui_proxy_remote_images"] = REMOTE_IMAGE_OFF
+    token = repr(raw)
+    if token not in _warned_bad_remote_image_mode:
+        _warned_bad_remote_image_mode.add(token)
+        print(f"[localm] config.json has gui_proxy_remote_images={token}, which "
+              f"is not one of {list(REMOTE_IMAGE_MODES)}; treating it as "
+              f"'{REMOTE_IMAGE_OFF}' (remote images in replies stay blocked).",
+              file=sys.stderr)
+
 
 def _warn_unconfigured_home(path: Path) -> None:
     """Surface (once) that no data dir was configured, so a missing / lost config
@@ -642,7 +721,9 @@ DEFAULT_CONFIG: dict = {
     # What it does buy, when a user wants images to work: the remote host never
     # sees the browser's IP, User-Agent or referrer, and the fetch is subject to
     # the same SSRF guard and domain lists as every other outbound request.
-    "gui_proxy_remote_images": False,
+    # "ask" is the state that DOES close the channel for an arbitrary host: the
+    # route refuses until the GUI has asked the reader about that origin.
+    "gui_proxy_remote_images": REMOTE_IMAGE_OFF,
     "coder_rail_side": "right",
     "coder_remember_projects": True,
     "coder_projects_remembered": 20,
@@ -1308,11 +1389,32 @@ def load_config_checked() -> tuple:
     with _io_lock:
         stored, read_ok = _read_json_checked(CONFIG_FILE, {})
     _merge_stored_config(cfg, stored)
+    # gui_proxy_remote_images shipped as a boolean and is now off/ask/on. There
+    # is no migration step: this is it, and it runs on every read so a stored
+    # `true` reads as "on" for the route, the schema, the CLI and the bug report
+    # alike.
+    _normalize_remote_image_mode(cfg)
     return cfg, read_ok
 
 
 def load_config() -> dict:
     return load_config_checked()[0]
+
+
+def remote_image_mode(cfg: Optional[dict] = None) -> str:
+    """The current gui_proxy_remote_images mode, ALWAYS one of
+    REMOTE_IMAGE_MODES.
+
+    load_config() already normalises the key, so for the ordinary caller this
+    only reads it. It coerces again anyway because it is the read a security
+    decision is made on, and a *cfg* built some other way (a hand-assembled
+    dict, a test double) has been through no normalisation at all. Same
+    function both times, so there is one definition of what a value means;
+    unreadable resolves to "off", which is the direction that refuses."""
+    if cfg is None:
+        cfg = load_config()
+    mode = coerce_remote_image_mode(cfg.get("gui_proxy_remote_images"))
+    return mode if mode is not None else REMOTE_IMAGE_OFF
 
 
 def keep_diagnostics_enabled() -> bool:

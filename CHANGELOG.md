@@ -448,6 +448,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   had. Applies to both the interactive chat web toggle and scheduled chat
   jobs, on local grammar-capable backends; toggle with the new "Grammar-
   constrain chat tool calls" setting.
+- **"Show remote images in replies" can now ask you first, per site.** The
+  setting gained a third choice between off and on: set it to "ask" and localm
+  checks with you once per site per conversation before any image from that site
+  is fetched. Nothing leaves your machine while you decide, and choosing not to
+  load leaves a note in the reply saying so. A reply's image address is chosen by
+  the model and the address itself can carry information out, so "on" only moves
+  the request from your browser to this machine, it does not stop it; "ask" is
+  the setting that stops it for a site you have not agreed to. Your answers last
+  for that conversation in that browser tab only: they are never saved to disk,
+  never shared with another conversation, and a reload asks again. Off is still
+  the default, and an install that had this switched on before keeps working
+  exactly as it did.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
