@@ -126,13 +126,15 @@ async def imagine(req: ImagineRequest, request: Request):
     images_dir = _images_dir()
     images_dir.mkdir(parents=True, exist_ok=True)
     out_path = images_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
-    from localm.config import load_config
-    _cfg = load_config()
-    s = _backend.settings(_cfg)
     owner = principal_id(request)
 
     def _generate(job):
         from localm.audit import SessionMode, effective_mode
+        from localm.config import load_config
+        # Resolved here, in the job's own worker thread, not the route above.
+        # See tests/test_comfy_media_routes_offloaded.py.
+        _cfg = load_config()
+        s = _backend.settings(_cfg)
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
         ok, msg = _backend.ensure_available(
@@ -357,18 +359,21 @@ async def imagine_comfy_models(request: Request):
     beyond that (a wedged native call, not ordinary slow-ComfyUI load). That
     one budget now also covers the registry read the role join needs - a small
     local JSON, well inside the ~10s of slack, and deliberately inside the SAME
-    offload so it cannot land back on the event loop."""
+    offload so it cannot land back on the event loop. settings() itself gets
+    its own offload below: it can reach sanitize_comfy_url's blocking DNS
+    lookup, a second way onto the event loop distinct from the /object_info
+    fetch (see tests/test_comfy_media_routes_offloaded.py)."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
     )
     from localm.plugins.media_roles import plugin_model_roles
-    s = _backend.settings(load_config())
     # Read in the request, not in the worker: this walks the plugin manager's
     # in-memory descriptors (no I/O), and handing app state to a thread is not
     # something to do for a lookup that costs nothing here.
     roles = plugin_model_roles(request.app, "image")
     try:
+        s = await run_in_threadpool_bounded(_backend.settings, load_config(), timeout=20.0)
         resolved = await run_in_threadpool_bounded(
             _backend._comfy_model_roles, s, roles, timeout=20.0)
         loras = await run_in_threadpool_bounded(_backend._comfy_lora_options, s, timeout=20.0)
@@ -385,7 +390,9 @@ async def imagine_comfy_launch():
     """Start (or confirm) ComfyUI is up for the image plugin, without running a
     generation - backs the Workflow panel's "Launch ComfyUI" button. Runs the
     same ensure_available() path a real generation uses, off the event loop
-    since a cold ComfyUI start can take minutes.
+    since a cold ComfyUI start can take minutes. settings() itself is also
+    offloaded (a separate, short budget): it can reach sanitize_comfy_url's
+    blocking DNS lookup (tests/test_comfy_media_routes_offloaded.py).
 
     Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
     itself will honour (comfy_launch_wait_seconds), plus a buffer - not an
@@ -397,9 +404,9 @@ async def imagine_comfy_launch():
     )
     from localm.media.comfy_client import comfy_launch_wait_seconds
     cfg = load_config()
-    s = _backend.settings(cfg)
     budget = comfy_launch_wait_seconds(cfg) + 30.0
     try:
+        s = await run_in_threadpool_bounded(_backend.settings, cfg, timeout=20.0)
         ok, message = await run_in_threadpool_bounded(
             _backend.ensure_available, s, timeout=budget)
     except ThreadCallTimeout as e:

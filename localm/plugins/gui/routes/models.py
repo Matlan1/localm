@@ -892,30 +892,33 @@ def register(app: FastAPI, ctx) -> None:
                 logger.debug("preflight workflow build failed for %s: %s", kind, e)
                 return []
             target = resolve_comfy_target(plugin=kind)
-            return describe_missing_models(workflow, target.api_url)
+            missing = describe_missing_models(workflow, target.api_url)
+
+            results = []
+            for slot in missing:
+                source = resolve_comfy_model_source(slot.filename)
+                entry = {
+                    "class_type": slot.class_type,
+                    "input_name": slot.input_name,
+                    "filename": slot.filename,
+                    "source": None,
+                    "dest_dir": None,
+                }
+                if source is not None:
+                    repo, file = source.spec.rsplit(":", 1)
+                    # Stays inside this offloaded call. See
+                    # tests/test_comfy_media_routes_offloaded.py.
+                    dest_dir = comfy_models_dest_dir(source.comfy_subfolder, plugin=kind)
+                    entry["source"] = {
+                        "repo": repo, "file": file,
+                        "size_bytes": source.size_bytes, "model_type": source.model_type,
+                    }
+                    entry["dest_dir"] = str(dest_dir) if dest_dir is not None else None
+                results.append(entry)
+            return results
 
         loop = asyncio.get_running_loop()
-        missing = await loop.run_in_executor(get_plugin_executor(), _check)
-
-        results = []
-        for slot in missing:
-            source = resolve_comfy_model_source(slot.filename)
-            entry = {
-                "class_type": slot.class_type,
-                "input_name": slot.input_name,
-                "filename": slot.filename,
-                "source": None,
-                "dest_dir": None,
-            }
-            if source is not None:
-                repo, file = source.spec.rsplit(":", 1)
-                dest_dir = comfy_models_dest_dir(source.comfy_subfolder, plugin=kind)
-                entry["source"] = {
-                    "repo": repo, "file": file,
-                    "size_bytes": source.size_bytes, "model_type": source.model_type,
-                }
-                entry["dest_dir"] = str(dest_dir) if dest_dir is not None else None
-            results.append(entry)
+        results = await loop.run_in_executor(get_plugin_executor(), _check)
         return {"missing": results}
 
     @app.post("/api/models/pull-comfy-source",
@@ -958,7 +961,13 @@ def register(app: FastAPI, ctx) -> None:
         # plugin context (the legacy global comfy_workdir), same as before
         # this field existed.
         plugin = req.plugin if req.plugin in MEDIA_PLUGINS else None
-        dest_dir = comfy_models_dest_dir(source.comfy_subfolder, plugin=plugin)
+        try:
+            dest_dir = await run_in_threadpool_bounded(
+                comfy_models_dest_dir, source.comfy_subfolder, plugin=plugin,
+                timeout=20.0)
+        except ThreadCallTimeout as e:
+            raise HTTPException(
+                504, f"Resolving the ComfyUI download destination timed out: {e}")
         if dest_dir is None:
             raise HTTPException(
                 400,
