@@ -8,11 +8,10 @@ an OPTIONAL aligned vector sidecar ``<ns>.vec.json`` (``{"dim", "vectors": {id:
 vec}}``). Keying vectors by record id (not position) keeps them correct across
 edits and deletes.
 
-Design mirrors ``localm/rag/store.py`` (home-scale JSON, atomic tmp+replace, BM25
-always-available, embeddings OPTIONAL, and - CHK-MEM-LOCK - a per-namespace lock so
-concurrent writers cannot silently clobber each other, exactly like rag's
-per-collection lock). It deliberately stays SMALL: consolidation + decay + the
-``N_MAX`` cap keep a namespace to a few hundred distilled records, never a
+Design mirrors ``localm/rag/store.py``: home-scale JSON, atomic tmp+replace, BM25
+always-available, embeddings OPTIONAL, and a per-namespace lock so concurrent
+writers cannot silently clobber each other. It stays SMALL: consolidation + decay
++ the ``N_MAX`` cap keep a namespace to a few hundred distilled records, never a
 transcript, so whole-file rewrites are cheap.
 
 Retrieval blends the Generative-Agents signals (Park et al. 2023): relevance
@@ -47,19 +46,18 @@ EmbedFn = Callable[[list[str]], list[list[float]]]
 
 # ---- on-disk format -------------------------------------------------------- #
 # Stamped on every JSONL line at save ("v"). Load tolerates lines without it
-# (files written before versioning are format 1), so existing stores keep
-# working. Bump this on a breaking MemoryRecord schema change and branch on the
-# stored value in _load() - the migration hook this store previously lacked
-# (LM-DA-002): _save() rewrites the whole file, so an unrecognized line that is
-# merely skipped is erased by the next write.
+# (files written before versioning are format 1). Bump this on a breaking
+# MemoryRecord schema change and branch on the stored value in _load(): _save()
+# rewrites the whole file, so an unrecognized line that is merely skipped is
+# erased by the next write.
 #
-# LM-DA-025: also reused, unchanged, as the "v" stamp for the three correction
-# sidecars (.corrections.jsonl, .forgotten.jsonl, .corrections-dismissed.json) -
-# a SHARED counter across four independent schemas, not a per-schema one. A
-# future bump for a MemoryRecord-only change also stamps a new value onto the
-# sidecars even though their own schemas did not change; any version-gated
-# migration written against "v" must branch per-schema (which file it came
-# from), not assume the raw number alone identifies a MemoryRecord revision.
+# Also reused, unchanged, as the "v" stamp for the three correction sidecars
+# (.corrections.jsonl, .forgotten.jsonl, .corrections-dismissed.json) - a SHARED
+# counter across four independent schemas, not a per-schema one. A bump for a
+# MemoryRecord-only change also stamps a new value onto the sidecars even though
+# their own schemas did not change; any version-gated migration written against
+# "v" must branch per-schema (which file it came from), not assume the raw number
+# alone identifies a MemoryRecord revision.
 FORMAT_VERSION = 1
 
 # ---- bounds (DoS / poisoning / bloat) ------------------------------------- #
@@ -69,11 +67,10 @@ K_CAP = 32                  # hard ceiling on a recall k
 
 # ---- retrieval scoring ---------------------------------------------------- #
 W_REL, W_REC, W_IMP = 0.5, 0.3, 0.2     # blend weights (sum 1.0)
-# Within the relevance signal, weight semantic cosine ABOVE lexical BM25 when an
-# embedder is present. Paraphrased factual queries share few tokens with the stored
-# fact, so BM25 is near-zero and noisy; a 50/50 blend diluted the strong cosine
-# signal (in-house benchmark: recall@1 0.19 at 50/50 vs 0.63 at this share, recall@3
-# 0.56 -> 0.94). Some BM25 is kept so exact-term queries (ids, filenames) still hit.
+# Within the relevance signal, semantic cosine is weighted ABOVE lexical BM25 when
+# an embedder is present: paraphrased factual queries share few tokens with the
+# stored fact, so BM25 is near-zero and noisy. Some BM25 is kept so exact-term
+# queries (ids, filenames) still hit.
 REL_LEX_SHARE = 0.20       # BM25 share of relevance when vectors present (rest = cosine)
 TAU_DAYS = 30.0             # recency e-folding time: 30d -> 0.37, 90d -> 0.05
 FLOOR = 0.05               # a recalled memory must beat this normalized score
@@ -83,28 +80,18 @@ VEC_COVERAGE = 0.8         # blend cosine only when >= this fraction have vector
 # ---- absolute relevance gate (recall precision) --------------------------- #
 # Recall injects a memory ONLY when it actually relates to the query, mirroring the
 # coder's episode gate (plugins/coder/episodes.py), so an OFF-TOPIC turn injects
-# NOTHING instead of the old always-surface-the-top-k behaviour (memory-audit
-# 2026-07-02 [10]: FLOOR was arithmetically dead - user/import were recency-pinned
-# at 1.0 and the min synth importance cleared it, so recall never fell silent, and
-# a static 6-fact block distracted small local models). Gates are ABSOLUTE (not
-# max-normalised) so silence-when-irrelevant holds:
+# NOTHING. Gates are ABSOLUTE (not max-normalised) so silence-when-irrelevant
+# holds:
 #   lexical: the query shares a CONTENT word (stopwords removed) with the record, OR
 #   semantic: the raw cosine to the record clears REL_COS_MIN (when vectors usable).
 # The blended score below still RANKS the eligible records; the gate only decides
-# eligibility. Note the pinned user/import recency is now harmless for the "never
-# silent" property (an off-topic user fact fails the gate regardless), and it still
-# keeps a relevant durable fact prominent among the eligible records.
-REL_COS_MIN = 0.55         # absolute cosine floor for the semantic gate, matching the
-# coder episode gate. Was 0.50 until real-model measurement (memory longitudinal
-# harness, real bge-small-en-v1.5) found a genuine off-topic false positive at
-# cos=0.5491 (an incidental lexical collision - a query about Mars vs a record
-# about a "Comet"-named project, both astronomy-adjacent nouns) while every
-# clearly-relevant paraphrase measured stayed >=0.62 and 10/10 unrelated control
-# sentences stayed <=0.45; 0.55 clears the false positive without excluding any
-# measured true positive.
+# eligibility. The pinned user/import recency keeps a relevant durable fact
+# prominent among the eligible records; an off-topic user fact fails the gate
+# regardless.
+# Absolute cosine floor for the semantic gate, matching the coder episode gate.
+REL_COS_MIN = 0.55
 # Stopwords stripped from the LEXICAL gate: a query and a fact sharing only "the"
-# must NOT clear it (that would break silence-when-irrelevant). Mirrors the coder
-# episode store's _STOPWORDS; a future refactor could share one copy.
+# must NOT clear it. Mirrors the coder episode store's _STOPWORDS.
 _STOPWORDS = frozenset(
     "a an and are as at be been but by can could did do does done for from had has "
     "have he her him his i if in into is it its me my no not of on only or our over "
@@ -121,40 +108,20 @@ def _content_tokens(text: str) -> set:
     return {t for t in _tokenize(text or "") if t not in _STOPWORDS}
 
 
-# ---- self-reference discriminator (REG-590) -------------------------------- #
-# First-person pronouns. Deliberately read from the RAW query, BEFORE _STOPWORDS is
-# applied - every one of these IS a stopword (see _STOPWORDS above), which is exactly
-# why this signal was invisible to the lexical gate.
+# ---- self-reference discriminator ------------------------------------------ #
+# First-person pronouns, read from the RAW query BEFORE _STOPWORDS is applied -
+# every one of these IS a stopword (see _STOPWORDS above). TRUSTED_SOURCES records
+# are PROFILE facts, so they are on-topic exactly when the user asks about
+# themselves.
 #
-# Why this exists: with no embedder there is no relevance signal, so "what is my name"
-# (vs "User is called Sam") and "recommend a pasta recipe" (vs "User was born in 1990")
-# are the SAME input to the lexical gate - both zero content-word overlap against a
-# trusted fact. REG-590 needs the first recalled; the [10] precision gate needs the
-# second silenced (test_user_fact_is_gated_not_always_injected). Nothing in the token
-# overlap separates them. First-person reference does: TRUSTED_SOURCES records are
-# PROFILE facts (who the user is), so they are on-topic exactly when the user asks
-# about themselves, and a question about pasta or France is not about them.
-#
-# This is a HEURISTIC, not relevance: "is the metric system better?" is about the
-# user's stored preference but carries no pronoun, so it still misses. It is a cheap
-# discriminator that preserves BOTH contracts on the reproduced cases, not a
-# substitute for a working embedder.
+# A HEURISTIC, not relevance: "is the metric system better?" is about the user's
+# stored preference but carries no pronoun, so it still misses.
 _SELF_REF = frozenset({"i", "me", "my", "mine", "myself"})
 
-# "my" does NOT mean "about me" when it introduces ANOTHER PERSON. Reported live
-# 2026-08-14: "Greet my friend Memo, who is watching right now" was classified
-# self-referential on the bare "my", and with coverage degraded the fallback below
-# promoted two unrelated profile facts by importance - so a greeting turned into
-# the model recalling a person named Fishy from a conversation days earlier. The
-# log for that turn reads
-#
-#     memory recall: injected 2 record(s), degrade=low_coverage
-#
-# i.e. exactly TRUST_FALLBACK_K records, none of them related to the request.
-#
-# A possessive naming a RELATIONSHIP is about that other person, so it must not
-# open the profile-fact fallback. "my name", "my birthday", "my preference" are
-# untouched and still self-referential, which is what REG-590 needs.
+# "my" does NOT mean "about me" when it introduces ANOTHER PERSON: a possessive
+# naming a RELATIONSHIP is about that other person, so it must not open the
+# profile-fact fallback. "my name", "my birthday", "my preference" are untouched
+# and still self-referential.
 _OTHER_PERSON = frozenset({
     "friend", "friends", "colleague", "colleagues", "coworker", "coworkers",
     "boss", "manager", "neighbour", "neighbor", "neighbours", "neighbors",
@@ -199,11 +166,9 @@ _DAY = 86400.0
 # rewrite these (see corrections.py / consolidate.py). Grouped identically by
 # recall (recency pin) and prune (decay exemption).
 TRUSTED_SOURCES = ("user", "import")
-# REG-590: how many TRUSTED_SOURCES facts may be promoted past a LEXICAL MISS when the
-# semantic signal is degraded (no_embedder / no_vectors / low_coverage / dim_mismatch).
-# Deliberately tiny: the harm [10] fixed scales with the NUMBER of irrelevant facts
-# injected every turn (it measured a static MAX_INJECT=6 block distracting small local
-# models), so 2 user-authored facts is a different order of thing, not a partial revert.
+# How many TRUSTED_SOURCES facts may be promoted past a LEXICAL MISS when the
+# semantic signal is degraded (no_embedder / no_vectors / low_coverage /
+# dim_mismatch).
 TRUST_FALLBACK_K = 2
 
 _AGENTS = ("chat", "coder")
@@ -231,23 +196,22 @@ def namespace_file(principal: str, agent: str, scope_key: str,
     base = _memory_root(root).resolve()
     path = (base / agent / f"{namespace_hash(principal, agent, scope_key)}.jsonl")
     # Path-safety: the resolved file must stay under <home>/memory. agent is
-    # allow-listed and the ns is a hex hash, so this is belt-and-suspenders
-    # against any future caller that lets a component flow in unchecked.
+    # allow-listed and the ns is a hex hash.
     #
-    # CHK-MEM-WINRESOLVE: two DIFFERENT namespaces of the same agent (distinct
-    # scope_key -> distinct ns_hash -> distinct per-namespace lock, so they do
-    # NOT serialise against each other) can race to be the first-ever write
-    # under a shared agent directory (e.g. <home>/memory/chat/) that does not
-    # exist yet: one thread's _save() may create that directory mid-flight
-    # while another thread is inside path.resolve() for a sibling file under
-    # it. On Windows this can make path.resolve() return a \\?\-prefixed
-    # extended-length form (ntpath.realpath's prefix-stripping re-validation,
-    # done via a second internal resolve, can itself be caught by the same
-    # race and leave the prefix in place) while base.resolve() - resolved
-    # moments earlier against a stable, already-existing directory - has no
-    # prefix. Both denote the identical location, so compare prefix-stripped
-    # forms; a real escape attempt is unaffected since the prefix carries no
-    # path-safety information (it only marks how the OS chose to resolve).
+    # Two DIFFERENT namespaces of the same agent (distinct scope_key -> distinct
+    # ns_hash -> distinct per-namespace lock, so they do NOT serialise against
+    # each other) can race to be the first-ever write under a shared agent
+    # directory (e.g. <home>/memory/chat/) that does not exist yet: one thread's
+    # _save() may create that directory mid-flight while another thread is inside
+    # path.resolve() for a sibling file under it. On Windows this can make
+    # path.resolve() return a \\?\-prefixed extended-length form (ntpath.realpath's
+    # prefix-stripping re-validation, done via a second internal resolve, can
+    # itself be caught by the same race and leave the prefix in place) while
+    # base.resolve() - resolved moments earlier against a stable,
+    # already-existing directory - has no prefix. Both denote the identical
+    # location, so compare prefix-stripped forms; a real escape attempt is
+    # unaffected since the prefix carries no path-safety information (it only
+    # marks how the OS chose to resolve).
     rp = _strip_extended_prefix(path.resolve())
     base = _strip_extended_prefix(base)
     if not (rp == base or _within(rp, base)):
@@ -262,8 +226,8 @@ _EXTENDED_UNC_PREFIX = "\\\\?\\UNC\\"
 def _strip_extended_prefix(path: Path) -> Path:
     """Strip Windows' \\?\\ (or \\?\\UNC\\) extended-length-path prefix, if
     present, so two resolutions of the identical location compare equal
-    regardless of which one the OS chose. See CHK-MEM-WINRESOLVE above; a
-    no-op on POSIX and on any path that never had the prefix."""
+    regardless of which one the OS chose. A no-op on POSIX and on any path that
+    never had the prefix."""
     s = str(path)
     if s.startswith(_EXTENDED_UNC_PREFIX):
         return Path("\\\\" + s[len(_EXTENDED_UNC_PREFIX):])
@@ -285,16 +249,14 @@ def _maxnorm(scores: list[float]) -> list[float]:
     return [s / top for s in scores] if top > 0 else [0.0 for _ in scores]
 
 
-# Per-namespace-hash locks (CHK-MEM-LOCK). A fresh MemoryStore is constructed per
-# call site - every HTTP request/plugin call builds its own instance (see plug.py's
-# _chat_store) - so a per-INSTANCE lock cannot help: two instances each _load() the
-# same on-disk state, mutate their own in-memory copy, and _save() - last writer
-# wins and the other write is silently lost. This is exactly rag/store.py's
-# CHK-RAG-LOCK, reproduced for memory (see _COLLECTION_LOCKS there). Keyed by
-# namespace_hash, so the map is bounded by the number of active namespaces, not
-# per-call. RLock so prune() calling replace(), or a caller batching several
-# save=False mutations under store.lock(), does not deadlock. Shared registry
-# implementation (storekit.NamespaceLockRegistry) - see CF-9/CF-10.
+# Per-namespace-hash locks. A fresh MemoryStore is constructed per call site -
+# every HTTP request/plugin call builds its own instance (see plug.py's
+# _chat_store) - so a per-INSTANCE lock cannot serialise them: two instances each
+# _load() the same on-disk state, mutate their own in-memory copy, and _save(),
+# and the losing write is silently lost. Keyed by namespace_hash, so the map is
+# bounded by the number of active namespaces, not per-call. RLock so prune()
+# calling replace(), or a caller batching several save=False mutations under
+# store.lock(), does not deadlock.
 _NAMESPACE_LOCKS = NamespaceLockRegistry()
 
 
@@ -302,44 +264,27 @@ def _namespace_lock(ns_hash: str):
     return _NAMESPACE_LOCKS.get(ns_hash)
 
 
-# CHK-MEM-XPROC: the registry above serialises writers INSIDE one process, which
-# its own docstring says plainly. It cannot serialise `localm memory add|forget|
-# restore|accept|clear` - its own OS process, its own registry - against a running
-# server's consolidation pass. Both _load() the same state, mutate their copy and
-# _save(): last writer wins and the other write is gone. rag hit exactly this and
-# built collection_lock.py for it; memory had the same exposure and no guard.
+# The registry above serialises writers INSIDE one process only. It cannot
+# serialise `localm memory add|forget|restore|accept|clear` - its own OS process,
+# its own registry - against a running server's consolidation pass: both _load()
+# the same state, mutate their copy and _save(), and the CLI reports success for a
+# write that is then gone. `localm setup-embeddings` writes every memory namespace
+# from its own process too (cli/maintenance.py).
 #
-# MEASURED 2026-08-19 against master, two real interpreters, reproduced twice: a
-# server-side write holding the namespace while `localm memory add` ran printed
-# "Remembered <id>" and exited 0, and the fact was ABSENT afterwards. A FALSE
-# SUCCESS (rule 5), not merely a lost update, which is what makes it worth a lock
-# rather than a note. The `localm memory` CLI is what made that second writer
-# routine, but it was reachable before it too: `localm setup-embeddings` writes
-# every memory namespace from its own process (cli/maintenance.py).
-#
-# WHY THE HEARTBEAT LOCK AND NOT config._cross_process_lock: that one reclaims any
-# holder older than 30s as abandoned, which is right for a config read-modify-write
-# and WRONG here - store.add()/replace() resolve the embedder INSIDE the lock, and
-# that can trigger a VRAM swap lasting minutes (BUG #648, documented at plug.py's
-# _off_loop). A 30s reclaim would reap a live holder and let both write, which is
-# the bug it was meant to prevent. collection_lock has no wall-clock limit and
-# keys staleness on a heartbeat instead, precisely because rag indexing has the
-# same long-legitimate-hold shape.
-#
-# Importing it from localm.rag is not a new layering edge: this module already
-# imports BM25, tokenize and _cosine from there. If that shared machinery is ever
-# moved to a neutral home (storekit is the obvious one), both consumers now call
-# the same function, so it is one import line each.
+# The cross-process lock is rag's heartbeat-based collection_write_lock, NOT
+# config._cross_process_lock: that one reclaims any holder older than 30s as
+# abandoned, and store.add()/replace() resolve the embedder INSIDE the lock, which
+# can trigger a VRAM swap lasting minutes - a wall-clock reclaim would reap a live
+# holder and let both write. collection_lock has no wall-clock limit and keys
+# staleness on a heartbeat instead.
 
 # How long recall's reinforcement waits for a busy namespace before skipping the
-# bump. Short on purpose: it runs on the chat turn (see recall's comment).
+# bump. It runs on the chat turn.
 _REINFORCE_LOCK_WAIT = 2.0
 
-# Only ONE thread per process ever contends for a namespace's FILE lock. Without
-# this, two threads here would each hit collection_write_lock's O_EXCL create, and
-# the loser would burn its whole budget fighting a holder inside its own process
-# that an in-process lock settles instantly. Same reason rag takes
-# _collection_lock before its file lock.
+# Gates the FILE lock so only ONE thread per process ever contends for it: a
+# sibling thread waits on this mutex instead of burning its whole budget on
+# collection_write_lock's O_EXCL create against a holder in its own process.
 _FILE_GATES = NamespaceLockRegistry()
 
 _XPROC_DEPTH = threading.local()
@@ -360,25 +305,20 @@ def _namespace_write_lock(ns_hash: str, store_file: Path, op: str,
 
     Reentrant on both halves. The in-process half is an RLock already; the
     cross-process half is NOT (collection_write_lock turns a nested acquisition
-    into an error on purpose), and nesting here is normal rather than exotic -
-    prune() calls replace(), and store.lock() is public precisely so a caller can
-    batch several save=False mutations. So the file lock is taken by the OUTERMOST
-    acquisition only, tracked per thread and per namespace.
+    into an error), and nesting here is normal - prune() calls replace(), and
+    store.lock() is public so a caller can batch several save=False mutations. So
+    the file lock is taken by the OUTERMOST acquisition only, tracked per thread
+    and per namespace.
 
-    READS deliberately do NOT take the FILE lock. _save() writes through
-    storekit.atomic_write (tmp + os.replace), so a concurrent reader sees the old
-    file or the new one, never a mix - the read side was already safe across
-    processes, and making every _load() contend for a file lock would put the chat
-    inlet behind whatever a background consolidation is doing. Reads DO take the
-    namespace RLock (MemoryStore.__init__ does, to _load()), which is why the
-    ordering below matters: hold that RLock across the file-lock wait and every
-    read in this process waits with you.
+    READS do NOT take the FILE lock. _save() writes through storekit.atomic_write
+    (tmp + os.replace), so a concurrent reader sees the old file or the new one,
+    never a mix. Reads DO take the namespace RLock (MemoryStore.__init__ does, to
+    _load()), so the ordering below matters: hold that RLock across the file-lock
+    wait and every read in this process waits with you.
 
     Never returns without the lock: a refusal raises CollectionLockedError rather
-    than proceeding unprotected, because an unserialised write is the exact lost
-    update this exists to prevent. *timeout* bounds the wait for callers that must
-    not block (recall's reinforcement - see its own comment); the default budget
-    is collection_lock's, which is right for a caller that has to finish."""
+    than proceeding unprotected. *timeout* bounds the wait for callers that must
+    not block (recall's reinforcement); the default budget is collection_lock's."""
     from localm.rag.collection_lock import collection_write_lock
     depth = getattr(_XPROC_DEPTH, "depth", None)
     if depth is None:
@@ -394,25 +334,20 @@ def _namespace_write_lock(ns_hash: str, store_file: Path, op: str,
             depth[ns_hash] -= 1
         return
     # ORDER IS LOAD-BEARING: gate, then FILE lock, then the namespace RLock - and
-    # the RLock is taken only AFTER the file lock is held.
-    #
-    # MEASURED 2026-08-19: taking the RLock first and waiting for the file lock
-    # inside it made every READ in this process block for the writer's whole
-    # budget, because MemoryStore.__init__ takes that same RLock to _load(). A
-    # foreign holder could park GET /api/memory for 30s (measured 29.6s live,
-    # 23.3s in a two-process repro) while /api/stats stayed fast - so it was never
-    # the event loop, it was this lock. Waiting on the file lock OUTSIDE the RLock
-    # keeps a reader's block down to the short load/mutate/save section.
+    # the RLock is taken only AFTER the file lock is held. MemoryStore.__init__
+    # takes that same RLock to _load(), so waiting for the file lock inside it
+    # blocks every READ in this process for the writer's whole budget. Waiting on
+    # the file lock OUTSIDE the RLock keeps a reader's block down to the short
+    # load/mutate/save section.
     #
     # No deadlock: every path takes them in this one order, and the gate means a
     # sibling thread waits on a cheap mutex rather than racing for the file.
     #
-    # THE GATE IS BOUNDED BY THE SAME BUDGET as the file lock, and that is not a
-    # detail. MEASURED 2026-08-19: an unbounded gate simply MOVED the starvation
-    # onto itself - a writer blocked for its full 30s held the gate throughout, so
-    # a caller that passes a short timeout (corrections(), reinforcement) queued
-    # behind it for 30s and its own 2s budget never applied. GET /api/memory still
-    # took 29.6s live, with the namespace RLock no longer the culprit.
+    # THE GATE IS BOUNDED BY THE SAME BUDGET as the file lock: an unbounded gate
+    # moves the starvation onto itself, because a writer blocked for its full
+    # budget holds the gate throughout and a caller that passes a short timeout
+    # (corrections(), reinforcement) queues behind it for that whole budget
+    # instead of its own.
     from localm.rag.collection_lock import wait_budget
     budget = wait_budget() if timeout is None else timeout
     gate = _FILE_GATES.get(ns_hash)
@@ -445,9 +380,9 @@ class MemoryStore:
         self.principal = principal or "owner"
         self.agent = agent
         self.scope_key = scope_key or ""
-        # CHK-MEM-LOCK: the key every mutating method locks on (see _namespace_lock).
-        # Computed from the (principal, agent, scope_key) strings alone (no I/O),
-        # so it is safe to compute before acquiring the lock below.
+        # The key every mutating method locks on (see _namespace_lock). Computed
+        # from the (principal, agent, scope_key) strings alone (no I/O), so it is
+        # safe to compute before acquiring the lock below.
         self._ns_hash = namespace_hash(self.principal, agent, self.scope_key)
         self._records: list[MemoryRecord] = []
         self._vectors: dict = {}        # id -> vector (present only when embedded)
@@ -456,16 +391,14 @@ class MemoryStore:
         # User/import records evicted by the most recent prune (size cap), so a
         # caller can surface an otherwise-silent user-fact loss. See prune().
         self.last_evicted_user: list[MemoryRecord] = []
-        # CHK-MEM-LOCK: namespace_file() and _load() must BOTH hold the lock, not
-        # just _load(). Every real call site constructs a fresh instance per call
-        # (see plug.py's _chat_store), so an unlocked read here can overlap
-        # ANOTHER thread's locked _atomic_write -> tmp.replace(path). This is not
-        # only _load()'s read_text(): namespace_file()'s own Path.resolve() calls
-        # can open a handle to an EXISTING target file to resolve it, which can
-        # likewise collide with an in-flight tmp.replace() and raise
-        # PermissionError on Windows - locking only _load() and leaving
-        # namespace_file() unlocked (an earlier version of this fix) still left
-        # that race open.
+        # namespace_file() and _load() must BOTH hold the lock, not just _load().
+        # Every real call site constructs a fresh instance per call (see plug.py's
+        # _chat_store), so an unlocked read here can overlap ANOTHER thread's
+        # locked _atomic_write -> tmp.replace(path). This is not only _load()'s
+        # read_text(): namespace_file()'s own Path.resolve() calls can open a
+        # handle to an EXISTING target file to resolve it, which can likewise
+        # collide with an in-flight tmp.replace() and raise PermissionError on
+        # Windows.
         with _namespace_lock(self._ns_hash):
             self._file = namespace_file(self.principal, agent, self.scope_key, root=root)
             self._load()
@@ -484,9 +417,9 @@ class MemoryStore:
         whose principal is a bearer-key hash that cannot be reconstructed from
         disk.
 
-        Deliberately not a general constructor: it does no path-safety derivation
-        because it takes an already-resolved file the caller enumerated from the
-        memory root itself.
+        Not a general constructor: it does no path-safety derivation, because it
+        takes an already-resolved file the caller enumerated from the memory root
+        itself.
         """
         obj = cls.__new__(cls)
         obj.principal = ""
@@ -513,16 +446,14 @@ class MemoryStore:
         return self._file
 
     def lock(self):
-        """This namespace's RLock (CHK-MEM-LOCK). Every mutating method below
-        acquires it internally for its own single call; exposed so a caller that
-        needs to batch several ``save=False`` mutations under ONE reload + save
-        (e.g. plug.py's ``_migrate_legacy``) can hold it across the whole batch,
-        mirroring how rag's ``_add_paths_locked`` reloads once before its loop
-        rather than once per file.
+        """This namespace's RLock. Every mutating method below acquires it
+        internally for its own single call; exposed so a caller that needs to
+        batch several ``save=False`` mutations under ONE reload + save (e.g.
+        plug.py's ``_migrate_legacy``) can hold it across the whole batch.
 
-        This is the WRITE lock (CHK-MEM-XPROC): every documented use of it is a
-        batch of MUTATIONS, so it takes the cross-process lock too. Returns a
-        FRESH context manager per call - do not stash one and reuse it."""
+        This is the WRITE lock: every documented use of it is a batch of
+        MUTATIONS, so it takes the cross-process lock too. Returns a FRESH context
+        manager per call - do not stash one and reuse it."""
         return self._wlock("a batch")
 
     def _wlock(self, op: str, timeout: Optional[float] = None):
@@ -537,10 +468,10 @@ class MemoryStore:
         self._records = []
         skipped = 0
         if self._file.is_file():
-            # split_jsonl, not splitlines(): see localm/jsonl.py - splitlines()
-            # also breaks on U+0085/U+2028/U+2029, which json.dumps(ensure_ascii=
-            # False) writes RAW, so a memory whose text contains one was torn in
-            # half and silently dropped on load (same defect measured in RAG).
+            # split_jsonl, not splitlines(): splitlines() also breaks on
+            # U+0085/U+2028/U+2029, which json.dumps(ensure_ascii=False) writes
+            # RAW, so a memory whose text contains one is torn in half and
+            # silently dropped on load.
             for line in split_jsonl(self._file.read_text(encoding="utf-8")):
                 line = line.strip()
                 if not line:
@@ -554,7 +485,7 @@ class MemoryStore:
                     # A partial/corrupt line must not break recall, but it may
                     # not vanish silently either: _save() rewrites the whole
                     # file, so every skipped line is erased by the next write
-                    # (warned about below, LM-DA-002).
+                    # (warned about below).
                     skipped += 1
         if skipped:
             from localm.debuglog import logger as _dbg
@@ -567,10 +498,9 @@ class MemoryStore:
         if vf.is_file():
             try:
                 data = json.loads(vf.read_text(encoding="utf-8"))
-                # A non-object top level (a bare list/number) has no .get and used
-                # to raise AttributeError straight out of _load, breaking the whole
-                # store; treat it as corrupt, like the records path treats a
-                # non-object line above.
+                # A non-object top level (a bare list/number) has no .get; treat
+                # it as corrupt, like the records path treats a non-object line
+                # above.
                 vecs = data.get("vectors", {}) if isinstance(data, dict) else None
                 if not isinstance(vecs, dict):
                     raise ValueError("vector sidecar has an unexpected structure")
@@ -579,11 +509,10 @@ class MemoryStore:
                 self._dim = data.get("dim") or _first_dim(self._vectors)
             except (json.JSONDecodeError, OSError, ValueError) as exc:
                 # The sidecar EXISTS but is corrupt/unreadable: degrade to no
-                # vectors (recall falls back to lexical BM25) but SURFACE it -
-                # unlike an absent sidecar (a normal cold start, handled by the
-                # is_file() gate), a present-yet-unparseable one is an unexpected
-                # fault the operator should see (LM-DA-002 / HON-3, mirrors the
-                # records warning above). The next _save() rewrites a clean file.
+                # vectors (recall falls back to lexical BM25) and warn - unlike an
+                # absent sidecar (a normal cold start, handled by the is_file()
+                # gate), a present-yet-unparseable one is an unexpected fault the
+                # operator should see. The next _save() rewrites a clean file.
                 self._vectors = {}
                 self._dim = None
                 from localm.debuglog import logger as _dbg
@@ -611,13 +540,11 @@ class MemoryStore:
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:
-        # storekit.atomic_write: unique per-writer temp name (CHK-MEM-LOCK -
-        # the crash-safety property of tmp+replace should hold even for a
-        # caller that writes a sidecar file outside the namespace lock, not
-        # just for serialized writers) PLUS the Windows PermissionError retry
-        # rag/store.py's copy had and this one previously lacked (an AV
-        # real-time scan / Search Indexer can transiently hold a handle to
-        # the target, which would otherwise fail a good write).
+        # storekit.atomic_write: a unique per-writer temp name, so tmp+replace
+        # stays crash-safe even for a caller that writes a sidecar file outside
+        # the namespace lock, PLUS a Windows PermissionError retry (an AV
+        # real-time scan / Search Indexer can transiently hold a handle to the
+        # target, which would otherwise fail a good write).
         _storekit_atomic_write(path, content)
 
     # ------------------------------------------------------------- basics -- #
@@ -635,8 +562,7 @@ class MemoryStore:
         of a different dim than the store's (a switched embedding model) is
         dropped, not stored, so cosine never mixes dims (best-effort, never
         raises - memory writes must not crash on an embedder hiccup, but a
-        real failure is still surfaced at debug level, not swallowed silently -
-        rule 5).
+        real failure is still surfaced at debug level, not swallowed silently).
 
         The failure log is CONTENT-GATED: *text* is a memory record (chat-derived),
         so the snippet is only written when debug_content_enabled() allows it. The
@@ -647,17 +573,12 @@ class MemoryStore:
             vec = embed_fn([text])[0]
         except Exception as e:
             from localm.debuglog import debug_content_enabled, logger as _dbg
-            # The FAILURE is always reported - a real embedder fault (a worker
-            # restart, an OOM, a dim mismatch) must never be swallowed (rule 5).
-            # But *text* is a memory RECORD: a synthesized fact about the user, or
-            # an episodic summary of their chat sessions, i.e. chat-derived
-            # CONTENT. So the snippet is gated on debug_content_enabled(), the
-            # same gate every other content-logging site uses (llama.py:1342,
-            # jobs/webtool.py:294). It returns False in privacy mode even when the
-            # debug log is ON for operational diagnostics, so privacy mode never
-            # persists memory content to the log file (REG-612). Only the length
-            # (operational metadata, not content) is kept when the gate is closed,
-            # so an over-long record is still diagnosable.
+            # The FAILURE is always reported. *text* is a memory RECORD, i.e.
+            # chat-derived CONTENT, so the snippet is gated on
+            # debug_content_enabled(); that returns False in privacy mode even
+            # when the debug log is ON, so privacy mode never persists memory
+            # content to the log file. Only the length is kept when the gate is
+            # closed, so an over-long record is still diagnosable.
             if debug_content_enabled():
                 _dbg.debug("memory embed_one failed for %r: %s", text[:80], e)
             else:
@@ -674,12 +595,12 @@ class MemoryStore:
 
     def add(self, record: MemoryRecord, *, embed_fn: Optional[EmbedFn] = None,
             save: bool = True) -> MemoryRecord:
-        # CHK-MEM-LOCK: re-sync with the latest committed state under the lock
-        # before mutating, so a concurrent add() elsewhere that finished first is
-        # not read-stale-then-overwritten (mirrors rag Collection.add_paths()).
-        # save=False (a caller batching several mutations, e.g. plug.py's
-        # _migrate_legacy) skips the reload - the caller already loaded fresh
-        # once via store.lock() and must not have that in-progress batch wiped.
+        # Re-sync with the latest committed state under the lock before mutating,
+        # so a concurrent add() elsewhere that finished first is not
+        # read-stale-then-overwritten. save=False (a caller batching several
+        # mutations, e.g. plug.py's _migrate_legacy) skips the reload - the caller
+        # already loaded fresh once via store.lock() and must not have that
+        # in-progress batch wiped.
         with self._wlock('an add'):
             if save:
                 self._load()
@@ -737,26 +658,19 @@ class MemoryStore:
     def clear(self, *, include_forgotten: bool = False) -> None:
         """Erase this namespace's live records.
 
-        MEASURED, because it is not what the name suggests: the forgotten sidecar
-        is a SEPARATE file and a plain clear() does not touch it, so after one,
-        every record that prune eviction or an accepted correction ever archived is
-        still readable on disk. Cleared three facts, evicted two beforehand, and
-        both evicted texts survived the clear.
+        The forgotten sidecar is a SEPARATE file and a plain clear() does not
+        touch it, so after one, every record that prune eviction or an accepted
+        correction ever archived is still readable on disk.
 
         ``include_forgotten`` takes the archive too, which is what any user-facing
         "erase what you remember about me" must pass: leaving the text in a sidecar
-        while reporting the memory cleared is a privacy claim that is not true. The
-        coder's episode store already draws exactly this line and says so in its own
-        clear(); this brings the two into agreement.
-
-        Also erases the pending-corrections sidecar (target_text/proposed_text) and
+        while reporting the memory cleared is a privacy claim that is not true. It
+        also erases the pending-corrections sidecar (target_text/proposed_text) and
         the corrections-dismissed sidecar (a rejected proposal's text, casefolded,
         inside its dedup key) - both hold the same verbatim user text as the
-        forgotten archive and were previously left untouched by this call.
+        forgotten archive.
 
-        The default stays False so this is not a behaviour change for anything that
-        existed before - and at the time of writing nothing else called clear() at
-        all, so the only caller is the CLI, which passes True.
+        The default is False; the CLI passes True.
         """
         with self._wlock('a clear'):
             self._records = []
@@ -796,8 +710,7 @@ class MemoryStore:
         them. Needed when record TEXT is mutated outside :meth:`update` (the
         consolidation batch): ``replace`` only embeds ids WITHOUT a vector, so
         a text change would otherwise keep serving the old text's vector
-        forever (memory-audit 2026-07-02). No save here; the caller's
-        replace/save persists the result."""
+        forever. No save here; the caller's replace/save persists the result."""
         for mem_id in ids:
             self._vectors.pop(mem_id, None)
 
@@ -808,8 +721,8 @@ class MemoryStore:
         mismatch. Used by consolidation to catch PARAPHRASED contradictions that
         share few tokens ('lives in Berlin' vs 'moved to Munich'), which the
         lexical matcher misses, so they reach the ADD/UPDATE/DELETE decision
-        instead of blind-accumulating (memory-audit 2026-07-02 F9). Compares
-        against THIS store's cached vectors keyed by record id."""
+        instead of blind-accumulating. Compares against THIS store's cached
+        vectors keyed by record id."""
         if embed_fn is None or not self._vectors:
             return -1, 0.0
         try:
@@ -837,22 +750,16 @@ class MemoryStore:
 
         This is how semantic recall turns on RETROACTIVELY: a user who chats
         before installing an embedding model has memories with no vectors, and
-        nothing re-embedded them, so recall stayed lexical forever even after
-        'localm setup-embeddings' (memory-audit 2026-07-02 F8).
+        nothing else re-embeds them.
 
-        BOUNDED per call on purpose, so a large store never stalls one caller.
-        That means a single call does NOT get coverage up on its own - drive it
-        to completion with ``memory.backfill.backfill_all``, which is what
-        setup-embeddings uses. An earlier version of this docstring claimed "a
-        regular background pass calls this so coverage climbs"; there was no
-        such pass, the consolidation hook was the only caller, and on an install
-        where auto-consolidation never ran coverage stayed at zero forever - the
-        2026-08-14 low_coverage report. Best-effort: an embed failure for one
-        record is skipped, not fatal.
+        BOUNDED per call, so a large store never stalls one caller. That means a
+        single call does NOT get coverage up on its own - drive it to completion
+        with ``memory.backfill.backfill_all``, which is what setup-embeddings
+        uses. Best-effort: an embed failure for one record is skipped, not fatal.
 
-        CHK-MEM-LOCK: locked and re-loaded like the other mutating methods, so a
-        backfill pass started from a stale snapshot cannot silently clobber a
-        concurrent add/update/delete's save."""
+        Locked and re-loaded like the other mutating methods, so a backfill pass
+        started from a stale snapshot cannot silently clobber a concurrent
+        add/update/delete's save."""
         if embed_fn is None:
             return 0
         with self._wlock('a vector backfill'):
@@ -878,7 +785,7 @@ class MemoryStore:
         consolidation batch and prune, so a crash leaves the pre-change store
         intact - never a half-consolidated state).
 
-        CHK-MEM-LOCK: locked AND re-loaded like every other mutating method, so a
+        Locked AND re-loaded like every other mutating method, so a
         standalone caller (e.g. the PUT /api/memory bulk-edit route) cannot
         silently clobber a concurrent add/update/delete's already-persisted
         vector. *records* (the caller's list) always overwrites ``self._records``
@@ -938,10 +845,9 @@ class MemoryStore:
         if n < TINY_CORPUS:
             # BM25 idf is unstable on a handful of records, so the LEXICAL signal
             # is skipped here - but the SEMANTIC (cosine) signal is not noisy on a
-            # tiny corpus, so use it when an embedder is present (a young store
-            # used to rank query-blind by recency+importance alone even with
-            # embeddings; memory-audit 2026-07-02 F8). No vectors -> no relevance
-            # signal, rank by recency+importance (transparent to callers).
+            # tiny corpus, so use it when an embedder is present. No vectors ->
+            # no relevance signal, rank by recency+importance (transparent to
+            # callers).
             return vec_rel if vec_rel is not None else [0.0] * n
         if self._bm25 is None:
             self._bm25 = BM25([r.text for r in self._records])
@@ -979,9 +885,9 @@ class MemoryStore:
         return _maxnorm(out)
 
     def _eligible(self, query: str, embed_fn: Optional[EmbedFn]) -> list[bool]:
-        """Per-record ABSOLUTE relevance eligibility for the recall precision gate
-        (memory-audit [10]): a record is eligible for injection only when the query
-        shares a CONTENT word with it (lexical) OR its raw cosine to the query clears
+        """Per-record ABSOLUTE relevance eligibility for the recall precision
+        gate: a record is eligible for injection only when the query shares a
+        CONTENT word with it (lexical) OR its raw cosine to the query clears
         REL_COS_MIN (semantic, when vectors are usable). A record failing BOTH is
         dropped, so recall stays SILENT when nothing is relevant. The query is
         embedded once here - a single short-string embed against the cached embedder
@@ -993,14 +899,12 @@ class MemoryStore:
             try:
                 qv = embed_fn([query])[0]
             except Exception:
-                # Not hidden: the SAME embed failure on the SAME embedder is surfaced
-                # as diagnostics["degrade_reason"]="query_embed_failed" by
-                # _vector_relevance, which recall() runs (via _relevance) on this same
-                # call before _eligible - so the "used N memories / semantic signal
-                # off" observability already reports it. Here it just drops the
-                # semantic eligibility signal; lexical eligibility still applies, so
-                # recall degrades to lexical rather than erroring. Rule 5: reported
-                # elsewhere, benign here.
+                # The SAME embed failure on the SAME embedder is surfaced as
+                # diagnostics["degrade_reason"]="query_embed_failed" by
+                # _vector_relevance, which recall() runs (via _relevance) on this
+                # same call before _eligible. Here it just drops the semantic
+                # eligibility signal; lexical eligibility still applies, so recall
+                # degrades to lexical rather than erroring.
                 qv = None
             stored_dim = len(next(iter(self._vectors.values())))
             if qv and len(qv) == stored_dim:
@@ -1012,30 +916,9 @@ class MemoryStore:
         # A LEXICAL HIT RAISES THE BAR FOR EVERYTHING ELSE. When the query shares a
         # content word with some record, that word says what the query is about, so
         # a cosine-only record riding in behind it must be strongly similar, not
-        # merely over the floor.
-        #
-        # Reported 2026-08-14: "Greet my friend Memo, who is watching right now"
-        # also injected "User once discussed a person named Fishy" - cos 0.5584
-        # against a REL_COS_MIN of 0.55, over by 0.008 - so a greeting was answered
-        # with an unrelated person from days earlier.
-        #
-        # WHY NOT RAISE REL_COS_MIN: measured on real bge-small over 16 pairs, no
-        # absolute floor separates true from false. Lowest TRUE 0.4480 ("what do I
-        # do for work" vs "User works on localm"); highest FALSE 0.5965 ("what is
-        # my name" vs "User has a friend called Memo"). Raising it drops a genuine
-        # hit first.
-        #
-        # WHY NOT EXCLUDE COSINE-ONLY RECORDS OUTRIGHT: that breaks a measured
-        # contract - test_relevance_weights_semantic_over_lexical pins that a
-        # semantic-only record OUT-RANKS a lexical-only one, a tuning that tripled
-        # recall@1 on the memory benchmark. A strong paraphrase must still win.
-        #
-        # WHERE THE NUMBER COMES FROM: among queries that HAVE a lexical hit - the
-        # only population this rule touches - every cosine-only record measured was
-        # a false positive, the highest at 0.5584 (the Fishy case). The true
-        # cosine-only companion in the benchmark test sits at ~1.0 (cosine-identical
-        # by construction). 0.75 sits between them with margin on both sides, and is
-        # deliberately well ABOVE the 0.5965 worst false pair measured anywhere.
+        # merely over the floor. A cosine-only record is still eligible on a
+        # strong paraphrase, so a semantic-only record can out-rank a
+        # lexical-only one.
         REL_COS_COMPANION = 0.75
         if any(lex_hits) and cos is not None:
             return [lex_hits[i] or cos[i] >= REL_COS_COMPANION
@@ -1055,7 +938,7 @@ class MemoryStore:
         recall's observability (``degrade_reason`` - why the semantic/cosine signal
         was not used, or None when it was; ``n_records``/``n_vectors``/
         ``n_recalled``) so a caller can surface "used N memories" + the degrade
-        reason. Default None keeps the call side-effect-free (no behaviour change)."""
+        reason. Default None keeps the call side-effect-free."""
         if not (query or "").strip() or not self._records:
             if diagnostics is not None:
                 diagnostics.update({"degrade_reason": None,
@@ -1072,10 +955,9 @@ class MemoryStore:
         # Raw decay (Generative-Agents style) lets an old, unimportant, off-topic
         # memory score below the floor and be dropped.
         # Stable, user-authored facts (source user/import) do NOT decay in relevance:
-        # a durable preference stated long ago must not be buried under recent chatter
-        # (measured: an old user fact fell out of the injected top-k). Recency decay
-        # still applies to synth memories. Mirrors prune(), which already exempts
-        # user/import from decay-based eviction.
+        # a durable preference stated long ago must not be buried under recent
+        # chatter. Recency decay still applies to synth memories. Mirrors prune(),
+        # which already exempts user/import from decay-based eviction.
         rec = [
             1.0 if r.source in ("user", "import")
             else math.exp(-((now - r.last_used) / _DAY) / TAU_DAYS)
@@ -1087,44 +969,33 @@ class MemoryStore:
             scored.append((score, i, r))
         # Sort by score desc; ties keep insertion order (index asc) for determinism.
         scored.sort(key=lambda t: (-t[0], t[1]))
-        # Absolute relevance gate (memory-audit [10]): only inject records that
-        # actually relate to the query (lexical content-word hit or cosine over
-        # REL_COS_MIN); an off-topic turn injects nothing rather than the top-k.
+        # Absolute relevance gate: only inject records that actually relate to the
+        # query (lexical content-word hit or cosine over REL_COS_MIN); an off-topic
+        # turn injects nothing rather than the top-k.
         eligible = self._eligible(query, embed_fn)
-        # REG-590: with the semantic signal degraded the gate above is LEXICAL-ONLY,
-        # and exact content-word overlap misses every paraphrase ("what is my name"
-        # vs "User is called Sam" share nothing), so the user's OWN saved facts went
-        # silently un-injected in the default no-embedder install. Do NOT fall back to
-        # the ungated top-k: that is exactly the static block [10] removed, and it
-        # misfires worst here, since a box without an embedder tends to run the small
-        # model [10] measured as distracted. Instead promote at most TRUST_FALLBACK_K
-        # TRUSTED_SOURCES facts, in score order, and only when the semantic signal is
-        # NOT available (the healthy path keeps the strict gate untouched).
-        # Be precise about what this IS: a BOUNDED TRUSTED-FACT FALLBACK, not
-        # paraphrase recall. Degraded means there is no relevance signal at all - rel
-        # is 0 for a zero-overlap record (the bug itself) and rec is pinned to 1.0 for
-        # TRUSTED_SOURCES - so this promotion is effectively IMPORTANCE-ordered and can
-        # surface 2 unrelated user facts while still missing the one asked about. It is
-        # strictly better than injecting nothing; a working embedder is the only real
-        # answer for relevance.
-        # This extends a distinction the store already treats as load-bearing:
-        # user/import are stable profile facts, not chatter - recall exempts them from
-        # recency decay (below) and prune() exempts them from decay eviction.
-        # Note this is NOT closed by shipping an embedder: low_coverage alone degrades
-        # any store whose backfill (64/pass) has not caught up yet.
+        # With the semantic signal degraded the gate above is LEXICAL-ONLY, and
+        # exact content-word overlap misses every paraphrase ("what is my name" vs
+        # "User is called Sam" share nothing). Rather than falling back to the
+        # ungated top-k, promote at most TRUST_FALLBACK_K TRUSTED_SOURCES facts, in
+        # score order, and only when the semantic signal is NOT available (the
+        # healthy path keeps the strict gate untouched).
+        #
+        # This is a BOUNDED TRUSTED-FACT FALLBACK, not paraphrase recall. Degraded
+        # means there is no relevance signal at all - rel is 0 for a zero-overlap
+        # record and rec is pinned to 1.0 for TRUSTED_SOURCES - so this promotion
+        # is effectively IMPORTANCE-ordered and can surface 2 unrelated user facts
+        # while still missing the one asked about. It also applies with an embedder
+        # installed: low_coverage alone degrades any store whose backfill has not
+        # caught up yet.
         hits = [(s, r) for s, i, r in scored if s > FLOOR and eligible[i]][:k]
         usable, _reason = self._vector_status(embed_fn)
         promoted = 0
-        # ONLY when the recall would otherwise be SILENT. An on-topic query that
-        # already found a lexical hit must not have unrelated trusted facts dragged in
-        # behind it (that would degrade a WORKING recall, and breaks
-        # test_ontopic_query_recalls_only_the_matching_fact). This keeps the fallback
-        # to the exact case REG-590 is about: the store had something, the gate
-        # returned nothing.
-        # ...and only for a SELF-REFERENTIAL query. Without this the fallback cannot
-        # tell REG-590's "what is my name" from [10]'s "recommend a pasta recipe" -
-        # identical zero-overlap inputs - and would re-inject unrelated profile facts
-        # on every off-topic turn, which is the exact harm [10] measured.
+        # ONLY when the recall would otherwise be SILENT: an on-topic query that
+        # already found a lexical hit must not have unrelated trusted facts dragged
+        # in behind it. And only for a SELF-REFERENTIAL query - without that the
+        # fallback cannot tell "what is my name" from "recommend a pasta recipe"
+        # (identical zero-overlap inputs) and would re-inject unrelated profile
+        # facts on every off-topic turn.
         if not usable and not hits and _is_self_referential(query):
             for _s, i, r in scored:                    # score order: best trusted first
                 if promoted >= TRUST_FALLBACK_K:
@@ -1138,28 +1009,23 @@ class MemoryStore:
                 hits = [(s, r) for s, i, r in scored if s > FLOOR and eligible[i]][:k]
         results = [r for _s, r in hits]
         if reinforce and results:
-            # CHK-MEM-LOCK: recall() is called with reinforce=True on every chat
-            # turn (_memory_inlet), making this the highest-frequency write path -
-            # a plain self._save() here would persist THIS instance's whole
-            # self._records, so an unlocked save could silently revert a
-            # concurrent add/update/delete/replace (e.g. resurrect a record
-            # another thread just deleted), not merely lose a last_used/uses
-            # bump. Lock + reload fresh state, then re-apply reinforcement by id
-            # against the RELOADED records (not `results`, whose objects would
-            # otherwise be orphaned by the reload) before saving.
+            # recall() is called with reinforce=True on every chat turn
+            # (_memory_inlet), making this the highest-frequency write path - a
+            # plain self._save() here would persist THIS instance's whole
+            # self._records, so an unlocked save could silently revert a concurrent
+            # add/update/delete/replace (e.g. resurrect a record another thread
+            # just deleted), not merely lose a last_used/uses bump. Lock + reload
+            # fresh state, then re-apply reinforcement by id against the RELOADED
+            # records (not `results`, whose objects would otherwise be orphaned by
+            # the reload) before saving. The cross-process lock is taken too: an
+            # unlocked save here can resurrect a record `localm memory forget` just
+            # deleted in ANOTHER process.
             #
-            # CHK-MEM-XPROC: this takes the cross-process lock too - an unlocked
-            # save here can resurrect a record `localm memory forget` just deleted
-            # in ANOTHER process, which is the same whole-namespace clobber the
-            # in-process note above describes, one boundary out.
-            #
-            # But BOUNDED, and skipped rather than waited out, because this runs on
-            # the chat turn: REG-520 exists precisely because this acquire used to
-            # wait minutes behind a consolidation, and an unbounded cross-process
-            # wait would reintroduce that with a longer rope. Reinforcement is a
-            # usage-counter bump - losing one costs a little recall ordering and
-            # nothing durable - so when the namespace is busy the right move is to
-            # skip the WRITE and still return the records. Never silent (rule 5).
+            # BOUNDED, and skipped rather than waited out, because this runs on the
+            # chat turn. Reinforcement is a usage-counter bump - losing one costs a
+            # little recall ordering and nothing durable - so when the namespace is
+            # busy the WRITE is skipped and the records are still returned. The
+            # skip is logged and reported in diagnostics, never silent.
             try:
                 with self._wlock("reinforcement", timeout=_REINFORCE_LOCK_WAIT):
                     self._load()
@@ -1191,10 +1057,9 @@ class MemoryStore:
             diagnostics["n_records"] = len(self._records)
             diagnostics["n_vectors"] = len(self._vectors)
             diagnostics["n_recalled"] = len(results)
-            # REG-590 / rule 5: a degraded recall that leaned on the trust fallback is
-            # REPORTED, never applied invisibly - the caller already surfaces
-            # degrade_reason ("keyword-only matching"), and this says how many facts
-            # only made it in because the semantic signal was unavailable.
+            # How many facts only made it in through the trust fallback, i.e.
+            # because the semantic signal was unavailable. The caller already
+            # surfaces degrade_reason ("keyword-only matching") alongside it.
             diagnostics["trust_fallback"] = promoted
         return results
 
@@ -1211,13 +1076,11 @@ class MemoryStore:
 
     def _archive_forgotten(self, records: list[MemoryRecord]) -> bool:
         """Append evicted records to a ``.forgotten.jsonl`` sidecar so forgetting
-        is RECOVERABLE, not a silent hard delete (memory-audit 2026-07-02: the
-        size cap could evict user-typed facts irreversibly). Returns True when the
-        archive is persisted (or there was nothing to archive), False when it
-        failed. prune() treats archival as best-effort (it logs and proceeds), but
-        an interactive accept of a supersession must NOT destroy the trusted record
-        when this returns False (rule 5: a recover-ability step that fails must not
-        be treated as success). The archive is capped so it cannot grow unbounded."""
+        is RECOVERABLE, not a silent hard delete. Returns True when the archive is
+        persisted (or there was nothing to archive), False when it failed. prune()
+        treats archival as best-effort (it logs and proceeds), but an interactive
+        accept of a supersession must NOT destroy the trusted record when this
+        returns False. The archive is capped so it cannot grow unbounded."""
         if not records:
             return True
         try:
@@ -1226,8 +1089,8 @@ class MemoryStore:
             if ff.is_file():
                 prior = [ln for ln in split_jsonl(ff.read_text(encoding="utf-8"))
                          if ln.strip()]
-            # "v": FORMAT_VERSION mirrors the main record store's stamp (LM-DA-025) -
-            # same forward-tolerant from_dict pattern, so a future schema change has a
+            # "v": FORMAT_VERSION mirrors the main record store's stamp - same
+            # forward-tolerant from_dict pattern, so a future schema change has a
             # migration hook here too, not just on the primary store.
             new = [json.dumps({"v": FORMAT_VERSION, **r.to_dict(),
                                "forgotten_at": time.time()}, ensure_ascii=False)
@@ -1259,8 +1122,8 @@ class MemoryStore:
             # Exists but unreadable (transient lock). Unlike the corrections sidecar
             # this read is NON-destructive - forgotten()/restore_forgotten only READ
             # the archive - so keep the empty return, but WARN rather than silently
-            # reporting "nothing to restore" when the archive merely could not be read
-            # (rule 5: an absent archive and an unreadable one are not the same thing).
+            # reporting "nothing to restore" when the archive merely could not be
+            # read - an absent archive and an unreadable one are not the same thing.
             # read_bytes (not read_text) so invalid-UTF-8 CONTENT is a per-line skip
             # below, not an uncaught UnicodeDecodeError that would 500 the restore route.
             from localm.debuglog import logger as _dbg
@@ -1296,18 +1159,16 @@ class MemoryStore:
 
     def forgotten(self) -> list[dict]:
         """Archived (forgotten) records for THIS namespace, newest-forgotten-first,
-        each an on-disk snapshot (record fields + ``forgotten_at``). LM-DA-024: the
-        read half of ``_archive_forgotten``'s recoverable-not-deleted contract - until
-        now nothing read this sidecar back, so recovery was filesystem-only despite
-        the archive step itself being correct. Used by the recovery route to show
-        what can be restored."""
+        each an on-disk snapshot (record fields + ``forgotten_at``). The read half
+        of ``_archive_forgotten``'s recoverable-not-deleted contract, used by the
+        recovery route to show what can be restored."""
         with _namespace_lock(self._ns_hash):
             return list(reversed(self._load_forgotten()))
 
     def restore_forgotten(self, mem_id: str, *,
                           embed_fn: Optional[EmbedFn] = None) -> Optional[MemoryRecord]:
-        """Recover one archived snapshot for *mem_id* back into the live store
-        (LM-DA-024). Two archive shapes exist, both handled here:
+        """Recover one archived snapshot for *mem_id* back into the live store.
+        Two archive shapes exist, both handled here:
 
           EVICTED - no live record with this id (prune's size cap, or an accepted
           DELETE correction fully removed it): the snapshot is re-added as a live
@@ -1316,15 +1177,9 @@ class MemoryStore:
           SUPERSEDED - a live record with this id already exists: an accepted
           UPDATE correction (see ``resolve_correction``) archives the PRE-CHANGE
           snapshot under the SAME id as the record it then mutates in place, so
-          the id never actually frees up. Refusing to restore whenever the id is
-          still live (an earlier version of this method did exactly that) made
-          every such entry permanently unrestorable - listed by ``forgotten()``
-          forever, 404ing on every restore attempt - which defeats
-          ``resolve_correction``'s own "recoverable, never a silent hard delete"
-          contract for its single most common path. So this case instead REVERTS
-          the live record's text to the archived snapshot in place (undoing
-          whatever changed it), matching exactly what an accepted UPDATE
-          correction could have altered.
+          the id never actually frees up. This case REVERTS the live record's text
+          to the archived snapshot in place (undoing whatever changed it),
+          matching exactly what an accepted UPDATE correction could have altered.
 
         When a record has more than one archive entry (forgotten/superseded more
         than once), the MOST RECENT one is applied, so repeated restores step back
@@ -1332,11 +1187,10 @@ class MemoryStore:
         corrected Berlin -> Munich -> Ghent first undoes to Munich, then Berlin.
         Returns None when no archive entry matches *mem_id* at all.
 
-        CHK-MEM-LOCK: locked and reloaded like every other mutating method, so a
-        concurrent add/delete/restore cannot race the read-decide-write sequence
-        below. The applied entry is removed from the archive on success (the
-        archive is a recovery queue, not an immutable audit log - mirrors
-        ``resolve_correction`` clearing a resolved pending entry)."""
+        Locked and reloaded like every other mutating method, so a concurrent
+        add/delete/restore cannot race the read-decide-write sequence below. The
+        applied entry is removed from the archive on success (the archive is a
+        recovery queue, not an immutable audit log)."""
         with self._wlock('a restore'):
             self._load()
             entries = self._load_forgotten()
@@ -1367,11 +1221,10 @@ class MemoryStore:
                 self._save_forgotten(remaining)
             except OSError as e:
                 # The restore/revert above already succeeded and is persisted; only
-                # the archive-trim cleanup failed. Must NOT surface as a restore
-                # failure (rule 5: a real success is not reported as an error) -
-                # logged so the stale archive entry is discoverable. A later restore
-                # of the same id at worst re-applies this same (already-applied)
-                # snapshot, which is idempotent.
+                # the archive-trim cleanup failed, so it must NOT surface as a
+                # restore failure. Logged so the stale archive entry is
+                # discoverable. A later restore of the same id at worst re-applies
+                # this same (already-applied) snapshot, which is idempotent.
                 from localm.debuglog import logger
                 logger.warning(
                     "memory: restored %s but could not trim the forgotten archive: %s",
@@ -1386,9 +1239,9 @@ class MemoryStore:
         (recoverable, not a silent hard delete) and the user-sourced evictions are
         exposed on ``last_evicted_user`` so a caller can surface them. Returns the
         number removed."""
-        # CHK-MEM-LOCK: locked and re-loaded like every other mutating method (the
-        # RLock lets the nested self.replace() call below re-acquire without
-        # deadlocking), so eviction is computed against the latest committed state,
+        # Locked and re-loaded like every other mutating method (the RLock lets the
+        # nested self.replace() call below re-acquire without deadlocking), so
+        # eviction is computed against the latest committed state,
         # not a stale in-memory snapshot that could re-evict an already-saved
         # record or miss one a concurrent writer just added.
         with self._wlock('a prune'):
@@ -1413,11 +1266,10 @@ class MemoryStore:
             return len(evicted)
 
     # ------------------------------------------------- pending corrections - #
-    # A synth candidate may never silently rewrite a trusted (user/import) fact,
-    # but the old unconditional NO_OP left a stale user fact uncorrectable
-    # (memory-audit 2026-07-02 [9]). Instead, consolidation records a PENDING
-    # CORRECTION here and the memory modal surfaces it for the user to accept
-    # (apply, old text archived + recoverable) or reject (keep + reset staleness).
+    # A synth candidate may never silently rewrite a trusted (user/import) fact.
+    # Consolidation records a PENDING CORRECTION here and the memory modal
+    # surfaces it for the user to accept (apply, old text archived + recoverable)
+    # or reject (keep + reset staleness).
     # Kept in a separate <ns>.corrections.jsonl sidecar so recall/prune/replace
     # never touch it.
     def _corrections_file(self) -> Path:
@@ -1428,14 +1280,12 @@ class MemoryStore:
         (best-effort, like the record loader) - including a line that is not valid
         UTF-8, so a torn multibyte write corrupts only that line, not the whole file;
         an ABSENT file is simply empty; a present-but-UNREADABLE file (I/O error)
-        RAISES (rule 5: missing != unreadable). Collapsing an unreadable file to []
+        RAISES - missing is not unreadable. Collapsing an unreadable file to []
         would let propose_corrections rewrite the sidecar with only the freshly
-        proposed entries and permanently wipe every pending correction, while telling
-        the caller it succeeded. Mirrors sessions.py:_load (re-raise so the caller
-        fails closed) and _load_dismissed (read_bytes, so only a real I/O error counts
-        as unreadable); the save-bearing callers here (propose_corrections /
-        corrections / resolve_correction) catch the OSError, warn, and abort the save
-        rather than crash."""
+        proposed entries and permanently wipe every pending correction, while
+        telling the caller it succeeded. The save-bearing callers here
+        (propose_corrections / corrections / resolve_correction) catch the OSError,
+        warn, and abort the save rather than crash."""
         cf = self._corrections_file()
         if not cf.is_file():
             return []
@@ -1470,10 +1320,10 @@ class MemoryStore:
         if not corrections:
             cf.unlink(missing_ok=True)
             return
-        # "v": FORMAT_VERSION mirrors the main record store's stamp (LM-DA-025).
+        # "v": FORMAT_VERSION mirrors the main record store's stamp.
         # PendingCorrection.from_dict already filters to known dataclass fields, so
-        # an unstamped (pre-LM-DA-025) line loads unchanged - no read-side change
-        # needed for tolerance, same as the main store's "v" rollout.
+        # an unstamped line loads unchanged - no read-side change needed for
+        # tolerance, same as the main store's "v" stamp.
         body = "\n".join(json.dumps({"v": FORMAT_VERSION, **c.to_dict()},
                                     ensure_ascii=False)
                          for c in corrections)
@@ -1485,29 +1335,25 @@ class MemoryStore:
     def _load_dismissed(self) -> set:
         """The set of correction dedup keys the user REJECTED. Consolidation skips
         re-proposing these, so a dismissed supersession does not reappear every pass
-        while the contradicting session is still in the recent window (the reject
-        route otherwise only cleared the pending entry, and the next consolidation
-        re-created it). A corrupt/absent file is treated as empty.
+        while the contradicting session is still in the recent window. A
+        corrupt/absent file is treated as empty.
 
-        LM-DA-025: current files are ``{"v": FORMAT_VERSION, "keys": [...]}``; a
-        pre-stamp file (a bare JSON array) still loads unchanged, same forward-
-        tolerant approach as the main store's "v" rollout.
+        Current files are ``{"v": FORMAT_VERSION, "keys": [...]}``; a pre-stamp
+        file (a bare JSON array) still loads unchanged, same forward-tolerant
+        approach as the main store's "v" stamp.
 
-        Known asymmetry: this is the one sidecar of the three LM-DA-025 touches
-        whose top-level SHAPE changed (array -> object), not just an added key
-        inside an already-dict-shaped line. A build OLDER than this change reading
-        a file written by this version sees a dict, falls through its own
+        Known asymmetry: this is the one stamped sidecar whose top-level SHAPE is
+        an object rather than a dict-shaped line. A build older than the stamp
+        reading a file written by this version sees a dict, falls through its own
         ``isinstance(data, list)`` check, and silently treats it as an empty
         dismissed set - so a downgrade or auto-rollback (see updater.py) after a
-        dismissal was saved would re-surface corrections the user already
-        rejected. Not data loss and self-heals on the next dismissal; accepted as
-        a documented tradeoff (not hidden) rather than engineered around, since
-        old code cannot be patched retroactively and the failure mode is bounded."""
+        dismissal was saved re-surfaces corrections the user already rejected. Not
+        data loss, and it self-heals on the next dismissal."""
         df = self._dismissed_file()
         if not df.is_file():
             return set()
-        # A present-but-UNREADABLE file (transient lock) RAISES via read_bytes (rule
-        # 5): collapsing it to an empty set would let resolve_correction's reject
+        # A present-but-UNREADABLE file (transient lock) RAISES via read_bytes:
+        # collapsing it to an empty set would let resolve_correction's reject
         # branch rewrite the file with only the new key and wipe every prior
         # dismissal. That caller catches the OSError and skips the dismissed save.
         # Corrupt CONTENT is a different case that self-heals on the next write, so it
@@ -1522,7 +1368,7 @@ class MemoryStore:
             if isinstance(data, dict):
                 raw = data.get("keys", [])
             elif isinstance(data, list):
-                raw = data                       # pre-LM-DA-025: unstamped bare array
+                raw = data                       # unstamped bare array
             else:
                 return set()
             return {tuple(k) for k in raw if isinstance(k, (list, tuple))}
@@ -1549,8 +1395,8 @@ class MemoryStore:
         run does not stack or re-nag. Newest are kept when the cap is exceeded.
         Returns the number newly recorded.
 
-        CHK-MEM-LOCK: locked and re-read like the record methods so a proposal from
-        a consolidation pass cannot clobber a concurrent accept/reject."""
+        Locked and re-read like the record methods so a proposal from a
+        consolidation pass cannot clobber a concurrent accept/reject."""
         if not proposals:
             return 0
         with self._wlock('a correction proposal'):
@@ -1561,8 +1407,8 @@ class MemoryStore:
                 # A sidecar exists but could not be read (transient lock). Do NOT
                 # proceed: _save_corrections below would rewrite the file with only
                 # the freshly proposed entries and wipe the pending ones. Skip this
-                # pass (nothing added, nothing lost) and let the consolidation caller
-                # keep going. Rule 5: surface the real failure, do not save over it.
+                # pass (nothing added, nothing lost), warn, and let the
+                # consolidation caller keep going.
                 from localm.debuglog import logger as _dbg
                 _dbg.warning(
                     "memory corrections %s: sidecar unreadable, skipping this "
@@ -1587,12 +1433,12 @@ class MemoryStore:
         target was deleted/evicted meanwhile is stale and dropped (and pruned from
         the sidecar) so the modal never shows an un-actionable suggestion.
 
-        CHK-MEM-XPROC: this READS but may also prune, so it wants the write lock -
-        yet it backs GET /api/memory and `localm memory corrections`, and a read
-        must not start failing because someone else holds the namespace. So the
-        lock is bounded and OPTIONAL: on contention the answer is still returned,
-        just without the opportunistic cleanup (which the next caller redoes).
-        Never silent (rule 5)."""
+        This READS but may also prune, so it wants the write lock - yet it backs
+        GET /api/memory and `localm memory corrections`, and a read must not start
+        failing because someone else holds the namespace. So the lock is bounded
+        and OPTIONAL: on contention the answer is still returned, just without the
+        opportunistic cleanup (which the next caller redoes), and the skip is
+        logged."""
         try:
             with self._wlock("a stale-correction prune",
                              timeout=_REINFORCE_LOCK_WAIT):
@@ -1612,7 +1458,7 @@ class MemoryStore:
         except OSError as e:
             # Unreadable sidecar: show nothing this call rather than crash, and do
             # NOT run the stale-prune save below over a phantom-empty list (which
-            # would wipe the file). Rule 5: warn, do not silently claim "none".
+            # would wipe the file). Warned, not silently reported as "none".
             from localm.debuglog import logger as _dbg
             _dbg.warning(
                 "memory corrections %s: unreadable, showing none for now: %s",
@@ -1645,7 +1491,7 @@ class MemoryStore:
                 # Cannot read the sidecar (transient lock): abort rather than crash or
                 # act on a phantom-empty list. Non-destructive - the pending entry,
                 # the record, and the dismissals are all left intact, so the user can
-                # retry once the lock clears. Rule 5: warn, do not silently 404-or-wipe.
+                # retry once the lock clears. Warned, not a silent 404-or-wipe.
                 from localm.debuglog import logger as _dbg
                 _dbg.warning(
                     "memory corrections %s: unreadable, cannot resolve %s now: %s",
@@ -1659,11 +1505,10 @@ class MemoryStore:
             outcome = "target_gone"
             if target is not None and accept:
                 # Archive the pre-change record so an accepted supersession is
-                # recoverable, never a silent hard delete (rule 5 / F4). If the
-                # archive FAILS, abort: do NOT destroy the trusted record and do NOT
-                # report success - leave the record and the pending correction intact
-                # so the user can retry (rule 5: a recover-ability step that fails
-                # must not be treated as a success).
+                # recoverable, never a silent hard delete. If the archive FAILS,
+                # abort: do NOT destroy the trusted record and do NOT report
+                # success - leave the record and the pending correction intact so
+                # the user can retry.
                 if not self._archive_forgotten([target]):
                     return {"status": "archive_failed", "id": correction_id,
                             "target_id": corr.target_id, "action": corr.action}
@@ -1687,8 +1532,8 @@ class MemoryStore:
                 # Rejected: the user confirms the existing fact. Bump updated so the
                 # staleness affordance resets, and REMEMBER this exact suggestion as
                 # dismissed so consolidation does not re-propose it while the
-                # contradicting session is still in the recent window (a bumped
-                # `updated` alone did nothing: the propose path never reads it).
+                # contradicting session is still in the recent window - the propose
+                # path never reads `updated`, so bumping it alone does nothing.
                 target.updated = now
                 self._save()
                 try:
@@ -1700,8 +1545,8 @@ class MemoryStore:
                     # every prior dismissal). The record is still confirmed and the
                     # pending entry is still cleared below; the only cost is this one
                     # dismissal is not recorded, so consolidation MAY re-propose it
-                    # later - a bounded re-nag, not data loss. Rule 5: warn, do not
-                    # save over an unreadable file.
+                    # later - a bounded re-nag, not data loss. Warned rather than
+                    # saved over.
                     from localm.debuglog import logger as _dbg
                     _dbg.warning(
                         "memory corrections-dismissed %s: unreadable, not recording "

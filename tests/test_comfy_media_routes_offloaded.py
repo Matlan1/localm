@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-COMFY-URL-SANITIZE-DNS-ON-THE-LOOP: settings()/default_api_url()/
-comfy_models_dest_dir() reach sanitize_comfy_url's blocking getaddrinfo
+"""settings()/default_api_url()/comfy_models_dest_dir() reach
+sanitize_comfy_url's blocking getaddrinfo
 (comfy_client._host_is_link_local), on 11 ``async def`` routes across the
 image/music/video plugins and the GUI models routes. Not reachable with the
 DEFAULT comfy_api_url (an IP literal, which ``ipaddress.ip_address`` parses
@@ -9,10 +9,8 @@ configures one.
 
 Oracle: ``asyncio.get_running_loop()`` succeeds only on the event-loop thread
 and raises RuntimeError anywhere else (a threadpool worker, or plain
-synchronous code with no loop at all) - the same structural, non-timing oracle
-``tests/test_comfy_models_offloaded_638.py`` and
-``tests/test_grammar_validation_offload.py`` already use for this defect
-class. ``_host_is_link_local`` is patched once, at its single canonical
+synchronous code with no loop at all) - a structural, non-timing oracle for
+this defect class. ``_host_is_link_local`` is patched once, at its single canonical
 module, rather than per-plugin: unlike a media backend (which a
 PluginManager-installed plugin loads under a synthetic module name, see
 ``_installed_backend`` below), it is never re-imported into a plugin's own
@@ -46,9 +44,9 @@ def _sink_probe(monkeypatch):
     guard, then settings()'s "sanitize the resolved value" defense-in-depth
     step - see music/video backend.py, which never checks the legacy global
     comfy_api_url directly and so always falls through default_api_url()).
-    That is a pre-existing, harmless redundancy in settings() itself, not a
-    property of WHERE it runs - so callers assert every recorded call is
-    off-loop, never an exact count.
+    That redundancy lives in settings() itself and is not a property of WHERE it
+    runs, so callers assert every recorded call is off-loop, never an exact
+    count.
     """
     from localm.media import comfy_client as cc
 
@@ -152,15 +150,14 @@ def test_generate_route_defers_settings_to_the_job_thread(
 
 # --------------------------------------------------------------------------- #
 #  {imagine,music,video}/comfy-models and comfy-launch: settings() itself is  #
-#  now offloaded alongside the calls REG-638 already offloaded                #
+#  offloaded alongside the calls around it                                    #
 # --------------------------------------------------------------------------- #
 
 def _installed_backend(plugin: str):
-    """The backend module the INSTALLED plugin actually uses (see
-    test_comfy_models_offloaded_638.py's identical helper and its docstring:
-    PluginManager loads a plugin under a synthetic package name, so patching
-    the canonical localm.plugins.builtin.<x>.backend silently patches nothing
-    the installed plugin's own route code sees)."""
+    """The backend module the INSTALLED plugin actually uses. PluginManager
+    loads a plugin under a synthetic package name, so patching the canonical
+    localm.plugins.builtin.<x>.backend silently patches nothing the installed
+    plugin's own route code sees."""
     mod = sys.modules.get(f"_localm_plugin_{plugin}.backend")
     assert mod is not None, (
         f"the installed {plugin} plugin's backend module was not found - the "
@@ -257,7 +254,8 @@ def test_comfy_launch_route_offloads_settings_dns_lookup(
 
 @pytest.fixture
 def scoped_app(tmp_path, monkeypatch):
-    """Mirrors test_gui_comfy_pull_routes.py's fixture of the same name."""
+    """A FastAPI app with the engine and the GUI attached, against a throwaway
+    LOCALM_HOME and no API key."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -290,13 +288,10 @@ def _set_hostname_comfy_config(tmp_path, *, workdir_name="external-comfy"):
 
 def test_preflight_route_offloads_settings_dns_lookup(
         scoped_app, tmp_path, monkeypatch):
-    """The missing slot must resolve to a CURATED source (not the null-source
-    case tests/test_gui_comfy_pull_routes.py also covers): comfy_models_dest_dir()
-    - the previously-buggy call - only runs inside the `if source is not None`
-    branch. A fixture with no curated match would never reach it at all,
-    passing whether or not the offload fix is present (proven by fires-control:
-    an earlier version of this test used the uncurated fixture and stayed
-    green with the fix reverted)."""
+    """The missing slot must resolve to a CURATED source, not the null-source
+    case: comfy_models_dest_dir() only runs inside the `if source is not None`
+    branch, so a fixture with no curated match never reaches it at all and
+    would pass whether or not that call is offloaded."""
     _set_hostname_comfy_config(tmp_path)
     calls = _sink_probe(monkeypatch)
 

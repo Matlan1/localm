@@ -194,7 +194,7 @@ class _PersistenceMixin:
                 # message rather than raising, so done alone covers a child that
                 # hit max_turns or tripped its circuit breaker. The child records
                 # its own verdict in the payload (background.py); the live child
-                # object is the fallback for a job that predates it.
+                # object is the fallback when the payload carries no verdict.
                 child_ok = result.get("ok")
                 if child_ok is None:
                     child_ok = getattr(child, "last_run_ok", True) if child else True
@@ -453,9 +453,9 @@ class _PersistenceMixin:
             p.parent.mkdir(parents=True, exist_ok=True)
             atomic_write(p, json.dumps(data, indent=2, ensure_ascii=False))
         except Exception:
-            # Never let checkpoint failure crash the session (AGENTS.md rule 5:
-            # surfaced, not silenced - a resume checkpoint failing to save is
-            # exactly the case a user needs to know about).
+            # Never let checkpoint failure crash the session, but warn rather
+            # than silence it - a resume checkpoint failing to save is exactly
+            # the case a user needs to know about.
             logger.warning("save_checkpoint: failed to persist %s", p, exc_info=True)
 
     def clear_checkpoint(self) -> None:
@@ -539,7 +539,7 @@ class _PersistenceMixin:
         # save: the guard in loop.py's run_task/chat only sets this once per Agent,
         # so a fresh Agent being resumed into needs it seeded here or its NEXT
         # instruction would retitle the whole session. Falls back to re-deriving
-        # from the messages for a checkpoint saved before title existed;
+        # from the messages for a checkpoint with no title field;
         # load_checkpoint()'s migration path already backfills it.
         self._session_title = data.get("title") or _first_user_text(self._messages)
         self.set_todos(normalize_todos(data.get("todos")))
@@ -551,9 +551,8 @@ class _PersistenceMixin:
 
         The file is plain user-writable JSON (same posture as _restore_delegated):
         each entry is filtered to the expected shape and skipped if it does not
-        fit, rather than trusted as-is. A checkpoint saved before this field
-        existed has no "changed_files" key at all - *raw* is then None and this
-        leaves the tracker empty.
+        fit, rather than trusted as-is. A checkpoint with no "changed_files" key
+        at all passes *raw* as None, and this leaves the tracker empty.
         """
         restored: dict[str, dict] = {}
         if isinstance(raw, dict):
@@ -641,7 +640,7 @@ class _PersistenceMixin:
         call_id = entry.get("call_id")
         group = [entry]
         # An entry with no call id is never grouped (single-file tools, and any
-        # entry predating call ids).
+        # entry that never recorded one).
         if call_id is not None:
             while self._undo_stack and self._undo_stack[-1].get("call_id") == call_id:
                 group.append(self._undo_stack.pop())

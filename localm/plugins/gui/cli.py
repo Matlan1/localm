@@ -25,9 +25,8 @@ def _report_preload_failure(console, exc: Exception) -> None:
     """The background model-preload thread's failure handler: notify the console
     AND log it. ``console.print`` alone never reaches the debug log file (it is
     not a logging call), so a preload failure with no other symptom - the user
-    never explicitly tries to chat - left NO trace a bug report could ever
-    surface, no matter how good the log-tail digest got. Log it too, with the
-    full traceback, so it is captured like any other failure (#617 follow-up)."""
+    never explicitly tries to chat - leaves NO trace a bug report could surface.
+    The log call carries the full traceback."""
     console.print(f"[yellow]Background model load failed: {exc}[/yellow]")
     from localm.debuglog import logger
     logger.exception("background model preload failed")
@@ -35,7 +34,7 @@ def _report_preload_failure(console, exc: Exception) -> None:
 
 def _mdns_addresses(host: str):
     """Which addresses mDNS should advertise for a bind on *host*, or None to let
-    ``netname.start_advertiser`` pick this machine's LAN IPv4 as before.
+    ``netname.start_advertiser`` pick this machine's LAN IPv4.
 
     A WILDCARD bind answers on every interface, so the LAN IPv4 that
     ``start_advertiser`` finds for itself is reachable and is the right advert -
@@ -98,20 +97,17 @@ def _tray_callbacks(app, hs):
     physically click Restart/Stop, run_advertised() has long since entered
     advertise()'s context and populated both.
 
-    Bug this fixes (verified against real code, not a guess): appface
-    invokes on_restart/on_stop with NO arguments
+    appface invokes on_restart/on_stop with NO arguments
     (``threading.Thread(target=self.on_restart)``, appface.py), and both
-    hs._do_restart and hs._do_shutdown are keyword-only with None defaults.
-    Wiring the bare functions directly (the previous code) meant a tray
-    Restart/Stop always called disarm_crash_guard(instance_id=None), which
-    clears the LEGACY unscoped marker (bugreport.py's per-instance-scoping
-    fallback) and leaves this instance's real server-crash.<instance_id>.marker
-    still armed - so the NEXT start reports a crash that never happened. The
-    HTTP routes (routes/admin.py's restart/stop endpoints) already pass the
-    real instance_id and get this right; only the tray path was broken.
-    _do_restart losing its port the same way meant _restart_argv omitted
-    ``-p``, so a re-exec'd server could come back on a different port -
-    stranding the tray/GUI's own open window on a dead one."""
+    hs._do_restart and hs._do_shutdown are keyword-only with None defaults, so
+    the instance_id has to be supplied here. A tray Restart/Stop that called
+    disarm_crash_guard(instance_id=None) would clear the LEGACY unscoped marker
+    (bugreport.py's per-instance-scoping fallback) and leave this instance's real
+    server-crash.<instance_id>.marker still armed, so the NEXT start would report
+    a crash that never happened. The HTTP routes (routes/admin.py's restart/stop
+    endpoints) pass the real instance_id the same way. _do_restart without its
+    port makes _restart_argv omit ``-p``, so a re-exec'd server can come back on
+    a different port, stranding the tray/GUI's own open window on a dead one."""
     def on_restart():
         hs._do_restart(instance_id=getattr(app.state, "instance_id", None),
                        port=getattr(app.state, "instance_port", None))
@@ -126,8 +122,8 @@ def _gui_bind_warning(host: str):
     """Warning text when the GUI binds past loopback without auth, or None when
     the bind is safe. Builds on the server's check, then escalates for the GUI:
     it also exposes the coder agent (shell + file edits). Traffic itself is
-    encrypted by built-in TLS on a network bind (NET-1); the warning is about the
-    coder agent's reach, not about cleartext.
+    encrypted by built-in TLS on a network bind; the warning is about the coder
+    agent's reach, not about cleartext.
     """
     from localm.cli import _exposed_bind_warning
     base = _exposed_bind_warning(host)
@@ -141,9 +137,9 @@ def _gui_bind_warning(host: str):
 
 
 def _mount_remote_gui(entry: dict) -> bool:
-    """Ask a running ``api``-mode instance to mount its GUI surface on demand
-    (H6 phase 5). POSTs to its loopback ``/v1/surfaces/gui`` with the instance's
-    own registry attach token (a local same-user secret). Returns True on
+    """Ask a running ``api``-mode instance to mount its GUI surface on demand.
+    POSTs to its loopback ``/v1/surfaces/gui`` with the instance's own registry
+    attach token (a local same-user secret). Returns True on
     success, False on any failure - an older instance without the endpoint, a
     missing token, or a network error - so the caller can fall back to just
     opening the address."""
@@ -216,12 +212,11 @@ def _print_qr(url: str) -> None:
 
 
 # gui options that only shape a FRESH server: an attach to an existing instance
-# cannot honor them, so passing one explicitly is a conflict we must NOT swallow
-# (the hard-won rule: never silently discard the user's explicit choice). Not
-# listed here = compatible with an attach: no_browser / debug / project /
-# force_new / isolated / keep_diagnostics (local or attach-control), no_model
-# (only picks a STARTUP model, moot when nothing is starting), or value-aware
-# (model / host / port) handled below.
+# cannot honor them, so passing one explicitly is reported as a conflict rather
+# than swallowed. Not listed here = compatible with an attach: no_browser /
+# debug / project / force_new / isolated / keep_diagnostics (local or
+# attach-control), no_model (only picks a STARTUP model, moot when nothing is
+# starting), or value-aware (model / host / port) handled below.
 _ATTACH_CONFLICT_FLAGS = {
     "ctx": "--ctx", "gpu_layers": "--gpu-layers",
     "pull_spec": "--pull", "mode": "--mode", "insecure": "--insecure",
@@ -419,10 +414,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                               f"{enable_debug()}")
         except Exception as e:
             # The user opted into keep_diagnostics, but the debug log could not be
-            # opened (e.g. an unwritable or full LOCALM_HOME). Do NOT abort startup
-            # over a diagnostics nicety, but do NOT report success silently either
-            # (AGENTS.md rule 5): warn so the user knows their bug reports will not
-            # include a debug log, instead of the Settings toggle quietly lying.
+            # opened (e.g. an unwritable or full LOCALM_HOME). Startup continues,
+            # but the failure is warned about so the user knows their bug reports
+            # will not include a debug log.
             console.print(
                 f"[yellow]could not enable the keep_diagnostics debug log:[/yellow] "
                 f"{e} - bug reports will not include one.")
@@ -441,9 +435,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             "requests and raw model output - delete it after analysis if that "
             "matters.")
 
-    # Attach-or-spawn (H6 phase 4): if a localm is already running for this
-    # project dir, open ITS GUI instead of starting a second server that
-    # double-loads the model. --new / --isolated force a fresh server.
+    # Attach-or-spawn: if a localm is already running for this project dir, open
+    # ITS GUI instead of starting a second server that double-loads the model.
+    # --new / --isolated force a fresh server.
     from localm.config import home_dir
     from localm import instances
     root_dir = instances.resolve_root_dir(override=project)
@@ -454,8 +448,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             # If the user asked for something the running instance cannot provide
             # (a different port/host/model, a fresh --mode/--ctx/tls/... ), say so
             # and let them decide: --new starts a separate server with their
-            # settings, or they drop the flag to attach (hard-won rule: never
-            # silently override an explicit choice).
+            # settings, or they drop the flag to attach.
             ctx = click.get_current_context()
             conflicts = _attach_conflicts(ctx, existing, model)
             if conflicts:
@@ -476,9 +469,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 f"running for [cyan]{root_dir}[/cyan] "
                 f"(pid {existing.get('pid')}, port {existing.get('port')}).")
             if existing.get("mode") != "full":
-                # On-demand GUI mount (H6 phase 5): the running instance is
-                # API-only; ask it to mount the GUI surface live (no second
-                # server, no second model load) using its own attach token.
+                # On-demand GUI mount: the running instance is API-only; ask it
+                # to mount the GUI surface live (no second server, no second
+                # model load) using its own attach token.
                 if _mount_remote_gui(existing):
                     console.print(
                         "  [green]Mounted the GUI on the running instance.[/green]")
@@ -593,8 +586,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if bind_warning and not insecure and host_from_config:
         # A config-driven network bind without a strong key is refused exactly
         # like the exit(2) below - the network is never served unauthenticated,
-        # and --insecure deliberately has NO config form, so this override can
-        # only ever be typed in a terminal - but the refusal here is a loopback
+        # and --insecure has NO config form, so this override can only ever be
+        # typed in a terminal - but the refusal here is a loopback
         # bind, not an exit: the server stays reachable on this machine so the
         # Settings page that caused the bind can also fix it. Surfaced on the
         # console, in the log, and via /api/companion (bind_fallback).
@@ -634,14 +627,12 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # waives AUTH, not bindability - a dead process helps nobody). An explicit
     # -H keeps failing hard in front of the operator who typed it.
     if host_from_config and bind_fallback is None:
-        # EVERY config-driven bind is probed, loopback included. This used to
-        # skip loopback on the reasoning that "loopback binds trivially" - true
-        # of 127.0.0.1 and ::1, and false of ``::ffff:127.0.0.1``, which
-        # is_loopback_host correctly calls loopback (it IS one) and which
-        # Windows refuses to bind (WinError 10049, measured). Skipping the probe
-        # for the whole loopback class therefore left exactly the
-        # dead-server-with-no-terminal hole this probe exists to close, reachable
-        # from a value the validator accepts. The probe costs one socket.
+        # EVERY config-driven bind is probed, loopback included: 127.0.0.1 and
+        # ::1 bind trivially, but ``::ffff:127.0.0.1`` - which is_loopback_host
+        # correctly calls loopback (it IS one) - is refused by Windows (WinError
+        # 10049), so skipping the probe for the loopback class would leave the
+        # dead-server-with-no-terminal hole open for a value the validator
+        # accepts. The probe costs one socket.
         from localm.cli import _bind_preflight_error
         _bind_err = _bind_preflight_error(host)
         if _bind_err is not None:
@@ -667,7 +658,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if not model_less:
         # allow_direct_path: this is the STARTUP model, typed by the operator as
         # `localm gui <path>`. The runtime switch path below is a different case
-        # and deliberately does NOT opt in.
+        # and does NOT opt in.
         info = get_model_info(model, allow_direct_path=True)
         if info is None:
             console.print(f"[red]Model not found:[/red] {model}")
@@ -675,8 +666,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         model_path, display_hint = info
         display_name = model if model in registry else display_hint
 
-    # Built-in TLS (NET-1): a network bind serves HTTPS out of the box so the
-    # API key and all traffic are encrypted. Resolved before attach_gui so the
+    # Built-in TLS: a network bind serves HTTPS out of the box so the API key
+    # and all traffic are encrypted. Resolved before attach_gui so the
     # coder/media/RAG self-call URL carries the right scheme - and BEFORE
     # pick_port below, so a config-driven bind that has to fall back to
     # loopback here picks its port for the host it will actually bind.
@@ -718,8 +709,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     try:
         # A wildcard is not itself connectable, so probe the loopback it covers
-        # (self_connect_host maps 0.0.0.0 -> 127.0.0.1 and :: -> ::1). Passing
-        # the raw wildcard used to work only for the IPv4 one by accident.
+        # (self_connect_host maps 0.0.0.0 -> 127.0.0.1 and :: -> ::1).
         chosen_port, was_busy = pick_port(port, host=self_connect_host(host))
     except PortInUseError as exc:
         # An explicit --port is honored or refused, never silently relocated onto
@@ -757,22 +747,20 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         if m_info is None:
             raise ValueError(f"Model not found: {name}")
         m_path, m_hint = m_info
-        # VIS-1: an explicit --mmproj always wins for the model it was given
-        # for; otherwise fall back to the model's own recorded/sibling
-        # projector (get_model_mmproj), or the common case - a pulled vision
-        # GGUF, no --mmproj flag given - silently loses image support on every
-        # load AND every switch this factory serves (#957).
+        # An explicit --mmproj always wins for the model it was given for;
+        # otherwise fall back to the model's own recorded/sibling projector
+        # (get_model_mmproj), so a pulled vision GGUF with no --mmproj flag
+        # keeps image support on every load AND every switch this factory
+        # serves.
         #
-        # VIS-3: --mmproj is scoped to `model` (the STARTUP model this server
-        # was launched with), never to the process. This factory is reused by
-        # every later switch_engine call for ANY model name, so an unscoped
-        # `mmproj or ...` silently applied the startup model's projector to
-        # whatever model was switched to next - including overriding a
-        # DIFFERENT model's own, correctly-recorded projector with one that
-        # was never meant for it (found 2026-08-05, see
-        # dev-notes/FINDING-gui-mmproj-closure-bleed-2026-08-05.md). Every name
-        # other than the startup model falls through to its own registry
-        # lookup, exactly as if --mmproj had never been given.
+        # --mmproj is scoped to `model` (the STARTUP model this server was
+        # launched with), never to the process. This factory is reused by every
+        # later switch_engine call for ANY model name, so an unscoped
+        # `mmproj or ...` would apply the startup model's projector to whatever
+        # model was switched to next, overriding a DIFFERENT model's own,
+        # correctly-recorded projector. Every name other than the startup model
+        # falls through to its own registry lookup, exactly as if --mmproj had
+        # never been given.
         mmproj_path = (mmproj if name == model else None) or get_model_mmproj(
             name, allow_direct_path=allow_direct_path)
         return Engine(
@@ -811,13 +799,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             self_url=f"{scheme}://{_self_authority}/v1",
             switch_model=switch_model,
             # Read the authoritative pointer directly rather than shadowing it
-            # in a local dict updated only on load (via on_active): that copy
-            # was never cleared on unload, so the GUI kept reporting a model
-            # "active" for an entire process lifetime after it was unloaded
-            # (found live: /api/models showed active=true post-unload while
-            # the core /v1/models/{id} - which reads this same pointer -
-            # correctly showed false). _active_model_name is already updated
-            # synchronously by both switch_engine (on load) and
+            # in a local dict updated only on load (via on_active), which is
+            # never cleared on unload and would keep reporting a model "active"
+            # for the rest of the process lifetime. _active_model_name is
+            # updated synchronously by both switch_engine (on load) and
             # unload_all_models/unload_one_model (on unload).
             active_model=lambda: hs._active_model_name or "",
         )
@@ -829,10 +814,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if pull_spec:
         from urllib.parse import quote
         from .web import mint_pull_grant
-        # SEC-PULL-CONFIRM: mint a single-use, spec-bound secret so THIS deep
-        # link can auto-start its own download with zero clicks, while a
-        # forged `?pull=` link elsewhere (which cannot know the secret) falls
-        # back to an explicit human confirmation (see init.js / web.py).
+        # Mint a single-use, spec-bound secret so THIS deep link can auto-start
+        # its own download with zero clicks, while a forged `?pull=` link
+        # elsewhere (which cannot know the secret) falls back to an explicit
+        # human confirmation (see init.js / web.py).
         pull_token = mint_pull_grant(app, pull_spec)
         open_url = (f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
                     f"&pull_token={quote(pull_token, safe='')}")
@@ -845,8 +830,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # host) and should never have to type the key, even when the server is exposed to
     # the LAN. The grant is a 256-bit single-use secret only we know and only place in
     # the URL we open locally, so a network client never sees it (see web.py's
-    # redemption note). Without this, a network bind treated the host user like a
-    # stranger and showed the key gate on their own machine.
+    # redemption note).
     from localm import auth as _auth
     from .web import mint_launch_grant
     if _auth.get_api_key():
@@ -982,8 +966,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             pass
 
     from localm import appface
-    # pywebview's webview.start() has a hard, unconditional requirement -
-    # verified against the installed 6.2.1 source, not assumed - to be
+    # pywebview's webview.start() has a hard, unconditional requirement to be
     # called from the process's actual main thread. That thread is normally
     # occupied by hs.run_advertised() below (it blocks until Ctrl+C), so
     # deciding to use a native window means giving IT the main thread instead
@@ -1002,24 +985,22 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # trust decision gating on app.state.bind_host matches what is actually
     # bound. bind_fallback carries WHY a configured network bind was not applied
     # (or None) - /api/companion surfaces it so a browser-only user is told what
-    # to fix instead of silently staying unreachable (we do not hide problems).
+    # to fix instead of silently staying unreachable.
     app.state.bind_host = host
     app.state.bind_fallback = bind_fallback
 
-    # Advertise this server in the instance registry (H6 phase 3/4) as a "full"
-    # surface (API + GUI) so a future launch in the same dir can discover and
-    # attach to it. --isolated keeps it invisible to discovery.
+    # Advertise this server in the instance registry as a "full" surface
+    # (API + GUI) so a future launch in the same dir can discover and attach to
+    # it. --isolated keeps it invisible to discovery.
     from localm import debuglog
     from localm.config import home_dir as _home_dir
     # Tray control surface (Windows): Open / Copy address / View logs / Restart /
     # Stop, so the running server is a real background app, not just a console.
     # Best-effort and fully guarded - it never blocks the server. Restart/Stop are
-    # wired to the server's existing hooks (via _tray_callbacks - NOT the bare
-    # hs._do_restart/hs._do_shutdown; see that function's docstring for why a
-    # bare wire silently misreported every tray stop/restart as a crash);
-    # "View logs" dumps the always-on activity buffer (INFO+, no chat content)
-    # to a readable file. (Linux gets a styled Tk control window next; see
-    # appface.)
+    # wired to the server's existing hooks via _tray_callbacks, NOT the bare
+    # hs._do_restart/hs._do_shutdown (see that function's docstring); "View
+    # logs" dumps the always-on activity buffer (INFO+, no chat content) to a
+    # readable file. Linux gets a styled Tk control window; see appface.
     on_restart, on_stop = _tray_callbacks(app, hs)
     app_face = appface.start_app_face(
         name="LocaLM", url=base_url, logfile=_home_dir() / "logs" / "recent.log",
@@ -1050,7 +1031,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 hide_console()
         threading.Thread(target=_mark_ready_when_listening,
                          name="localm-ready", daemon=True).start()
-        # ADR-0012: route hang-alarm surfacing into the native status window.
+        # Route hang-alarm surfacing into the native status window.
         # set_error turns the status red AND un-hides the window from the tray
         # (see _StatusWindow._poll's "error" branch), so a hung server is
         # unmissable instead of a log line nobody tails; set_ready restores
@@ -1063,10 +1044,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     def _serve():
         # The advertise + run_server tail is identical to http_server.serve()'s
-        # (CF-6): shared via run_advertised so there is one implementation of
-        # that sequence, not two hand-maintained copies. The app object itself
-        # is still built above (not inside serve()) since the GUI needs it
-        # ready earlier to wire attach_gui/grants/etc. before this point.
+        # and is shared via run_advertised. The app object itself is built above
+        # rather than inside serve(), because the GUI wires attach_gui and the
+        # launch grants onto it first.
         try:
             hs.run_advertised(app, host, chosen_port,
                               mode="api" if api_mode else "full",
@@ -1120,18 +1100,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         if not appface.run_native_window(open_url, on_quit=on_stop):
             webbrowser.open(open_url)
         # MUST join here, not just rely on server_thread being non-daemon:
-        # confirmed live (a real crash, then reproduced and root-caused in
-        # isolation) that concurrent.futures.thread registers its shutdown
-        # via CPython's internal threading._register_atexit(), which fires
-        # as soon as THIS (main) thread's top-level code finishes - BEFORE
-        # Python waits for non-daemon threads to actually join. Without this
-        # join, main() returning the instant the window closed flipped the
-        # shared plugin executor's global shutdown flag while the server
-        # thread was still fully alive, and every in-flight request relying
-        # on get_plugin_executor() (e.g. GET /api/models) started raising
-        # "cannot schedule new futures after shutdown" for as long as the
-        # server kept running. Joining keeps this thread's own top-level code
-        # "still running" for exactly as long as the server actually is.
+        # concurrent.futures.thread registers its shutdown via CPython's
+        # internal threading._register_atexit(), which fires as soon as THIS
+        # (main) thread's top-level code finishes - BEFORE Python waits for
+        # non-daemon threads to join. Without this join, main() returning the
+        # instant the window closed flips the shared plugin executor's global
+        # shutdown flag while the server thread is still alive, and every
+        # in-flight request relying on get_plugin_executor() (e.g. GET
+        # /api/models) raises "cannot schedule new futures after shutdown" for
+        # as long as the server keeps running. Joining keeps this thread's own
+        # top-level code running for exactly as long as the server is.
         server_thread.join()
     else:
         _serve()

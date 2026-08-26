@@ -3,13 +3,9 @@
 ``_serve_async`` and ``_serve_async_plain``, plus the real (non-faked) ``_relay``
 round trip.
 
-tests/test_portmux.py drives these in a SUBPROCESS (real uvicorn, real TLS),
-which is black-box evidence but registers no coverage in this process.
-tests/test_portmux_redirect.py covers the pure/fast pieces with fake streams.
-This module fills the remaining gap: the async lifecycle functions themselves,
-started as real asyncio tasks against real ephemeral (port 0) sockets in THIS
-process, so both the happy path and the "internal server never came up" failure
-path are exercised for real.
+The async lifecycle functions are started as real asyncio tasks against real
+ephemeral (port 0) sockets in THIS process, so both the happy path and the
+"internal server never came up" failure path are exercised for real.
 
 One substitution: on the PLAIN (no-TLS) path the internal uvicorn always binds to
 a hardcoded ``127.0.0.1:0`` (an ephemeral loopback port), which cannot
@@ -264,11 +260,9 @@ def test_serve_async_propagates_a_bad_tls_cert_instead_of_hanging(tmp_path):
     # comes up and the caller finds out immediately - rather than hang forever
     # or fall through to an unprotected bind.
     #
-    # The outer wait_for(timeout=10) is a safety net so a regression cannot hang
-    # the suite, NOT the behavioural assertion: asyncio.TimeoutError is itself
-    # an Exception subclass, so a bare pytest.raises(Exception) would pass
-    # either way. The isinstance check below is what pins failed-fast, and it
-    # is a type check rather than a wall-clock one.
+    # The outer wait_for(timeout=10) is a safety net against a hang, not the
+    # behavioural assertion: asyncio.TimeoutError is itself an Exception
+    # subclass, so the isinstance check below is what pins failed-fast.
     async def go():
         port = _free_port()
         missing_cert = str(tmp_path / "does-not-exist.crt")
@@ -286,12 +280,9 @@ def test_serve_async_propagates_a_bad_tls_cert_instead_of_hanging(tmp_path):
 
 class _FailFastServer:
     """Stand-in for uvicorn.Server whose serve() fails before startup completes,
-    simulating the internal loopback uvicorn never coming up. A REAL bind failure
-    on 127.0.0.1:0 is not practically reproducible (an ephemeral loopback port
-    essentially never collides or exhausts in a test run), so this narrow
-    substitution exercises portmux's OWN response to that failure: it must
+    simulating the internal loopback uvicorn never coming up: portmux must
     propagate the error, not hang or silently continue with no backend
-    listening. The TLS variant gets a REAL failure instead."""
+    listening."""
     def __init__(self, config):
         self.config = config
         self.started = False
@@ -323,7 +314,7 @@ def test_serve_async_plain_propagates_internal_server_startup_failure(monkeypatc
 def _patch_bugreport(monkeypatch):
     """Record calls to the crash-guard hooks without touching disk: run_server is
     tested here for its OWN wiring and ordering, not for bugreport's own
-    (separately tested, hermetic-per-LOCALM_HOME) behaviour."""
+    behaviour."""
     calls = []
     monkeypatch.setattr(bugreport_mod, "check_and_report_prior_crash",
                         lambda *a, **k: calls.append(("checked",)))
@@ -394,7 +385,7 @@ def test_run_server_plain_falls_back_to_uvicorn_run_on_unexpected_error(monkeypa
         raise RuntimeError("peek layer exploded")
     monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
 
-    def fail_socket(host, port):   # simulates create_listen_socket failing (#1517)
+    def fail_socket(host, port):   # simulates create_listen_socket failing
         raise OSError("simulated: cannot build the listening socket")
     monkeypatch.setattr(portmux, "create_listen_socket", fail_socket)
 
@@ -427,7 +418,7 @@ def test_run_server_tls_falls_back_to_uvicorn_run_on_unexpected_error(monkeypatc
         raise RuntimeError("demux exploded")
     monkeypatch.setattr(portmux, "_serve_async", fake_serve)
 
-    def fail_socket(host, port):   # simulates create_listen_socket failing (#1517)
+    def fail_socket(host, port):   # simulates create_listen_socket failing
         raise OSError("simulated: cannot build the listening socket")
     monkeypatch.setattr(portmux, "create_listen_socket", fail_socket)
 

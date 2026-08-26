@@ -107,8 +107,7 @@ def _raising_stream(exc: BaseException):
 
     ``GgufBackend.chat_stream`` and ``HFBackend.chat_stream`` are generator
     functions, so calling them returns a generator and the guard fires on the
-    first ``next()``. A side_effect that raised at CALL time would land before
-    ``_generate_full``'s try block, a different code path.
+    first ``next()``.
     """
     def _stream(messages, **kwargs):
         raise exc
@@ -224,7 +223,7 @@ class TestBackendGrammarCapability:
 
 
 class TestGrammarUnsupportedIsNotConfusedWithOtherFailures:
-    """The class's PLACE in the hierarchy is load-bearing, not decoration."""
+    """The class's PLACE in the hierarchy decides which except arm claims it."""
 
     def test_it_is_a_value_error(self):
         assert issubclass(GrammarUnsupportedError, ValueError)
@@ -650,7 +649,7 @@ class TestTheRuntimeCatchIsNotWidened:
         assert "int() got a str" not in r.text
 
     def test_a_working_completion_is_untouched(self):
-        # finish_reason stays stop on the happy path; the new arm does not mark
+        # finish_reason stays stop on the happy path; the arm does not mark
         # every response as an error.
         r = _post(_mock_engine(),
                   {"model": "test-model", "prompt": "hi", "stream": False},
