@@ -2018,25 +2018,58 @@ async def _idle_unload_loop() -> None:
             _dbg.warning("idle-unload check failed (continuing)", exc_info=True)
 
 
-async def _gpu_registry_heartbeat_loop() -> None:
+async def _gpu_registry_heartbeat_loop(*, interval: float = 20.0) -> None:
     """Keep this instance's cross-install GPU-coordination entry fresh
     (~every 20s), matching the ``_idle_unload_loop`` pattern above. Only
     started when this instance is actually registered for coordination (see
     ``_gpu_coord`` / the lifespan startup below) - a plain test app or an
     ``--isolated`` run never starts this loop at all. A transient failure is
     logged, not fatal (RULE 5): the entry just ages until the next tick, and a
-    stale entry is skipped by a peer's own liveness+identity check anyway."""
+    stale entry is skipped by a peer's own liveness+identity check anyway.
+
+    *interval* is the tick period; override it only in tests, same as
+    ``start_executor_saturation_watch``'s ``poll``.
+
+    THE WARNING IS LOGGED ONCE PER FAILURE RUN, then throttled to DEBUG. A
+    heartbeat failure is usually PERSISTENT (an unwritable registry path, a
+    wedged driver probe), and an unconditional warning on a 20s tick emits
+    three lines a minute WITH A FULL TRACEBACK for the life of the server -
+    which buries the one line that mattered and trains people to ignore the
+    log. This is the same log-once-then-throttle shape the VRAM-probe daemon
+    and the executor saturation watch already use.
+
+    A SUCCESS RESETS IT, so a LATER, separate failure warns again rather than
+    being silenced forever by the first one. That is the half a plain
+    "only ever warn once" flag gets wrong.
+
+    The catch stays broad ON PURPOSE - this loop must never be the thing that
+    kills the server - and that is unchanged. Only the volume is. Note that
+    ``asyncio.CancelledError`` derives from ``BaseException``, not
+    ``Exception``, so shutdown still cancels this loop rather than being
+    swallowed and logged as a heartbeat failure."""
+    warned = False
     while True:
-        await asyncio.sleep(20)
+        await asyncio.sleep(interval)
         try:
             # Offloaded off the event loop: _gpu_registry_sync does filesystem I/O
             # (registry write) and, when a non-zero main_gpu_index is configured, a
             # GPU driver probe - either could otherwise stall the single loop and
             # freeze the whole WebUI on this 20s tick while the box is idle.
             await asyncio.get_running_loop().run_in_executor(None, _gpu_registry_sync)
-        except Exception:
+        except Exception as e:
             from localm.debuglog import logger as _dbg
-            _dbg.warning("gpu-registry heartbeat failed (continuing)", exc_info=True)
+            if not warned:
+                _dbg.warning("gpu-registry heartbeat failed (continuing)", exc_info=True)
+                warned = True
+            else:
+                # No exc_info on the throttled line: the traceback is what makes
+                # the repeat expensive, and it is identical to the one already
+                # logged above. The type and message still identify a CHANGE of
+                # cause, which is the only new information a repeat can carry.
+                _dbg.debug("gpu-registry heartbeat still failing (%s: %s)",
+                           type(e).__name__, e)
+        else:
+            warned = False
 
 
 async def _hang_heartbeat_loop() -> None:

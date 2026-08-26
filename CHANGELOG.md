@@ -468,6 +468,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Chat comes back on the model you were actually using after generating
+  media.** Making an image, music, or video unloads the chat model to free up
+  VRAM and reloads it when the job finishes. That reload asked for the model
+  the server started with instead of the one you had switched to, so anyone
+  who had picked a different model returned from a generation talking to a
+  different model than they left, with nothing saying it had changed.
+- **One request using a grammar no longer holds up everyone else.** Checking a
+  grammar before generation has to wait for the model to answer, and that wait
+  was blocking every other request on the server rather than just the one that
+  asked for it, so a single constrained request could briefly stall chat for
+  every other client. The check now runs alongside other work.
 - **A model in use can no longer be deleted out from under itself.** Removing a
   model through an AI assistant (the MCP `remove_model` tool) deleted its file
   without checking whether anything was still using it, so a model you had just

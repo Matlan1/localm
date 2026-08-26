@@ -233,9 +233,24 @@ def register(app: FastAPI, ctx) -> None:
         Explicitly reload a model into memory.
 
         Use this endpoint if you want to pre-warm the model before the first
-        inference request. If no model is specified, pre-warms the default model.
+        inference request. If no model is specified, pre-warms the model an
+        unnamed request would currently resolve to.
+
+        THE UNNAMED CASE GOES THROUGH ``_resolve_unnamed_model_name`` rather
+        than re-deriving the chain here, and that is the fix rather than a
+        tidy-up. The inline version read
+        ``_active_model_name or _default_model_name`` and SKIPPED
+        ``_last_active_model_name``, which is precisely where an unload parks
+        the name of the model that was in use. So the media VRAM handover -
+        which unloads chat, generates, then POSTs here with no model name -
+        brought back the STARTUP model instead of the one the user had loaded,
+        and they returned to chat talking to something they never chose.
+
+        The shared helper already had it right and is used by ``GET /health``
+        and ``get_engine``'s own fallback; this route was the odd one out, so
+        the duplication WAS the defect.
         """
-        name = model or _hs._active_model_name or _hs._default_model_name
+        name = model or _hs._resolve_unnamed_model_name()
         if not name:
             raise HTTPException(503, "No model specified or configured to load")
             

@@ -777,7 +777,7 @@ def _reset_gpu_probe_cache() -> None:
     a no-op (see _run), which the clears alone provably could not do."""
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
     global _gpu_probe_done, _gpu_probe_result, _isolated_torch_unavailable
-    global _isolated_torch_broken_warned
+    global _isolated_torch_broken_warned, _child_stderr_cap_reported
     with _gpu_probe_lock:
         _gpu_last_good = None
         _gpu_probe_inflight = False
@@ -786,6 +786,13 @@ def _reset_gpu_probe_cache() -> None:
         # would silently disable the torch path for every later test in the worker.
         _isolated_torch_unavailable = False
         _isolated_torch_broken_warned = False
+        # The child-stderr latch has the SAME cross-test leak as the line above and
+        # therefore belongs in the same reset: without it, one test's simulated
+        # probe failure suppresses the stderr relay for every later test in the
+        # worker, which reads as "the relay is broken" rather than "it already
+        # said this once".
+        _child_stderr_seen.clear()
+        _child_stderr_cap_reported = False
         # Unpublish the join handles too: after a reset the slot reads free, so no
         # caller should join a probe from the epoch just retired. An abandoned
         # thread still holding its own local done/result is unaffected (it sets its
@@ -1251,6 +1258,55 @@ def _capped_stderr(text: str, limit: int = _CHILD_STDERR_LOG_CAP) -> str:
     return text[:limit] + f"... [truncated, {len(text) - limit} more chars]"
 
 
+# Distinct child-stderr texts already reported this process, and whether the cap
+# below has been announced. Guarded by _gpu_probe_lock (probes can overlap).
+_CHILD_STDERR_SEEN_CAP = 8
+_child_stderr_seen: set[str] = set()
+_child_stderr_cap_reported = False
+
+
+def _child_stderr_once(err: str) -> "str | None":
+    """The child's stderr, capped, the FIRST time this exact text is seen this
+    process. ``None`` once it is a repeat, so the caller can leave it out.
+
+    WHY THIS IS LATCHED AT ALL: ``list_gpus`` deliberately re-probes on every
+    call (no TTL, so the live "free" reading is never stale), and the GUI's VRAM
+    meter polls it roughly every 2.5s. On a box where the probe keeps failing,
+    relaying the child's whole stderr blob unconditionally writes it about 24
+    times a minute for the life of the server. That is the same log flood the
+    ``_isolated_torch_broken_warned`` latch further down already exists to
+    prevent, and the reason it matters is not disk: it is that the one line
+    somebody needs is buried under a thousand copies of itself.
+
+    WHY IT IS KEYED ON THE TEXT rather than being a plain once-only bool like
+    that neighbour: that latch guards a FIXED sentence, so repeating it adds
+    nothing and a bool is exactly right. Here the message IS the diagnostic, and
+    a second, DIFFERENT failure carries real information. A bool would silence
+    it, which trades a log flood for a hidden problem - the wrong side of
+    AGENTS.md rule 5. Keying on the text kills the repeat and keeps the change.
+
+    The cap bounds a pathological case (stderr that varies every probe, e.g. one
+    carrying a timestamp or an address) rather than a realistic one - a genuinely
+    broken box repeats one text. Reaching it is announced rather than silently
+    going blind.
+    """
+    global _child_stderr_cap_reported
+    if not err:
+        return None
+    capped = _capped_stderr(err)
+    with _gpu_probe_lock:
+        if capped in _child_stderr_seen:
+            return None
+        if len(_child_stderr_seen) >= _CHILD_STDERR_SEEN_CAP:
+            if _child_stderr_cap_reported:
+                return None
+            _child_stderr_cap_reported = True
+            return (f"[{_CHILD_STDERR_SEEN_CAP} distinct probe failures already "
+                    "logged this process; further distinct causes suppressed]")
+        _child_stderr_seen.add(capped)
+    return capped
+
+
 class _IsolatedTorchWedged(Exception):
     """The out-of-process torch probe ran but did not finish in time, i.e. TORCH
     ITSELF is wedging on this box (the sm_120 case). Distinct from the child
@@ -1339,10 +1395,10 @@ def _torch_gpus_isolated() -> "Optional[list]":
         # native fault taking the process down). That is COULD NOT ASK, not
         # "torch sees no device" - collapsing the two would report "no GPU" on a
         # box whose GPU torch can see perfectly well.
+        said = _child_stderr_once(err)
         logger.debug("list_gpus: out-of-process torch probe printed nothing "
                      "(rc=%s)%s; treating as unavailable, not as 'no device'",
-                     proc.returncode,
-                     f"; child said: {_capped_stderr(err)}" if err else "")
+                     proc.returncode, f"; child said: {said}" if said else "")
         return None
     try:
         devices = json.loads(raw)
@@ -1353,16 +1409,19 @@ def _torch_gpus_isolated() -> "Optional[list]":
                 for d in devices):
             raise ValueError("torch probe reply has the wrong shape")
     except Exception as e:
+        said = _child_stderr_once(err)
         logger.debug("list_gpus: out-of-process torch probe reply unusable "
                      "(%s)%s; falling through to nvidia-smi", e,
-                     f"; child said: {_capped_stderr(err)}" if err else "")
+                     f"; child said: {said}" if said else "")
         return None
     if err:
         # The child prints its own failure cause here before answering []. That
         # is the reason the reading is missing, so it must not die with the
-        # discarded stream.
-        logger.debug("list_gpus: out-of-process torch probe reported: %s",
-                     _capped_stderr(err))
+        # discarded stream. Latched: this line carries NOTHING but the stderr,
+        # so once it is a repeat there is no line left worth writing.
+        said = _child_stderr_once(err)
+        if said:
+            logger.debug("list_gpus: out-of-process torch probe reported: %s", said)
     return devices
 
 
