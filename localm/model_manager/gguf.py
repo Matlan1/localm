@@ -1110,7 +1110,10 @@ def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[i
                 (offset,) = struct.unpack("<Q", f.read(8))
                 entries.append((name, offset))
             data_start = f.tell()
-    except (OSError, struct.error, IndexError, UnicodeDecodeError) as exc:
+    # ValueError: an out-of-range seek from a hostile KV array count. See
+    # test_hostile_kv_array_count_does_not_crash.
+    except (OSError, struct.error, IndexError, UnicodeDecodeError,
+            ValueError) as exc:
         logger.debug("gguf MoE expert-byte probe: could not parse %s (%s)",
                      path.name, type(exc).__name__)
         return None
