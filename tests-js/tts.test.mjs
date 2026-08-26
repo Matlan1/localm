@@ -109,7 +109,7 @@ test("R08: an insecure (plain-HTTP) context explains why the model will not pers
 // The fixture is the REAL measured signal shape, not an invented one: on AMD
 // RDNA2 / Chrome 151 the webgpu backend put -24.98 at index 9 (3 fresh loads out
 // of 3), preceded by small non-zero garbage, while wasm produced exact zeros
-// there. See dev-notes/TTS-ROOT-CAUSE-2026-08-13.md.
+// there.
 const SR = 24000;
 
 function gpuLikeChunk() {                        // measured head, then quiet speech

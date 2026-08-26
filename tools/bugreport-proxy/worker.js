@@ -160,7 +160,7 @@ async function latestRelease(request, env, url) {
   const gate = updateGateOrError(request, env);
   if (gate) return gate;
   // Opt-in prerelease channel (localm's update_allow_prerelease setting, admin_only,
-  // default off - see dev-notes/self-updater-design's prerelease-channel addendum).
+  // default off).
   const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
   const rel = await latestAppRelease(env, wantsPrerelease);
   if (rel === null) return json({ ok: true, version: null, note: "no releases yet" });
@@ -187,10 +187,10 @@ async function latestRelease(request, env, url) {
 
 // Matches an app release tag (v1.2.3, v1.2.3rc1, v1.2.3-beta, ...) and nothing
 // else. This repo also hosts non-app releases in the SAME release list - e.g.
-// llama-cuda-linux-<tag>, the self-built Linux CUDA runtime (dev-notes/ADR-0010)
-// - and GitHub's own "latest release" concept has no notion of release TYPE, so
-// without this filter any such release can silently outrank the real app build
-// the moment it is newer. Measured live 2026-08-07: /releases/latest returned
+// llama-cuda-linux-<tag>, the self-built Linux CUDA runtime - and GitHub's own
+// "latest release" concept has no notion of release TYPE, so without this
+// filter any such release can silently outrank the real app build the moment
+// it is newer. Measured live 2026-08-07: /releases/latest returned
 // llama-cuda-linux-b9870 ahead of v0.1.4 for the few minutes between that build
 // publishing and its --prerelease flag being set by hand. The CI workflow that
 // publishes those builds now always sets --prerelease too (belt), but this

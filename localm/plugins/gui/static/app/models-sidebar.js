@@ -370,9 +370,9 @@ export async function pollActivity() {
 // Boot-time reattach, mirroring coder.js's reattachSessions(): ask the server
 // what is running, reattach a live stream to anything found (fire-and-forget -
 // an operation can run far longer than boot should wait), and toast once.
-// streamJob() already handles reconnect + replay dedup internally (see
-// dev-notes/streamJob-reconnect-contract.md) - this needs no dedup logic of
-// its own, it only needs to call streamJob() once per running operation.
+// streamJob() already handles reconnect + replay dedup internally - this
+// needs no dedup logic of its own, it only needs to call streamJob() once
+// per running operation.
 export async function reattachActivity() {
   try {
     const ops = await _readActivity();
