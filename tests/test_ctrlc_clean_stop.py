@@ -13,6 +13,7 @@ Two halves, and both are needed for the console output to be honest:
   marker) instead of leaving all of it to interpreter teardown.
 """
 
+import dis
 import importlib
 import multiprocessing
 import pathlib
@@ -81,15 +82,28 @@ class TestEveryWorkerAppliesTheGuard:
         "localm.voice": "_worker_main",
     }
 
+    @staticmethod
+    def _calls(func, name):
+        """True when *func*'s bytecode actually CALLS *name*.
+
+        Not `name in func.__code__.co_names`: these workers import the helper
+        inside the function body, so co_names holds the name whether or not the
+        call survives - a check that stays green when the call is deleted."""
+        ops = list(dis.get_instructions(func))
+        for i, ins in enumerate(ops):
+            if ins.opname.startswith("LOAD_") and ins.argval == name:
+                if any(n.opname.startswith("CALL") for n in ops[i + 1:i + 4]):
+                    return True
+        return False
+
     @pytest.mark.parametrize("module_name", sorted(ENTRY_POINTS))
     def test_worker_entry_point_ignores_interrupts(self, module_name):
         mod = importlib.import_module(module_name)
         func = getattr(mod, self.ENTRY_POINTS[module_name])
-        names = set(func.__code__.co_names)
-        assert "install_parent_death_watchdog" in names, (
+        assert self._calls(func, "install_parent_death_watchdog"), (
             f"{module_name} changed shape; this test is pinned to the wrong "
             "function and is no longer checking anything")
-        assert "ignore_interrupt_signals" in names, (
+        assert self._calls(func, "ignore_interrupt_signals"), (
             f"{module_name}.{self.ENTRY_POINTS[module_name]} must ignore console "
             "interrupts, or a Ctrl+C aimed at the server tears this worker down "
             "and the intentional stop is reported as a crash")
@@ -203,3 +217,60 @@ class TestServingStopRunsTheGuiButtonTeardown:
             http_server.run_advertised(app, "127.0.0.1", 1, mode="full")
         assert ("teardown", "inst-42") in calls
         assert calls.index(("teardown", "inst-42")) < calls.index("advertise-exit")
+
+
+class TestTheStopDoesNotWaitForALongResponse:
+    """Without a bound, uvicorn's graceful shutdown waits for the LONGEST open
+    response, so a Ctrl+C during a chat stream does not stop the server until
+    that generation finishes on its own - which is the behaviour the GUI's Stop
+    button does not have."""
+
+    @staticmethod
+    def _captured_config_kwargs(monkeypatch, run):
+        """Drive the real entry point far enough to build its uvicorn Config,
+        and report the kwargs it was given. Asserted through the actual call
+        rather than by reading the source, so a site that stops passing the
+        timeout fails here."""
+        import uvicorn
+
+        seen = {}
+
+        class _Stop(Exception):
+            pass
+
+        def _fake_config(*a, **kw):
+            seen.update(kw)
+            raise _Stop
+
+        monkeypatch.setattr(uvicorn, "Config", _fake_config)
+        with pytest.raises(_Stop):
+            run()
+        return seen
+
+    def test_plain_bind_bounds_the_drain(self, monkeypatch):
+        import asyncio
+
+        from localm import portmux
+
+        seen = self._captured_config_kwargs(
+            monkeypatch,
+            lambda: asyncio.run(portmux._serve_async_plain(object(), "127.0.0.1", 0, "warning")))
+        assert seen.get("timeout_graceful_shutdown") == portmux.GRACEFUL_SHUTDOWN_TIMEOUT
+
+    def test_tls_bind_bounds_the_drain(self, monkeypatch):
+        import asyncio
+
+        from localm import portmux
+
+        seen = self._captured_config_kwargs(
+            monkeypatch,
+            lambda: asyncio.run(portmux._serve_async(object(), "127.0.0.1", 0,
+                                                     "cert.pem", "key.pem", "warning")))
+        assert seen.get("timeout_graceful_shutdown") == portmux.GRACEFUL_SHUTDOWN_TIMEOUT
+
+    def test_the_bound_is_short_enough_to_feel_immediate(self):
+        """A cap only helps if it is well under the time a user waits before
+        deciding the keypress did nothing."""
+        from localm import portmux
+
+        assert 0 < portmux.GRACEFUL_SHUTDOWN_TIMEOUT <= 5.0
