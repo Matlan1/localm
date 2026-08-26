@@ -314,6 +314,13 @@ def pull_model(
     # (AUDIT-HIGH-6). Only an absolute path or an existing file counts, so a bare
     # HF "owner/repo" is never shadowed by a same-named local directory. add_local
     # does the validation + dedup.
+    # escape(): model_spec (and so `local`) is the raw CLI/GUI-supplied spec
+    # string, and expected_sha256 (`want`) is the raw --sha256 value - neither
+    # is charset-validated before this point (a bad --sha256 only fails the
+    # digest COMPARISON below, which happens after these prints run). `actual`
+    # is a real hashlib hexdigest and cannot carry markup, but is escaped too
+    # rather than relying on that staying true.
+    from rich.markup import escape
     try:
         local = Path(model_spec).expanduser()
         is_local_path = local.exists() and (local.is_absolute() or local.is_file())
@@ -330,18 +337,19 @@ def pull_model(
             if local.is_dir():
                 console.print(
                     "[red]--sha256 is not supported for a local directory[/red] "
-                    f"({local}): a folder has many files and no single digest to "
-                    "verify. Drop --sha256, or point at a single .gguf file.")
+                    f"({escape(str(local))}): a folder has many files and no single "
+                    "digest to verify. Drop --sha256, or point at a single .gguf file.")
                 return False
             want = expected_sha256.strip().lower()
             actual = _verify_digest(local).lower()
             if actual != want:
                 console.print(
-                    f"[red]SHA256 mismatch![/red] {local} is {actual[:16]}…, not "
-                    f"--sha256 {want[:16]}…. Refusing to register.")
+                    f"[red]SHA256 mismatch![/red] {escape(str(local))} is "
+                    f"{escape(actual[:16])}…, not --sha256 {escape(want[:16])}…. "
+                    "Refusing to register.")
                 return False
-            _report_success(f"[green]✓[/green] SHA256 verified: {actual[:16]}…",
-                            f"[green]OK[/green] SHA256 verified: {actual[:16]}…")
+            _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
+                            f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
         # A local file gets no remote type probe: honour an explicit --type, else let
         # add_local deterministically detect it (GGUF -> llm, HF dir -> config.json,
         # otherwise the 'unknown' sentinel rather than a silent 'llm').
@@ -407,7 +415,11 @@ def pull_model(
         console.print(
             "[red]dest_dir is only supported for a single-file spec[/red] "
             "(owner/repo:file or owner/repo/file.gguf) - "
-            f"{model_spec!r} would pull a full snapshot or direct URL instead."
+            # Quoted by hand rather than via !r/repr(): escape() after repr()
+            # re-escapes repr()'s own backslash, and repr() after escape() is
+            # the wrong order too (see localm/cli/doctor.py's identical note).
+            f"'{escape(model_spec)}' would pull a full snapshot or direct "
+            "URL instead."
         )
         return False
 
@@ -427,7 +439,7 @@ def pull_model(
             res = _mm._pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
                                      redownload=redownload, model_type=detected_type)
     else:
-        console.print(f"[red]Unknown spec:[/red] {model_spec}")
+        console.print(f"[red]Unknown spec:[/red] {escape(model_spec)}")
         console.print("Formats:")
         console.print("  [bold]owner/repo[/bold]              full HF model directory")
         console.print("  [bold]owner/repo:file.gguf[/bold]   single GGUF file")
@@ -441,7 +453,7 @@ def pull_model(
     # where the main model isn't a llama.cpp GGUF registration to attach a
     # projector to - just download the file for the user to wire up by hand.
     if res and mmproj_spec and not is_single_file_spec:
-        console.print(f"Pulling mmproj: {mmproj_spec}")
+        console.print(f"Pulling mmproj: {escape(mmproj_spec)}")
         # "/" must be present (an owner/repo), same precondition
         # _fetch_explicit_mmproj enforces: without it a bare "file.gguf" (no
         # repo) passes the .endswith(".gguf") half of this check and then
@@ -481,9 +493,13 @@ def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
         if usage.free < required_bytes:
             need_gb  = required_bytes / 1024**3
             free_gb  = usage.free / 1024**3
+            # escape(): dest_dir can be caller-supplied (e.g. --comfy-dest-dir);
+            # need_gb/free_gb are floats formatted with :.1f and cannot carry markup.
+            from rich.markup import escape
             console.print(
                 f"[red]Not enough disk space.[/red] "
-                f"Need {need_gb:.1f} GB, have {free_gb:.1f} GB free on {dest_dir}"
+                f"Need {need_gb:.1f} GB, have {free_gb:.1f} GB free on "
+                f"{escape(str(dest_dir))}"
             )
             return False
     except Exception as e:
@@ -616,6 +632,14 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
     at first image - registry.py's ``vision_input_guidance`` is the analogous
     message for the chat-time case.
     """
+    # escape(): repo_id/filename/candidate/e all come from a REMOTE repo
+    # (repo_id/filename from the caller's spec, candidate from that repo's OWN
+    # file listing) - none is charset-restricted. `candidate` in particular
+    # sits directly inside an OPEN [yellow]...[/yellow] tag below, so an
+    # unescaped value there is genuine markup-TAG-INJECTION, not just
+    # bracket-drop (a filename like "x][/yellow][red on white]FAKE[/red on
+    # white][yellow]y" would close the real tag and open fake styled text).
+    from rich.markup import escape
     files = _hf_repo_files(repo_id)
     if files is None:
         return None
@@ -625,7 +649,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
             console.print(
                 "[yellow]Note:[/yellow] this looks like a vision-language "
                 f"model, but no vision projector (mmproj) file was found in "
-                f"{repo_id}. It may not be able to see images - if the "
+                f"{escape(repo_id)}. It may not be able to see images - if the "
                 "projector lives in a different repo, pull it explicitly "
                 "with [bold]--mmproj <repo>:<file>[/bold]."
             )
@@ -633,7 +657,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
 
     dest = base_dir / candidate
     if not dest.exists():
-        console.print(f"Pulling vision projector: {candidate}")
+        console.print(f"Pulling vision projector: {escape(candidate)}")
         try:
             from huggingface_hub import hf_hub_download
             local = hf_hub_download(repo_id=repo_id, filename=candidate,
@@ -642,9 +666,9 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
                 shutil.move(local, dest)
         except Exception as e:
             console.print(
-                f"[yellow]Found a vision projector ({candidate}) in {repo_id} "
-                f"but could not download it: {e}. Vision may not work for "
-                "this model.[/yellow]"
+                f"[yellow]Found a vision projector ({escape(candidate)}) in "
+                f"{escape(repo_id)} but could not download it: {escape(str(e))}. "
+                "Vision may not work for this model.[/yellow]"
             )
             return None
 
@@ -654,7 +678,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
         # check would silently hand the backend a bad projector instead of the
         # honest "none found" state (AGENTS.md rule 5).
         console.print(
-            f"[yellow]{candidate} does not look like a valid vision "
+            f"[yellow]{escape(candidate)} does not look like a valid vision "
             "projector (GGUF metadata check failed) - not attaching it.[/yellow]"
         )
         return None
@@ -736,6 +760,16 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
     # passed this guard and then crashed the else branch below with an
     # IndexError on parts[1], since rsplit("/", 1) on a "/"-free string
     # returns a ONE-element list.
+    # escape(): mmproj_spec/m_file/safe/e are all attacker/user/MCP-supplied
+    # (mmproj_spec is the raw --mmproj value; m_file/safe are components of
+    # it) and NOT charset-restricted (_safe_models_filename rejects path
+    # traversal and Windows-reserved characters, not '['/']'). `safe` sits
+    # directly inside an OPEN [yellow]...[/yellow] tag below - genuine
+    # markup-TAG-INJECTION, not just bracket-drop. This is also the "genuinely
+    # ironic" site: the message reporting a filename FAILED the safety check
+    # was itself unescaped, so the unsafe filename could weaponize the very
+    # warning about it.
+    from rich.markup import escape
     if not ("/" in mmproj_spec
             and (":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf"))):
         console.print("[red]mmproj spec must be a specific file (owner/repo:file.gguf)[/red]")
@@ -750,12 +784,12 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
     # spec, which may be user- or client-supplied over MCP.
     safe = _mm._safe_models_filename(m_file, base_dir)
     if safe is None:
-        console.print(f"[red]Unsafe mmproj filename:[/red] {m_file}")
+        console.print(f"[red]Unsafe mmproj filename:[/red] {escape(m_file)}")
         return None
 
     dest = base_dir / safe
     if not dest.exists():
-        console.print(f"Pulling mmproj: {mmproj_spec}")
+        console.print(f"Pulling mmproj: {escape(mmproj_spec)}")
         try:
             from huggingface_hub import hf_hub_download
             local = hf_hub_download(repo_id=m_repo, filename=safe, local_dir=str(base_dir),
@@ -763,12 +797,12 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
             if Path(local) != dest:
                 shutil.move(local, dest)
         except Exception as e:
-            console.print(f"[red]mmproj download failed:[/red] {e}")
+            console.print(f"[red]mmproj download failed:[/red] {escape(str(e))}")
             return None
 
     if not _mm.gguf_is_mmproj(dest):
         console.print(
-            f"[yellow]{safe} does not look like a valid vision projector "
+            f"[yellow]{escape(safe)} does not look like a valid vision projector "
             "(GGUF metadata check failed) - not attaching it.[/yellow]"
         )
         return None
@@ -833,6 +867,13 @@ def _pull_gguf_file(
     or MCP pull never had a way to pass --mmproj, so without this a vision
     GGUF downloaded with no way to ever see an image (#957).
     """
+    # escape(): spec (so repo_id/filename/parts derived from it), the resolved
+    # `part`/`want`/`expected` values below, and every exception's text are
+    # all attacker/user/MCP-supplied or remote-sourced, none charset-
+    # restricted. repo_id/filename in particular sit directly inside OPEN
+    # [bold cyan]/[bold] tags at several sites below - genuine markup-TAG-
+    # INJECTION, not just bracket-drop.
+    from rich.markup import escape
     try:
         from huggingface_hub import hf_hub_download, hf_hub_url
     except ImportError:
@@ -856,10 +897,12 @@ def _pull_gguf_file(
     # Traversal guard (GAP-CLI-2): the filename comes from an untrusted spec
     # (owner/repo:../../evil.gguf), so confine every part to base_dir before
     # it is used as a destination. Reject the whole pull on any unsafe part.
+    # escape(part): the "genuinely ironic" site - a filename that just FAILED
+    # this safety check must not be able to weaponize the warning about it.
     for part in all_parts:
         if _safe_models_filename(part, base_dir) is None:
             console.print(
-                f"[red]Unsafe model filename:[/red] {part}\n"
+                f"[red]Unsafe model filename:[/red] {escape(part)}\n"
                 "A model filename must be a single name inside the models folder "
                 "(no '/', '\\', or '..')."
             )
@@ -879,8 +922,8 @@ def _pull_gguf_file(
     if want and expected and want != expected.lower():
         console.print(
             f"[red]SHA256 mismatch (before download):[/red] --sha256 "
-            f"{want[:16]}… does not match HuggingFace's metadata for "
-            f"{filename} ({expected[:16]}…). Refusing to download."
+            f"{escape(want[:16])}… does not match HuggingFace's metadata for "
+            f"{escape(filename)} ({escape(expected[:16])}…). Refusing to download."
         )
         return False
     # The digest we will verify against / store: prefer HF metadata, else the
@@ -889,15 +932,16 @@ def _pull_gguf_file(
 
     missing = [p for p in all_parts if not (base_dir / p).exists()]
     if not missing:
-        console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
+        console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         # If the user asserted a hash, verify the file actually on disk before
         # treating it as the requested model.
         if want:
             on_disk = _verify_digest(dest, purpose="to check the file already here")
             if on_disk.lower() != want:
                 console.print(
-                    f"[red]SHA256 mismatch![/red] The file already at {filename} "
-                    f"({on_disk[:16]}…) does not match --sha256 ({want[:16]}…)."
+                    f"[red]SHA256 mismatch![/red] The file already at "
+                    f"{escape(filename)} ({escape(on_disk[:16])}…) does not "
+                    f"match --sha256 ({escape(want[:16])}…)."
                 )
                 return False
         if register:
@@ -963,14 +1007,20 @@ def _pull_gguf_file(
     if not _mm._check_disk_space(base_dir, total_size):
         return False
 
+    # TAG-INJECTION site: repo_id/filename sit directly inside OPEN
+    # [bold cyan]/[bold] tags - an unescaped value here could close the real
+    # tag and open fake styled text of its own choosing, not just corrupt its
+    # own display. len(all_parts)/len(missing) are ints, never markup.
     if len(all_parts) > 1:
         console.print(
-            f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold] "
+            f"Pulling [bold cyan]{escape(repo_id)}[/bold cyan] / "
+            f"[bold]{escape(filename)}[/bold] "
             f"[dim](split GGUF, {len(all_parts)} parts, "
             f"{len(missing)} to download)[/dim]"
         )
     else:
-        console.print(f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold]")
+        console.print(f"Pulling [bold cyan]{escape(repo_id)}[/bold cyan] / "
+                      f"[bold]{escape(filename)}[/bold]")
 
     with _download_progress([base_dir / p for p in missing], total_size,
                             base_dir=base_dir, rel_parts=list(missing)) as _prog:
@@ -986,7 +1036,8 @@ def _pull_gguf_file(
                 if Path(local) != final:
                     shutil.move(local, final)
             except Exception as e:
-                console.print(f"[red]Download failed[/red] ({part}): {e}")
+                console.print(f"[red]Download failed[/red] ({escape(part)}): "
+                              f"{escape(str(e))}")
                 # Deliberately WITHOUT _prog.ok(): this return unwinds the
                 # context manager cleanly, so silence is the only thing that
                 # stops it announcing 100% for a download that just failed.
@@ -1000,16 +1051,16 @@ def _pull_gguf_file(
         actual = _verify_digest(dest).lower()
         if actual != want:
             console.print(
-                f"[red]SHA256 mismatch![/red] Expected {want[:16]}…, got "
-                f"{actual[:16]}… - deleting downloaded file(s)"
+                f"[red]SHA256 mismatch![/red] Expected {escape(want[:16])}…, got "
+                f"{escape(actual[:16])}… - deleting downloaded file(s)"
             )
             for part in all_parts:
                 p = base_dir / part
                 if p.exists():
                     p.unlink()
             return False
-        _report_success(f"[green]✓[/green] SHA256 verified: {actual[:16]}…",
-                        f"[green]OK[/green] SHA256 verified: {actual[:16]}…")
+        _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
+                        f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
 
     if register:
         reg_type = model_type
@@ -1029,11 +1080,16 @@ def _pull_gguf_file(
                   sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
                   architecture=gguf_meta.get("architecture"),
                   expert_count=gguf_meta.get("expert_count"))
-        _report_success(f"[green]✓[/green] [bold]{model_name}[/bold] is ready",
-                        f"[green]OK[/green] [bold]{model_name}[/bold] is ready")
+        # model_name is _sanitize_name()-derived (A-Za-z0-9._- only) so this is
+        # defense-in-depth, matching the established convention of not relying
+        # on that charset restriction holding forever.
+        _report_success(f"[green]✓[/green] [bold]{escape(model_name)}[/bold] is ready",
+                        f"[green]OK[/green] [bold]{escape(model_name)}[/bold] is ready")
     else:
-        _report_success(f"[green]✓[/green] [bold]{filename}[/bold] downloaded",
-                        f"[green]OK[/green] [bold]{filename}[/bold] downloaded")
+        # filename here is NOT charset-restricted (register=False routes here,
+        # e.g. a ComfyUI dest_dir pull) - genuine tag-injection position.
+        _report_success(f"[green]✓[/green] [bold]{escape(filename)}[/bold] downloaded",
+                        f"[green]OK[/green] [bold]{escape(filename)}[/bold] downloaded")
     return True
 
 
@@ -1072,23 +1128,27 @@ def _warn_if_repo_ships_code(dest: Path, repo_id: str) -> None:
     So: fetch everything, and make the presence of code VISIBLE at the moment it
     arrives, rather than leaving the user to discover it later or not at all.
     """
+    # escape(): repo_id/e/file names below all come from a REMOTE repo and are
+    # interpolated into a Rich markup string. Unescaped, a file named
+    # '[/b]evil.py' raises MarkupError (which would abort the pull between the
+    # download and the _register call, leaving the model on disk and
+    # unregistered), and one named '[red]x.py' is parsed as a style tag and
+    # VANISHES - a security notice that reports "ships 1 Python file(s) ()"
+    # and names nothing. A repo must not be able to edit, blank, or weaponise
+    # the warning that is about it. Imported up front (not just below the
+    # early-return) so BOTH branches of this function get the same protection
+    # - the early-return branch used to be the one gap.
+    from rich.markup import escape
     try:
         py = sorted(p for p in dest.rglob("*.py") if p.is_file())
     except OSError as e:
         # A failed scan must not fail an otherwise-good download, but it must not
         # read as "no code found" either (AGENTS.md rule 5): say it was not checked.
-        console.print(f"[yellow]Could not check {repo_id} for bundled code: {e}[/yellow]")
+        console.print(f"[yellow]Could not check {escape(repo_id)} for bundled "
+                      f"code: {escape(str(e))}[/yellow]")
         return
     if not py:
         return
-    # escape(): these names come from a REMOTE repo and are interpolated into a
-    # Rich markup string. Unescaped, a file named '[/b]evil.py' raises MarkupError
-    # (which would abort the pull between the download and the _register call,
-    # leaving the model on disk and unregistered), and one named '[red]x.py' is
-    # parsed as a style tag and VANISHES - a security notice that reports "ships 1
-    # Python file(s) ()" and names nothing. A repo must not be able to edit, blank,
-    # or weaponise the warning that is about it.
-    from rich.markup import escape
     shown = ", ".join(escape(p.name) for p in py[:5])
     if len(py) > 5:
         shown += f", and {len(py) - 5} more"
@@ -1122,8 +1182,13 @@ def _resolve_snapshot_type(dest: Path, model_type: str) -> str:
     logger.info("Snapshot %s typed %r from its downloaded config.json (the HF "
                 "pipeline_tag probe could not resolve it)", dest.name, detected)
     if detected != "unknown":
+        # detected is one of _detect_local_model_type's fixed type-label
+        # vocabulary today, but escaped anyway (defense-in-depth, tag-injection
+        # position) rather than relying on that classifier never echoing back
+        # anything from the downloaded repo's own files.
+        from rich.markup import escape
         console.print(f"[green]Determined model type from config.json:[/green] "
-                      f"[bold]{detected}[/bold]")
+                      f"[bold]{escape(detected)}[/bold]")
     else:
         # Still no hard signal even from the real files: say so (AGENTS.md rule
         # 5). It stays runnable by name, it just is not auto-loaded for chat.
@@ -1188,14 +1253,20 @@ def _pull_hf_snapshot(
     model_type: str = "llm",
 ) -> bool:
     """Download a complete HuggingFace model repo (for transformers/HF format models)."""
+    # escape(): repo_id is the raw caller-supplied spec (CLI/GUI/MCP), dest is
+    # derived from it via _sanitize_name (charset-safe, escaped anyway as
+    # defense-in-depth), and every exception's text is remote-sourced. Several
+    # sites below interpolate repo_id/dest directly inside an OPEN Rich tag -
+    # genuine markup-TAG-INJECTION, not just corruption of their own display.
+    from rich.markup import escape
     # FAC-5: a full-repo snapshot is many files; there is no single digest to
     # check --sha256 against. Refuse the flag with a clear message rather than
     # silently ignoring it (which would give a false sense of verification).
     if expected_sha256:
         console.print(
             "[red]--sha256 is not supported for a full HuggingFace repo[/red] "
-            f"({repo_id}): a snapshot has many files and no single digest to "
-            "verify. Drop --sha256, or pull a single file with "
+            f"({escape(repo_id)}): a snapshot has many files and no single "
+            "digest to verify. Drop --sha256, or pull a single file with "
             "[bold]owner/repo:file.gguf --sha256 <hash>[/bold]."
         )
         return False
@@ -1231,7 +1302,7 @@ def _pull_hf_snapshot(
                      "to a config.json-only completeness check", repo_id, e)
 
     if dest.exists() and _snapshot_is_complete(dest, repo_siblings, repo_id):
-        console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
+        console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
         _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
                                  model_type=_resolve_snapshot_type(dest, model_type))
         return True
@@ -1252,9 +1323,14 @@ def _pull_hf_snapshot(
 
         same_source = sorted(n for n, info in reg.items() if _is_same_repo(info))
         if same_source:
+            # Registry keys are _sanitize_name()-derived (safe charset), so
+            # this is defense-in-depth; quoted by hand rather than via !r -
+            # escape() after repr() re-escapes repr()'s own backslash (see
+            # localm/cli/doctor.py's identical note).
+            names = ", ".join(f"'{escape(n)}'" for n in same_source)
             console.print(
                 f"[yellow]This repo is already downloaded - registered as "
-                f"{', '.join(repr(n) for n in same_source)}[/yellow]"
+                f"{names}[/yellow]"
             )
             if not sys.stdin.isatty():
                 console.print("[dim]Non-interactive session - skipping. "
@@ -1299,10 +1375,16 @@ def _pull_hf_snapshot(
         foreign = [n for n in find_aliases_by_path(dest, reg_now)
                   if reg_now[n].get("source") != f"hf:{repo_id}"]
         if foreign:
+            # repo_id/dest sit directly inside the OPEN [red]...[/red] tag -
+            # genuine tag-injection position. `foreign` entries are registry
+            # keys (safe charset), quoted by hand rather than via !r (see the
+            # same-source note above).
+            foreign_names = ", ".join(f"'{escape(n)}'" for n in foreign)
             console.print(
-                f"[red]Refusing to pull {repo_id} into {dest}:[/red] this "
+                f"[red]Refusing to pull {escape(repo_id)} into "
+                f"{escape(str(dest))}:[/red] this "
                 f"folder already holds a DIFFERENT model, registered as "
-                f"{', '.join(repr(n) for n in foreign)}. Pulling here would "
+                f"{foreign_names}. Pulling here would "
                 f"silently mix the two repos' files together. Pull with "
                 f"[bold]-n <a-different-name>[/bold] to give this repo its "
                 "own directory."
@@ -1323,9 +1405,11 @@ def _pull_hf_snapshot(
         return False
 
     _mm.ensure_dirs()
+    # TAG-INJECTION site: repo_id/dest sit directly inside OPEN
+    # [bold cyan]/[bold] tags.
     console.print(
-        f"Downloading full model [bold cyan]{repo_id}[/bold cyan] "
-        f"-> [bold]{dest}[/bold]"
+        f"Downloading full model [bold cyan]{escape(repo_id)}[/bold cyan] "
+        f"-> [bold]{escape(str(dest))}[/bold]"
     )
     console.print("[dim]This may take a while for large models...[/dim]")
 
@@ -1338,7 +1422,7 @@ def _pull_hf_snapshot(
             )
             _prog.ok()
     except Exception as e:
-        console.print(f"[red]Download failed:[/red] {e}")
+        console.print(f"[red]Download failed:[/red] {escape(str(e))}")
         return False
 
     _warn_if_repo_ships_code(dest, repo_id)
@@ -1361,15 +1445,21 @@ def _pull_hf_snapshot(
         model_name, dest, f"hf:{repo_id}",
         model_type=_resolve_snapshot_type(dest, model_type))
     if not registered:
+        # TAG-INJECTION site: repo_id/dest sit directly inside the OPEN
+        # [yellow]...[/yellow] tag. model_name is _sanitize_name()-derived
+        # (safe charset), escaped anyway as defense-in-depth.
         console.print(
-            f"[yellow]{repo_id} was downloaded to {dest}, but could not be "
-            f"registered as '{model_name}'[/yellow] (see message above) - "
-            "the files are on disk. Retry with a different -n name, or "
-            "'localm alias' it in."
+            f"[yellow]{escape(repo_id)} was downloaded to {escape(str(dest))}, "
+            f"but could not be registered as '{escape(model_name)}'[/yellow] "
+            "(see message above) - the files are on disk. Retry with a "
+            "different -n name, or 'localm alias' it in."
         )
         return False
-    _report_success(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}",
-                    f"[green]OK[/green] [bold]{model_name}[/bold] downloaded to {dest}")
+    _report_success(
+        f"[green]✓[/green] [bold]{escape(model_name)}[/bold] downloaded to "
+        f"{escape(str(dest))}",
+        f"[green]OK[/green] [bold]{escape(model_name)}[/bold] downloaded to "
+        f"{escape(str(dest))}")
     return True
 
 
