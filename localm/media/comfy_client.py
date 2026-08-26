@@ -851,13 +851,25 @@ def sanitize_comfy_url(url: str) -> str:
     control calls (free / interrupt / stop) into an SSRF probe of cloud metadata
     (CHK-COMFY-APIURL). Loopback + LAN + public are allowed - a real ComfyUI runs
     on any of those."""
+    sanitized, _warning = sanitize_comfy_url_checked(url)
+    return sanitized
+
+
+def sanitize_comfy_url_checked(url: str) -> tuple:
+    """Same guard as ``sanitize_comfy_url``, also returning a user-facing warning
+    string (or None when the URL passed unchanged). A caller with an actual
+    warning channel (a media plugin's ``settings()``) uses this instead, so the
+    guard replacing an admin-set URL reaches the user instead of only the debug
+    log (AGENTS.md rule 5)."""
     try:
         if _host_is_link_local(urllib.parse.urlparse(url).hostname or ""):
             from localm.debuglog import logger
             logger.warning(
                 "comfy_api_url %r targets a link-local/metadata address; ignoring "
                 "it and using the loopback default (CHK-COMFY-APIURL)", url)
-            return _COMFY_LOOPBACK_DEFAULT
+            return _COMFY_LOOPBACK_DEFAULT, (
+                f"comfy_api_url {url!r} targets a link-local/metadata address; "
+                f"ignoring it and using the loopback default instead")
     except Exception as e:
         # FAIL CLOSED: if the guard itself cannot parse or verify the URL (e.g.
         # urlparse raising "Invalid IPv6 URL"), refusing is the only honest
@@ -868,8 +880,10 @@ def sanitize_comfy_url(url: str) -> str:
         logger.warning(
             "comfy_api_url %r could not be validated (%s); ignoring it and "
             "using the loopback default (CHK-COMFY-APIURL)", url, e)
-        return _COMFY_LOOPBACK_DEFAULT
-    return url
+        return _COMFY_LOOPBACK_DEFAULT, (
+            f"comfy_api_url {url!r} could not be validated ({e}); ignoring it "
+            f"and using the loopback default instead")
+    return url, None
 
 
 def default_api_url() -> str:

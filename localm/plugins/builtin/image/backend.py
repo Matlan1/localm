@@ -57,6 +57,15 @@ def settings(full_config: dict) -> dict:
     api_url = ("" if own_active else comfy_blk.get("api_url")) \
         or (None if own_active else full_config.get("comfy_api_url")) \
         or _comfy.default_api_url()
+    # sanitize on the RESOLVED value, not just the default_api_url fallback: a
+    # per-plugin comfy.api_url (or the global comfy_api_url) would otherwise
+    # short-circuit before default_api_url()'s own guard, letting an admin-set
+    # link-local/metadata host reach the outbound comfy calls (CHK-COMFY-APIURL
+    # residual). Idempotent for the already-guarded default path. The _checked
+    # variant also surfaces a guard fallback through this settings() warning
+    # channel instead of only the debug log (AGENTS.md rule 5).
+    api_url, url_warning = _comfy.sanitize_comfy_url_checked(api_url.rstrip("/"))
+    warning = media_config.combine_warnings(warning, url_warning)
     launch_cmd = "" if own_active else (
         comfy_blk.get("launch_cmd")
         or legacy_comfy_value("comfy_launch_cmd", full_config) or "")
@@ -65,13 +74,7 @@ def settings(full_config: dict) -> dict:
         or legacy_comfy_value("comfy_workdir", full_config) or "")
     return {
         "backend": backend_name,
-        # sanitize_comfy_url on the RESOLVED value, not just the default_api_url
-        # fallback: a per-plugin comfy.api_url (or the global comfy_api_url) would
-        # otherwise short-circuit before default_api_url()'s own guard, letting an
-        # admin-set link-local/metadata host reach the outbound comfy calls
-        # (CHK-COMFY-APIURL residual). Sanitising here is idempotent for the
-        # already-guarded default path.
-        "api_url": _comfy.sanitize_comfy_url(api_url.rstrip("/")),
+        "api_url": api_url,
         "launch_cmd": launch_cmd,
         "workdir": workdir,
         "output_dir": comfy_blk.get("output_dir")
