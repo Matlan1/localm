@@ -11,7 +11,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-## [0.1.5] - 2026-08-19
+## [0.1.5] - 2026-08-26
 
 ### Added
 - **A coder session started in the browser can now choose which model server
