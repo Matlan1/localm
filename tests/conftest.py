@@ -763,7 +763,7 @@ _RESOURCE_GATES = (
      "Playwright not installed (pip install playwright && playwright install)"),
     ("real_vulkan_split", _vulkan_split_configured,
      "set LOCALM_TEST_LAVAPIPE_ICD to a second Vulkan device's ICD manifest "
-     "path (see dev-notes/split-gpu-testing-research-2026-07-13.md Tier 1)"),
+     "path"),
     ("real_multi_gpu_hardware", _real_multi_gpu_hardware_configured,
      "set LOCALM_TEST_REAL_MULTI_GPU=1 on any real 2-GPU box, owned or rented "
      "(Tier 2 - see scripts/tier2_gpu_split/README.md)"),

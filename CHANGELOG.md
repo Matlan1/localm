@@ -797,6 +797,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   exceeded context window" message, and stopping the server while a reply
   was still streaming could itself crash instead of ending the reply
   cleanly.
+- **The Linux CUDA fallback error no longer points at a file you can't
+  open.** When no CUDA build is available for your llama.cpp tag on Linux
+  and localm falls back to Vulkan, the error referenced an internal
+  maintainer file that isn't part of the published repository. It now
+  states the same condition without the dead reference.
 
 ### Security
 - **Turning network access off no longer left the voice model able to
