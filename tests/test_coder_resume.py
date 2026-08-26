@@ -189,8 +189,11 @@ def test_restricted_session_does_not_clobber_the_owner_checkpoint(tmp_path, monk
         _seed_checkpoint(app, a.json()["id"], owner_msgs)
 
         # A restricted scoped session (forced to the project root) runs + persists.
+        # No explicit mode: a scoped key's requested mode cannot be less private
+        # than the floor. See test_resumable_and_resume_are_owner_only.
         b = client.post("/api/coder/sessions", headers=sh,
-                        json={"cwd": str(proj), "mode": "log"})
+                        json={"cwd": str(proj)})
+        assert b.status_code == 200
         sess = app.state.coder_sessions.get(b.json()["id"])
         assert sess.restricted is True
         sess.agent._messages = [{"role": "user", "content": "scoped work"}]
