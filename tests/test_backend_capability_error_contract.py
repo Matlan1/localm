@@ -87,8 +87,8 @@ class _EngineWithBackend(Engine):
     """A real Engine (real ``validate_grammar``, real ``supports_grammar``) over a
     hand-built backend.
 
-    Subclassed rather than constructed, because ``Engine.__init__`` calls
-    ``create_backend`` and would resolve a real model file. Every METHOD under
+    Subclassed rather than constructed: ``Engine.__init__`` calls
+    ``create_backend``, which resolves a real model file. Every METHOD under
     test is inherited unchanged, so this exercises the real delegation path.
     """
 

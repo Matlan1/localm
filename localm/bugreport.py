@@ -1095,8 +1095,8 @@ def save_user_report(description: str = "", *, summary: str = "",
     JS console errors). *extra_hang_trace* lets the CLI supply a freeze trace
     it found in a DIFFERENT process (see live_server_hang_trace) - the self-pid
     check below only ever catches the caller's own freeze, which is never the
-    CLI's own case. Returns None on a write failure (the caller
-    surfaces that rather than reporting a false success). Serialized on
+    CLI's own case. Returns None on a write failure (the caller surfaces that
+    rather than reporting a false success). Serialized on
     ``_SAVE_REPORT_LOCK`` (see the comment above that lock) so two GUI-triggered
     calls running on different worker threads at once cannot race the shared
     pre_restart.log read+delete or collide on the same-second report filename."""
