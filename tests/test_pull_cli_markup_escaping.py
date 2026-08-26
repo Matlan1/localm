@@ -548,7 +548,13 @@ class TestPullUrlBracketDrop:
     def test_sha256_mismatch_after_download_message_survives_verbatim(
             self, rich_capture, url_env, monkeypatch):
         url = "https://example.com/plain.gguf"
-        bad_sha = f"deadbeef-{BRACKET_STYLE}"
+        # The print only shows the first 16 chars (bad_sha[:16]) - the
+        # COMPLETE bracket tag must fit inside that slice, or an unescaped
+        # site would pass this assertion for the wrong reason (a dangling,
+        # unterminated '[' is left as literal text by Rich's own parser
+        # regardless of escaping - confirmed empirically while writing this).
+        bad_sha = "[bold red]" + "c" * 40
+        assert "[bold red]" in bad_sha[:16], "payload must fit its own tag in the visible slice"
         _wire_http(monkeypatch, 4, _resp(200, b"GGUF"))
 
         ok = mm._pull_url(url, "m", expected_sha256=bad_sha)
