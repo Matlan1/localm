@@ -445,3 +445,32 @@ def test_recovery_mode_parsing(monkeypatch):
     assert ha.recovery_mode() == "off"
     monkeypatch.setenv("LOCALM_HANG_RECOVERY", "bogus")
     assert ha.recovery_mode() == "restart"
+
+
+def test_no_dead_env_constants():
+    """NEW-HANG-PROBE-DEAD-CONSTANT: LOCALM_HANG_PROBE was declared as a
+    `_PROBE_ENV` constant right beside four working siblings and never read
+    anywhere - a user could set it forever with no effect, and nothing said
+    so. Guards the CLASS of bug: every `_*_ENV` constant this module
+    declares must be READ (an ast.Name in Load context) somewhere else in
+    the module, not merely mentioned in a comment or docstring.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(ha.__file__).read_text(encoding="utf-8"))
+    declared = set()
+    loaded = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id.endswith("_ENV")):
+            declared.add(node.targets[0].id)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            loaded.add(node.id)
+
+    assert declared, "sanity: expected at least one _*_ENV constant here"
+    dead = declared - loaded
+    assert not dead, (
+        f"{sorted(dead)} declared but never read anywhere in the module - "
+        "the exact shape of the LOCALM_HANG_PROBE dead-constant bug")

@@ -394,6 +394,10 @@ def test_run_server_plain_falls_back_to_uvicorn_run_on_unexpected_error(monkeypa
         raise RuntimeError("peek layer exploded")
     monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
 
+    def fail_socket(host, port):   # simulates create_listen_socket failing (#1517)
+        raise OSError("simulated: cannot build the listening socket")
+    monkeypatch.setattr(portmux, "create_listen_socket", fail_socket)
+
     import uvicorn as uvicorn_mod
     fallback_calls = []
     monkeypatch.setattr(uvicorn_mod, "run", lambda app, **kw: fallback_calls.append(kw))
@@ -422,6 +426,10 @@ def test_run_server_tls_falls_back_to_uvicorn_run_on_unexpected_error(monkeypatc
     async def fake_serve(app, host, port, ssl_certfile, ssl_keyfile, log_level):
         raise RuntimeError("demux exploded")
     monkeypatch.setattr(portmux, "_serve_async", fake_serve)
+
+    def fail_socket(host, port):   # simulates create_listen_socket failing (#1517)
+        raise OSError("simulated: cannot build the listening socket")
+    monkeypatch.setattr(portmux, "create_listen_socket", fail_socket)
 
     import uvicorn as uvicorn_mod
     fallback_calls = []

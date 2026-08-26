@@ -79,6 +79,7 @@ class TestGgufEmbedderMainGpuWiring:
         mock_api.llama_model_n_embd.return_value = 768   # int(...) would TypeError on a bare Mock
         mock_api.has_embeddings_api.return_value = True
         mock_api.has_memory_api.return_value = False
+        mock_api.llama_n_ctx_seq.return_value = 2048   # must be int-comparable, not a bare Mock
         return mock_api
 
     def _build(self, mock_api):

@@ -581,6 +581,58 @@ def test_guard_sees_the_startup_engine_that_is_not_in_the_engine_map(models_home
 
 
 # ---------------------------------------------------------------------------
+#  Every test above proves the POLICY. This one proves the WIRING: that
+#  loaded_engine_holding_model_file answers with registry.engine_holding_model_file's
+#  OWN result rather than an independently maintained copy of the same logic.
+#  A fixture built from real files can never distinguish those two - both
+#  implementations agree on every real input today by construction, so agreement
+#  proves nothing about whether one is still a second, driftable copy of the
+#  other. Forcing the registry policy to answer with a fabricated result no
+#  inline computation could produce is what makes the two distinguishable.
+# ---------------------------------------------------------------------------
+
+
+def test_loaded_engine_holding_model_file_delegates_to_registry_policy(
+        models_home, monkeypatch):
+    """The registry policy's answer must be the wrapper's answer, verbatim."""
+    import localm.model_manager.registry as registry_mod
+
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"victim": {"path": str(gguf), "source": "local"}})
+
+    sentinel = registry_mod.ModelFileHold(
+        "SENTINEL-FROM-REGISTRY-POLICY",
+        "a marker no inline computation over real paths could produce")
+    captured = {}
+
+    def fake_engine_holding_model_file(model, reg, candidates):
+        captured["model"] = model
+        captured["candidates"] = list(candidates)
+        return sentinel
+
+    monkeypatch.setattr(registry_mod, "engine_holding_model_file",
+                        fake_engine_holding_model_file)
+
+    hs._engines.clear()
+    hs._engine = None
+    hs._engines["holder"] = _FileEngine("holder", gguf)
+    try:
+        result = hs.loaded_engine_holding_model_file("victim")
+    finally:
+        hs._engines.clear()
+
+    assert result is sentinel, (
+        "loaded_engine_holding_model_file must return the registry policy's "
+        "own object, not a value it computed independently - a copy that "
+        "merely agrees with the policy today can silently drift from it "
+        "tomorrow, which is the defect this test guards against")
+    assert captured["model"] == "victim"
+    assert captured["candidates"] == [("holder", str(gguf))], (
+        "the wrapper's only remaining job is turning this process's "
+        "residents into (key, model_path) pairs for the shared policy")
+
+
+# ---------------------------------------------------------------------------
 #  POST /v1/models/rename - the always-present route the CLI drives, so a
 #  rename from another process re-keys the live engine.
 # ---------------------------------------------------------------------------

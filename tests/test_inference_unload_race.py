@@ -17,17 +17,16 @@ import time
 from unittest.mock import MagicMock, patch
 
 from localm.inference.backends.llamacpp.llama import LlamaCpp
+from tests._bare_llama import make_bare_llama
 
 
 def _lockable_llama() -> LlamaCpp:
-    llm = LlamaCpp.__new__(LlamaCpp)
-    llm._gen_lock = threading.RLock()
-    llm._stop = threading.Event()
-    llm._cached_tokens = [1, 2, 3]
-    llm._ctx_ptr = None      # nothing to actually free in this unit test
-    llm._model_ptr = None
-    llm._verbose = True
-    return llm
+    return make_bare_llama(
+        _cached_tokens=[1, 2, 3],
+        _ctx_ptr=None,      # nothing to actually free in this unit test
+        _model_ptr=None,
+        _verbose=True,
+    )
 
 
 def test_close_signals_stop_immediately_and_waits_for_the_lock():

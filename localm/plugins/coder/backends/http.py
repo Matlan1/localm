@@ -279,8 +279,15 @@ class HTTPBackend(BaseLLMBackend):
         body (see _body()/_anthropic_body()), so this is the one thing a caller
         needs to change to make a live session's NEXT request target a
         different model - no new backend/Agent needed, so conversation history
-        survives. Mirrors set_tools()'s in-place-mutation shape."""
+        survives. Mirrors set_tools()'s in-place-mutation shape.
+
+        Also drops the cached context_capacity(): that value is per-MODEL
+        (the server's /v1/config reports the currently loaded model's ceiling),
+        so a switch must re-fetch it or the coder keeps budgeting history
+        against the OLD model's window."""
         self._model = model
+        self._ctx_capacity_cached = False
+        self._ctx_capacity = None
 
     @property
     def last_usage(self) -> dict:

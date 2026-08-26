@@ -9,7 +9,6 @@ prompt instead of the ChatML fallback). A correct runtime never hits either,
 but a genuinely bad decode or template must surface or fall back, not silently
 produce garbage."""
 
-import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +19,7 @@ from localm.inference.backends.llamacpp.llama import (
     _apply_model_template,
     _format_chatml,
 )
+from tests._bare_llama import make_bare_llama
 
 import localm.inference.backends.llamacpp._api as _api
 
@@ -194,35 +194,11 @@ class TestFallbackReasonReachesTheInstance:
     this link - the return-guard tests call _apply_model_template directly, and
     the visibility tests fake the runner below the LlamaCpp layer entirely."""
 
-    _FAKES: list = []
-
     def _bare_llama(self) -> LlamaCpp:
-        llm = LlamaCpp.__new__(LlamaCpp)
-        llm._n_ctx = 4096
-        llm._n_ctx_max = None
-        llm._n_ctx_grow = 4096
-        llm._seed = 1234
-        llm._verbose = False
-        llm._model_ptr = 111
-        llm._ctx_ptr = 222
-        llm._tokenizer = MagicMock()
-        llm._cached_tokens = []
-        llm._ctx_capacity = 4096
-        llm._kv_supported = None
-        llm._gen_lock = threading.RLock()
-        llm._inference_lock = threading.Lock()
-        llm._stop = threading.Event()
-        llm.chat_template_fallback_reason = None
-        self._FAKES.append(llm)
-        return llm
+        return make_bare_llama(_model_ptr=111, _ctx_ptr=222)
 
-    @pytest.fixture(autouse=True)
-    def _null_fake_pointers(self):
-        yield
-        for llm in self._FAKES:
-            llm._model_ptr = None
-            llm._ctx_ptr = None
-        self._FAKES.clear()
+    # Fake-pointer teardown is handled globally by tests/conftest.py's
+    # autouse _neutralise_bare_llama_pointers fixture.
 
     def test_create_chat_completion_records_the_fallback_reason(self):
         llm = self._bare_llama()

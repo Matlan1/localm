@@ -173,3 +173,82 @@ class TestEngineLayerScrub:
         out = "".join(eng.chat_stream([{"role": "user", "content": "hi"}]))
         assert "<|channel" not in out and "channel|>" not in out
         assert out == "<think>\ninternal reasoning\n</think>\nHello there!"
+
+
+#  Turn-open markers emitted as plain text (REC-D1-ROLEWORD, structural half)
+#
+#  A turn-open marker carries the role word after it, so a scrubber that removes
+#  the marker alone leaves a bare "model" / "assistant" at the head of the reply.
+#  The turn-CLOSE counterparts are deliberately absent from _MARKER_RE: the
+#  backend treats those as stop strings and ends the turn, which is a stronger
+#  response than editing the text.
+
+#  Every marker string _MARKER_RE is meant to remove whole, longest first. Used
+#  both as the coverage list and as the bound the stream buffer has to clear.
+_TURN_MARKERS = [
+    "<|start_header_id|>assistant<|end_header_id|>\n",
+    "<|start_header_id|>ipython<|end_header_id|>\n",
+    "<start_of_turn>assistant\n",
+    "<|im_start|>assistant\n",
+    "<start_of_turn>model\n",
+    "<|im_start|>system\n",
+    "<start_of_turn>user\n",
+    "<|turn>assistant\n",
+    "<|start|>assistant",
+    "<|channel|>",
+    "<unused7>",
+]
+
+
+class TestTurnOpenMarkers:
+    def test_turn_open_marker_takes_its_role_word_with_it(self):
+        """The role word is part of the marker. Removing only the delimiter is
+        what leaks a bare 'model' or 'assistant' into the visible reply."""
+        for marker in _TURN_MARKERS:
+            out = scrub_text(f"{marker}Hello")
+            assert out == "Hello", f"{marker!r} left {out!r}"
+
+    def test_role_words_in_ordinary_prose_are_untouched(self):
+        """Only the structural marker is removed. A bare role word the model
+        writes in prose is model behaviour, and stripping it would corrupt every
+        legitimate use of an ordinary English word."""
+        for prose in ("Model: here is the answer",
+                      "the Model card says otherwise",
+                      "she asked him about the assistant role",
+                      "a system prompt names the user"):
+            assert scrub_text(prose) == prose
+
+    def test_near_miss_markers_are_not_stripped(self):
+        """The match is anchored on the whole delimiter, so text that merely
+        starts the same way survives."""
+        for safe in ("<started>", "x<start_of_turnip>", "a < b", "<|imagine|>",
+                     "<start_of_turn", "<|start_header_id|>nobody"):
+            assert scrub_text(f"keep {safe} keep") == f"keep {safe} keep"
+
+    def test_marker_hold_covers_every_marker_at_every_stream_split(self):
+        """_MARKER_HOLD bounds how much text scrub_stream keeps buffered, so it
+        has to stay at or above the longest marker _MARKER_RE can match. Driven
+        through the real streaming path at every split point rather than
+        asserting the literal, so the relation is what fails when either side
+        moves."""
+        from localm.textnorm import _MARKER_HOLD
+
+        for marker in _TURN_MARKERS:
+            assert len(marker) <= _MARKER_HOLD, (
+                f"{marker!r} is {len(marker)} chars, longer than the "
+                f"_MARKER_HOLD={_MARKER_HOLD} stream buffer")
+            text = f"before {marker}after"
+            for i in range(len(text) + 1):
+                out = _scrub([text[:i], text[i:]])
+                assert out == "before after", (
+                    f"{marker!r} split at {i} produced {out!r}")
+
+    def test_streaming_and_one_shot_agree_on_turn_open_markers(self):
+        for marker in _TURN_MARKERS:
+            text = f"a {marker}b"
+            assert _scrub([text]) == scrub_text(text)
+
+    def test_turn_open_scrub_is_idempotent(self):
+        for marker in _TURN_MARKERS:
+            once = scrub_text(f"{marker}reply")
+            assert scrub_text(once) == once

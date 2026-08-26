@@ -425,7 +425,12 @@ def main(
             # exists.
             from ..agent.checkpoint import checkpoint_info
             info = checkpoint_info(work_dir)
-            if info:
+            if info and info.get("unreadable"):
+                print_warning(
+                    "A saved session was found for this project but could not "
+                    "be read; it will not appear in /sessions."
+                )
+            elif info:
                 ts = info.get("interrupted_at", "unknown time")
                 turns = info.get("turns", "?")
                 print_warning(

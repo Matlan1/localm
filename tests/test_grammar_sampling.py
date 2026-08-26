@@ -18,42 +18,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.inference.backends.llamacpp.llama import LlamaCpp
-
-_FAKES: list = []
+from tests._bare_llama import make_bare_llama
 
 
 def _bare_llama() -> LlamaCpp:
-    llm = LlamaCpp.__new__(LlamaCpp)
-    llm._n_ctx = 4096
-    llm._n_ctx_max = None
-    llm._n_ctx_grow = 4096
-    llm._seed = 1234
-    llm._verbose = False
-    llm._model_ptr = 111
-    llm._ctx_ptr = 222
-    llm._tokenizer = MagicMock()
-    llm._cached_tokens = []
-    llm._ctx_capacity = 4096
-    llm._kv_supported = None
-    # __init__ always sets this; a hand-built instance that omits it is
-    # not a LlamaCpp, and the generate path reads it directly.
-    llm._mtp_ctx_ptr = None
-    llm._gen_lock = threading.RLock()
-    llm._inference_lock = threading.Lock()
-    llm._stop = threading.Event()
-    _FAKES.append(llm)
-    return llm
+    return make_bare_llama(_model_ptr=111, _ctx_ptr=222)
 
 
-@pytest.fixture(autouse=True)
-def _null_fake_pointers():
-    # Null the fake pointers before GC so __del__ -> close() does not pass a
-    # bogus int to the real llama_free.
-    yield
-    for llm in _FAKES:
-        llm._model_ptr = None
-        llm._ctx_ptr = None
-    _FAKES.clear()
+# Fake-pointer teardown is handled globally by tests/conftest.py's autouse
+# _neutralise_bare_llama_pointers fixture.
 
 
 def test_build_sampler_rejects_invalid_grammar_never_adds_null():

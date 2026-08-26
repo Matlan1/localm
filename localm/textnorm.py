@@ -3,8 +3,10 @@
 
 Some finetunes emit their training-format control markers as plain text:
 harmony-style channel tags (``<|channel|>analysis <|message|>``), the Gemma 4
-turn/tool dialect (``<|turn>model``, ``<|"|>`` quote tokens), or reserved
-vocabulary placeholders (``<unused7>``). These are model internals, not content.
+turn/tool dialect (``<|turn>model``, ``<|"|>`` quote tokens), a turn-open marker
+together with its role word (``<start_of_turn>model``, ``<|im_start|>assistant``),
+or reserved vocabulary placeholders (``<unused7>``). These are model internals,
+not content.
 
 Thinking-channel markers are not dropped but normalised to canonical
 ``<think> ... </think>`` so every frontend handles reasoning one way; the rest
@@ -55,10 +57,23 @@ _MARKER_RE = re.compile(
     r"|<\|tool>|<tool\|>"                                     # Gemma 4 tool declarations
     r"|<\|think\|>|<think\|>"                                 # Gemma 4 thinking enable token
     r"|<unused\d+>?"                                          # Gemma reserved tokens
+    # A turn-OPEN marker carries the role word, so the role suffix is matched
+    # with it - removing the marker alone leaves a bare "model" / "assistant" at
+    # the head of the reply. The matching turn-CLOSE markers are not listed
+    # here: the backend handles those as stop strings, ending the turn rather
+    # than editing the text.
+    r"|<start_of_turn>(?:user|model|assistant|system|tool)?\n?"   # Gemma 1-3 turn open
+    r"|<\|im_start\|>(?:user|model|assistant|system|tool)?\n?"    # ChatML turn open
+    r"|<\|start_header_id\|>"
+    r"(?:user|model|assistant|system|tool|ipython)?"
+    r"<\|end_header_id\|>\n?"                                 # Llama 3 role header
 )
 
-# Longest text a partial marker could span across two stream pieces.
-_MARKER_HOLD = 32
+# Longest text a partial marker could span across two stream pieces. Stays at or
+# above the longest string _MARKER_RE can match, or scrub_stream commits a cut
+# inside a marker and leaks its tail as text.
+# See test_marker_hold_covers_every_marker_at_every_stream_split.
+_MARKER_HOLD = 48
 
 
 def scrub_text(text: str) -> str:

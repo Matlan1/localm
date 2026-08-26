@@ -372,6 +372,45 @@ def test_scoped_key_cannot_switch_the_shared_model(tmp_path, monkeypatch):
         assert r.status_code == 403       # switching the shared engine needs the owner
 
 
+def test_scoped_key_cannot_force_a_less_private_mode(tmp_path, monkeypatch):
+    # req.mode must be owner-gated the same way req.model already is: a scoped
+    # key on a privacy-pinned project must not be able to POST {"mode": "full"}
+    # and get an audit trail / transcript written.
+    proj = tmp_path / "proj"; proj.mkdir()
+    (proj / ".localcoder").mkdir()
+    (proj / ".localcoder" / "config.toml").write_text('mode = "privacy"\n', encoding="utf-8")
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    scoped = auth.create_key("phone", ["coder"])
+
+    with TestClient(app) as client:
+        h = {"Authorization": f"Bearer {scoped['key']}"}
+        # Less private than the pinned floor: refused.
+        r = client.post("/api/coder/sessions", headers=h,
+                        json={"cwd": str(proj), "mode": "full"})
+        assert r.status_code == 403
+        # Same as the floor: allowed.
+        r2 = client.post("/api/coder/sessions", headers=h,
+                         json={"cwd": str(proj), "mode": "privacy"})
+        assert r2.status_code == 200
+        # An unknown mode string is a clean 400, not a 500.
+        r3 = client.post("/api/coder/sessions", headers=h,
+                         json={"cwd": str(proj), "mode": "bogus"})
+        assert r3.status_code == 400
+        # The owner is not restricted by this gate.
+        r4 = client.post("/api/coder/sessions",
+                         headers={"Authorization": "Bearer ownersecret"},
+                         json={"cwd": str(proj), "mode": "full"})
+        assert r4.status_code == 200
+        # Close it: a "full" mode session opens a real audit-log file handle in
+        # the process-global sessions dir (localm.audit._SESSIONS_DIR is frozen
+        # at import time, unaffected by this test's HOME_DIR monkeypatch), and
+        # leaving it open trips the suite's own end-of-run cleanup elsewhere.
+        client.delete(f"/api/coder/sessions/{r4.json()['id']}",
+                      headers={"Authorization": "Bearer ownersecret"})
+
+
 # ------------------------------------------------------------------ #
 #  coder:full - the privileged, owner-only "unrestricted coder" scope #
 # ------------------------------------------------------------------ #

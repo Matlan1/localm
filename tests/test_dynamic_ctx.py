@@ -5,24 +5,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from localm.inference.backends.llamacpp.llama import LlamaCpp
+from tests._bare_llama import make_bare_llama
 from tests._fake_batch import fake_batch_init
 
 
 def _llm(n_ctx=4096, n_ctx_max=16384, n_ctx_grow=4096):
-    llm = LlamaCpp.__new__(LlamaCpp)
-    llm._n_ctx = n_ctx
-    llm._n_ctx_max = max(n_ctx_max, n_ctx) if n_ctx_max else None
-    llm._n_ctx_grow = max(256, n_ctx_grow)
-    llm._cached_tokens = []
-    llm._ctx_capacity = n_ctx
-    llm._kv_supported = None
-    llm._verbose = False
-    llm._model_ptr = None
-    llm._ctx_ptr = None
-    llm._tokenizer = MagicMock()
-    llm._vram_check = None
-    return llm
+    # Mirrors __init__'s own n_ctx_max/n_ctx_grow clamping (llama.py), so this
+    # matches what a real load would compute rather than a fixed default.
+    return make_bare_llama(
+        _n_ctx=n_ctx,
+        _n_ctx_max=max(n_ctx_max, n_ctx) if n_ctx_max else None,
+        _n_ctx_grow=max(256, n_ctx_grow),
+        _ctx_capacity=n_ctx,
+    )
 
 
 class TestTargetCtx:
@@ -64,8 +59,10 @@ class TestGenerationBudget:
         assert llm._fit_generation_budget(7000, 4096) == 1128
 
     def test_raises_when_conversation_outgrows_ceiling(self):
+        from localm.inference.backends.base import ContextCapacityExceededError
+
         llm = _llm(n_ctx_max=8192)
-        with pytest.raises(RuntimeError, match="n_ctx_max"):
+        with pytest.raises(ContextCapacityExceededError, match="n_ctx_max"):
             llm._fit_generation_budget(8190, 1024)
 
     def test_unlimited_never_clamps(self):

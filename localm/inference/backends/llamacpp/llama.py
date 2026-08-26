@@ -1402,6 +1402,9 @@ class LlamaCpp:
             # try loses the real error to an UnboundLocalError.
             sampler = None
             draft_sampler = None
+            # Carries a rejected speculation's replacement token into the next
+            # loop iteration; set only by the reject branch below.
+            pending_token = None
             try:
                 # One contiguous suppression scope covering context work and
                 # prefill. The ROCm lazy-buffer verification messages fire
@@ -1437,13 +1440,13 @@ class LlamaCpp:
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
                 )
-                # Drafting samples with a plain greedy sampler and then pushes the
-                # winning token into the main chain. With a grammar in that chain
-                # the token was chosen without the grammar's mask, so it can be one
-                # the grammar forbids, and accepting it advances the parse stacks
-                # out of step - the same mis-sequenced accept documented below,
-                # which throws across the C ABI. Constrained requests therefore
-                # take the single-token path.
+                # Drafting proposes tokens greedily off the MTP context; the
+                # request's own sampler below decides what is emitted. Constrained
+                # requests take the single-token path instead: draft_sampler stays
+                # None whenever a grammar is active, so no speculation ever runs
+                # with a grammar sampler in the chain, where a mis-sequenced accept
+                # throws across the C ABI.
+                # See test_mtp_drafting_is_disabled_while_a_grammar_is_active.
                 draft_sampler = (
                     api.llama_sampler_init_greedy()
                     if self._mtp_ctx_ptr is not None and grammar is None
@@ -1486,7 +1489,15 @@ class LlamaCpp:
                             # sampler fault" that kept grammar enforcement dormant. It
                             # also double-counted tokens in the repetition-penalty
                             # window. Do NOT re-add an accept after sample.
-                            token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
+                            #
+                            # A pending token was already sampled from *sampler*
+                            # by the rejected speculation below, so re-sampling
+                            # here would both discard it and read a logits row
+                            # that no longer matches the KV cache.
+                            if pending_token is not None:
+                                token, pending_token = pending_token, None
+                            else:
+                                token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
                             eog = self._tokenizer.is_eog(token)
 
                         # Stop when the model signals end-of-generation via the vocabulary
@@ -1561,11 +1572,22 @@ class LlamaCpp:
                                 try:
                                     ret = api.llama_decode(self._ctx_ptr, batch)
                                     if ret == 0:
-                                        # Verify if target model agrees with draft at pos
-                                        verified_token = api.llama_sampler_sample(draft_sampler, self._ctx_ptr, 0)
+                                        # The target model's own continuation of
+                                        # *token*, drawn through the REQUEST's
+                                        # sampler (temperature, top_k, top_p and
+                                        # the repetition window), from logits row
+                                        # 0 - the row produced after *token*.
+                                        # llama_sampler_sample accepts what it
+                                        # returns, and verified_token is emitted
+                                        # on both branches below, so the sampler
+                                        # is never advanced past a token that was
+                                        # not produced.
+                                        verified_token = api.llama_sampler_sample(sampler, self._ctx_ptr, 0)
                                         if verified_token == draft_token:
-                                            # Draft MATCHED / ACCEPTED!
-                                            api.llama_sampler_accept(sampler, draft_token)
+                                            # Draft MATCHED / ACCEPTED! The sample
+                                            # above already accepted it; a second
+                                            # accept here is the double accept
+                                            # that threw across the C ABI.
                                             # Keep MTP context KV cache in sync with accepted draft token
                                             if self._mtp_ctx_ptr is not None:
                                                 try:
@@ -1589,6 +1611,14 @@ class LlamaCpp:
                                                 api.llama_kv_cache_seq_rm(self._mtp_ctx_ptr, 0, pos + 1, -1)
                                             self._cached_tokens.append(token)
                                             pos += 1
+                                            # verified_token is the target's own
+                                            # continuation of *token* and is what
+                                            # this position emits. Carry it to the
+                                            # loop head rather than re-sampling:
+                                            # the last logits row belongs to the
+                                            # draft token just removed from the KV
+                                            # cache.
+                                            pending_token = verified_token
                                     else:
                                         # Decode failed, fall back to single token
                                         api.llama_batch_free(batch)

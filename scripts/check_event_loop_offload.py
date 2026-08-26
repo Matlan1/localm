@@ -7,18 +7,22 @@ call is only ever a defect in the first shape, and when it happens EVERY client
 of the server stalls, not just the one making the request - every chat stream,
 every SSE job feed, every poll.
 
-A grep cannot find these: the blocking call is usually two or three hops down a
-helper chain. Coverage cannot either: the line executes, it is simply executing
-in the wrong thread.
+This class has now been found four times: the GPU probes (#541), then
+`POST /api/embedding/warmup`, `GET /api/image-proxy` and `GET /api/rag/embedding`
+in one QA run. Each was found by a hang alarm firing in the field rather than by
+anything in the tree, which is why this exists: a grep cannot find them (the
+blocking call is usually two or three hops down a helper chain) and coverage
+cannot either (the line executes, it is simply executing in the wrong thread).
 
 WHAT COUNTS AS BLOCKING, and why it is not "any lock"
 -----------------------------------------------------
 Flagging every `with some_lock:` reached from a handler produces roughly 180 of
 this repo's 208 async routes, because the auth path alone takes several
-short-lived dict guards on every single request. So a lock is only interesting
-when its critical section can be held for a long time, and that is computed
-rather than declared: pass 1 walks every `with <lock>:` body in the tree and
-asks whether it transitively reaches a slow primitive.
+short-lived dict guards on every single request. That is the shape of gate
+people switch off. So a lock is only interesting when its critical section can
+be held for a long time, and that is computed rather than declared: pass 1 walks
+every `with <lock>:` body in the tree and asks whether it transitively reaches a
+slow primitive.
 
     UNBOUNDED   the body spawns a child and waits for it, or loads a native
                 library. `localm.inference.embedder._LOCK` is the worked
@@ -26,11 +30,13 @@ asks whether it transitively reaches a slow primitive.
                 construction, i.e. a process spawn plus a native model load,
                 whose own ceiling is 300s. A status probe that takes that lock
                 to read one integer therefore blocks the loop for as long as a
-                cold load takes.
+                cold load takes. That is exactly what the hang alarm caught at
+                47s and climbing.
     BOUNDED     the body runs a short subprocess or writes a file.
                 `localm.sessions._LOCK` is the worked example: its writes reach
                 `restrict_file_perms`, which shells out to `icacls` on Windows.
-                Reported, but it does not fail the gate.
+                Real, measurable, and a completely different severity from the
+                first kind - so it is reported, and it does not fail the gate.
 
 A network call is always UNBOUNDED: the timeouts in this tree are 10-60s, and
 `socket.getaddrinfo` takes no timeout at all.
@@ -41,24 +47,29 @@ Work handed to a worker thread. The analyzer follows the same boundaries the
 code does: `run_in_threadpool`, `run_in_threadpool_bounded`, `run_in_executor`,
 `anyio.to_thread.run_sync`, a `jobs.start_fn` callback, an explicit
 `Thread(target=...)`. A nested `def` that is passed to any of those is not
-walked, because its body runs off the loop.
+walked, because its body runs off the loop. Getting that wrong in either
+direction is the whole difficulty: an early version of this file counted a
+nested closure as part of its parent and reported `GET /v1/comfy/status`, which
+is correctly offloaded and says so in its own comment, as blocking.
 
 CONFIDENCE
 ----------
 A call of the form `x.method(...)`, where `x` is a local whose type this file
 cannot know, is resolved by unique method name across the tree and marked
-UNCONFIRMED (`~>` in the printed chain). Dropping the heuristic loses real
-findings (`store.record_result`); trusting it invents them (`sidecar.rename`,
-which is `pathlib.Path.rename`, resolves to the CLI's `rename` command and
-manufactures a network call on three media routes that make none). Read the
-chain before acting on an UNCONFIRMED hop.
+UNCONFIRMED (`~>` in the printed chain). That heuristic is worth keeping and
+worth marking: dropping it lost a real finding (`store.record_result`), and
+trusting it invented one (`sidecar.rename`, which is `pathlib.Path.rename`,
+resolved to the CLI's `rename` command and manufactured a network call on three
+media routes that make none). Read the chain before acting on an UNCONFIRMED
+hop.
 
 USAGE
 -----
     python scripts/check_event_loop_offload.py            # full report
     python scripts/check_event_loop_offload.py --gate     # exit 1 on a NEW unbounded finding
 
-`tests/test_event_loop_offload.py` pins the gate and proves this file FIRES.
+`tests/test_event_loop_offload.py` pins the gate and, more importantly, proves
+this file FIRES: a check that has never been red proves nothing.
 """
 
 from __future__ import annotations
@@ -74,12 +85,14 @@ REPO = Path(__file__).resolve().parents[1]
 ROUTE_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 ROUTE_RECEIVERS = {"app", "_app", "router", "_router"}
 
-# Calls that hand the callable to a worker thread, so its body is not walked.
+# Crossing any of these hands the callable to a worker thread, so its body is
+# not on the event loop and is not walked.
 OFFLOADERS = {"run_in_threadpool", "run_in_threadpool_bounded", "run_sync",
               "run_in_executor", "start_fn", "submit", "start_thread", "to_thread"}
 THREAD_CTORS = {"Thread", "Process"}
 
-# Direct outbound network calls, all treated as unbounded here.
+# Direct outbound network calls. Always unbounded for this file's purpose: the
+# timeouts in this tree run 10-60s and getaddrinfo takes none at all.
 NET_LEAVES = {"safe_fetch_bytes", "safe_fetch_json", "safe_fetch_text",
               "verified_urlopen", "urlopen", "urlretrieve"}
 NET_MOD_CALLS = (
@@ -89,35 +102,33 @@ NET_MOD_CALLS = (
        ("httpx", "get"), ("httpx", "post"), ("httpx", "request")}
 )
 
-# Primitives that make a lock body slow, split by whether the wait is bounded.
+# Primitives that make a lock body slow. Split by whether the wait has a ceiling
+# a user would accept, because that split is the whole difference between "the
+# server froze for 47s" and "this request cost an extra 40ms".
 UNBOUNDED_LEAVES = {"spawn_and_load", "load_lib", "CDLL", "WinDLL", "Popen",
                     "getaddrinfo", "create_connection"} | NET_LEAVES
 BOUNDED_LEAVES = {"check_output", "check_call", "communicate"}
 # `x.join()` / `x.wait()` / `x.poll()` where x names a child, a queue or a
-# future. Matched on the receiver's name.
+# future. Matched on the receiver's name because the type is not knowable here.
 WAIT_CALLS = {"join", "wait", "recv", "poll", "result"}
 WAIT_RECEIVER_HINTS = ("proc", "thread", "queue", "conn", "child", "future",
                        "_q", "worker")
 
-# Known exceptions, keyed on (handler qualname, sink function) and never on a
-# line number. Every entry carries a reason and a tracking id.
+# Deliberate, KNOWN exceptions. Keyed on (handler qualname, sink function) and
+# never on a line number, so an edit elsewhere in the file cannot silently
+# detach an entry - the same reason CodeQL dispositions here are keyed on
+# file::function. Every entry needs a reason and a tracking id: an allowlist
+# without those is how a gate turns into a list of things nobody remembers.
+#
+# NEW-COMFY-URL-SANITIZE-DNS-ON-THE-LOOP previously listed 11 handlers here
+# (imagine/music/video's main + comfy-models + comfy-launch routes, plus
+# media_preflight and model_pull_comfy_source): sanitize_comfy_url's blocking
+# getaddrinfo, reached via settings()/default_api_url()/comfy_models_dest_dir().
+# All 11 now offload that resolution with run_in_threadpool_bounded, so the
+# sweep no longer finds a sink there at all - removed rather than left in, so
+# a future regression at any of these exact sites is reported as a NEW
+# finding instead of silently matching a stale exception.
 ALLOWED: dict[tuple[str, str], str] = {}
-for _handler in (
-    "imagine", "imagine_comfy_models", "imagine_comfy_launch",
-    "music", "music_comfy_models", "music_comfy_launch",
-    "video", "video_comfy_models", "video_comfy_launch",
-    "register.media_preflight", "register.model_pull_comfy_source",
-):
-    ALLOWED[(_handler, "_host_is_link_local")] = (
-        "NEW-COMFY-URL-SANITIZE-DNS-ON-THE-LOOP. sanitize_comfy_url resolves the "
-        "configured comfy_api_url to refuse a link-local/metadata host, and the "
-        "resolution is a blocking getaddrinfo. NOT reachable in the default "
-        "config: comfy_api_url defaults to an IP literal, which ipaddress "
-        "parses without touching DNS. Only an owner who sets a HOSTNAME pays "
-        "it. The DNS lookup itself is load-bearing for the SSRF guard and must "
-        "not be removed; the fix is to offload settings()/default_api_url() at "
-        "each of these handlers, which is being tracked separately because "
-        "those files are under concurrent edit.")
 
 
 def _dotted(node: ast.AST) -> str:
@@ -183,7 +194,8 @@ class Finding:
 
     @property
     def allow_key(self) -> tuple[str, str]:
-        # (handler, function that blocks), never a line number.
+        # (handler, function that blocks), never a line number: an edit
+        # elsewhere in either file must not silently detach an entry.
         return (self.handler.qual, self.sink_func)
 
     @property
@@ -201,7 +213,12 @@ class Analyzer:
     def __init__(self, root: Path, package: str = "localm"):
         self.root = root
         self.mods: dict[str, Module] = {}
-        # Files this analyzer could not parse; reported by --gate.
+        # A file this analyzer cannot parse contributes NOTHING to the sweep, so
+        # a syntax error would quietly turn the gate green for that file - the
+        # unexpected-green shape this whole class keeps producing. Measured
+        # while fires-controlling this very check: a botched edit to
+        # routes/chat.py made the gate pass on code that WAS blocking. Recorded
+        # here and surfaced by --gate rather than only printed.
         self.unparseable: list[str] = []
         self.by_leaf: dict[str, list[Func]] = defaultdict(list)
         self.by_class: dict[str, list[Func]] = defaultdict(list)
@@ -288,8 +305,9 @@ class Analyzer:
         """func's own statements, with directly-nested def/async def removed.
 
         A nested def is a separate Func and is usually the thread-side closure,
-        so counting its body as part of the parent would report a
-        correctly-offloaded handler as blocking."""
+        so counting its body as part of the parent reports correctly-offloaded
+        handlers as blocking. That was a real false positive on
+        `GET /v1/comfy/status` before this existed."""
         out: list[ast.stmt] = []
         for stmt in func.node.body:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):

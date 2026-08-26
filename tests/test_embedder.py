@@ -1780,6 +1780,17 @@ def test_context_drift_check_silent_on_older_build_with_no_n_ctx_seq(caplog):
     assert caplog.records == []
 
 
+def test_context_drift_check_silent_on_non_int_probe_result(caplog):
+    """A probe result that is neither an int nor None (an unconfigured test
+    double, or any other caller supplying a non-conforming api) must not
+    raise and must not warn - the margin comparison only makes sense for a
+    real integer."""
+    caplog.set_level(logging.WARNING, logger="localm")
+    emb._warn_if_context_config_drifted(
+        _FakeCtxApi(2048, MagicMock()), object(), 2048)
+    assert caplog.records == []
+
+
 def test_context_drift_check_never_raises(caplog):
     class _BrokenApi:
         def llama_n_ctx(self, ctx):

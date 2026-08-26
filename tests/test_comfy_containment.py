@@ -72,6 +72,7 @@ class _ComfyStub(HTTPServer):
         self.input_dir = input_dir
         self.history: dict = {}        # prompt_id -> outputs dict
         self.history_deleted: list = []  # prompt_ids deleted via POST /history
+        self.fail_history_clear = False  # force POST /history to fail
         self.output_kind = "images"    # "images" | "audio" | gifs ...
         self.file_ext = ".png"
         self._counter = 0
@@ -145,6 +146,8 @@ class _Handler(BaseHTTPRequestHandler):
             (s.input_dir / name).write_bytes(b"INPUTDATA")
             return self._json(200, {"name": name})
         if p.path == "/history":
+            if s.fail_history_clear:
+                return self._json(500, {"error": "boom"})
             data = json.loads(body or b"{}")
             for pid in data.get("delete", []):
                 s.history.pop(pid, None)
@@ -243,6 +246,29 @@ def test_contain_without_dir_warns_but_still_clears_history(stub, monkeypatch):
     assert "WARNING" in warn                       # loud, not silent
     assert (stub.output_dir / fn).exists()         # could not delete the copy
     assert "pidY" in stub.history_deleted          # but history WAS cleared
+
+
+def test_contain_warns_when_history_clear_fails(stub):
+    # NEW-COMFY-HISTORY-CLEAR-DISCARDED: clear_comfy_history()'s return value
+    # must not be discarded - a failed clear is a containment step that failed
+    # and must be surfaced, even though the rest of containment still proceeds.
+    fn = "ComfyUI_history_fail.png"
+    (stub.output_dir / fn).write_bytes(b"X")
+    stub.history["pidHF"] = {"9": {"images": [
+        {"filename": fn, "subfolder": "", "type": "output"}]}}
+    stub.fail_history_clear = True
+
+    warn = comfy.contain_comfy_artifacts(
+        stub.base_url, "pidHF",
+        {"filename": fn, "subfolder": "", "type": "output"},
+        comfy_output_dir=str(stub.output_dir),
+        delete_outputs=True,
+    )
+
+    assert "WARNING" in warn
+    assert "history" in warn.lower()
+    assert not (stub.output_dir / fn).exists()      # the rest of containment still ran
+    assert "pidHF" not in stub.history_deleted      # history genuinely was not cleared
 
 
 class TestContainmentRejectsOutOfBoundsNames:

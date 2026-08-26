@@ -470,6 +470,12 @@ if [ ! -x .venv/bin/localm ]; then
     say ""
   fi
 fi
+# Decided once, reused below: setup-llama, make-launcher and plugin setup all
+# invoke .venv/bin/localm directly, and a still-missing binary must not turn
+# into a confusing mid-script exit or a false "still works" claim once it has
+# already been warned about above.
+LOCALM_BIN_OK=1
+[ -x .venv/bin/localm ] || LOCALM_BIN_OK=0
 
 # ---- native llama.cpp runtime wheel (loader imports it) ---------------------
 # (The PyTorch/transformers stack is installed further down, AFTER the backend
@@ -524,7 +530,12 @@ case "$bpick" in
   2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=cpu ;;
   6) BACKEND=own ;;   *) BACKEND="$REC" ;;
 esac
-if [ "$BACKEND" = own ]; then
+if [ "$LOCALM_BIN_OK" != 1 ]; then
+  # .venv/bin/localm never got installed (warned above) - it is what setup-llama
+  # runs through, so calling it here would just fail again, less clearly.
+  say "  Skipped - .venv/bin/localm is missing (see the warning above)."
+  say "  Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|cpu>"
+elif [ "$BACKEND" = own ]; then
   buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
   if [ -n "$buildpath" ]; then
     .venv/bin/localm setup-llama --from "$buildpath" || {
@@ -628,9 +639,13 @@ fi
 # cannot run standalone (non-relocatable interpreter) the menu entry below falls
 # back to the venv python. `localm gui` always works; this never blocks install.
 say ""
-say "  Building the LocaLM app launcher ..."
-.venv/bin/localm make-launcher --force \
-  || say "  [!] Could not build the LocaLM launcher - 'localm gui' still works."
+if [ "$LOCALM_BIN_OK" = 1 ]; then
+  say "  Building the LocaLM app launcher ..."
+  .venv/bin/localm make-launcher --force \
+    || say "  [!] Could not build the LocaLM launcher - 'localm gui' still works."
+else
+  say "  Skipping the LocaLM app launcher (.venv/bin/localm is missing)."
+fi
 
 # ---- application menu entry --------------------------------------------------
 SHORTCUT=""
@@ -690,8 +705,13 @@ say ""
 # `localm plugin setup` prints its own header (it states chat is always on), so
 # this is just a section divider - do not repeat that line here.
 say "  Optional features (plugins):"
-.venv/bin/localm plugin setup \
-  || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
+if [ "$LOCALM_BIN_OK" = 1 ]; then
+  .venv/bin/localm plugin setup \
+    || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
+else
+  say "  Skipped - .venv/bin/localm is missing; run later once fixed:"
+  say "    .venv/bin/localm plugin setup"
+fi
 
 # ---- record what we installed (so uninstall removes ONLY what we created) ----
 crd=""; if [ "${DATA_CREATED:-0}" = 1 ]; then crd="--data-created"; fi
@@ -712,10 +732,19 @@ fi
   >/dev/null 2>&1 || say "  [!] Could not record the install manifest (uninstall will be conservative)."
 
 say ""
-say "  Done. This clone is self-contained:"
-say "    ./localm-launcher.sh    graphical launcher (GUI / chat / server / coder)"
-say "    ./localm.sh <args>      the localm CLI, e.g.:  ./localm.sh gui"
-say "    .venv/bin/localm ...    CLI directly"
+if [ "$LOCALM_BIN_OK" = 1 ]; then
+  say "  Done. This clone is self-contained:"
+  say "    ./localm-launcher.sh    graphical launcher (GUI / chat / server / coder)"
+  say "    ./localm.sh <args>      the localm CLI, e.g.:  ./localm.sh gui"
+  say "    .venv/bin/localm ...    CLI directly"
+else
+  say "  Done, with one open issue: .venv/bin/localm never got installed (see the"
+  say "  warning above), so the CLI is not usable yet:"
+  say "    ./localm-launcher.sh    graphical launcher - works now (does not need it)"
+  say "    ./localm.sh <args>      will NOT work until it is fixed"
+  say "    .venv/bin/localm ...    will NOT work until it is fixed"
+  say "  Fix it with:  uv pip install -p .venv -e \".[${EXTRAS}]\" --reinstall"
+fi
 say ""
 say "  The GUI launcher uses Tk; localm's bundled Python includes it, so it"
 say "  normally works out of the box. If the launcher ever reports Tk missing"

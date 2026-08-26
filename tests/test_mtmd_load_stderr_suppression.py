@@ -17,17 +17,14 @@ writing raw bytes straight to fd 2."""
 import logging
 import os
 
-from localm.inference.backends.llamacpp import llama as llama_mod
 from localm.inference.backends.llamacpp import mtmd as mtmd_mod
+from tests._bare_llama import make_bare_llama
 
 
 def _bare_instance():
     """A LlamaCpp instance with native __init__ bypassed - _load_mmproj only
     touches self._model_ptr and self._mtmd, both set here."""
-    inst = llama_mod.LlamaCpp.__new__(llama_mod.LlamaCpp)
-    inst._model_ptr = 0xDEADBEEF  # any truthy "pointer"; never dereferenced
-    inst._mtmd = None
-    return inst
+    return make_bare_llama(_model_ptr=0xDEADBEEF)  # any truthy "pointer"; never dereferenced
 
 
 def _redirect_fd2_to(path):

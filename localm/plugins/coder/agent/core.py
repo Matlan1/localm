@@ -25,7 +25,7 @@ import localm.plugins.coder.agent as _agent
 from ..backends.base import BaseLLMBackend
 from ..indexer import ProjectMap
 from ..tools import SAFE_RESTRICTED_TOOLS
-from ..audit import AuditLogT, SessionMode
+from ..audit import AuditLogT, SessionMode, register_coder_session_mode
 from .constants import expand_shell_disable
 from .loop import _LoopMixin
 from .execution import _ExecutionMixin
@@ -125,6 +125,14 @@ class Agent(
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
         self.parent         = parent
         self.mode           = mode
+        # Publish this session's own cwd-resolved mode for debug_content_enabled()
+        # (localm.debuglog) to see - it cannot resolve a project's own
+        # .localcoder/config.toml privacy pin on its own (localm.audit.
+        # register_coder_session_mode's docstring explains why). Only the
+        # top-level agent registers: a child inherits the parent's mode rather
+        # than resolving its own, so it would only double-count the same session.
+        if parent is None:
+            register_coder_session_mode(mode)
         self._scope         = scope        # optional glob filter on file-access tools
         # Whether _scope was INHERITED from the parent rather than chosen for
         # this agent. Only an inherited scope follows the parent's later

@@ -24,9 +24,10 @@ def _complete_model(ctx, param, incomplete):
 def _report_preload_failure(console, exc: Exception) -> None:
     """The background model-preload thread's failure handler: notify the console
     AND log it. ``console.print`` alone never reaches the debug log file (it is
-    not a logging call), so a preload failure with no other symptom would leave
-    no trace a bug report could surface. Logged with the full traceback, so it is
-    captured like any other failure."""
+    not a logging call), so a preload failure with no other symptom - the user
+    never explicitly tries to chat - left NO trace a bug report could ever
+    surface, no matter how good the log-tail digest got. Log it too, with the
+    full traceback, so it is captured like any other failure (#617 follow-up)."""
     console.print(f"[yellow]Background model load failed: {exc}[/yellow]")
     from localm.debuglog import logger
     logger.exception("background model preload failed")
@@ -46,6 +47,26 @@ def _mdns_addresses(host: str):
     advertises ITSELF. This is also what makes ``<name>.local`` usable on a
     specific IPv6 bind, where the LAN IPv4 would be pure fiction."""
     return None if is_wildcard_host(host) else [host]
+
+
+def _model_less_hint(api_mode: bool) -> str:
+    """The console line shown next to "model:" when nothing is loaded yet."""
+    if api_mode:
+        return ("  model: [yellow]none yet - "
+                "add one with `localm pull <name>`[/yellow]")
+    return "  model: [yellow]none yet - add one on the Models page[/yellow]"
+
+
+def _console_url_line(api_mode: bool, base_url: str, open_url: str) -> tuple:
+    """(label, url) for the line naming where to reach the running server.
+
+    api_mode never mounts a GUI, so open_url's GUI-only additions (a
+    view=models/pull deep link, a browser auto-login grant) would name a page
+    that is not being served; base_url is shown instead.
+    """
+    if api_mode:
+        return "API base", base_url
+    return "Open the GUI", open_url
 
 
 def _should_auto_open_browser(no_browser: bool) -> bool:
@@ -71,24 +92,26 @@ def _tray_callbacks(app, hs):
     Returns LAZY closures over *app*, not functools.partial-bound values:
     app.state.instance_id/instance_port are set by instances.advertise()
     inside hs.run_advertised(), which is called just below this function's
-    own call site - AFTER the tray is wired. A partial would freeze
-    instance_id/port at None (their state at wire time); these closures read
-    app.state at CALL time instead, and by the time a user can physically click
-    Restart/Stop, run_advertised() has entered advertise()'s context and
-    populated both.
+    own call site - AFTER the tray is wired, not before. A partial would
+    freeze instance_id/port at None (their state at wire time); these
+    closures read app.state at CALL time instead - by the time a user can
+    physically click Restart/Stop, run_advertised() has long since entered
+    advertise()'s context and populated both.
 
-    appface invokes on_restart/on_stop with NO arguments
+    Bug this fixes (verified against real code, not a guess): appface
+    invokes on_restart/on_stop with NO arguments
     (``threading.Thread(target=self.on_restart)``, appface.py), and both
     hs._do_restart and hs._do_shutdown are keyword-only with None defaults.
-    Wiring the bare functions directly makes a tray Restart/Stop call
-    disarm_crash_guard(instance_id=None), which clears the LEGACY unscoped
-    marker (bugreport.py's per-instance-scoping fallback) and leaves this
-    instance's real server-crash.<instance_id>.marker still armed, so the NEXT
-    start reports a crash that never happened. _do_restart losing its port the
-    same way makes _restart_argv omit ``-p``, so a re-exec'd server can come
-    back on a different port and strand the tray/GUI's own open window on a dead
-    one. The HTTP routes (routes/admin.py's restart/stop endpoints) pass the
-    real instance_id."""
+    Wiring the bare functions directly (the previous code) meant a tray
+    Restart/Stop always called disarm_crash_guard(instance_id=None), which
+    clears the LEGACY unscoped marker (bugreport.py's per-instance-scoping
+    fallback) and leaves this instance's real server-crash.<instance_id>.marker
+    still armed - so the NEXT start reports a crash that never happened. The
+    HTTP routes (routes/admin.py's restart/stop endpoints) already pass the
+    real instance_id and get this right; only the tray path was broken.
+    _do_restart losing its port the same way meant _restart_argv omitted
+    ``-p``, so a re-exec'd server could come back on a different port -
+    stranding the tray/GUI's own open window on a dead one."""
     def on_restart():
         hs._do_restart(instance_id=getattr(app.state, "instance_id", None),
                        port=getattr(app.state, "instance_port", None))
@@ -103,8 +126,8 @@ def _gui_bind_warning(host: str):
     """Warning text when the GUI binds past loopback without auth, or None when
     the bind is safe. Builds on the server's check, then escalates for the GUI:
     it also exposes the coder agent (shell + file edits). Traffic itself is
-    encrypted by built-in TLS on a network bind; the warning is about the coder
-    agent's reach, not about cleartext.
+    encrypted by built-in TLS on a network bind (NET-1); the warning is about the
+    coder agent's reach, not about cleartext.
     """
     from localm.cli import _exposed_bind_warning
     base = _exposed_bind_warning(host)
@@ -118,18 +141,21 @@ def _gui_bind_warning(host: str):
 
 
 def _mount_remote_gui(entry: dict) -> bool:
-    """Ask a running ``api``-mode instance to mount its GUI surface on demand.
-    POSTs to its loopback ``/v1/surfaces/gui`` with the instance's own registry
-    attach token (a local same-user secret). Returns True on success, False on
-    any failure - an older instance without the endpoint, a missing token, or a
-    network error - so the caller can fall back to just opening the address."""
+    """Ask a running ``api``-mode instance to mount its GUI surface on demand
+    (H6 phase 5). POSTs to its loopback ``/v1/surfaces/gui`` with the instance's
+    own registry attach token (a local same-user secret). Returns True on
+    success, False on any failure - an older instance without the endpoint, a
+    missing token, or a network error - so the caller can fall back to just
+    opening the address."""
     import requests
     scheme = entry.get("scheme") or "http"
     port = entry.get("port")
     token = entry.get("token")
     if not port or not token:
         return False
-    # Dial the loopback address that instance bound.
+    # Dial the loopback THAT instance bound: an IPv6-bound server does not
+    # answer on the IPv4 loopback, and this call is what turns a headless
+    # server into a GUI one.
     from localm.bindhost import self_connect_host, url_host
     url = (f"{scheme}://{url_host(self_connect_host(entry.get('host')))}"
            f":{port}/v1/surfaces/gui")
@@ -162,6 +188,8 @@ def _print_qr(url: str) -> None:
     try:
         import qrcode
     except ImportError:
+        # qrcode is a core dependency (pyproject.toml `dependencies`), so this
+        # means the install is broken/partial, not that an extra is missing.
         con.print('  [yellow][PoC][/yellow] QR unavailable: the "qrcode" '
                   'package is missing from this install ([cyan]pip install '
                   'qrcode[/cyan] to fix it)')
@@ -171,9 +199,10 @@ def _print_qr(url: str) -> None:
         q.add_data(url)
         q.make(fit=True)
         buf = io.StringIO()
-        q.print_ascii(out=buf, invert=True)
+        q.print_ascii(out=buf, invert=True)   # invert scans better on dark terminals
         con.print("  [yellow][PoC - experimental][/yellow] scan to open localm on your phone:")
-        # Write the block glyphs as UTF-8 bytes.
+        # Write the block glyphs as UTF-8 bytes so a legacy console code page
+        # (e.g. Windows cp1252) cannot raise UnicodeEncodeError at startup.
         data = buf.getvalue().encode("utf-8", "replace")
         out = getattr(sys.stdout, "buffer", None)
         if out is not None:
@@ -186,10 +215,13 @@ def _print_qr(url: str) -> None:
                   "terminal; just open the URL above on your phone)[/dim]")
 
 
-# gui options that only shape a FRESH server: passing one explicitly is a
-# conflict with attaching to an existing instance. Options not listed here are
-# compatible with an attach, or are value-aware (model / host / port) and
-# handled below.
+# gui options that only shape a FRESH server: an attach to an existing instance
+# cannot honor them, so passing one explicitly is a conflict we must NOT swallow
+# (the hard-won rule: never silently discard the user's explicit choice). Not
+# listed here = compatible with an attach: no_browser / debug / project /
+# force_new / isolated / keep_diagnostics (local or attach-control), no_model
+# (only picks a STARTUP model, moot when nothing is starting), or value-aware
+# (model / host / port) handled below.
 _ATTACH_CONFLICT_FLAGS = {
     "ctx": "--ctx", "gpu_layers": "--gpu-layers",
     "pull_spec": "--pull", "mode": "--mode", "insecure": "--insecure",
@@ -232,8 +264,8 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
     (empty list = attaching is fine). port/host/model are value-aware so re-passing
     what the running server already uses is NOT a conflict."""
     conflicts: list = []
-    # port / host: a conflict only when the requested value differs from the
-    # running instance's.
+    # port / host: conflict only if the requested value DIFFERS from the running
+    # instance's - asking for the port it is already on is harmless.
     if _explicit(ctx, "port"):
         want, have = ctx.params.get("port"), existing.get("port")
         try:
@@ -246,16 +278,19 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
         want, have = ctx.params.get("host"), existing.get("host")
         if str(want) != str(have):
             conflicts.append(f"--host {want} (the running server bound {have})")
-    # model: probe the running instance; a conflict only when its active model is
-    # known and different.
+    # model: a specific model was named. Probe the running instance; conflict only
+    # when its active model is KNOWN and different (unknown -> attach quietly, like
+    # `localm run`; same model -> attach). Never silently serve a different model.
     if model and _explicit(ctx, "model"):
         active = _probe_active_model(existing)
         if active and active != model:
             conflicts.append(
                 f"model {model} (the running server serves {active})")
-    # everything else: an attach cannot set the running server's ctx / gpu-layers
-    # / tls / mode, so an explicit pass is a conflict. --mode is never compared
-    # and always conflicts.
+    # everything else: an attach cannot retroactively set the running server's
+    # ctx / gpu-layers / tls / mode / ..., so an explicit pass is a conflict.
+    # (--mode is the session-persistence mode, a different namespace from the
+    # entry's SURFACE mode, so it cannot be compared cheaply - any explicit --mode
+    # conflicts.)
     for name, flag in _ATTACH_CONFLICT_FLAGS.items():
         if _explicit(ctx, name):
             conflicts.append(flag)
@@ -344,20 +379,26 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     """
     from localm.console import console, show_url
 
+    # A click into this console window must not freeze the server
+    # (Windows QuickEdit suspends output, and output blocks inference).
     from localm.winconsole import disable_quickedit, set_console_title
     disable_quickedit()
-    # Set the console title now; a richer title carrying the port is set below.
+    # Brand the window right away so it never reads as a python.exe path; a richer
+    # title (with the port) is set once the port is chosen below.
     set_console_title("LocaLM")
-    # Set the taskbar grouping id (AppUserModelID) and, best-effort, the console
-    # icon. Must run BEFORE the splash/status window is created below.
+    # Give this process a real app identity: set the taskbar grouping id
+    # (AppUserModelID) now, BEFORE the splash/status window is created below, so its
+    # taskbar button groups as LocaLM. Also best-effort sets the console icon (the
+    # console is hidden once the server is up; the splash window carries the icon
+    # itself). Pairs with the LocaLM.exe launcher so the running app reads as LocaLM.
     from localm.applaunch import apply_window_identity
     apply_window_identity()
-    # Print the wordmark line (the M in accent blue).
+    # Light branding: a single wordmark line (the M in accent blue), no noise.
     console.print("[bold]LocaL[/bold][bold #4f9cf9]M[/bold #4f9cf9]  [dim]local AI, offline[/dim]")
 
-    # --keep-diagnostics is a per-run override of the config toggle; export it so
-    # the server's gates resolve it via keep_diagnostics_enabled(). Set BEFORE the
-    # debug-log decision below.
+    # --keep-diagnostics is a per-run override of the config toggle (the launcher
+    # checkbox passes it); export it so the server's gates resolve it via
+    # keep_diagnostics_enabled(). Set BEFORE the debug-log decision below.
     if keep_diagnostics:
         import os as _osd
         _osd.environ["LOCALM_KEEP_DIAGNOSTICS"] = "1"
@@ -366,8 +407,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         from localm.debuglog import enable_debug
         console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
     else:
-        # With keep_diagnostics on, a debug log is written without --debug. Chat
-        # content is still never written in privacy mode.
+        # keep_diagnostics: a user who opted into keeping diagnostics for bug
+        # reports (even in privacy mode) gets a debug log written too, so a report
+        # has request/operation context - without needing to pass --debug. Chat
+        # content is still never written in privacy mode (see debug_content_enabled).
         try:
             from localm.config import keep_diagnostics_enabled
             if keep_diagnostics_enabled():
@@ -375,8 +418,11 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 console.print(f"[yellow]debug log (keep_diagnostics):[/yellow] "
                               f"{enable_debug()}")
         except Exception as e:
-            # The debug log could not be opened: warn and carry on rather than
-            # aborting startup or reporting success.
+            # The user opted into keep_diagnostics, but the debug log could not be
+            # opened (e.g. an unwritable or full LOCALM_HOME). Do NOT abort startup
+            # over a diagnostics nicety, but do NOT report success silently either
+            # (AGENTS.md rule 5): warn so the user knows their bug reports will not
+            # include a debug log, instead of the Settings toggle quietly lying.
             console.print(
                 f"[yellow]could not enable the keep_diagnostics debug log:[/yellow] "
                 f"{e} - bug reports will not include one.")
@@ -395,16 +441,21 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             "requests and raw model output - delete it after analysis if that "
             "matters.")
 
-    # If a localm is already running for this project dir, open ITS GUI instead of
-    # starting a second server. --new / --isolated force a fresh server.
+    # Attach-or-spawn (H6 phase 4): if a localm is already running for this
+    # project dir, open ITS GUI instead of starting a second server that
+    # double-loads the model. --new / --isolated force a fresh server.
     from localm.config import home_dir
     from localm import instances
     root_dir = instances.resolve_root_dir(override=project)
     if not (force_new or isolated):
         existing = instances.find_attachable(home_dir(), root_dir)
         if existing:
-            # An explicit server-config flag the running instance cannot provide
-            # is reported rather than discarded by attaching.
+            # Do NOT silently discard explicit server-config flags by attaching.
+            # If the user asked for something the running instance cannot provide
+            # (a different port/host/model, a fresh --mode/--ctx/tls/... ), say so
+            # and let them decide: --new starts a separate server with their
+            # settings, or they drop the flag to attach (hard-won rule: never
+            # silently override an explicit choice).
             ctx = click.get_current_context()
             conflicts = _attach_conflicts(ctx, existing, model)
             if conflicts:
@@ -425,8 +476,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 f"running for [cyan]{root_dir}[/cyan] "
                 f"(pid {existing.get('pid')}, port {existing.get('port')}).")
             if existing.get("mode") != "full":
-                # The running instance is API-only; ask it to mount the GUI
-                # surface live using its own attach token.
+                # On-demand GUI mount (H6 phase 5): the running instance is
+                # API-only; ask it to mount the GUI surface live (no second
+                # server, no second model load) using its own attach token.
                 if _mount_remote_gui(existing):
                     console.print(
                         "  [green]Mounted the GUI on the running instance.[/green]")
@@ -436,18 +488,31 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                         "instance?); opening its address anyway.[/yellow]")
             console.print(f"  [dim]Opening[/dim] [cyan]{show_url(url)}[/cyan]")
             if not no_browser:
-                # A unique cache-buster forces a fresh navigation instead of
-                # focusing an already-open tab or serving a cached shell. That
-                # loopback GET / makes the remote re-run its session auto-seed.
-                # No launch grant is minted here; the app ignores the stray param.
+                # Force a FRESH navigation with a unique cache-buster so the browser
+                # actually reloads (instead of silently focusing an already-open tab
+                # at the same URL) and cannot serve the shell from a warm service-
+                # worker cache. That fresh loopback GET / makes the remote re-run its
+                # own session auto-seed, so a relaunch lands authenticated even after
+                # a key roll. We do NOT mint a launch grant here: the running instance
+                # may be an OLDER localm that has no grant endpoint, whereas the
+                # loopback auto-seed exists in every version. The app ignores the
+                # stray param.
                 import secrets as _secrets
                 from localm import appface
                 sep = "&" if "?" in url else "?"
                 open_url = f"{url}{sep}lm={_secrets.token_hex(3)}"
-                # run_native_window BLOCKS this thread until the window closes,
-                # and must run on the process's actual main thread - which main()
-                # already is here. hide_on_close=False: closing the window ends
-                # this attach-only invocation instead of hiding it to a tray.
+                # run_native_window BLOCKS this thread until the window closes -
+                # correct here: main() is already this process's actual main
+                # thread, and this attach-only invocation starts no server of
+                # its own to keep the process alive, so blocking here IS what
+                # keeps a native window's host process running for as long as
+                # the window stays open (see run_native_window's docstring for
+                # why it must run on the main thread specifically).
+                # hide_on_close=False: this invocation owns no server of its
+                # own to keep alive (it only ever attached to one already
+                # running elsewhere) - closing this window is this whole
+                # process's purpose, so it should just close for real, not
+                # hide to a tray this invocation never creates.
                 if not appface.run_native_window(open_url, hide_on_close=False):
                     webbrowser.open(open_url)
             return
@@ -481,23 +546,25 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     registry = load_registry()
     model_less = False
     if no_model:
-        # Open with nothing loaded; the user picks or switches on the Models page.
+        # Explicit "open with nothing loaded" even when usable models exist; the
+        # user picks or switches on the Models page.
         model_less = True
         model = ""
         console.print("[dim]Opening with no model loaded - "
                       "pick one on the Models page.[/dim]")
     elif not model:
         if not registry:
-            # Nothing registered: open the GUI so the user can add a model from
-            # the Models page (or via --pull). No engine until then.
+            # Fresh install: open the GUI anyway so the user can add a model
+            # from the Models page (or via --pull). No engine until then.
             model_less = True
             console.print("[yellow]No models registered yet.[/yellow] "
                           "Opening the GUI - add one on the Models page"
                           + (" (download starting)…" if pull_spec else "."))
         else:
             # Pick the first entry that still resolves to a real model file or
-            # directory, skipping rows whose file is missing or is not a model. A
-            # type='unknown' model is skipped here but stays runnable by name.
+            # directory, skipping rows whose file is missing or is not a model,
+            # so one bad registry entry never blocks startup. A type='unknown' model
+            # is skipped here (never auto-loaded as chat) but stays runnable by name.
             model = next((n for n in sorted(registry)
                           if get_model_info(n) and is_auto_chat_eligible(registry[n])), None)
             if model is None:
@@ -507,23 +574,30 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                     "(files missing, not a model, or type 'unknown').[/yellow] "
                     "Opening the GUI - fix, add, or set a model's type on the Models page.")
 
-    # Effective bind host: an explicit -H wins for this process (and survives an
-    # in-place restart, which re-execs the same argv); otherwise the GUI-settable
-    # 'bind_host' config key; otherwise loopback. host_from_config marks a bind
-    # driven from the GUI, so every failed precondition below degrades LOUDLY to
-    # loopback instead of exiting.
+    # Effective bind host: an explicit -H wins for this process (and survives
+    # an in-place restart, which re-execs the same argv); otherwise the
+    # GUI-settable 'bind_host' config key (Applies.RESTART - this read, running
+    # in the fresh process, is what makes Settings > Restart server apply it);
+    # otherwise loopback. host_from_config marks a bind possibly driven from
+    # the GUI by a user with NO terminal: every failed precondition below must
+    # then degrade LOUDLY to loopback instead of exiting, or the server dies
+    # with no terminal-free way back (the GUI is how that user would fix it).
     from localm.cli import _resolve_bind_host
     host, host_from_config = _resolve_bind_host(host)
     bind_fallback = None
 
-    # Refuse to bind past loopback without auth unless explicitly forced. Checked
-    # before any setup work.
+    # Refuse to bind past loopback without auth unless explicitly forced: the GUI
+    # exposes not just the chat API but the coder agent, which can run shell
+    # commands and edit files on this machine. Checked before any setup work.
     bind_warning = _gui_bind_warning(host)
     if bind_warning and not insecure and host_from_config:
-        # A config-driven network bind without a strong key binds loopback instead
-        # of exiting, so the Settings page that caused the bind stays reachable.
-        # --insecure has no config form. Surfaced on the console, in the log, and
-        # via /api/companion (bind_fallback).
+        # A config-driven network bind without a strong key is refused exactly
+        # like the exit(2) below - the network is never served unauthenticated,
+        # and --insecure deliberately has NO config form, so this override can
+        # only ever be typed in a terminal - but the refusal here is a loopback
+        # bind, not an exit: the server stays reachable on this machine so the
+        # Settings page that caused the bind can also fix it. Surfaced on the
+        # console, in the log, and via /api/companion (bind_fallback).
         from localm.auth import any_key_configured
         _why = ("no API key is set" if not any_key_configured()
                 else "the API key is too short to be safe")
@@ -550,11 +624,24 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
         console.print("[bold yellow]  Proceeding anyway (--insecure set).[/bold yellow]")
 
-    # A config-sourced address must also be bindable right now, probed with a real
-    # throwaway bind, with the same loud loopback fallback. Runs even under
-    # --insecure. An explicit -H still fails hard.
+    # A config-sourced address must also be BINDABLE right now, not merely
+    # well-formed: the field's own recommended use (one specific interface IP)
+    # goes stale when DHCP reassigns the machine, and handing a stale address
+    # to the server kills the process at the socket bind - the locked-out-user
+    # failure the auth fallback above exists to prevent, through a different
+    # door. Probed with a real throwaway bind (syntax checks cannot see it);
+    # same loud loopback fallback. Runs even under --insecure (that flag
+    # waives AUTH, not bindability - a dead process helps nobody). An explicit
+    # -H keeps failing hard in front of the operator who typed it.
     if host_from_config and bind_fallback is None:
-        # EVERY config-driven bind is probed, loopback included.
+        # EVERY config-driven bind is probed, loopback included. This used to
+        # skip loopback on the reasoning that "loopback binds trivially" - true
+        # of 127.0.0.1 and ::1, and false of ``::ffff:127.0.0.1``, which
+        # is_loopback_host correctly calls loopback (it IS one) and which
+        # Windows refuses to bind (WinError 10049, measured). Skipping the probe
+        # for the whole loopback class therefore left exactly the
+        # dead-server-with-no-terminal hole this probe exists to close, reachable
+        # from a value the validator accepts. The probe costs one socket.
         from localm.cli import _bind_preflight_error
         _bind_err = _bind_preflight_error(host)
         if _bind_err is not None:
@@ -578,8 +665,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     model_path = None
     display_name = ""
     if not model_less:
-        # allow_direct_path: this is the STARTUP model, typed as
-        # `localm gui <path>`. The runtime switch path below does not opt in.
+        # allow_direct_path: this is the STARTUP model, typed by the operator as
+        # `localm gui <path>`. The runtime switch path below is a different case
+        # and deliberately does NOT opt in.
         info = get_model_info(model, allow_direct_path=True)
         if info is None:
             console.print(f"[red]Model not found:[/red] {model}")
@@ -587,16 +675,20 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         model_path, display_hint = info
         display_name = model if model in registry else display_hint
 
-    # A network bind serves HTTPS. Resolved before attach_gui so the coder/media/
-    # RAG self-call URL carries the right scheme, and BEFORE pick_port below so a
-    # bind that falls back to loopback here picks its port for the host it will
-    # actually bind.
+    # Built-in TLS (NET-1): a network bind serves HTTPS out of the box so the
+    # API key and all traffic are encrypted. Resolved before attach_gui so the
+    # coder/media/RAG self-call URL carries the right scheme - and BEFORE
+    # pick_port below, so a config-driven bind that has to fall back to
+    # loopback here picks its port for the host it will actually bind.
     from localm.cli import _resolve_tls, _setup_tls_or_exit
     if host_from_config:
-        # A config-driven bind stays on loopback when built-in TLS cannot be set
-        # up, rather than exiting or serving cleartext. An unusable custom cert
-        # pair already degrades to the built-in cert inside _resolve_tls. A
-        # half-specified CLI --tls-cert/--tls-key propagates as a usage error.
+        # A config-driven bind must not die over TLS (no terminal to see the
+        # exit - see host_from_config above). An unusable CUSTOM cert pair
+        # already degrades to the built-in cert inside _resolve_tls; this
+        # catches the built-in path itself failing (a broken crypto stack),
+        # where the only option that is neither cleartext nor a dead server is
+        # staying on loopback. A half-specified CLI --tls-cert/--tls-key is
+        # still the operator's usage error and propagates as one.
         try:
             ssl_certfile, ssl_keyfile = _resolve_tls(
                 host, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)
@@ -626,22 +718,28 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     try:
         # A wildcard is not itself connectable, so probe the loopback it covers
-        # (self_connect_host maps 0.0.0.0 -> 127.0.0.1 and :: -> ::1).
+        # (self_connect_host maps 0.0.0.0 -> 127.0.0.1 and :: -> ::1). Passing
+        # the raw wildcard used to work only for the IPv4 one by accident.
         chosen_port, was_busy = pick_port(port, host=self_connect_host(host))
     except PortInUseError as exc:
-        # An explicit --port is honored or refused, never relocated onto another
-        # port. Only the default auto-bumps.
+        # An explicit --port is honored or refused, never silently relocated onto
+        # another (often the shared default) port. Only the default auto-bumps.
         console.print(f"[red]Port {exc.port} is already in use.[/red] "
                       "Free it, or choose another with -p/--port.")
         sys.exit(1)
     if was_busy:
         console.print(f"[yellow]Default port busy - using {chosen_port}.[/yellow]")
 
-    # The authority (host:port) this process uses to reach ITSELF, and the address
-    # shown to the user. Derived from the effective bind, not hardcoded to
-    # 127.0.0.1. _self_host is the bare address, for socket-level self-connects;
-    # _self_authority is the url_host-bracketed form, for anything that goes into
-    # a URL.
+    # The authority (host:port) this process uses to reach ITSELF, and to show the
+    # user the address that works on this machine. Derived from the effective bind
+    # rather than hardcoded to 127.0.0.1: a server bound only on ::1 (or on one
+    # specific interface) has nothing listening on the IPv4 loopback, so every
+    # self-call the GUI makes - the coder agent, RAG self-embedding, the chat/media
+    # VRAM handover - would dial an address that is not there. url_host brackets an
+    # IPv6 literal so the result is a legal URL authority and not https://::1:8642/.
+    # The BARE address for socket-level self-connects (create_connection takes
+    # an address, never a bracketed URL authority), and the bracketed form for
+    # anything that goes into a URL.
     _self_host = self_connect_host(host)
     _self_authority = f"{url_host(_self_host)}:{chosen_port}"
 
@@ -650,16 +748,31 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     from .web import attach_gui
 
     def _make_engine(name: str, *, allow_direct_path: bool = False) -> Engine:
-        # allow_direct_path defaults to False, so switch_engine - which calls
-        # factory(name) positionally with a model name off the wire - cannot opt
-        # in. The startup load below passes it explicitly.
+        # This factory has TWO callers with different trust: the startup load just
+        # below (operator-typed `localm gui <path>`, opts in) and switch_engine
+        # (a model name off the wire from the GUI/API, which must not). Defaulting
+        # to False means the wire path gets the safe behaviour by construction -
+        # switch_engine calls factory(name) positionally and cannot opt in.
         m_info = get_model_info(name, allow_direct_path=allow_direct_path)
         if m_info is None:
             raise ValueError(f"Model not found: {name}")
         m_path, m_hint = m_info
-        # An explicit --mmproj applies only to `model`, the STARTUP model this
-        # server was launched with. Every other name falls back to that model's
-        # own recorded/sibling projector via get_model_mmproj.
+        # VIS-1: an explicit --mmproj always wins for the model it was given
+        # for; otherwise fall back to the model's own recorded/sibling
+        # projector (get_model_mmproj), or the common case - a pulled vision
+        # GGUF, no --mmproj flag given - silently loses image support on every
+        # load AND every switch this factory serves (#957).
+        #
+        # VIS-3: --mmproj is scoped to `model` (the STARTUP model this server
+        # was launched with), never to the process. This factory is reused by
+        # every later switch_engine call for ANY model name, so an unscoped
+        # `mmproj or ...` silently applied the startup model's projector to
+        # whatever model was switched to next - including overriding a
+        # DIFFERENT model's own, correctly-recorded projector with one that
+        # was never meant for it (found 2026-08-05, see
+        # dev-notes/FINDING-gui-mmproj-closure-bleed-2026-08-05.md). Every name
+        # other than the startup model falls through to its own registry
+        # lookup, exactly as if --mmproj had never been given.
         mmproj_path = (mmproj if name == model else None) or get_model_mmproj(
             name, allow_direct_path=allow_direct_path)
         return Engine(
@@ -676,8 +789,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         try:
             engine = _make_engine(model, allow_direct_path=True)
         except Exception as e:
-            # A single bad registry entry degrades to the model-less path instead
-            # of stopping the server from starting.
+            # A single bad registry entry must not stop the server from starting;
+            # degrade to the model-less path and let the user pick on the Models page.
             console.print(f"[yellow]Could not load model '{model}': {e}[/yellow]")
             console.print("[yellow]Opening the GUI model-less - pick a model on "
                           "the Models page.[/yellow]")
@@ -697,10 +810,15 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             app,
             self_url=f"{scheme}://{_self_authority}/v1",
             switch_model=switch_model,
-            # Read the authoritative pointer directly rather than shadowing it in
-            # a local dict. _active_model_name is updated synchronously by both
-            # switch_engine (on load) and unload_all_models/unload_one_model (on
-            # unload).
+            # Read the authoritative pointer directly rather than shadowing it
+            # in a local dict updated only on load (via on_active): that copy
+            # was never cleared on unload, so the GUI kept reporting a model
+            # "active" for an entire process lifetime after it was unloaded
+            # (found live: /api/models showed active=true post-unload while
+            # the core /v1/models/{id} - which reads this same pointer -
+            # correctly showed false). _active_model_name is already updated
+            # synchronously by both switch_engine (on load) and
+            # unload_all_models/unload_one_model (on unload).
             active_model=lambda: hs._active_model_name or "",
         )
 
@@ -711,18 +829,24 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if pull_spec:
         from urllib.parse import quote
         from .web import mint_pull_grant
-        # Mint a single-use, spec-bound secret so this deep link auto-starts its
-        # own download; a forged `?pull=` link without the secret falls back to an
-        # explicit human confirmation.
+        # SEC-PULL-CONFIRM: mint a single-use, spec-bound secret so THIS deep
+        # link can auto-start its own download with zero clicks, while a
+        # forged `?pull=` link elsewhere (which cannot know the secret) falls
+        # back to an explicit human confirmation (see init.js / web.py).
         pull_token = mint_pull_grant(app, pull_spec)
         open_url = (f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
                     f"&pull_token={quote(pull_token, safe='')}")
     elif model_less:
         open_url = f"{base_url}?view=models"
-    # When auth is on, hand the auto-opened browser a single-use grant in the URL
-    # so it lands AUTHENTICATED via a real navigation rather than the implicit
-    # GET / cookie auto-seed. Runs on ANY bind, network included; the grant is
-    # placed only in the URL opened locally, so a network client never sees it.
+    # One-time launch handoff: when auth is on, hand the auto-opened browser a
+    # single-use grant in the URL so it lands AUTHENTICATED via a real navigation,
+    # instead of depending on the implicit GET / cookie auto-seed. This runs on ANY
+    # bind, including a NETWORK bind - the person launching is on THIS machine (the
+    # host) and should never have to type the key, even when the server is exposed to
+    # the LAN. The grant is a 256-bit single-use secret only we know and only place in
+    # the URL we open locally, so a network client never sees it (see web.py's
+    # redemption note). Without this, a network bind treated the host user like a
+    # stranger and showed the key gate on their own machine.
     from localm import auth as _auth
     from .web import mint_launch_grant
     if _auth.get_api_key():
@@ -739,14 +863,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     _srv_name = "localm API server" if api_mode else "localm GUI"
     console.print(f"[bold green]{_srv_name}[/bold green] → {show_url(base_url)}")
     if model_less:
-        console.print("  model: [yellow]none yet - add one on the Models page[/yellow]")
+        console.print(_model_less_hint(api_mode))
     else:
         console.print(f"  model: [cyan]{display_name or Path(str(model_path)).stem}[/cyan]")
     console.print("  Ctrl+C to stop")
 
-    # Reach-by-name (mDNS): advertise <mdns_name>.local on a network bind. Started
-    # HERE, before printing, so <name>.local is only recommended when it is
-    # actually being advertised. Closed in the finally below.
+    # Reach-by-name (mDNS): advertise <mdns_name>.local on a network bind so a
+    # phone reaches the GUI by name. Started HERE, before printing, so the printed
+    # name reflects reality: we only recommend <name>.local when it is actually
+    # being advertised (not on a loopback / --isolated bind, not when mDNS is off,
+    # not when the name is taken). Closed in the finally below.
     from localm import netname
     mdns_advertiser = None
     if not is_loopback_host(host) and not isolated:
@@ -755,9 +881,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             addresses=_mdns_addresses(host))
     _adv_name = netname.mdns_fqdn() if mdns_advertiser is not None else None
 
-    # Phone / LAN access. The GUI is an installable PWA. Bound to loopback it is
-    # reachable only on this machine; bound to the network, print the address a
-    # phone on the same Wi-Fi can open.
+    # Phone / LAN access. The GUI is an installable PWA, so a phone just opens
+    # this URL and adds it to the home screen. Bound to loopback, it is only
+    # reachable on this machine; bound to the network, print the address a phone
+    # on the same Wi-Fi can open. See docs/phone.md (Tailscale for off-LAN use).
     if is_loopback_host(host):
         console.print(
             "  [dim]use from your phone: bind to your network with "
@@ -769,7 +896,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 "scannable: [/dim][cyan]localm gui -H 0.0.0.0 --qr[/cyan]")
     else:
         # A network bind: print the reachable NAMES (localm.local when advertised,
-        # the Tailscale MagicDNS name) and IPs.
+        # the Tailscale MagicDNS name) and IPs so a phone needs no address typed by
+        # hand.
         targets = netname.network_targets(mdns_name=_adv_name, bind_host=host)
         primary_url = None
         qr_url = None
@@ -779,14 +907,15 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             console.print(f"  [dim]{_label}:[/dim] [cyan]{show_url(url)}[/cyan]{suffix}")
             if primary_url is None:
                 primary_url = url
-            # Prefer an IP for the scannable QR; fall back to the first target
-            # below.
+            # Prefer an IP for the scannable QR (resolves on any phone, even one
+            # without mDNS); fall back to the first target below.
             if qr_url is None and "(IP)" in _label:
                 qr_url = url
         if primary_url is None:
-            # No reachable network address detected: say so instead of printing an
-            # unconnectable wildcard URL. The loopback URL above still works on
-            # this machine.
+            # No reachable network address detected (mDNS off, no LAN IPv4, no
+            # Tailscale). Do NOT print a dead wildcard URL (https://0.0.0.0/ is not
+            # connectable from anywhere) - say so honestly; the loopback URL above
+            # still works on this machine.
             console.print("  [dim]no reachable network address detected - "
                           "this machine only[/dim]")
         if scheme == "https":
@@ -809,8 +938,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         if show_qr and (qr_url or primary_url):
             _print_qr(qr_url or primary_url)
 
-    # Preload the model in the background. Engine.load is lock-protected; a
-    # request arriving mid-load waits on it.
+    # Preload the model in the background so the first chat reply is fast.
+    # Engine.load is lock-protected; a request arriving mid-load waits on it.
     def _preload():
         try:
             engine.load()
@@ -820,9 +949,12 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if engine is not None:
         threading.Thread(target=_preload, daemon=True, name="preload").start()
 
-    # Print the exact local URL, carrying the one-time grant. soft_wrap emits the
-    # long URL as ONE line, with no injected newline.
-    console.print(f"  [dim]Open the GUI:[/dim] [cyan]{show_url(open_url)}[/cyan]",
+    # Print the exact local URL (Jupyter-style) so it is copy-pasteable even if the
+    # browser does not open. It carries the one-time grant, which is fine: this is the
+    # host's own console. soft_wrap so the long URL is emitted as ONE line (a wrapped
+    # URL with an injected newline is not copy-pasteable).
+    _url_label, _shown_url = _console_url_line(api_mode, base_url, open_url)
+    console.print(f"  [dim]{_url_label}:[/dim] [cyan]{show_url(_shown_url)}[/cyan]",
                   soft_wrap=True)
 
     def _open_when_ready(url: str, port: int, timeout: float = 20.0) -> None:
@@ -850,42 +982,54 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             pass
 
     from localm import appface
-    # pywebview's webview.start() must be called from the process's actual main
-    # thread, which hs.run_advertised() below otherwise occupies. A native window
-    # therefore takes the main thread and the server moves to a background one,
-    # in the branch after the tray/status-window setup.
+    # pywebview's webview.start() has a hard, unconditional requirement -
+    # verified against the installed 6.2.1 source, not assumed - to be
+    # called from the process's actual main thread. That thread is normally
+    # occupied by hs.run_advertised() below (it blocks until Ctrl+C), so
+    # deciding to use a native window means giving IT the main thread instead
+    # and moving the server to a background one - see the branch after the
+    # tray/status-window setup. Decided once, up front, so every "who opens
+    # what, on which thread" choice below stays consistent.
     want_native = _should_auto_open_browser(no_browser) and appface.native_window_available()
 
     if _should_auto_open_browser(no_browser) and not want_native:
         threading.Thread(target=_open_when_ready, args=(open_url, chosen_port),
                          daemon=True, name="open-browser").start()
 
-    # Record the EFFECTIVE bind host (after any config-bind fallback above), so
-    # the SPA-shell route and every trust decision gating on app.state.bind_host
-    # match what is actually bound. bind_fallback carries why a configured network
-    # bind was not applied, or None; /api/companion surfaces it.
+    # Record the bind host so the SPA-shell route knows whether every client is
+    # loopback (a 127.0.0.1 bind) and can safely seed the API key into the page.
+    # This is the EFFECTIVE host (after any config-bind fallback above), so every
+    # trust decision gating on app.state.bind_host matches what is actually
+    # bound. bind_fallback carries WHY a configured network bind was not applied
+    # (or None) - /api/companion surfaces it so a browser-only user is told what
+    # to fix instead of silently staying unreachable (we do not hide problems).
     app.state.bind_host = host
     app.state.bind_fallback = bind_fallback
 
-    # Advertise this server in the instance registry as a "full" surface (API +
-    # GUI) so a later launch in the same dir can discover and attach to it.
-    # --isolated keeps it invisible to discovery.
+    # Advertise this server in the instance registry (H6 phase 3/4) as a "full"
+    # surface (API + GUI) so a future launch in the same dir can discover and
+    # attach to it. --isolated keeps it invisible to discovery.
     from localm import debuglog
     from localm.config import home_dir as _home_dir
     # Tray control surface (Windows): Open / Copy address / View logs / Restart /
-    # Stop. Best-effort and fully guarded; it never blocks the server. Restart and
-    # Stop go through _tray_callbacks, not the bare hs._do_restart /
-    # hs._do_shutdown. "View logs" dumps the always-on activity buffer (INFO+, no
-    # chat content) to a readable file.
+    # Stop, so the running server is a real background app, not just a console.
+    # Best-effort and fully guarded - it never blocks the server. Restart/Stop are
+    # wired to the server's existing hooks (via _tray_callbacks - NOT the bare
+    # hs._do_restart/hs._do_shutdown; see that function's docstring for why a
+    # bare wire silently misreported every tray stop/restart as a crash);
+    # "View logs" dumps the always-on activity buffer (INFO+, no chat content)
+    # to a readable file. (Linux gets a styled Tk control window next; see
+    # appface.)
     on_restart, on_stop = _tray_callbacks(app, hs)
     app_face = appface.start_app_face(
         name="LocaLM", url=base_url, logfile=_home_dir() / "logs" / "recent.log",
         get_log_lines=debuglog.recent_activity,
         on_restart=on_restart, on_stop=on_stop)
     if app_face is not None:
-        # Flip the window from "Starting..." to "Running" (and, on Windows, hide it
-        # to the tray) once the port actually accepts connections. Polled in a
-        # thread with a raw TCP connect, which works for http and https alike.
+        # Accurate splash: flip the window from "Starting..." to "Running" (and, on
+        # Windows, hide it to the tray) once the port is ACTUALLY accepting
+        # connections. Polled in a thread so it is independent of the web
+        # framework's event API (a raw TCP connect works for http and https alike).
         def _mark_ready_when_listening():
             import socket
             import time as _t
@@ -897,51 +1041,66 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                     _t.sleep(0.25)
             app_face.set_ready()
             # When the launcher spawned us with our OWN console, hide it now that
-            # the server is up and the tray/status window is the surface. A direct
-            # `localm gui` in a terminal sets no such flag and is left alone.
+            # the server is up and the tray/status window is the surface - so it
+            # runs like a background app. A direct `localm gui` in a terminal has no
+            # such flag, so that terminal is left alone.
             import os as _os2
             if _os2.environ.get("LOCALM_OWN_CONSOLE"):
                 from localm.winconsole import hide_console
                 hide_console()
         threading.Thread(target=_mark_ready_when_listening,
                          name="localm-ready", daemon=True).start()
-        # Route hang-alarm surfacing into the native status window: set_error turns
-        # the status red and un-hides the window from the tray, set_ready restores
-        # the Running state. Both are queue-based and thread-safe; the alarm calls
-        # them from its own daemon thread.
+        # ADR-0012: route hang-alarm surfacing into the native status window.
+        # set_error turns the status red AND un-hides the window from the tray
+        # (see _StatusWindow._poll's "error" branch), so a hung server is
+        # unmissable instead of a log line nobody tails; set_ready restores
+        # the normal Running state if the condition clears. Both are
+        # queue-based and thread-safe - the alarm calls them from its own
+        # daemon thread.
         hs.set_hang_surface(
             lambda text: app_face.set_error(f"Server problem: {text}"),
             app_face.set_ready)
 
     def _serve():
-        # run_advertised performs the shared advertise + run_server sequence. The
-        # app object itself is built above, not inside serve().
+        # The advertise + run_server tail is identical to http_server.serve()'s
+        # (CF-6): shared via run_advertised so there is one implementation of
+        # that sequence, not two hand-maintained copies. The app object itself
+        # is still built above (not inside serve()) since the GUI needs it
+        # ready earlier to wire attach_gui/grants/etc. before this point.
         try:
             hs.run_advertised(app, host, chosen_port,
                               mode="api" if api_mode else "full",
                               ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile,
                               project=project, isolated=isolated, log_level="warning")
         finally:
-            # Runs once the SERVER has actually stopped - on the main thread in the
-            # browser-tab case, on the background server thread when want_native is
-            # set - never merely once a native window has closed.
+            # Runs once the SERVER has actually stopped - on the main thread
+            # in the browser-tab case, on the background server thread in the
+            # native-window case (want_native below) - never merely once a
+            # native window has closed, which can happen long before the
+            # server does (closing the window must not tear down what is
+            # still serving requests in the background).
             if app_face is not None:
                 app_face.close()
             if mdns_advertiser is not None:
                 mdns_advertiser.close()
             if manager is not None:
                 manager.close_all()
-            # No-op when want_native is False. When it is true, this destroys the
-            # window that only ever hides itself on its close button, so
-            # run_native_window's blocking webview.start() returns and the process
-            # can exit.
+            # No-op when want_native is False (no native window this run).
+            # When it IS true, the window only ever hides on its own close
+            # button (appface.run_native_window's _on_closing) - this is
+            # what lets it actually be destroyed, so run_native_window's
+            # blocking webview.start() call returns and the process can
+            # exit, now that the server it was fronting has genuinely
+            # stopped.
             appface.close_native_window()
 
     if want_native:
-        # The server thread is non-daemon, so closing the native window does not
-        # kill a still-running server; Ctrl+C or the tray Stop button stops it. The
-        # process's real main thread goes to the window, the one thread pywebview
-        # accepts.
+        # Give this thread to the server (non-daemon: closing the native
+        # window must NOT kill a still-running server, matching today's
+        # "closing a browser tab doesn't stop the server" behavior - Ctrl+C
+        # or the tray Stop button is still how you actually stop it) and
+        # hand the process's real main thread to the window instead, since
+        # that is the one thread pywebview will accept.
         server_thread = threading.Thread(target=_serve, name="localm-server",
                                         daemon=False)
         server_thread.start()
@@ -954,18 +1113,25 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                     break
             except OSError:
                 _time3.sleep(0.25)
-        # on_quit=on_stop is the same callable the tray's Stop button uses, so with
-        # "quit when the app window is closed" on, closing the window stops the
-        # server.
+        # on_quit=on_stop: the SAME callable the tray's Stop button already
+        # uses (_tray_callbacks above) - when the "quit when the app window
+        # is closed" setting is on, closing the window stops the server
+        # exactly like clicking Stop would, instead of just hiding it.
         if not appface.run_native_window(open_url, on_quit=on_stop):
             webbrowser.open(open_url)
-        # MUST join, rather than rely on server_thread being non-daemon:
-        # concurrent.futures.thread registers its shutdown via
-        # threading._register_atexit(), which fires as soon as this main thread's
-        # top-level code finishes, BEFORE non-daemon threads are joined. Joining
-        # keeps this thread's top-level code running for exactly as long as the
-        # server is, so the shared plugin executor stays up while requests are
-        # still being served.
+        # MUST join here, not just rely on server_thread being non-daemon:
+        # confirmed live (a real crash, then reproduced and root-caused in
+        # isolation) that concurrent.futures.thread registers its shutdown
+        # via CPython's internal threading._register_atexit(), which fires
+        # as soon as THIS (main) thread's top-level code finishes - BEFORE
+        # Python waits for non-daemon threads to actually join. Without this
+        # join, main() returning the instant the window closed flipped the
+        # shared plugin executor's global shutdown flag while the server
+        # thread was still fully alive, and every in-flight request relying
+        # on get_plugin_executor() (e.g. GET /api/models) started raising
+        # "cannot schedule new futures after shutdown" for as long as the
+        # server kept running. Joining keeps this thread's own top-level code
+        # "still running" for exactly as long as the server actually is.
         server_thread.join()
     else:
         _serve()

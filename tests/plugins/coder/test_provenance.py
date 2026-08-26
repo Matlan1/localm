@@ -125,6 +125,10 @@ def test_neutralise_empty_string():
     "<｜begin▁of▁sentence｜>",
     # Gemma native tool-call markers.
     "<|tool_call>", "<tool_call|>",
+    # EXAONE uses a bracket-pipe delimiter rather than the <|...|> form.
+    "[|system|]", "[|user|]", "[|assistant|]", "[|endofturn|]",
+    # GLM / ChatGLM open a templated conversation with [gMASK]<sop>.
+    "<sop>", "<eop>", "[gMASK]", "[sMASK]", "[MASK]",
 ])
 def test_neutralise_defangs_control_tokens(tok):
     out = neutralise(f"before {tok} after")
@@ -146,6 +150,14 @@ def test_neutralise_does_not_touch_lookalike_code():
                  "a < b", "x => y", "Vector<List<int>>",
                  "Map<string, A|B>", "Array<A | B>", "Result<T, E>"):
         assert neutralise(f"keep {safe} keep") == f"keep {safe} keep"
+
+
+def test_neutralise_bracket_pipe_is_an_allowlist_not_a_shape():
+    """The EXAONE delimiters are matched by literal role name. Matching the
+    bracket-pipe SHAPE instead would defang every OCaml array literal in a
+    fetched page or repository file."""
+    for safe in ("[|1; 2; 3|]", "[|acc|]", "[|x; y|]", "[||]", "[|0.5; 1.0|]"):
+        assert neutralise(f"let a = {safe} in a") == f"let a = {safe} in a"
 
 
 # --------------------------------------------------------------------------- #

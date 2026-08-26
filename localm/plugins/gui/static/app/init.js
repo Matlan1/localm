@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - init. */
+/* localm GUI - init (split from app.js). Classic script: it
+   shares the one global lexical environment with the other app/* and
+   pages/* scripts, so every cross-section reference resolves by bare
+   name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
 import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, sentShellToken } from "./helpers.js";
@@ -10,9 +14,27 @@ import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, r
 import { capsReady, loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
 import { VIEWS, showView } from "./tabs.js";
 
-// CSRF self-heal: on a 403 for a same-origin request that carried our own
-// X-CSRF-Token, refresh the token from /api/session and retry the write once.
-// Installed before any fetch, so it covers boot too.
+// CSRF self-heal: a cookie-authed write can 403 if the in-memory CSRF token went
+// stale (server restart rotated the per-process secret; or a POST fired before
+// the boot token fetch resolved). On such a 403, refresh from /api/session and
+// retry the write ONCE. Safe: a 403 is rejected before the handler runs, so
+// nothing is duplicated. Same-origin only, and only when WE sent an X-CSRF-Token
+// (our own write). Installed before any fetch so it covers boot too. This, plus
+// deriving the token from the session (never a separate cookie), is what makes
+// "missing CSRF token" unreachable.
+
+// Same-origin paths whose 403 is the ROUTE's own answer rather than a rejected
+// credential. The stale-shell recovery below skips them.
+// See "a 403 from /api/image-proxy is the route saying the feature is OFF" in
+// tests-js/auth-recovery.test.mjs.
+const _ROUTE_OWNED_403 = ["/api/image-proxy"];
+
+function _routeOwns403(url) {
+  let path = url;
+  try { path = new URL(url, location.origin).pathname; } catch (e) { /* use the raw value */ }
+  return _ROUTE_OWNED_403.some((p) => path === p || path.startsWith(p + "/"));
+}
+
 const _rawFetch = window.fetch.bind(window);
 window.fetch = async function (input, init) {
   const res = await _rawFetch(input, init);
@@ -32,22 +54,28 @@ window.fetch = async function (input, init) {
         }
       }
     }
-    // Open-mode counterpart: open (keyless loopback) mode has no CSRF token, so
-    // the self-heal above never fires there and a rejected shell-token bearer
-    // routes to its own recovery instead.
+    // Open-mode counterpart (NEW-RESTART-DEAD-BUTTONS). The self-heal above can
+    // NEVER fire in open (keyless loopback) mode: it is gated on `sent`, the
+    // X-CSRF-Token WE sent, and open mode has no CSRF token at all -
+    // routes/session.py returns csrf="" while no key is configured, so
+    // authHeaders() sends the shell-token bearer instead. That left the one
+    // credential open mode actually uses with no recovery path of any kind.
     else if (res.status === 403 && sentShellToken(hdrs)) {
       const url = typeof input === "string" ? input : (input && input.url) || "";
-      if (url.startsWith("/") || url.startsWith(location.origin)) onShellTokenRejected();
+      if ((url.startsWith("/") || url.startsWith(location.origin)) && !_routeOwns403(url)) {
+        onShellTokenRejected();
+      }
     }
   } catch (e) { /* fall through with the original response */ }
   return res;
 };
 
-// Whether this origin already confirmed the backend's id on an earlier boot.
-// Only then are the instance-scoped localStorage reads below - all of which run
-// before this load's /v1/config round trip resolves - used for the first paint.
-// refreshCtxLimit()/initServerConversations() correct everything once their
-// round trip lands.
+// AUD-INSTANCEID (see helpers.js reconcileInstanceId): whether this origin
+// already confirmed the backend's id on an earlier boot. Only then are the
+// instance-scoped localStorage reads below (all run BEFORE this load's /v1/config
+// round trip resolves) trusted for the FIRST paint; a brand-new pairing must not
+// flash foreign data. refreshCtxLimit()/initServerConversations() then correct
+// everything once their round trip lands.
 const _instanceTrusted = instanceCacheTrusted();
 
 $("setup-cwd").value = _instanceTrusted ? (localStorage.getItem("localm.coderCwd") || "") : "";
@@ -73,13 +101,14 @@ if ($("install-gate-install")) $("install-gate-install").onclick = () => {
   });
 };
 
-// Hard auth gate: hide the app shell and show only the onboarding, loading no
-// /api data. window.__localmLocked lets late boot steps (deep-link restore,
-// pages.js) bail too.
+// Hard auth gate (NET-1): when the server REQUIRES a key and this browser has
+// none that works, show ONLY the onboarding - do NOT reveal the app shell or
+// load any /api data behind an unsatisfied gate. window.__localmLocked lets late
+// boot steps (deep-link restore, pages.js) bail too.
 export function lockUI(message) {
   window.__localmLocked = true;
   const app = $("app");
-  if (app) app.style.display = "none";
+  if (app) app.style.display = "none";          // nothing of localm behind the gate
   showKeyGate(message || "This LocaLM server requires an API key.");
 }
 export function unlockUI() {
@@ -91,15 +120,20 @@ export function unlockUI() {
   if (app) app.style.display = "";
 }
 
-// Unregister the service worker and drop its caches. Callers pair this with a
-// reload and a sessionStorage guard that bounds it to one attempt.
+// Recovery (AUTH-1b): when auth is WEDGED - logged in successfully but the page
+// still boots 401 - the cause is a stale service-worker shell (or a cached
+// navigation that bypassed the loopback cookie re-seed), NOT the key. Do
+// automatically what the user otherwise does by hand (clear site data):
+// unregister the SW, drop its caches, reload once. A sessionStorage guard bounds
+// it to one attempt so it can never loop. Do NOT touch SameSite (the cookie IS
+// sent same-origin; that misdiagnosis would only open CSRF).
 export async function resetServiceWorkerAndCaches() {
   try {
     if ("serviceWorker" in navigator) {
       const regs = await navigator.serviceWorker.getRegistrations();
       await Promise.all(regs.map((r) => r.unregister()));
     }
-  } catch (e) { /* best-effort */ }
+  } catch (e) { /* best-effort; the reload still fetches a fresh shell */ }
   try {
     if (window.caches) {
       const keys = await caches.keys();
@@ -109,11 +143,11 @@ export async function resetServiceWorkerAndCaches() {
 }
 window.resetServiceWorkerAndCaches = resetServiceWorkerAndCaches;
 
-// Manual escape hatch, offered on the reconnect overlay: wipe the client-side
-// cookies, storage, service worker and caches, then reload to the key gate. Each
-// step is independently guarded so one failure does not block the rest. (The
-// HttpOnly localm_session cookie cannot be cleared from JS; a stale one yields a
-// 401 and the key gate.)
+// Manual escape hatch (offered on the reconnect overlay): wipe EVERY client-side
+// artifact that could wedge boot/auth, then reload to a clean state (the key
+// gate). Each step is independently guarded so one failure never blocks the rest.
+// (The HttpOnly localm_session cookie cannot be cleared from JS, but a stale one
+// never wedges the client - it simply yields a 401 -> the key gate.)
 export async function resetClientState() {
   try {
     document.cookie.split(";").forEach((c) => {
@@ -128,18 +162,37 @@ export async function resetClientState() {
 }
 window.resetClientState = resetClientState;
 
-// --- open-mode shell-token recovery ---------------------------------------
-// In open (keyless loopback) mode the GUI's only management credential is the
-// per-process shell token, baked into the index.html the serving process
-// returns and read into a module-scope const in helpers.js, so it changes only
-// by loading a new document. A page that outlives the process that served it
-// holds a dead token, and the open-mode gate demands that bearer for every
-// unsafe method and every /api|/v1 metadata GET.
+// --- open-mode shell-token recovery (NEW-RESTART-DEAD-BUTTONS) -------------
+// In open (keyless loopback) mode the GUI's ONLY management credential is the
+// per-process shell token: http_server.py mints it with secrets.token_urlsafe
+// at startup ("per-process so it dies on restart") and web.py bakes THAT
+// process's value into the index.html it serves. helpers.js reads it into a
+// module-scope const at load, so it can only ever change by loading a new
+// document. A page that outlives the process which served it therefore holds a
+// dead credential and has no way to refresh it in place.
 //
-// Recovery: drop the service worker and its caches so the reload cannot be
-// served the same stale shell, then reload. A one-shot sessionStorage guard
-// bounds it to a single attempt; a second rejection shows the overlay below
-// instead of reloading again.
+// This is not a write-only problem. The open-mode gate in http_server.py
+// requires that bearer for every unsafe method AND every /api|/v1 metadata GET
+// (everything except /api/session and /v1/models*), so a stale token 403s
+// essentially the whole shell at once - which is what "every button is dead
+// after a restart" actually is. Two known ways to end up holding one:
+//   - the reconnect poll reloads on the first HTTP answer it gets, and the OLD
+//     process keeps answering for the whole unload + wait_for_vram_release
+//     window before it re-execs, so that reload can be served by the process
+//     that is about to disappear (see onServerUnreachable below, which now
+//     waits to observe a down first);
+//   - sw.js falls a navigation back to the PRECACHED "/" whenever the network
+//     throws, which is exactly the case during the re-exec gap - and that
+//     cached copy carries whatever token was live when the worker installed.
+//
+// The only source of a live token is a fresh document from the CURRENT process,
+// so the recovery is: drop the service worker and its caches (otherwise the
+// reload can be served the same stale shell straight back out of the cache),
+// then reload. A one-shot sessionStorage guard bounds it exactly like the
+// AUTH-1b self-heal above, so it can never loop: if a freshly served document
+// still has its token rejected then staleness is not the cause, and we SAY so
+// rather than reload again or - as before this fix - unlock a shell whose every
+// call fails, with nothing on screen to explain it.
 export function showShellStaleOverlay() {
   let ov = $("shell-stale-overlay");
   if (!ov) {
@@ -169,9 +222,10 @@ export async function onShellTokenRejected() {
   try { alreadyTried = sessionStorage.getItem("localm.shellReset") === "1"; }
   catch (e) { /* sessionStorage unavailable in some private modes */ }
   if (alreadyTried) { showShellStaleOverlay(); return; }
-  // Confirm the server is still reachable before reloading, so a reload aimed
-  // into a restart gap lands on the reconnect overlay rather than a browser
-  // error page.
+  // A 403 proves the server ANSWERED, but during a restart the process that
+  // answered may be on its way out. Confirm it is still reachable before
+  // reloading, so a reload aimed into the re-exec gap lands on our own
+  // reconnect overlay (which retries) instead of the browser's error page.
   if (!(await serverReachable())) { onServerUnreachable({ sawDown: true }); return; }
   try { sessionStorage.setItem("localm.shellReset", "1"); } catch (e) { /* ignore */ }
   await resetServiceWorkerAndCaches();
@@ -179,9 +233,10 @@ export async function onShellTokenRejected() {
 }
 window.onShellTokenRejected = onShellTokenRejected;
 
-// Server-unreachable lock: a distinct "reconnecting" overlay with an auto-retry,
-// shown instead of the key gate. When the server answers again, the page reloads
-// for a clean boot.
+// Server-unreachable lock (AUTH-1b): the server is DOWN, NOT an auth failure.
+// Show a distinct "reconnecting" overlay and auto-retry instead of the key gate,
+// so a dead server is not mistaken for a bad key and re-entered in a loop. When
+// it answers again, reload for a clean boot (which handles 200 vs 401 freshly).
 export let _reconnectTimer = null;
 export function showReconnectOverlay() {
   let ov = $("reconnect-overlay");
@@ -192,8 +247,9 @@ export function showReconnectOverlay() {
     panel.appendChild(el("div", "reconnect-spinner"));
     panel.appendChild(el("div", "reconnect-msg",
       "Can't reach the LocaLM server. It may be starting or stopped. Reconnecting..."));
-    // Manual escape hatch: clears all client-side state and reloads to the key
-    // gate.
+    // Escape hatch: a client must always have a manual way out, so no local
+    // artifact (a bad cookie, a wedged shell) can ever trap the user with no
+    // recovery. Reset clears all client-side state and reloads to the key gate.
     const reset = el("button", "reconnect-reset", "Reset and re-enter key");
     reset.type = "button";
     reset.onclick = resetClientState;
@@ -208,8 +264,11 @@ export function hideReconnectOverlay() {
   if (ov) ov.style.display = "none";
 }
 
-// First-load progress overlay, shown immediately at boot and hidden once the
-// model list resolves or fails.
+// R25: first-load progress. Shown immediately at boot so the cold-start wait
+// (the first /api/models can block many seconds while the model loads) reads as
+// in-progress, not a blank shell. Distinct in copy from the reconnect overlay
+// (server DOWN). Hidden once the model list resolves or fails, so it never stacks
+// over the gate or the app.
 export function showStartupOverlay() {
   let ov = $("startup-overlay");
   if (!ov) {
@@ -231,9 +290,10 @@ export function hideStartupOverlay() {
 window.showStartupOverlay = showStartupOverlay;
 window.hideStartupOverlay = hideStartupOverlay;
 
-// Reachability probe carrying no auth headers, so it cannot fail for a
-// client-side reason. Any HTTP response, 401 included, counts as reachable; only
-// a thrown fetch counts as down.
+// Reachability probe carrying NO auth headers, so it can NEVER fail for a
+// client-side reason (a bad cookie/header that makes authHeaders throw). ANY HTTP
+// response - even 401 - proves the server is reachable; only a thrown fetch means
+// it is genuinely down. Makes the "server unreachable" verdict actually mean it.
 export async function serverReachable() {
   try {
     await fetch("/api/models", { cache: "no-store" });
@@ -244,66 +304,90 @@ export async function serverReachable() {
 }
 window.serverReachable = serverReachable;
 
-// How many consecutive reachable polls count as "the server came back" when it
-// was never observed down.
+// How many consecutive REACHABLE polls to accept as "the server came back"
+// when we never actually observed it go down. Only reached on the restart path
+// below; see the sawDown note there for why it is bounded rather than infinite.
 const _UP_POLLS_WITHOUT_DOWN = 3;   // ~9s at the 3s poll interval
 
-// *opts.sawDown* records whether the caller has already observed the server
-// unreachable. bootAuthProbe passes true and reloads on the first poll that
-// answers. The Settings "Restart server" button does not: it calls this while
-// the old process is still answering, so this path waits until the server is
-// seen down, or until _UP_POLLS_WITHOUT_DOWN answers have arrived, before
-// reloading.
+// *sawDown* records whether the caller has already OBSERVED the server
+// unreachable. bootAuthProbe has (a thrown fetch is why it calls this), so it
+// passes true and keeps the original behaviour: reload on the first poll that
+// answers. The Settings "Restart server" button has NOT - it calls this
+// optimistically right after POSTing the restart, while the server is still up.
+//
+// That distinction matters because _do_restart unloads the engines and waits on
+// wait_for_vram_release BEFORE it re-execs, so the OLD process keeps answering
+// for seconds after the POST. Reloading on the first answer therefore hands the
+// browser a document from the process that is about to disappear, whose shell
+// token dies with it - one of the two ways a page ends up holding a dead
+// credential (see onShellTokenRejected above). So on that path, wait until we
+// have seen it actually go down before treating an answer as the NEW process.
+//
+// BOUNDED, deliberately: the re-exec gap can be shorter than one 3s poll, so a
+// fast restart can come back without us ever catching it down. Waiting forever
+// for a transition we may have missed would strand the user on the overlay -
+// strictly worse than the bug being fixed. After _UP_POLLS_WITHOUT_DOWN answers
+// we reload anyway, which is exactly today's behaviour; if that reload does land
+// on the doomed process, the shell-token recovery catches it.
 export function onServerUnreachable(opts) {
   window.__localmLocked = true;
   const app = $("app");
   if (app) app.style.display = "none";
   const gate = $("key-gate");
-  if (gate) gate.style.display = "none";   // connectivity, not the key
+  if (gate) gate.style.display = "none";   // a connectivity problem, not a key one
   showReconnectOverlay();
   if (_reconnectTimer) return;
   let downSeen = !!(opts && opts.sawDown);
   let upPolls = 0;
   _reconnectTimer = setInterval(async () => {
     if (!(await serverReachable())) { downSeen = true; return; }   // still down - keep waiting
-    if (!downSeen && ++upPolls < _UP_POLLS_WITHOUT_DOWN) return;    // may be the old process
+    if (!downSeen && ++upPolls < _UP_POLLS_WITHOUT_DOWN) return;    // may be the OLD process
     clearInterval(_reconnectTimer);
     _reconnectTimer = null;
-    location.reload();                         // back up: a clean boot handles 200/401
+    location.reload();                         // back up -> clean boot handles 200/401
   }, 3000);
 }
 window.onServerUnreachable = onServerUnreachable;
 
-// Boot auth probe. Returns true when authed, and the caller then loads the app.
-// Status 0 / unreachable -> reconnect overlay, not the gate; 401 -> key gate, or
-// a one-shot stale-shell self-heal if a prior login should already have authed;
-// 200 -> unlock.
+// Boot auth probe (AUTH-1b refactor). Returns true when authed (the caller then
+// loads the app). status 0 / unreachable -> reconnect overlay (NOT the gate);
+// 401 -> key gate, OR a one-shot stale-shell self-heal if a prior login should
+// already have authed; 200 -> unlock.
 export async function bootAuthProbe() {
   let status;
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });
     status = r.status;
   } catch (e) {
-    // The authed request could not complete. A header-free probe separates a
-    // client-side failure (treated as 401, the key gate) from a dead server.
+    // The authed request could not complete. Before declaring the server
+    // unreachable (a dead-end overlay), confirm with a header-free probe: if the
+    // server answers at all it is UP and the failure was client-side, so treat it
+    // as "needs auth" (the recoverable key gate), NOT a dead server.
     status = (await serverReachable()) ? 401 : 0;
   }
   if (status === 0) { onServerUnreachable({ sawDown: true }); return false; }
-  // A 403 on the boot probe while we hold a shell token is the open-mode
-  // stale-shell-token case: run the recovery and never report authed. A 403
-  // without a shell token falls through to the handling below.
+  // A 403 on the boot probe is the open-mode stale-shell-token case
+  // (NEW-RESTART-DEAD-BUTTONS): in open mode the gate in http_server.py demands
+  // the per-process shell bearer for this very GET, so a page served by an
+  // earlier process fails it. This used to fall through to unlockUI() below and
+  // reveal a shell whose every subsequent call 403s, with nothing on screen
+  // saying why - the dead-buttons report. Recover instead, and never report
+  // authed. Scoped to the case we can actually diagnose: only when we HAVE a
+  // shell token, i.e. we really are the open-mode client this describes. A 403
+  // without one is some other condition and keeps its existing handling rather
+  // than being swept into this recovery.
   if (status === 403 && sentShellToken(authHeaders())) {
     await onShellTokenRejected();
     return false;
   }
   if (status === 401) {
-    // A successful login (marked by submitKeyGate or the Settings key save)
-    // that still boots 401 means the cached shell is wedged: reset it once and
-    // reload.
+    // A SUCCESSFUL login (marker set by submitKeyGate / the Settings key save)
+    // that still boots 401 means the cached shell, not the key, is wedged ->
+    // reset it once and reload, so the user never has to clear site data.
     if (sessionStorage.getItem("localm.loginOk") === "1"
         && sessionStorage.getItem("localm.swReset") !== "1") {
       sessionStorage.removeItem("localm.loginOk");
-      sessionStorage.setItem("localm.swReset", "1");   // one-shot guard
+      sessionStorage.setItem("localm.swReset", "1");   // one-shot guard - no loop
       await resetServiceWorkerAndCaches();
       location.reload();
       return false;
@@ -315,8 +399,10 @@ export async function bootAuthProbe() {
   try {
     sessionStorage.removeItem("localm.loginOk");
     sessionStorage.removeItem("localm.swReset");
-    // Clearing the shell-token guard re-arms the recovery for a later restart
-    // in the same tab.
+    // Same for the shell-token guard: this boot's credential works, so a LATER
+    // restart in the same tab must get its own recovery attempt. Leaving it set
+    // would make the second restart of a session skip straight to the "reload
+    // by hand" overlay having never retried.
     sessionStorage.removeItem("localm.shellReset");
   } catch (e) { /* sessionStorage may be unavailable in some private modes */ }
   unlockUI();
@@ -325,12 +411,13 @@ export async function bootAuthProbe() {
 window.bootAuthProbe = bootAuthProbe;
 
 (async () => {
-  showStartupOverlay();   // immediate first-load feedback
+  showStartupOverlay();   // R25: immediate first-load feedback (cold start is slow)
   // Probe auth before loading any app data or revealing the shell.
   const authed = await bootAuthProbe();
   if (!authed) { hideStartupOverlay(); return; }   // gate / reconnect overlay takes over
-  // Stash the session's CSRF token before any state-changing request can fire.
-  // Awaited so it is ready before the app loads.
+  // Stash the session's CSRF token (derived server-side, in lockstep with the
+  // session) before any state-changing request can fire, so the first write never
+  // has to rely on the 403 self-heal. Awaited so it is ready before the app loads.
   await refreshCsrf();
   // On a phone not yet installed, show the one-time install landing first; the
   // app still loads behind it and is revealed by "Continue". Desktop / installed

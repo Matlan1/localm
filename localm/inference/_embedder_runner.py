@@ -326,12 +326,12 @@ class EmbedderRunner:
         trace = self._native_crash_trace()
         if not trace:
             return " No native stack trace was captured for this fault."
-        from localm.debuglog import logger
+        from localm.debuglog import logger, native_fault_hint
         # Logged as well as returned: the trace is multi-line and belongs in the
         # debug log the message points at, not inlined into an HTTP error body.
         logger.error("embedding worker native fault trace:\n%s", trace)
         first = trace.splitlines()[0].strip()
-        return f" Native fault: {first} (full trace in the debug log)."
+        return f" Native fault: {first} ({native_fault_hint()})."
 
     def _spawn(self) -> None:
         from localm._mp_spawn import ensure_spawn_uses_venv_python

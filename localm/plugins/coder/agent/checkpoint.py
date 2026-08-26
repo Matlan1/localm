@@ -141,6 +141,16 @@ def _entry_from_checkpoint(checkpoint_id: str, data: dict) -> dict:
         "changed_files": len(data.get("changed_files") or {}),
     }
 
+def _any_checkpoint_file_present(cwd) -> bool:
+    """True if at least one checkpoint-shaped file exists for *cwd*, whether or
+    not it parses - distinguishes "never saved one" from "saved one that is now
+    unreadable" for checkpoint_info's caller."""
+    d = _project_dir_for(cwd)
+    if d.is_dir() and any(d.glob("*.json")):
+        return True
+    return (_legacy_home_checkpoint_path_for(cwd).is_file()
+            or _legacy_checkpoint_path_for(cwd).is_file())
+
 def list_checkpoints(cwd) -> list:
     """Every saved checkpoint for *cwd*, NEWEST first, so a resume can choose
     among several interrupted sessions in one project.
@@ -186,6 +196,8 @@ def checkpoint_info(cwd) -> Optional[dict]:
                 "total_tokens": data.get("total_tokens", 0),
                 "messages": len(data["messages"]),
             }
+    if _any_checkpoint_file_present(cwd):
+        return {"unreadable": True}
     return None
 
 def _first_user_text(messages: list) -> str:

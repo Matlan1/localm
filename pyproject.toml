@@ -56,7 +56,7 @@ dependencies = [
     # this guard absent precisely where nobody would think to look for it. See
     # localm/plugins/coder/tools/files.py _compile_model_pattern.
     "regex>=2026.7.19",
-    "huggingface-hub>=1.27.0",
+    "huggingface-hub>=1.28.0",
     "pydantic>=2.13.4",
     "fastapi>=0.141.1",
     # fastapi's own requirement is only starlette>=0.46.0, too weak to rely on:
@@ -65,8 +65,8 @@ dependencies = [
     # than uv.lock's pinned 1.3.1. Declared explicitly so the ASGI layer
     # fastapi depends on cannot resolve to something far older than what this
     # project is actually tested against.
-    "starlette>=1.3.1",
-    "uvicorn>=0.52.3",
+    "starlette>=1.6.0",
+    "uvicorn>=0.52.4",
     # Built-in TLS (NET-1): localm mints a local CA + leaf cert so a network
     # bind serves HTTPS out of the box. Core, not an extra - encryption on an
     # exposed bind must never be opt-in. See localm/tls.py and docs/tls.md.
@@ -166,7 +166,7 @@ gpu = [
     # cap further only once transformers 5.16+ is re-verified the same way (or the win32
     # torch wheel ships distributed) - re-verify with a cold install, not the dev venv,
     # since the dev venv lags uv.lock and hid the original regression.
-    "transformers[kernels]~=5.15.0",
+    "transformers[kernels]~=5.15.1",
     # Pin the transitive tokenizers so it does not flip between resolver passes
     # (the 0.23.1 <-> 0.22.2 churn on repeated setup runs). 0.22.2 is what
     # transformers 5.12 (tokenizers<=0.23.0,>=0.22.0) resolves to.
@@ -227,7 +227,7 @@ grammar = [
 cpu = []
 # Development + CI tooling (lint + tests). Install with:  pip install -e ".[dev]"
 dev = [
-    "ruff>=0.16.3",
+    "ruff>=0.16.4",
     "pytest>=8.0",
     # Coverage measurement (TEST-1). Visibility only for now: CI publishes a
     # number, there is no --cov-fail-under gate. See [tool.coverage] below.

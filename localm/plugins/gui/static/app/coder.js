@@ -540,6 +540,14 @@ export function handleCoderEvent(s, ev) {
     case "tool_result": {
       const card = s.pendingCards.shift();
       if (card) {
+        // A user rejection already has its own confirm card narrating
+        // "Rejected <tool>" (confirm_resolved, resolveConfirmCard) - this
+        // tool_call card has no output and nothing left to add, so showing
+        // both reads as the same rejection reported twice for one click.
+        if (ev.summary === "rejected by user") {
+          card.remove();
+          break;
+        }
         const state = card.querySelector(".state");
         // Real server-side timing (execution.py) around the tool invocation
         // itself - not a client-side guess between two render events, which
@@ -823,6 +831,9 @@ export async function refreshResumable() {
       btn.textContent = `Continue last session (${d.turns} turns, ${when})`;
       btn.style.display = "";
     } else {
+      if (r.ok && d.unreadable) {
+        toast("A saved session was found for this project but could not be read");
+      }
       btn.style.display = "none";
     }
   } catch { btn.style.display = "none"; }

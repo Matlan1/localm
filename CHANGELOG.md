@@ -469,6 +469,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Your sampling settings now apply to every token on a multi-token-prediction
+  model.** These models predict a token ahead and check the guess against the
+  main model. That check ignored the temperature, top-k, top-p and repetition
+  penalty on your request, so a large share of the reply came out as if you had
+  asked for greedy decoding, and the repetition penalty that exists to stop a
+  reply looping was not consulted for those tokens. When the guess turns out to
+  be wrong, the model's own token is now used instead of being thrown away.
+- **A stray turn marker no longer opens a reply.** Some models emit their own
+  training-format turn markers as ordinary text. Several dialects were already
+  removed before the reply reached you, but the ChatML, Llama 3 and Gemma ones
+  were not, so a reply could begin with a stray marker or a bare role word such
+  as "model". A role word the model writes in ordinary prose is untouched.
+- **The app no longer reloads itself when a reply links a remote image.**
+  Showing remote images in replies is off by default, and the request the page
+  makes for one is refused while it is off. The app mistook that refusal for its
+  own login being rejected, so it cleared its offline cache and reloaded the
+  page in the middle of the reply that carried the image, losing it. A genuinely
+  expired login still recovers the same way it did before.
 - **Chat comes back on the model you were actually using after generating
   media.** Making an image, music, or video unloads the chat model to free up
   VRAM and reloads it when the job finishes. That reload asked for the model
@@ -797,8 +815,63 @@ permanent public record of what shipped and are never rewritten; the in-progress
   exceeded context window" message, and stopping the server while a reply
   was still streaming could itself crash instead of ending the reply
   cleanly.
+- **The Linux CUDA fallback error no longer points at a file you can't
+  open.** When no CUDA build is available for your llama.cpp tag on Linux
+  and localm falls back to Vulkan, the error referenced an internal
+  maintainer file that isn't part of the published repository. It now
+  states the same condition without the dead reference.
+- **`setup.sh` could quit partway through with a confusing error on a rare,
+  filesystem-specific install hiccup.** Occasionally, mostly on a WSL clone
+  under a Windows-drive mount, `uv pip install` reports success while the
+  `localm` command itself does not get written; setup already retried once
+  and warned loudly when it was still missing, but then went on to run that
+  missing command anyway for the native runtime, which quit setup early with
+  an unrelated-looking "failed" message instead of the real cause. Setup now
+  skips the steps that need the command and finishes normally, and its
+  closing summary says plainly which commands will not work until it is
+  fixed (the graphical launcher is unaffected).
+- **`localm gui` no longer disappears without a trace when the GUI fails to
+  load.** A broken or partial install could make the GUI's own code fail to
+  import, and the command was then dropped entirely - Click answered "No
+  such command 'gui'", exactly what a typo would look like. It now tells you
+  the GUI could not be loaded and how to see the underlying error.
+- **`localm gui --api-mode` no longer points you at a web page it never
+  serves.** With no model loaded, the model line said "add one on the Models
+  page"; the address line was always labelled "Open the GUI" and carried a
+  browser-only deep link. `--api-mode` mounts no GUI at all, so both now
+  match: the hint points at `localm pull <name>`, and the address line shows
+  the plain API base under "API base".
+- **`localm run MODEL -p "..."` now exits non-zero when the model load
+  hard-fails.** A crashed or unreachable load printed the real error in red
+  but still exited 0 with empty output, so a script chaining on the exit
+  code (or piping the output to a next step) could not tell that call apart
+  from a normal reply that happened to be empty.
+- **A worker crash no longer points you at a debug log that was never
+  written.** The message after a native crash always said "full trace in
+  the debug log", even when nothing had turned debug mode on and no such
+  file existed. It now says so only when the log actually exists, and
+  otherwise tells you to rerun with `--debug` to get one.
+- **Setting `LOCALM_MTMD_CPU=1` to skip the GPU attempt for image
+  understanding no longer reports that as a GPU failure.** With the
+  variable set, the vision projector deliberately never tries the GPU -
+  but the log said "the vision projector could not be loaded onto the
+  GPU... Set LOCALM_MTMD_CPU=1 to skip the GPU attempt entirely", advising
+  you to set the exact variable you had already set. It now says plainly
+  that CPU encoding is being used as requested. A genuine GPU failure
+  (the variable unset) still gets the original message.
+- **`localm comfy status` no longer uses "own" for two opposite things.**
+  With nothing configured, "Preferred target : own" and "Target now : your
+  own ComfyUI" read as agreeing while naming opposite targets - the first
+  means localm's managed ComfyUI, the second means a separate install you
+  run yourself. The preferred-target line now spells out the same wording
+  the second line already uses.
 
 ### Security
+- **Two more model families' role markers are now defanged in untrusted text.**
+  A fetched page, a tool result or a stored memory is escaped so it cannot forge
+  a system or assistant turn using the model's own delimiters. EXAONE and GLM
+  models use delimiters that were not in that list, so text aimed at them passed
+  through unescaped.
 - **Turning network access off no longer left the voice model able to
   download anyway.** The neural text-to-speech voice is fetched by your
   browser directly, so localm's network switch, which every other
@@ -874,6 +947,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   warning, and the matching message in the GUI's bind-fallback notice, now
   say the length is a floor and point at `localm key generate` for an
   actually strong, random key.
+- **`localm memory clear` now actually erases everything it reports erasing.**
+  It could print "Erased N remembered and M forgotten fact(s)" and exit
+  successfully while two records of your own words stayed on disk: a pending
+  suggestion to update or delete a saved fact, and the text of a suggestion
+  you had already turned down. Both are now removed by the same command, and
+  it refuses to report success if anything is still there afterward.
 
 ## [0.1.5rc3] - 2026-08-13
 

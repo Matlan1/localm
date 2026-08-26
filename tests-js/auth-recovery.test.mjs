@@ -150,6 +150,42 @@ test("RESTART: a shell-token 403 on an ORDINARY call (the real restart case: the
     "which carries whatever token was live when the worker installed");
 });
 
+test("RESTART: a 403 from /api/image-proxy is the route saying the feature is OFF, " +
+     "so it must NOT trigger the shell recovery", async () => {
+  // The test above is this one's control: the SAME 403, the SAME shell token, on
+  // an ordinary route, DOES recover. Only the path differs.
+  //
+  // /api/image-proxy answers 403 whenever "Show remote images in replies" is off,
+  // which is the shipped default, and helpers.js sends it with authHeaders(). So
+  // in open mode a model reply carrying `![](https://host/x.png)` produced a 403
+  // on a shell-token request, the wrapper read that as a rejected credential, and
+  // the page unregistered its service worker, dropped its caches and reloaded -
+  // mid-reply. Measured in a real browser: proxy OFF reloaded the page every
+  // time, proxy ON never did, same page and same image URL.
+  let status = 200;
+  const fetchImpl = async () => (status === 200
+    ? { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" }
+    : { ok: false, status: 403, json: async () => ({}), text: async () => "" });
+  const { window } = loadApp({ fetchImpl, shellToken: SHELL });
+  await tick();
+  assert.equal(window.__localmLocked, false, "premise: this boot unlocked normally");
+
+  stubReload(window);
+  const { unregistered, deleted } = stubSWAndCaches(window);
+  status = 403;
+  await window.fetch(
+    "/api/image-proxy?url=" + encodeURIComponent("https://example.invalid/a.png"),
+    { headers: window.authHeaders() });
+  await tick();
+
+  assert.equal(unregistered.length, 0,
+    "the service worker must survive: the credential was fine, the feature is off");
+  assert.deepEqual(deleted, [], "and its caches with it");
+  assert.equal(window.sessionStorage.getItem("localm.shellReset"), null,
+    "the one-shot recovery guard was never armed, so a later REAL stale token " +
+    "still gets its single recovery");
+});
+
 test("RESTART: a 403 with NO shell token is NOT swept into the shell recovery", async () => {
   const { window } = loadApp({ fetchImpl: forbidden });   // no shellToken
   await tick();

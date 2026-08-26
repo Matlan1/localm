@@ -89,3 +89,52 @@ def test_sanitize_fails_closed_on_unparseable_url(caplog):
     with caplog.at_level(logging.WARNING, logger="localm"):
         assert c.sanitize_comfy_url("http://[::1") == _LOOPBACK
     assert "could not be validated" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# NEW-MULTIPLE-SITES-CITING-AGENTS (scoped instance): the guard's fallback was
+# only ever surfaced to the debug log, invisible without --debug. settings()
+# has an actual user-facing warning channel (piped to job.push in plug.py) -
+# the checked variant must feed it.
+# --------------------------------------------------------------------------- #
+
+def test_sanitize_checked_reports_no_warning_on_a_clean_url():
+    url, warning = c.sanitize_comfy_url_checked(_LOOPBACK)
+    assert url == _LOOPBACK
+    assert warning is None
+
+
+def test_sanitize_checked_reports_a_warning_on_fallback():
+    url, warning = c.sanitize_comfy_url_checked(_METADATA)
+    assert url == _LOOPBACK
+    assert warning and "link-local" in warning
+
+
+def test_image_settings_surfaces_the_apiurl_guard_warning(monkeypatch):
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    s = _image_backend.settings(_plugin_cfg("image", {"api_url": _METADATA}))
+    assert s["api_url"] == _LOOPBACK
+    assert s["warning"] and "link-local" in s["warning"]
+
+
+def test_music_settings_surfaces_the_apiurl_guard_warning(monkeypatch):
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    s = _music_backend.settings(_plugin_cfg("music", {"api_url": _METADATA}))
+    assert s["api_url"] == _LOOPBACK
+    assert s["warning"] and "link-local" in s["warning"]
+
+
+def test_video_settings_surfaces_the_apiurl_guard_warning(monkeypatch):
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    s = _video_backend.settings(_plugin_cfg("video", {"api_url": _METADATA}))
+    assert s["api_url"] == _LOOPBACK
+    assert s["warning"] and "link-local" in s["warning"]
+
+
+def test_image_settings_no_warning_on_lan_api_url(monkeypatch):
+    # Control: a normal LAN url must not manufacture a warning.
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    lan = "http://192.168.1.50:8188"
+    s = _image_backend.settings(_plugin_cfg("image", {"api_url": lan}))
+    assert s["api_url"] == lan
+    assert not s["warning"]

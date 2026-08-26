@@ -25,6 +25,7 @@ from .display import (
     print_server_timeout,
     print_warning,
 )
+from .proc_tail import StderrTail
 
 
 # localm's claimed range (see localm.config.PORT_RANGE) - stays clear of
@@ -65,6 +66,7 @@ class ManagedServer:
         self.host       = host
         self._extra     = extra_args or []
         self._proc: Optional[subprocess.Popen] = None
+        self._stderr: Optional[StderrTail] = None
 
     # ------------------------------------------------------------------ #
 
@@ -96,7 +98,9 @@ class ManagedServer:
             self._proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
             )
         except (FileNotFoundError, OSError):
             print_warning(
@@ -104,6 +108,7 @@ class ManagedServer:
                 "Point --url at an existing OpenAI-compatible server instead."
             )
             return False
+        self._stderr = StderrTail(self._proc)
 
         deadline = time.monotonic() + _STARTUP_TIMEOUT
         while time.monotonic() < deadline:
@@ -114,11 +119,15 @@ class ManagedServer:
                 os.environ["LOCALM_URL"] = f"http://{self.host}:{self.port}/v1"
                 return True
             if self._proc.poll() is not None:
-                print_warning(f"localm serve exited early (code {self._proc.returncode})")
+                msg = f"localm serve exited early (code {self._proc.returncode})"
+                tail = self._stderr.tail()
+                if tail:
+                    msg += f":\n{tail}"
+                print_warning(msg)
                 return False
             time.sleep(_POLL_INTERVAL)
 
-        print_server_timeout()
+        print_server_timeout(self._stderr.tail())
         return False
 
     def stop(self) -> None:

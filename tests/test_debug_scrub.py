@@ -19,7 +19,7 @@ def _scrub(pieces):
 
 
 class TestUtf8PieceReassembly:
-    """A multibyte character whose UTF-8 bytes straddle two tokens is
+    """R46: a multibyte character whose UTF-8 bytes straddle two tokens must be
     reassembled, not decoded into U+FFFD replacement characters mid-word."""
 
     def test_two_byte_char_split_across_tokens(self):
@@ -51,11 +51,11 @@ class TestUtf8PieceReassembly:
         assert out == "Hello, world!"
 
     def test_old_per_token_decode_would_have_mangled_this(self):
-        # Decoding each token's bytes in isolation produces replacement chars at
-        # the split.
+        # Documents the bug: decoding each token's bytes in isolation (the old
+        # token_to_piece path) produced replacement chars at the split.
         per_token = "".join(b.decode("utf-8", errors="replace")
                             for b in [b"caf\xc3", b"\xa9"])
-        assert "�" in per_token                  # per-token decoding mangles it
+        assert "�" in per_token                  # the old, broken result
         fixed = "".join(_utf8_pieces(iter([b"caf\xc3", b"\xa9"])))
         assert "�" not in fixed and fixed == "café"
 
@@ -75,7 +75,7 @@ class TestMarkerScrub:
         assert _scrub([text]) == "<think>\nReasoning here.\n</think>\nThe answer."
 
     def test_mangled_channel_tags_become_think(self):
-        # Mangled channel tags around the reasoning block.
+        # The exact garbage observed in the bug report
         text = "<|channel>thought\nhmm<channel|>Good morning! How can I help?"
         assert _scrub([text]) == \
             "<think>\nhmm\n</think>\nGood morning! How can I help?"
@@ -98,7 +98,7 @@ class TestMarkerScrub:
         assert _scrub(["before <unused2> after"]) == "before  after"
 
     def test_truncated_unused_token_at_stream_end(self):
-        # The stream ends mid-token: "<unused2" with no closing ">".
+        # The crash trace ended mid-token: "<unused2" with no closing ">"
         assert _scrub(["text then <unused2"]) == "text then "
 
     def test_marker_straddling_chunks(self):
@@ -166,18 +166,16 @@ class TestDebugLog:
         """_decode_stream always scrubs; debug mode logs the raw text in log/full
         mode, but NEVER in privacy mode (chat content is not persisted there)."""
         import logging as _logging
-        from localm.inference.backends.llamacpp.llama import LlamaCpp
-        from unittest.mock import MagicMock
+        from tests._bare_llama import make_bare_llama
 
         def _flush():
             for h in debuglog.logger.handlers:
                 if isinstance(h, _logging.FileHandler):
                     h.flush()
 
-        llm = LlamaCpp.__new__(LlamaCpp)
-        llm._tokenizer = MagicMock()
-        # _decode_stream decodes raw token BYTES through one UTF-8-safe stream,
-        # so the tokenizer mock yields bytes, not str.
+        llm = make_bare_llama()
+        # _decode_stream now decodes raw token BYTES through one UTF-8-safe
+        # stream (R46), so the tokenizer mock yields bytes, not str.
         llm._tokenizer.token_to_piece_bytes.side_effect = \
             lambda t: {1: b"<|channel|>", 2: b"thought", 3: b" hi"}[t]
         try:
@@ -193,7 +191,7 @@ class TestDebugLog:
             assert "<|channel|>thought hi" in path.read_text(encoding="utf-8")
 
             # privacy mode: a decode's raw content must NOT reach the debug log,
-            # even though the log file is open.
+            # even though the log file is open (the keep_diagnostics leak fix).
             llm._tokenizer.token_to_piece_bytes.side_effect = \
                 lambda t: {1: b"<|channel|>", 2: b"SECRETWORD", 3: b" x"}[t]
             monkeypatch.setenv("LOCALM_MODE", "privacy")
@@ -202,5 +200,3 @@ class TestDebugLog:
             assert "SECRETWORD" not in path.read_text(encoding="utf-8")
         finally:
             llm._tokenizer = None
-            llm._model_ptr = None
-            llm._ctx_ptr = None

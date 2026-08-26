@@ -673,6 +673,11 @@ class CoderSession:
         if set_model_fn is None:
             return False
         set_model_fn(model)
+        # Record the switch so an exported/read-back session does not
+        # misattribute the turns after it to the OLD model.
+        self.agent._audit.notice(
+            "model_switch", f"switched model {self.model} -> {model} "
+            f"at turn {self.agent.turns}")
         self.model = model          # keep info() truthful - see its docstring
         return True
 

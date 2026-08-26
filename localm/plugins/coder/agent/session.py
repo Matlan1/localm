@@ -13,7 +13,7 @@ from ..display import print_info
 from ..memory import cap_user_instructions, forget, remember
 from ..parser import strip_tool_calls
 from ..prompts import build_subagent_system_prompt, build_system_prompt
-from ..audit import SessionMode
+from ..audit import SessionMode, unregister_coder_session_mode
 
 # Upper bound on how long the CLI's SYNCHRONOUS close-time reflection (see
 # _maybe_store_episode) may hold the process open. An expired deadline is turned
@@ -225,6 +225,8 @@ class _SessionMixin:
         """
         self._maybe_store_episode()
         self._audit.close()
+        if self.parent is None:
+            unregister_coder_session_mode(self.mode)
         if self.mode == SessionMode.FULL:
             return self._write_session_markdown()
         return None

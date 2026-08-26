@@ -108,7 +108,11 @@ def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]
         'EXTRAS="coder,voice,monitor"\n'
         + _heartbeat_functions()
         + _install_block()
-        + '\nprintf "COMPLETED\\n"\n'
+        # LOCALM_BIN_OK is set at the tail of the extracted block (right before
+        # the "native llama.cpp runtime wheel" marker _install_block() cuts at)
+        # - echo it so tests can assert it tracks .venv/bin/localm's real
+        # presence, not just that the retry/warning text looks right.
+        + '\nprintf "COMPLETED LOCALM_BIN_OK=%s\\n" "$LOCALM_BIN_OK"\n'
     )
     env = dict(os.environ)
     env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
@@ -127,6 +131,7 @@ def test_present_no_retry_needed(tmp_path):
     assert "STILL missing" not in result.stdout
     assert (tmp_path / ".venv" / "bin" / "localm").exists()
     assert (tmp_path / ".stub-uv-calls").read_text().strip() == "1"
+    assert "LOCALM_BIN_OK=1" in result.stdout
 
 
 def test_recovered_by_retry(tmp_path):
@@ -136,6 +141,7 @@ def test_recovered_by_retry(tmp_path):
     assert "retrying once" in result.stdout
     assert "STILL missing" not in result.stdout
     assert (tmp_path / ".venv" / "bin" / "localm").exists()
+    assert "LOCALM_BIN_OK=1" in result.stdout
 
 
 def test_still_missing_after_retry_warns_and_continues(tmp_path):
@@ -145,6 +151,10 @@ def test_still_missing_after_retry_warns_and_continues(tmp_path):
     assert "retrying once" in result.stdout
     assert "STILL missing" in result.stdout
     assert not (tmp_path / ".venv" / "bin" / "localm").exists()
+    # THE FIX under test: LOCALM_BIN_OK must reflect the real, still-missing
+    # state, because setup-llama/make-launcher/plugin-setup downstream branch
+    # on it instead of blindly invoking a binary that was just diagnosed absent.
+    assert "LOCALM_BIN_OK=0" in result.stdout
 
 
 def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path):
@@ -156,6 +166,7 @@ def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path)
     assert "COMPLETED" in result.stdout
     assert "retrying once" in result.stdout
     assert "STILL missing" in result.stdout
+    assert "LOCALM_BIN_OK=0" in result.stdout
 
 
 def test_retry_install_is_guarded_in_source():
@@ -173,6 +184,109 @@ def test_retry_install_is_guarded_in_source():
     line_end = block.index("\n", second)
     retry_line = block[second:line_end]
     assert "||" in retry_line, "the retry install must be guarded (e.g. `|| true`)"
+
+
+# ---------------------------------------------------------------------------
+# setup.sh: the backend-provision (setup-llama) block must not attempt to run
+# a .venv/bin/localm that was already diagnosed missing above.
+#
+# Regression for a second-order break the entry-point fix left in place: once
+# .venv/bin/localm is confirmed STILL missing, the script used to continue
+# straight into `.venv/bin/localm setup-llama --backend ...` anyway (BACKEND
+# is anything but "own" by default, since REC auto-picks a real backend).
+# Bash fails that call with "No such file or directory", the surrounding
+# `|| { ...; exit 1; }` catches it, and setup.sh exits 1 on a MISLEADING
+# "setup-llama failed" message - contradicting the retry block's own comment
+# that "the rest of this script does not depend on the entry point". Proven
+# live: bash -c './missing-binary setup-llama --backend x || { exit 1; };
+# echo unreachable' never prints "unreachable".
+# ---------------------------------------------------------------------------
+
+
+def _provision_block() -> str:
+    src = SETUP_SH.read_text(encoding="utf-8")
+    start = src.index('if [ "$LOCALM_BIN_OK" != 1 ]; then\n')
+    end = src.index("\nfi\n\n# ---- PyTorch + transformers", start)
+    return src[start : end + len("\nfi")]
+
+
+def _make_localm_setup_llama_stub(bin_dir: Path, *, rc: int) -> None:
+    # Records each invocation's args (one per line) into a counter file
+    # relative to cwd, exactly like _make_uv_stub, so a test can assert the
+    # binary was never called at all (the skip path) or called exactly once
+    # with the expected args (the normal path).
+    _make_executable(
+        bin_dir / "localm",
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> .stub-localm-calls\n'
+        f"exit {rc}\n",
+    )
+
+
+def _run_provision_block(tmp_path: Path, *, localm_bin_ok: bool, backend: str,
+                          stub_rc: int = 0) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    _make_localm_setup_llama_stub(venv_bin, rc=stub_rc)
+    script = (
+        "set -euo pipefail\n"
+        'say() { printf "%s\\n" "$*"; }\n'
+        'ask() { printf "%s" "$2"; }\n'  # always answers the prompt's default
+        'offer_report() { printf "OFFERED_REPORT\\n"; }\n'
+        f'LOCALM_BIN_OK={1 if localm_bin_ok else 0}\n'
+        f'BACKEND="{backend}"\n'
+        + _provision_block()
+        + '\nprintf "COMPLETED\\n"\n'
+    )
+    env = dict(os.environ)
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return subprocess.run([_bash(), "-c", script], capture_output=True, text=True,
+                          env=env, cwd=str(tmp_path), timeout=15)
+
+
+def test_provision_skips_without_invoking_localm_when_bin_missing(tmp_path):
+    result = _run_provision_block(tmp_path, localm_bin_ok=False, backend="vulkan")
+    assert result.returncode == 0, result.stderr
+    assert "COMPLETED" in result.stdout
+    assert "Skipped - .venv/bin/localm is missing" in result.stdout
+    assert "setup-llama failed" not in result.stdout
+    # The decisive assertion: the stub must NEVER have been invoked. Before
+    # the fix this branch didn't exist and the call below fell straight
+    # through to `.venv/bin/localm setup-llama --backend vulkan`.
+    assert not (tmp_path / ".stub-localm-calls").exists()
+
+
+def test_provision_skips_without_invoking_localm_when_bin_missing_own_backend(tmp_path):
+    # BACKEND=own used to be asked its own buildpath question first; confirm
+    # the missing-binary skip pre-empts that path too, not just the `else`.
+    result = _run_provision_block(tmp_path, localm_bin_ok=False, backend="own")
+    assert result.returncode == 0, result.stderr
+    assert "COMPLETED" in result.stdout
+    assert "Skipped - .venv/bin/localm is missing" in result.stdout
+    assert not (tmp_path / ".stub-localm-calls").exists()
+
+
+def test_provision_runs_normally_when_bin_present(tmp_path):
+    # Regression protection: the pre-existing, working case must be unchanged.
+    result = _run_provision_block(tmp_path, localm_bin_ok=True, backend="vulkan", stub_rc=0)
+    assert result.returncode == 0, result.stderr
+    assert "COMPLETED" in result.stdout
+    assert "Skipped - .venv/bin/localm is missing" not in result.stdout
+    calls = (tmp_path / ".stub-localm-calls").read_text().strip()
+    assert calls == "setup-llama --backend vulkan"
+
+
+def test_provision_still_hard_fails_on_a_real_setup_llama_failure(tmp_path):
+    # A genuine setup-llama failure (binary present, provisioning itself
+    # fails) must still abort setup loudly - only the missing-BINARY case is
+    # now soft. Distinguishes "skip" from "the pre-existing hard-fail path".
+    result = _run_provision_block(tmp_path, localm_bin_ok=True, backend="vulkan", stub_rc=3)
+    assert result.returncode == 1
+    assert "setup-llama failed" in result.stdout
+    assert "OFFERED_REPORT" in result.stdout
+    assert "COMPLETED" not in result.stdout
 
 
 # ---------------------------------------------------------------------------
