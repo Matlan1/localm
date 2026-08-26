@@ -353,3 +353,23 @@ def test_mtp_two_consecutive_rejections_each_emit_their_own_token():
 
     assert tokens == [500, 502, 504]
     _assert_chain_matches_output(rec, tokens)
+
+
+def test_mtp_sampler_state_never_advances_past_an_emitted_token():
+    """The state-consistency property on its own, over a run that both accepts
+    and rejects a speculation, so it cannot be shadowed by an earlier assertion
+    about the token stream.
+
+    llama.cpp offers no way to rewind a sampler, so a token the chain accepts
+    and the caller never receives leaves the repetition window permanently out
+    of step with the reply that was actually produced.
+    """
+    rec = _SpecRecorder(
+        head=[600, 700, _SpecRecorder.EOG],
+        draft=[601, 603],
+        verify=[601, 604],
+    )
+
+    tokens, _ = _run_generate(rec, max_new_tokens=8)
+
+    _assert_chain_matches_output(rec, tokens)
