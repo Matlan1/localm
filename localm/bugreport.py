@@ -329,9 +329,11 @@ _QUERY_SECRET_RE = re.compile(
 # (a browser console error, a bundled log tail) - "X-Api-Key: <value>". Matched
 # by NAME like the query-string case above, over a small explicit set of
 # credential header names rather than a bearer-style catch-all, so an unrelated
-# header is never touched.
+# header is never touched, including "Authorization" (value redacted whole,
+# leading scheme word such as Bearer/Basic included).
 _HEADER_SECRET_RE = re.compile(
-    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"
+    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
+    r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
 )
 
 

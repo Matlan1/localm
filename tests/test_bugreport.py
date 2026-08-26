@@ -183,6 +183,23 @@ def test_scrub_secrets_redacts_credential_header_line():
     assert "X-Api-Key: <redacted>" in out
 
 
+# An "Authorization" header must be redacted by NAME, the same as X-Api-Key
+# above - not only when its value happens to start with "Bearer". A raw
+# token and a Basic-auth (base64 user:pass) value are asserted in one block
+# so a regression in either shape is caught. The Bearer canary is 8+ chars so
+# it also satisfies _BEARER_RE's own minimum length, keeping this test a pure
+# signal for the header-name match rather than an artifact of canary length.
+def test_scrub_secrets_redacts_authorization_header_regardless_of_scheme():
+    out = bugreport._scrub_secrets(
+        "Authorization: Bearer CANARY6BEARER\n"
+        "Authorization: CANARY7RAWTOKEN\n"
+        "Authorization: Basic Q0FOQVJZOFVTRVI6Q0FOQVJZOFBBU1M=\n")
+    assert "CANARY6BEARER" not in out
+    assert "CANARY7RAWTOKEN" not in out
+    assert "Q0FOQVJZOFVTRVI6Q0FOQVJZOFBBU1M=" not in out
+    assert out.count("Authorization: <redacted>") == 3
+
+
 def test_scrub_secrets_query_and_header_redaction_is_idempotent():
     once = bugreport._scrub_secrets(
         "https://x.example/s?api_key=CANARY1&q=hello -- X-Api-Key: CANARY2")
