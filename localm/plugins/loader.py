@@ -47,8 +47,8 @@ from localm.plugins.contract import KNOWN_PLUGIN_KEYS
 
 def plugins_dir() -> Path:
     """Root directory scanned for external plugins."""
-    from localm.config import home_dir
-    return home_dir() / "plugins"
+    from localm.config import HOME_DIR
+    return HOME_DIR / "plugins"
 
 
 # ------------------------------------------------------------------ #
