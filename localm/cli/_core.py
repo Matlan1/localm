@@ -48,8 +48,9 @@ def _exposed_bind_warning(host: str) -> Optional[str]:
             f"char{'s' if len(key) != 1 else ''}) - a key this short is trivially "
             f"guessable, so the server is effectively unauthenticated on the "
             f"network.\n"
-            f"  Set a strong key (>= {MIN_KEY_LEN} chars):  "
-            f"$env:LOCALM_API_KEY = \"<secret>\""
+            f"  Generate one:  localm key generate\n"
+            f"  ({MIN_KEY_LEN}+ characters silences this warning, but only a "
+            f"randomly generated key is actually hard to guess.)"
         )
     return None
 

@@ -848,6 +848,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   console attached, or nothing left to type into), it used to go ahead and
   send anyway. It now treats that exactly like you said no: the report is
   saved locally and nothing is sent, with a note on where to find it.
+- **The weak-key warning no longer implies an 8-character key is "strong".**
+  Binding to the network with a key under the minimum length told you to "set
+  a strong key (>= 8 chars)", which read as if hitting that length made the
+  key strong. It doesn't: the floor only rules out the shortest, easiest
+  guesses, and a short human-chosen key can still be trivially guessable. The
+  warning, and the matching message in the GUI's bind-fallback notice, now
+  say the length is a floor and point at `localm key generate` for an
+  actually strong, random key.
 
 ## [0.1.5rc3] - 2026-08-13
 
