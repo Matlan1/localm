@@ -851,6 +851,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the debug log", even when nothing had turned debug mode on and no such
   file existed. It now says so only when the log actually exists, and
   otherwise tells you to rerun with `--debug` to get one.
+- **Setting `LOCALM_MTMD_CPU=1` to skip the GPU attempt for image
+  understanding no longer reports that as a GPU failure.** With the
+  variable set, the vision projector deliberately never tries the GPU -
+  but the log said "the vision projector could not be loaded onto the
+  GPU... Set LOCALM_MTMD_CPU=1 to skip the GPU attempt entirely", advising
+  you to set the exact variable you had already set. It now says plainly
+  that CPU encoding is being used as requested. A genuine GPU failure
+  (the variable unset) still gets the original message.
 
 ### Security
 - **Two more model families' role markers are now defanged in untrusted text.**
