@@ -20,6 +20,7 @@ from ..display import (
     print_success,
     print_warning,
 )
+from .goal import _run_goal_loop
 
 def _read_multiline() -> str:
     """
@@ -50,7 +51,7 @@ _SLASH_COMMANDS = (
     "/help", "/exit", "/quit", "/clear", "/model", "/mode", "/cwd", "/cd",
     "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
     "/sessions", "/compact", "/memory", "/remember", "/forget", "/save",
-    "/export", "/scope", "/changes", "/diff", "/bg", "/verify",
+    "/export", "/scope", "/changes", "/diff", "/bg", "/verify", "/goal",
 )
 
 
@@ -141,7 +142,11 @@ def _repl(agent: Agent) -> None:
         try:
             # Starting a fresh task - discard any stale checkpoint
             agent.clear_checkpoint()
-            agent.chat(user_input)
+            if agent.goal_cmd is not None:
+                _run_goal_loop(agent, user_input, agent.goal_cmd,
+                               agent.goal_max_iters, agent.cwd)
+            else:
+                agent.chat(user_input)
         except KeyboardInterrupt:
             # Checkpoint was already saved inside _loop; just swallow here
             pass
@@ -516,6 +521,43 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             agent.verify_cmd = arg
             print_success(f"Verification: `{arg}` must exit 0 before a turn "
                           "that changed files finishes.")
+
+    elif cmd == "goal":
+        from ..verify import command_text, detect_verify_command
+        if not arg:
+            current = (command_text(agent.goal_cmd)
+                       if agent.goal_cmd is not None else "(off)")
+            print_info(
+                f"Goal mode: {current}\n"
+                "  /goal <command>  iterate the next task until this exits 0\n"
+                "  /goal auto       re-detect the project's check\n"
+                "  /goal off        plain-text messages get one turn again\n"
+                "Unlike /verify, a failed check re-runs the WHOLE task with "
+                f"the failure fed back, up to {agent.goal_max_iters} "
+                "iteration(s), instead of ending the turn.")
+        elif arg == "off":
+            agent.goal_cmd = None
+            print_info("Goal mode off - plain-text messages get a single "
+                       "chat turn again.")
+        elif arg == "auto":
+            detected = detect_verify_command(agent.cwd)
+            agent.goal_cmd = detected
+            if detected is None:
+                print_warning(
+                    "No obvious check found in this project (looked for a "
+                    "verify key in .localcoder/config.toml, Cargo.toml, go.mod, "
+                    "a package.json test script, and a pytest setup). "
+                    "Set one with /goal <command>.")
+            else:
+                print_success(
+                    f"Goal mode: `{command_text(detected)}` must exit 0, up "
+                    f"to {agent.goal_max_iters} iteration(s) per task.")
+        else:
+            agent.goal_cmd = arg
+            print_success(
+                f"Goal mode: `{arg}` must exit 0, up to "
+                f"{agent.goal_max_iters} iteration(s) per task, with each "
+                "failure's output fed back for another attempt.")
 
     elif cmd == "scope":
         if not arg:

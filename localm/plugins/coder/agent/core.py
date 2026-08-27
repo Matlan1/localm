@@ -174,6 +174,11 @@ class Agent(
         # hand it straight back.
         self.verify_cmd     = None if restricted else verify_cmd
         self.verify_max_retries = verify_max_retries
+        # /goal in cli/repl.py routes each plain-text message through
+        # cli/goal.py's _run_goal_loop instead of a single chat() turn, using
+        # this command and iteration cap.
+        self.goal_cmd: Optional[str] = None
+        self.goal_max_iters: int = 5
         # Per-task turn budget for uncertainty escalation. None -> 2/3 of max_turns.
         self.turn_budget    = turn_budget if turn_budget is not None else max(3, (max_turns * 2) // 3)
         # Structured event sink (GUI/web sessions). Called with a dict per event:

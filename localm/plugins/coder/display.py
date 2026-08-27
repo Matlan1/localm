@@ -337,6 +337,8 @@ HELP_TEXT = """\
   [bold]/scope clear[/bold]          remove the active scope restriction
   [bold]/verify [cmd|auto|off][/bold] command that must exit 0 before a turn that
                         changed files may finish (run by the harness, not the model)
+  [bold]/goal [cmd|auto|off][/bold] iterate the next task until this command exits 0,
+                        re-running the whole task with each failure fed back
 
 [dim]Tab completes commands and project paths (where readline is available);
 REPL history persists across sessions in log/full modes, never in privacy.[/dim]
