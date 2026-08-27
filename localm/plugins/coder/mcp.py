@@ -92,7 +92,7 @@ class MCPServer:
         init = self._request("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": {"name": "localcoder", "version": "0.1.5rc3"},
+            "clientInfo": {"name": "localcoder", "version": "0.1.5"},
         }, timeout=_INIT_TIMEOUT)
         if "error" in init:
             raise MCPError(self._with_tail(
