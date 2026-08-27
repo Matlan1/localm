@@ -118,6 +118,45 @@ def test_make_self_classify_with_model_calls_endpoint(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  A crashed generation rendered as HTTP 200 must not be trusted as content    #
+# --------------------------------------------------------------------------- #
+
+def test_self_classify_falls_back_on_a_crashed_generation(monkeypatch):
+    """http_server._complete() catches a generation crash and returns it as a
+    normal 200 with finish_reason="error" (readable-in-chat by design). The
+    tie-break must not treat that content as a real classification."""
+    class FakeResp:
+        ok = True
+        def json(self):
+            return {"choices": [{"finish_reason": "error", "message": {
+                "content": "[inference error: worker exit 1]"}}]}
+    monkeypatch.setattr(requests, "request", lambda *a, **k: FakeResp())
+    classify = plug._make_self_classify("https://127.0.0.1:65535/v1", lambda: "mymodel")
+    assert classify("key: value") is None
+
+
+def test_self_describe_image_raises_on_a_crashed_generation(monkeypatch):
+    """Same failure mode as above, for the image-description path: a vision
+    worker that dies on undecodable bytes must be reported as a failed
+    description, not indexed as the image's real content (this is the vision
+    generation crashing, so a raise here reaches extract_bytes's own
+    ExtractError handling for a per-file failure - see extract.py)."""
+    class FakeResp:
+        ok = True
+        def json(self):
+            return {"choices": [{"finish_reason": "error", "message": {
+                "content": "[inference error: worker exit 1]"}}]}
+    monkeypatch.setattr(requests, "request", lambda *a, **k: FakeResp())
+    describe = plug._make_self_describe_image(
+        "https://127.0.0.1:65535/v1", lambda: "mymodel")
+    try:
+        describe(b"not a real image", "image/png")
+        assert False, "expected a RuntimeError, the crash text was returned instead"
+    except RuntimeError as e:
+        assert "inference error" in str(e)
+
+
+# --------------------------------------------------------------------------- #
 #  Pure heuristic / classify_format unit tests (lazy import)                   #
 # --------------------------------------------------------------------------- #
 
