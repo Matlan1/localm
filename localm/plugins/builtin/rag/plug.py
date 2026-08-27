@@ -182,7 +182,19 @@ def _make_self_classify(self_url: str, active_model):
                              },
                              timeout=10, base_url=self_url)
             if r.ok:
-                choice = r.json()["choices"][0]["message"]["content"].strip().lower()
+                body = r.json()["choices"][0]
+                if body.get("finish_reason") == "error":
+                    # The backend caught a generation crash and rendered it as a
+                    # normal 200 (http_server._complete's design, for the chat
+                    # UI) - the content is an internal error message, not a real
+                    # classification. Fall back to the heuristic label instead of
+                    # trusting it.
+                    from localm.debuglog import logger
+                    logger.debug("rag classify: tie-break backend errored mid-"
+                                 "generation, falling back to heuristic label: %s",
+                                 body["message"]["content"].strip())
+                    return None
+                choice = body["message"]["content"].strip().lower()
                 choice = choice.replace("`", "").replace(".", "")
                 return choice
             # Non-ok HTTP response: self_request does not raise on a non-2xx, so log
@@ -222,9 +234,18 @@ def _make_self_describe_image(self_url: str, active_model):
                          },
                          timeout=60, base_url=self_url)
         if r.ok:
+            body = r.json()["choices"][0]
+            if body.get("finish_reason") == "error":
+                # The backend caught a generation crash (e.g. the vision worker
+                # died on undecodable image bytes) and rendered it as a normal
+                # 200 (http_server._complete's design, for the chat UI) - the
+                # content is an internal error message, never a real
+                # description. Raise so extract_bytes records a clean per-file
+                # failure instead of indexing the crash text as content.
+                raise RuntimeError(body["message"]["content"].strip())
             # "" means the model answered with an empty description. A request
             # failure propagates below.
-            return r.json()["choices"][0]["message"]["content"].strip()
+            return body["message"]["content"].strip()
         # Not OK: surface the endpoint's real error. A transport error from
         # self_request propagates rather than being swallowed to None.
         err_detail = ""

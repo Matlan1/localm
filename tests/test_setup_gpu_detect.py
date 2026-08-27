@@ -30,7 +30,20 @@ SETUP_SH = ROOT / "setup.sh"
 
 
 def _bash() -> str | None:
-    return shutil.which("bash")
+    """Git for Windows ships TWO bash.exe: <root>/bin/bash.exe (a thin shim)
+    and <root>/usr/bin/bash.exe (the real MSYS bash). The shim bootstraps its
+    own MSYS root's /usr/bin ahead of whatever PATH this test passes via
+    subprocess's env=, so a stub placed on an isolated PATH silently loses to
+    the real system uname/etc - the real bash does not do this. Which one
+    shutil.which("bash") finds first depends on this machine's own PATH
+    ordering, so prefer the real bash's sibling path when it exists rather
+    than trusting whichever one comes first."""
+    found = shutil.which("bash")
+    if found is None:
+        return None
+    shim = Path(found)
+    real = shim.parent.parent / "usr" / "bin" / shim.name
+    return str(real) if real.is_file() else found
 
 
 def _function_body(name: str) -> str:
@@ -40,10 +53,21 @@ def _function_body(name: str) -> str:
     return src[start:end]
 
 
+def _mark_executable(path: Path) -> None:
+    """os.chmod()/Path.chmod() cannot set a real POSIX execute bit on NTFS -
+    it silently no-ops the S_IEXEC/S_IXGRP/S_IXOTH bits, which some Git-Bash/
+    MSYS builds require before they will invoke a shebang script via command
+    substitution (others are lenient about it, which is why this was never
+    caught locally). Route through bash's own chmod, which does set a bit
+    MSYS itself recognizes."""
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    subprocess.run(["chmod", "+x", str(path)], check=True)
+
+
 def _make_stub(bin_dir: Path, name: str) -> None:
     stub = bin_dir / name
     stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    _mark_executable(stub)
 
 
 def _run_detect_gpu(tmp_path: Path, *, stub_names: list[str]) -> str:
@@ -180,7 +204,7 @@ def _make_uname_stub(bin_dir: Path, *, os_name: str, arch: str) -> None:
         f'if [ "$1" = "-m" ]; then echo {arch}; fi\n',
         encoding="utf-8",
     )
-    stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    _mark_executable(stub)
 
 
 def _run_detect_gpu_with_uname(tmp_path: Path, *, os_name: str, arch: str,
