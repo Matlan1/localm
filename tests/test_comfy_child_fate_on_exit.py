@@ -97,6 +97,7 @@ class TestRealChildIsKilled:
 
     def test_a_real_spawned_comfy_is_dead_after_shutdown(self, monkeypatch):
         monkeypatch.setattr(hs, "_engine", None)
+        _patch_network(monkeypatch)
         proc = _spawn_sleeper()
         try:
             cc._remember_spawned("http://127.0.0.1:8188", proc)
@@ -117,6 +118,7 @@ class TestRealChildIsKilled:
 
     def test_a_real_spawned_comfy_is_dead_after_restart(self, monkeypatch):
         monkeypatch.setattr(hs, "_engine", None)
+        _patch_network(monkeypatch)
         proc = _spawn_sleeper()
         try:
             cc._remember_spawned("http://127.0.0.1:8188", proc)
