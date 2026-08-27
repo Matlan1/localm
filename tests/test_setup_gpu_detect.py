@@ -53,7 +53,10 @@ def _mark_executable(path: Path) -> None:
 
 def _make_stub(bin_dir: Path, name: str) -> None:
     stub = bin_dir / name
-    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    # newline="\n": Path.write_text()'s default newline translation writes
+    # CRLF on Windows, which corrupts the shebang line - MSYS then reports
+    # the stub as not found rather than merely non-executable.
+    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
     _mark_executable(stub)
 
 
@@ -185,11 +188,13 @@ def test_detect_gpu_guess_not_printed_as_its_own_verdict_line_in_source():
 
 def _make_uname_stub(bin_dir: Path, *, os_name: str, arch: str) -> None:
     stub = bin_dir / "uname"
+    # newline="\n": see _make_stub.
     stub.write_text(
         "#!/bin/sh\n"
         f'if [ "$1" = "-s" ]; then echo {os_name}; fi\n'
         f'if [ "$1" = "-m" ]; then echo {arch}; fi\n',
         encoding="utf-8",
+        newline="\n",
     )
     _mark_executable(stub)
 
