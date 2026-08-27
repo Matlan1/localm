@@ -38,8 +38,19 @@ from localm.media import comfy_client as cc
 
 
 def _spawn_sleeper(seconds: int = 120) -> subprocess.Popen:
+    """Spawn a real child the same way _launch_and_wait spawns ComfyUI: its own
+    process group/session on POSIX (start_new_session), its own process group
+    on Windows (CREATE_NEW_PROCESS_GROUP). _kill_process_tree's POSIX arm does
+    os.killpg(os.getpgid(pid), ...) on the assumption that the target has its
+    OWN group - a plain Popen() without this shares the CALLER's group, so
+    killpg would signal the test runner's own process group too."""
+    popen_kw: dict = {}
+    if sys.platform == "win32":
+        popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kw["start_new_session"] = True
     return subprocess.Popen([sys.executable, "-c",
-                             f"import time; time.sleep({seconds})"])
+                             f"import time; time.sleep({seconds})"], **popen_kw)
 
 
 def _dead(proc, timeout=15.0) -> bool:
