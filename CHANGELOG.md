@@ -517,6 +517,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **A ComfyUI instance localm launched itself is no longer left running after
+  you stop or restart the server.** It runs in its own detached process so it
+  can be closed cleanly on demand, but nothing closed it when the server
+  itself stopped or restarted - it just kept running in the background,
+  still holding whatever model it last had loaded, and a repeated
+  restart could leave several of these behind at once. Stopping or
+  restarting localm now stops any ComfyUI it launched along with it.
 - **Starting localm no longer prints an unprompted note about a missing vision
   projector.** Launch used to include a network check for each vision-capable
   model's companion projector file, and if network access was off it announced
