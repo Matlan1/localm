@@ -11,6 +11,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **`/goal <command>` in the coder REPL.** Iterates the current task until the
+  command exits 0, feeding each failure back for another attempt (up to 5 by
+  default), instead of stopping after a single reply. `/goal auto` re-detects
+  the project's own check; `/goal off` turns it off again. The same iterating
+  loop the non-interactive `--until` flag already used.
+
 ## [0.1.5] - 2026-08-26
 
 ### Added
