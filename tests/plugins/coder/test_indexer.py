@@ -10,6 +10,7 @@ write_file/edit_file - has no `path` arg to refresh_file() ahead of time; see
 execution.py's _refresh_map_for_tool and context.py's _build_messages)."""
 
 import json
+import os
 import time
 from unittest.mock import patch
 
@@ -341,6 +342,13 @@ def test_load_reconcile_picks_up_an_edit_made_after_caching(tmp_path):
     ProjectMap.build(tmp_path).save_cache(cache)
 
     f.write_text("def new_func():\n    pass\n", encoding="utf-8")
+    # Force a detectably later mtime. old_func/new_func are the same byte
+    # length, so _rescan_if_dirty()'s stat-diff (mtime+size, not a content
+    # hash) needs the mtime to differ - and two back-to-back writes can
+    # otherwise land in the same filesystem timestamp tick.
+    st = f.stat()
+    os.utime(f, (st.st_atime, st.st_mtime + 2))
+
     loaded = ProjectMap.load_cached_and_reconcile(tmp_path, cache)
     assert loaded.file_count() == 1   # still just a.py - no self-contamination
     fs = next(x for x in loaded.files if x.path.name == "a.py")
