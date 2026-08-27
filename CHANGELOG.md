@@ -11,16 +11,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-26
+
 ### Added
 - **`/goal <command>` in the coder REPL.** Iterates the current task until the
   command exits 0, feeding each failure back for another attempt (up to 5 by
   default), instead of stopping after a single reply. `/goal auto` re-detects
   the project's own check; `/goal off` turns it off again. The same iterating
   loop the non-interactive `--until` flag already used.
-
-## [0.1.5] - 2026-08-26
-
-### Added
 - **A coder session started in the browser can now choose which model server
   answers it.** The setup form offers this localm, any OpenAI-compatible URL
   (Ollama, LM Studio, vLLM), OpenAI, or Anthropic, per session, matching the
@@ -517,6 +515,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Indexing a broken image into a knowledge base no longer stores an internal
+  error message as if it were the image's description.** If the model
+  answering an image-description request crashed on unreadable image data, its
+  own error text was saved and returned as a normal search result. That path
+  is now treated as a failed description, the same as any other failure, and
+  the file is skipped rather than indexed with the wrong content.
 - **A ComfyUI instance localm launched itself is no longer left running after
   you stop or restart the server.** It runs in its own detached process so it
   can be closed cleanly on demand, but nothing closed it when the server
