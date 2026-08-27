@@ -307,6 +307,139 @@ def test_serve_async_plain_propagates_internal_server_startup_failure(monkeypatc
     asyncio.run(go())
 
 
+class _CleanExitServer:
+    """Stand-in for uvicorn.Server whose serve() completes NORMALLY (no
+    exception) without ever setting ``started`` - the other completion state
+    portmux's startup-wait loop must handle: _FailFastServer above covers the
+    task finishing WITH an exception."""
+    def __init__(self, config):
+        self.config = config
+        self.started = False
+        self.should_exit = False
+        self.servers = []
+
+    async def serve(self, sockets=None):
+        return
+
+
+def test_serve_async_plain_returns_cleanly_when_internal_server_exits_without_starting(monkeypatch):
+    import uvicorn as uvicorn_mod
+    monkeypatch.setattr(uvicorn_mod, "Server", _CleanExitServer)
+
+    async def go():
+        port = _free_port()
+        result = await portmux._serve_async_plain(_tiny_asgi_app, "127.0.0.1", port, "warning")
+        assert result is None
+        with pytest.raises(OSError):
+            await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout=2)
+    asyncio.run(go())
+
+
+def test_serve_async_tls_returns_cleanly_when_internal_server_exits_without_starting(
+        tmp_path, monkeypatch):
+    cert, key = tls.ensure_cert(tmp_path, hostnames=["127.0.0.1"])
+    import uvicorn as uvicorn_mod
+    monkeypatch.setattr(uvicorn_mod, "Server", _CleanExitServer)
+
+    async def go():
+        port = _free_port()
+        result = await portmux._serve_async(
+            _tiny_asgi_app, "127.0.0.1", port, cert, key, "warning")
+        assert result is None
+    asyncio.run(go())
+
+
+def test_serve_async_plain_closes_the_listen_socket_when_start_server_fails(monkeypatch):
+    """The internal uvicorn is real and comes up; the OUTER demux socket fails
+    to bind as a start_server listener - the prepared socket must be closed
+    rather than leaked, and the error must propagate."""
+    async def fail_start_server(*a, **kw):
+        raise RuntimeError("simulated: asyncio.start_server failed")
+    monkeypatch.setattr(portmux.asyncio, "start_server", fail_start_server)
+
+    async def go():
+        port = _free_port()
+        with pytest.raises(RuntimeError, match="simulated: asyncio.start_server failed"):
+            await portmux._serve_async_plain(_tiny_asgi_app, "127.0.0.1", port, "warning")
+        # A fresh bind on the same port must succeed immediately - proves the
+        # listen socket was closed, not leaked.
+        s = portmux.create_listen_socket("127.0.0.1", port)
+        s.close()
+    asyncio.run(go())
+
+
+def test_serve_async_tls_closes_the_listen_socket_when_start_server_fails(tmp_path, monkeypatch):
+    cert, key = tls.ensure_cert(tmp_path, hostnames=["127.0.0.1"])
+
+    async def fail_start_server(*a, **kw):
+        raise RuntimeError("simulated: asyncio.start_server failed")
+    monkeypatch.setattr(portmux.asyncio, "start_server", fail_start_server)
+
+    async def go():
+        port = _free_port()
+        with pytest.raises(RuntimeError, match="simulated: asyncio.start_server failed"):
+            await portmux._serve_async(
+                _tiny_asgi_app, "127.0.0.1", port, cert, key, "warning")
+        s = portmux.create_listen_socket("127.0.0.1", port)
+        s.close()
+    asyncio.run(go())
+
+
+# --------------------------------------------------------------------------- #
+#  _cancel_inflight_conns: the empty/all-done arm the shutdown tests above
+#  never reach (they always leave one connection genuinely still pending)
+# --------------------------------------------------------------------------- #
+
+def test_cancel_inflight_conns_with_no_pending_tasks_is_a_noop():
+    asyncio.run(portmux._cancel_inflight_conns(set()))
+
+
+def test_cancel_inflight_conns_skips_a_task_that_already_finished():
+    async def go():
+        done_task = asyncio.ensure_future(asyncio.sleep(0))
+        await done_task
+        assert done_task.done()
+        # Must not try to cancel/await an already-finished task.
+        await portmux._cancel_inflight_conns({done_task})
+    asyncio.run(go())
+
+
+# --------------------------------------------------------------------------- #
+#  Non-Windows platform: the wakeup-task branch is win32-only, so a real
+#  Windows CI run can only exercise the "no wakeup task" arm by asserting the
+#  live platform check itself, not by faking sys.platform on the box that
+#  IS win32 (that would test a code path no real non-Windows box takes).
+# --------------------------------------------------------------------------- #
+
+def test_serve_async_plain_skips_the_wakeup_task_off_windows(monkeypatch):
+    monkeypatch.setattr(portmux.sys, "platform", "linux")
+
+    async def go():
+        port = _free_port()
+        task = asyncio.ensure_future(
+            portmux._serve_async_plain(_tiny_asgi_app, "127.0.0.1", port, "warning"))
+        await _wait_connectable(port)
+        await _shutdown(task)
+        with pytest.raises(OSError):
+            await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout=2)
+    asyncio.run(go())
+
+
+def test_serve_async_tls_skips_the_wakeup_task_off_windows(tmp_path, monkeypatch):
+    cert, key = tls.ensure_cert(tmp_path, hostnames=["127.0.0.1"])
+    monkeypatch.setattr(portmux.sys, "platform", "linux")
+
+    async def go():
+        port = _free_port()
+        task = asyncio.ensure_future(
+            portmux._serve_async(_tiny_asgi_app, "127.0.0.1", port, cert, key, "warning"))
+        await _wait_connectable(port)
+        await _shutdown(task)
+        with pytest.raises(OSError):
+            await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout=2)
+    asyncio.run(go())
+
+
 # --------------------------------------------------------------------------- #
 #  run_server: crash-guard wiring, instance_id extraction, failure handling
 # --------------------------------------------------------------------------- #
@@ -401,6 +534,42 @@ def test_run_server_plain_falls_back_to_uvicorn_run_on_unexpected_error(monkeypa
         # waits for the longest open response.
         "timeout_graceful_shutdown": portmux.GRACEFUL_SHUTDOWN_TIMEOUT,
     }]
+    assert calls[-1] == ("disarmed", None)
+
+
+def test_run_server_plain_fallback_binds_the_prepared_socket_on_success(monkeypatch):
+    """The OTHER arm from the test above: create_listen_socket succeeds on the
+    fallback path too, so _run_uvicorn_on_socket must bind the real prepared
+    socket via Server.run(sockets=...) instead of uvicorn's own bind."""
+    calls = _patch_bugreport(monkeypatch)
+
+    async def fake_serve(app, host, port, log_level):
+        raise RuntimeError("peek layer exploded")
+    monkeypatch.setattr(portmux, "_serve_async_plain", fake_serve)
+
+    class _RecordingServer:
+        instances: list = []
+        def __init__(self, config):
+            self.config = config
+            self.run_sockets = None
+            _RecordingServer.instances.append(self)
+        def run(self, sockets=None):
+            self.run_sockets = sockets
+
+    _RecordingServer.instances = []
+    import uvicorn as uvicorn_mod
+    monkeypatch.setattr(uvicorn_mod, "Server", _RecordingServer)
+
+    port = _free_port()
+    portmux.run_server(_bare_app, "127.0.0.1", port)   # must not raise
+    assert len(_RecordingServer.instances) == 1
+    server = _RecordingServer.instances[0]
+    try:
+        assert server.run_sockets and len(server.run_sockets) == 1
+        assert server.run_sockets[0].getsockname()[1] == port
+    finally:
+        for s in (server.run_sockets or []):
+            s.close()
     assert calls[-1] == ("disarmed", None)
 
 
