@@ -219,6 +219,61 @@ def test_apple_silicon_is_metal(tmp_path):
     assert _run_detect_gpu_with_uname(tmp_path, os_name="Darwin", arch="arm64") == "metal"
 
 
+def test_zzz_diagnostic_apple_silicon_stub_dump(tmp_path):
+    """TEMPORARY, remove before merge. Dumps everything about the uname stub
+    and its invocation so a real CI-only failure can be diagnosed from the
+    log instead of guessed at locally (this box's Git-Bash cannot reproduce
+    the failure that windows-latest CI shows for test_apple_silicon_is_metal)."""
+    import platform
+    import sys
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_uname_stub(bin_dir, os_name="Darwin", arch="arm64")
+    stub = bin_dir / "uname"
+
+    env = dict(os.environ)
+    env["PATH"] = str(bin_dir)
+
+    direct = subprocess.run([_bash(), "-c", '"$1" -s; echo "exit=$?"', "--", str(stub)],
+                            capture_output=True, text=True, env=env, timeout=15)
+    via_path = subprocess.run([_bash(), "-c", "uname -s; echo \"exit=$?\""],
+                              capture_output=True, text=True, env=env, timeout=15)
+    type_result = subprocess.run([_bash(), "-c", "type uname; type -a uname"],
+                                 capture_output=True, text=True, env=env, timeout=15)
+    ls_path = shutil.which("ls")
+    version_result = subprocess.run([_bash(), "--version"],
+                                    capture_output=True, text=True, env=env, timeout=15)
+    msystem_result = subprocess.run([_bash(), "-c", "echo MSYSTEM=$MSYSTEM"],
+                                    capture_output=True, text=True, env=env, timeout=15)
+    listing = subprocess.run([_bash(), "-c", '"$1" -la "$2"', "--", ls_path or "ls", str(bin_dir)],
+                             capture_output=True, text=True, env=env, timeout=15)
+    no_redirect_script = _function_body("detect_gpu").replace("2>/dev/null", "")
+    no_redirect = subprocess.run([_bash(), "-c", no_redirect_script + "\ndetect_gpu\n"],
+                                 capture_output=True, text=True, env=env, timeout=15)
+
+    pytest.fail(
+        f"DIAGNOSTIC DUMP (not a real failure)\n"
+        f"platform.system()={platform.system()!r} sys.platform={sys.platform!r}\n"
+        f"_bash()={_bash()!r}\n"
+        f"stub bytes={stub.read_bytes()!r}\n"
+        f"stub stat mode={oct(stub.stat().st_mode)}\n"
+        f"--- direct invocation ($1 -s via absolute path) ---\n"
+        f"returncode={direct.returncode} stdout={direct.stdout!r} stderr={direct.stderr!r}\n"
+        f"--- via PATH (uname -s) ---\n"
+        f"returncode={via_path.returncode} stdout={via_path.stdout!r} stderr={via_path.stderr!r}\n"
+        f"--- type uname ---\n"
+        f"returncode={type_result.returncode} stdout={type_result.stdout!r} stderr={type_result.stderr!r}\n"
+        f"--- bash --version / MSYSTEM ---\n"
+        f"stdout={version_result.stdout!r} stderr={version_result.stderr!r}\n"
+        f"MSYSTEM stdout={msystem_result.stdout!r}\n"
+        f"--- ls -la bin_dir ---\n"
+        f"stdout={listing.stdout!r} stderr={listing.stderr!r}\n"
+        f"--- detect_gpu with 2>/dev/null stripped ---\n"
+        f"returncode={no_redirect.returncode} stdout={no_redirect.stdout!r} stderr={no_redirect.stderr!r}\n"
+    )
+
+
 def test_intel_mac_is_cpu_not_metal(tmp_path):
     # Matches hwdetect.py's own policy: Intel Macs get "cpu", not metal - the
     # official llama.cpp macOS Metal build targets Apple Silicon.
