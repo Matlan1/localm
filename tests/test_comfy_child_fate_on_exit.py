@@ -1,0 +1,205 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""A stop or restart must not abandon a ComfyUI instance localm itself
+launched.
+
+localm spawns ComfyUI (its own managed instance, or a user's via
+comfy_launch_cmd) in a DETACHED process group specifically so stop_comfy()
+can kill its whole tree on demand (see comfy_client.py's _launch_and_wait).
+That same detachment means the child does NOT die on its own when the
+localm server process exits or re-execs:
+
+  * _do_shutdown ends at os._exit(0) and _do_restart at os.execv. Both
+    bypass atexit.
+  * CREATE_NEW_PROCESS_GROUP (Windows) / start_new_session (POSIX) is exactly
+    what keeps a Ctrl+C or an ordinary parent-death signal from reaching it.
+
+An abandoned ComfyUI keeps running, holding whatever VRAM/RAM its last job
+loaded, invisible to the next server start (a fresh process has an empty
+_spawned_procs).
+
+The first test class here spawns a genuine child and asserts on genuine
+process liveness, for the same reason test_job_child_fate_on_exit.py's does:
+a recording double's stop_comfy being CALLED would also pass against a kill
+that never reaches the process (the wrong pid, a signal the child ignores).
+The double-based tests below only cover which exit paths call it.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+
+import pytest
+
+from localm.inference import http_server as hs
+from localm.media import comfy_client as cc
+
+
+def _spawn_sleeper(seconds: int = 120) -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c",
+                             f"import time; time.sleep({seconds})"])
+
+
+def _dead(proc, timeout=15.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return True
+        time.sleep(0.05)
+    return proc.poll() is not None
+
+
+@pytest.fixture(autouse=True)
+def isolated_spawned_procs(monkeypatch):
+    """A fresh _spawned_procs dict per test - module-level state shared
+    across every caller (see test_comfy_console_warnings.py's own note on
+    this same hazard)."""
+    monkeypatch.setattr(cc, "_spawned_procs", {})
+
+
+class _FakeProc:
+    """A Popen stand-in for the tests that only ask WHICH PATHS call the stop."""
+    def __init__(self, *, alive=True, pid=4242):
+        self.pid = pid
+        self._alive = alive
+
+    def poll(self):
+        return None if self._alive else 0
+
+
+def _patch_network(monkeypatch, *, alive_after=False):
+    """Stub the network side-effects stop_comfy makes so a fake-proc test
+    never touches a real ComfyUI - mirrors test_stopcomfy_2026_07_01.py's
+    _patch_common."""
+    monkeypatch.setattr(cc, "interrupt_comfy", lambda url: True)
+    monkeypatch.setattr(cc, "free_comfy_vram", lambda url=None: True)
+    monkeypatch.setattr(cc, "_comfy_alive", lambda url, timeout=3.0: alive_after)
+
+
+# --------------------------------------------------------------------------- #
+#  the real property: a real spawned ComfyUI is actually dead afterwards
+# --------------------------------------------------------------------------- #
+
+class TestRealChildIsKilled:
+
+    def test_a_real_spawned_comfy_is_dead_after_shutdown(self, monkeypatch):
+        monkeypatch.setattr(hs, "_engine", None)
+        proc = _spawn_sleeper()
+        try:
+            cc._remember_spawned("http://127.0.0.1:8188", proc)
+            assert proc.poll() is None, "the helper child did not start"
+            monkeypatch.setattr(
+                os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+            with pytest.raises(SystemExit):
+                hs._do_shutdown()
+            assert _dead(proc), (
+                "the ComfyUI localm launched survived the stop: a detached "
+                "process group does not die with the parent, and os._exit "
+                "bypasses atexit - a quiet child then keeps running orphaned "
+                "(measured)")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+    def test_a_real_spawned_comfy_is_dead_after_restart(self, monkeypatch):
+        monkeypatch.setattr(hs, "_engine", None)
+        proc = _spawn_sleeper()
+        try:
+            cc._remember_spawned("http://127.0.0.1:8188", proc)
+            assert proc.poll() is None, "the helper child did not start"
+            monkeypatch.setattr(
+                os, "execv", lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+            with pytest.raises(SystemExit):
+                hs._do_restart()
+            assert _dead(proc), (
+                "the OLD ComfyUI survived the restart: os.execv replaces "
+                "this process image but never touches a detached child")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+
+# --------------------------------------------------------------------------- #
+#  stop_all_spawned_comfy: multiple instances, partial failure
+# --------------------------------------------------------------------------- #
+
+class TestStopAllSpawned:
+
+    def test_stops_every_tracked_instance_not_just_the_first(self, monkeypatch):
+        _patch_network(monkeypatch)
+        killed = []
+        monkeypatch.setattr(cc, "_kill_process_tree",
+                            lambda proc: killed.append(proc.pid))
+        for i, url in enumerate(("http://127.0.0.1:8188",
+                                 "http://127.0.0.1:8189",
+                                 "http://127.0.0.1:8190")):
+            cc._remember_spawned(url, _FakeProc(pid=100 + i))
+        assert cc.stop_all_spawned_comfy() == 3
+        assert sorted(killed) == [100, 101, 102]
+
+    def test_no_spawned_instances_is_a_noop(self, monkeypatch):
+        _patch_network(monkeypatch)
+        assert cc.stop_all_spawned_comfy() == 0
+
+    def test_one_instance_failing_to_stop_does_not_block_the_others(self, monkeypatch):
+        _patch_network(monkeypatch)
+        killed = []
+
+        def _kill(proc):
+            if proc.pid == 200:
+                raise RuntimeError("boom")
+            killed.append(proc.pid)
+        monkeypatch.setattr(cc, "_kill_process_tree", _kill)
+        cc._remember_spawned("http://127.0.0.1:8188", _FakeProc(pid=200))
+        cc._remember_spawned("http://127.0.0.1:8189", _FakeProc(pid=201))
+        assert cc.stop_all_spawned_comfy() == 1   # only the healthy one counted
+        assert killed == [201]
+
+
+# --------------------------------------------------------------------------- #
+#  both exit paths must call it
+# --------------------------------------------------------------------------- #
+
+class TestExitPathsInvokeIt:
+
+    @pytest.fixture
+    def a_spawned_instance(self, monkeypatch):
+        monkeypatch.setattr(hs, "_engine", None)
+        _patch_network(monkeypatch)
+        killed = []
+        monkeypatch.setattr(cc, "_kill_process_tree",
+                            lambda proc: killed.append(proc.pid))
+        cc._remember_spawned("http://127.0.0.1:8188", _FakeProc(pid=321))
+        return killed
+
+    def test_do_shutdown_stops_the_spawned_comfy(self, a_spawned_instance, monkeypatch):
+        monkeypatch.setattr(os, "_exit",
+                            lambda code: (_ for _ in ()).throw(SystemExit(code)))
+        with pytest.raises(SystemExit):
+            hs._do_shutdown()
+        assert a_spawned_instance == [321], (
+            "stop left the launched ComfyUI running: os._exit bypasses "
+            "atexit, so nothing else reaps it")
+
+    def test_do_restart_stops_the_spawned_comfy(self, a_spawned_instance, monkeypatch):
+        monkeypatch.setattr(os, "execv",
+                            lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+        with pytest.raises(SystemExit):
+            hs._do_restart()
+        assert a_spawned_instance == [321], (
+            "restart left the OLD ComfyUI running: os.execv replaces this "
+            "process image but never touches a separate detached child")
+
+    def test_a_failure_in_the_comfy_stop_does_not_block_the_shutdown(self, monkeypatch):
+        """The stop the user asked for outranks tidying up ComfyUI."""
+        monkeypatch.setattr(hs, "_engine", None)
+        monkeypatch.setattr(cc, "stop_all_spawned_comfy",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        monkeypatch.setattr(os, "_exit",
+                            lambda code: (_ for _ in ()).throw(SystemExit(code)))
+        with pytest.raises(SystemExit):
+            hs._do_shutdown()

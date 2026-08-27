@@ -1408,6 +1408,25 @@ def _take_spawned(api_url: str):
         return _spawned_procs.pop(api_url, None)
 
 
+def stop_all_spawned_comfy() -> int:
+    """Stop every ComfyUI instance localm itself launched - image/music/video
+    can each point at a different api_url, so this is the "all of them" form
+    of stop_comfy() for a full server stop/restart. Returns how many were
+    stopped. Best-effort per instance: one instance's stop failure does not
+    block the others."""
+    with _spawned_lock:
+        api_urls = list(_spawned_procs.keys())
+    stopped = 0
+    for api_url in api_urls:
+        try:
+            ok, _ = stop_comfy(api_url)
+            if ok:
+                stopped += 1
+        except Exception:
+            pass
+    return stopped
+
+
 def spawned_pid(api_url: Optional[str] = None) -> Optional[int]:
     """The PID of the ComfyUI localm launched for *api_url* if it is still ours
     and running, else None (localm did not launch it, or it has exited)."""

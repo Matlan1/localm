@@ -2932,6 +2932,21 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     except Exception:
         _dbg_swallow("terminating job child processes during shutdown failed "
                      "(non-fatal); a child may be left running")
+    # Any ComfyUI instance localm itself launched (image/music/video, each
+    # possibly its own api_url) runs in a detached process group so
+    # stop_comfy() can kill its whole tree on demand - which also means it
+    # does NOT die on its own when this process exits. Left unstopped it
+    # keeps running, orphaned, holding whatever VRAM/RAM its last job loaded.
+    try:
+        from localm.media.comfy_client import stop_all_spawned_comfy
+        _comfy_stopped = stop_all_spawned_comfy()
+        if _comfy_stopped:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("stopped %d localm-launched ComfyUI instance(s) on shutdown",
+                      _comfy_stopped)
+    except Exception:
+        _dbg_swallow("stopping localm-launched ComfyUI instance(s) during shutdown "
+                     "failed (non-fatal); one may be left running")
     # Unload all engines in the multi-model dictionary
     for engine in list(_engines.values()):
         try:
@@ -3100,6 +3115,21 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     except Exception:
         _dbg_swallow("terminating job child processes during restart failed "
                      "(non-fatal); a child may be left running")
+    # Any ComfyUI instance localm itself launched runs in a detached process
+    # group so stop_comfy() can kill its whole tree on demand - which also
+    # means it does NOT die on its own when this process re-execs. Left
+    # unstopped it keeps running, orphaned, holding whatever VRAM/RAM its
+    # last job loaded, alongside the freshly re-exec'd server.
+    try:
+        from localm.media.comfy_client import stop_all_spawned_comfy
+        _comfy_stopped = stop_all_spawned_comfy()
+        if _comfy_stopped:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("stopped %d localm-launched ComfyUI instance(s) on restart",
+                      _comfy_stopped)
+    except Exception:
+        _dbg_swallow("stopping localm-launched ComfyUI instance(s) during restart "
+                     "failed (non-fatal); one may be left running")
 
     free_before = None
     try:
