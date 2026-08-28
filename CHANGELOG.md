@@ -11,6 +11,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **A stuck GPU-detection helper could wedge VRAM measurement for the rest of
+  the run.** When it happened, loading any model afterward refused with "free
+  VRAM could not be measured," even though the graphics driver itself was
+  fine, and only a server restart cleared it. The helper's own cleanup after
+  giving up on a slow check could itself block forever waiting on a hung
+  child process; that wait is now bounded, so a stuck helper is abandoned
+  instead of wedging every check that comes after it.
+
 ## [0.1.5] - 2026-08-26
 
 ### Added

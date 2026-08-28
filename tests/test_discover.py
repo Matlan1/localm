@@ -1087,9 +1087,17 @@ class TestListGpus:
     def test_falls_back_to_nvidia_smi_without_torch(self):
         csv = ("0, NVIDIA RTX 4090, 24576, 20000\n"
                "1, NVIDIA RTX 3060, 12288, 10000\n")
-        fake_proc = MagicMock(returncode=0, stdout=csv)
+        # Both the isolated-torch probe and the nvidia-smi fallback now spawn
+        # via subprocess.Popen. The isolated-torch call sees this same CSV
+        # text, which is not valid JSON: it correctly reports "unusable
+        # reply" (None) and falls through to nvidia-smi, whose call gets the
+        # identical mocked reply and parses it as CSV - matching the
+        # fallback chain this test exercises.
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.return_value = (csv, "")
+        fake_popen.return_value.returncode = 0
         with patch.dict(sys.modules, {"torch": None}), \
-             patch("subprocess.run", return_value=fake_proc):
+             patch("subprocess.Popen", fake_popen):
             gpus = list_gpus()
         assert len(gpus) == 2
         # free_scope "device" is part of this path's contract: nvidia-smi's
@@ -1103,15 +1111,41 @@ class TestListGpus:
 
     def test_empty_when_nothing_available(self):
         with patch.dict(sys.modules, {"torch": None}), \
-             patch("subprocess.run", side_effect=FileNotFoundError):
+             patch("subprocess.Popen", side_effect=FileNotFoundError):
             assert list_gpus() == []
 
     def test_empty_when_torch_sees_no_cuda(self):
         fake = MagicMock()
         fake.cuda.is_available.return_value = False
         with patch.dict(sys.modules, {"torch": fake}), \
-             patch("subprocess.run", side_effect=FileNotFoundError):
+             patch("subprocess.Popen", side_effect=FileNotFoundError):
             assert list_gpus() == []
+
+    def test_nvidia_smi_wedged_post_kill_drain_is_bounded(self, monkeypatch):
+        """Same defect as _torch_gpus_isolated's own drain: subprocess.run's
+        Windows kill-path drains the pipes with a SECOND communicate() call
+        carrying no timeout of its own, which can block forever if nvidia-smi
+        (or a process it spawned) leaves the pipe open. That would wedge the
+        shared single-flight GPU-probe lock (_gpu_probe_inflight) permanently.
+        The drain here must be bounded, not left open-ended."""
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: True)
+        import subprocess
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.side_effect = [
+            subprocess.TimeoutExpired("nvidia-smi", 5.0),
+            subprocess.TimeoutExpired("nvidia-smi", 3.0),
+        ]
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        assert discover._list_gpus_probe() == []
+
+        fake_popen.return_value.kill.assert_called_once()
+        calls = fake_popen.return_value.communicate.call_args_list
+        assert len(calls) == 2
+        assert calls[1].kwargs.get("timeout") is not None, (
+            "the post-kill drain has no timeout of its own - a wedged "
+            "nvidia-smi (or a process it spawned) holding the pipe open can "
+            "block this forever")
 
 
 class TestListGpusSafety:
@@ -1467,7 +1501,7 @@ class TestListGpusInconclusiveStatus:
 
     def _blind_nvidia_smi(self, monkeypatch):
         import subprocess
-        monkeypatch.setattr(subprocess, "run",
+        monkeypatch.setattr(subprocess, "Popen",
                             MagicMock(side_effect=FileNotFoundError("no nvidia-smi")))
 
     def test_latch_engaged_and_nvidia_smi_blind_reports_inconclusive(self, monkeypatch):
@@ -1520,8 +1554,11 @@ class TestListGpusInconclusiveStatus:
             discover, "_torch_gpus_isolated",
             lambda: pytest.fail("latch was engaged; must not respawn the child"))
         import subprocess
-        monkeypatch.setattr(subprocess, "run", MagicMock(return_value=MagicMock(
-            returncode=0, stdout="0, RTX 4090, 24576, 20000\n")))
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.return_value = (
+            "0, RTX 4090, 24576, 20000\n", "")
+        fake_popen.return_value.returncode = 0
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
         gpus, status = list_gpus(return_status=True)
 

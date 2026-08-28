@@ -1258,6 +1258,14 @@ def _torch_gpu_probe_known_doomed() -> bool:
 # timeout, and must sit above a legitimate cold driver init.
 _ISOLATED_TORCH_PROBE_TIMEOUT = 10.0
 
+# Bound on the pipe drain attempted after killing a wedged isolated-torch-probe
+# child. See _torch_gpus_isolated: subprocess.run's own post-kill drain on
+# Windows has no timeout of its own and can block forever, so this module
+# calls Popen.communicate() directly instead and bounds BOTH attempts itself.
+# Kept well under _ISOLATED_TORCH_PROBE_TIMEOUT so the two together still fit
+# inside _GPU_PROBE_DEADLINE.
+_ISOLATED_TORCH_DRAIN_TIMEOUT = 3.0
+
 # Latched True once the out-of-process torch enumeration proves it CANNOT answer
 # on this box (spawn failure, timeout, unusable reply). Read/written under
 # _gpu_probe_lock, cleared by _reset_gpu_probe_cache. This is not a reading cache
@@ -1426,24 +1434,47 @@ def _torch_gpus_isolated() -> "Optional[list]":
     import subprocess
     from localm._mp_spawn import interpreter_for_localm_children
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [interpreter_for_localm_children(), "-u", "-m",
              "localm._torch_gpu_probe"],
-            capture_output=True, text=True,
-            timeout=_ISOLATED_TORCH_PROBE_TIMEOUT)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except Exception as e:
+        logger.debug("list_gpus: could not spawn the out-of-process torch probe "
+                     "(%s); falling through to nvidia-smi", type(e).__name__)
+        return None
+    try:
+        stdout, stderr = proc.communicate(timeout=_ISOLATED_TORCH_PROBE_TIMEOUT)
     except subprocess.TimeoutExpired:
         # Surfaced, not silenced: this is the wedged-driver case, and a silent
         # [] here is indistinguishable from "this box has no GPU".
+        proc.kill()
+        try:
+            # subprocess.run's own Windows kill-path calls communicate() a
+            # SECOND time with NO timeout of its own to drain the pipes
+            # (verified directly against CPython's subprocess.run source: the
+            # comment there reads "communicate() _after_ kill() is required
+            # to collect that"). If this probe's child left a grandchild
+            # alive holding the inherited pipe handle, that drain never sees
+            # EOF and blocks forever - which would wedge the shared
+            # single-flight probe lock (_gpu_probe_inflight) permanently for
+            # the rest of the process's life, well past this function
+            # returning. Bound the drain ourselves so a killed-but-not-fully-
+            # reaped child cannot do that; give up on its output rather than
+            # risk an unbounded wait.
+            stdout, stderr = proc.communicate(timeout=_ISOLATED_TORCH_DRAIN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
         logger.debug("list_gpus: out-of-process torch probe did not answer "
                      "within %.1fs; falling through to nvidia-smi",
                      _ISOLATED_TORCH_PROBE_TIMEOUT)
         raise _IsolatedTorchWedged() from None
     except Exception as e:
+        proc.kill()
         logger.debug("list_gpus: could not spawn the out-of-process torch probe "
                      "(%s); falling through to nvidia-smi", type(e).__name__)
         return None
-    err = (proc.stderr or "").strip()
-    raw = (proc.stdout or "").strip()
+    err = (stderr or "").strip()
+    raw = (stdout or "").strip()
     if not raw:
         # The child ALWAYS prints one line, "[]" included on its own failure path,
         # so empty stdout means it died before printing (killed, hard crash, a
@@ -1585,13 +1616,25 @@ def _list_gpus_probe() -> list:
 
     try:
         import subprocess
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.free",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5)
-        if proc.returncode == 0 and proc.stdout.strip():
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            nvidia_smi_out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # See _torch_gpus_isolated: subprocess.run's own Windows kill-path
+            # drains the pipes with a SECOND communicate() call that carries
+            # no timeout of its own, which can block forever. Bound the
+            # post-kill drain here the same way.
+            proc.kill()
+            try:
+                nvidia_smi_out, _ = proc.communicate(timeout=_ISOLATED_TORCH_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                nvidia_smi_out = ""
+        if proc.returncode == 0 and nvidia_smi_out.strip():
             out = []
-            for line in proc.stdout.strip().splitlines():
+            for line in nvidia_smi_out.strip().splitlines():
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) < 4:
                     continue
