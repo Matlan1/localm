@@ -120,17 +120,13 @@ jobs:
       # exactly the signal this matrix exists to surface, so let Windows finish.
       fail-fast: false
       matrix:
-        # TEMPORARY, diagnostic only: ubuntu-24.04 and ubuntu-22.04 both die
-        # identically mid-suite regardless of resource levels, so the image
-        # and internal resource usage are not the variable under test here.
-        # Split the Linux run into two half-size jobs to test whether a
-        # shorter per-job duration avoids the kill. (#1577)
+        # TEMPORARY, diagnostic only: a single lone ubuntu-22.04 job, split 1
+        # of 2, nothing else in the matrix - isolates whether concurrent
+        # Linux jobs (or windows-latest running alongside) are a factor.
+        # (#1577)
         include:
-          - os: windows-latest
           - os: ubuntu-22.04
             split: "1"
-          - os: ubuntu-22.04
-            split: "2"
     steps:
       # fetch-depth: 0 (full history) is REQUIRED, not a nicety: the hygiene gates that
       # diff against the published record - the changelog append-only check and the PWA
