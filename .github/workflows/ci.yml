@@ -120,8 +120,9 @@ jobs:
       # exactly the signal this matrix exists to surface, so let Windows finish.
       fail-fast: false
       matrix:
-        # Pinned off the floating ubuntu-latest label (currently ubuntu-24.04,
-        # image 20260823.283.1). (#1577)
+        # TEMPORARY, diagnostic only: ubuntu-24.04 and ubuntu-22.04 both die
+        # identically mid-suite, so the image itself is not the variable
+        # under test here. (#1577)
         os: [windows-latest, ubuntu-22.04]
     steps:
       # fetch-depth: 0 (full history) is REQUIRED, not a nicety: the hygiene gates that
@@ -220,6 +221,9 @@ jobs:
             free -h | head -3
             echo "procs: $(ps -e --no-headers | wc -l) threads: $(ps -eL --no-headers | wc -l)"
             ps -e -o comm= | sort | uniq -c | sort -rn | head -6
+            df -h / /tmp 2>/dev/null
+            echo "open fds (allocated free max): $(cat /proc/sys/fs/file-nr)"
+            echo "loadavg: $(cat /proc/loadavg)"
             if [ -f /tmp/pytest-report.jsonl ]; then
               jq -s '[.[] | select(.["$report_type"]=="TestReport")] as $r | ($r | map(select(.when=="setup") | .nodeid)) as $setups | ($r | map(select(.when=="call" or .when=="teardown") | .nodeid)) as $done | {inflight: ($setups - $done)[-12:], total_setups: ($setups|length)}' /tmp/pytest-report.jsonl || echo "jq parse pending"
             fi
