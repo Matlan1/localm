@@ -1088,8 +1088,16 @@ class TestListGpus:
         csv = ("0, NVIDIA RTX 4090, 24576, 20000\n"
                "1, NVIDIA RTX 3060, 12288, 10000\n")
         fake_proc = MagicMock(returncode=0, stdout=csv)
+        # The isolated-torch probe (Popen+communicate) sees the same CSV text,
+        # which is not valid JSON: it correctly reports "unusable reply" (None)
+        # and falls through to nvidia-smi (subprocess.run, still mocked below),
+        # matching the fallback chain this test exercises.
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.return_value = (csv, "")
+        fake_popen.return_value.returncode = 0
         with patch.dict(sys.modules, {"torch": None}), \
-             patch("subprocess.run", return_value=fake_proc):
+             patch("subprocess.run", return_value=fake_proc), \
+             patch("subprocess.Popen", fake_popen):
             gpus = list_gpus()
         assert len(gpus) == 2
         # free_scope "device" is part of this path's contract: nvidia-smi's
@@ -1103,14 +1111,16 @@ class TestListGpus:
 
     def test_empty_when_nothing_available(self):
         with patch.dict(sys.modules, {"torch": None}), \
-             patch("subprocess.run", side_effect=FileNotFoundError):
+             patch("subprocess.run", side_effect=FileNotFoundError), \
+             patch("subprocess.Popen", side_effect=FileNotFoundError):
             assert list_gpus() == []
 
     def test_empty_when_torch_sees_no_cuda(self):
         fake = MagicMock()
         fake.cuda.is_available.return_value = False
         with patch.dict(sys.modules, {"torch": fake}), \
-             patch("subprocess.run", side_effect=FileNotFoundError):
+             patch("subprocess.run", side_effect=FileNotFoundError), \
+             patch("subprocess.Popen", side_effect=FileNotFoundError):
             assert list_gpus() == []
 
 

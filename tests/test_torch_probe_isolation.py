@@ -79,18 +79,71 @@ class TestIsolatedProbeDegradesHonestly:
     _LOGGER = "localm"
 
     def _run(self, monkeypatch, **kw):
-        monkeypatch.setattr(subprocess, "run", MagicMock(**kw))
+        """kw mirrors the old subprocess.run(**kw) contract these tests were
+        written against (return_value=<obj with .stdout/.stderr/.returncode>
+        or side_effect=<exception>), adapted to the Popen()+communicate()
+        split _torch_gpus_isolated now uses: an OSError-family side_effect
+        fires from Popen() itself (a spawn failure); anything else (e.g.
+        TimeoutExpired) fires from the first communicate() call, with the
+        post-kill drain communicate() then returning empty output."""
+        fake_popen = MagicMock()
+        side_effect = kw.get("side_effect")
+        result = kw.get("return_value")
+        if isinstance(side_effect, OSError):
+            fake_popen.side_effect = side_effect
+        elif side_effect is not None:
+            fake_popen.return_value.communicate.side_effect = [side_effect, ("", "")]
+        else:
+            fake_popen.return_value.communicate.return_value = (result.stdout, result.stderr)
+            fake_popen.return_value.returncode = result.returncode
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
         return discover._torch_gpus_isolated()
 
     def test_timeout_raises_wedged_not_a_plain_cannot_ask(self, monkeypatch, caplog):
         """A timeout means TORCH is wedging, which must never be retried
         in-process. It is signalled distinctly for that reason."""
         caplog.set_level("DEBUG", logger=self._LOGGER)
-        monkeypatch.setattr(subprocess, "run", MagicMock(
-            side_effect=subprocess.TimeoutExpired("py", 10.0)))
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.side_effect = [
+            subprocess.TimeoutExpired("py", 10.0), ("", "")]
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
         with pytest.raises(discover._IsolatedTorchWedged):
             discover._torch_gpus_isolated()
         assert "did not answer" in caplog.text
+
+    def test_a_wedged_post_kill_drain_is_bounded_not_left_open_ended(
+            self, monkeypatch, caplog):
+        """subprocess.run's own Windows kill-path drains the pipes with a
+        SECOND communicate() call that carries no timeout of its own (verified
+        against CPython's subprocess.run source: its comment reads
+        "communicate() _after_ kill() is required to collect that"). If a
+        grandchild the probe spawned inherited the pipe handle and stays
+        alive, that drain never sees EOF and blocks forever - which would
+        wedge the shared single-flight GPU-probe lock (_gpu_probe_inflight)
+        for the rest of the process's life, well past this call returning.
+        The drain here must be bounded by its own timeout and give up rather
+        than risk an unbounded wait."""
+        caplog.set_level("DEBUG", logger=self._LOGGER)
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.side_effect = [
+            subprocess.TimeoutExpired("py", 10.0),   # the probe itself wedges
+            subprocess.TimeoutExpired("py", 3.0),    # the post-kill drain ALSO wedges
+        ]
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        with pytest.raises(discover._IsolatedTorchWedged):
+            discover._torch_gpus_isolated()
+
+        fake_popen.return_value.kill.assert_called_once()
+        calls = fake_popen.return_value.communicate.call_args_list
+        assert len(calls) == 2, (
+            "must attempt exactly one bounded drain after kill(), not retry "
+            "unboundedly")
+        assert calls[1].kwargs.get("timeout") is not None, (
+            "the post-kill drain communicate() call has no timeout of its "
+            "own - a wedged grandchild holding the pipe open can block this "
+            "forever, exactly the CPython subprocess.run Windows bug this "
+            "test guards against")
 
     def test_spawn_failure_falls_through_and_is_logged(self, monkeypatch, caplog):
         caplog.set_level("DEBUG", logger=self._LOGGER)
@@ -189,15 +242,16 @@ class TestIsolatedProbeDegradesHonestly:
         """Bare sys.executable is the BASE interpreter inside a Windows
         multiprocessing-spawn worker, whose children cannot import localm or
         torch at all."""
-        fake = MagicMock(return_value=MagicMock(stdout="[]", stderr=""))
-        monkeypatch.setattr(subprocess, "run", fake)
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.return_value = ("[]", "")
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
         monkeypatch.setattr("localm._mp_spawn.interpreter_for_localm_children",
                             lambda: "SENTINEL-PY")
         discover._torch_gpus_isolated()
-        argv = fake.call_args[0][0]
+        argv = fake_popen.call_args[0][0]
         assert argv[0] == "SENTINEL-PY"
         assert argv[-2:] == ["-m", "localm._torch_gpu_probe"]
-        assert fake.call_args.kwargs["timeout"] == \
+        assert fake_popen.return_value.communicate.call_args.kwargs["timeout"] == \
             discover._ISOLATED_TORCH_PROBE_TIMEOUT
 
 
@@ -439,13 +493,6 @@ cuda = _Cuda()
 from localm import discover as _discover
 
 
-class _FakeCompleted:
-    def __init__(self, stdout="", stderr="", returncode=0):
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
-
-
 @pytest.fixture
 def probe_log(monkeypatch, caplog):
     """Reset the process-wide latch and hand back a driver for the real
@@ -458,10 +505,13 @@ def probe_log(monkeypatch, caplog):
     def _drive(stderrs, stdout='[]'):
         replies = iter(stderrs)
 
-        def _fake_run(*a, **kw):
-            return _FakeCompleted(stdout=stdout, stderr=next(replies))
+        def _fake_popen(*a, **kw):
+            fake = MagicMock()
+            fake.communicate.return_value = (stdout, next(replies))
+            fake.returncode = 0
+            return fake
 
-        monkeypatch.setattr(subprocess, "run", _fake_run)
+        monkeypatch.setattr(subprocess, "Popen", _fake_popen)
         # caplog.records ACCUMULATES across calls, so a test that drives this
         # helper twice would otherwise read the FIRST drive's lines back out of
         # the second drive's result and pass no matter what the second one did.
