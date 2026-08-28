@@ -1616,13 +1616,25 @@ def _list_gpus_probe() -> list:
 
     try:
         import subprocess
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.free",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5)
-        if proc.returncode == 0 and proc.stdout.strip():
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            nvidia_smi_out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # See _torch_gpus_isolated: subprocess.run's own Windows kill-path
+            # drains the pipes with a SECOND communicate() call that carries
+            # no timeout of its own, which can block forever. Bound the
+            # post-kill drain here the same way.
+            proc.kill()
+            try:
+                nvidia_smi_out, _ = proc.communicate(timeout=_ISOLATED_TORCH_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                nvidia_smi_out = ""
+        if proc.returncode == 0 and nvidia_smi_out.strip():
             out = []
-            for line in proc.stdout.strip().splitlines():
+            for line in nvidia_smi_out.strip().splitlines():
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) < 4:
                     continue
