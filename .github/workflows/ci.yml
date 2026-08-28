@@ -218,6 +218,8 @@ jobs:
             sleep 15
             echo "=== DIAG $(date -u +%H:%M:%S) ==="
             free -h | head -3
+            echo "procs: $(ps -e --no-headers | wc -l) threads: $(ps -eL --no-headers | wc -l)"
+            ps -e -o comm= | sort | uniq -c | sort -rn | head -6
             if [ -f /tmp/pytest-report.jsonl ]; then
               jq -s '[.[] | select(.["$report_type"]=="TestReport")] as $r | ($r | map(select(.when=="setup") | .nodeid)) as $setups | ($r | map(select(.when=="call" or .when=="teardown") | .nodeid)) as $done | {inflight: ($setups - $done)[-12:], total_setups: ($setups|length)}' /tmp/pytest-report.jsonl || echo "jq parse pending"
             fi
