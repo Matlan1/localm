@@ -195,29 +195,8 @@ jobs:
       # tests/conftest.py and the few tests that bind a real socket use an
       # OS-assigned ephemeral port, so this is safe. See AGENTS.md "Test-run
       # cadence".
-      - name: Tests (Windows)
-        if: runner.os == 'Windows'
+      - name: Tests
         run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
-
-      # TEMPORARY DIAGNOSTIC: tracks network activity (interface byte/packet
-      # counters, socket counts by protocol) every 15s up to the moment of a
-      # kill - the one resource dimension not yet measured in this
-      # investigation. (#1577)
-      - name: Tests (Linux, network diagnostic)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          (
-            pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
-          ) &
-          PYTEST_PID=$!
-          while kill -0 "$PYTEST_PID" 2>/dev/null; do
-            sleep 15
-            echo "=== DIAG $(date -u +%H:%M:%S) ==="
-            cat /proc/net/dev | tail -n +3
-            ss -s
-          done
-          wait "$PYTEST_PID"
 
       # Per-module coverage floors for the trust boundary (pathsafe, auth,
       # netpolicy, scopes, tls, bindhost, config, portmux): a missed branch in
