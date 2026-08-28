@@ -209,6 +209,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          pip install pytest-reportlog
           (
             pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json --report-log=/tmp/pytest-report.jsonl
           ) &
