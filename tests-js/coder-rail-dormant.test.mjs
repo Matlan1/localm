@@ -188,6 +188,86 @@ test("rail: a failed side save puts the rail back rather than lying about it", a
     "the unsaved flip was undone, so the screen matches what was stored");
 });
 
+test("rail: clicking the same dormant row twice reuses the session, not a second one", async () => {
+  // Simulates the pre-fix backend too: every POST /api/coder/sessions
+  // returns a DIFFERENT id, exactly as observed in the real bug report (six
+  // clicks on one row, six different session ids). The fix must stop the
+  // SECOND click from ever reaching this POST at all.
+  let nextId = 1;
+  const posts = [];
+  const { window } = loadApp({
+    fetchImpl: async (url, opts = {}) => {
+      const u = String(url);
+      if (u === "/api/coder/sessions" && opts.method === "POST") {
+        posts.push({ url: u, opts });
+        const sent = JSON.parse(opts.body);
+        return { ok: true, status: 200,
+                 json: async () => ({
+                   id: "sess" + nextId++, cwd: sent.cwd, resumed: true, notes: [],
+                 }),
+                 text: async () => "", headers: { get: () => null } };
+      }
+      const body = u.startsWith("/api/coder/dormant") ? PAYLOAD : {};
+      return { ok: true, status: 200, json: async () => body, text: async () => "",
+               headers: { get: () => null } };
+    },
+  });
+  await settle();
+  await window.refreshDormant();
+
+  const row = () => [...rail(window).querySelectorAll(".coder-session-item.dormant")]
+    .find((n) => n.querySelector(".title").textContent === "build a calculator");
+  assert.ok(row(), "precondition: the dormant row is present");
+
+  row().onclick();
+  await settle();
+  row().onclick();   // the row list is a snapshot - it still shows after being resumed
+  await settle();
+  row().onclick();
+  await settle();
+
+  assert.equal(posts.length, 1,
+    `clicking an already-open session must not start another - got ${posts.length} POSTs`);
+});
+
+test("rail: a rapid double-click on a dormant row cannot race past the reuse check", async () => {
+  // The reuse check above only sees an already-open session once its POST has
+  // resolved and registerSession() has run - a click fired before that must
+  // still not slip a second POST through.
+  let resolvePost;
+  const posts = [];
+  const { window } = loadApp({
+    fetchImpl: async (url, opts = {}) => {
+      const u = String(url);
+      if (u === "/api/coder/sessions" && opts.method === "POST") {
+        posts.push({ url: u, opts });
+        const sent = JSON.parse(opts.body);
+        await new Promise((res) => { resolvePost = res; });
+        return { ok: true, status: 200,
+                 json: async () => ({ id: "sessA", cwd: sent.cwd, resumed: true, notes: [] }),
+                 text: async () => "", headers: { get: () => null } };
+      }
+      const body = u.startsWith("/api/coder/dormant") ? PAYLOAD : {};
+      return { ok: true, status: 200, json: async () => body, text: async () => "",
+               headers: { get: () => null } };
+    },
+  });
+  await settle();
+  await window.refreshDormant();
+
+  const row = () => [...rail(window).querySelectorAll(".coder-session-item.dormant")]
+    .find((n) => n.querySelector(".title").textContent === "build a calculator");
+  row().onclick();
+  await settle();
+  row().onclick();   // fired while the first POST is still in flight
+  await settle();
+  resolvePost();
+  await settle();
+
+  assert.equal(posts.length, 1,
+    `a click while the first POST was still in flight must not queue a second one - got ${posts.length}`);
+});
+
 test("rail: arriving at the coder view loads past sessions by itself", async () => {
   // loadAppWithPages, not loadApp: `onViewShown` is installed only by
   // pages/dispatch.js.

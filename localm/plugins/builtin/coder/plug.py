@@ -522,6 +522,26 @@ async def create_session(req: CreateSessionRequest, request: Request):
             raise HTTPException(400, f"Not a directory: {req.cwd}")
         cwd = cwd.resolve()
 
+    # A resume of a directory that already has a RESUMED session running here
+    # must join that one, not start a second: the GUI's "past sessions" rail
+    # is a snapshot (not live), so a row for an already-resumed checkpoint
+    # stays clickable, and repeat clicks would otherwise each spawn their own
+    # CoderSession with its own open events stream that nothing ever tears
+    # down. Scoped to an existing session that was ITSELF opened via resume -
+    # a resume request must still be free to load a saved checkpoint into a
+    # cwd that only has a plain (non-resumed) session running, which is a
+    # different, legitimate request the join would otherwise silently eat.
+    # Gated on `not restricted` for the same reason the resume-from-
+    # checkpoint call below is (line ~629): a restricted session never
+    # actually resumes history, so it has no "same conversation" to rejoin.
+    if req.resume and not restricted:
+        existing = mgr.find_by_cwd(cwd, principal=principal)
+        if existing is not None and existing.opened_via_resume:
+            return {**existing.info(), "resumed": False,
+                    "notes": ["Already open - joined the session already "
+                              "running for this folder instead of starting "
+                              "another."]}
+
     # A per-session model switch changes the one shared engine for EVERYONE, so a
     # scoped key must not trigger it (DoS / interfering with the owner's session).
     if req.model and req.model != active_model():
@@ -621,6 +641,12 @@ async def create_session(req: CreateSessionRequest, request: Request):
         **gen_kwargs,
     ))
     session.principal = principal      # who owns this session (None = the owner)
+    # Whether THIS session is itself a resume, for the join-guard above: it
+    # must be able to tell "a resume request landed on an already-resumed
+    # session" (join it) apart from "a resume request landed on a plain,
+    # never-resumed session" (load the checkpoint into a genuinely new one
+    # instead, unaffected by the plain session already running).
+    session.opened_via_resume = bool(req.resume and not restricted)
     mgr.create(session)
     # Optional resume: restore this cwd's saved conversation into the new
     # session. Owner / coder:full only - a restricted scoped session must not

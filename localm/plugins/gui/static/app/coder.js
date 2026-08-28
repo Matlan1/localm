@@ -701,6 +701,29 @@ export function populateSetupModels() {
   }
 }
 
+// A resume (a "Past sessions here" row, or "Continue last session") for a cwd
+// that already has a LIVE entry must never open a second one: each live
+// session holds its own open events stream for as long as it exists, and a
+// dormant row stays clickable after being resumed (the list is a snapshot,
+// not live), so nothing stops a second, third, ... click from starting yet
+// another one - each accumulating an open connection nothing ever tears
+// down. Resuming twice is also two agents free to edit the same directory
+// at once, which is its own hazard independent of the connection leak.
+function _liveSessionForCwd(cwd) {
+  for (const s of coder.sessions.values()) {
+    if (s.info.cwd === cwd) return s;
+  }
+  return null;
+}
+
+// _liveSessionForCwd alone still races on a rapid double-click: the second
+// click can run before the first POST has resolved and registerSession() has
+// added the new entry, so it would see no live session yet and fire its own
+// POST. This closes that window - a resume for a cwd already mid-request is
+// refused outright rather than queued, so a second click is a no-op, not a
+// second session started slightly later.
+const _cwdResumeInFlight = new Set();
+
 export async function startCoderSession(opts = {}) {
   const resume = !!opts.resume;
   // A rail row names its OWN project, which is usually not the one in the form -
@@ -709,6 +732,16 @@ export async function startCoderSession(opts = {}) {
   if (opts.cwd) $("setup-cwd").value = opts.cwd;
   const cwd = $("setup-cwd").value.trim();
   if (!cwd) { toast("Enter a project directory", true); return; }
+  if (resume) {
+    const already = _liveSessionForCwd(cwd);
+    if (already) {
+      activateSession(already.info.id);
+      toast("Already open - switched to it instead of starting another");
+      return;
+    }
+    if (_cwdResumeInFlight.has(cwd)) return;
+    _cwdResumeInFlight.add(cwd);
+  }
   $("setup-start").disabled = true;
   try {
     const body = {
@@ -787,21 +820,31 @@ export async function startCoderSession(opts = {}) {
     // screenshot, a shared screen or a stray autofill can pick it up.
     $("setup-backend-key").value = "";
     lsSetScoped("localm.coderCwd", cwd);
-    // A resumed session replays its restored recap from the server; a fresh one
-    // has no history to replay (CODER-2).
-    registerSession(info, { replay: !!info.resumed });
+    // The server itself refuses a second concurrent session for a cwd that
+    // already has one (defense in depth for the client-side check above - a
+    // stale tab, a second window, or a race the check above did not close in
+    // time): its id is one this tab may already have registered. Re-running
+    // registerSession() on an id already in coder.sessions would open a
+    // SECOND concurrent stream for the same session, the exact leak this is
+    // meant to prevent - so only register when it is genuinely new here.
+    if (!coder.sessions.has(info.id)) {
+      // A resumed session replays its restored recap from the server; a fresh
+      // one has no history to replay (CODER-2).
+      registerSession(info, { replay: !!info.resumed });
+    }
     activateSession(info.id);
     // An option the server could not honour is SAID, not silently swallowed -
     // otherwise a ticked box and an ignored one look identical (AGENTS.md
     // rule 5). The server decides; this only relays.
     for (const note of info.notes || []) toast(note, true);
     if (info.resumed) toast("Resumed your last session in this folder");
-    else if (resume) toast("No saved session to resume - started fresh");
+    else if (resume && !info.notes?.length) toast("No saved session to resume - started fresh");
     refreshModels();
   } catch (e) {
     toast("Failed to start session: " + e.message, true);
   } finally {
     $("setup-start").disabled = false;
+    if (resume) _cwdResumeInFlight.delete(cwd);
   }
 }
 
