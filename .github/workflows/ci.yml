@@ -120,7 +120,15 @@ jobs:
       # exactly the signal this matrix exists to surface, so let Windows finish.
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        # TEMPORARY: running ubuntu-latest 3x in parallel to get more
+        # attempts per unit of wall-clock time against today's high
+        # external failure rate on GitHub-hosted Linux runners. Revert to
+        # a single entry once one attempt completes clean. (#1577)
+        include:
+          - os: windows-latest
+          - os: ubuntu-latest
+          - os: ubuntu-latest
+          - os: ubuntu-latest
     steps:
       # fetch-depth: 0 (full history) is REQUIRED, not a nicety: the hygiene gates that
       # diff against the published record - the changelog append-only check and the PWA
