@@ -195,7 +195,35 @@ jobs:
       # tests/conftest.py and the few tests that bind a real socket use an
       # OS-assigned ephemeral port, so this is safe. See AGENTS.md "Test-run
       # cadence".
+      # TEMPORARY DIAGNOSTIC (Linux only): ubuntu-latest has failed with
+      # "The runner has received a shutdown signal" at a consistent ~43%
+      # progress point across three independent runs (two different heads,
+      # one a clean retry of the same head) - not random infra flakiness.
+      # Local reproduction (WSL, more RAM than this runner's 7GB) sails past
+      # the same point cleanly, so this interleaves a memory/process snapshot
+      # directly into the SAME live-streamed step log every 15s: if the
+      # runner is killed mid-run, whatever was already logged survives even
+      # though no later step gets a chance to run. Remove once the actual
+      # cause is identified from a captured snapshot.
       - name: Tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ( while true; do
+              sleep 15
+              echo "::group::[mem $(date -u +%T)]"
+              free -h
+              echo "  top RSS:"
+              ps -eo pid,rss,comm --sort=-rss | head -8
+              echo "::endgroup::"
+            done ) &
+          MONPID=$!
+          pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
+          STATUS=$?
+          kill "$MONPID" 2>/dev/null || true
+          exit $STATUS
+      - name: Tests
+        if: runner.os != 'Linux'
         run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
 
       # Per-module coverage floors for the trust boundary (pathsafe, auth,
