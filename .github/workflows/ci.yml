@@ -120,7 +120,9 @@ jobs:
       # exactly the signal this matrix exists to surface, so let Windows finish.
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        # Pinned off the floating ubuntu-latest label (currently ubuntu-24.04,
+        # image 20260823.283.1). (#1577)
+        os: [windows-latest, ubuntu-22.04]
     steps:
       # fetch-depth: 0 (full history) is REQUIRED, not a nicety: the hygiene gates that
       # diff against the published record - the changelog append-only check and the PWA
