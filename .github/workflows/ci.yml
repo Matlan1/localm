@@ -197,8 +197,31 @@ jobs:
       # tests/conftest.py and the few tests that bind a real socket use an
       # OS-assigned ephemeral port, so this is safe. See AGENTS.md "Test-run
       # cadence".
-      - name: Tests
+      - name: Tests (Windows)
+        if: runner.os == 'Windows'
         run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
+
+      # TEMPORARY DIAGNOSTIC: interleaves a report-log tail (which test's
+      # setup phase has completed with no call/teardown yet - i.e. likely
+      # in-flight per worker) into this same live step log, so it survives
+      # a runner-level kill that a completion-time report never would.
+      - name: Tests (Linux, diagnostic)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          (
+            pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json --report-log=/tmp/pytest-report.jsonl
+          ) &
+          PYTEST_PID=$!
+          while kill -0 "$PYTEST_PID" 2>/dev/null; do
+            sleep 15
+            echo "=== DIAG $(date -u +%H:%M:%S) ==="
+            free -h | head -3
+            if [ -f /tmp/pytest-report.jsonl ]; then
+              jq -s '[.[] | select(.["$report_type"]=="TestReport")] as $r | ($r | map(select(.when=="setup") | .nodeid)) as $setups | ($r | map(select(.when=="call" or .when=="teardown") | .nodeid)) as $done | {inflight: ($setups - $done)[-12:], total_setups: ($setups|length)}' /tmp/pytest-report.jsonl || echo "jq parse pending"
+            fi
+          done
+          wait "$PYTEST_PID"
 
       # Per-module coverage floors for the trust boundary (pathsafe, auth,
       # netpolicy, scopes, tls, bindhost, config, portmux): a missed branch in
