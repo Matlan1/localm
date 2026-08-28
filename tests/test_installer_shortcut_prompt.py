@@ -83,12 +83,15 @@ def test_manifest_records_no_shortcut_when_none_was_created(bat):
 
 def test_make_launcher_quiet_prints_no_competing_start_instruction(monkeypatch):
     """--quiet keeps the notes and the failure path, drops the hints."""
+    import sys
     from click.testing import CliRunner
     from localm import applaunch
     from localm.cli import maintenance
 
+    fake_path = (Path("X:/clone/.venv/localm-app/LocaLM.exe") if sys.platform == "win32"
+                else Path("/clone/.venv/localm-app/LocaLM"))
     fake = applaunch.LauncherResult(
-        ok=True, path=Path("X:/clone/.venv/localm-app/LocaLM.exe"),
+        ok=True, path=fake_path,
         notes=["built LocaLM.exe from python.exe + 4 runtime DLL(s)"])
     monkeypatch.setattr(applaunch, "make_launcher", lambda force=False: fake)
 
@@ -98,7 +101,11 @@ def test_make_launcher_quiet_prints_no_competing_start_instruction(monkeypatch):
     assert loud.exit_code == 0 and quiet.exit_code == 0
     # The note (real work done) survives both; the hints only appear when loud.
     assert "built LocaLM.exe" in loud.output and "built LocaLM.exe" in quiet.output
-    assert "Launch it:" in loud.output
+    # "Launch it:" is a Windows-only hint (maintenance.py gates it on
+    # sys.platform == "win32"); POSIX's equivalent affordance is the desktop
+    # entry line, which this fake result does not set.
+    if sys.platform == "win32":
+        assert "Launch it:" in loud.output
     assert "Launch it:" not in quiet.output, \
         "setup must not be handed a competing way to start localm"
     assert "Launcher ready:" not in loud.output, \

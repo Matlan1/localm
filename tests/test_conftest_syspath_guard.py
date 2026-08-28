@@ -230,6 +230,57 @@ class TestTheRecordingMachineryFires:
         assert "tmp_path" in out, "must point at the fix, not just complain"
 
 
+class TestTheGuardExemptsTheRealCertStoreProbe:
+    """ssl.create_default_context() (verified_urlopen's native-store path,
+    localm/http_ssl.py) reads a small, fixed set of read-only trust-anchor
+    paths under /etc on POSIX - real filesystem access, but categorically
+    different from the credentials/config /etc otherwise marks: a CA bundle
+    is data every TLS client on the machine needs to read.
+
+    Measured directly against CPython 3.12 on Ubuntu 24.04 (matching CI):
+    patching os.stat and calling create_default_context() records exactly
+    /etc/ssl/cert.pem, /etc/pki/tls/cert.pem, /etc/ssl/certs, and nothing
+    else - the allowlist in conftest.py was built from that measurement,
+    not assumed from distro folklore."""
+
+    @pytest.mark.skipif(os.name == "nt",
+                        reason="the /etc marker, and this probe, are POSIX-only")
+    def test_ssl_create_default_context_does_not_trip_the_guard(self, pytester):
+        _with_real_conftest(pytester)
+        pytester.makepyfile("""
+            import ssl
+
+            def test_native_cert_store_lookup():
+                ssl.create_default_context()
+        """)
+        result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider")
+        assert result.ret == 0, (
+            "a legitimate ssl.create_default_context() call tripped the "
+            "system-path guard:\n" + result.stdout.str())
+        result.assert_outcomes(passed=1)
+
+    @pytest.mark.skipif(os.name == "nt",
+                        reason="the /etc marker is POSIX-only")
+    def test_the_exemption_stays_narrow_an_unrelated_etc_path_still_fires(
+            self, pytester):
+        """The fix must not widen into "anything under /etc/ssl is fine" -
+        an unrelated /etc path the allowlist does not name is still caught."""
+        _with_real_conftest(pytester)
+        pytester.makepyfile("""
+            import os
+
+            def test_touches_an_unrelated_etc_path():
+                try:
+                    os.stat("/etc/hostname")
+                except FileNotFoundError:
+                    pass
+        """)
+        result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider")
+        assert result.ret != 0, (
+            "the cert-store exemption leaked into an unrelated /etc path")
+        result.stdout.fnmatch_lines(["*touched a real system path*"])
+
+
 class TestTheGuardDoesNotFalsePositive:
     """The quiet cases: paths that must NOT be flagged."""
 

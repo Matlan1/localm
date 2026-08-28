@@ -19,6 +19,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   giving up on a slow check could itself block forever waiting on a hung
   child process; that wait is now bounded, so a stuck helper is abandoned
   instead of wedging every check that comes after it.
+- **Clicking an already-open coder session now switches to it instead of
+  opening it again.** Clicking a session that was already running started a
+  second, independent copy of it every time, each holding its own connection
+  open indefinitely. Enough of these open at once could make the rest of the
+  app stop responding - most visibly, the Plugins page's list would stop
+  loading. Reopening a session you already have open now does nothing more
+  than bring it to the front, the same as every other session in the list.
 
 ## [0.1.5] - 2026-08-26
 

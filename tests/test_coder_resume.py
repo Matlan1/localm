@@ -144,6 +144,102 @@ def test_resume_false_does_not_restore(tmp_path, monkeypatch):
         assert app.state.coder_sessions.get(b.json()["id"]).agent._messages == []
 
 
+def test_resuming_an_open_session_joins_it_instead_of_starting_a_second(
+        tmp_path, monkeypatch):
+    """The GUI's "past sessions" rail is a snapshot, not live: a row for an
+    already-resumed checkpoint stays clickable, so nothing on the client
+    alone stops a second, third... POST for the same directory (this is
+    defense in depth for the client-side fix - a second window, a stale
+    page, or a race). The server must refuse to open a second concurrent
+    session for a cwd that already has one live, and join that one instead."""
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        a = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log", "resume": True})
+        assert a.status_code == 200
+        first_id = a.json()["id"]
+
+        b = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log", "resume": True})
+        assert b.status_code == 200
+        assert b.json()["id"] == first_id, (
+            "a second resume for the same cwd must join the already-open "
+            "session, not create a second one")
+        assert b.json()["resumed"] is False, (
+            "joining an existing session is not itself a fresh checkpoint "
+            "restore - resumed describes THAT action, which did not happen "
+            "here")
+        assert app.state.coder_sessions.list(is_owner=True) and \
+            len(app.state.coder_sessions.list(is_owner=True)) == 1, (
+            "a second live CoderSession was created for the same directory")
+
+        c = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log", "resume": True})
+        assert c.json()["id"] == first_id, "a third click must join it too"
+        assert len(app.state.coder_sessions.list(is_owner=True)) == 1
+
+
+def test_a_second_open_session_in_a_different_directory_is_unaffected(
+        tmp_path, monkeypatch):
+    """The join-instead-of-duplicate guard is per-cwd, not global: two
+    genuinely different projects must each get their own live session."""
+    proj_a = tmp_path / "a"; proj_a.mkdir()
+    proj_b = tmp_path / "b"; proj_b.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(tmp_path)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        a = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj_a), "mode": "log", "resume": True})
+        b = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj_b), "mode": "log", "resume": True})
+        assert a.json()["id"] != b.json()["id"]
+        assert len(app.state.coder_sessions.list(is_owner=True)) == 2
+
+
+def test_a_plain_new_session_is_unaffected_by_the_join_guard(
+        tmp_path, monkeypatch):
+    """The guard is scoped to resume=True: an ordinary "start fresh" request
+    for a cwd that already has a live session must still work, unchanged -
+    this bug is specifically about resuming a session that is already open,
+    not about limiting a directory to one session ever."""
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        a = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log", "resume": True})
+        b = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log"})   # no resume
+        assert b.json()["id"] != a.json()["id"]
+        assert len(app.state.coder_sessions.list(is_owner=True)) == 2
+
+
+def test_restricted_resume_is_unaffected_by_the_join_guard(tmp_path, monkeypatch):
+    """A restricted session never actually resumes (test_resumable_and_
+    resume_are_owner_only) so it has no "same conversation" to rejoin - the
+    join guard must not change that path at all: two resume=True requests
+    from a scoped key still each start their own fresh restricted session."""
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    scoped = auth.create_key("phone", ["coder"])
+    sh = {"Authorization": f"Bearer {scoped['key']}"}
+    with TestClient(app) as client:
+        a = client.post("/api/coder/sessions", headers=sh,
+                        json={"cwd": str(proj), "resume": True})
+        b = client.post("/api/coder/sessions", headers=sh,
+                        json={"cwd": str(proj), "resume": True})
+        assert a.json()["id"] != b.json()["id"], (
+            "a restricted session must keep starting fresh each time, "
+            "unaffected by the owner-path join guard")
+
+
 def test_resumable_and_resume_are_owner_only(tmp_path, monkeypatch):
     proj = tmp_path / "proj"; proj.mkdir()
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
@@ -437,3 +533,29 @@ def test_resume_recap_strips_a_bare_json_tool_call(tmp_path, monkeypatch):
     texts = [e["text"] for e in b.history if e.get("type") == "history"]
     # The pure-call third message (no prose) contributes no row at all.
     assert texts == ["write it out", "Let me check that file."]
+
+
+def test_find_by_cwd_is_scoped_by_principal(tmp_path, monkeypatch):
+    """A live session in a cwd must be findable only for the SAME principal -
+    the join guard in create_session must never hand one principal's session
+    to another's "already open" check, matching how list() already scopes a
+    non-owner caller's view of the session table."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    proj = tmp_path / "proj"; proj.mkdir()
+    from localm.plugins.coder.sessions import CoderSession, SessionManager
+
+    mgr = SessionManager()
+    owned_by_a = CoderSession(proj, _StubBackend(), auto_approve=True,
+                              auto_verify=False, mode="log")
+    owned_by_a.principal = "alice"
+    mgr.create(owned_by_a)
+
+    assert mgr.find_by_cwd(proj, principal="alice") is owned_by_a
+    assert mgr.find_by_cwd(proj, principal="bob") is None, (
+        "a different principal's live session in the same directory must "
+        "not be surfaced as \"already open\" to this one")
+    assert mgr.find_by_cwd(proj, principal=None) is None, (
+        "the owner (principal=None) must not be silently joined to a "
+        "scoped key's session either")
+    assert mgr.find_by_cwd(tmp_path / "elsewhere", principal="alice") is None

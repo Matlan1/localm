@@ -877,6 +877,21 @@ class SessionManager:
         with self._lock:
             return self._sessions.get(session_id)
 
+    def find_by_cwd(self, cwd: Path, *,
+                    principal: Optional[str] = None) -> Optional[CoderSession]:
+        """A live session already running in *cwd*, scoped to *principal* the
+        same way :meth:`list` scopes a non-owner caller's view (never let one
+        principal's "already open" check see another principal's session).
+        Used to refuse opening a second concurrent session for a directory
+        that already has one running - the GUI's own dormant-session rail is
+        a snapshot, not live, so nothing else stops a resumed session from
+        being resumed again while its first instance is still open."""
+        with self._lock:
+            for s in self._sessions.values():
+                if s.cwd == cwd and s.principal == principal:
+                    return s
+        return None
+
     def list(self, *, principal: Optional[str] = None, is_owner: bool = True) -> list:
         """Session summaries. The owner sees all; a scoped caller (is_owner=False)
         sees only the sessions matching its *principal* - so a handed-out key
