@@ -211,30 +211,20 @@ jobs:
       # pull torch / ROCm / llama-cpp wheels from a custom AMD index and are
       # GPU-bound, so they are never installed in CI; tests needing those extras
       # skip themselves (importorskip).
-      # TEMPORARY, diagnostic only: pinned to the EXACT versions pip resolved
-      # on 2026-08-14 (the last confirmed-clean real execution), to test
-      # whether this exact known-good dependency set still completes against
-      # today's current test content. (#1577)
+      # TEMPORARY, diagnostic only: pinned to the versions pip resolved on
+      # 2026-08-14 (the last confirmed-clean real execution), to test
+      # whether this known-good dependency set still completes against
+      # today's current test content. Four packages (huggingface-hub,
+      # uvicorn, pypdf, ruff) are left unpinned: pyproject.toml's own floor
+      # for each has been raised past the 2026-08-14 version since, so pip
+      # cannot satisfy an exact pin there - checked against every floor in
+      # pyproject.toml before this list was written, not assumed. One
+      # single line, no shell-specific continuation syntax, since this
+      # step runs under bash on Linux and pwsh on Windows. (#1577)
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,rag]" \
-            "annotated-doc==0.0.5" "annotated-types==0.8.0" "anyio==4.14.2" \
-            "certifi==2026.7.22" "cffi==2.1.1" "charset_normalizer==3.5.0" \
-            "click==8.4.2" "coverage==7.15.4" "cryptography==50.0.0" \
-            "execnet==2.1.2" "fastapi==0.141.1" "filelock==3.32.3" \
-            "fsspec==2026.7.0" "h11==0.16.0" "hf-xet==1.6.0" "httpcore==1.0.9" \
-            "httpx==0.28.1" "huggingface-hub==1.27.0" "idna==3.18" \
-            "ifaddr==0.2.0" "iniconfig==2.3.0" "markdown-it-py==4.2.0" \
-            "mdurl==0.1.2" "packaging==26.3" "pillow==12.3.0" "pluggy==1.6.0" \
-            "psutil==7.2.2" "pycparser==3.0" "pydantic==2.13.4" \
-            "pydantic-core==2.46.4" "pygments==2.20.0" "pypdf==6.16.0" \
-            "pytest==9.1.1" "pytest-cov==7.1.0" "pytest-xdist==3.8.0" \
-            "pyyaml==6.0.3" "qrcode==8.2" "regex==2026.7.19" \
-            "requests==2.34.2" "rich==15.0.0" "ruff==0.16.3" \
-            "starlette==1.6.0" "tqdm==4.70.0" "typing-extensions==4.16.0" \
-            "typing-inspection==0.4.4" "urllib3==2.7.0" "uvicorn==0.52.3" \
-            "zeroconf==0.150.0"
+          pip install -e ".[dev,rag]" "annotated-doc==0.0.5" "annotated-types==0.8.0" "anyio==4.14.2" "certifi==2026.7.22" "cffi==2.1.1" "charset_normalizer==3.5.0" "click==8.4.2" "coverage==7.15.4" "cryptography==50.0.0" "execnet==2.1.2" "fastapi==0.141.1" "filelock==3.32.3" "fsspec==2026.7.0" "h11==0.16.0" "hf-xet==1.6.0" "httpcore==1.0.9" "httpx==0.28.1" "idna==3.18" "ifaddr==0.2.0" "iniconfig==2.3.0" "markdown-it-py==4.2.0" "mdurl==0.1.2" "packaging==26.3" "pillow==12.3.0" "pluggy==1.6.0" "psutil==7.2.2" "pycparser==3.0" "pydantic==2.13.4" "pydantic-core==2.46.4" "pygments==2.20.0" "pytest==9.1.1" "pytest-cov==7.1.0" "pytest-xdist==3.8.0" "pyyaml==6.0.3" "qrcode==8.2" "regex==2026.7.19" "requests==2.34.2" "rich==15.0.0" "starlette==1.6.0" "tqdm==4.70.0" "typing-extensions==4.16.0" "typing-inspection==0.4.4" "urllib3==2.7.0" "zeroconf==0.150.0"
 
       # The mandated repo-hygiene gate (AGENTS.md): no em/en dashes, no personal
       # disclosure, no machine-absolute paths in code. It also runs the release-file
