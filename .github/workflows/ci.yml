@@ -121,9 +121,16 @@ jobs:
       fail-fast: false
       matrix:
         # TEMPORARY, diagnostic only: ubuntu-24.04 and ubuntu-22.04 both die
-        # identically mid-suite, so the image itself is not the variable
-        # under test here. (#1577)
-        os: [windows-latest, ubuntu-22.04]
+        # identically mid-suite regardless of resource levels, so the image
+        # and internal resource usage are not the variable under test here.
+        # Split the Linux run into two half-size jobs to test whether a
+        # shorter per-job duration avoids the kill. (#1577)
+        include:
+          - os: windows-latest
+          - os: ubuntu-22.04
+            split: "1"
+          - os: ubuntu-22.04
+            split: "2"
     steps:
       # fetch-depth: 0 (full history) is REQUIRED, not a nicety: the hygiene gates that
       # diff against the published record - the changelog append-only check and the PWA
@@ -202,33 +209,23 @@ jobs:
         if: runner.os == 'Windows'
         run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
 
-      # TEMPORARY DIAGNOSTIC: interleaves a report-log tail (which test's
-      # setup phase has completed with no call/teardown yet - i.e. likely
-      # in-flight per worker) into this same live step log, so it survives
-      # a runner-level kill that a completion-time report never would.
-      - name: Tests (Linux, diagnostic)
+      # TEMPORARY DIAGNOSTIC: runs only HALF the test files per job (split by
+      # matrix.split), to test whether a shorter-duration job avoids the
+      # runner-shutdown kill every full-size run has hit since Aug 26.
+      - name: Tests (Linux, half N/2 - diagnostic)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          pip install pytest-reportlog
-          (
-            pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json --report-log=/tmp/pytest-report.jsonl
-          ) &
-          PYTEST_PID=$!
-          while kill -0 "$PYTEST_PID" 2>/dev/null; do
-            sleep 15
-            echo "=== DIAG $(date -u +%H:%M:%S) ==="
-            free -h | head -3
-            echo "procs: $(ps -e --no-headers | wc -l) threads: $(ps -eL --no-headers | wc -l)"
-            ps -e -o comm= | sort | uniq -c | sort -rn | head -6
-            df -h / /tmp 2>/dev/null
-            echo "open fds (allocated free max): $(cat /proc/sys/fs/file-nr)"
-            echo "loadavg: $(cat /proc/loadavg)"
-            if [ -f /tmp/pytest-report.jsonl ]; then
-              jq -s '[.[] | select(.["$report_type"]=="TestReport")] as $r | ($r | map(select(.when=="setup") | .nodeid)) as $setups | ($r | map(select(.when=="call" or .when=="teardown") | .nodeid)) as $done | {inflight: ($setups - $done)[-12:], total_setups: ($setups|length)}' /tmp/pytest-report.jsonl || echo "jq parse pending"
-            fi
-          done
-          wait "$PYTEST_PID"
+          mapfile -t ALL_FILES < <(find tests -name 'test_*.py' | sort)
+          N=${#ALL_FILES[@]}
+          HALF=$((N / 2))
+          if [ "${{ matrix.split }}" = "1" ]; then
+            FILES=("${ALL_FILES[@]:0:$HALF}")
+          else
+            FILES=("${ALL_FILES[@]:$HALF}")
+          fi
+          echo "Running ${#FILES[@]} of $N test files (split ${{ matrix.split }})"
+          pytest -m "not integration" -n auto "${FILES[@]}"
 
       # Per-module coverage floors for the trust boundary (pathsafe, auth,
       # netpolicy, scopes, tls, bindhost, config, portmux): a missed branch in
