@@ -252,6 +252,36 @@ def _syspath_regex(roots):
     return re.compile("(?:" + "|".join(re.escape(r) for r in roots) + r")(?:/|$)")
 
 
+# ssl.create_default_context() (localm/http_ssl.py's verified_urlopen, using
+# the platform's native store by design) reads a small, fixed set of PUBLIC
+# trust-anchor paths under /etc on POSIX - real filesystem access, but
+# categorically different from the credentials/config /etc otherwise marks:
+# a CA bundle is data every TLS client on the machine needs to read. See
+# test_conftest_syspath_guard.py's TestTheGuardExemptsTheRealCertStoreProbe
+# for the exact set this was measured against and the negative case proving
+# the exemption stays narrow.
+_SYSPATH_CERT_STORE_ALLOW = frozenset({
+    "/etc/ssl/certs",
+    "/etc/ssl/cert.pem",
+    "/etc/pki/tls/cert.pem",
+    "/etc/pki/tls/certs",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+})
+
+
+def _is_cert_store_probe(raw) -> bool:
+    try:
+        s = os.fspath(raw)
+    except TypeError:
+        return False
+    if isinstance(s, bytes):
+        s = s.decode("utf-8", "replace")
+    elif not isinstance(s, str):
+        return False
+    return s.replace("\\", "/").rstrip("/").lower() in _SYSPATH_CERT_STORE_ALLOW
+
+
 def _syspath_matches(rx, raw) -> bool:
     """True when *raw* names a marked system location. Pure string work: this
     never touches the filesystem, and tolerates anything os.stat accepts
@@ -297,7 +327,7 @@ def _arm_system_path_guard() -> bool:
 
     def _wrap(kind, func):
         def guarded(path, *args, **kwargs):
-            if _syspath_matches(rx, path):
+            if _syspath_matches(rx, path) and not _is_cert_store_probe(path):
                 key = (kind, str(path), _syspath_origin())
                 _SYSPATH_HITS[key] = _SYSPATH_HITS.get(key, 0) + 1
             return func(path, *args, **kwargs)

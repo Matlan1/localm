@@ -289,9 +289,13 @@ def test_bare_localm_argv_on_the_launcher_exe_fails_with_exit_2(tmp_path):
     The EXACT failure signature depends on what sys.executable is in the process
     running this test: a standalone interpreter treats "setup-llama" as a script
     path it cannot open and exits 2; a venv's own python.exe refuses to run away
-    from its venv at all ("No pyvenv.cfg file", a distinct nonzero code). Both
-    are the bare-copy approach breaking, which is all this test asserts - it
-    does not check that a fully-loaded backend started."""
+    from its venv at all ("No pyvenv.cfg file", a distinct nonzero code); a
+    POSIX venv's ``bin/python`` is typically a symlink to the base interpreter,
+    so copy2() (which follows symlinks) copies the base binary itself, which
+    then cannot find its own relocated stdlib and fails to bootstrap at all
+    ("Could not find platform independent libraries" / "No module named
+    'encodings'"). All three are the bare-copy approach breaking, which is all
+    this test asserts - it does not check that a fully-loaded backend started."""
     launcher = tmp_path / ("localm.exe" if sys.platform == "win32" else "localm")
     shutil.copy2(sys.executable, launcher)
     if sys.platform != "win32":
@@ -301,7 +305,9 @@ def test_bare_localm_argv_on_the_launcher_exe_fails_with_exit_2(tmp_path):
     result = subprocess.run(old_style_cmd, capture_output=True, text=True)
 
     assert result.returncode != 0, result.stdout
-    assert "setup-llama" in result.stderr or "pyvenv.cfg" in result.stderr, result.stderr
+    assert ("setup-llama" in result.stderr or "pyvenv.cfg" in result.stderr
+           or "Could not find platform independent libraries" in result.stderr), \
+        result.stderr
 
 
 # ---------------------- safe extraction (zip slip) ----------------------

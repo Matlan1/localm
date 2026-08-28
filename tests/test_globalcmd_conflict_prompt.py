@@ -79,8 +79,16 @@ def test_a_real_path_conflict_is_still_reported(clone, tmp_path, monkeypatch):
 
 
 def test_detection_stays_lexical_and_touches_no_real_directory(monkeypatch):
-    """resolve() hits the filesystem, so the PATH comparison must not use it."""
-    monkeypatch.setenv("PATH", os.pathsep.join(["C:/Windows/System32", "/usr/bin"]))
+    """resolve() hits the filesystem, so the PATH comparison must not use it.
+
+    The two fixture entries must be valid PATH entries on the platform under
+    test - a drive-letter path joined with POSIX's colon separator (os.pathsep)
+    is unparseable on POSIX (the drive letter's own colon is indistinguishable
+    from the separator), which would split one entry into two and fail the
+    len() assertion for a reason unrelated to what this test checks."""
+    a, b = (["C:/Windows/System32", "D:/tools/bin"] if os.name == "nt"
+            else ["/usr/local/bin", "/usr/bin"])
+    monkeypatch.setenv("PATH", os.pathsep.join([a, b]))
     dirs = gc.path_dirs()
     assert len(dirs) == 2
     assert all(isinstance(d, str) for d in dirs), \

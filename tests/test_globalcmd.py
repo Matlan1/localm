@@ -128,7 +128,8 @@ def test_install_posix_symlink(monkeypatch, tmp_path):
     bindir = tmp_path / "localbin"
     monkeypatch.setattr(gc, "bin_dir", lambda root: bindir)
     monkeypatch.setattr(gc, "shim_path", lambda root: bindir / "localm")
-    monkeypatch.setattr(gc, "_posix_ensure_on_path", lambda d: (False, None))
+    monkeypatch.setattr(gc, "_posix_ensure_on_path",
+                        lambda d, prepend=False: (False, None))
     monkeypatch.setattr(gc.shutil, "which", lambda name: None)
     target = tmp_path / ".venv" / "bin" / "localm"
     target.parent.mkdir(parents=True)
