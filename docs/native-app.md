@@ -58,6 +58,18 @@ with the `desktop` extra installed, both can be visible at once - a tray icon or
 status window for Open/Copy address/View logs/Restart/Stop, and the app window
 itself showing the GUI content.
 
+## First launch on Windows
+
+The first time you start `LocaLM.exe` (from a double-click, the desktop shortcut, or
+the Launcher), Windows SmartScreen may show a blue "Windows protected your PC" screen
+warning about an unrecognized publisher. This is expected: `LocaLM.exe` is a copy of
+your own interpreter built locally by `make-launcher` (see "What it actually is"
+below), not signed with a paid code-signing certificate, so Windows has no publisher
+reputation to check it against. Click **More info**, then **Run anyway** to continue.
+There is no way to remove this warning without a paid code-signing certificate; it is
+not a sign that anything is wrong with the build, and it only appears for the
+`LocaLM.exe` launcher itself, not for `localm gui` run directly in a terminal.
+
 ## Build it
 
 ```
