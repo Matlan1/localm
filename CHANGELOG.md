@@ -43,6 +43,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   on the same port when this happens, so a crash recovers on its own instead
   of requiring you to notice and restart it yourself. A clean, intentional
   shutdown is unaffected.
+- **An installed app whose certificate stopped being trusted, such as after
+  switching devices or a new certificate being generated, still said
+  "Running as an installed app" with no hint anything was wrong.** It now
+  tells you the certificate needs to be trusted again and where to get it.
 
 ## [0.1.5] - 2026-08-26
 
