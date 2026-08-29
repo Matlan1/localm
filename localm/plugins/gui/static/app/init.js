@@ -308,31 +308,35 @@ export async function serverReachable() {
 }
 window.serverReachable = serverReachable;
 
-// How many consecutive REACHABLE polls to accept as "the server came back"
-// when we never actually observed it go down. Only reached on the restart path
-// below; see the sawDown note there for why it is bounded rather than infinite.
+// Identity probe carrying NO auth headers, same as serverReachable: returns the
+// /whoami payload, or null if the server did not answer or the body did not parse.
+export async function fetchWhoami() {
+  try {
+    const r = await fetch("/whoami", { cache: "no-store" });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    return null;
+  }
+}
+window.fetchWhoami = fetchWhoami;
+
+// How many consecutive REACHABLE polls to accept as "the server came back" when
+// there is no per-process id to compare against (the sawDown path, or a /whoami
+// answer with no instance_id).
 const _UP_POLLS_WITHOUT_DOWN = 3;   // ~9s at the 3s poll interval
 
 // *sawDown* records whether the caller has already OBSERVED the server
 // unreachable. bootAuthProbe has (a thrown fetch is why it calls this), so it
 // passes true and keeps the original behaviour: reload on the first poll that
-// answers. The Settings "Restart server" button has NOT - it calls this
-// optimistically right after POSTing the restart, while the server is still up.
+// answers.
 //
-// That distinction matters because _do_restart unloads the engines and waits on
-// wait_for_vram_release BEFORE it re-execs, so the OLD process keeps answering
-// for seconds after the POST. Reloading on the first answer therefore hands the
-// browser a document from the process that is about to disappear, whose shell
-// token dies with it - one of the two ways a page ends up holding a dead
-// credential (see onShellTokenRejected above). So on that path, wait until we
-// have seen it actually go down before treating an answer as the NEW process.
-//
-// BOUNDED, deliberately: the re-exec gap can be shorter than one 3s poll, so a
-// fast restart can come back without us ever catching it down. Waiting forever
-// for a transition we may have missed would strand the user on the overlay -
-// strictly worse than the bug being fixed. After _UP_POLLS_WITHOUT_DOWN answers
-// we reload anyway, which is exactly today's behaviour; if that reload does land
-// on the doomed process, the shell-token recovery catches it.
+// *priorInstanceId*, when given, is the /whoami instance_id captured right
+// before a restart was requested. Every poll then compares against it instead
+// of guessing from a bounded up-poll count: the OLD process keeps answering
+// through its own unload-and-wait sequence before it re-execs, so "still
+// reachable" does not mean "the new process is up" - only a DIFFERENT
+// instance_id does. Passed only by the Settings "Restart server" button.
 export function onServerUnreachable(opts) {
   window.__localmLocked = true;
   const app = $("app");
@@ -342,8 +346,23 @@ export function onServerUnreachable(opts) {
   showReconnectOverlay();
   if (_reconnectTimer) return;
   let downSeen = !!(opts && opts.sawDown);
+  const priorInstanceId = opts && opts.priorInstanceId;
   let upPolls = 0;
   _reconnectTimer = setInterval(async () => {
+    if (priorInstanceId) {
+      const who = await fetchWhoami();
+      if (!who) return;                                    // still down - keep waiting
+      if (who.instance_id) {
+        if (who.instance_id === priorInstanceId) return;    // still the OLD process - keep waiting
+        // a different instance_id: this IS the new process
+      } else if (++upPolls < _UP_POLLS_WITHOUT_DOWN) {
+        return;                                             // no id to compare - bounded fallback
+      }
+      clearInterval(_reconnectTimer);
+      _reconnectTimer = null;
+      location.reload();
+      return;
+    }
     if (!(await serverReachable())) { downSeen = true; return; }   // still down - keep waiting
     if (!downSeen && ++upPolls < _UP_POLLS_WITHOUT_DOWN) return;    // may be the OLD process
     clearInterval(_reconnectTimer);

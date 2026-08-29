@@ -310,6 +310,58 @@ test("RESTART: a caller that DID observe the server down still reloads on the " 
     "applies only to the restart path, which has not seen a down yet");
 });
 
+test("RESTART: with a priorInstanceId, the poll waits for a DIFFERENT " +
+     "instance_id rather than reloading after a bounded count of \"still " +
+     "reachable\" answers - the old process keeps answering /whoami with its " +
+     "own id throughout its unload-and-wait sequence, well past that bound", async () => {
+  const state = { instanceId: "old-proc" };
+  const fetchImpl = async (url) => {
+    if (String(url) === "/whoami") {
+      return { ok: true, status: 200, json: async () => ({ instance_id: state.instanceId }),
+        text: async () => "" };
+    }
+    return { ok: true, status: 200, json: async () => ({ models: [] }), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl, shellToken: SHELL });
+  await tick();
+  const p = armPoll(window);
+
+  window.onServerUnreachable({ priorInstanceId: "old-proc" });
+  assert.ok(p.poll, "a reconnect poll was armed");
+
+  for (let i = 0; i < 6; i++) {
+    await p.poll();
+    assert.equal(p.reloadDecisions, 0,
+      `poll ${i + 1}: still the OLD process's instance_id - must not reload into it`);
+  }
+
+  state.instanceId = "new-proc";   // the re-exec'd process is up
+  await p.poll();
+  assert.equal(p.reloadDecisions, 1,
+    "a DIFFERENT instance_id proves this is the new process - reload now");
+});
+
+test("RESTART: with a priorInstanceId, a /whoami answer with no instance_id " +
+     "field falls back to the bounded up-poll count", async () => {
+  const fetchImpl = async (url) => {
+    if (String(url) === "/whoami") {
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    }
+    return { ok: true, status: 200, json: async () => ({ models: [] }), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl, shellToken: SHELL });
+  await tick();
+  const p = armPoll(window);
+
+  window.onServerUnreachable({ priorInstanceId: "old-proc" });
+  await p.poll();
+  await p.poll();
+  assert.equal(p.reloadDecisions, 0, "still within the fallback bound");
+  await p.poll();
+  assert.equal(p.reloadDecisions, 1,
+    "no instance_id to compare against - falls back to the bounded-count heuristic");
+});
+
 test("AUTH-1b: a 200 boot clears the recovery markers and reveals the app", async () => {
   const { window } = loadApp({ fetchImpl: allOk });
   await tick();
