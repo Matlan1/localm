@@ -68,6 +68,69 @@ _PATH_RE = re.compile(r"^/[!-~]*$")
 _READ_CHUNK = 65536
 
 
+def _crash_watchdog_disabled() -> bool:
+    import os
+    return os.environ.get("LOCALM_CRASH_WATCHDOG", "").strip().lower() in (
+        "0", "off", "false", "no")
+
+
+def _spawn_crash_recovery_watchdog(*, host: str, port: int, tls: bool,
+                                   instance_id: Optional[str]) -> None:
+    """Spawn ``scripts/crash_recovery_watchdog.py`` DETACHED, watching this
+    process's own pid, so it can relaunch the server if this process dies
+    without reaching ``disarm_crash_guard``. Never raises: a watchdog that
+    fails to spawn must not block or fail server startup. Set
+    ``LOCALM_CRASH_WATCHDOG=off`` to disable it."""
+    if not instance_id or _crash_watchdog_disabled():
+        return
+    try:
+        import json
+        import os
+        import subprocess
+
+        from localm import bugreport
+        from localm.bindhost import self_connect_host
+        from localm.updater import repo_root
+
+        script = repo_root() / "scripts" / "crash_recovery_watchdog.py"
+        if not script.is_file():
+            return
+        crash_dir = bugreport._crash_dir(home=None)
+        relaunch_argv = [sys.executable, "-m", "localm", *sys.argv[1:]]
+        if port:
+            relaunch_argv += ["-p", str(port)]
+        argv = [sys.executable, str(script),
+               "--pid", str(os.getpid()),
+               "--host", self_connect_host(host),
+               "--port", str(port),
+               "--scheme", "https" if tls else "http",
+               "--instance-id", str(instance_id),
+               "--crash-dir", str(crash_dir),
+               "--relaunch-argv", json.dumps(relaunch_argv)]
+        # A prior watchdog's own relaunch of THIS process sets this so the
+        # rolling crash-storm window (each watchdog is a short-lived, one-shot
+        # process, so it cannot keep the count in its own memory) survives
+        # across the whole relaunch chain rather than resetting to zero every
+        # time a fresh watchdog is spawned.
+        restart_history = os.environ.get("LOCALM_CRASH_WATCHDOG_HISTORY", "")
+        if restart_history:
+            argv += ["--restart-history", restart_history]
+        kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL, close_fds=True)
+        if sys.platform == "win32":
+            kwargs["creationflags"] = (
+                getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(argv, **kwargs)
+    except Exception as e:
+        try:
+            _log.warning("could not spawn the crash-recovery watchdog: %s", e)
+        except Exception:
+            pass
+
+
 def run_server(
     app,
     host: str,
@@ -98,6 +161,8 @@ def run_server(
     bugreport.arm_crash_guard(context={"host": host, "port": port,
                                         "tls": bool(ssl_certfile)},
                               instance_id=instance_id)
+    _spawn_crash_recovery_watchdog(host=host, port=port, tls=bool(ssl_certfile),
+                                   instance_id=instance_id)
 
     try:
         if not ssl_certfile:

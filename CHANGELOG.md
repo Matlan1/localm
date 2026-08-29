@@ -38,6 +38,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   earlier attempt, which made the failure look like an unrelated problem
   instead of a network one. A genuine network failure is now reported as
   blocked regardless of what is already cached.
+- **If the server process ever died unexpectedly, such as a crash, it stayed
+  down until manually restarted.** A watchdog now relaunches it automatically
+  on the same port when this happens, so a crash recovers on its own instead
+  of requiring you to notice and restart it yourself. A clean, intentional
+  shutdown is unaffected.
 
 ## [0.1.5] - 2026-08-26
 
