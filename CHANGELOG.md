@@ -32,6 +32,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   server that was already on its way out rather than the freshly restarted
   one. It now waits for confirmation that a genuinely new server process has
   come up before reloading.
+- **A blocked or failing Kokoro voice download could show a raw, unhelpful
+  error instead of the "allow huggingface.co" guidance.** This happened
+  whenever the browser had already cached part of the voice model from an
+  earlier attempt, which made the failure look like an unrelated problem
+  instead of a network one. A genuine network failure is now reported as
+  blocked regardless of what is already cached.
 
 ## [0.1.5] - 2026-08-26
 
