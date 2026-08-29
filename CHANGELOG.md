@@ -47,6 +47,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   switching devices or a new certificate being generated, still said
   "Running as an installed app" with no hint anything was wrong.** It now
   tells you the certificate needs to be trusted again and where to get it.
+- **Right-clicking the tray icon could, in rare cases, crash the server
+  outright.** The tray's background thread now sets up what Windows needs
+  before it can show its menu, closing off the specific way this could
+  happen. Combined with the automatic-restart fix above, this is also less
+  likely to matter if it ever does.
 
 ## [0.1.5] - 2026-08-26
 
