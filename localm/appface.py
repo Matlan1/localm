@@ -622,6 +622,8 @@ class _WinTray(AppFace):
     _ID_STOP = 1005
     _ID_SHOW = 1006
 
+    _COINIT_APARTMENTTHREADED = 0x2
+
     def __init__(self, *, name, url, logfile, on_restart, on_stop, get_log_lines=None,
                  on_show=None):
         self.name = name
@@ -708,14 +710,57 @@ class _WinTray(AppFace):
             self._ID_SHOW: self._show,
         }.get(cmd_id, lambda: None)()
 
+    # ---- COM apartment (see _run's call site for why) ----
+    def _com_init(self):
+        """Establish an STA COM apartment on this thread. Returns the ole32
+        handle to pass to _com_uninit, or None if unavailable or the call
+        failed. Best-effort: guarded so a failure here never blocks the tray
+        from starting, matching every other call in this class."""
+        import ctypes
+        try:
+            ole32 = ctypes.windll.ole32
+            ole32.CoInitializeEx.restype = ctypes.c_long
+            hr = ole32.CoInitializeEx(None, self._COINIT_APARTMENTTHREADED)
+            if hr < 0:
+                logger.debug("appface: CoInitializeEx returned 0x%08X on "
+                             "the tray thread; continuing without it",
+                             hr & 0xFFFFFFFF)
+                return None
+            return ole32
+        except Exception:
+            logger.debug("appface: CoInitializeEx failed on the tray thread",
+                         exc_info=True)
+            return None
+
+    def _com_uninit(self, ole32) -> None:
+        if ole32 is None:
+            return
+        try:
+            ole32.CoUninitialize()
+        except Exception:
+            pass
+
     # ---- the Win32 plumbing (its own thread owns the window + message loop) ----
     def _run(self):
         import ctypes
-        from ctypes import wintypes
 
         user32 = ctypes.windll.user32
         shell32 = ctypes.windll.shell32
         kernel32 = ctypes.windll.kernel32
+        # TrackPopupMenu's internal message pump can trigger outgoing COM
+        # calls (UI Automation/accessibility notifications for the popup),
+        # and a thread with no COM apartment established raises
+        # RPC_E_CANTCALLOUT_ININPUTSYNCCALL when that happens. STA (not MTA)
+        # because this thread runs a real GetMessage/DispatchMessage loop.
+        ole32 = self._com_init()
+        try:
+            self._run_message_loop(user32, shell32, kernel32)
+        finally:
+            self._com_uninit(ole32)
+
+    def _run_message_loop(self, user32, shell32, kernel32):
+        from ctypes import wintypes
+        import ctypes
 
         LRESULT = ctypes.c_ssize_t
         WM_APP = 0x8000
