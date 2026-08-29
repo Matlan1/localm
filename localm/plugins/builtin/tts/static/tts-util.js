@@ -61,8 +61,10 @@ export function pickDtype(cfg, device) {
 // failed huggingface.co download (script/ad blocker, firewall, offline, or a
 // 403 from a filtering proxy) surfaces as a network-class error; tell the user
 // to allow huggingface.co rather than dumping a raw error. A genuine runtime
-// fault (already cached, or a non-network error) keeps its real message so we
-// do not hide the actual problem.
+// fault keeps its real message so we do not hide the actual problem.
+//
+// `cached` gates only the `!online` fallback. A `networkish` match is
+// unconditional and is never suppressed by `cached`.
 export function classifyLoadError(err, { cached = false, online = true } = {}) {
   const raw = (err && (err.message || err.name)) ? String(err.message || err.name) : String(err || "");
   const m = raw.toLowerCase();
@@ -71,7 +73,7 @@ export function classifyLoadError(err, { cached = false, online = true } = {}) {
     // Specific network signatures only. NOT a bare "fetch" - that would mislabel
     // a genuine runtime error mentioning "prefetch"/"fetching shard" as blocked.
     /failed to fetch|networkerror|network error|load failed|err_|net::|blocked|forbidden|\b403\b|cors/.test(m);
-  if (!cached && (networkish || !online)) {
+  if (networkish || (!cached && !online)) {
     return {
       blocked: true,
       message:

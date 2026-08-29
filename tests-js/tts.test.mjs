@@ -69,6 +69,15 @@ test("R07: being offline (and uncached) is reported as a blocked download", () =
   assert.equal(r.blocked, true);
 });
 
+test("R07: a networkish failure is STILL reported as blocked even when a stale " +
+     "cache entry makes modelCached() report true (a partial prior download)", () => {
+  const r = classifyLoadError(
+    new TypeError("NetworkError when attempting to fetch resource."),
+    { cached: true, online: true });
+  assert.equal(r.blocked, true);
+  assert.match(r.message, /allow huggingface\.co/i);
+});
+
 test("R07: a non-network fault when the model is cached keeps its real message", () => {
   const r = classifyLoadError(new Error("ONNX runtime: bad graph"), { cached: true, online: true });
   assert.equal(r.blocked, false);
