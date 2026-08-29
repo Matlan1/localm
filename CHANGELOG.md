@@ -26,6 +26,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   app stop responding - most visibly, the Plugins page's list would stop
   loading. Reopening a session you already have open now does nothing more
   than bring it to the front, the same as every other session in the list.
+- **Restarting the server from Settings could leave the page stuck on a
+  reconnecting screen instead of coming back.** The page could reload before
+  the old server had actually finished shutting down, landing back on the
+  server that was already on its way out rather than the freshly restarted
+  one. It now waits for confirmation that a genuinely new server process has
+  come up before reloading.
 
 ## [0.1.5] - 2026-08-26
 

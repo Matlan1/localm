@@ -1138,13 +1138,21 @@ if ($("server-restart")) {
       "This restarts the LocaLM server (the model is unloaded first, then reloaded). " +
       "It will be briefly unavailable, then reconnect automatically.",
       "Restart", async () => {
+        const before = window.fetchWhoami ? await window.fetchWhoami() : null;
         try {
           const r = await fetch("/v1/server/restart",
                                 { method: "POST", headers: authHeaders() });
           if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
           toast("Server restarting…");
-          // The reconnect overlay polls until the new process is up.
-          if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
+          // The reconnect overlay polls /whoami's instance_id until a NEW
+          // process answers, rather than reloading on a bounded count of
+          // reachable polls that the still-shutting-down old process can
+          // satisfy on its own.
+          if (window.onServerUnreachable) {
+            setTimeout(() => onServerUnreachable({
+              priorInstanceId: before && before.instance_id
+            }), 800);
+          }
         } catch (e) { toast("Could not restart: " + e.message, true); }
       });
   };
