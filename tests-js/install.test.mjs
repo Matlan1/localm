@@ -80,3 +80,21 @@ test("PWA cert gate: a usable install prompt overrides certNeeded", () => {
   assert.ok(shown(btn), "an install prompt wins over the cert hint");
   assert.ok(!shown(hint));
 });
+
+test("PWA cert gate: an installed app whose cert stopped being trusted is told so", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.applyInstallUI({ standalone: true, certUntrusted: true });
+  const { btn, hint, ios } = els(window);
+  assert.ok(shown(hint), "the cert-untrusted hint is shown");
+  assert.ok(!shown(btn) && !shown(ios), "still no install paths once already installed");
+  assert.match(hint.textContent, /certificate/i, "names the actual problem");
+  assert.doesNotMatch(hint.textContent, /^Running as an installed app\.$/,
+    "does not silently claim everything is fine");
+});
+
+test("PWA cert gate: an installed app with a trusted cert still gets the plain confirmation", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.applyInstallUI({ standalone: true, certUntrusted: false });
+  const { hint } = els(window);
+  assert.match(hint.textContent, /installed app/i);
+});
