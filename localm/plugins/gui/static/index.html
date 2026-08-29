@@ -1372,13 +1372,17 @@
     if (typeof window.applyInstallUI !== "function") return;
     var sa = standalone();
     var canPrompt = !!window.__deferredInstall;
-    // Offer the cert step unless trust is CONFIRMED (__swFailed === false); an
-    // unknown state (undefined - e.g. Firefox mobile) must still surface it, so a
-    // self-signed cert is never undownloadable. Mirrors updateKeyGateCertStep.
-    var certNeeded = location.protocol === "https:" && window.__swFailed !== false
-      && !sa && !canPrompt && !(!sa && ios());
+    // Trust unconfirmed (__swFailed !== false; undefined counts too, e.g.
+    // Firefox mobile) on HTTPS, regardless of install state - a standalone
+    // launch can lose cert trust just as easily as a browser tab can (a new
+    // device, a rotated CA). certNeeded narrows this to "blocks installing",
+    // so it stays false once already standalone; certUntrusted does not.
+    // Mirrors updateKeyGateCertStep.
+    var certUntrusted = location.protocol === "https:" && window.__swFailed !== false;
+    var certNeeded = certUntrusted && !sa && !canPrompt && !(!sa && ios());
     window.applyInstallUI({ standalone: sa, ios: !sa && ios(),
-                            canPrompt: canPrompt, certNeeded: certNeeded });
+                            canPrompt: canPrompt, certNeeded: certNeeded,
+                            certUntrusted: certUntrusted });
     if (window.refreshInstallGateIfOpen) window.refreshInstallGateIfOpen();
     // Keep the key gate's "Install certificate" step in sync with cert trust:
     // __swFailed is only known after SW registration resolves (async, after

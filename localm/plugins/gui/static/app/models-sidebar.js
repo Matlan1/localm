@@ -655,7 +655,7 @@ export function isIOSSafari() {
 
 // Show exactly one of: installed confirmation, the native Install button, the
 // iOS Add-to-Home-Screen steps, or the generic hint. env = {standalone, ios,
-// canPrompt}; missing fields are treated as false.
+// canPrompt, certNeeded, certUntrusted}; missing fields are treated as false.
 export function applyInstallUI(env) {
   env = env || {};
   const btn = document.getElementById("install-app");
@@ -666,6 +666,13 @@ export function applyInstallUI(env) {
   if (!hint) return;
   hint.style.display = "none";
   if (env.standalone) {
+    if (env.certUntrusted) {
+      hint.textContent = "This device no longer trusts this server's certificate. "
+        + "Open localm-ca.crt from the server (/localm-ca.crt) and install it, "
+        + "then reload.";
+      hint.style.display = "";
+      return;
+    }
     hint.textContent = "Running as an installed app.";
     hint.style.display = "";
     return;
