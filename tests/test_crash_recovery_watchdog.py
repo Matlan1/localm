@@ -116,7 +116,7 @@ class TestReadMarkerPid:
 class TestRunCleanShutdown:
     """A watched process exits and its marker is already gone (disarm_crash_guard
     already ran) - no replacement ever answers /whoami. run() must return
-    EXIT_WATCHDOG_STOPPED_CLEAN and must NOT relaunch."""
+    EXIT_OK and must NOT relaunch."""
 
     def test_clean_exit_is_never_relaunched(self, tmp_path):
         wd = _load_wd()
@@ -131,127 +131,165 @@ class TestRunCleanShutdown:
             # removed it as part of a clean shutdown.
             code = wd.run(pid=proc.pid, host="127.0.0.1", port=port, scheme="http",
                           instance_id="clean-inst", crash_dir=tmp_path,
-                          relaunch_argv=relaunch_argv, poll_interval=0.05,
-                          grace_s=0.5, request_timeout=1.0, log_path=None)
+                          relaunch_argv=relaunch_argv, restart_history=[],
+                          poll_interval=0.05, grace_s=0.5, request_timeout=1.0,
+                          log_path=None)
             proc.wait(timeout=5)
-            assert code == wd.EXIT_WATCHDOG_STOPPED_CLEAN
+            assert code == wd.EXIT_OK
             assert not sentinel.exists()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_a_replacement_already_up_is_not_relaunched_either(self, tmp_path):
+        """An ordinary restart/update already in flight: something else
+        answers /whoami with a new instance_id before the marker check even
+        runs. run() must retire without relaunching - the replacement's own
+        run_server() call already spawned its own watchdog."""
+        wd = _load_wd()
+        holder = [None]
+        server, thread, port = _whoami_server(holder)
+        try:
+            proc = _spawn_sleeper(0.1)
+            _write_marker(tmp_path, "old-inst", proc.pid)
+            replacement = _spawn_sleeper(2.0)
+            try:
+                _write_marker(tmp_path, "new-inst", replacement.pid)
+
+                def _flip():
+                    time.sleep(0.05)
+                    holder[0] = "new-inst"
+
+                threading.Thread(target=_flip, daemon=True).start()
+                sentinel = tmp_path / "relaunched.txt"
+                relaunch_argv = [sys.executable, "-c",
+                                 f"open(r'{sentinel}', 'w').write('x')"]
+                code = wd.run(pid=proc.pid, host="127.0.0.1", port=port,
+                              scheme="http", instance_id="old-inst",
+                              crash_dir=tmp_path, relaunch_argv=relaunch_argv,
+                              restart_history=[], poll_interval=0.02,
+                              grace_s=2.0, request_timeout=0.5, log_path=None)
+                assert code == wd.EXIT_OK
+                assert not sentinel.exists()
+            finally:
+                replacement.kill()
+                replacement.wait(timeout=5)
         finally:
             server.shutdown()
             thread.join(timeout=5)
 
 
 class TestRunCrashRelaunches:
-    """A watched process exits WITHOUT clearing its marker (a crash). run() must
-    invoke the relaunch command and then track whatever instance answers next."""
+    """A watched process exits WITHOUT clearing its marker (a crash). run()
+    must invoke the relaunch command exactly once and then return - it does
+    NOT keep watching the replacement, since the replacement's own startup
+    spawns its own fresh watchdog."""
 
-    def test_crash_triggers_a_real_relaunch(self, tmp_path):
+    def test_crash_triggers_a_real_relaunch_then_returns(self, tmp_path):
         wd = _load_wd()
         holder = [None]
         server, thread, port = _whoami_server(holder)
         try:
-            proc = _spawn_sleeper(0.2)
+            proc = _spawn_sleeper(0.1)
             _write_marker(tmp_path, "dead-inst", proc.pid)
             sentinel = tmp_path / "relaunched.txt"
             relaunch_argv = [sys.executable, "-c",
                              f"open(r'{sentinel}', 'w').write('x')"]
 
-            done = {}
-
-            def _drive():
-                done["code"] = wd.run(
-                    pid=proc.pid, host="127.0.0.1", port=port, scheme="http",
-                    instance_id="dead-inst", crash_dir=tmp_path,
-                    relaunch_argv=relaunch_argv, poll_interval=0.05,
-                    grace_s=0.5, request_timeout=1.0, log_path=None)
-
-            t = threading.Thread(target=_drive, daemon=True)
-            t.start()
-
-            deadline = time.monotonic() + 10
+            code = wd.run(pid=proc.pid, host="127.0.0.1", port=port, scheme="http",
+                          instance_id="dead-inst", crash_dir=tmp_path,
+                          relaunch_argv=relaunch_argv, restart_history=[],
+                          poll_interval=0.02, grace_s=0.2, request_timeout=0.5,
+                          log_path=None)
+            assert code == wd.EXIT_OK
+            deadline = time.monotonic() + 5
             while not sentinel.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
             assert sentinel.exists(), "the crash was never relaunched"
-
-            # Give the never-answering relaunch its grace window, then bring up
-            # a real, live process as the recovered instance so run() settles
-            # into steady watching instead of treating a fake pid as an
-            # instant second crash.
-            recovered = _spawn_sleeper(5.0)
-            try:
-                _write_marker(tmp_path, "recovered-inst", recovered.pid)
-                holder[0] = "recovered-inst"
-                time.sleep(0.3)
-                assert t.is_alive(), (
-                    "run() exited instead of settling into watching the "
-                    "recovered instance")
-            finally:
-                recovered.kill()
-                recovered.wait(timeout=5)
         finally:
             server.shutdown()
             thread.join(timeout=5)
 
 
 class TestRunStormCap:
-    """A relaunch that ALSO crashes immediately, every time, must eventually stop
-    being retried rather than loop forever."""
+    """A relaunch that ALSO crashes immediately, every time. Since each watchdog
+    is a one-shot process, the cap can only work if the restart history is
+    correctly threaded from one call's relaunch into the next call's
+    restart_history - exactly as portmux.py/LOCALM_CRASH_WATCHDOG_HISTORY
+    carries it between real, separate watchdog processes."""
 
-    def test_repeated_crash_is_capped(self, tmp_path):
+    def test_repeated_crash_is_capped_across_the_chain(self, tmp_path):
         wd = _load_wd()
         wd._STORM_LIMIT = 2
         wd._STORM_WINDOW_S = 300.0
         holder = [None]
         server, thread, port = _whoami_server(holder)
         try:
-            proc = _spawn_sleeper(0.2)
-            _write_marker(tmp_path, "crashy", proc.pid)
-            # Every relaunch is itself an instant no-op process - it never
-            # answers /whoami, so poll_for_new_instance always times out and
-            # run() re-checks the SAME still-present marker on each pass.
             relaunch_argv = [sys.executable, "-c", "pass"]
-
-            code = wd.run(pid=proc.pid, host="127.0.0.1", port=port, scheme="http",
-                          instance_id="crashy", crash_dir=tmp_path,
-                          relaunch_argv=relaunch_argv, poll_interval=0.02,
-                          grace_s=0.1, request_timeout=0.5, log_path=None)
-            assert code == wd.EXIT_STORM_CAPPED
+            history = []
+            codes = []
+            for i in range(3):
+                proc = _spawn_sleeper(0.1)
+                _write_marker(tmp_path, f"crashy{i}", proc.pid)
+                code = wd.run(pid=proc.pid, host="127.0.0.1", port=port,
+                              scheme="http", instance_id=f"crashy{i}",
+                              crash_dir=tmp_path, relaunch_argv=relaunch_argv,
+                              restart_history=list(history), poll_interval=0.02,
+                              grace_s=0.1, request_timeout=0.5, log_path=None)
+                codes.append(code)
+                if code != wd.EXIT_OK:
+                    break
+                history.append(time.time())
+            assert codes == [wd.EXIT_OK, wd.EXIT_OK, wd.EXIT_STORM_CAPPED]
         finally:
             server.shutdown()
             thread.join(timeout=5)
 
-    def test_fires_control_without_the_cap_it_never_returns(self, tmp_path):
-        """Proves the test above actually exercises the cap: with the storm
-        check disabled, the identical scenario never reaches a return at all
-        within a generous bound."""
+    def test_fires_control_a_higher_limit_does_not_cap_the_same_chain(self, tmp_path):
+        """Proves the test above is actually exercising the cap boundary: the
+        identical three-crash chain, with the limit raised, never gets capped."""
         wd = _load_wd()
-        wd._STORM_LIMIT = 10 ** 9
+        wd._STORM_LIMIT = 100
         wd._STORM_WINDOW_S = 300.0
         holder = [None]
         server, thread, port = _whoami_server(holder)
         try:
-            proc = _spawn_sleeper(0.2)
-            _write_marker(tmp_path, "crashy2", proc.pid)
             relaunch_argv = [sys.executable, "-c", "pass"]
-
-            result = {}
-
-            def _drive():
-                result["code"] = wd.run(
-                    pid=proc.pid, host="127.0.0.1", port=port, scheme="http",
-                    instance_id="crashy2", crash_dir=tmp_path,
-                    relaunch_argv=relaunch_argv, poll_interval=0.02,
-                    grace_s=0.1, request_timeout=0.5, log_path=None)
-
-            t = threading.Thread(target=_drive, daemon=True)
-            t.start()
-            t.join(timeout=3)
-            assert t.is_alive(), (
-                "run() returned even with the storm cap effectively disabled - "
-                "the cap test above is not exercising what it claims to")
+            history = []
+            codes = []
+            for i in range(3):
+                proc = _spawn_sleeper(0.1)
+                _write_marker(tmp_path, f"crashy-hi{i}", proc.pid)
+                code = wd.run(pid=proc.pid, host="127.0.0.1", port=port,
+                              scheme="http", instance_id=f"crashy-hi{i}",
+                              crash_dir=tmp_path, relaunch_argv=relaunch_argv,
+                              restart_history=list(history), poll_interval=0.02,
+                              grace_s=0.1, request_timeout=0.5, log_path=None)
+                codes.append(code)
+                history.append(time.time())
+            assert codes == [wd.EXIT_OK, wd.EXIT_OK, wd.EXIT_OK], (
+                "the chain was capped even with the limit raised - the cap "
+                "test above is not exercising what it claims to")
         finally:
             server.shutdown()
             thread.join(timeout=5)
+
+
+class TestRestartHistory:
+    def test_from_string_parses_and_drops_garbage(self):
+        wd = _load_wd()
+        assert wd.restart_history_from_string("") == []
+        assert wd.restart_history_from_string("1.0,2.5, 3") == [1.0, 2.5, 3.0]
+        assert wd.restart_history_from_string("1.0,garbage,3") == [1.0, 3.0]
+
+    def test_storm_active_respects_the_window(self):
+        wd = _load_wd()
+        now = 1000.0
+        old = [now - wd._STORM_WINDOW_S - 1] * 10
+        assert wd.storm_active(old, now) is False
+        recent = [now - 1.0] * wd._STORM_LIMIT
+        assert wd.storm_active(recent, now) is True
+        assert wd.storm_active(recent[:-1], now) is False
 
 
 class TestPollForNewInstance:

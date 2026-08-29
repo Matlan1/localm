@@ -1,33 +1,40 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Detached crash-recovery watchdog: relaunch the server if it dies without a
-clean shutdown, without waiting for a human to notice and restart it by hand.
+"""Detached crash-recovery watchdog: relaunch the server once if it dies
+without a clean shutdown, without waiting for a human to notice and restart
+it by hand.
 
 ``localm.portmux.run_server()`` spawns this DETACHED once, right after arming
 the crash guard (``bugreport.arm_crash_guard``). It is stdlib-only, with ZERO
 ``localm`` package imports, so a broken localm install cannot break the thing
 meant to recover from one - the same reasoning as ``update_watchdog.py``.
 
-It watches one PID at a time. When that PID exits, it gives the replacement a
-grace window to show up on its own (the ordinary restart path re-execs a new
-process on the same port), by polling that port's own unauthenticated
-``GET /whoami``:
+It watches exactly one pid/instance and returns as soon as ONE of these is
+true, and never follows a transition to a different pid:
 
-* a NEW instance_id answers within the grace window: an ordinary restart or
-  update already in progress. Read that instance's own crash marker for its
-  pid and resume watching it.
+* the watched pid answers ``GET /whoami`` with an instance_id other than its
+  own within the grace window after exiting: an ordinary restart or update
+  was already in flight. Nothing to do - that instance's own run_server()
+  call already spawned its own watchdog.
 * nothing answers, and the watched instance's own crash marker file (see
   ``localm.bugreport._crash_marker_path`` - the naming is duplicated here
   rather than imported, and pinned by
-  test_crash_watchdog_marker_path_matches_bugreport) is still present: the
-  process died without reaching its own clean-shutdown path. Relaunch it with
-  the saved command line.
-* nothing answers, and the marker is gone: a clean, intentional shutdown
-  (disarm_crash_guard already ran). Exit; there is nothing left to watch.
+  test_crash_watchdog_marker_path_matches_bugreport) is gone: a clean,
+  intentional shutdown (disarm_crash_guard already ran). Nothing to recover.
+* nothing answers, and the marker is still present: the process died without
+  reaching its own clean-shutdown path. Relaunch it with the saved command
+  line, then return - the relaunched process's own startup spawns a fresh
+  watchdog for itself, so this one does not keep watching afterward. Two
+  watchdogs both adopting the same replacement would race to relaunch it
+  twice on a later crash; retiring on handoff avoids that entirely.
 
-Relaunches are capped within a rolling window (see _STORM_LIMIT/_STORM_WINDOW_S)
-so a process that crashes on every startup cannot loop forever; once capped,
-this watchdog logs and exits rather than retrying silently.
+Relaunches are capped within a rolling window (_STORM_LIMIT/_STORM_WINDOW_S)
+so a process that crashes on every startup is not retried forever. Because
+each watchdog is a short-lived, one-shot process, that history cannot live in
+its own memory - it is carried in the LOCALM_CRASH_WATCHDOG_HISTORY
+environment variable, set on the relaunched child so its own next watchdog
+inherits it, mirroring localm.inference._hang_alarm's in-process restart
+history but threaded across real process boundaries instead of an execv.
 
 This does not touch privacy mode: it writes no new persistent file by default
 (--log-file is opt-in, mirroring update_watchdog.py), never reads or logs
@@ -44,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import ssl
 import subprocess
 import sys
@@ -53,7 +61,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-EXIT_WATCHDOG_STOPPED_CLEAN = 0
+EXIT_OK = 0
 EXIT_STORM_CAPPED = 1
 EXIT_RELAUNCH_FAILED = 2
 
@@ -62,6 +70,7 @@ DEFAULT_GRACE_S = 25.0
 DEFAULT_REQUEST_TIMEOUT_S = 3.0
 _STORM_LIMIT = 4
 _STORM_WINDOW_S = 300.0
+_HISTORY_ENV = "LOCALM_CRASH_WATCHDOG_HISTORY"
 
 
 def _log(log_path: Optional[Path], msg: str) -> None:
@@ -99,7 +108,6 @@ def pid_alive(pid: int) -> bool:
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
     else:
-        import os
         import errno
 
         try:
@@ -183,12 +191,42 @@ def poll_for_new_instance(host: str, port: int, scheme: str, old_instance_id: st
         time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
 
-def relaunch(argv: list, *, log_path: Optional[Path]) -> Optional[int]:
+def restart_history_from_string(raw: str) -> list:
+    """Parse the comma-separated epoch-seconds list carried in
+    LOCALM_CRASH_WATCHDOG_HISTORY. An unparseable entry is dropped rather
+    than failing the whole history, since a corrupt env var must never block
+    a genuine crash recovery."""
+    out = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part:
+            try:
+                out.append(float(part))
+            except ValueError:
+                continue
+    return out
+
+
+def storm_active(history: list, now_epoch: float) -> bool:
+    recent = [t for t in history if now_epoch - t < _STORM_WINDOW_S]
+    return len(recent) >= _STORM_LIMIT
+
+
+def relaunch(argv: list, *, restart_history: list, now_epoch: float,
+            log_path: Optional[Path]) -> Optional[int]:
     """Start *argv* detached, matching the creation flags
     localm.updater.spawn_health_watchdog already uses for a process meant to
-    outlive its spawner. Returns the new process's pid, or None on failure."""
+    outlive its spawner. The updated restart history is set on the child's
+    environment (a plain Popen, unlike os.execv, does not inherit implicitly)
+    so the watchdog THAT process spawns for itself can see how many
+    relaunches already happened in this window. Returns the new process's
+    pid, or None on failure."""
+    kept = [t for t in restart_history if now_epoch - t < _STORM_WINDOW_S]
+    kept.append(now_epoch)
+    env = os.environ.copy()
+    env[_HISTORY_ENV] = ",".join(f"{t:.3f}" for t in kept)
     kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                  stderr=subprocess.DEVNULL, close_fds=True)
+                  stderr=subprocess.DEVNULL, close_fds=True, env=env)
     if sys.platform == "win32":
         kwargs["creationflags"] = (
             getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
@@ -205,77 +243,70 @@ def relaunch(argv: list, *, log_path: Optional[Path]) -> Optional[int]:
 
 
 def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
-       crash_dir: Path, relaunch_argv: list, poll_interval: float,
-       grace_s: float, request_timeout: float, log_path: Optional[Path]) -> int:
+       crash_dir: Path, relaunch_argv: list, restart_history: list,
+       poll_interval: float, grace_s: float, request_timeout: float,
+       log_path: Optional[Path]) -> int:
+    """Watch exactly one pid/instance until ONE of three things happens, then
+    return - this watchdog never follows a transition to a new pid. Whatever
+    replaces the watched instance (a relaunch this call performs, or an
+    ordinary restart/update already in flight) goes through run_server()
+    again on its own, which spawns ITS OWN fresh watchdog - so two watchdogs
+    racing to watch the same replacement is avoided by each one retiring as
+    soon as it sees a replacement exists, rather than adopting it."""
     _log(log_path,
         f"watching pid {pid} (instance {instance_id!r}) on "
         f"{scheme}://{host}:{port}")
-    restart_history: list = []
 
-    while True:
-        if pid_alive(pid):
-            time.sleep(poll_interval)
-            continue
+    while pid_alive(pid):
+        time.sleep(poll_interval)
 
-        _log(log_path, f"pid {pid} is gone - waiting up to {grace_s}s for a "
-                       "replacement to come up on its own")
-        replacement = poll_for_new_instance(
-            host, port, scheme, instance_id, crash_dir, deadline_s=grace_s,
-            poll_interval=poll_interval, request_timeout=request_timeout,
-            log_path=log_path)
-        if replacement is not None:
-            instance_id, pid = replacement
-            _log(log_path,
-                f"replacement instance {instance_id!r} (pid {pid}) is "
-                "already up - resuming watch, no relaunch needed")
-            continue
-
-        marker = marker_path(crash_dir, instance_id)
-        if not marker.exists():
-            _log(log_path,
-                f"no replacement appeared and {marker.name} is gone - this "
-                "was a clean, intentional shutdown. Nothing to recover.")
-            return EXIT_WATCHDOG_STOPPED_CLEAN
-
-        now = time.monotonic()
-        restart_history = [t for t in restart_history if now - t < _STORM_WINDOW_S]
-        if len(restart_history) >= _STORM_LIMIT:
-            _log(log_path,
-                f"{marker.name} is still present (no clean shutdown) but "
-                f"{_STORM_LIMIT} relaunches already happened in the last "
-                f"{_STORM_WINDOW_S:.0f}s - not relaunching again. Giving up; "
-                "the crash marker and any trace file are left in place for "
-                "the next manual start to report.")
-            return EXIT_STORM_CAPPED
-
+    _log(log_path, f"pid {pid} is gone - waiting up to {grace_s}s for a "
+                   "replacement to come up on its own")
+    replacement = poll_for_new_instance(
+        host, port, scheme, instance_id, crash_dir, deadline_s=grace_s,
+        poll_interval=poll_interval, request_timeout=request_timeout,
+        log_path=log_path)
+    if replacement is not None:
+        new_id, new_pid = replacement
         _log(log_path,
-            f"{marker.name} is still present - the process died without a "
-            "clean shutdown. Relaunching.")
-        new_os_pid = relaunch(relaunch_argv, log_path=log_path)
-        if new_os_pid is None:
-            return EXIT_RELAUNCH_FAILED
-        restart_history.append(now)
-        pid = new_os_pid
-        learned = poll_for_new_instance(
-            host, port, scheme, instance_id, crash_dir, deadline_s=grace_s,
-            poll_interval=poll_interval, request_timeout=request_timeout,
-            log_path=log_path)
-        if learned is not None:
-            instance_id, learned_pid = learned
-            _log(log_path,
-                f"relaunch confirmed as instance {instance_id!r} "
-                f"(pid {learned_pid})")
-        else:
-            _log(log_path,
-                f"relaunch (pid {pid}) did not answer /whoami within "
-                f"{grace_s}s - watching its process directly under the "
-                "previous instance id until it does")
+            f"replacement instance {new_id!r} (pid {new_pid}) is already "
+            "up with its own watchdog - nothing more for this one to do")
+        return EXIT_OK
+
+    marker = marker_path(crash_dir, instance_id)
+    if not marker.exists():
+        _log(log_path,
+            f"no replacement appeared and {marker.name} is gone - this was "
+            "a clean, intentional shutdown. Nothing to recover.")
+        return EXIT_OK
+
+    now = time.time()
+    if storm_active(restart_history, now):
+        _log(log_path,
+            f"{marker.name} is still present (no clean shutdown) but "
+            f"{_STORM_LIMIT} relaunches already happened in the last "
+            f"{_STORM_WINDOW_S:.0f}s - not relaunching again. Giving up; "
+            "the crash marker and any trace file are left in place for "
+            "the next manual start to report.")
+        return EXIT_STORM_CAPPED
+
+    _log(log_path,
+        f"{marker.name} is still present - the process died without a "
+        "clean shutdown. Relaunching.")
+    new_os_pid = relaunch(relaunch_argv, restart_history=restart_history,
+                          now_epoch=now, log_path=log_path)
+    if new_os_pid is None:
+        return EXIT_RELAUNCH_FAILED
+    _log(log_path,
+        f"relaunch (pid {new_os_pid}) started - it will spawn its own "
+        "watchdog on startup. This watchdog's job is done.")
+    return EXIT_OK
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="Watch a localm server pid; relaunch it if it dies "
-                    "without a clean shutdown.")
+        description="Watch a localm server pid; relaunch it once if it "
+                    "dies without a clean shutdown.")
     ap.add_argument("--pid", required=True, type=int)
     ap.add_argument("--host", required=True)
     ap.add_argument("--port", required=True, type=int)
@@ -284,6 +315,9 @@ def main(argv=None) -> int:
     ap.add_argument("--crash-dir", required=True, type=Path)
     ap.add_argument("--relaunch-argv", required=True,
                     help="JSON-encoded list, e.g. '[\"python\",\"-m\",\"localm\"]'")
+    ap.add_argument("--restart-history", default="",
+                    help="Comma-separated epoch-seconds list, normally set "
+                        "via LOCALM_CRASH_WATCHDOG_HISTORY rather than by hand.")
     ap.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL_S)
     ap.add_argument("--grace", type=float, default=DEFAULT_GRACE_S)
     ap.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT_S)
@@ -298,11 +332,14 @@ def main(argv=None) -> int:
         _log(args.log_file, f"bad --relaunch-argv: {e}")
         return EXIT_RELAUNCH_FAILED
 
+    restart_history = restart_history_from_string(
+        args.restart_history or os.environ.get(_HISTORY_ENV, ""))
+
     return run(pid=args.pid, host=args.host, port=args.port, scheme=args.scheme,
               instance_id=args.instance_id, crash_dir=args.crash_dir.resolve(),
-              relaunch_argv=relaunch_argv, poll_interval=args.poll_interval,
-              grace_s=args.grace, request_timeout=args.request_timeout,
-              log_path=args.log_file)
+              relaunch_argv=relaunch_argv, restart_history=restart_history,
+              poll_interval=args.poll_interval, grace_s=args.grace,
+              request_timeout=args.request_timeout, log_path=args.log_file)
 
 
 if __name__ == "__main__":

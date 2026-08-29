@@ -107,6 +107,14 @@ def _spawn_crash_recovery_watchdog(*, host: str, port: int, tls: bool,
                "--instance-id", str(instance_id),
                "--crash-dir", str(crash_dir),
                "--relaunch-argv", json.dumps(relaunch_argv)]
+        # A prior watchdog's own relaunch of THIS process sets this so the
+        # rolling crash-storm window (each watchdog is a short-lived, one-shot
+        # process, so it cannot keep the count in its own memory) survives
+        # across the whole relaunch chain rather than resetting to zero every
+        # time a fresh watchdog is spawned.
+        restart_history = os.environ.get("LOCALM_CRASH_WATCHDOG_HISTORY", "")
+        if restart_history:
+            argv += ["--restart-history", restart_history]
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL, close_fds=True)
         if sys.platform == "win32":
