@@ -6,6 +6,8 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from localm.config import DEFAULT_CONFIG
 from localm.settings_schema import CORE_FIELDS
 from localm.inference.backends.base import BaseBackend
@@ -760,4 +762,107 @@ def test_mtp_carried_token_is_not_dropped_at_the_token_budget_boundary():
 
     assert tokens == [200, 202]
     _assert_chain_matches_output(rec, tokens)
+
+
+# --- Real end-to-end proof, against a real MTP-head GGUF ---------------------
+#
+# Everything above drives _generate with a scripted api.* mock. temperature=0.0
+# there makes _build_sampler's chain greedy too, so those tests cannot tell
+# sampler from draft_sampler - the fixture's value space never intersects the
+# defect's trigger space. This drives a real model with a real, non-greedy
+# sampling config through real native decode instead.
+
+_MTP_REPO = "unsloth/Qwen3.5-0.8B-MTP-GGUF"
+_MTP_FILE = "Qwen3.5-0.8B-Q4_K_M.gguf"
+
+
+@pytest.fixture(scope="module")
+def real_mtp_model_path():
+    from huggingface_hub import hf_hub_download
+    try:
+        return hf_hub_download(repo_id=_MTP_REPO, filename=_MTP_FILE)
+    except Exception as e:
+        pytest.skip(f"could not fetch {_MTP_REPO}/{_MTP_FILE}: {e}")
+
+
+@pytest.mark.integration
+@pytest.mark.real_gguf
+def test_real_mtp_model_verification_is_distribution_exact(real_mtp_model_path):
+    """The headline fidelity property, against a real MTP-head model: with the
+    request's own sampler deciding verification (llama.py's speculative MTP
+    block), MTP-enabled generation must produce byte-identical output to the
+    same run with MTP disabled, given the same seed and the same non-greedy
+    sampling config. Upstream's own speculative decoding is distribution-exact
+    by construction (common_sampler_sample_and_accept_n); this is what breaks
+    first if verification ever samples from draft_sampler again instead of the
+    request's own chain.
+    """
+    from localm.inference.backends.llamacpp.llama import LlamaCpp
+    from localm.inference.backends.llamacpp._loader import load_lib
+    from localm.inference.backends.llamacpp import _api as api
+
+    try:
+        load_lib()
+    except Exception as e:
+        pytest.skip(f"native llama runtime not provisioned (run 'localm "
+                    f"setup-llama'): {e}")
+
+    seed = 20260901
+    sampling = dict(temperature=0.8, top_p=0.95, top_k=40, repeat_penalty=1.1)
+    messages = [{"role": "user",
+                 "content": "Write a short paragraph about a cat exploring a garden."}]
+
+    def _run(mtp_enabled):
+        try:
+            llm = LlamaCpp(real_mtp_model_path, n_ctx=2048, n_gpu_layers=99,
+                            seed=seed, mtp_enabled=mtp_enabled)
+        except Exception as e:
+            pytest.skip(f"model failed to load on this machine: {e}")
+        accepted = 0
+        rejected = 0
+        try:
+            if mtp_enabled:
+                last_draft = []
+                original = api.llama_sampler_sample
+
+                def _spy(sampler, ctx, idx):
+                    nonlocal accepted, rejected
+                    token = original(sampler, ctx, idx)
+                    if llm._mtp_ctx_ptr is not None and ctx == llm._mtp_ctx_ptr:
+                        last_draft.append(token)
+                    elif ctx == llm._ctx_ptr and idx == 0:
+                        if last_draft and token == last_draft[-1]:
+                            accepted += 1
+                        else:
+                            rejected += 1
+                        last_draft.clear()
+                    return token
+
+                api.llama_sampler_sample = _spy
+                try:
+                    out = llm.create_chat_completion(
+                        messages, max_tokens=150, stream=False, seed=seed, **sampling)
+                finally:
+                    api.llama_sampler_sample = original
+            else:
+                out = llm.create_chat_completion(
+                    messages, max_tokens=150, stream=False, seed=seed, **sampling)
+            return out["choices"][0]["message"]["content"], accepted, rejected
+        finally:
+            llm.close()
+
+    on_text, accepted, rejected = _run(mtp_enabled=True)
+    off_text, _, _ = _run(mtp_enabled=False)
+
+    if accepted == 0 and rejected == 0:
+        pytest.skip("no draft/verify cycle observed on this run - MTP did not "
+                    "engage, nothing to verify")
+
+    assert len(on_text) >= 10, f"suspiciously short output: {on_text!r}"
+    assert accepted > 0, "the accept path never ran - fixture did not exercise it"
+    assert rejected > 0, "the reject path never ran - fixture did not exercise it"
+    assert on_text == off_text, (
+        "MTP-enabled output diverged from the MTP-disabled control with the "
+        "same seed and sampling config - verification is no longer sampling "
+        "through the request's own sampler")
 
