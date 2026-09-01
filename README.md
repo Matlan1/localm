@@ -225,6 +225,8 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
+Any OpenAI-compatible client works the same way, including AI browsers with a local-model option (BrowserOS and similar), LM Studio, and Ollama - point them at the same base URL.
+
 The usage block adds performance numbers - which fields appear depends on streaming and the endpoint; see [docs/server-api.md](docs/server-api.md) for the full breakdown and API surface.
 
 ---

@@ -18,6 +18,13 @@ below; the `admin` scope implies every other one). CORS is locked to
 localhost by default; widen it with the `cors_origins` config key. See
 [tls.md](tls.md) before exposing the server beyond 127.0.0.1.
 
+The three OpenAI-compatible inference routes below (`/v1/chat/completions`,
+`/v1/completions`, `/v1/embeddings`) are the one exception: they accept a
+cross-origin request from any local app - LM Studio/Ollama-style clients and
+AI browsers included - without needing `cors_origins` widened first, so
+pointing one at localm works the same way it would against LM Studio or
+Ollama.
+
 ## OpenAI-compatible endpoints
 
 ### `POST /v1/chat/completions`
