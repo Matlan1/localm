@@ -81,6 +81,15 @@ LANGUAGE_IDS = ["en", "de"]
 _AVATAR_DATA_URI_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,", re.IGNORECASE)
 _AVATAR_MAX_DATA_URI_LEN = 200_000
 _AVATAR_MAX_GLYPH_LEN = 16
+# chat_background (see config.py): "" or a raster data URI, same mime set as an
+# avatar but a much larger cap - a wallpaper is downscaled client-side to a
+# bigger edge than an avatar (see helpers.js fileToBackgroundDataUri) and
+# encoded as JPEG, not PNG. See test_background_value_rejects_oversized_data_uri.
+_BACKGROUND_MAX_DATA_URI_LEN = 3_000_000
+# user_name (see config.py): a plain display string, never rendered as markup
+# (chat.js's el() sets it via textContent). Capped so it cannot overflow the
+# message-row layout.
+_USER_NAME_MAX_LEN = 64
 
 
 @dataclass
@@ -388,6 +397,14 @@ CORE_FIELDS: list = [
                  "An emoji or a small uploaded image shown next to your own "
                  "messages. Blank shows nothing.",
                  group="Chat", owner="chat", applies=Applies.LIVE),
+    # HIDDEN: rendered beside user_avatar in the same Avatars panel, not a
+    # generic text box - see settings.js buildAvatarsSection. A general display
+    # name (not avatar-specific): it also doubles as the future per-user name
+    # once multi-user support lands.
+    SettingField("user_name", Widget.HIDDEN, "Your name",
+                 "Shown next to your messages instead of \"You\". Blank keeps "
+                 "the default.",
+                 group="Chat", owner="chat", applies=Applies.LIVE),
     SettingField("model_avatar_default", Widget.HIDDEN, "Model icon",
                  "An emoji or a small uploaded image shown next to every "
                  "model's replies. Blank falls back to a generated monogram.",
@@ -519,6 +536,13 @@ CORE_FIELDS: list = [
                  "Language the web GUI is shown in. Anything not translated "
                  "yet stays in English.",
                  group="General"),
+    # HIDDEN: rendered by the Settings -> System -> Appearance card's own
+    # upload/preview/clear controls, not a generic form control - same reasoning
+    # as logo_style right above.
+    SettingField("chat_background", Widget.HIDDEN, "Chat background",
+                 "A background image shown behind your chat messages. Blank "
+                 "shows none.",
+                 group="General", applies=Applies.LIVE),
     # OFF means the project list is NOT WRITTEN, never "written but hidden" -
     # see plugins/coder/projects.py, whose privacy-mode refusal is NOT covered
     # by this setting and is not configurable at all.
@@ -1249,6 +1273,34 @@ def _validate_avatar_overrides(key: str, val) -> dict:
     return out
 
 
+def _validate_background_value(key: str, val) -> str:
+    """Validate chat_background: "" or a raster data URI. See
+    _AVATAR_DATA_URI_RE / _BACKGROUND_MAX_DATA_URI_LEN."""
+    s = str(val)
+    if not s:
+        return ""
+    if _AVATAR_DATA_URI_RE.match(s):
+        if len(s) > _BACKGROUND_MAX_DATA_URI_LEN:
+            raise ValueError(
+                f"{key}: image is too large ({len(s)} bytes encoded, max "
+                f"{_BACKGROUND_MAX_DATA_URI_LEN})")
+        return s
+    raise ValueError(
+        f"{key}: must be an uploaded png/jpeg/gif/webp image, never a URL or "
+        f"a path, got {s!r}")
+
+
+def _validate_user_name(key: str, val) -> str:
+    """Validate user_name: a plain, length-capped display string. Blank clears
+    it (the client falls back to "You")."""
+    s = str(val).strip()
+    if len(s) > _USER_NAME_MAX_LEN:
+        raise ValueError(
+            f"{key}: name is too long ({len(s)} characters, max "
+            f"{_USER_NAME_MAX_LEN})")
+    return s
+
+
 def _validate_one(key: str, val, field: "SettingField", default):
     nullable = default is None
     widget = field.widget
@@ -1378,6 +1430,10 @@ def _validate_one(key: str, val, field: "SettingField", default):
             return _validate_avatar_value(key, val)
         if key == "model_avatar_overrides":
             return _validate_avatar_overrides(key, val)
+        if key == "chat_background":
+            return _validate_background_value(key, val)
+        if key == "user_name":
+            return _validate_user_name(key, val)
         # plugins_enabled (list) / plugins (dict): managed by the engine, not the
         # settings form, but accepted with the right container type for the
         # GET->PATCH round-trip the GUI does.
