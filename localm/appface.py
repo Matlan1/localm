@@ -19,7 +19,7 @@ import webbrowser
 from pathlib import Path
 from typing import Callable, Optional
 
-from localm.debuglog import debug_enabled, logger
+from localm.debuglog import logger
 
 
 def icon_path() -> Optional[str]:
@@ -214,10 +214,7 @@ def run_native_window(url: str, name: str = "LocaLM", *,
         # gui="qt" on Linux: pywebview tries GTK first, and this project never
         # installs the GTK extra, so qt is the backend the `desktop` extra
         # actually provides there. Windows and macOS keep pywebview's default.
-        # debug=True also enables the window's right-click menu and keyboard
-        # accelerators (Ctrl+C etc.) alongside devtools.
-        start_kwargs = {"icon": icon_path(), "private_mode": False,
-                        "debug": debug_enabled()}
+        start_kwargs = {"icon": icon_path(), "private_mode": False}
         if sys.platform.startswith("linux"):
             start_kwargs["gui"] = "qt"
         webview.start(**start_kwargs)

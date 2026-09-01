@@ -160,8 +160,8 @@ test("renderMarkdown opens changelog-shaped reference links in a new tab", () =>
   assert.equal(a.getAttribute("target"), "_blank",
     "a changelog link must open in a new tab, not navigate the app window away "
     + "(the native window has no address bar or back button)");
-  assert.equal(a.getAttribute("rel"), "noopener",
-    "a target=_blank link must carry rel=noopener");
+  assert.equal(a.getAttribute("rel"), "noopener noreferrer",
+    "a target=_blank link must carry rel=noopener noreferrer");
 });
 
 test("renderMarkdown opens chat-reply-shaped inline links in a new tab too", () => {
@@ -173,7 +173,7 @@ test("renderMarkdown opens chat-reply-shaped inline links in a new tab too", () 
   assert.ok(a, "inline link was lost");
   assert.equal(a.getAttribute("href"), "https://github.com/Matlan1/localm");
   assert.equal(a.getAttribute("target"), "_blank");
-  assert.equal(a.getAttribute("rel"), "noopener");
+  assert.equal(a.getAttribute("rel"), "noopener noreferrer");
 });
 
 test("a link inside a <think> block also opens in a new tab", () => {
@@ -184,7 +184,7 @@ test("a link inside a <think> block also opens in a new tab", () => {
   const a = det.querySelector("a");
   assert.ok(a, "think-block link was lost");
   assert.equal(a.getAttribute("target"), "_blank");
-  assert.equal(a.getAttribute("rel"), "noopener");
+  assert.equal(a.getAttribute("rel"), "noopener noreferrer");
 });
 
 test("a model-authored <form> survives sanitisation, so the CSP must confine it", () => {

@@ -589,7 +589,7 @@ function proxyRemoteImages(root, scope) {
 function secureExternalLinks(root) {
   root.querySelectorAll("a[href]").forEach((a) => {
     a.target = "_blank";
-    a.rel = "noopener";
+    a.rel = "noopener noreferrer";
   });
 }
 
