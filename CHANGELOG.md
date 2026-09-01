@@ -341,6 +341,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   before a load, so the low-VRAM preflight check and the automatic
   GPU-layer/context-size sizing were both blind to it. They now reserve room
   for it up front.
+- **Network access set to "Ask" left semantic search and memory recall
+  silently stuck on lexical-only search, with no hint that a one-time
+  download would fix it.** The status message now says the download is
+  available right now instead of reading like a hard refusal, and the
+  Memory panel offers the same one-click "Download now" action the
+  Knowledge page already had, so a Memory-only user has a way to fix it too.
 
 ### Security
 - **A bug report now hides credentials that were logged as structured data, not
