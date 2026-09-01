@@ -884,12 +884,11 @@ def build_report(summary: str, reason: str = "",
     # Crash diagnostics passed via context (e.g. recovered-crash reports, which
     # have no Python error object): a faulthandler native trace when one was
     # captured, and the crashed run's own log tail (the actionable bit when a
-    # window-close/OS-kill left no trace). Both are already home-scrubbed at
-    # their source.
+    # window-close/OS-kill left no trace).
     ctx = context or {}
     native = ctx.get("native_trace")
     if native:
-        parts += ["", "## Native fault trace", "```", _scrub_home(str(native))[:4000], "```"]
+        parts += ["", "## Native fault trace", "```", _scrub_secrets(str(native))[:4000], "```"]
     tail = ctx.get("recent_log_tail")
     if tail:
         parts += ["", "## Recent log (tail)", "```", _scrub_home(str(tail))[:4000], "```"]
