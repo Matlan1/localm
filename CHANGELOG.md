@@ -317,6 +317,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model file, was never cleaned up, so repeated failed attempts each left
   one more stranded process behind, still holding memory. That worker is
   now shut down whenever a load fails this way.
+- **A model with Multi-Token Prediction turned on could run out of VRAM, or
+  get auto-sized fewer GPU layers or a smaller context than it needed, even
+  when the load looked like it should fit.** MTP's own draft context needs
+  extra VRAM beyond the model's weights, and that cost was never counted
+  before a load, so the low-VRAM preflight check and the automatic
+  GPU-layer/context-size sizing were both blind to it. They now reserve room
+  for it up front.
 
 ### Security
 - **A bug report now hides credentials that were logged as structured data, not
