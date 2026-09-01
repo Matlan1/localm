@@ -19,6 +19,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   giving up on a slow check could itself block forever waiting on a hung
   child process; that wait is now bounded, so a stuck helper is abandoned
   instead of wedging every check that comes after it.
+- **A separate cause of the same "free VRAM could not be measured" refusal:**
+  a GPU check running at the same time as a model load could read the driver
+  library as ready before it had actually finished starting up, then wait on
+  it anyway. On a slow first start this could take longer than the check's
+  own budget, timing out even though nothing was actually stuck. That check
+  now gives up on its own short budget and falls back to measuring VRAM a
+  different way instead of waiting it out.
 - **Clicking an already-open coder session now switches to it instead of
   opening it again.** Clicking a session that was already running started a
   second, independent copy of it every time, each holding its own connection

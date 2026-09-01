@@ -1566,6 +1566,79 @@ class TestListGpusInconclusiveStatus:
         assert gpus and gpus[0]["name"] == "RTX 4090"
 
 
+class TestTorchGpusResidentBounded:
+    """`sys.modules` gains a module's entry BEFORE that module's body finishes
+    running, so `_torch_is_resident()` can read True while another thread is
+    still mid-import of torch. `_torch_gpus_resident_bounded` must not let a
+    caller block on that other thread's import lock for its full duration."""
+
+    def test_returns_the_real_value_when_the_read_is_fast(self, monkeypatch):
+        monkeypatch.setattr(
+            discover, "_torch_gpus_resident",
+            lambda: [{"index": 0, "name": "FAST", "total": 1, "free": 1}])
+
+        result = discover._torch_gpus_resident_bounded(timeout=2.0)
+
+        assert result == [{"index": 0, "name": "FAST", "total": 1, "free": 1}]
+
+    def test_returns_empty_without_blocking_past_the_timeout(self, monkeypatch):
+        import time
+
+        def _wedged_on_the_import_lock():
+            time.sleep(5.0)
+            return [{"index": 0, "name": "TOO-LATE", "total": 1, "free": 1}]
+
+        monkeypatch.setattr(discover, "_torch_gpus_resident",
+                            _wedged_on_the_import_lock)
+
+        t0 = time.monotonic()
+        result = discover._torch_gpus_resident_bounded(timeout=0.1)
+        elapsed = time.monotonic() - t0
+
+        assert result == []
+        assert elapsed < 1.0, (
+            f"took {elapsed:.2f}s against a 0.1s timeout - blocked on the "
+            f"other thread's read instead of returning at the bound")
+
+    def test_list_gpus_probe_falls_through_to_nvidia_smi_on_overrun(
+            self, monkeypatch):
+        """Integration point: _list_gpus_probe must not inherit an unbounded
+        block just because _torch_is_resident() said True."""
+        import functools
+        import subprocess
+        import time
+
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed",
+                            lambda: False)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: True)
+        monkeypatch.setattr(
+            discover, "_torch_gpus_resident_bounded",
+            functools.partial(discover._torch_gpus_resident_bounded, timeout=0.1))
+
+        def _slow_import_then_answer():
+            time.sleep(3.0)
+            return []
+
+        monkeypatch.setattr(discover, "_torch_gpus_resident",
+                            _slow_import_then_answer)
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.return_value = (
+            "0, FALLBACK-GPU, 8192, 4096\n", "")
+        fake_popen.return_value.returncode = 0
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        t0 = time.monotonic()
+        out = discover._list_gpus_probe()
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 2.0, (
+            f"took {elapsed:.2f}s - the resident-read overrun blocked "
+            f"_list_gpus_probe instead of falling through")
+        assert out and out[0]["name"] == "FALLBACK-GPU", (
+            "did not reach the nvidia-smi fallback after the bounded "
+            "resident read overran")
+
+
 class TestListGpusJoinInflight:
     """A patient off-loop caller must be able to JOIN a probe already in flight
     (opt-in wait_for_inflight), not just get an instant BUSY.
