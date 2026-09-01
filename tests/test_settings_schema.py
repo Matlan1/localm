@@ -512,3 +512,82 @@ def test_model_avatar_overrides_rejects_a_bad_entry():
     with pytest.raises(ValueError, match="qwen3-coder-30b"):
         ss.validate_update({
             "model_avatar_overrides": {"qwen3-coder-30b": "http://evil.example/x.png"}})
+
+
+# --------------------------------------------------------------------------- #
+#  chat_background (wallpaper)                                                #
+# --------------------------------------------------------------------------- #
+
+def test_background_value_accepts_empty():
+    assert ss.validate_update({"chat_background": ""}) == {"chat_background": ""}
+    with pytest.raises(ValueError):
+        ss.validate_update({"chat_background": None})
+
+
+def test_background_value_accepts_a_data_uri():
+    uri = "data:image/jpeg;base64,iVBORw0KGgo="
+    assert ss.validate_update({"chat_background": uri}) == {"chat_background": uri}
+
+
+@pytest.mark.parametrize("bad", [
+    "http://example.com/a.jpg",
+    "https://example.com/a.jpg",
+    "//example.com/a.jpg",
+    "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+    "/etc/passwd",
+    "C:\\Users\\me\\wallpaper.jpg",
+    "AB",   # unlike an avatar, a background has no short-glyph fallback
+])
+def test_background_value_rejects_anything_but_a_data_uri(bad):
+    with pytest.raises(ValueError):
+        ss.validate_update({"chat_background": bad})
+
+
+def test_background_value_rejects_oversized_data_uri():
+    huge = "data:image/jpeg;base64," + ("A" * ss._BACKGROUND_MAX_DATA_URI_LEN)
+    with pytest.raises(ValueError):
+        ss.validate_update({"chat_background": huge})
+
+
+def test_background_value_rejects_a_huge_garbage_string_without_reflecting_it():
+    """A value that fails the data-URI match entirely (never reaches the size
+    check below) must not have its raised error message grow with the input -
+    unlike the oversized-but-matching case, this branch has no other bound."""
+    huge_garbage = "x" * 5_000_000
+    with pytest.raises(ValueError) as exc:
+        ss.validate_update({"chat_background": huge_garbage})
+    assert len(str(exc.value)) < 1000
+    assert huge_garbage not in str(exc.value)
+
+
+def test_background_value_accepts_up_to_the_cap():
+    prefix = "data:image/jpeg;base64,"
+    at_cap = prefix + ("A" * (ss._BACKGROUND_MAX_DATA_URI_LEN - len(prefix)))
+    assert len(at_cap) == ss._BACKGROUND_MAX_DATA_URI_LEN
+    assert ss.validate_update({"chat_background": at_cap}) == {"chat_background": at_cap}
+
+
+# --------------------------------------------------------------------------- #
+#  user_name                                                                  #
+# --------------------------------------------------------------------------- #
+
+def test_user_name_accepts_empty():
+    """Same contract as user_avatar: "" clears the field; None is a validation
+    error rather than a synonym for "" (a client sends "" to clear it)."""
+    assert ss.validate_update({"user_name": ""}) == {"user_name": ""}
+    with pytest.raises(ValueError):
+        ss.validate_update({"user_name": None})
+
+
+def test_user_name_accepts_a_plain_string_and_strips_it():
+    assert ss.validate_update({"user_name": "  Matt  "}) == {"user_name": "Matt"}
+
+
+def test_user_name_accepts_up_to_the_cap():
+    at_cap = "a" * ss._USER_NAME_MAX_LEN
+    assert ss.validate_update({"user_name": at_cap}) == {"user_name": at_cap}
+
+
+def test_user_name_rejects_a_too_long_value():
+    with pytest.raises(ValueError):
+        ss.validate_update({"user_name": "a" * (ss._USER_NAME_MAX_LEN + 1)})

@@ -821,6 +821,17 @@
               <div class="sub" data-i18n="appearance.logoStyle.help">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
               <div id="logo-style-picker" class="logo-style-picker"></div>
 
+              <label>Chat background</label>
+              <div class="sub">A background image behind your chat messages. Local file only - never a URL.</div>
+              <div class="chat-bg-picker">
+                <div id="chat-bg-preview" class="chat-bg-preview empty"></div>
+                <div class="chat-bg-actions">
+                  <button type="button" class="btn-secondary" id="chat-bg-upload">Upload image</button>
+                  <button type="button" class="btn-secondary" id="chat-bg-clear">Clear</button>
+                  <input type="file" id="chat-bg-file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+                </div>
+              </div>
+
               <label class="check" data-i18n="appearance.showMmproj">
                 <input type="checkbox" id="show-mmproj-files">
                 Show vision projector (.mmproj) files in repository search results

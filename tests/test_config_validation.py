@@ -606,6 +606,22 @@ class TestPatchConfig:
         assert r.status_code == 400
         assert "maximum" in r.text
 
+    def test_chat_background_round_trips(self, client):
+        uri = "data:image/jpeg;base64,iVBORw0KGgo="
+        r = client.patch("/v1/config", json={"chat_background": uri})
+        assert r.status_code == 200
+        assert client.get("/v1/config").json()["chat_background"] == uri
+
+    def test_chat_background_rejects_a_url_400(self, client):
+        r = client.patch("/v1/config", json={"chat_background": "http://evil.example/x.jpg"})
+        assert r.status_code == 400
+        assert client.get("/v1/config").json()["chat_background"] == ""
+
+    def test_user_name_round_trips_and_strips(self, client):
+        r = client.patch("/v1/config", json={"user_name": "  Matt  "})
+        assert r.status_code == 200
+        assert client.get("/v1/config").json()["user_name"] == "Matt"
+
 
 # --------------------------------------------------------------------------- #
 #  /v1/config instance_id: a stable per-data-directory id, so the GUI can tell

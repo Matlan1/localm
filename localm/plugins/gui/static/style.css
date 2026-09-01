@@ -56,6 +56,9 @@
   /* R17: readable column width for chat/coder transcript blocks. The chat and
      coder views widen this to full-width (see #view-chat / #view-coder). */
   --thread-max: 860px;
+  /* Settings > System > Appearance "Chat background" picker; applied by
+     helpers.js applyChatBackground(). */
+  --chat-bg-image: none;
 }
 
 [data-theme="light"] {
@@ -556,6 +559,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   flex: 1;
   overflow-y: auto;
   padding: 24px 0 12px;
+}
+#chat-messages {
+  background-image: var(--chat-bg-image);
+  background-size: cover;
+  background-position: center;
 }
 .msg-row { max-width: var(--thread-max); margin: 0 auto 18px; padding: 0 24px; }
 .msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
@@ -1451,6 +1459,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 }
 .avatar-picker-preview img { width: 100%; height: 100%; object-fit: cover; }
 .avatar-picker-glyph { width: 110px; }
+.avatar-name-input { width: 220px; }
 .avatar-overrides-box {
   border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px; margin-top: 12px;
@@ -1459,6 +1468,15 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .avatar-overrides-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
 .avatar-override-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .avatar-override-id { width: 200px; }
+.chat-bg-picker { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 14px; }
+.chat-bg-preview {
+  width: 160px; height: 90px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg-input);
+  background-size: cover; background-position: center;
+  flex: none;
+}
+.chat-bg-preview.empty { border-style: dashed; }
+.chat-bg-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* The Settings "Updates" card: three sub-blocks (app update, runtime update,
    the update-behavior toggles) stacked in one card, same bordered-box language
    as .media-comfy-box so they read as distinct pieces without being separate
