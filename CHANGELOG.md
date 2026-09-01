@@ -357,6 +357,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   available right now instead of reading like a hard refusal, and the
   Memory panel offers the same one-click "Download now" action the
   Knowledge page already had, so a Memory-only user has a way to fix it too.
+- **`localm comfy restart` reported success without restarting anything, for
+  a ComfyUI you started yourself.** It aborted the in-flight render as
+  intended, then reported "ComfyUI is running." either way - indistinguishable
+  from an actual restart. It now says plainly that nothing was restarted and
+  that ComfyUI is left running, so you know to restart it yourself.
 
 ### Security
 - **A bug report now hides credentials that were logged as structured data, not

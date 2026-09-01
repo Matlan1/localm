@@ -296,8 +296,8 @@ def comfy_restart() -> None:
     """Restart the ComfyUI localm launched: stop it, then launch a fresh one.
 
     Only meaningful for a ComfyUI localm started (see `localm comfy status`);
-    for one you started yourself, the stop half aborts its render but its
-    process is left alone, so the relaunch finds it already up.
+    for one you started yourself, the stop half aborts its render and leaves
+    its process running, and nothing is relaunched.
     """
     from ..config import load_config
 
