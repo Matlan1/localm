@@ -47,6 +47,21 @@ function setCoderState(text) {
     text === "error" ? " st-error" : "");
 }
 
+// Updates the busy pill with the seconds elapsed since the active session's
+// last SSE frame (a token, a tool event, or a keepalive comment), so a long
+// silent generation still visibly changes instead of sitting on a static
+// "working…" label. No-op unless the active session is busy and its pill is
+// currently showing the running state.
+export function tickCoderBusyIndicator() {
+  const s = activeSession();
+  if (!s || !s.busy || typeof s.lastEventAt !== "number") return;
+  const node = $("coder-state");
+  if (!node.classList.contains("st-running")) return;
+  const secs = Math.max(0, Math.floor((Date.now() - s.lastEventAt) / 1000));
+  node.textContent = `working… ${secs}s`;
+}
+setInterval(tickCoderBusyIndicator, 1000);
+
 export function renderSessionSelect() {
   const sel = $("session-select");
   sel.replaceChildren();
@@ -299,6 +314,7 @@ export function registerSession(info, { replay }) {
     info,
     feedEl,
     busy: info.busy || false,
+    lastEventAt: null,   // set on every SSE frame received, including a keepalive
     liveBody: null,
     liveText: "",
     liveReasoning: "",   // H4: thinking model's reasoning, streamed via "reasoning" events
@@ -693,7 +709,7 @@ export async function streamSession(s, replay) {
         let ev;
         try { ev = JSON.parse(payload); } catch { return; }
         if (coder.sessions.has(s.info.id)) handleCoderEvent(s, ev);
-      });
+      }, () => { s.lastEventAt = Date.now(); });
     } catch (e) {
       if (!coder.sessions.has(s.info.id) || s.closed) return;
       await new Promise((res) => setTimeout(res, 1500));

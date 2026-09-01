@@ -961,8 +961,11 @@ export function nearBottom(elm) {
   return elm.scrollHeight - elm.scrollTop - elm.clientHeight < 80;
 }
 
-/** Parse an SSE byte stream from fetch(), invoking onData per `data:` payload. */
-export async function readSSE(response, onData) {
+/** Parse an SSE byte stream from fetch(), invoking onData per `data:` payload.
+ *  onAnyFrame, when given, fires once per parsed frame (any blank-line-terminated
+ *  block) regardless of whether it carries a `data:` payload - so a bare comment
+ *  such as a keepalive still reaches it. */
+export async function readSSE(response, onData, onAnyFrame) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -974,6 +977,7 @@ export async function readSSE(response, onData) {
     while ((idx = buf.indexOf("\n\n")) !== -1) {
       const frame = buf.slice(0, idx);
       buf = buf.slice(idx + 2);
+      if (onAnyFrame) onAnyFrame();
       for (const line of frame.split("\n")) {
         if (line.startsWith("data: ")) onData(line.slice(6));
       }
