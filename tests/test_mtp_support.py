@@ -1098,3 +1098,38 @@ def test_auto_gpu_layers_offloads_fewer_when_mtp_will_allocate_a_draft_context()
         f"sizing must offload strictly fewer layers once it reserves VRAM "
         f"for its own draft context")
 
+
+def test_the_mtp_draft_charge_does_not_scale_with_the_split_device_count():
+    """On an N-device split the charged overhead is N main-context compute
+    buffers plus exactly ONE for the MTP draft context, never N of them.
+
+    Arm 1 accepts a combined total sized for 3 main buffers plus one draft
+    buffer, carrying less than one buffer of slack. Arm 2 is the control: the
+    same total at 4 devices is refused.
+    """
+    # llama.cpp b10375: every src/models/ graph_mtp builds ONE block in the
+    # nextn tail range at or above hparams.n_layer(); src/llama-model.cpp
+    # :1360-1366 assigns that block and the output head to the last device.
+    ov = GgufBackend._VRAM_OVERHEAD_BYTES
+    weights = 3 * 1024 ** 3
+    draft_kv_per_token = 1000
+    draft_ctx = 1024
+    slack = 100_000
+    total = weights + 3 * ov + (draft_ctx * draft_kv_per_token + ov) + slack
+
+    def check(devices):
+        b = _mtp_sizing_backend(n_ctx=draft_ctx)
+        b._model_bytes = lambda: weights
+        b._kv_bytes_per_token = lambda: 0
+        with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+                   return_value=("qwen35", 1)), \
+             patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+                   return_value=draft_kv_per_token), \
+             patch.object(GgufBackend, "_split_free_total_bytes",
+                          return_value=(total, total, devices)):
+            b._check_vram()
+
+    check(3)
+
+    with pytest.raises(RuntimeError, match="Context too large"):
+        check(4)
