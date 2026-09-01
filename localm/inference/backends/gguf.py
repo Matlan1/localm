@@ -203,8 +203,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         try:
             self._load_native()
         except ModelLoadCancelled:
-            # A newer model selection superseded this load. Propagate as-is so the
-            # caller reports superseded rather than the load failure below.
+            # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:
             # Combined-when-split free VRAM budget; the helper never raises.

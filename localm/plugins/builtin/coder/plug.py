@@ -974,6 +974,9 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
         if isinstance(res, dict) and res.get("status") == "superseded":
             raise HTTPException(
                 503, f"Model load was superseded by a newer request: {res.get('by')}")
+        if isinstance(res, dict) and res.get("status") == "cancelled":
+            raise HTTPException(
+                503, f"Model load was cancelled: {res.get('reason')}")
 
     if not session.set_model(req.model):
         raise HTTPException(409, "Session is busy; cannot switch models mid-task")

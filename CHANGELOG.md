@@ -285,6 +285,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   open.** `serve` never opens a browser, so every `serve` startup that
   attached printed a claim that wasn't true. That line now just states where
   the server can be reached, accurate whether or not a browser actually opens.
+- **A model load aborted for an unrelated reason reported a made-up "superseded
+  by a newer request: None" instead of what actually happened.** This showed up
+  as the error when using the API or the coder plugin's model switcher, if the
+  load was cut short by something other than picking a different model. The
+  real reason is now shown instead; picking a genuinely different model while
+  one is still loading is unaffected and still reports it as superseded.
 
 ### Security
 - **A model can no longer take over your terminal through the coder's own
