@@ -238,3 +238,127 @@ def test_slash_command_is_never_routed_through_goal_loop(home, tmp_path,
 
     assert goal_calls == []
     assert str(agent.cwd) in called["msg"]
+
+
+# --------------------------------------------------------------------------- #
+#  Sensitive-file warning: scoped to each goal run, not only REPL exit        #
+#                                                                              #
+#  review_guard.render_warning() is wired into ONE call site outside the      #
+#  REPL: cli/_main.py's process-exit finally block. That fires once, for the  #
+#  whole session, when the REPL finally exits - so a long-lived /goal session #
+#  that rewrites a test to force a pass gets no warning until the user quits, #
+#  unscoped to which of possibly several goal runs it belongs to. These pin   #
+#  the REPL-local warning that fires right after each goal run instead.      #
+# --------------------------------------------------------------------------- #
+
+def _write_via_tool(agent, path, content="x = 1\n"):
+    """Drive a REAL file write through the agent's own tool path (not a mock),
+    so the changed-files tracker updates exactly as it would for a live goal
+    run that edits a file."""
+    from localm.plugins.coder.parser import ToolCall
+    result = agent._execute_tool(
+        ToolCall(name="write_file", args={"path": path, "content": content},
+                 raw="", start=0, end=0),
+        interactive=False)
+    assert result.ok
+
+
+def test_goal_run_warns_about_a_sensitive_file_it_touched(home, tmp_path,
+                                                           monkeypatch):
+    agent = _agent(_proj(tmp_path))
+    agent.goal_cmd = "pytest -x"
+
+    from localm.plugins.coder.cli import repl as repl_mod
+
+    def _fake_goal_loop(a, task, cmd, max_iters, work_dir):
+        _write_via_tool(a, "tests/test_foo.py")
+        return (True, "ok")
+
+    monkeypatch.setattr(repl_mod, "_run_goal_loop", _fake_goal_loop)
+    warnings = []
+    monkeypatch.setattr(repl_mod, "print_warning", warnings.append)
+
+    _drive_repl_with_one_message(repl_mod, agent, monkeypatch, "fix the bug")
+
+    assert len(warnings) == 1
+    assert "tests/test_foo.py" in warnings[0]
+
+
+def test_goal_run_stays_silent_when_it_touches_nothing_sensitive(
+        home, tmp_path, monkeypatch):
+    agent = _agent(_proj(tmp_path))
+    agent.goal_cmd = "pytest -x"
+
+    from localm.plugins.coder.cli import repl as repl_mod
+
+    def _fake_goal_loop(a, task, cmd, max_iters, work_dir):
+        _write_via_tool(a, "src/app.py")
+        return (True, "ok")
+
+    monkeypatch.setattr(repl_mod, "_run_goal_loop", _fake_goal_loop)
+    warnings = []
+    monkeypatch.setattr(repl_mod, "print_warning", warnings.append)
+
+    _drive_repl_with_one_message(repl_mod, agent, monkeypatch, "fix the bug")
+
+    assert warnings == []
+
+
+def test_goal_run_warning_is_scoped_to_that_run_not_the_whole_session(
+        home, tmp_path, monkeypatch):
+    """A test file rewritten by an EARLIER goal run must not re-trigger the
+    warning on a LATER goal run that does not touch it - the warning tracks
+    what THIS run touched, not "has this session ever touched a test"."""
+    agent = _agent(_proj(tmp_path))
+    agent.goal_cmd = "pytest -x"
+
+    from localm.plugins.coder.cli import repl as repl_mod
+
+    calls = {"n": 0}
+
+    def _fake_goal_loop(a, task, cmd, max_iters, work_dir):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            _write_via_tool(a, "tests/test_foo.py")
+        return (True, "ok")
+
+    monkeypatch.setattr(repl_mod, "_run_goal_loop", _fake_goal_loop)
+    warnings = []
+    monkeypatch.setattr(repl_mod, "print_warning", warnings.append)
+
+    inputs = iter(["first task", "second task", EOFError()])
+
+    def fake_input(prompt=""):
+        nxt = next(inputs)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    monkeypatch.setattr(repl_mod.console, "input", fake_input)
+    repl_mod._repl(agent)
+
+    assert calls["n"] == 2
+    assert len(warnings) == 1   # only the first run's touch was ever flagged
+
+
+def test_goal_run_warning_fires_even_when_the_run_is_interrupted(
+        home, tmp_path, monkeypatch):
+    """Ctrl+C mid-goal-run must not skip the warning for whatever the run had
+    already touched before the interrupt."""
+    agent = _agent(_proj(tmp_path))
+    agent.goal_cmd = "pytest -x"
+
+    from localm.plugins.coder.cli import repl as repl_mod
+
+    def _fake_goal_loop(a, task, cmd, max_iters, work_dir):
+        _write_via_tool(a, "tests/test_foo.py")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(repl_mod, "_run_goal_loop", _fake_goal_loop)
+    warnings = []
+    monkeypatch.setattr(repl_mod, "print_warning", warnings.append)
+
+    _drive_repl_with_one_message(repl_mod, agent, monkeypatch, "fix the bug")
+
+    assert len(warnings) == 1
+    assert "tests/test_foo.py" in warnings[0]
