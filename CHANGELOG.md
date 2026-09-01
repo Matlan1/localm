@@ -386,6 +386,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   history mixing with an unrelated one. Each session now gets its own file,
   and every entry in it is tagged with the session that wrote it.
 
+### Security
+- **An MCP client asked to pull a model could point localm at any
+  HuggingFace repo, with nothing vetting the source.** Setting up an
+  embedding model over MCP was already limited to a short known-good list
+  or one you had already registered yourself; pulling a chat model had no
+  such limit, so a client steered by injected content could cause an
+  arbitrary, unvetted GGUF to be downloaded and loaded. Pulling a model
+  over MCP is now held to the same standard: a known repo, or one whose
+  source matches a model you already have registered.
+
 ## [0.1.5] - 2026-08-26
 
 ### Added
