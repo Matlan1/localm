@@ -385,8 +385,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   history interleaved into it - including a scoped or restricted session's
   history mixing with an unrelated one. Each session now gets its own file,
   and every entry in it is tagged with the session that wrote it.
-
-### Security
 - **An MCP client asked to pull a model could point localm at any
   HuggingFace repo, with nothing vetting the source.** Setting up an
   embedding model over MCP was already limited to a short known-good list
