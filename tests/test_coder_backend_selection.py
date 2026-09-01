@@ -132,6 +132,35 @@ def test_default_is_this_localm_and_stays_on_the_machine():
     assert notes == []
 
 
+# --------------------------------------------------------------------------- #
+#  The local backend's own self-call credential                               #
+# --------------------------------------------------------------------------- #
+# The default backend self-calls this same server, so it needs the same
+# credential precedence as any other authenticated caller: the persisted
+# owner key, not only $LOCALM_API_KEY.
+
+def test_local_backend_uses_the_persisted_owner_key(monkeypatch):
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    from localm import auth
+    auth.set_api_key("file-key-persisted")
+    backend, _, _ = _resolve(_req())
+    assert backend._api_key == "file-key-persisted"
+
+
+def test_local_backend_env_still_wins_over_the_persisted_key(monkeypatch):
+    from localm import auth
+    auth.set_api_key("file-key")
+    monkeypatch.setenv("LOCALM_API_KEY", "env-key")
+    backend, _, _ = _resolve(_req())
+    assert backend._api_key == "env-key"
+
+
+def test_local_backend_falls_back_to_the_placeholder_in_open_mode(monkeypatch):
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    backend, _, _ = _resolve(_req())
+    assert backend._api_key == "localm"
+
+
 def test_privacy_refuses_a_cloud_backend_and_says_what_to_change(monkeypatch):
     _no_netpolicy(monkeypatch)
     with pytest.raises(HTTPException) as e:

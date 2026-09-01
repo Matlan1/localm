@@ -113,6 +113,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   with the command to see the rest. A truncated diff could therefore read as a
   complete one.
 
+- **The Coder stopped working once you set an owner key from Settings >
+  Security.** Starting a session, or asking for an estimate, failed with
+  "This server requires an API key" - even though one genuinely was set. The
+  Coder's own request back into this same server was using the wrong
+  credential in that case; it now uses the key you actually set.
 - **Embedding long text no longer fails on runtime builds that ignore the
   shared-cache request.** localm asks its embedding runtime for one shared
   attention cache so several texts can be encoded in a single pass. Some builds
