@@ -17,6 +17,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   pass. Works even when `coder_review` (the automatic pass's own on/off switch,
   off by default) is off, and reports the same verdict that pass reads:
   approved, or the list of blocking issues plus the reviewer's notes.
+- **Other AI tools can now read localm's memory of you, so you stop repeating
+  yourself.** With the memory plugin on, `localm mcp` offers a `memory_recall`
+  tool: any MCP client (Claude Desktop, an editor's agent) can look up the
+  facts localm has remembered about you rather than starting from nothing.
+  Reading changes nothing - it will not alter what localm remembers or how
+  long it keeps it. Writing is a separate opt-in: pass `localm mcp
+  --memory-write` to also offer `memory_append`, which lets a client suggest a
+  fact. Anything it suggests is stored as unverified, never as something you
+  said yourself, and if it contradicts a fact you typed, it goes to the same
+  accept/reject review as any other suggestion instead of overwriting you.
+  Both tools are refused in privacy mode.
 
 ### Fixed
 - **A stuck GPU-detection helper could wedge VRAM measurement for the rest of
