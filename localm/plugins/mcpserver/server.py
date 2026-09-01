@@ -577,11 +577,9 @@ _MEMORY_WRITE_OFF_MSG = (
     "personal memory from an external client is opt-in and separate from enabling "
     "the memory plugin. Relaunch the server with: localm mcp --memory-write")
 
-# HuggingFace repos pull_model's MCP-client-supplied `repo` may target without
-# the operator having pulled from that repo already. Mirrors
-# KNOWN_EMBEDDING_MODELS' role in setup_embeddings: a small known-good default
-# set, with _known_pull_repo() adding the second escape hatch (an
-# already-registered model's own source).
+# HuggingFace repos pull_model's MCP-client-supplied `repo` may target
+# directly. An already-registered model's own source is accepted too - see
+# _known_pull_repo().
 KNOWN_PULL_REPOS = frozenset({
     "bartowski/Qwen2.5-7B-Instruct-GGUF",
     "TheBloke/Mixtral-8x7B-v0.1-GGUF",
