@@ -1009,8 +1009,12 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             _switch_loading = name
         try:
             await loop.run_in_executor(None, new_engine.load)
-        except ModelLoadCancelled:
-            return {"status": "superseded", "model": name, "by": _switch_desired}
+        except ModelLoadCancelled as e:
+            # Only a still-current supersession is reported as one; any other
+            # cancellation reason is returned as-is.
+            if preempt and _switch_desired != name:
+                return {"status": "superseded", "model": name, "by": _switch_desired}
+            return {"status": "cancelled", "model": name, "reason": str(e)}
         except RuntimeError as exc:
             # The backend's own sizing found the model genuinely cannot fit even
             # with 0 GPU layers (GgufBackend._check_vram - llamacpp/_sizing.py) or
@@ -1155,6 +1159,8 @@ async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
     res = await switch_engine(name, _engine_factory, preempt=False)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
+    if res.get("status") == "cancelled":
+        raise HTTPException(503, f"Model load was cancelled: {res.get('reason')}")
 
     return _engines[name]
 

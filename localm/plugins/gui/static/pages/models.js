@@ -478,7 +478,7 @@ export async function refreshModelsPage() {
           use.textContent = "loading…";
           try {
             const res = await switchModel(m.name);
-            if (!res || res.status !== "superseded") {
+            if (!res || (res.status !== "superseded" && res.status !== "cancelled")) {
               toastLoadResult(res, m.name);
               refreshModelsPage();
               // Keep the Settings "Live tuning" VRAM estimate, which defaults
