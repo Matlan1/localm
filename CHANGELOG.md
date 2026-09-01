@@ -26,6 +26,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   own budget, timing out even though nothing was actually stuck. That check
   now gives up on its own short budget and falls back to measuring VRAM a
   different way instead of waiting it out.
+- **Loading a model that hit an inconclusive VRAM reading now retries a few
+  times on its own before giving up**, instead of immediately refusing and
+  asking you to try again yourself. If it still cannot get a clear reading
+  after those automatic attempts, it says so plainly rather than suggesting
+  something to go do about it.
 - **Clicking an already-open coder session now switches to it instead of
   opening it again.** Clicking a session that was already running started a
   second, independent copy of it every time, each holding its own connection
