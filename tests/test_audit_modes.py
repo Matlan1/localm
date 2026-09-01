@@ -134,6 +134,53 @@ class TestFactories:
 
 
 # ------------------------------------------------------------------ #
+#  Session identity: two logs opened in the same second by the same   #
+#  process must never collide (REG: coder session audit log merge)    #
+# ------------------------------------------------------------------ #
+
+class TestSessionIdentity:
+    def test_distinct_session_ids_give_distinct_files_same_second_same_pid(
+            self, tmp_path):
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("time.strftime", return_value="2026-01-01_000000"):
+            log1 = AuditLog(label="localcoder", session_id="aaaaaaaa")
+            log2 = AuditLog(label="localcoder", session_id="bbbbbbbb")
+        try:
+            assert log1.path != log2.path
+            assert "aaaaaaaa" in log1.path.name
+            assert "bbbbbbbb" in log2.path.name
+        finally:
+            log1.close()
+            log2.close()
+
+    def test_no_session_id_still_gives_distinct_files_same_second_same_pid(
+            self, tmp_path):
+        """A caller that passes no session_id (a future call site, or one of
+        the existing non-coder ones) must not be able to reintroduce the
+        collision: AuditLog mints its own id when none is given."""
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("time.strftime", return_value="2026-01-01_000000"):
+            log1 = AuditLog(label="chat")
+            log2 = AuditLog(label="chat")
+        try:
+            assert log1.path != log2.path
+        finally:
+            log1.close()
+            log2.close()
+
+    def test_every_record_is_tagged_with_the_session_id(self, tmp_path):
+        with patch("localm.audit._SESSIONS_DIR", tmp_path):
+            log = AuditLog(label="localcoder", session_id="deadbeef")
+            log.user("hello")
+            log.llm("hi there")
+            log.close()
+        events = [json.loads(l) for l in
+                  log.path.read_text(encoding="utf-8").splitlines()]
+        assert len(events) == 4  # started, user, llm, ended
+        assert all(e["session"] == "deadbeef" for e in events)
+
+
+# ------------------------------------------------------------------ #
 #  Back-compat shim                                                   #
 # ------------------------------------------------------------------ #
 

@@ -347,7 +347,8 @@ class Agent(
         # max_tokens is handled in the CLI, not here (see harness_profiles).
         from ..harness_profiles import agent_gen_overrides
         self.gen_kwargs = {**agent_gen_overrides(self._model_name), **self.gen_kwargs}
-        self._audit: AuditLogT = make_audit_log(mode, label=name)
+        self._audit: AuditLogT = make_audit_log(
+            mode, label=name, session_id=self._checkpoint_id)
         self._project_map: ProjectMap = self._build_project_map(cwd)
         self._memory: str = load_memory(cwd)
         # User-authored custom instructions: an explicit string (CLI
