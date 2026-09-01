@@ -481,7 +481,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                     console.print(
                         "  [yellow]Could not mount the GUI on it (an older "
                         "instance?); opening its address anyway.[/yellow]")
-            console.print(f"  [dim]Opening[/dim] [cyan]{show_url(url)}[/cyan]")
+            _url_label, _ = _console_url_line(api_mode, url, url)
+            console.print(f"  [dim]{_url_label}:[/dim] [cyan]{show_url(url)}[/cyan]",
+                          soft_wrap=True)
             if not no_browser:
                 # Force a FRESH navigation with a unique cache-buster so the browser
                 # actually reloads (instead of silently focusing an already-open tab
