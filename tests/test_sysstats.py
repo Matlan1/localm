@@ -889,11 +889,21 @@ class TestAmdWholeGpuActivity:
     """
 
     @staticmethod
-    def _fake_adl(monkeypatch, *, adapters, sensors, activity_rc=0):
+    def _fake_adl(monkeypatch, *, adapters, sensors, activity_rc=0, legacy=None,
+                  seen_isize=None):
         """Fake ADL whose calls write through ctypes byref, as the real DLL does.
 
         *adapters*: list of (bus, device, function, present, vendor_id).
         *sensors*:  {adapter_index: {sensor_index: (supported, value)}}.
+        *legacy*:   {export_name: (rc, activity_percent)} for the pre-PMLog
+                    Overdrive entry points. An export absent from this mapping is
+                    absent from the fake DLL, exactly as on a driver that does not
+                    have it. Every OTHER int field of the returned struct is
+                    filled with a distinct in-range percentage, so reading the
+                    wrong field yields a plausible WRONG number rather than an
+                    obvious error.
+        *seen_isize*: optional list; each ADLPMActivity iSize the caller set
+                    before the call is appended to it.
         """
         from localm import gpu_usage
 
@@ -918,8 +928,32 @@ class TestAmdWholeGpuActivity:
                     ref._obj.sensors[si].value = val
                 return 0
 
+        # AMD's own header names the activity field per struct. Stated here
+        # independently of gpu_usage's mapping, so a wrong mapping fails.
+        activity_field = {
+            "ADL2_OverdriveN_PerformanceStatus_Get": "iGPUActivityPercent",
+            "ADL2_Overdrive6_CurrentStatus_Get": "iActivityPercent",
+            "ADL2_Overdrive5_CurrentActivity_Get": "iActivityPercent",
+        }
+
+        def _make_legacy(export, rc, value):
+            def _call(_ctx, _idx, ref):
+                obj = ref._obj
+                if export == "ADL2_Overdrive5_CurrentActivity_Get"                         and seen_isize is not None:
+                    seen_isize.append(obj.iSize)
+                for i, (name, _t) in enumerate(obj._fields_):
+                    setattr(obj, name, 7 + i)
+                if rc == 0:
+                    setattr(obj, activity_field[export], value)
+                return rc
+            return _call
+
+        dll = _FakeDll()
+        for export, (rc, value) in (legacy or {}).items():
+            setattr(dll, export, _make_legacy(export, rc, value))
+
         monkeypatch.setattr(gpu_usage, "_adl_open",
-                            lambda: {"dll": _FakeDll(), "ctx": None})
+                            lambda: {"dll": dll, "ctx": None})
         # Undo the autouse stub: these tests ARE the AMD path.
         monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity",
                             _REAL_AMD_ACTIVITY)
@@ -1001,6 +1035,185 @@ class TestAmdWholeGpuActivity:
         self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
                        activity_rc=-8)   # ADL_ERR_NOT_SUPPORTED
         assert gpu_usage._adl_activity_by_bus() == {}
+
+
+class TestAmdActivityLegacySecondLine(TestAmdWholeGpuActivity):
+    """A board PMLog cannot answer for must still get a WHOLE-GPU figure.
+
+    PMLog (Overdrive 8) is unsupported on older drivers and pre-Overdrive-8
+    boards, and can also be refused for one call. Without a second AMD source
+    the readout falls all the way to the WDDM ``GPU Engine`` fold, which on this
+    vendor can report an unrelated process's video encoder while the card's
+    compute engine is saturated.
+
+    The pre-PMLog Overdrive activity APIs report the same whole-GPU quantity, so
+    they are tried before that fallback is reached.
+    """
+
+    _ODN = "ADL2_OverdriveN_PerformanceStatus_Get"
+    _OD6 = "ADL2_Overdrive6_CurrentStatus_Get"
+    _OD5 = "ADL2_Overdrive5_CurrentActivity_Get"
+
+    def test_legacy_answers_when_pmlog_is_unsupported(self, monkeypatch):
+        """PMLog refuses, a legacy Overdrive query answers, and the figure
+        published is the legacy one rather than nothing."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                       activity_rc=-8,                    # ADL_ERR_NOT_SUPPORTED
+                       legacy={self._ODN: (0, 64)})
+        assert gpu_usage._adl_activity_by_bus() == {45: 64.0}
+        assert gpu_usage.amd_whole_gpu_activity() == 64.0
+
+    def test_legacy_answers_when_the_pmlog_sensor_is_not_published(
+            self, monkeypatch):
+        """A board whose PMLog call succeeds but does not publish sensor 19 is
+        the same "PMLog cannot answer" case as an outright failure."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
+                       sensors={0: {19: (0, 0)}},
+                       legacy={self._OD6: (0, 37)})
+        assert gpu_usage.amd_whole_gpu_activity() == 37.0
+
+    def test_each_legacy_struct_reads_its_own_activity_field(self, monkeypatch):
+        """Each struct has a different layout and a different activity field.
+        Every other int field carries a distinct in-range decoy, so reading the
+        wrong offset returns a plausible wrong percentage, not an error."""
+        from localm import gpu_usage
+        for export, expected in ((self._ODN, 81), (self._OD6, 82), (self._OD5, 83)):
+            self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                           activity_rc=-8, legacy={export: (0, expected)})
+            assert gpu_usage.amd_whole_gpu_activity() == float(expected), export
+
+    def test_overdrive5_is_called_with_its_size_field_set(self, monkeypatch):
+        """ADLPMActivity carries its own size and ADL requires it set before the
+        call; leaving it zero is a rejected call on a real driver."""
+        import ctypes
+        from localm import gpu_usage
+        seen = []
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                       activity_rc=-8, legacy={self._OD5: (0, 12)},
+                       seen_isize=seen)
+        assert gpu_usage.amd_whole_gpu_activity() == 12.0
+        assert seen == [ctypes.sizeof(gpu_usage._ADLPMActivity)], seen
+
+    def test_pmlog_still_wins_when_it_answers(self, monkeypatch):
+        """The second line must never hijack a board PMLog already serves. The
+        legacy source is wired to a different number so a swap is visible."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
+                       sensors={0: {19: (1, 73)}},
+                       legacy={self._ODN: (0, 5)})
+        assert gpu_usage.amd_whole_gpu_activity() == 73.0
+
+    def test_a_refusing_legacy_source_defers_to_the_next(self, monkeypatch):
+        """An unsupported entry point is skipped, not treated as 0%."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                       activity_rc=-8,
+                       legacy={self._ODN: (-8, 0), self._OD6: (-8, 0),
+                               self._OD5: (0, 46)})
+        assert gpu_usage.amd_whole_gpu_activity() == 46.0
+
+    def test_an_absent_export_is_skipped(self, monkeypatch):
+        """An older atiadlxx.dll need not export every one of these. A missing
+        export must not abandon the ones it does have."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                       activity_rc=-8, legacy={self._OD5: (0, 29)})
+        assert not hasattr(gpu_usage._adl_open()["dll"], self._ODN)
+        assert gpu_usage.amd_whole_gpu_activity() == 29.0
+
+    def test_an_out_of_range_legacy_value_is_refused(self, monkeypatch):
+        """A wrong struct layout marshals garbage silently. Outside 0-100 the
+        reading is refused rather than published, exactly as for PMLog."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                       activity_rc=-8, legacy={self._ODN: (0, 4294967295)})
+        assert gpu_usage._adl_activity_by_bus() == {}
+        assert gpu_usage.amd_whole_gpu_activity() is None
+
+    def test_no_source_answering_is_not_an_idle_card(self, monkeypatch):
+        """Both lines failing yields None, never 0%: a card reported IDLE on a
+        measurement that never happened is a failed reading dressed as a good
+        one. This is what leaves the WDDM fold as the last resort."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                       activity_rc=-8,
+                       legacy={self._ODN: (-8, 0), self._OD6: (-8, 0),
+                               self._OD5: (-1, 0)})
+        assert gpu_usage._adl_activity_by_bus() == {}
+        assert gpu_usage.amd_whole_gpu_activity() is None
+
+    def test_a_raising_legacy_call_never_breaks_the_readout(self, monkeypatch):
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                       activity_rc=-8, legacy={self._OD6: (0, 51)})
+        dll = gpu_usage._adl_open()["dll"]
+
+        def _boom(_ctx, _idx, _ref):
+            raise OSError("driver went away")
+
+        setattr(dll, self._ODN, _boom)
+        assert gpu_usage.amd_whole_gpu_activity() == 51.0
+
+    def test_mixed_board_reads_each_card_through_its_own_source(self, monkeypatch):
+        """Per ADAPTER, not per box: one modern card and one old one in the same
+        machine must both report, each through whichever source answers it."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch,
+                       adapters=[(45, 0, 0, 1, 1002), (67, 0, 0, 1, 1002)],
+                       sensors={0: {19: (1, 22)}},      # only adapter 0 has PMLog
+                       legacy={self._ODN: (0, 90)})
+        assert gpu_usage._adl_activity_by_bus() == {45: 22.0, 67: 90.0}
+        assert gpu_usage.amd_whole_gpu_activity() == 90.0
+
+    def test_the_answering_source_is_named_in_the_debug_log(self, monkeypatch,
+                                                            caplog):
+        """Which ADL path answered has to be recoverable from a bug report."""
+        import logging
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                       activity_rc=-8, legacy={self._OD6: (0, 44)})
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            assert gpu_usage.amd_whole_gpu_activity() == 44.0
+        assert any(self._OD6 in r.getMessage() and "45" in r.getMessage()
+                   for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+class TestGpuUtilLegacyKeepsTheWddmFoldLast:
+    """The WDDM fold stays the LAST resort, and only for boards no AMD source
+    could answer."""
+
+    @staticmethod
+    def _cold(monkeypatch):
+        from localm import sysstats
+        monkeypatch.setattr(sysstats, "_gpu_util_last", None)
+        monkeypatch.setattr(sysstats, "_gpu_util_last_at", None)
+        monkeypatch.setattr(sysstats, "_gpu_util_inflight", True)
+
+    def test_an_amd_reading_is_published_without_touching_the_wddm_fold(
+            self, monkeypatch):
+        from localm import gpu_usage, sysstats
+
+        def _never():
+            raise AssertionError("adapter_utilisation must not be reached when "
+                                 "an AMD source answered")
+
+        self._cold(monkeypatch)
+        monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: 64.0)
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation", _never)
+        assert sysstats._gpu_util() == {"gpu": {"percent": 64.0}}
+
+    def test_the_wddm_fold_is_still_reached_when_no_amd_source_answers(
+            self, monkeypatch):
+        """The regression guard for the fallback itself: it must not be orphaned
+        by the new chain, or Intel and non-AMD Windows boards lose their only
+        device-global source."""
+        from localm import gpu_usage, sysstats
+        self._cold(monkeypatch)
+        monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: None)
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation", lambda: {"L1": 31.0})
+        assert sysstats._gpu_util() == {"gpu": {"percent": 31.0}}
 
 
 class TestGpuUtilSourceOrder:

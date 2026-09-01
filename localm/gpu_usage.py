@@ -141,6 +141,80 @@ class _ADLPMLogDataOutput(ctypes.Structure):
                 ("sensors", _ADLSingleSensorData * _ADL_PMLOG_MAX_SENSORS)]
 
 
+class _ADLPMActivity(ctypes.Structure):
+    """ADL's ADLPMActivity, filled by ``ADL2_Overdrive5_CurrentActivity_Get``.
+
+    Ten ints; ``iActivityPercent`` is the whole-GPU busy percent. ``iSize`` must
+    be set to the struct size before the call. A wrong layout silently marshals
+    garbage."""
+    _fields_ = [("iSize", ctypes.c_int),
+                ("iEngineClock", ctypes.c_int),
+                ("iMemoryClock", ctypes.c_int),
+                ("iVddc", ctypes.c_int),
+                ("iActivityPercent", ctypes.c_int),
+                ("iCurrentPerformanceLevel", ctypes.c_int),
+                ("iCurrentBusSpeed", ctypes.c_int),
+                ("iCurrentBusLanes", ctypes.c_int),
+                ("iMaximumBusLanes", ctypes.c_int),
+                ("iReserved", ctypes.c_int)]
+
+
+class _ADLOD6CurrentStatus(ctypes.Structure):
+    """ADL's ADLOD6CurrentStatus, filled by ``ADL2_Overdrive6_CurrentStatus_Get``.
+
+    Nine ints; ``iActivityPercent`` is the whole-GPU busy percent. A wrong layout
+    silently marshals garbage."""
+    _fields_ = [("iEngineClock", ctypes.c_int),
+                ("iMemoryClock", ctypes.c_int),
+                ("iActivityPercent", ctypes.c_int),
+                ("iCurrentPerformanceLevel", ctypes.c_int),
+                ("iCurrentBusSpeed", ctypes.c_int),
+                ("iCurrentBusLanes", ctypes.c_int),
+                ("iMaximumBusLanes", ctypes.c_int),
+                ("iExtValue", ctypes.c_int),
+                ("iExtMask", ctypes.c_int)]
+
+
+class _ADLODNPerformanceStatus(ctypes.Structure):
+    """ADL's ADLODNPerformanceStatus, filled by
+    ``ADL2_OverdriveN_PerformanceStatus_Get``.
+
+    Eighteen ints; ``iGPUActivityPercent`` is the whole-GPU busy percent. A wrong
+    layout silently marshals garbage."""
+    _fields_ = [("iCoreClock", ctypes.c_int),
+                ("iMemoryClock", ctypes.c_int),
+                ("iDCEFClock", ctypes.c_int),
+                ("iGFXClock", ctypes.c_int),
+                ("iUVDClock", ctypes.c_int),
+                ("iVCEClock", ctypes.c_int),
+                ("iGPUActivityPercent", ctypes.c_int),
+                ("iCurrentCorePerformanceLevel", ctypes.c_int),
+                ("iCurrentMemoryPerformanceLevel", ctypes.c_int),
+                ("iCurrentDCEFPerformanceLevel", ctypes.c_int),
+                ("iCurrentGFXPerformanceLevel", ctypes.c_int),
+                ("iUVDPerformanceLevel", ctypes.c_int),
+                ("iVCEPerformanceLevel", ctypes.c_int),
+                ("iCurrentBusSpeed", ctypes.c_int),
+                ("iCurrentBusLanes", ctypes.c_int),
+                ("iMaximumBusLanes", ctypes.c_int),
+                ("iVDDC", ctypes.c_int),
+                ("iVDDCI", ctypes.c_int)]
+
+
+# Whole-GPU activity entry points predating PMLog, newest first, as
+# (export, struct, activity field, whether iSize must be set before the call).
+_ADL_LEGACY_ACTIVITY_SOURCES = (
+    ("ADL2_OverdriveN_PerformanceStatus_Get", _ADLODNPerformanceStatus,
+     "iGPUActivityPercent", False),
+    ("ADL2_Overdrive6_CurrentStatus_Get", _ADLOD6CurrentStatus,
+     "iActivityPercent", False),
+    ("ADL2_Overdrive5_CurrentActivity_Get", _ADLPMActivity,
+     "iActivityPercent", True),
+)
+
+_ADL_PMLOG_SOURCE = "ADL2_New_QueryPMLogData_Get"
+
+
 _ADL_ALLOC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_int)
 
 
@@ -229,6 +303,64 @@ def _adl_used_by_bus() -> Dict[int, int]:
         return {}
 
 
+def _adl_usable_pct(raw: float, source: str) -> Optional[float]:
+    """*raw* when it is a percentage ADL could really have meant, else None.
+
+    A value outside 0-100 means the field being read is not the one intended - a
+    wrong sensor index or a struct-layout drift, both of which marshal garbage
+    silently instead of raising. None yields no entry, never a fabricated 0%."""
+    if 0.0 <= raw <= 100.0:
+        return raw
+    logger.debug("gpu_usage: %s returned %s, outside 0-100; ignoring", source, raw)
+    return None
+
+
+def _adl_pmlog_activity(dll, ctx, adapter_index: int) -> Optional[float]:
+    """Whole-GPU busy percent for one adapter from ADL's PMLog sensor array, or
+    None when this adapter cannot answer through it.
+
+    Needs no ``PMLog_Start`` and no shared-memory session: called cold it answers
+    immediately. None covers all three ways it declines - the call failing, the
+    board not publishing the sensor, and a value outside 0-100."""
+    data = _ADLPMLogDataOutput()
+    if dll.ADL2_New_QueryPMLogData_Get(ctx, adapter_index, ctypes.byref(data)) != _ADL_OK:
+        return None
+    sensor = data.sensors[_ADL_PMLOG_ACTIVITY_GFX]
+    if not sensor.supported:
+        return None
+    return _adl_usable_pct(float(sensor.value), _ADL_PMLOG_SOURCE)
+
+
+def _adl_legacy_activity(dll, ctx, adapter_index: int):
+    """``(percent, export_name)`` from the Overdrive activity APIs that predate
+    PMLog, or None when none of them answers for this adapter.
+
+    Tried newest first, and the first that returns a usable percentage wins.
+    Reached only when :func:`_adl_pmlog_activity` declined, which is what an
+    older driver, a pre-Overdrive-8 board, or a refused PMLog query looks like.
+
+    An export the installed ``atiadlxx.dll`` does not have is skipped rather than
+    raising, so an older driver missing one of these still gets the others."""
+    for export, struct, field, needs_size in _ADL_LEGACY_ACTIVITY_SOURCES:
+        fn = getattr(dll, export, None)
+        if fn is None:
+            continue
+        data = struct()
+        if needs_size:
+            data.iSize = ctypes.sizeof(struct)
+        try:
+            rc = fn(ctx, adapter_index, ctypes.byref(data))
+        except Exception as e:
+            logger.debug("gpu_usage: %s raised: %s", export, e)
+            continue
+        if rc != _ADL_OK:
+            continue
+        pct = _adl_usable_pct(float(getattr(data, field)), export)
+        if pct is not None:
+            return pct, export
+    return None
+
+
 def _adl_activity_by_bus() -> Dict[int, float]:
     """``{pci_bus_number: whole_gpu_busy_percent}`` per present AMD adapter, or ``{}``.
 
@@ -236,12 +368,13 @@ def _adl_activity_by_bus() -> Dict[int, float]:
     WDDM ``GPU Engine`` counter behind :func:`adapter_utilisation` cannot give on
     this vendor.
 
-    Reads the activity sensor through ``ADL2_New_QueryPMLogData_Get``, which needs
-    no ``PMLog_Start`` and no shared-memory session: called cold it answers
-    immediately.
+    Each adapter is read through PMLog first and, when that declines, through the
+    pre-PMLog Overdrive activity APIs. Both are whole-GPU sensors, so an adapter
+    answering through either is reported the same way; which one answered is
+    written to the debug log once per adapter and source.
 
-    A sensor the board does not publish, or a value outside 0-100, yields NO ENTRY
-    rather than a fabricated 0%.
+    An adapter no source can answer for yields NO ENTRY rather than a fabricated
+    0%, and one adapter failing never hides the rest.
     """
     state = _adl_open()
     if not state:
@@ -267,21 +400,18 @@ def _adl_activity_by_bus() -> Dict[int, float]:
             key = (info.iBusNumber, info.iDeviceNumber, info.iFunctionNumber)
             if key in seen:
                 continue
-            data = _ADLPMLogDataOutput()
-            rc = dll.ADL2_New_QueryPMLogData_Get(
-                ctx, info.iAdapterIndex, ctypes.byref(data))
-            if rc != _ADL_OK:
-                continue   # one adapter failing never hides the rest
-            sensor = data.sensors[_ADL_PMLOG_ACTIVITY_GFX]
-            if not sensor.supported:
-                continue
-            pct = float(sensor.value)
-            if not (0.0 <= pct <= 100.0):
-                # Out of range: report nothing.
-                logger.debug("gpu_usage: ADL activity out of range (%s); ignoring", pct)
-                continue
+            pct = _adl_pmlog_activity(dll, ctx, info.iAdapterIndex)
+            source = _ADL_PMLOG_SOURCE
+            if pct is None:
+                legacy = _adl_legacy_activity(dll, ctx, info.iAdapterIndex)
+                if legacy is None:
+                    continue
+                pct, source = legacy
             seen.add(key)
             out[int(info.iBusNumber)] = pct
+            if _notice_once("amd_activity", (int(info.iBusNumber), source)):
+                logger.debug("gpu_usage: whole-GPU activity for AMD bus %d reads "
+                             "through %s", int(info.iBusNumber), source)
         return out
     except Exception as e:
         logger.debug("gpu_usage: ADL activity query failed: %s", e)
