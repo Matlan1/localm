@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, simpledialog, ttk
@@ -190,17 +191,12 @@ def _auth():
 
 
 def load_models() -> list:
+    """The launcher's chat-model dropdown entries: registered LLM names, deduped
+    and sorted. A plain registry read - call sync_models_dir_safe() first to
+    pick up files added to (or gone missing from) the models folder."""
     try:
         sys.path.insert(0, str(REPO_DIR))
         from localm.config import load_registry
-        # Pick up models added to (or gone missing from) the models folder since
-        # last refresh. Guarded so an older localm without sync still lists fine.
-        try:
-            from localm.model_manager import sync_models_dir
-            # Local reconciliation only; no network I/O.
-            sync_models_dir(backfill_mmproj=False)
-        except Exception:
-            pass
         reg = load_registry()
         # Only LLM (chat) models belong in the launcher's selector: this dropdown
         # launches a chat model, so an embedding / LoRA / VAE / diffusion component
@@ -214,9 +210,33 @@ def load_models() -> list:
             # the same rule so the selector still filters, not shows everything.
             names = [n for n, e in reg.items()
                      if isinstance(e, dict) and e.get("model_type", "llm") == "llm"]
-        return sorted(names)
+        return sorted(set(names))
     except Exception:
         return []
+
+
+def sync_models_dir_safe():
+    """Reconcile the models folder with the registry - the same local, no-network
+    scan `localm gui`/`serve` runs at startup. Returns the sync_models_dir()
+    result (a ModelSyncResult), or None if it could not run."""
+    try:
+        sys.path.insert(0, str(REPO_DIR))
+        from localm.model_manager import sync_models_dir
+        return sync_models_dir(backfill_mmproj=False)
+    except Exception:
+        return None
+
+
+def is_models_root(path: str) -> bool:
+    """True when *path* is the data directory or its models folder, not a
+    specific model to import."""
+    try:
+        sys.path.insert(0, str(REPO_DIR))
+        from localm.config import HOME_DIR, MODELS_DIR
+        p = Path(path).resolve()
+        return p in {HOME_DIR.resolve(), MODELS_DIR.resolve()}
+    except Exception:
+        return False
 
 
 def _anchor_home(p: str) -> str:
@@ -294,6 +314,8 @@ class Launcher(tk.Tk):
         self.show_key = tk.BooleanVar(value=False)
         self.require_auth = tk.BooleanVar(
             value=bool(_a.require_auth_enabled()) if _a else False)
+
+        self._ticker_active = False
 
         self._build()
         self._on_mode_change()
@@ -414,9 +436,10 @@ class Launcher(tk.Tk):
         self.model_box = ttk.Combobox(model_card, textvariable=self.model,
                                       state="readonly", width=46)
         self.model_box.grid(row=1, column=0, sticky="we", pady=(4, 0))
-        ttk.Button(model_card, text="refresh", style="Quiet.TButton",
-                   command=self._refresh_models).grid(
-            row=1, column=1, padx=(8, 0), pady=(4, 0))
+        self.refresh_btn = ttk.Button(model_card, text="rescan",
+                                      style="Quiet.TButton",
+                                      command=self._refresh_models)
+        self.refresh_btn.grid(row=1, column=1, padx=(8, 0), pady=(4, 0))
         model_card.columnconfigure(0, weight=1)
 
         # ----- import a model (for empty registries / new models) -----
@@ -577,27 +600,100 @@ class Launcher(tk.Tk):
 
     # ------------------------------------------------------------- #
 
-    def _refresh_models(self) -> None:
-        models = load_models()
+    def _refresh_models(self, sync: bool = True) -> None:
+        """Update the model dropdown. *sync* (the default - startup and the
+        rescan button) reconciles the models folder first, off the UI thread,
+        so a large registry never freezes the window; pass sync=False for a
+        plain reload of what's already registered (e.g. right after an import
+        that just wrote the registry itself - no folder scan needed to see it)."""
+        if not sync:
+            self._apply_models(load_models())
+            return
+        self._set_busy(True)
+        self._start_ticker("Checking models folder")
+
+        def work():
+            result = sync_models_dir_safe()
+            models = load_models()
+            self.after(0, lambda: self._refresh_done(result, models))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_models(self, models: list) -> None:
         # The "no model" sentinel always leads the list so the Web GUI can be
         # launched with nothing loaded even when usable models are registered.
-        values = [NO_MODEL_LABEL] + models
+        # Deduplicates [NO_MODEL_LABEL] + models before it reaches the widget.
+        seen = set()
+        values = []
+        for v in [NO_MODEL_LABEL] + models:
+            if v not in seen:
+                seen.add(v)
+                values.append(v)
         self.model_box["values"] = values
         if self.model.get() not in values:
             self.model.set(models[0] if models else NO_MODEL_LABEL)
+
+    def _refresh_done(self, result, models: list) -> None:
+        self._stop_ticker()
+        self._set_busy(False)
+        self._apply_models(models)
+        if result is not None and result.changed:
+            bits = []
+            if result.added:
+                bits.append(f"{result.added} new")
+            if result.flagged:
+                bits.append(f"{result.flagged} missing")
+            if result.restored:
+                bits.append(f"{result.restored} restored")
+            if result.pruned:
+                bits.append(f"{result.pruned} pruned")
+            if result.backfilled:
+                bits.append(f"{result.backfilled} metadata backfilled")
+            if bits:
+                self.status_msg(f"Models folder synced: {', '.join(bits)}.")
+                return
         if not models:
             self.status_msg("No models yet - Import one, or just launch the Web "
                             "GUI and add one on the Models page", error=False)
+        else:
+            plural = "" if len(models) == 1 else "s"
+            self.status_msg(f"Up to date ({len(models)} model{plural}).")
+
+    # ------------------------- progress ticker ---------------------- #
+
+    def _start_ticker(self, label: str) -> None:
+        """Begin a live, changing status line ('label... (Ns)') that keeps
+        updating until _stop_ticker() - so a background scan or import never
+        leaves the window showing a static, unchanging message."""
+        self._ticker_label = label
+        self._ticker_start = time.monotonic()
+        self._ticker_frame = 0
+        self._ticker_active = True
+        self._tick()
+
+    def _tick(self) -> None:
+        if not self._ticker_active:
+            return
+        elapsed = int(time.monotonic() - self._ticker_start)
+        # Dot count keys off the frame counter, not the whole elapsed second.
+        dots = "." * ((self._ticker_frame % 3) + 1)
+        self._ticker_frame += 1
+        self.status_msg(f"{self._ticker_label}{dots} ({elapsed}s)")
+        self.after(400, self._tick)
+
+    def _stop_ticker(self) -> None:
+        self._ticker_active = False
 
     # ------------------------- model import ----------------------- #
 
     def _set_busy(self, busy: bool) -> None:
-        """Disable the controls that must not run mid-import: a multi-GB hash can
-        take many seconds, and Launching (R48) or generating a key (R49) during it
-        would race the registry write or stomp the 'hashing' status text. Re-enabled
-        when the import finishes."""
+        """Disable the controls that must not run mid-import or mid-scan: a
+        multi-GB hash or a folder sync can take a while, and Launching (R48),
+        generating a key (R49), or starting a second scan/import during it
+        would race the registry write or stomp the live status line.
+        Re-enabled when the work finishes."""
         state = "disabled" if busy else "normal"
-        for b in (*self.import_btns, self.launch_btn, self.gen_btn):
+        for b in (*self.import_btns, self.launch_btn, self.gen_btn, self.refresh_btn):
             try:
                 b.configure(state=state)
             except tk.TclError:
@@ -616,15 +712,21 @@ class Launcher(tk.Tk):
     def _import_from_folder(self) -> None:
         path = filedialog.askdirectory(
             title="Select a HuggingFace model directory")
-        if path:
-            self._register_path(path)
+        if not path:
+            return
+        if is_models_root(path):
+            # The data dir / models folder is not a model - sync it instead
+            # of calling `localm add`, which only ever refuses this path.
+            self._refresh_models(sync=True)
+            return
+        self._register_path(path)
 
     def _register_path(self, path: str) -> None:
         """Register a local file/dir via `localm add` off the UI thread.
         SHA256 hashing of a multi-GB file can take a few seconds."""
         before = set(load_models())
         self._set_busy(True)
-        self.status_msg("Importing… (hashing may take a moment)")
+        self._start_ticker("Importing")
 
         def work():
             ok, msg = False, ""
@@ -644,9 +746,11 @@ class Launcher(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
 
     def _register_done(self, ok: bool, msg: str, before: set) -> None:
+        self._stop_ticker()
         self._set_busy(False)
-        self._refresh_models()
-        new = sorted(set(load_models()) - before)
+        current = load_models()
+        self._apply_models(current)
+        new = sorted(set(current) - before)
         if ok and new:
             self.model.set(new[0])
             self.status_msg(f"Imported {new[0]} ✓")

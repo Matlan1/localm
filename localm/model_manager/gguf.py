@@ -435,22 +435,33 @@ def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:
     contribute only their first part - llama.cpp finds the siblings on its own;
     loose single-file GGUFs contribute themselves. Mirrors the first-part filter
     in sync_models_dir.
+
+    Walks breadth-first, one level at a time, and never descends into a
+    subfolder past *max_depth* - an unrelated deep or wide subtree past that
+    depth (a cache folder, an old install) is never traversed at all.
     """
     out: List[Path] = []
-    for f in sorted(d.rglob("*.gguf")):
-        try:
-            if not f.is_file():
+    frontier: List[Path] = [d]
+    level = 0
+    while frontier and level < max_depth:
+        level += 1
+        next_frontier: List[Path] = []
+        for folder in frontier:
+            try:
+                out.extend(f for f in folder.glob("*.gguf") if f.is_file())
+                next_frontier.extend(p for p in folder.iterdir() if p.is_dir())
+            except OSError:
                 continue
-            depth = len(f.relative_to(d).parts)
-        except (OSError, ValueError):
-            continue
-        if depth > max_depth:
-            continue
+        frontier = next_frontier
+    out.sort()
+
+    kept: List[Path] = []
+    for f in out:
         parts = split_gguf_parts(f.name)
         if parts and f.name != parts[0]:
             continue   # non-first split part -> registered via its first part
-        out.append(f)
-    return out
+        kept.append(f)
+    return kept
 
 
 

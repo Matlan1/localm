@@ -59,6 +59,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   before it can show its menu, closing off the specific way this could
   happen. Combined with the automatic-restart fix above, this is also less
   likely to matter if it ever does.
+- **The launcher's "Import from folder" gave no sign anything was happening
+  and could sit for a while before failing, especially when pointed at the
+  models folder itself (such as after copying it in from another install).**
+  That case now syncs the folder instead of refusing it as "not a model."
+  Every import shows a live, updating status now instead of a static
+  message, and the model list refreshes automatically in the background
+  when the launcher opens or when the new "rescan" button is used, rather
+  than freezing the window while it scans.
 
 ## [0.1.5] - 2026-08-26
 
