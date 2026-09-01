@@ -110,8 +110,7 @@ def recap_rows(messages: list, tool_names: set) -> list:
     One row per user/assistant message with surviving prose, tool-call markup
     removed. Tool-result envelopes and steering notes are dropped. A turn whose
     content was ENTIRELY tool calls keeps a row naming them (see
-    test_recap_keeps_a_row_for_a_tool_only_turn): dropping it silently is
-    indistinguishable, in the feed, from the turn never having happened.
+    test_recap_keeps_a_row_for_a_tool_only_turn).
 
     Each row is ``{"role": ..., "text": ...}``; text is capped at 4000 chars.
     """
@@ -823,11 +822,8 @@ class CoderSession:
         uses."""
         return {
             "id": self.id,
-            # Which SAVED conversation is loaded here, as opposed to "id", which
-            # names this live session. Lets a caller tell "the checkpoint I
-            # asked for is already open" apart from "a DIFFERENT one is", and
-            # lets the session rail hide a checkpoint that is already live from
-            # its past-sessions list.
+            # Which SAVED conversation is loaded here; "id" above names this
+            # live session. Matches a /api/coder/dormant row id.
             "checkpoint_id": self.checkpoint_id,
             "cwd": str(self.cwd),
             "model": self.model,
