@@ -3088,7 +3088,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     every native free has been issued) can confirm the releases actually landed
     before re-exec spawns a fresh worker into them. Best-effort: an
     unmeasurable or wedged probe must not block a restart the user asked for,
-    and vram_capacity() is itself deadline-bounded."""
+    and vram_capacity() is itself deadline-bounded. Skipped entirely when
+    nothing is loaded (checked via the cheap had_engines/had_embedder reads
+    below, before either probe or unload runs), since list_gpus() re-probes on
+    every call with no TTL cache and a cold reading can itself take several
+    seconds - not worth paying when its result would never be used."""
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os.execv below bypasses atexit, the job worker
@@ -3131,13 +3135,6 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         _dbg_swallow("stopping localm-launched ComfyUI instance(s) during restart "
                      "failed (non-fatal); one may be left running")
 
-    free_before = None
-    try:
-        from localm.discover import vram_capacity
-        free_before = vram_capacity().get("free")
-    except Exception:
-        _dbg_swallow("free-VRAM read before restart failed (non-fatal)")
-
     # Unload all engines in the multi-model dictionary
     # had_engines asks "is anything ACTUALLY loaded" (worth waiting on), not
     # merely "is the dict non-empty": unload_all_models/idle-unload both KEEP a
@@ -3147,10 +3144,30 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # wait's full timeout for nothing - the exact "no delay in the common
     # case" claim below would be false. getattr defaults to False so a test
     # double that does not define .loaded (never holding real VRAM) is
-    # correctly treated as nothing-to-wait-for.
+    # correctly treated as nothing-to-wait-for. Read before any unload runs
+    # (cheap: already-in-memory objects, no I/O) so the free-VRAM probe below
+    # can be skipped for a restart with nothing loaded.
     had_engines = any(getattr(e, "loaded", False) for e in _engines.values())
     if not had_engines and _engine is not None and _engine not in _engines.values():
         had_engines = bool(getattr(_engine, "loaded", False))
+
+    # Same cheap, no-I/O pre-check for the embedder (loaded_path() takes a
+    # plain lock and reads already-in-memory state; it does not trigger a load).
+    had_embedder = False
+    try:
+        from localm.inference import embedder as _embedder_precheck
+        had_embedder = _embedder_precheck.loaded_path() is not None
+    except Exception:
+        _dbg_swallow("embedder loaded-path check during restart failed (non-fatal)")
+
+    free_before = None
+    if had_engines or had_embedder:
+        try:
+            from localm.discover import vram_capacity
+            free_before = vram_capacity().get("free")
+        except Exception:
+            _dbg_swallow("free-VRAM read before restart failed (non-fatal)")
+
     for engine in list(_engines.values()):
         try:
             engine.unload()

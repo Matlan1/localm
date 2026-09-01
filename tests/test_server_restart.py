@@ -289,15 +289,19 @@ def test_do_restart_skips_vram_wait_when_nothing_was_loaded(monkeypatch):
 
     import localm.vram as vram
 
-    def _must_not_be_called(*_a, **_kw):
-        raise AssertionError("wait_for_vram_release must not fire when nothing was unloaded")
-
-    monkeypatch.setattr(vram, "wait_for_vram_release", _must_not_be_called)
+    # Recorded rather than raised: wait_for_vram_release's own call site is
+    # wrapped in a broad `except Exception`, which would silently swallow an
+    # AssertionError raised from inside the mock and let the test pass either
+    # way. Asserting on the call list AFTER _do_restart returns is outside
+    # that try/except, so it actually observes what happened.
+    calls = []
+    monkeypatch.setattr(vram, "wait_for_vram_release", lambda *a, **kw: calls.append(1))
 
     try:
         http_server._do_restart()
     except SystemExit:
-        pass   # no AssertionError means the wait was correctly skipped
+        pass
+    assert calls == [], "wait_for_vram_release must not fire when nothing was unloaded"
 
 
 def test_do_restart_skips_vram_wait_for_a_stale_unloaded_engine_entry(monkeypatch):
@@ -322,16 +326,17 @@ def test_do_restart_skips_vram_wait_for_a_stale_unloaded_engine_entry(monkeypatc
 
     import localm.vram as vram
 
-    def _must_not_be_called(*_a, **_kw):
-        raise AssertionError("wait_for_vram_release must not fire for a stale, "
-                             "already-unloaded _engines entry")
-
-    monkeypatch.setattr(vram, "wait_for_vram_release", _must_not_be_called)
+    # See test_do_restart_skips_vram_wait_when_nothing_was_loaded: recorded
+    # rather than raised, since the call site is wrapped in `except Exception`.
+    calls = []
+    monkeypatch.setattr(vram, "wait_for_vram_release", lambda *a, **kw: calls.append(1))
 
     try:
         http_server._do_restart()
     except SystemExit:
-        pass   # no AssertionError means the wait was correctly skipped
+        pass
+    assert calls == [], ("wait_for_vram_release must not fire for a stale, "
+                         "already-unloaded _engines entry")
 
 
 def test_do_restart_skips_vram_wait_when_unmeasurable(monkeypatch):
@@ -357,15 +362,16 @@ def test_do_restart_skips_vram_wait_when_unmeasurable(monkeypatch):
 
     monkeypatch.setattr(discover, "vram_capacity", lambda *a, **kw: {})
 
-    def _must_not_be_called(*_a, **_kw):
-        raise AssertionError("wait_for_vram_release must not fire when VRAM is unmeasurable")
-
-    monkeypatch.setattr(vram, "wait_for_vram_release", _must_not_be_called)
+    # See test_do_restart_skips_vram_wait_when_nothing_was_loaded: recorded
+    # rather than raised, since the call site is wrapped in `except Exception`.
+    calls = []
+    monkeypatch.setattr(vram, "wait_for_vram_release", lambda *a, **kw: calls.append(1))
 
     try:
         http_server._do_restart()
     except SystemExit:
         pass
+    assert calls == [], "wait_for_vram_release must not fire when VRAM is unmeasurable"
 
 
 def test_do_restart_vram_wait_failure_does_not_block_restart(monkeypatch):
@@ -423,6 +429,10 @@ def test_do_restart_waits_for_vram_release_when_only_embedder_was_loaded(monkeyp
     monkeypatch.setattr(os, "execv", _fake_relaunch)
 
     from localm.inference import embedder as emb
+    # loaded_path() is the pre-release "was anything loaded" probe free_before's
+    # skip gate now reads; without it the scenario is indistinguishable from
+    # "nothing was loaded" even though release_for_exit() reports True.
+    monkeypatch.setattr(emb, "loaded_path", lambda: "/fake/embedder/model.gguf")
     monkeypatch.setattr(emb, "release_for_exit", lambda: True)
 
     import localm.discover as discover
@@ -438,3 +448,121 @@ def test_do_restart_waits_for_vram_release_when_only_embedder_was_loaded(monkeyp
     except SystemExit:
         pass
     assert calls == [1]
+
+
+# ---------------------- free-VRAM probe skip (restart speed) ---------------
+#
+# vram_capacity() -> list_gpus() re-probes on every call with no TTL cache (see
+# discover.list_gpus's own docstring), so a cold reading - an isolated
+# subprocess cold-importing torch - can itself cost several real seconds.
+# free_before's ONLY consumer is the had_engines/had_embedder-gated wait
+# below, so reading it when neither is true wastes that time on every restart
+# that has nothing loaded (--no-model, or a server that idle-unloaded
+# everything) for a number that is never used.
+
+def test_do_restart_skips_free_vram_probe_when_nothing_was_loaded(monkeypatch):
+    monkeypatch.setattr(http_server, "_engines", {})
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    from localm.inference import embedder as emb
+    monkeypatch.setattr(emb, "loaded_path", lambda: None)
+
+    def _fake_relaunch(exe, argv):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    import localm.discover as discover
+
+    # Recorded rather than raised: vram_capacity's call site is wrapped in
+    # `except Exception`, which would silently swallow an AssertionError
+    # raised from inside the mock and let the test pass either way (see
+    # test_do_restart_skips_vram_wait_when_nothing_was_loaded above for the
+    # same shape on the wait call). Asserting on the call list AFTER
+    # _do_restart returns is outside that try/except, so it actually
+    # observes what happened.
+    calls = []
+    monkeypatch.setattr(discover, "vram_capacity", lambda *a, **kw: calls.append(1))
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+    assert calls == [], (
+        "vram_capacity must not be probed for free_before when nothing is "
+        "loaded - its result would never be used")
+
+
+def test_do_restart_probes_free_vram_when_engines_present(monkeypatch):
+    """The mirror of the skip test above: when something IS loaded, free_before
+    still has to be read (its result feeds the release-confirmation wait)."""
+    class _FakeEngine:
+        loaded = True
+
+        def unload(self):
+            pass
+
+    monkeypatch.setattr(http_server, "_engines", {"model-a": _FakeEngine()})
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    from localm.inference import embedder as emb
+    monkeypatch.setattr(emb, "loaded_path", lambda: None)
+
+    def _fake_relaunch(exe, argv):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    import localm.discover as discover
+    import localm.vram as vram
+
+    calls = []
+
+    def _probe(*_a, **_kw):
+        calls.append(1)
+        return {"free": 42}
+
+    monkeypatch.setattr(discover, "vram_capacity", _probe)
+    monkeypatch.setattr(vram, "wait_for_vram_release",
+                        lambda read_free, before_bytes=None, **kw: (True, before_bytes))
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+    assert calls, "vram_capacity must still be probed when an engine is loaded"
+
+
+def test_do_restart_probes_free_vram_when_only_embedder_present(monkeypatch):
+    """Same mirror, for the embedder-only case: had_embedder alone must still
+    trigger the probe, not just had_engines."""
+    monkeypatch.setattr(http_server, "_engines", {})
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    from localm.inference import embedder as emb
+    monkeypatch.setattr(emb, "loaded_path", lambda: "/fake/embedder/model.gguf")
+    monkeypatch.setattr(emb, "release_for_exit", lambda: True)
+
+    def _fake_relaunch(exe, argv):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    import localm.discover as discover
+    import localm.vram as vram
+
+    calls = []
+
+    def _probe(*_a, **_kw):
+        calls.append(1)
+        return {"free": 42}
+
+    monkeypatch.setattr(discover, "vram_capacity", _probe)
+    monkeypatch.setattr(vram, "wait_for_vram_release",
+                        lambda read_free, before_bytes=None, **kw: (True, before_bytes))
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+    assert calls, "vram_capacity must still be probed when the embedder is loaded"
