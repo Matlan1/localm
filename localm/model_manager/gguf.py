@@ -832,19 +832,35 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
     return total_kv_heads * head_dim * 2 * 2
 
 
+# The same four key spellings llamacpp/_api.py's _MTP_META_KEYS checks for MTP
+# eligibility, in the same priority order. Kept as its own tuple here rather
+# than imported: model_manager/gguf.py is a dependency-light leaf module and
+# llamacpp/_api.py sits a layer above it. See
+# test_key_templates_stay_in_sync_with_api_py.
+_MTP_NEXTN_KEY_TEMPLATES = (
+    "{arch}.nextn_predict_layers",
+    "{arch}.mtp_head_count",
+    "nextn_predict_layers",
+    "general.mtp_head_count",
+)
+
+
 def gguf_nextn_predict_layers(path: Path) -> "tuple[str, int]":
     """(architecture, nextn_predict_layers) read from *path*'s own GGUF header,
     before the model is loaded - the metadata half of the two-part check
     llama_model_mtp_support (llamacpp/_api.py) makes on an already-loaded
     model, so a VRAM preflight can answer the same question before one exists.
 
-    Reads only the ONE real upstream key (LLM_KV_NEXTN_PREDICT_LAYERS,
-    "%s.nextn_predict_layers"), not the tolerated alternate spellings
-    _api.py's _MTP_META_KEYS also accepts for third-party conversions.
+    Checks the same four key spellings llama_model_mtp_support's own
+    _MTP_META_KEYS does (_MTP_NEXTN_KEY_TEMPLATES above), in the same
+    priority order - the real upstream key first, then the tolerated
+    alternates seen on third-party conversions - so a GGUF whose MTP metadata
+    only carries an alternate spelling is not silently under-charged here
+    while still getting a real draft context at load.
 
     Returns ("", 0) - never raises - when the file is not a readable GGUF or
-    declares no architecture; (architecture, 0) when the key is absent,
-    non-scalar, or non-positive for that architecture."""
+    declares no architecture; (architecture, 0) when none of the four keys
+    resolve to a positive integer for that architecture."""
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_META_PROBE_BYTES)
@@ -868,7 +884,8 @@ def gguf_nextn_predict_layers(path: Path) -> "tuple[str, int]":
             if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
                 architecture, off = _gguf_read_string(buf, off)
                 continue
-            if key.endswith(".nextn_predict_layers"):
+            if key in ("nextn_predict_layers", "general.mtp_head_count") or \
+                    key.endswith((".nextn_predict_layers", ".mtp_head_count")):
                 try:
                     raw[key], off = _gguf_read_scalar(buf, off, vtype)
                     continue
@@ -882,9 +899,12 @@ def gguf_nextn_predict_layers(path: Path) -> "tuple[str, int]":
 
     if not architecture:
         return "", 0
-    val = raw.get(f"{architecture}.nextn_predict_layers")
-    nextn = int(val) if isinstance(val, int) and val > 0 else 0
-    return architecture, nextn
+    for template in _MTP_NEXTN_KEY_TEMPLATES:
+        key = template.replace("{arch}", architecture)
+        val = raw.get(key)
+        if isinstance(val, int) and val > 0:
+            return architecture, val
+    return architecture, 0
 
 
 def gguf_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int) -> int:

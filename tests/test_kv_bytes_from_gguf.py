@@ -214,6 +214,50 @@ class TestGgufNextnPredictLayers:
         f = _gguf(tmp_path / "m.gguf", kv)
         assert gguf_nextn_predict_layers(f) == ("step35", 3)
 
+    def test_arch_scoped_mtp_head_count_spelling_is_read_too(self, tmp_path):
+        # The real key llama_model_mtp_support checks first is
+        # nextn_predict_layers, but it ALSO accepts an architecture-scoped
+        # mtp_head_count spelling. A file carrying only that spelling must
+        # not be silently under-charged here just because the sizing path
+        # missed a tolerated spelling the real load-time check accepts.
+        kv = _shape("qwen35moe", 48, 2048, 16, 4, extra=[
+            ("qwen35moe.mtp_head_count", _T_UINT32, 2)])
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_nextn_predict_layers(f) == ("qwen35moe", 2)
+
+    def test_bare_nextn_predict_layers_spelling_is_read_too(self, tmp_path):
+        # Unlike the other three spellings this one is NOT architecture-
+        # scoped in llama_model_mtp_support's own _MTP_META_KEYS, and this
+        # reader mirrors that exactly rather than being more precise than the
+        # real detector it exists to shadow.
+        kv = _shape("deepseek2", 61, 7168, 128, 128, extra=[
+            ("nextn_predict_layers", _T_UINT32, 1)])
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_nextn_predict_layers(f) == ("deepseek2", 1)
+
+    def test_bare_general_mtp_head_count_spelling_is_read_too(self, tmp_path):
+        kv = _shape("deepseek32", 61, 7168, 128, 128, extra=[
+            ("general.mtp_head_count", _T_UINT32, 1)])
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_nextn_predict_layers(f) == ("deepseek32", 1)
+
+    def test_real_key_wins_over_a_lower_priority_spelling(self, tmp_path):
+        # When more than one spelling is present, the priority order matches
+        # _MTP_META_KEYS: the real key first.
+        kv = _shape("qwen35", 48, 2048, 16, 4, extra=[
+            ("qwen35.nextn_predict_layers", _T_UINT32, 1),
+            ("qwen35.mtp_head_count", _T_UINT32, 99),
+        ])
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_nextn_predict_layers(f) == ("qwen35", 1)
+
+    def test_key_templates_stay_in_sync_with_api_py(self):
+        # The strongest guard against the two lists drifting apart: compare
+        # them directly rather than trusting a comment to be kept current.
+        from localm.inference.backends.llamacpp._api import _MTP_META_KEYS
+        from localm.model_manager.gguf import _MTP_NEXTN_KEY_TEMPLATES
+        assert _MTP_NEXTN_KEY_TEMPLATES == _MTP_META_KEYS
+
     def test_no_nextn_key_at_all(self, tmp_path):
         f = _gguf(tmp_path / "m.gguf", _shape("llama", 32, 4096, 32, 8))
         assert gguf_nextn_predict_layers(f) == ("llama", 0)
