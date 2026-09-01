@@ -1153,7 +1153,8 @@ class TestChatEmbedStdoutSafety:
         with patch("localm.model_manager.pull.pull_model", return_value=True):
             resp = _req(server, "tools/call",
                         {"name": "pull_model",
-                         "arguments": {"repo": "org/repo", "name": "newmodel"}})
+                         "arguments": {"repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+                                       "name": "newmodel"}})
         assert resp["result"]["isError"] is False
         captured = capsys.readouterr()
         assert "NATIVE_LOAD_NOISE_ON_STDOUT" not in captured.out
@@ -1290,27 +1291,32 @@ class TestModelDiscoveryTools:
         assert "localm add" in r["result"]["content"][0]["text"]
         assert str(tmp_path) in exists_spy
 
-    def test_pull_model_nonexistent_local_path_falls_through_to_pull(
+    def test_pull_model_nonexistent_local_path_falls_through_to_unknown_repo_refusal(
             self, exists_spy, tmp_path):
         """Control: an ordinary NON-existent local path is not UNC/device
-        syntax either, so it still falls through past the local-add check to
-        the normal pull mechanics."""
+        syntax either, so it still falls through past the local-add check -
+        to the known-repo gate, which refuses it (it is not a HuggingFace
+        repo id, so it cannot be a known or registered one either)."""
         server, _ = _server()
         missing = str(tmp_path / "does-not-exist")
-        with patch("localm.model_manager.pull.pull_model", return_value=True) as mock_pull:
+        with patch("localm.config.load_registry", return_value={}), \
+             patch("localm.model_manager.pull.pull_model", return_value=True) as mock_pull:
             r = self._call(server, "pull_model", {"repo": missing, "name": "m"})
-        assert r["result"]["isError"] is False
-        mock_pull.assert_called_once_with(missing, name="m")
+        assert r["result"]["isError"] is True
+        assert "is a path on this machine" not in r["result"]["content"][0]["text"]
+        assert "Refusing to pull" in r["result"]["content"][0]["text"]
+        mock_pull.assert_not_called()
         assert missing in exists_spy
 
     def test_pull_model_success_loads_by_default(self):
         server, engines = _server()
+        repo = "bartowski/Qwen2.5-7B-Instruct-GGUF"
         with patch("localm.model_manager.pull.pull_model", return_value=True) as mock_pull:
             r = self._call(server, "pull_model",
-                           {"repo": "owner/repo", "file": "m.Q4_K_M.gguf", "name": "m"})
+                           {"repo": repo, "file": "m.Q4_K_M.gguf", "name": "m"})
         assert r["result"]["isError"] is False
         assert "loaded" in r["result"]["content"][0]["text"]
-        mock_pull.assert_called_once_with("owner/repo:m.Q4_K_M.gguf", name="m")
+        mock_pull.assert_called_once_with(f"{repo}:m.Q4_K_M.gguf", name="m")
         assert engines._loaded_name == "m"
         # "loaded ... ready to use" must mean an actual backend load, not just
         # cache registration - engines.get() alone leaves the engine
@@ -1324,7 +1330,8 @@ class TestModelDiscoveryTools:
         server, engines = _server()
         with patch("localm.model_manager.pull.pull_model", return_value=True):
             r = self._call(server, "pull_model",
-                           {"repo": "owner/repo", "name": "m", "load": False})
+                           {"repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+                            "name": "m", "load": False})
         assert r["result"]["isError"] is False
         assert "not loaded" in r["result"]["content"][0]["text"]
         assert engines._loaded_name != "m"
@@ -1332,7 +1339,8 @@ class TestModelDiscoveryTools:
     def test_pull_model_failure_is_surfaced(self):
         server, _ = _server()
         with patch("localm.model_manager.pull.pull_model", return_value=False):
-            r = self._call(server, "pull_model", {"repo": "owner/repo", "name": "m"})
+            r = self._call(server, "pull_model",
+                           {"repo": "bartowski/Qwen2.5-7B-Instruct-GGUF", "name": "m"})
         assert r["result"]["isError"] is True
         assert "pull failed" in r["result"]["content"][0]["text"]
 
@@ -1340,7 +1348,8 @@ class TestModelDiscoveryTools:
         server, _ = _server()
         with patch("localm.model_manager.pull.pull_model",
                    side_effect=RuntimeError("network down")):
-            r = self._call(server, "pull_model", {"repo": "owner/repo", "name": "m"})
+            r = self._call(server, "pull_model",
+                           {"repo": "bartowski/Qwen2.5-7B-Instruct-GGUF", "name": "m"})
         assert r["result"]["isError"] is True
         assert "network down" in r["result"]["content"][0]["text"]
 
@@ -1349,7 +1358,8 @@ class TestModelDiscoveryTools:
         server = MCPStdioServer(build_tools(engines))
         with patch("localm.model_manager.pull.pull_model", return_value=True), \
              patch.object(engines, "get", side_effect=RuntimeError("no GPU memory")):
-            r = self._call(server, "pull_model", {"repo": "owner/repo", "name": "m"})
+            r = self._call(server, "pull_model",
+                           {"repo": "bartowski/Qwen2.5-7B-Instruct-GGUF", "name": "m"})
         assert r["result"]["isError"] is True
         assert "loading it failed" in r["result"]["content"][0]["text"]
         assert "no GPU memory" in r["result"]["content"][0]["text"]
@@ -1366,11 +1376,36 @@ class TestModelDiscoveryTools:
         engines = EngineCache(default_model=None, engine_factory=failing_load_factory)
         server = MCPStdioServer(build_tools(engines))
         with patch("localm.model_manager.pull.pull_model", return_value=True):
-            r = self._call(server, "pull_model", {"repo": "owner/repo", "name": "m"})
+            r = self._call(server, "pull_model",
+                           {"repo": "bartowski/Qwen2.5-7B-Instruct-GGUF", "name": "m"})
         assert r["result"]["isError"] is True
         assert "loading it failed" in r["result"]["content"][0]["text"]
         assert "no GPU memory" in r["result"]["content"][0]["text"]
         engines._engines["m"].load.assert_called_once()
+
+    def test_pull_model_rejects_repo_not_known_or_registered(self):
+        server, _ = _server()
+        with patch("localm.config.load_registry", return_value={}):
+            r = self._call(server, "pull_model",
+                           {"repo": "some-unvetted-org/some-unvetted-model-gguf",
+                            "name": "m"})
+        assert r["result"]["isError"] is True
+        assert "Refusing to pull" in r["result"]["content"][0]["text"]
+        assert "some-unvetted-org/some-unvetted-model-gguf" in r["result"]["content"][0]["text"]
+
+    def test_pull_model_accepts_repo_matching_registered_model_source(self):
+        """A repo outside KNOWN_PULL_REPOS is still accepted once the operator
+        has registered a model whose source is that same repo (via the CLI or
+        GUI, not this MCP surface)."""
+        server, _ = _server()
+        repo = "some-operator-vetted-org/some-operator-vetted-model-gguf"
+        reg = {"existing": {"source": f"hf:{repo}", "path": "x"}}
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.model_manager.pull.pull_model", return_value=True) as mock_pull:
+            r = self._call(server, "pull_model",
+                           {"repo": repo, "name": "m", "load": False})
+        assert r["result"]["isError"] is False
+        mock_pull.assert_called_once_with(repo, name="m")
 
 
 class TestRunCoderTask:
