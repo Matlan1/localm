@@ -76,6 +76,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   variables, to raise rate limits and reach gated or login-required models
   on search and download. Neither is required: search and downloads keep
   working anonymously with nothing set.
+- **Chat messages can now show a background image.** Set it in Settings >
+  System > Appearance, next to the logo picker; Clear removes it.
+- **You can set your own display name for chat messages**, shown next to your
+  messages instead of "You". Set it in Settings > Chat > Avatars.
+- **The per-model icon override in Settings > Chat > Avatars now offers a
+  dropdown of your installed models** instead of requiring you to type an
+  exact model name.
 
 ### Fixed
 - **The list of other running LocaLM servers now really does cover the whole

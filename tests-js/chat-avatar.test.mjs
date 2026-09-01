@@ -53,6 +53,23 @@ test("addMessageRow: the user turn has no head wrapper when user_avatar is unset
     "msg-role stays a direct child, unchanged from before this feature");
 });
 
+test("addMessageRow: the user role label is \"You\" by default, and chat.userName overrides it", () => {
+  const { window } = loadApp();
+  const doc = window.document;
+  const box = doc.getElementById("chat-messages");
+  runScript(window, "chat.userName = '';");
+  window.addMessageRow(box, "user", "hi");
+  assert.equal(box.querySelector(".msg-row.user:last-child .msg-role").textContent, "You");
+
+  runScript(window, "chat.userName = 'Matt';");
+  window.addMessageRow(box, "user", "hi again");
+  assert.equal(box.querySelector(".msg-row.user:last-child .msg-role").textContent, "Matt");
+
+  // The assistant role label is unaffected by chat.userName.
+  window.addMessageRow(box, "assistant", "hello", { model: "model-a" });
+  assert.equal(box.querySelector(".msg-row.assistant:last-child .msg-role").textContent, "model-a");
+});
+
 test("addMessageRow: the assistant turn always gets a head wrapper, monogram by default", () => {
   const { window } = loadApp();
   const doc = window.document;
