@@ -1601,12 +1601,52 @@ def _torch_gpus_isolated_once() -> list:
     return devices
 
 
+_TORCH_RESIDENT_READ_TIMEOUT = 3.0
+
+
+def _torch_gpus_resident_bounded(timeout: float = _TORCH_RESIDENT_READ_TIMEOUT) -> list:
+    """Like :func:`_torch_gpus_resident`, but bounded and safe to call from a
+    caller with its own deadline.
+
+    ``"torch" in sys.modules`` becomes True the moment ANY thread starts
+    importing torch, before that import finishes: CPython inserts a module
+    into ``sys.modules`` before running its body, so a concurrent
+    ``_torch_is_resident()`` check can read True while another thread is still
+    deep inside torch's own (slow, on some ROCm/HIP builds) DLL-loading
+    ``__init__.py``. Calling :func:`_torch_gpus_resident` in that window does
+    a bare ``import torch``, which blocks on Python's per-module import lock
+    for the remaining duration of that other thread's import.
+
+    Runs the read in a background thread with a short bound; on overrun,
+    returns ``[]`` so the caller falls through exactly as if torch had not
+    been resident at all. Never raises."""
+    result: dict = {}
+    done = threading.Event()
+
+    def _read() -> None:
+        try:
+            result["value"] = _torch_gpus_resident()
+        except Exception:
+            pass
+        finally:
+            done.set()
+
+    try:
+        threading.Thread(target=_read, name="localm-torch-gpus-resident",
+                         daemon=True).start()
+    except Exception:
+        return []
+    if not done.wait(timeout):
+        return []
+    return result.get("value", [])
+
+
 def _list_gpus_probe() -> list:
     """The actual (blocking) GPU driver probe. Call :func:`list_gpus`, not this -
     this one has no timeout and can wedge on a busy/broken driver."""
     if not _torch_gpu_probe_known_doomed():
         try:
-            out = _torch_gpus_resident() if _torch_is_resident() \
+            out = _torch_gpus_resident_bounded() if _torch_is_resident() \
                 else _torch_gpus_isolated_once()
             if out:
                 _apply_device_global_free(out)
