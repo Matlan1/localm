@@ -1,0 +1,8 @@
+{
+  "name": "localm",
+  "description": "Chat, manage models, and delegate coding tasks to localm, an offline local LLM engine, through its MCP server.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Matlan1"
+  }
+}

@@ -43,6 +43,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   indexed for call sites of a symbol, so it (and a read-only reviewer
   sub-agent) can check who else calls something before touching its
   signature, without a manual grep round-trip.
+- **localm's MCP server now ships as a portable Agent Plugin bundle** (a
+  `plugin.json` manifest, `.mcp.json`, and a `skills/localm/` skill at the
+  repo root), loadable in Claude Code with `claude --plugin-dir <path to
+  this repo>` instead of pasting the MCP server's JSON config by hand. The
+  skill gives the assistant operational guidance: how to judge model/quant
+  fit before downloading, when to delegate a whole task instead of a single
+  chat call, and what image generation needs.
 
 ### Fixed
 - **The list of other running LocaLM servers now really does cover the whole
