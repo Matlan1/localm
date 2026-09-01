@@ -291,6 +291,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   load was cut short by something other than picking a different model. The
   real reason is now shown instead; picking a genuinely different model while
   one is still loading is unaffected and still reports it as superseded.
+- **An embedding model that failed to load could leave its worker process
+  running in the background.** This worker handles semantic search and agent
+  memory, and a load that failed cleanly, such as a broken or misconfigured
+  model file, was never cleaned up, so repeated failed attempts each left
+  one more stranded process behind, still holding memory. That worker is
+  now shut down whenever a load fails this way.
 
 ### Security
 - **A model can no longer take over your terminal through the coder's own
