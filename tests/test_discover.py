@@ -1616,7 +1616,7 @@ class TestTorchGpusResidentBounded:
             functools.partial(discover._torch_gpus_resident_bounded, timeout=0.1))
 
         def _slow_import_then_answer():
-            time.sleep(0.3)
+            time.sleep(3.0)
             return []
 
         monkeypatch.setattr(discover, "_torch_gpus_resident",
