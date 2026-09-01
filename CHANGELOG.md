@@ -252,6 +252,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   up on demand, at that very first click. It now warms up in the background
   as soon as a reply finishes, when that needs no extra download prompt, so
   playback usually starts right away by the time you click.
+- **`localm serve`, and `localm gui` when it attaches to an already-running
+  instance, said it was "Opening" the address even when nothing was going to
+  open.** `serve` never opens a browser, so every `serve` startup that
+  attached printed a claim that wasn't true. That line now just states where
+  the server can be reached, accurate whether or not a browser actually opens.
 
 ### Security
 - **A shortcut or linked folder inside your project no longer leads the coder
