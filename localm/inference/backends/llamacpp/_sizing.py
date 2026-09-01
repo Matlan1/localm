@@ -62,10 +62,11 @@ class VramSizingMixin:
     Expects the host class to provide: ``model_path`` (str), ``n_ctx`` (int),
     ``n_gpu_layers`` (int, the configured/raw value), ``effective_gpu_layers``
     (Optional[int], the resolved value once known), ``ctx_auto`` (bool),
-    ``n_ctx_max`` (Optional[int]), ``_llm`` (the loaded native model, or None -
-    only read by ``_check_context_fit`` for ``kv_bytes_per_token``/
-    ``_offload_kqv``), and ``_ram_kv_hint_shown`` (bool, mutable one-time-hint
-    guard).
+    ``n_ctx_max`` (Optional[int]), ``mtp_enabled`` (bool, read defensively via
+    getattr so a test double may omit it), ``_llm`` (the loaded native model,
+    or None - only read by ``_check_context_fit`` for
+    ``kv_bytes_per_token``/``_offload_kqv``), and ``_ram_kv_hint_shown`` (bool,
+    mutable one-time-hint guard).
     """
 
     # Rough VRAM headroom for KV cache + compute buffers beyond model weights,
@@ -420,6 +421,58 @@ class VramSizingMixin:
         process can invalidate between the probe and the load."""
         return self._VRAM_OVERHEAD_BYTES * max(1, int(devices or 1))
 
+    # The MTP draft context is never created larger than this many tokens
+    # regardless of the main n_ctx - matches llama.py's own
+    # cp_mtp.n_ctx = min(n_ctx, 2048).
+    _MTP_DRAFT_CTX_CAP = 2048
+
+    def _mtp_draft_context_vram_bytes(self) -> int:
+        """Extra VRAM llama.py's MTP draft context (cp_mtp) will need beyond
+        the shared model weights, for THIS load - 0 when ``mtp_enabled`` is
+        off or this GGUF is not eligible for one.
+
+        Two charges: the draft context's own KV cache, sized to its capped
+        n_ctx (``min(self.n_ctx, _MTP_DRAFT_CTX_CAP)``) and its own
+        nextn/draft layer count rather than the whole stack; and a flat
+        compute-buffer charge of ``_VRAM_OVERHEAD_BYTES``, the same constant
+        the main context's own KV-cache-plus-compute-buffer overhead already
+        uses - the draft context's n_batch/n_ubatch are set to its own n_ctx
+        regardless of layer count, so its buffers are not assumed to shrink
+        proportionally with it.
+
+        Eligibility is the SAME two-part gate llama_model_mtp_support checks
+        on an already-loaded model (declared nextn metadata AND an
+        architecture whose llama.cpp class actually builds an MTP graph -
+        MTP_GRAPH_ARCHITECTURES), read from the GGUF header directly so this
+        can answer before any load exists. Never raises: a probe failure
+        charges 0, the same as "not eligible". Memoised per instance - the
+        file read happens once per load."""
+        if not getattr(self, "mtp_enabled", False):
+            return 0
+        cached = getattr(self, "_mtp_draft_vram_bytes_cached", None)
+        if cached is not None:
+            return cached
+        charge = 0
+        try:
+            from localm.inference.backends.llamacpp._api import (
+                MTP_GRAPH_ARCHITECTURES)
+            from localm.model_manager.gguf import (
+                gguf_mtp_draft_kv_bytes_per_token, gguf_nextn_predict_layers)
+            path = Path(self.model_path)
+            arch, nextn_layers = gguf_nextn_predict_layers(path)
+            if arch in MTP_GRAPH_ARCHITECTURES and nextn_layers > 0:
+                draft_ctx = min(self.n_ctx, self._MTP_DRAFT_CTX_CAP)
+                kv_per_token = gguf_mtp_draft_kv_bytes_per_token(
+                    path, nextn_layers)
+                charge = draft_ctx * kv_per_token + self._VRAM_OVERHEAD_BYTES
+        except Exception as exc:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("mtp draft-context VRAM probe failed (%s); charging "
+                       "nothing extra for it", type(exc).__name__)
+            charge = 0
+        self._mtp_draft_vram_bytes_cached = charge
+        return charge
+
     @staticmethod
     def _vram_levels() -> list:
         """(free, total) bytes per device, [] when not measurable.
@@ -632,7 +685,8 @@ class VramSizingMixin:
         else:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             weights = int(model_bytes * min(1.0, gpu_layers / layers))
-        need = weights + kv_cache + self._split_overhead_bytes(split_devices)
+        need = (weights + kv_cache + self._split_overhead_bytes(split_devices)
+                + self._mtp_draft_context_vram_bytes())
         ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
         if total is not None and need > total:
             # On a split box the ceiling exceeded is the split's combined one.
@@ -802,7 +856,8 @@ class VramSizingMixin:
         # An n_cpu_moe load's pinned expert weights never draw on this budget.
         model = self._effective_model_bytes_for_vram()
         budget = (free - model - self._split_overhead_bytes(split_devices)
-                  - embedder_ctx_reservation_bytes())
+                  - embedder_ctx_reservation_bytes()
+                  - self._mtp_draft_context_vram_bytes())
         if budget <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN)
         auto = budget // self._kv_bytes_per_token()
@@ -873,7 +928,8 @@ class VramSizingMixin:
         # load's pinned expert weights never draw on this budget.
         model = self._effective_model_bytes_for_vram()
         kv = self.n_ctx * self._kv_bytes_per_token()
-        overhead = self._split_overhead_bytes(split_devices)
+        overhead = (self._split_overhead_bytes(split_devices)
+                    + self._mtp_draft_context_vram_bytes())
         if model <= 0 or free >= model + kv + overhead:
             return self._DEFAULT_GPU_LAYERS    # full offload fits (or nothing left to size)
         weight_budget = free - kv - overhead
