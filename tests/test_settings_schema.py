@@ -9,13 +9,37 @@ from localm import settings_schema as ss
 from localm.config import DEFAULT_CONFIG
 
 
+# hf_token / civitai_api_key are schema-only BY DESIGN (see their SettingField
+# comment in settings_schema.py): they route to model_source_credentials.py's
+# owner-only file instead of config.json, and staying OUT of DEFAULT_CONFIG is
+# the safety backstop - a caller that ever reaches validate_update with one of
+# these keys (the intended interception skipped) gets a loud "unknown config
+# key" error instead of a silent write into config.json.
+SCHEMA_ONLY_CREDENTIAL_KEYS = {"hf_token", "civitai_api_key"}
+
+
 def test_schema_matches_config_keys_exactly():
-    """Guards drift: every config key has a field and vice versa."""
-    field_keys = {f.key for f in ss.CORE_FIELDS}
+    """Guards drift: every config key has a field and vice versa, except the
+    documented schema-only credential keys above."""
+    field_keys = {f.key for f in ss.CORE_FIELDS} - SCHEMA_ONLY_CREDENTIAL_KEYS
     cfg_keys = set(DEFAULT_CONFIG)
     assert field_keys == cfg_keys, (
         f"only-in-config={cfg_keys - field_keys}, "
         f"only-in-schema={field_keys - cfg_keys}")
+
+
+def test_credential_keys_are_deliberately_schema_only():
+    """The two model-source credential fields must stay OUT of DEFAULT_CONFIG
+    and must be marked secret - if a future edit "fixes" the asymmetry above by
+    adding them to DEFAULT_CONFIG, it silently defeats the safety backstop:
+    validate_update would then accept and persist a real token into
+    config.json instead of rejecting it whenever the interception is skipped."""
+    by_key = {f.key: f for f in ss.CORE_FIELDS}
+    for key in SCHEMA_ONLY_CREDENTIAL_KEYS:
+        assert key not in DEFAULT_CONFIG, f"{key} must not be in DEFAULT_CONFIG"
+        assert by_key[key].secret is True
+        assert by_key[key].widget == ss.Widget.SECRET
+        assert by_key[key].admin_only is True
 
 
 def test_embedding_pooling_options_match_the_embedder():
@@ -262,6 +286,12 @@ GUARD_OWNER_KEYS = {
 # cannot expose the server or strip its transport encryption.
 NETWORK_BIND_OWNER_KEYS = {"bind_host", "tls_enabled", "tls_cert", "tls_key"}
 
+# Optional third-party model-source credentials (ADR-0015 decision 4): each
+# names where an outbound Bearer credential goes, the same "where does data
+# go" boundary as OUTBOUND_OWNER_KEYS above. Schema-only - see
+# SCHEMA_ONLY_CREDENTIAL_KEYS.
+MODEL_SOURCE_CREDENTIAL_KEYS = {"hf_token", "civitai_api_key"}
+
 
 def test_admin_only_keys_lists_the_owner_only_settings():
     # The rag_* folder keys widen a filesystem-read boundary; net_allow_private
@@ -296,6 +326,8 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         # folder creation/rename, log export and RAG indexing treat as a normal
         # local folder.
         | {"allow_network_drives"}
+        # Optional HF/CivitAI credentials (ADR-0015).
+        | MODEL_SOURCE_CREDENTIAL_KEYS
         # The GUI-settable server bind + TLS trio.
         | NETWORK_BIND_OWNER_KEYS)
 

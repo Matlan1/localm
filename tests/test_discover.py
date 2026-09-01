@@ -275,6 +275,19 @@ class TestHfParamBytes:
         assert hf_param_bytes(st) == expected
 
 
+class TestHfAuthHeaders:
+    """_hf_auth_headers is the tiny pure helper HFSource (sources.py) relies
+    on to turn a configured token into HF's own Authorization convention."""
+
+    def test_none_when_no_token(self):
+        assert discover._hf_auth_headers(None) is None
+        assert discover._hf_auth_headers("") is None
+
+    def test_bearer_header_when_token_set(self):
+        assert discover._hf_auth_headers("hf_abc123") == {
+            "Authorization": "Bearer hf_abc123"}
+
+
 class TestHfSearchSize:
     def test_hf_results_carry_size_and_request_expand(self, monkeypatch):
         import json as _json
