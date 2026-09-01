@@ -137,6 +137,12 @@ _MAX_SHELL_SCOPE_FLAGS = 3
 # gates.
 _SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"run_shell", "run_shell_background"})
 
+# Tools the shell reject-list inspects before anything else can run them. The
+# shell pair takes a command line; git_push takes argv parts and appends its
+# branch verbatim, so a "+ref" or ":ref" refspec reaches git as a force or a
+# delete with no flag present.
+_SHELL_GUARDED_TOOLS: frozenset[str] = _SHELL_EXEC_TOOLS | frozenset({"git_push"})
+
 # The background job-control tools. Useless without a way to start a job, so they
 # follow the shell-exec family wherever it is disabled.
 _SHELL_JOB_TOOLS: frozenset[str] = frozenset({"check_shell_job", "kill_shell_job"})
