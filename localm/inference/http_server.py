@@ -3148,14 +3148,6 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         _dbg_swallow("stopping localm-launched ComfyUI instance(s) during restart "
                      "failed (non-fatal); one may be left running")
 
-    free_before = None
-    try:
-        from localm.discover import vram_capacity
-        free_before = vram_capacity().get("free")
-    except Exception:
-        _dbg_swallow("free-VRAM read before restart failed (non-fatal)")
-
-    # Unload all engines in the multi-model dictionary
     # had_engines asks "is anything ACTUALLY loaded" (worth waiting on), not
     # merely "is the dict non-empty": unload_all_models/idle-unload both KEEP a
     # now-unloaded engine's entry in _engines so a later request reloads it
@@ -3164,10 +3156,31 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # wait's full timeout for nothing - the exact "no delay in the common
     # case" claim below would be false. getattr defaults to False so a test
     # double that does not define .loaded (never holding real VRAM) is
-    # correctly treated as nothing-to-wait-for.
+    # correctly treated as nothing-to-wait-for. Computed before any
+    # unload/release below, and used to gate the free-VRAM read that follows.
     had_engines = any(getattr(e, "loaded", False) for e in _engines.values())
     if not had_engines and _engine is not None and _engine not in _engines.values():
         had_engines = bool(getattr(_engine, "loaded", False))
+
+    # Cheap: a lock check, not a probe. Must run before release_for_exit() below.
+    embedder_had_something = False
+    try:
+        from localm.inference import embedder as _embedder_mod
+        embedder_had_something = _embedder_mod.loaded_path() is not None
+    except Exception:
+        _dbg_swallow("embedder loaded-state check during restart failed (non-fatal)")
+
+    # A subprocess-isolated GPU probe when torch is not resident. See
+    # test_do_restart_skips_vram_wait_when_nothing_was_loaded.
+    free_before = None
+    if had_engines or embedder_had_something:
+        try:
+            from localm.discover import vram_capacity
+            free_before = vram_capacity().get("free")
+        except Exception:
+            _dbg_swallow("free-VRAM read before restart failed (non-fatal)")
+
+    # Unload all engines in the multi-model dictionary
     for engine in list(_engines.values()):
         try:
             engine.unload()

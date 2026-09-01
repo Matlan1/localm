@@ -278,7 +278,10 @@ def test_do_restart_waits_for_vram_release_when_engines_present(monkeypatch):
 
 def test_do_restart_skips_vram_wait_when_nothing_was_loaded(monkeypatch):
     """A model-less restart (no chat engine, no embedder loaded) must not pay
-    the wait's latency - there is nothing whose release needs confirming."""
+    the wait's latency - there is nothing whose release needs confirming. It
+    also must not pay for the free-VRAM PROBE itself: vram_capacity() is a
+    subprocess-isolated GPU probe when torch is not resident, costing real
+    seconds for a free_before value nothing below would read anyway."""
     monkeypatch.setattr(http_server, "_engines", {})
     monkeypatch.setattr(http_server, "_engine", None)
 
@@ -287,17 +290,26 @@ def test_do_restart_skips_vram_wait_when_nothing_was_loaded(monkeypatch):
 
     monkeypatch.setattr(os, "execv", _fake_relaunch)
 
+    import localm.discover as discover
     import localm.vram as vram
 
-    def _must_not_be_called(*_a, **_kw):
-        raise AssertionError("wait_for_vram_release must not fire when nothing was unloaded")
-
-    monkeypatch.setattr(vram, "wait_for_vram_release", _must_not_be_called)
+    # Asserted on AFTER the call, from OUTSIDE _do_restart: both call sites
+    # below wrap their call in their own try/except Exception, which would
+    # silently swallow an AssertionError raised as a side_effect from INSIDE
+    # the call, making a raising double pass whether or not the call fired.
+    probe_calls = []
+    monkeypatch.setattr(discover, "vram_capacity",
+                        lambda *a, **kw: (probe_calls.append(1), {"free": 1})[1])
+    wait_calls = []
+    monkeypatch.setattr(vram, "wait_for_vram_release",
+                        lambda *a, **kw: wait_calls.append(1))
 
     try:
         http_server._do_restart()
     except SystemExit:
-        pass   # no AssertionError means the wait was correctly skipped
+        pass
+    assert probe_calls == [], "vram_capacity must not fire when nothing was loaded"
+    assert wait_calls == [], "wait_for_vram_release must not fire when nothing was unloaded"
 
 
 def test_do_restart_skips_vram_wait_for_a_stale_unloaded_engine_entry(monkeypatch):
@@ -320,18 +332,26 @@ def test_do_restart_skips_vram_wait_for_a_stale_unloaded_engine_entry(monkeypatc
 
     monkeypatch.setattr(os, "execv", _fake_relaunch)
 
+    import localm.discover as discover
     import localm.vram as vram
 
-    def _must_not_be_called(*_a, **_kw):
-        raise AssertionError("wait_for_vram_release must not fire for a stale, "
-                             "already-unloaded _engines entry")
-
-    monkeypatch.setattr(vram, "wait_for_vram_release", _must_not_be_called)
+    # Asserted on AFTER the call, from OUTSIDE _do_restart - see the identical
+    # note in test_do_restart_skips_vram_wait_when_nothing_was_loaded.
+    probe_calls = []
+    monkeypatch.setattr(discover, "vram_capacity",
+                        lambda *a, **kw: (probe_calls.append(1), {"free": 1})[1])
+    wait_calls = []
+    monkeypatch.setattr(vram, "wait_for_vram_release",
+                        lambda *a, **kw: wait_calls.append(1))
 
     try:
         http_server._do_restart()
     except SystemExit:
-        pass   # no AssertionError means the wait was correctly skipped
+        pass
+    assert probe_calls == [], (
+        "vram_capacity must not fire for a stale, already-unloaded _engines entry")
+    assert wait_calls == [], (
+        "wait_for_vram_release must not fire for a stale, already-unloaded _engines entry")
 
 
 def test_do_restart_skips_vram_wait_when_unmeasurable(monkeypatch):
@@ -423,6 +443,7 @@ def test_do_restart_waits_for_vram_release_when_only_embedder_was_loaded(monkeyp
     monkeypatch.setattr(os, "execv", _fake_relaunch)
 
     from localm.inference import embedder as emb
+    monkeypatch.setattr(emb, "loaded_path", lambda: "fake-embedder-model")
     monkeypatch.setattr(emb, "release_for_exit", lambda: True)
 
     import localm.discover as discover
