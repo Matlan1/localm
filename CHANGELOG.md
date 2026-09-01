@@ -36,8 +36,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   workflows can find it directly, rather than in localm's own flat models
   folder. NSFW results are excluded by default, and content flagged as
   depicting a minor is always excluded. Files in an older, riskier format are
-  hidden unless you explicitly ask to see them. A GUI for this is coming in a
-  follow-up.
+  hidden unless you explicitly ask to see them.
+- **CivitAI search is now on the Models page too**, alongside HuggingFace - a
+  source picker switches the whole search card between the two. Results show
+  CivitAI's own commercial-use, derivatives, and credit permissions (not an
+  SPDX license string, since CivitAI does not use one), and each file lists
+  its CivitAI safety-scan status. NSFW and legacy-format results stay opt-in
+  toggles, off by default, matching the CLI's behavior.
 - **The coder can now find where a function or class is called before you
   change it.** A new `find_references` tool searches the project it has
   indexed for call sites of a symbol, so it (and a read-only reviewer

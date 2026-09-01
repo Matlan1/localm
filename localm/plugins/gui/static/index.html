@@ -364,10 +364,14 @@
             <div class="card-head-text"><h3>Find models</h3></div></div>
           <div id="disc-search-box">
             <div class="row">
+              <select id="disc-source" title="Which model source to search">
+                <option value="hf">HuggingFace</option>
+                <option value="civitai">CivitAI</option>
+              </select>
               <input type="text" id="disc-query" placeholder="search HuggingFace - empty shows the most downloaded" spellcheck="false">
               <button class="btn-primary" id="disc-search">Search</button>
             </div>
-            <div class="disc-filter-bar">
+            <div class="disc-filter-bar disc-hf-only" id="disc-hf-filters">
               <div class="disc-filters" id="disc-type-filter">
                 <span class="sub disc-filter-label">Types</span>
                 <label class="disc-chip" data-type="llm"><input type="checkbox" class="disc-type" value="llm" checked><span>LLMs</span></label>
@@ -382,6 +386,24 @@
                 <span class="sub disc-filter-label">Format</span>
                 <label class="disc-chip disc-chip-fmt" data-fmt="gguf"><input type="checkbox" id="disc-fmt-gguf" checked><span>GGUF</span></label>
                 <label class="disc-chip disc-chip-fmt" data-fmt="hf"><input type="checkbox" id="disc-fmt-hf" checked><span>Safetensors</span></label>
+              </div>
+            </div>
+            <div class="disc-filter-bar disc-civitai-only" id="disc-civitai-filters" style="display:none">
+              <div class="disc-filters" id="disc-civitai-type-filter">
+                <span class="sub disc-filter-label">Types</span>
+                <label class="disc-chip" data-type="Checkpoint"><input type="checkbox" class="disc-civitai-type" value="Checkpoint" checked><span>Checkpoints</span></label>
+                <label class="disc-chip" data-type="LORA"><input type="checkbox" class="disc-civitai-type" value="LORA" checked><span>LoRA</span></label>
+                <label class="disc-chip" data-type="LoCon"><input type="checkbox" class="disc-civitai-type" value="LoCon" checked><span>LoCon</span></label>
+                <label class="disc-chip" data-type="DoRA"><input type="checkbox" class="disc-civitai-type" value="DoRA" checked><span>DoRA</span></label>
+                <label class="disc-chip" data-type="TextualInversion"><input type="checkbox" class="disc-civitai-type" value="TextualInversion" checked><span>Embeddings</span></label>
+                <label class="disc-chip" data-type="VAE"><input type="checkbox" class="disc-civitai-type" value="VAE" checked><span>VAEs</span></label>
+                <label class="disc-chip" data-type="Controlnet"><input type="checkbox" class="disc-civitai-type" value="Controlnet" checked><span>ControlNets</span></label>
+                <label class="disc-chip" data-type="Upscaler"><input type="checkbox" class="disc-civitai-type" value="Upscaler" checked><span>Upscalers</span></label>
+              </div>
+              <div class="disc-filters" id="disc-civitai-toggles">
+                <span class="sub disc-filter-label">Show</span>
+                <label class="disc-chip" title="Off by default. A model flagged as depicting a minor is excluded either way."><input type="checkbox" id="disc-civitai-nsfw"><span>NSFW</span></label>
+                <label class="disc-chip" title="PickleTensor/unknown-format files can execute code on load. Off by default; each result shows its own CivitAI safety-scan status, which is evidence, not a guarantee."><input type="checkbox" id="disc-civitai-legacy"><span>Legacy formats</span></label>
               </div>
             </div>
             <div class="sub disc-hf-hint" id="disc-hf-hint" style="display:none"></div>

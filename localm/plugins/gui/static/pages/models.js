@@ -770,6 +770,29 @@ export function discTypes() {
   return boxes.filter((b) => b.checked).map((b) => b.value);
 }
 
+export function discSource() {
+  const s = $("disc-source");
+  return s && s.value === "civitai" ? "civitai" : "hf";
+}
+
+export function discCivitaiTypes() {
+  // Mirrors discTypes() for the CivitAI-only type chips (localm/model_manager/
+  // sources.py CIVITAI_TYPE_MAP keys). Defaults to all when absent; empty (none
+  // ticked) is a real state the caller surfaces, same as discTypes().
+  const boxes = [...document.querySelectorAll(".disc-civitai-type")];
+  return boxes.filter((b) => b.checked).map((b) => b.value);
+}
+
+export function discCivitaiNsfw() {
+  const b = $("disc-civitai-nsfw");
+  return !!(b && b.checked);
+}
+
+export function discCivitaiLegacyFormats() {
+  const b = $("disc-civitai-legacy");
+  return !!(b && b.checked);
+}
+
 // The model_type hint carried into a pull for a chosen discovery result: the
 // badged detected_type, or - when HF gave no confident type ("unknown") and the
 // search is narrowed to exactly ONE type - that single type. Null otherwise, so
@@ -885,7 +908,136 @@ function discRepoRow(m, gpus) {
   return row;
 }
 
+// CivitAI's own license flag system (allowCommercialUse/allowDerivatives/
+// allowNoCredit/allowDifferentLicense), never an SPDX string - CivitAI has no
+// SPDX equivalent, so this is displayed as what it is rather than mapped onto
+// discRepoRow's HF `license` shape. true/false/absent (three-state, since the
+// API may omit a flag) each get their own word - never collapsed to "yes/no".
+function civitaiFlag(value) {
+  if (value === true) return "yes";
+  if (value === false) return "no";
+  return "unknown";
+}
+
+// allowCommercialUse is an array of the specific permitted uses (e.g.
+// ["Image", "Sell"]), not a boolean like the other three flags - shown as the
+// actual permitted uses rather than collapsed into a lossy yes/no, and an
+// EMPTY array is a real "no commercial use", not "unknown" (only an absent
+// field is unknown).
+function civitaiCommercialUse(value) {
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "no";
+  if (value === true) return "yes";
+  if (value === false) return "no";
+  return "unknown";
+}
+
+// One CivitAI search result: name + type badge + license-flag summary + NSFW
+// badge (only when flagged; a `minor`-flagged model never reaches this - the
+// server hard-excludes it regardless of the NSFW toggle) + downloads + a
+// "files" expander for its latest model VERSION. Unlike discRepoRow, CivitAI
+// has no per-repo GGUF/HF format split - one row always means one model.
+function discCivitaiRow(m) {
+  const row = el("div", "disc-repo");
+  const head = el("div", "head");
+  head.appendChild(iconEl("models", "ic ic-model"));
+  head.appendChild(el("span", "name", m.name || "(unnamed)"));
+  if (m.type) head.appendChild(el("span", "arch-badge", m.type));
+  if (m.nsfw === true) {
+    const badge = el("span", "type-badge type-unknown",
+      typeof m.nsfwLevel === "number" ? `NSFW (level ${m.nsfwLevel})` : "NSFW");
+    badge.title = "CivitAI-flagged NSFW content. Only shown because the NSFW toggle is on.";
+    head.appendChild(badge);
+  }
+  const flags = el("span", "sub civitai-license",
+    `commercial use: ${civitaiCommercialUse(m.allowCommercialUse)} · `
+    + `derivatives: ${civitaiFlag(m.allowDerivatives)} · `
+    + `credit required: ${civitaiFlag(m.allowNoCredit === undefined ? undefined : !m.allowNoCredit)} · `
+    + `different license: ${civitaiFlag(m.allowDifferentLicense)}`);
+  flags.title = "CivitAI's own permission flags, not an SPDX license - shown as CivitAI reports them.";
+  const meta = el("span", "meta disc-stats");
+  meta.appendChild(iconEl("download", "meta-ic"));
+  meta.appendChild(el("span", "", fmtCount((m.stats || {}).downloadCount)));
+  head.appendChild(meta);
+  const versions = Array.isArray(m.modelVersions) ? m.modelVersions : [];
+  const latestVersion = versions[0] && versions[0].id;
+  const filesBox = el("div", "files");
+  if (latestVersion != null) {
+    const btn = el("button", "btn-secondary", "files");
+    btn.onclick = () => discoverCivitaiFiles(latestVersion, filesBox, btn);
+    head.appendChild(btn);
+  }
+  row.appendChild(head);
+  row.appendChild(flags);
+  row.appendChild(filesBox);
+  return row;
+}
+
+// A CivitAI safety-scan status pill: CivitAI's own upload-time scan result,
+// evidence rather than a guarantee (per ADR-0015) - so it borrows the MoE-pill
+// "inferred, not confirmed" visual treatment (dashed border) for anything that
+// is not an affirmative clean result, rather than reading as a green light.
+function civitaiScanBadge(status) {
+  const s = (status || "").trim();
+  const clean = /^success$/i.test(s);
+  const badge = el("span", "moe-badge " + (clean ? "moe-confirmed" : "moe-likely"),
+    "scan: " + (s || "unknown"));
+  badge.title = "CivitAI's own upload-time safety scan - evidence, not a guarantee.";
+  return badge;
+}
+
+export async function discoverCivitaiFiles(versionId, filesBox, btn) {
+  if (filesBox.childElementCount) {            // toggle collapse
+    filesBox.replaceChildren();
+    return;
+  }
+  if (btn) btn.disabled = true;
+  filesBox.replaceChildren(el("div", "sub", "loading file list…"));
+  try {
+    const legacy = discCivitaiLegacyFormats();
+    const r = await fetch("/api/discover/files?repo=" + encodeURIComponent(versionId)
+                          + "&source=civitai&legacy_formats=" + (legacy ? "true" : "false"),
+                          { headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    filesBox.replaceChildren();
+    const files = Array.isArray(data.files) ? data.files : [];
+    if (!files.length) {
+      filesBox.appendChild(el("div", "sub",
+        "(no downloadable files - try Show legacy formats if you expect a "
+        + "riskier format)"));
+    }
+    for (const f of files) {
+      const row = el("div", "disc-file");
+      const fmt = (f.metadata || {}).format || "?";
+      row.appendChild(el("span", "quant", fmt));
+      const sizeKb = f.sizeKB || 0;
+      row.appendChild(el("span", "mono", (sizeKb / (1024 * 1024)).toFixed(2) + " GB"));
+      row.appendChild(civitaiScanBadge(f.virusScanResult));
+      row.appendChild(el("span", "fname", f.name || String(f.id)));
+      const pull = el("button", "btn-secondary", "pull");
+      pull.onclick = () => {
+        $("pull-spec").value = `civitai:${versionId}:${f.id}`;
+        $("pull-name").value = (f.name || `civitai-${versionId}`).replace(/\.[^.]+$/, "");
+        const nameInput = $("pull-name");
+        if (typeof nameInput.scrollIntoView === "function") {
+          nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        nameInput.focus();
+        nameInput.select();
+        toast("Review the alias, then click Add to download from CivitAI");
+      };
+      row.appendChild(pull);
+      filesBox.appendChild(row);
+    }
+  } catch (e) {
+    filesBox.replaceChildren(el("div", "sub", "Failed: " + e.message));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 export async function discoverSearch() {
+  if (discSource() === "civitai") return _discoverSearchCivitai();
   const box = $("disc-results");
   const formats = discFormats();
   const types = discTypes();
@@ -932,6 +1084,42 @@ export async function discoverSearch() {
         "MoE? = inferred from the model's name, not confirmed by its own header"));
     }
     for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus));
+  } catch (e) {
+    box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
+  } finally {
+    $("disc-search").disabled = false;
+  }
+}
+
+async function _discoverSearchCivitai() {
+  const box = $("disc-results");
+  const types = discCivitaiTypes();
+  if (!types.length) {
+    box.replaceChildren(el("div", "sub",
+      "Select at least one model type to search for."));
+    return;
+  }
+  hideHfHint();
+  box.replaceChildren(el("div", "sub", "searching CivitAI…"));
+  $("disc-search").disabled = true;
+  try {
+    const q = $("disc-query").value.trim();
+    const nsfw = discCivitaiNsfw();
+    const r = await fetch("/api/discover/search?q=" + encodeURIComponent(q)
+                          + "&source=civitai"
+                          + "&types=" + encodeURIComponent(types.join(","))
+                          + "&nsfw=" + (nsfw ? "true" : "false"),
+                          { headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    $("disc-vram").textContent = "";
+    box.replaceChildren();
+    const results = Array.isArray(data.results) ? data.results : [];
+    if (!results.length) {
+      box.appendChild(el("div", "sub", "(no matching CivitAI models found)"));
+      return;
+    }
+    for (const m of results) box.appendChild(discCivitaiRow(m));
   } catch (e) {
     box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
   } finally {
@@ -1051,6 +1239,29 @@ $("disc-query").addEventListener("keydown", (e) => {
   if (e.key === "Enter") discoverSearch();
 });
 
+const DISC_SOURCE_PLACEHOLDER = {
+  hf: "search HuggingFace - empty shows the most downloaded",
+  civitai: "search CivitAI - empty shows the most downloaded",
+};
+
+function applyDiscSource() {
+  const source = discSource();
+  const hfBar = $("disc-hf-filters"), civitaiBar = $("disc-civitai-filters");
+  if (hfBar) hfBar.style.display = source === "hf" ? "" : "none";
+  if (civitaiBar) civitaiBar.style.display = source === "civitai" ? "" : "none";
+  const q = $("disc-query");
+  if (q) q.placeholder = DISC_SOURCE_PLACEHOLDER[source];
+  hideHfHint();
+  const box = $("disc-results");
+  if (box) box.replaceChildren();
+  const vram = $("disc-vram");
+  if (vram) vram.textContent = "";
+}
+if ($("disc-source")) {
+  $("disc-source").addEventListener("change", applyDiscSource);
+  applyDiscSource();
+}
+
 // Mirror a filter checkbox's state onto its chip label as an `.on` class, which
 // is what style.css colours.
 function _syncChip(box) {
@@ -1079,6 +1290,21 @@ _bindDiscToggle($("disc-fmt-hf"), "localm.discFmtHf");
 for (const box of document.querySelectorAll(".disc-type")) {
   _bindDiscToggle(box, "localm.discType." + box.value);
 }
+for (const box of document.querySelectorAll(".disc-civitai-type")) {
+  _bindDiscToggle(box, "localm.discCivitaiType." + box.value);
+}
+// NSFW and legacy-formats are NOT persisted like the type/format chips above -
+// both must start off every session (ADR-0015: off by default, an explicit
+// per-search choice), never remembered from a prior search.
+if ($("disc-civitai-nsfw")) {
+  _syncChip($("disc-civitai-nsfw"));
+  $("disc-civitai-nsfw").addEventListener("change", () => {
+    _syncChip($("disc-civitai-nsfw"));
+    const results = $("disc-results");
+    if (results && results.childElementCount) discoverSearch();
+  });
+}
+if ($("disc-civitai-legacy")) _syncChip($("disc-civitai-legacy"));
 
 // Curated model shortcuts (`localm pull <alias>`, see MODEL_SHORTCUTS in
 // model_manager/registry.py) - a fixed local list, so it works with

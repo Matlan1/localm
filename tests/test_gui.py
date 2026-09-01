@@ -3021,6 +3021,141 @@ class TestDiscoverEndpoints:
         with TestClient(app) as client:
             assert client.get("/api/discover/files?repo=a/b").status_code == 502
 
+    def test_civitai_search_returns_results_unaffected_by_hf_shape(self, gui_app, monkeypatch):
+        """source=civitai returns CivitAI's own item shape (license flags, nsfw,
+        modelVersions) - never forced through the HF result schema, which has no
+        equivalent fields (ADR-0015)."""
+        app, _ = gui_app
+        item = {"name": "Detail Tweaker", "type": "LORA",
+                "allowCommercialUse": ["Image"], "allowDerivatives": True,
+                "allowNoCredit": False, "allowDifferentLicense": False,
+                "nsfw": False, "modelVersions": [{"id": 135867}],
+                "stats": {"downloadCount": 42}}
+        monkeypatch.setattr(
+            "localm.model_manager.sources.civitai_search",
+            lambda q, limit=20, types=None, nsfw=False, api_key=None:
+                {"items": [item], "next_cursor": None})
+        with TestClient(app) as client:
+            data = client.get("/api/discover/search?source=civitai&q=tweaker").json()
+        assert data["source"] == "civitai"
+        assert data["results"] == [item]
+        assert "vram" not in data          # no HF-shaped VRAM fit fields on a civitai response
+
+    def test_civitai_search_passes_types_and_nsfw_through(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        captured = {}
+
+        def fake_search(q, limit=20, types=None, nsfw=False, api_key=None):
+            captured["types"] = types
+            captured["nsfw"] = nsfw
+            return {"items": [], "next_cursor": None}
+        monkeypatch.setattr("localm.model_manager.sources.civitai_search", fake_search)
+        with TestClient(app) as client:
+            client.get("/api/discover/search?source=civitai&types=Checkpoint,VAE&nsfw=true")
+        assert captured["types"] == ["Checkpoint", "VAE"]
+        assert captured["nsfw"] is True
+
+    def test_civitai_search_nsfw_defaults_false(self, gui_app, monkeypatch):
+        """ADR-0015: NSFW is an explicit, off-by-default localm-side toggle -
+        mirroring, not just inheriting, CivitAI's own server default."""
+        app, _ = gui_app
+        captured = {}
+
+        def fake_search(q, limit=20, types=None, nsfw=False, api_key=None):
+            captured["nsfw"] = nsfw
+            return {"items": [], "next_cursor": None}
+        monkeypatch.setattr("localm.model_manager.sources.civitai_search", fake_search)
+        with TestClient(app) as client:
+            client.get("/api/discover/search?source=civitai")
+        assert captured["nsfw"] is False
+
+    def test_civitai_files_returns_files_with_scan_status(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        f = {"id": 99264, "name": "detailTweaker.safetensors", "sizeKB": 123456.0,
+             "metadata": {"format": "SafeTensor"}, "virusScanResult": "Success",
+             "hashes": {"SHA256": "ABC"}}
+        monkeypatch.setattr(
+            "localm.model_manager.sources.civitai_list_files",
+            lambda version_id, include_legacy_formats=False, api_key=None: [f])
+        with TestClient(app) as client:
+            data = client.get("/api/discover/files?repo=135867&source=civitai").json()
+        assert data["source"] == "civitai"
+        assert data["files"] == [f]
+
+    def test_civitai_files_passes_legacy_formats_through(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        captured = {}
+
+        def fake_files(version_id, include_legacy_formats=False, api_key=None):
+            captured["include_legacy_formats"] = include_legacy_formats
+            return []
+        monkeypatch.setattr("localm.model_manager.sources.civitai_list_files", fake_files)
+        with TestClient(app) as client:
+            client.get("/api/discover/files?repo=135867&source=civitai&legacy_formats=true")
+        assert captured["include_legacy_formats"] is True
+
+    def test_civitai_files_legacy_formats_defaults_false(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        captured = {}
+
+        def fake_files(version_id, include_legacy_formats=False, api_key=None):
+            captured["include_legacy_formats"] = include_legacy_formats
+            return []
+        monkeypatch.setattr("localm.model_manager.sources.civitai_list_files", fake_files)
+        with TestClient(app) as client:
+            client.get("/api/discover/files?repo=135867&source=civitai")
+        assert captured["include_legacy_formats"] is False
+
+    def test_civitai_unreachable_is_502(self, gui_app, monkeypatch):
+        from localm.model_manager.sources import CivitAIError
+
+        def down(q, limit=20, types=None, nsfw=False, api_key=None):
+            raise CivitAIError("CivitAI request failed: timeout")
+        app, _ = gui_app
+        monkeypatch.setattr("localm.model_manager.sources.civitai_search", down)
+        with TestClient(app) as client:
+            assert client.get("/api/discover/search?source=civitai").status_code == 502
+
+    def test_civitai_net_off_is_403_with_gui_native_message(self, gui_app, monkeypatch):
+        from localm.model_manager.sources import CivitAIError
+
+        def blocked(q, limit=20, types=None, nsfw=False, api_key=None):
+            raise CivitAIError("Network access is disabled (net_mode=off).", off=True)
+        app, _ = gui_app
+        monkeypatch.setattr("localm.model_manager.sources.civitai_search", blocked)
+        with TestClient(app) as client:
+            r = client.get("/api/discover/search?source=civitai")
+        assert r.status_code == 403
+        assert "Network access is off" in r.json()["detail"]
+
+    def test_civitai_no_valid_type_is_422(self, gui_app, monkeypatch):
+        """civitai_search itself refuses an empty resolved type list (ModelSourceError,
+        no off=True) - confirm that maps to 422, not 403 or 502."""
+        from localm.model_manager.sources import ModelSourceError
+
+        def no_types(q, limit=20, types=None, nsfw=False, api_key=None):
+            raise ModelSourceError("No valid model type requested for CivitAI search.")
+        app, _ = gui_app
+        monkeypatch.setattr("localm.model_manager.sources.civitai_search", no_types)
+        with TestClient(app) as client:
+            assert client.get("/api/discover/search?source=civitai").status_code == 422
+
+    def test_hf_search_default_source_unaffected_by_civitai_branch(self, gui_app, monkeypatch):
+        """source defaults to 'hf', so every pre-existing caller with no source
+        param keeps getting the original HF-shaped response untouched."""
+        app, _ = gui_app
+        monkeypatch.setattr(
+            "localm.discover.hf_search",
+            lambda q, limit=20, formats=("gguf",), model_types=None: [
+                {"id": "org/m", "downloads": 1, "likes": 0, "updated": "",
+                 "formats": ["gguf"]}])
+        monkeypatch.setattr("localm.discover.vram_info",
+                            _vram_info_double({"total": 16_000_000_000}))
+        with TestClient(app) as client:
+            data = client.get("/api/discover/search?q=llama").json()
+        assert data["source"] == "hf"
+        assert data["results"][0]["id"] == "org/m"
+
 
 # ------------------------------------------------------------------ #
 #  Voice (/api/voice/transcribe)                                       #
