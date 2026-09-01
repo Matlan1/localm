@@ -156,6 +156,7 @@ def test_restart_holds_the_launch_lock_across_the_ownership_check_and_stop(monke
     assert seen_locked_during_stop == [True]
     assert not lock.locked()                             # released once restart_comfy returns
     assert calls == {"interrupt": 0, "vram": 0, "killed": []}   # stop_comfy was the spy, not the real one
+    cc._take_spawned(url)
 
 
 def test_restart_does_not_deadlock_under_concurrent_restarts(monkeypatch):
