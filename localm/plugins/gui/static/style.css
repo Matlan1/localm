@@ -1695,6 +1695,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
    pill's type colour on its own text and is unreadable on several platforms. */
 .data-table select.model-type-select option { color: var(--text); background: var(--bg-input); }
 .job-state.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+#coder-state.st-running { animation: mic-pulse 1.2s infinite; }
 /* interrupted: the server stopped while the operation was in flight, so its
    outcome is UNKNOWN (localm/plugins/gui/jobs.py _JOB_STATUSES). Yellow
    "needs attention", the same treatment st-skipped/st-unknown get - not the red
