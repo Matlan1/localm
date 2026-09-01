@@ -866,3 +866,235 @@ def test_real_mtp_model_verification_is_distribution_exact(real_mtp_model_path):
         "same seed and sampling config - verification is no longer sampling "
         "through the request's own sampler")
 
+
+# --------------------------------------------------------------------------- #
+#  _generate_image: an image-bearing turn must never touch the draft context. #
+#  test_an_image_turn_clears_the_draft_cache_too (above) pins the KV-reset    #
+#  half in isolation; this drives the real generator end to end.              #
+# --------------------------------------------------------------------------- #
+
+def test_generate_image_never_samples_or_decodes_the_draft_context():
+    """The vision decode loop has no draft context: it must never sample from
+    or decode into _mtp_ctx_ptr, and mtp_active_this_call must read False
+    afterwards even though supports_mtp (a MODEL capability) stays True."""
+    llm = make_bare_llama(
+        _model_ptr=ctypes.c_void_p(1),
+        _ctx_ptr=ctypes.c_void_p(2),
+        _mtp_ctx_ptr=ctypes.c_void_p(3),
+        supports_mtp=True,
+        mtp_active_this_call=True,   # as if a PRIOR text turn had speculated
+    )
+    llm._mtmd = MagicMock(marker="<image>")
+    llm._mtmd.eval_into.return_value = 5   # position after the mtmd prefill
+    llm._create_batch = MagicMock(return_value=MagicMock())
+    llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
+
+    messages = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:fake"}},
+        {"type": "text", "text": "describe this"},
+    ]}]
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api, \
+         patch("localm.inference.backends.llamacpp.llama._apply_model_template",
+               return_value=("prompt", None)), \
+         patch("localm.inference.backends.llamacpp.llama._build_sampler",
+               return_value=MagicMock()), \
+         patch.object(LlamaCppModule.LlamaCpp, "_messages_with_markers",
+                      return_value=(messages, [])):
+        mock_api.llama_sampler_sample.side_effect = [100, 101, _SpecRecorder.EOG]
+        mock_api.llama_decode.return_value = 0
+        tokens = list(llm._generate_image(
+            messages, max_new_tokens=8, temperature=0.8, top_k=40, top_p=0.95,
+            repeat_penalty=1.1,
+        ))
+
+    assert tokens == [100, 101]
+    assert llm.mtp_active_this_call is False, (
+        "an image turn read as having speculated - supports_mtp staying True "
+        "is a model capability, not a statement about this call")
+
+    decode_ctxs = [call.args[0] for call in mock_api.llama_decode.call_args_list]
+    assert llm._mtp_ctx_ptr not in decode_ctxs, (
+        f"the draft context was decoded into during an image turn: {decode_ctxs}")
+    sample_ctxs = [call.args[1] for call in mock_api.llama_sampler_sample.call_args_list]
+    assert llm._mtp_ctx_ptr not in sample_ctxs, (
+        f"the draft context was sampled during an image turn: {sample_ctxs}")
+    # supports_mtp is unaffected - it describes the MODEL, not this request.
+    assert llm.supports_mtp is True
+
+
+# --------------------------------------------------------------------------- #
+#  VRAM preflight: the MTP draft context must be charged, not silently free.  #
+# --------------------------------------------------------------------------- #
+
+def _mtp_sizing_backend(*, mtp_enabled=True, n_ctx=4096, ctx_auto=False):
+    return GgufBackend("fake-model.gguf", n_gpu_layers=99, mtp_enabled=mtp_enabled,
+                       n_ctx=n_ctx, ctx_auto=ctx_auto)
+
+
+def test_mtp_draft_vram_is_zero_when_mtp_is_disabled():
+    b = _mtp_sizing_backend(mtp_enabled=False)
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)) as mocked:
+        assert b._mtp_draft_context_vram_bytes() == 0
+    mocked.assert_not_called(), "mtp_enabled=False must short-circuit before any file read"
+
+
+def test_mtp_draft_vram_is_zero_when_the_architecture_has_no_real_mtp_graph():
+    # glm4moe declares the nextn metadata key but build_arch_graph ignores
+    # gtype for it - the SAME false-positive _api.py's MTP_GRAPH_ARCHITECTURES
+    # gate already refuses at load time. Sizing must agree, or it charges VRAM
+    # for a context that will never actually be created.
+    b = _mtp_sizing_backend()
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("glm4moe", 1)):
+        assert b._mtp_draft_context_vram_bytes() == 0
+
+
+def test_mtp_draft_vram_is_zero_when_no_nextn_layers_are_declared():
+    b = _mtp_sizing_backend()
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 0)):
+        assert b._mtp_draft_context_vram_bytes() == 0
+
+
+def test_mtp_draft_vram_charges_kv_plus_the_flat_overhead_when_eligible():
+    # n_ctx below the 2048 cap, so this test is about the arithmetic alone -
+    # see test_mtp_draft_vram_caps_the_draft_context_at_2048_tokens for the cap.
+    b = _mtp_sizing_backend(n_ctx=1024)
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)), \
+         patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+               return_value=1000):
+        charge = b._mtp_draft_context_vram_bytes()
+    assert charge == 1024 * 1000 + GgufBackend._VRAM_OVERHEAD_BYTES
+
+
+def test_mtp_draft_vram_caps_the_draft_context_at_2048_tokens():
+    # The main n_ctx is far above the 2048 cap llama.py's own
+    # cp_mtp.n_ctx = min(n_ctx, 2048) actually allocates.
+    b = _mtp_sizing_backend(n_ctx=65536)
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)), \
+         patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+               return_value=1000):
+        charge = b._mtp_draft_context_vram_bytes()
+    assert charge == 2048 * 1000 + GgufBackend._VRAM_OVERHEAD_BYTES
+
+
+def test_mtp_draft_vram_is_memoised_per_instance():
+    b = _mtp_sizing_backend()
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)) as mocked, \
+         patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+               return_value=1000):
+        b._mtp_draft_context_vram_bytes()
+        b._mtp_draft_context_vram_bytes()
+    assert mocked.call_count == 1, "the GGUF header should be probed once per load"
+
+
+def test_mtp_draft_vram_never_raises_on_a_probe_failure():
+    b = _mtp_sizing_backend()
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               side_effect=RuntimeError("boom")):
+        assert b._mtp_draft_context_vram_bytes() == 0
+
+
+def _mtp_vram_levels(free, total):
+    """Patch every VRAM-reading path GgufBackend._check_vram/_auto_ctx_max/
+    _auto_gpu_layers can fall through to, so a bare 'free, total' fully
+    determines what they see."""
+    from contextlib import ExitStack
+    from localm.inference.backends.llamacpp import _loader
+    stack = ExitStack()
+    stack.enter_context(patch.object(
+        GgufBackend, "_free_total_vram_bytes", return_value=(free, total)))
+    stack.enter_context(patch.object(
+        _loader, "gpu_memory_isolated", return_value=(free, total)))
+    stack.enter_context(patch.object(
+        GgufBackend, "_device_global_free_bytes", return_value=None))
+    return stack
+
+
+def test_check_vram_raises_when_the_mtp_draft_context_pushes_over_the_ceiling():
+    """_check_vram's hard 'can never fit' refusal must account for the MTP
+    draft context's own VRAM, not just weights + the main KV cache - the same
+    total that fits without the draft charge must refuse with it."""
+    import pytest
+
+    def backend():
+        b = _mtp_sizing_backend(n_ctx=4096)
+        b._model_bytes = lambda: 3 * 1024 ** 3
+        b._kv_bytes_per_token = lambda: 0
+        return b
+
+    total = 3 * 1024 ** 3 + GgufBackend._VRAM_OVERHEAD_BYTES + 100_000
+
+    b0 = backend()
+    b0._mtp_draft_context_vram_bytes = lambda: 0
+    with _mtp_vram_levels(total, total):
+        b0._check_vram()          # fits without the MTP charge - no raise
+
+    b1 = backend()
+    b1._mtp_draft_context_vram_bytes = lambda: 2 * 1024 ** 3
+    with _mtp_vram_levels(total, total):
+        with pytest.raises(RuntimeError, match="Context too large"):
+            b1._check_vram()
+
+
+def test_auto_ctx_max_shrinks_the_budget_by_the_mtp_draft_context():
+    def backend():
+        b = _mtp_sizing_backend(n_ctx=4096, ctx_auto=True)
+        b._model_bytes = lambda: 1 * 1024 ** 3
+        b._kv_bytes_per_token = lambda: 50_000
+        return b
+
+    # free is picked so the UNCAPPED budget (2 GB worth of tokens at 50000
+    # bytes/token) sits well below _AUTO_CTX_MAX=65536 in both arms - a
+    # difference the cap would otherwise hide.
+    free = 1 * 1024 ** 3 + GgufBackend._VRAM_OVERHEAD_BYTES + 2_000_000_000
+    total = free
+
+    b_off = backend()
+    b_off._mtp_draft_context_vram_bytes = lambda: 0
+    with _mtp_vram_levels(free, total):
+        ctx_off = b_off._auto_ctx_max()
+
+    b_on = backend()
+    b_on._mtp_draft_context_vram_bytes = lambda: 500 * 1024 ** 2
+    with _mtp_vram_levels(free, total):
+        ctx_on = b_on._auto_ctx_max()
+
+    assert ctx_on < ctx_off, (
+        f"an MTP-reserving load auto-sized the SAME context ceiling "
+        f"({ctx_on} vs {ctx_off}) as one that reserves nothing for it")
+
+
+def test_auto_gpu_layers_offloads_fewer_when_mtp_will_allocate_a_draft_context():
+    """End to end, through the real gate: an MTP-enabled, MTP-eligible load
+    reserves the draft context's VRAM before deciding how many layers fit, so
+    it offloads fewer of them than the identical load with MTP off."""
+    def backend(mtp_enabled):
+        b = _mtp_sizing_backend(mtp_enabled=mtp_enabled, n_ctx=4096)
+        b.n_gpu_layers_auto = True
+        b._model_bytes = lambda: 4 * 1024 ** 3
+        b._cached_layer_count = lambda: 32
+        b._kv_bytes_per_token = lambda: 1000
+        return b
+
+    free, total = 3 * 1024 ** 3, 8 * 1024 ** 3
+
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)), \
+         patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+               return_value=2000):
+        with _mtp_vram_levels(free, total):
+            n_with_mtp = backend(True)._auto_gpu_layers()
+        with _mtp_vram_levels(free, total):
+            n_without_mtp = backend(False)._auto_gpu_layers()
+
+    assert 0 < n_with_mtp < n_without_mtp <= 99, (
+        f"n_with_mtp={n_with_mtp} n_without_mtp={n_without_mtp}: MTP-enabled "
+        f"sizing must offload strictly fewer layers once it reserves VRAM "
+        f"for its own draft context")
+

@@ -19,7 +19,11 @@ from unittest.mock import patch
 import pytest
 
 from localm.inference.backends.gguf import GgufBackend
-from localm.model_manager.gguf import gguf_kv_bytes_per_token
+from localm.model_manager.gguf import (
+    gguf_kv_bytes_per_token,
+    gguf_mtp_draft_kv_bytes_per_token,
+    gguf_nextn_predict_layers,
+)
 
 
 GB = 1024 ** 3
@@ -190,6 +194,148 @@ class TestGgufKvBytesPerToken:
         cut = tmp_path / "cut.gguf"
         cut.write_bytes(data[:len(data) // 2])
         assert gguf_kv_bytes_per_token(cut) == 0     # no signal, and no exception
+
+
+# --------------------------------------------------------------------------- #
+#  gguf_nextn_predict_layers / gguf_mtp_draft_kv_bytes_per_token: the MTP      #
+#  draft context's OWN pre-load metadata, distinct from the whole model's.     #
+# --------------------------------------------------------------------------- #
+
+class TestGgufNextnPredictLayers:
+    def test_declared_single_head(self, tmp_path):
+        kv = _shape("qwen35", 48, 2048, 16, 4, extra=[
+            ("qwen35.nextn_predict_layers", _T_UINT32, 1)])
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_nextn_predict_layers(f) == ("qwen35", 1)
+
+    def test_declared_multi_head(self, tmp_path):
+        kv = _shape("step35", 60, 4096, 32, 8, extra=[
+            ("step35.nextn_predict_layers", _T_UINT32, 3)])
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_nextn_predict_layers(f) == ("step35", 3)
+
+    def test_no_nextn_key_at_all(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", _shape("llama", 32, 4096, 32, 8))
+        assert gguf_nextn_predict_layers(f) == ("llama", 0)
+
+    def test_zero_valued_key_reads_as_absent(self, tmp_path):
+        kv = _shape("glm4moe", 47, 4096, 32, 8, extra=[
+            ("glm4moe.nextn_predict_layers", _T_UINT32, 0)])
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_nextn_predict_layers(f) == ("glm4moe", 0)
+
+    def test_key_order_does_not_matter(self, tmp_path):
+        kv = _shape("qwen35", 48, 2048, 16, 4, extra=[
+            ("qwen35.nextn_predict_layers", _T_UINT32, 1)])
+        # architecture LAST: resolved against it at the end, like the KV path.
+        f = _gguf(tmp_path / "m.gguf", kv[1:] + [kv[0]])
+        assert gguf_nextn_predict_layers(f) == ("qwen35", 1)
+
+    def test_architecture_scoped_so_an_mmproj_clip_block_cannot_win(self, tmp_path):
+        # A vision projector's own (fabricated) nextn key must not attach to
+        # the LLM's answer.
+        kv = _shape("llama", 32, 4096, 32, 8, extra=[
+            ("clip.nextn_predict_layers", _T_UINT32, 5)])
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_nextn_predict_layers(f) == ("llama", 0)
+
+    def test_zero_when_not_a_gguf(self, tmp_path):
+        f = tmp_path / "m.gguf"
+        f.write_bytes(b"\0" * 4096)
+        assert gguf_nextn_predict_layers(f) == ("", 0)
+
+    def test_zero_when_file_missing(self, tmp_path):
+        assert gguf_nextn_predict_layers(tmp_path / "nope.gguf") == ("", 0)
+
+    def test_zero_when_no_architecture_declared(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf",
+                  [("some.nextn_predict_layers", _T_UINT32, 1)])
+        assert gguf_nextn_predict_layers(f) == ("", 0)
+
+    def test_does_not_raise_on_truncated_header(self, tmp_path):
+        # architecture is the FIRST key _shape emits, so it can parse clean
+        # even when the nextn key past it is cut away - what matters is that
+        # this never raises and never reports a nextn count it never read.
+        full = _gguf(tmp_path / "m.gguf", _shape("qwen35", 48, 2048, 16, 4, extra=[
+            ("qwen35.nextn_predict_layers", _T_UINT32, 1)]))
+        data = full.read_bytes()
+        cut = tmp_path / "cut.gguf"
+        cut.write_bytes(data[:len(data) // 2])
+        _arch, nextn = gguf_nextn_predict_layers(cut)     # no exception
+        assert nextn == 0
+
+
+class TestGgufMtpDraftKvBytesPerToken:
+    def test_gqa_shape_scaled_by_nextn_layers(self, tmp_path):
+        # One draft layer: nextn_layers * n_head_kv * head_dim * 2 (K and V) *
+        # 2 (f16) - the SAME per-layer formula gguf_kv_bytes_per_token uses,
+        # multiplied by 1 draft layer rather than the model's 48.
+        f = _gguf(tmp_path / "m.gguf", _shape("qwen35", 48, 2048, 16, 4))
+        assert gguf_mtp_draft_kv_bytes_per_token(f, 1) == 4 * 128 * 2 * 2 == 2048
+
+    def test_scales_linearly_with_nextn_layers(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", _shape("step35", 60, 4096, 32, 8))
+        one = gguf_mtp_draft_kv_bytes_per_token(f, 1)
+        three = gguf_mtp_draft_kv_bytes_per_token(f, 3)
+        assert three == one * 3
+        # NOT the whole-stack rate (60 layers).
+        assert three != gguf_kv_bytes_per_token(f)
+
+    def test_zero_when_nextn_layers_is_zero_or_negative(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", _shape("qwen35", 48, 2048, 16, 4))
+        assert gguf_mtp_draft_kv_bytes_per_token(f, 0) == 0
+        assert gguf_mtp_draft_kv_bytes_per_token(f, -1) == 0
+
+    def test_explicit_key_value_length_wins_over_n_embd_over_n_head(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", _shape(
+            "gemma3", 26, 4096, 32, 4,
+            extra=[("gemma3.attention.key_length", _T_UINT32, 256),
+                   ("gemma3.attention.value_length", _T_UINT32, 256)]))
+        assert gguf_mtp_draft_kv_bytes_per_token(f, 1) == 4 * (256 + 256) * 2
+
+    def test_hybrid_per_layer_array_uses_the_maximum_not_the_sum(self, tmp_path):
+        # Granite-shaped hybrid: attending layers all carry head_count_kv=4,
+        # everything else 0. A single draft layer costs the max of the
+        # per-layer array, not the whole array summed (that would be
+        # gguf_kv_bytes_per_token's own whole-stack answer).
+        f = _gguf(tmp_path / "g.gguf", [
+            ("general.architecture", _T_STRING, "granitehybrid"),
+            ("granitehybrid.block_count", _T_UINT32, 40),
+            ("granitehybrid.embedding_length", _T_UINT32, 1536),
+            ("granitehybrid.attention.head_count", _T_UINT32, 12),
+            ("granitehybrid.attention.head_count_kv", _T_ARRAY,
+             (_T_INT32, _granite_layers())),
+        ])
+        head_dim = 1536 // 12
+        assert gguf_mtp_draft_kv_bytes_per_token(f, 1) == 4 * head_dim * 2 * 2 == 2048
+        assert gguf_mtp_draft_kv_bytes_per_token(f, 1) != gguf_kv_bytes_per_token(f)
+
+    def test_architecture_scoped_so_an_mmproj_clip_block_cannot_win(self, tmp_path):
+        kv = _shape("llama", 32, 4096, 32, 8, extra=[
+            ("clip.block_count", _T_UINT32, 2),
+            ("clip.embedding_length", _T_UINT32, 64),
+            ("clip.attention.head_count", _T_UINT32, 1),
+            ("clip.attention.head_count_kv", _T_UINT32, 1),
+        ])
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_mtp_draft_kv_bytes_per_token(f, 1) == 8 * 128 * 2 * 2
+
+    def test_zero_when_shape_keys_absent(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf",
+                  [("general.architecture", _T_STRING, "llama")])
+        assert gguf_mtp_draft_kv_bytes_per_token(f, 1) == 0
+
+    def test_zero_when_not_a_gguf(self, tmp_path):
+        f = tmp_path / "m.gguf"
+        f.write_bytes(b"\0" * 4096)
+        assert gguf_mtp_draft_kv_bytes_per_token(f, 1) == 0
+
+    def test_does_not_raise_on_truncated_header(self, tmp_path):
+        full = _gguf(tmp_path / "m.gguf", _shape("qwen35", 48, 2048, 16, 4))
+        data = full.read_bytes()
+        cut = tmp_path / "cut.gguf"
+        cut.write_bytes(data[:len(data) // 2])
+        assert gguf_mtp_draft_kv_bytes_per_token(cut, 1) == 0
 
 
 # --------------------------------------------------------------------------- #

@@ -832,6 +832,154 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
     return total_kv_heads * head_dim * 2 * 2
 
 
+def gguf_nextn_predict_layers(path: Path) -> "tuple[str, int]":
+    """(architecture, nextn_predict_layers) read from *path*'s own GGUF header,
+    before the model is loaded - the metadata half of the two-part check
+    llama_model_mtp_support (llamacpp/_api.py) makes on an already-loaded
+    model, so a VRAM preflight can answer the same question before one exists.
+
+    Reads only the ONE real upstream key (LLM_KV_NEXTN_PREDICT_LAYERS,
+    "%s.nextn_predict_layers"), not the tolerated alternate spellings
+    _api.py's _MTP_META_KEYS also accepts for third-party conversions.
+
+    Returns ("", 0) - never raises - when the file is not a readable GGUF or
+    declares no architecture; (architecture, 0) when the key is absent,
+    non-scalar, or non-positive for that architecture."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return "", 0
+
+    architecture = None
+    raw: dict = {}
+    try:
+        if buf[:4] != b"GGUF":
+            return "", 0
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return "", 0
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            if key.endswith(".nextn_predict_layers"):
+                try:
+                    raw[key], off = _gguf_read_scalar(buf, off, vtype)
+                    continue
+                except struct.error:
+                    pass        # not a scalar - skip it normally
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        # Truncated within the bounded read, or a malformed layout. Fall
+        # through and answer from whatever resolved cleanly.
+        pass
+
+    if not architecture:
+        return "", 0
+    val = raw.get(f"{architecture}.nextn_predict_layers")
+    nextn = int(val) if isinstance(val, int) and val > 0 else 0
+    return architecture, nextn
+
+
+def gguf_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int) -> int:
+    """f16 KV-cache bytes per token for *nextn_layers* MTP/draft layers only -
+    the rate llama.py's separate, smaller MTP draft context (its own KV cache,
+    not the main model's) actually pays per token - read from *path*'s own
+    GGUF header before the model is loaded.
+
+    Same per-attending-layer shape formula as gguf_kv_bytes_per_token
+    (head_count_kv heads * (key_length + value_length), or the
+    embedding_length/head_count fallback, times 2 bytes/element for K and V),
+    multiplied by *nextn_layers* instead of summed across the whole stack. A
+    hybrid architecture's PER-LAYER head_count_kv array is reduced by its
+    MAXIMUM entry rather than matched to a specific layer index: which
+    physical layer(s) host the nextn head(s) is not stated anywhere in the
+    file's metadata, and the maximum is the conservative direction for a VRAM
+    preflight estimate.
+
+    Returns 0 - never raises - when *nextn_layers* is <= 0, the file is not a
+    readable GGUF, or the shape keys needed are absent, non-scalar, or
+    non-positive."""
+    if nextn_layers <= 0:
+        return 0
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return 0
+
+    architecture = None
+    vals: dict = {}
+    per_layer_kv: dict = {}
+    try:
+        if buf[:4] != b"GGUF":
+            return 0
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return 0
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            if key.endswith(_GGUF_KV_HEADS_SUFFIX) and vtype == _GGUF_TYPE_ARRAY:
+                try:
+                    per_layer_kv[key], off = _gguf_read_int_array(buf, off)
+                    continue
+                except struct.error:
+                    pass        # not an integer array - skip it normally
+            if any(key.endswith(s) for s in _GGUF_KV_SHAPE_SUFFIXES):
+                try:
+                    vals[key], off = _gguf_read_scalar(buf, off, vtype)
+                    continue
+                except struct.error:
+                    pass        # not a scalar (array/string) - skip it normally
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        pass
+
+    if not architecture:
+        return 0
+
+    def _get(suffix: str) -> int:
+        v = vals.get(f"{architecture}{suffix}")
+        return int(v) if isinstance(v, int) and v > 0 else 0
+
+    per_layer = per_layer_kv.get(f"{architecture}{_GGUF_KV_HEADS_SUFFIX}")
+    if per_layer is not None:
+        positive = [v for v in per_layer if v > 0]
+        n_head_kv = max(positive) if positive else 0
+    else:
+        n_head_kv = _get(_GGUF_KV_HEADS_SUFFIX)
+    if n_head_kv <= 0:
+        return 0
+
+    k_len = _get(".attention.key_length")
+    v_len = _get(".attention.value_length")
+    if k_len and v_len:
+        per_head_bytes = (k_len + v_len) * 2
+    else:
+        n_embd = _get(".embedding_length")
+        n_head = _get(".attention.head_count")
+        if not n_embd or not n_head:
+            return 0
+        head_dim = n_embd // n_head
+        if head_dim <= 0:
+            return 0
+        per_head_bytes = head_dim * 2 * 2
+    return n_head_kv * per_head_bytes * nextn_layers
+
+
 def gguf_expert_count(path: Path) -> int:
     """Number of EXPERTS in *path*, or 0 when it is not a Mixture-of-Experts model.
 
