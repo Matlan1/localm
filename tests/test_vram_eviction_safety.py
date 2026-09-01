@@ -635,6 +635,87 @@ class TestInconclusiveProbeDoesNotSkipTheGate:
         assert hs._engines["model-a"].loaded
 
 
+def _flaky_probe_double(monkeypatch, *, timeout_calls, free_once_ok):
+    """A discover.vram_info double whose STATUS changes across calls: TIMEOUT
+    for the first *timeout_calls* calls, then GPU_PROBE_OK reporting
+    *free_once_ok* bytes free from then on. probe_double's status is fixed at
+    wrap time, so this needs its own counter rather than that helper."""
+    from localm.discover import GPU_PROBE_OK, GPU_PROBE_TIMEOUT
+    calls = {"n": 0}
+
+    def _double(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= timeout_calls:
+            value = {"total": 16 * 1024 ** 3}
+            status = GPU_PROBE_TIMEOUT
+        else:
+            value = {"total": 16 * 1024 ** 3, "free": free_once_ok}
+            status = GPU_PROBE_OK
+        if kwargs.get("return_status"):
+            return value, status
+        return value
+
+    monkeypatch.setattr("localm.discover.vram_info", _double)
+    return calls
+
+
+class TestInconclusiveProbeRetriesBeforeRefusing:
+    """A single inconclusive probe must not immediately hand the caller a 503
+    to retry themselves: the exact scenario this guards is a transient
+    concurrent-import race (see discover._torch_gpus_resident_bounded) that
+    typically clears within a couple of seconds, well inside
+    _INCONCLUSIVE_LOAD_RETRIES retries."""
+
+    def test_a_probe_that_clears_within_the_retry_budget_loads_successfully(
+            self, monkeypatch):
+        """The property the user actually wants: a transient inconclusive
+        reading must resolve into a successful load with NO caller-visible
+        error, not a 503 the caller has to retry by hand."""
+        monkeypatch.setattr(hs, "_INCONCLUSIVE_LOAD_RETRY_DELAY", 0)
+        _install_fakes(monkeypatch, free=None)  # baseline: registry, engine factory
+        calls = _flaky_probe_double(
+            monkeypatch, timeout_calls=hs._INCONCLUSIVE_LOAD_RETRIES,
+            free_once_ok=10 * 1024 ** 3)
+
+        client = TestClient(hs.create_app(None))
+        r = _chat(client, "model-a")
+
+        assert r.status_code == 200, (
+            f"a probe that clears within the retry budget must load "
+            f"transparently, not surface a 503 for the caller to retry: "
+            f"{r.text[:200]}")
+        assert hs._engines["model-a"].loaded
+        assert calls["n"] == hs._INCONCLUSIVE_LOAD_RETRIES + 1, (
+            f"expected exactly {hs._INCONCLUSIVE_LOAD_RETRIES + 1} probe "
+            f"attempts (the retries did not run as designed); got {calls['n']}")
+
+    def test_exhausting_every_retry_still_refuses_cleanly(self, monkeypatch):
+        """When the condition genuinely never clears, the caller still gets a
+        503 (never a silent bad load) - but it must not instruct the caller to
+        do anything, and must say retries were already attempted."""
+        monkeypatch.setattr(hs, "_INCONCLUSIVE_LOAD_RETRY_DELAY", 0)
+        _install_fakes(monkeypatch, free=None)
+        calls = _flaky_probe_double(
+            monkeypatch, timeout_calls=10 ** 6, free_once_ok=10 * 1024 ** 3)
+
+        client = TestClient(hs.create_app(None))
+        r = _chat(client, "model-a")
+
+        assert r.status_code == 503, r.text
+        assert calls["n"] == hs._INCONCLUSIVE_LOAD_RETRIES + 1, (
+            f"expected exactly {hs._INCONCLUSIVE_LOAD_RETRIES + 1} probe "
+            f"attempts before giving up; got {calls['n']}")
+        assert str(hs._INCONCLUSIVE_LOAD_RETRIES + 1) in r.text, (
+            f"the refusal must state how many attempts were already made "
+            f"automatically: {r.text[:200]}")
+        for instruction in ("restart the gpu app", "retry shortly",
+                            "unload another model"):
+            assert instruction not in r.text.lower(), (
+                f"the refusal must state what happened, not instruct the "
+                f"user what to do next ({instruction!r} found): {r.text[:200]}")
+        assert not hs._engines.get("model-a", FakeEngine("x")).loaded
+
+
 def _fake_stat_size(monkeypatch, path: Path, size_bytes: int):
     """Make ``path.stat().st_size`` report *size_bytes* without writing that
     many real bytes to disk. *path* must already exist (a real, tiny

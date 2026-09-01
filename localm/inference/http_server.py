@@ -442,6 +442,13 @@ def _gpu_placement_fields(engine) -> dict:
     return dict(placement) if placement else {}
 
 
+# switch_engine's eviction loop: how many additional probe attempts an
+# inconclusive-and-nothing-left-to-evict result gets, and the pause between
+# them, before it becomes a caller-visible 503.
+_INCONCLUSIVE_LOAD_RETRIES = 2
+_INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
+
+
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True) -> dict:
     global _engines, _engines_lru, _active_model_name, _last_active_model_name, _engine_factory, _last_activity_per_model
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
@@ -539,6 +546,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             # attempts, making this branch fire again instead of the loop
             # converging to either a successful load or the final 503.
             embedder_evict_attempted = False
+            inconclusive_retries = 0
+            load_attempt_started = time.monotonic()
 
             while True:
                 # Off the event loop: vram_capacity()/gpu_split_shortfall() route
@@ -735,10 +744,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         # the failure modes are not symmetric. A wrong permit hands
                         # a too-big model to the native loader, which "can hard-abort
                         # the process rather than return NULL" (gpu_split_shortfall's
-                        # docstring) - unrecoverable. A wrong refusal is a 503 the
-                        # user can retry, by which time the abandoned probe has
-                        # usually landed and the driver is warm. So refuse, and quote
-                        # no figure, since none was measured.
+                        # docstring) - unrecoverable. A wrong refusal only costs a
+                        # retry, by which time the abandoned probe has usually landed
+                        # and the driver is warm. So refuse-and-retry, quoting no
+                        # figure, since none was measured.
                         #
                         # Two ways the probe fails to complete, and both the long
                         # deadline and wait_for_inflight=True above are aimed at
@@ -748,16 +757,24 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         # the join waits on ITS result instead of taking an instant
                         # BUSY. So reaching here needs the probe to blow the FULL
                         # deadline even after joining, i.e. a genuinely stuck or
-                        # wedged driver rather than an ordinary cold init or
-                        # heartbeat collision.
+                        # wedged driver, or a fresh, still-completing cold init
+                        # elsewhere in this process, rather than an ordinary cold
+                        # init or heartbeat collision this call itself started.
+                        #
+                        # A caller-visible refusal is deferred behind
+                        # _INCONCLUSIVE_LOAD_RETRIES automatic retries: the load
+                        # itself re-probes from scratch instead of reporting a
+                        # transient condition as a request the caller must repeat.
+                        if inconclusive_retries < _INCONCLUSIVE_LOAD_RETRIES:
+                            inconclusive_retries += 1
+                            await asyncio.sleep(_INCONCLUSIVE_LOAD_RETRY_DELAY)
+                            continue
+                        elapsed = time.monotonic() - load_attempt_started
                         raise HTTPException(
-                            503, f"Cannot load '{name}': free VRAM could not be "
-                            f"measured (the GPU probe did not complete within "
-                            f"{discover._GPU_PROBE_CLI_DEADLINE:.0f}s, so the driver "
-                            f"may be stuck), and no idle model could be unloaded to "
-                            f"make room. Refusing rather than load a model that may "
-                            f"not fit. Retry shortly; if this persists, restart the "
-                            f"GPU app holding the driver, or unload another model.")
+                            503, f"Cannot load '{name}': tried measuring free VRAM "
+                            f"{inconclusive_retries + 1} times over about "
+                            f"{elapsed:.0f}s without a conclusive reading, and no "
+                            f"idle model could be freed to make room.")
                     # Local eviction exhausted: before giving up, best-effort ask a
                     # sibling localm instance to release ITS VRAM (multi-instance
                     # coordination, see localm.gpu_registry). Off the event loop (it
