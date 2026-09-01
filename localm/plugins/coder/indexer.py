@@ -398,6 +398,19 @@ class ProjectMap:
         candidate_cap = max(max_files * 4, max_files + 50)
         candidates: list[Path] = []
         hit_cap = False
+        root_resolved = root.resolve()
+
+        def _inside_root(p: Path) -> bool:
+            """Whether *p* resolves to a location still inside *root*.
+
+            ``os.walk`` skips a directory SYMLINK but descends a Windows
+            JUNCTION, which is not ``islink``. See
+            test_project_map_does_not_index_through_a_directory_link.
+            """
+            try:
+                return p.resolve().is_relative_to(root_resolved)
+            except OSError:
+                return False
 
         for dirpath, dirnames, filenames in os.walk(root):
             if deadline_s is not None and (time.monotonic() - start) > deadline_s:
@@ -410,6 +423,7 @@ class ProjectMap:
                 if not d.startswith(".")
                 and d not in _SKIP_DIRS
                 and not _is_ignored((Path(dirpath) / d).relative_to(root), gi_patterns)
+                and _inside_root(Path(dirpath) / d)
             )
             for name in sorted(filenames):
                 if name.startswith("."):           # skip hidden files
@@ -442,6 +456,8 @@ class ProjectMap:
             try:
                 rel = abs_path.relative_to(root)
             except ValueError:
+                continue
+            if not _inside_root(abs_path):
                 continue
 
             # One stat() call covers the is_file() check AND the mtime/size

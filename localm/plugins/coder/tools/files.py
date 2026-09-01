@@ -675,6 +675,20 @@ def tool_tree(
 
     lines: list[str] = []
     total = 0
+    cwd_resolved = cwd.resolve()
+    escaped: list[str] = []
+
+    def _inside(entry: Path) -> bool:
+        """Whether *entry* resolves to a location still inside the project root.
+
+        A directory symlink or a Windows junction is an ordinary entry to
+        ``iterdir``/``is_dir``, so descending one walks outside the root. See
+        test_tree_does_not_walk_out_of_the_project_root.
+        """
+        try:
+            return entry.resolve().is_relative_to(cwd_resolved)
+        except OSError:
+            return False
 
     def _fmt_size(n: int) -> str:
         if n >= 1_000_000:
@@ -692,6 +706,13 @@ def tool_tree(
         except PermissionError:
             return
         entries = [e for e in entries if e.name not in _IGNORE and not e.name.endswith(".egg-info")]
+        kept = []
+        for e in entries:
+            if _inside(e):
+                kept.append(e)
+            else:
+                escaped.append(e.name)
+        entries = kept
         for i, entry in enumerate(entries):
             if total >= max_files:
                 lines.append(
@@ -715,6 +736,12 @@ def tool_tree(
     rel = root.relative_to(cwd) if root.is_relative_to(cwd) else root
     lines.append(f"{rel}/")
     _walk(root, "", 1)
+    if escaped:
+        shown = ", ".join(sorted(set(escaped))[:5])
+        lines.append(
+            f"    ... ({len(escaped)} entr{'y' if len(escaped) == 1 else 'ies'} "
+            f"link outside the project root and were not followed: {shown})"
+        )
     return ToolResult.success(
         "\n".join(lines),
         summary=f"tree {rel}/ ({total} files)",
