@@ -239,10 +239,12 @@ class TestPullCivitaiFileSSRF:
 
     def test_real_ssrf_resolver_refuses_a_private_redirect_target(
             self, fake_registry, tmp_path, monkeypatch):
-        """Same as the real, unmocked property test_ssrf_pull_2026_07_01.py
-        asserts for _pull_url: the REAL _ssrf_resolve_final_url (not mocked
-        here) must refuse a CivitAI-provided URL that is itself private-IP
-        shaped, with no reliance on CivitAI's own host being trustworthy."""
+        """A URL that is itself private-IP shaped: even the second,
+        immediately-before-connect check_url call alone (the same "revalidate
+        right before the GET" pattern _pull_url_locked uses) would catch this
+        one, so this proves the OVERALL guarantee - no private address is ever
+        connected to - rather than isolating _ssrf_resolve_final_url on its
+        own (see the redirect-chain variant below for that)."""
         store, _ = fake_registry
         dest_dir = tmp_path / "comfyui-models" / "loras"
         monkeypatch.setenv("LOCALM_NET_MODE", "allow")   # isolate the IP-class check
@@ -253,6 +255,40 @@ class TestPullCivitaiFileSSRF:
         monkeypatch.setattr(
             "localm.media.managed_comfy.comfy_models_dest_dir",
             lambda subfolder, cfg=None, plugin=None: dest_dir)
+
+        ok = _pull_civitai_file("135867", None)
+
+        assert ok is False
+        assert not dest_dir.exists() or list(dest_dir.iterdir()) == []
+        assert store == {}
+
+    def test_real_ssrf_resolver_refuses_a_redirect_TO_a_private_target(
+            self, fake_registry, tmp_path, monkeypatch):
+        """The representative CivitAI threat model (ADR-0015 Decision 3): the
+        STARTING url is the legitimate public civitai.com download endpoint -
+        exactly what resolve_download() returns for a real pull - and only the
+        redirect it answers with points at a private address. This isolates
+        _ssrf_resolve_final_url's own per-hop re-validation: the immediately-
+        before-connect check_url in _pull_civitai_file never even runs, because
+        the resolver itself must refuse before returning."""
+        store, _ = fake_registry
+        dest_dir = tmp_path / "comfyui-models" / "loras"
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")   # isolate the IP-class check
+        resolved = _resolved()   # a real https://civitai.com/... starting URL
+        monkeypatch.setattr(
+            "localm.model_manager.sources.CivitAISource.resolve_download",
+            lambda self, ref, file, **kw: resolved)
+        monkeypatch.setattr(
+            "localm.media.managed_comfy.comfy_models_dest_dir",
+            lambda subfolder, cfg=None, plugin=None: dest_dir)
+
+        def _head_redirects_to_private(method, url, **kw):
+            assert method == "HEAD", "only the resolver's own HEAD probe should ever fire here"
+            resp = _FakeStreamResponse(b"", status_code=307,
+                                       headers={"Location": "http://169.254.169.254/latest/meta-data/"})
+            return resp
+
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _head_redirects_to_private)
 
         ok = _pull_civitai_file("135867", None)
 
