@@ -38,6 +38,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   depicting a minor is always excluded. Files in an older, riskier format are
   hidden unless you explicitly ask to see them. A GUI for this is coming in a
   follow-up.
+- **The coder can now find where a function or class is called before you
+  change it.** A new `find_references` tool searches the project it has
+  indexed for call sites of a symbol, so it (and a read-only reviewer
+  sub-agent) can check who else calls something before touching its
+  signature, without a manual grep round-trip.
 
 ### Fixed
 - **The list of other running LocaLM servers now really does cover the whole
