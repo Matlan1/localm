@@ -116,6 +116,9 @@ class SettingField:
     min: Optional[float] = None
     max: Optional[float] = None
     step: Optional[float] = None
+    # An external link shown under the field's help text, as (url, label). Opens
+    # in the caller's own browser tab (target=_blank), never embedded in-app.
+    link: Optional[tuple] = None
 
     def to_json(self) -> dict:
         d = {
@@ -129,6 +132,8 @@ class SettingField:
             d["engine_managed"] = True
         if self.options is not None:
             d["options"] = self.options
+        if self.link is not None:
+            d["link"] = {"url": self.link[0], "label": self.link[1]}
         for attr in ("min", "max", "step"):
             v = getattr(self, attr)
             if v is not None:
@@ -666,6 +671,26 @@ CORE_FIELDS: list = [
                  "When a registered model's file has gone, delete its registry "
                  "entry automatically instead of flagging it as missing.",
                  group="Models"),
+    # Neither key is in DEFAULT_CONFIG: validate_update() rejects any key not
+    # there, so a caller that ever skips the interception below gets a loud 400
+    # instead of a silent write into config.json. PATCH /v1/config and `localm
+    # config` both intercept these two keys before validate_update runs, routing
+    # them to model_source_credentials.py's owner-only file instead. admin_only
+    # for the same "where does an outbound credential go" boundary as
+    # net_search_url/bugreport_upload_url above.
+    SettingField("hf_token", Widget.SECRET, "Hugging Face API token",
+                 "Optional: raises rate limits and unlocks gated/login-required "
+                 "Hugging Face models. Blank = anonymous access. Falls back to "
+                 "the HF_TOKEN environment variable.",
+                 group="Models", admin_only=True, secret=True,
+                 link=("https://huggingface.co/settings/tokens", "Get a token")),
+    SettingField("civitai_api_key", Widget.SECRET, "CivitAI API key",
+                 "Optional: raises rate limits and unlocks gated/login-required "
+                 "CivitAI models. Blank = anonymous access. Falls back to the "
+                 "CIVITAI_API_KEY environment variable.",
+                 group="Models", admin_only=True, secret=True,
+                 link=("https://civitai.com/user/account",
+                       "Get a key (Account, then API Keys)")),
     # ---- Plugins ----
     SettingField("suggest_plugins", Widget.TOGGLE,
                  "Suggest installing a plugin for its command",

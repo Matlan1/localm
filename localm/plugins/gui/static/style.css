@@ -1377,6 +1377,7 @@ pre:hover .canvas-btn { opacity: 1; }
   display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin-top: 10px;
 }
 .settings-fields .sub { margin: 0 0 10px; font-size: 12px; }
+.settings-field-link { display: block; margin: 0 0 10px; font-size: 12px; }
 /* An auto-detected path shown in a blank "Blank = auto-detect" field, OR a
    SELECT still sitting on its unmodified shipped default (NEW-DEFAULT-VALUE-
    PLACEHOLDER - a dropdown has no blank state to hide the value behind the

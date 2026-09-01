@@ -484,6 +484,13 @@ export function buildSettingControl(field) {
     wrap.appendChild(el("div", "sub",
       `Currently running on port ${field.live_port}. ${saved} takes effect on the next restart.`));
   }
+  if (field.link) {
+    const link = el("a", "settings-field-link", field.link.label);
+    link.href = field.link.url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    wrap.appendChild(link);
+  }
   if (field.action) {
     const actRow = el("div", "");
     actRow.style.marginTop = "0.5rem";

@@ -961,10 +961,24 @@ def config_cmd(key, value):
       localm config n_ctx 8192
       localm config temperature 0.7
       localm config main_gpu_index 1
+      localm config hf_token hf_xxx
     """
     from rich.markup import escape
 
+    from localm.model_source_credentials import CREDENTIAL_KEYS, set_credentials
     from localm.settings_schema import validate_update
+    # hf_token / civitai_api_key are not config.json keys (see
+    # settings_schema.py's comment above their SettingField entries): route them
+    # to their own owner-only file instead of validate_update/update_config, and
+    # never echo the value back.
+    if key in CREDENTIAL_KEYS:
+        try:
+            set_credentials({key: value})
+        except ValueError as e:
+            raise click.ClickException(str(e))
+        action = "cleared" if not value.strip() else "updated"
+        console.print(f"[green]✓[/green] {escape(str(key))} {action}")
+        return
     try:
         validated = validate_update({key: value})
     except ValueError as e:

@@ -164,6 +164,17 @@ def register(app: FastAPI, ctx) -> None:
                     "plugin's own endpoint (/v1/tts/config, /v1/media/config/"
                     "<plugin>, /api/plugins/<name>/enable), which validates the "
                     "value and enforces its own permission.")
+        # Model-source credentials (hf_token, civitai_api_key) are not in
+        # DEFAULT_CONFIG and must never reach config.json: popped out of body and
+        # routed to their own owner-only file before validate_update runs. The
+        # admin_only check above already covers authorization for these two keys.
+        from localm.model_source_credentials import CREDENTIAL_KEYS, set_credentials
+        cred_updates = {k: body.pop(k) for k in list(body) if k in CREDENTIAL_KEYS}
+        if cred_updates:
+            try:
+                set_credentials(cred_updates)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
         # The second writer of `embedding_model`, besides POST /api/rag/embedding.
         # A switch that would invalidate existing collections' semantic search
         # returns needs_confirm instead of taking effect. Placed after the
