@@ -291,3 +291,170 @@ test("rail: arriving at the coder view loads past sessions by itself", async () 
   assert.ok(titles.includes("build a calculator"),
     "opening the coder view must populate the rail without any further input");
 });
+
+// Two saved conversations in the SAME project, which is what the folder-only
+// match could not tell apart, plus one elsewhere.
+const TWO_HERE = {
+  privacy_note: "Privacy-mode sessions are never recorded and never appear here.",
+  projects: [
+    {
+      path: "/work/here", name: "here", available: true, current: true,
+      sessions: [
+        { id: "aaa111", title: "build a calculator", interrupted_at: null,
+          turns: 4, total_tokens: 10, messages: 8, changed_files: 1 },
+        { id: "aaa222", title: "write the readme", interrupted_at: null,
+          turns: 2, total_tokens: 5, messages: 4, changed_files: 0 },
+      ],
+    },
+    {
+      path: "/work/elsewhere", name: "elsewhere", available: true, current: false,
+      sessions: [
+        { id: "bbb222", title: "write a csv parser", interrupted_at: null,
+          turns: 2, total_tokens: 5, messages: 4, changed_files: 0 },
+      ],
+    },
+  ],
+};
+
+// Like boot(), but the POST answers the way the real server does: reporting
+// WHICH saved conversation the new session holds. Without that field the client
+// cannot tell one past session from another and every check here is vacuous.
+function bootCheckpointAware(payload = TWO_HERE) {
+  const posts = [];
+  const deletes = [];
+  const { window } = loadApp({
+    fetchImpl: async (url, opts = {}) => {
+      const u = String(url);
+      if (u === "/api/coder/sessions" && opts.method === "POST") {
+        const sent = JSON.parse(opts.body);
+        posts.push(sent);
+        const cid = sent.resume_checkpoint_id || "fresh0";
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            id: "sess-" + cid, cwd: sent.cwd, checkpoint_id: cid,
+            resumed: !!sent.resume, notes: [],
+          }),
+          text: async () => "", headers: { get: () => null },
+        };
+      }
+      if (opts.method === "DELETE") {
+        deletes.push(u);
+        return { ok: true, status: 200, json: async () => ({}),
+                 text: async () => "", headers: { get: () => null } };
+      }
+      const body = u.startsWith("/api/coder/dormant") ? payload : {};
+      return { ok: true, status: 200, json: async () => body,
+               text: async () => "", headers: { get: () => null } };
+    },
+  });
+  return { window, posts, deletes };
+}
+
+const dormantTitles = (window) =>
+  [...rail(window).querySelectorAll(".coder-session-item.dormant .title")]
+    .map((n) => n.textContent);
+
+const rowNamed = (window, title) =>
+  [...rail(window).querySelectorAll(".coder-session-item.dormant")]
+    .find((n) => n.querySelector(".title").textContent === title);
+
+const modalButton = (window, label) =>
+  [...window.document.getElementById("modal").querySelectorAll("button")]
+    .find((b) => b.textContent === label);
+
+test("rail: opening a DIFFERENT past session does not silently switch to the open one",
+  async () => {
+    // The reported bug: with one session open for a folder, clicking another of
+    // that folder's past sessions reported "Already open - switched to it" and
+    // activated the session already running, never loading the one clicked.
+    const { window, posts, deletes } = bootCheckpointAware();
+    await settle();
+    await window.refreshDormant();
+
+    rowNamed(window, "build a calculator").onclick();
+    await settle();
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].resume_checkpoint_id, "aaa111");
+
+    await window.refreshDormant();
+    const other = rowNamed(window, "write the readme");
+    assert.ok(other, "precondition: the other past session is still listed");
+    other.onclick();
+    await settle();
+
+    // It must NOT have quietly joined the open session, and must NOT have
+    // opened a second one behind the user's back either.
+    assert.equal(posts.length, 1,
+      "clicking a different past session must ask before ending the open one");
+    assert.ok(modalButton(window, "End it and continue"),
+      "the user must be told a session is already open, not silently switched");
+
+    // Confirming ends the open session and continues the one actually clicked.
+    modalButton(window, "End it and continue").click();
+    await settle();
+    await settle();
+    assert.equal(deletes.length, 1, "the open session was not ended");
+    assert.equal(posts.length, 2, "the clicked session was not opened");
+    assert.equal(posts[1].resume_checkpoint_id, "aaa222",
+      "the session that opened is not the one the user clicked");
+  });
+
+test("rail: re-clicking the session that is already open still reuses it", async () => {
+  // THE LEAK GUARD at the client layer, with checkpoint ids present so the new
+  // discrimination is actually exercised (the older reuse test's mock reports
+  // no checkpoint id, so it passes through the unable-to-tell path instead).
+  const { window, posts } = bootCheckpointAware();
+  await settle();
+  await window.refreshDormant();
+
+  rowNamed(window, "build a calculator").onclick();
+  await settle();
+  assert.equal(posts.length, 1);
+
+  // The row list is a snapshot taken before the session opened, so the row the
+  // user can still click is the one for the session now running.
+  const stale = rowNamed(window, "build a calculator");
+  if (stale) { stale.onclick(); await settle(); stale.onclick(); await settle(); }
+  assert.equal(posts.length, 1,
+    `re-opening the session already running must not start another - got ${posts.length} POSTs`);
+});
+
+test("rail: the session that is open is not also listed as a past session", async () => {
+  // A session is checkpointed after every completed task, not only at close, so
+  // its checkpoint is on disk while it is still running and the dormant listing
+  // returns it like any other - it appeared under both "Open" and "Past
+  // sessions here" at the same time.
+  const { window } = bootCheckpointAware();
+  await settle();
+  await window.refreshDormant();
+  assert.deepEqual(dormantTitles(window),
+    ["build a calculator", "write the readme", "write a csv parser"],
+    "precondition: all three start out listed as past sessions");
+
+  rowNamed(window, "build a calculator").onclick();
+  await settle();
+  await window.refreshDormant();
+
+  assert.ok(texts(window).includes("Open"), "the live session is listed as open");
+  assert.deepEqual(dormantTitles(window), ["write the readme", "write a csv parser"],
+    "the session that is currently open must not also be offered as a past one");
+});
+
+test("rail: an other-project group disappears when its only session is open",
+  async () => {
+    // The count in the group summary and the group's own presence both have to
+    // follow the filter, or an empty "Other projects" group is left behind.
+    const { window } = bootCheckpointAware();
+    await settle();
+    await window.refreshDormant();
+    assert.ok(texts(window).includes("Other projects"));
+
+    rowNamed(window, "write a csv parser").onclick();
+    await settle();
+    await window.refreshDormant();
+
+    assert.ok(!texts(window).includes("Other projects"),
+      "an other-project group whose only session is now open must not be shown");
+    assert.ok(!dormantTitles(window).includes("write a csv parser"));
+  });

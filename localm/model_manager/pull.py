@@ -351,6 +351,29 @@ def pull_model(
             "allow just downloads: localm config net_allow_model_downloads true")
         return False
 
+    # civitai:<versionId> or civitai:<versionId>:<fileId>: a distinct provider,
+    # dispatched before the HF-oriented type auto-detect below - its type comes
+    # from CivitAI's own model type (sources.CIVITAI_TYPE_MAP), never from an
+    # HF pipeline-tag probe, and it always routes to the ComfyUI-subfoldered
+    # tree rather than an explicit dest_dir.
+    if spec.startswith("civitai:"):
+        if dest_dir is not None:
+            console.print(
+                "[red]dest_dir is not supported for a civitai: spec[/red] - "
+                "the destination is resolved automatically from the file's "
+                "own CivitAI type."
+            )
+            return False
+        if mmproj_spec:
+            console.print(
+                "[yellow]--mmproj is ignored for a civitai: spec[/yellow] "
+                "(vision projectors are an HF/GGUF concept).")
+        version_id, _, file_id = spec[len("civitai:"):].partition(":")
+        return _mm._pull_civitai_file(
+            version_id, name, file_id=file_id or None,
+            expected_sha256=expected_sha256, redownload=redownload,
+            register=register, model_type=model_type)
+
     # Remote spec: resolve the model type (a network probe against HF for a bare
     # owner/repo). Only reached for confirmed-remote specs, after the local-path
     # and net_mode gates above.
@@ -1811,6 +1834,183 @@ def _pull_url_locked(
     # here, and is escaped anyway; it sits in a TAG-INJECTION position.
     _report_success(f"[green]✓[/green] [bold]{escape(name)}[/bold] is ready",
                     f"[green]OK[/green] [bold]{escape(name)}[/bold] is ready")
+    return True
+
+
+def _pull_civitai_file(
+    version_id: str,
+    name: Optional[str],
+    file_id: Optional[str] = None,
+    expected_sha256: Optional[str] = None,
+    redownload: bool = False,
+    register: bool = True,
+    model_type: str = "auto",
+    include_legacy_formats: bool = False,
+) -> bool:
+    """Download one file from a CivitAI model VERSION id into the
+    ComfyUI-subfoldered tree for whichever ComfyUI instance is currently
+    active (managed or external - see media.managed_comfy.comfy_models_dest_dir),
+    and register it into localm's own registry.json eagerly.
+
+    *file_id*, when given, selects one file among the version's files (see
+    sources.CivitAISource.resolve_download); otherwise the primary file (or
+    the first remaining after the safe-format filter) is used. *model_type*
+    "auto" takes the registry type CivitAI's own model type maps to
+    (sources.CIVITAI_TYPE_MAP); an explicit value overrides only the registry
+    label, never the ComfyUI subfolder the file is physically routed to,
+    which always follows CivitAI's own type.
+
+    The download redirect (a time-boxed pre-signed URL) is resolved and
+    fetched through the same per-hop SSRF-guarded path _pull_url uses
+    (_ssrf_resolve_final_url), never a hardcoded-trusted-host shortcut.
+    """
+    from rich.markup import escape
+
+    from . import sources as _sources
+    from localm.media.managed_comfy import comfy_models_dest_dir
+    from localm import netpolicy
+
+    try:
+        resolved = _sources.CivitAISource().resolve_download(
+            version_id, file_id, include_legacy_formats=include_legacy_formats)
+    except _sources.ModelSourceError as e:
+        console.print(f"[red]CivitAI:[/red] {escape(str(e))}")
+        return False
+
+    reg_type = resolved.model_type if model_type == "auto" else model_type
+
+    dest_dir = comfy_models_dest_dir(resolved.comfy_subfolder)
+    if dest_dir is None:
+        console.print(
+            "[red]No ComfyUI folder is configured to download into.[/red] Set "
+            "a ComfyUI workdir (localm config comfy_workdir <path>), or enable "
+            "the managed ComfyUI instance, then retry."
+        )
+        return False
+
+    safe = _safe_models_filename(resolved.filename, dest_dir)
+    if safe is None:
+        console.print(
+            f"[red]Unsafe model filename:[/red] {escape(resolved.filename)}")
+        return False
+    filename = safe
+    dest = dest_dir / filename
+
+    want = expected_sha256.lower() if expected_sha256 else None
+    if want and resolved.sha256 and want != resolved.sha256.lower():
+        console.print(
+            f"[red]SHA256 mismatch (before download):[/red] --sha256 "
+            f"{escape(want[:16])}… does not match CivitAI's metadata for "
+            f"{escape(filename)} ({escape(resolved.sha256[:16])}…). "
+            "Refusing to download."
+        )
+        return False
+    verify_digest = resolved.sha256 or want
+
+    model_name = _sanitize_name(name or Path(filename).stem)
+
+    if dest.exists() and not redownload:
+        console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
+        if verify_digest:
+            on_disk = _verify_digest(dest, purpose="to check the file already here")
+            if on_disk.lower() != verify_digest.lower():
+                console.print(
+                    f"[red]SHA256 mismatch![/red] The file already at "
+                    f"{escape(filename)} ({escape(on_disk[:16])}…) does not "
+                    f"match the expected digest ({escape(verify_digest[:16])}…)."
+                )
+                return False
+        if register:
+            _mm._register_with_dedup(model_name, dest, resolved.source_tag,
+                                     digest=verify_digest, model_type=reg_type)
+        return True
+
+    from ..config import _mkdir_or_explain
+    _mkdir_or_explain(dest_dir, is_home=False)
+
+    if not _mm._check_disk_space(dest_dir, resolved.size_bytes or 0):
+        return False
+
+    try:
+        dl_url = _ssrf_resolve_final_url(resolved.url)
+    except netpolicy.NetworkPolicyError as e:
+        console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
+        return False
+
+    console.print(f"Pulling [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
+                  f"[bold]{escape(filename)}[/bold]")
+
+    part_file = dest_dir / (filename + ".part")
+    try:
+        with _part_lock(filename):
+            import requests
+            try:
+                netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
+                r = netpolicy.pinned_request("GET", dl_url, stream=True, timeout=30,
+                                             allow_redirects=False)
+                if r.status_code in (301, 302, 303, 307, 308):
+                    console.print(f"[red]Refused:[/red] unexpected redirect from "
+                                  f"{escape(dl_url)}")
+                    return False
+                r.raise_for_status()
+            except netpolicy.NetworkPolicyError as e:
+                console.print(f"[red]Refused by network policy:[/red] {escape(str(e))}")
+                return False
+            except requests.HTTPError as e:
+                code = getattr(e.response, "status_code", "?")
+                console.print(f"[red]Download failed[/red] (HTTP {code}): "
+                              f"{escape(dl_url)}")
+                return False
+            except requests.RequestException as e:
+                console.print(f"[red]Could not reach[/red] {escape(dl_url)}: "
+                              f"{escape(str(e))}")
+                return False
+
+            content_length = int(r.headers.get("content-length", 0)) or resolved.size_bytes or 0
+
+            def _part_bytes() -> int:
+                try:
+                    return part_file.stat().st_size
+                except OSError:
+                    return 0
+
+            with _snapshot_progress(_part_bytes, content_length) as _prog:
+                try:
+                    with open(part_file, "wb") as f:
+                        for chunk in r.iter_content(65536):
+                            f.write(chunk)
+                except Exception as e:
+                    console.print(f"[red]Download failed:[/red] {escape(str(e))}")
+                    return False
+                _prog.ok()
+
+            part_file.rename(dest)
+    except PullInFlight as e:
+        console.print(f"[red]Download already in progress:[/red] {escape(str(e))}")
+        return False
+
+    actual = _verify_digest(dest)
+    if verify_digest:
+        if actual.lower() != verify_digest.lower():
+            console.print(
+                f"[red]SHA256 mismatch![/red] Expected {escape(verify_digest[:16])}…, "
+                f"got {escape(actual[:16])}… - deleting corrupted file"
+            )
+            dest.unlink()
+            return False
+        _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
+                        f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
+    else:
+        console.print(f"[dim]SHA256: {escape(actual)}[/dim]")
+
+    if register:
+        _mm._register_with_dedup(model_name, dest, resolved.source_tag,
+                                 digest=actual, model_type=reg_type)
+    _report_success(
+        f"[green]✓[/green] [bold]{escape(model_name)}[/bold] downloaded to "
+        f"{escape(str(dest))}",
+        f"[green]OK[/green] [bold]{escape(model_name)}[/bold] downloaded to "
+        f"{escape(str(dest))}")
     return True
 
 

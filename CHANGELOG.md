@@ -11,7 +11,51 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **`/review` in the coder REPL.** Asks the reviewer model for a second opinion
+  on the current diff right now, instead of waiting for the automatic pre-done
+  pass. Works even when `coder_review` (the automatic pass's own on/off switch,
+  off by default) is off, and reports the same verdict that pass reads:
+  approved, or the list of blocking issues plus the reviewer's notes.
+- **Other AI tools can now read localm's memory of you, so you stop repeating
+  yourself.** With the memory plugin on, `localm mcp` offers a `memory_recall`
+  tool: any MCP client (Claude Desktop, an editor's agent) can look up the
+  facts localm has remembered about you rather than starting from nothing.
+  Reading changes nothing - it will not alter what localm remembers or how
+  long it keeps it. Writing is a separate opt-in: pass `localm mcp
+  --memory-write` to also offer `memory_append`, which lets a client suggest a
+  fact. Anything it suggests is stored as unverified, never as something you
+  said yourself, and if it contradicts a fact you typed, it goes to the same
+  accept/reject review as any other suggestion instead of overwriting you.
+  Both tools are refused in privacy mode.
+- **CivitAI models can now be searched and pulled from the command line**,
+  alongside HuggingFace: `localm search --source civitai <query>` and
+  `localm pull civitai:<versionId>`. A downloaded file is verified against
+  CivitAI's own checksum and lands in the active ComfyUI's matching
+  `models/<type>` folder (checkpoints, LoRAs, VAEs, textual inversions) so
+  workflows can find it directly, rather than in localm's own flat models
+  folder. NSFW results are excluded by default, and content flagged as
+  depicting a minor is always excluded. Files in an older, riskier format are
+  hidden unless you explicitly ask to see them. A GUI for this is coming in a
+  follow-up.
+- **The coder can now find where a function or class is called before you
+  change it.** A new `find_references` tool searches the project it has
+  indexed for call sites of a symbol, so it (and a read-only reviewer
+  sub-agent) can check who else calls something before touching its
+  signature, without a manual grep round-trip.
+
 ### Fixed
+- **The list of other running LocaLM servers now really does cover the whole
+  machine.** Settings > Server & network said it listed every server running on
+  this machine, but it only ever saw servers that share this install's data
+  folder. A second LocaLM installed somewhere else stayed invisible while it was
+  running, holding the graphics card and answering on its own port, which was
+  exactly when you needed to know about it. Those servers are now listed too,
+  marked "other install", with their directory and address. They carry no Stop
+  button on purpose: this app holds no shutdown credential for another install,
+  and ending one outright would skip its model unload and leave it reporting a
+  crash that never happened, so it has to be stopped from its own window or the
+  terminal it was started in.
 - **A stuck GPU-detection helper could wedge VRAM measurement for the rest of
   the run.** When it happened, loading any model afterward refused with "free
   VRAM could not be measured," even though the graphics driver itself was
@@ -26,6 +70,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   own budget, timing out even though nothing was actually stuck. That check
   now gives up on its own short budget and falls back to measuring VRAM a
   different way instead of waiting it out.
+- **Loading a model that hit an inconclusive VRAM reading now retries a few
+  times on its own before giving up**, instead of immediately refusing and
+  asking you to try again yourself. If it still cannot get a clear reading
+  after those automatic attempts, it says so plainly rather than suggesting
+  something to go do about it.
+- **Restarting the server could take noticeably longer than it needed to,
+  even with nothing loaded at the time.** It always checked how much free
+  graphics memory was available before restarting, even when there was
+  nothing using any and no reason to wait for memory to be freed. That check
+  is now skipped whenever there is nothing to release, so a restart with no
+  model loaded completes much faster.
 - **Clicking an already-open coder session now switches to it instead of
   opening it again.** Clicking a session that was already running started a
   second, independent copy of it every time, each holding its own connection
@@ -33,6 +88,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   app stop responding - most visibly, the Plugins page's list would stop
   loading. Reopening a session you already have open now does nothing more
   than bring it to the front, the same as every other session in the list.
+- **Opening a DIFFERENT past coder session for a folder that already had one
+  open switched to the open one and said it had worked.** Every past session
+  in a folder was treated as the same session, so picking the second one in
+  the list quietly left you in the first, reporting "already open". Picking a
+  different saved conversation now offers to end the open one and continue the
+  one you actually picked, since a folder runs one session at a time. Reopening
+  the session that is already open still just brings it to the front.
+- **The session that is currently open is no longer also listed under "past
+  sessions".** A running session is saved as you go, so it appeared in both
+  lists at once and could be "continued" while you were already sitting in it.
+- **Reopening a past coder session no longer drops turns that only ran tools.**
+  A step that read or wrote a file and said nothing else vanished from the
+  restored conversation, so reopening it read as though that work had never
+  happened. Those turns now appear, naming the tools that ran.
 - **Restarting the server from Settings could leave the page stuck on a
   reconnecting screen instead of coming back.** The page could reload before
   the old server had actually finished shutting down, landing back on the
@@ -67,6 +136,27 @@ permanent public record of what shipped and are never rewritten; the in-progress
   message, and the model list refreshes automatically in the background
   when the launcher opens or when the new "rescan" button is used, rather
   than freezing the window while it scans.
+- **In the coder REPL, running several `/goal` tasks in one session could let
+  a task that rewrites the test it is judged against go unflagged until you
+  quit the REPL.** The warning about edited test or CI-config files now shows
+  right after each `/goal` task finishes, not only when the session ends.
+
+### Security
+- **The coder now refuses a small set of catastrophic shell commands outright,
+  instead of relying on you being there to say no.** Until now the only thing
+  standing between the model and a command like a recursive delete of your home
+  directory was the confirmation prompt, and an unattended run skips that
+  prompt entirely: with auto-approve on, "ls" and a command that wipes a disk
+  took exactly the same path. A fixed safety check now runs on every command
+  the model writes, before anything else, and cannot be approved past. It
+  refuses a recursive delete aimed at a drive root, a home directory or a
+  system directory; commands that format or overwrite a disk; writes that would
+  overwrite or delete your SSH, GnuPG, AWS, Docker or Kubernetes credentials;
+  downloaded scripts piped straight into a shell; a force push at master or
+  main; and "git reset --hard", which throws away uncommitted work. Each
+  refusal says which rule stopped it and what to do instead. Ordinary commands
+  are unaffected, including ones that look similar such as deleting a build
+  directory or force-pushing your own feature branch.
 
 ## [0.1.5] - 2026-08-26
 

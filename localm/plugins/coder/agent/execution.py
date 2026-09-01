@@ -22,13 +22,14 @@ from ..diffutil import (
     read_old_content, read_old_content_checked, resolve_new_content,
 )
 from ..confirm import invoke_confirm
+from .. import shell_guard
 from ..parser import ToolCall
 from ..tools import ToolResult
 from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
-    _PATCH_MODE_ELIGIBLE_TOOLS, _SCOPE_PATH_ARGS,
+    _PATCH_MODE_ELIGIBLE_TOOLS, _PROJECT_MAP_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SKILL_STATE_TOOLS, _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
@@ -282,6 +283,35 @@ class _ExecutionMixin:
         self._emit("info", text=msg)
         self._audit.notice("scope_shell_path", msg)
 
+    def _shell_guard_verdict(self, call: ToolCall):
+        """Classify a shell call against the reject-list in shell_guard.
+
+        Returns ``(refusal, unchecked)``: the first matching refusal, and
+        whether the check FAILED to run. A check that raises returns
+        ``(None, True)``, and the caller must then require confirmation instead
+        of executing, so a command the gate never inspected is never
+        auto-approved. The failure is warned, emitted and audited, never
+        silenced. See test_a_classifier_failure_denies_rather_than_allows.
+        """
+        print_warning = _agent.print_warning
+        for arg_name in _SHELL_COMMAND_ARGS.get(call.name, ("command",)):
+            command = str(call.args.get(arg_name) or "")
+            if not command.strip():
+                continue
+            try:
+                refusal = shell_guard.classify(command, self.cwd)
+            except Exception as exc:
+                msg = (f"{call.name}: the shell safety check could not run "
+                       f"({type(exc).__name__}: {exc}), so this command now "
+                       "requires confirmation before it can run.")
+                print_warning(msg)
+                self._emit("info", text=msg)
+                self._audit.notice("shell_guard_error", msg)
+                return None, True
+            if refusal is not None:
+                return refusal, False
+        return None, False
+
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         # Hard gate: a tool disabled for this session (e.g. run_shell for a
@@ -396,6 +426,25 @@ class _ExecutionMixin:
         if self.scope and call.name in _SHELL_UNSCOPED_TOOLS:
             self._warn_shell_outside_scope(call)
 
+        # Shell reject-list. Runs for every shell call, ahead of dry-run,
+        # network policy and confirmation, and is not affected by auto_approve,
+        # always_confirm, lenient or the confirm handler. An unchecked call
+        # falls through to needs_confirm below.
+        # See test_a_dangerous_command_is_blocked_under_auto_approve.
+        shell_unchecked = False
+        if call.name in _SHELL_EXEC_TOOLS:
+            refusal, shell_unchecked = self._shell_guard_verdict(call)
+            if refusal is not None:
+                result = ToolResult.error(refusal.message())
+                self._audit.notice("shell_guard_blocked", refusal.message())
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                # No duration_s: the command never ran.
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary=f"blocked by the shell safety gate "
+                                   f"({refusal.rule})")
+                return result
+
         # Dry-run: show destructive calls but don't execute them
         if self.dry_run and tool_def.destructive:
             result = ToolResult.success(
@@ -446,7 +495,7 @@ class _ExecutionMixin:
         # confirmation for every such double. Only a genuine ToolCall's lenient
         # field (dataclass default False) is trusted; anything else counts as
         # non-lenient.
-        needs_confirm = (
+        needs_confirm = shell_unchecked or (
             (tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default) and (
                 not self.auto_approve or call.name in self.always_confirm
                 or (isinstance(call, ToolCall) and call.lenient)
@@ -521,11 +570,13 @@ class _ExecutionMixin:
         args = dict(call.args)
         if call.name in _PARENT_AGENT_TOOLS:
             args["_parent_agent"] = self
-        # The task-list tools operate on THIS session's state (tools/tasks.py), and
-        # use_skill arms this session's active-skill restriction (skills.py).
+        # The task-list tools operate on THIS session's state (tools/tasks.py),
+        # use_skill arms this session's active-skill restriction (skills.py), and
+        # find_references reads this session's live ProjectMap (tools/references.py).
         # Injected after the copy, so a model-supplied "_session" cannot win and
         # choose its own restriction.
-        if call.name in _TODO_TOOLS or call.name in _SKILL_STATE_TOOLS:
+        if call.name in _TODO_TOOLS or call.name in _SKILL_STATE_TOOLS \
+                or call.name in _PROJECT_MAP_TOOLS:
             args["_session"] = self
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:

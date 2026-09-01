@@ -147,28 +147,46 @@ export function renderCoderSessionList() {
     }
   }
 
+  // A session is checkpointed after every completed task, not only when it
+  // closes, so a session that is open RIGHT NOW also has a saved checkpoint on
+  // disk and the dormant listing returns it like any other. It is already
+  // listed under "Open" above, so showing it again as past would offer to
+  // continue a conversation the user is currently sitting in. Matching on the
+  // checkpoint id alone is enough: it is unique per conversation, and a
+  // checkpoint that moves projects moves its file with it.
+  const liveCheckpointIds = new Set();
+  for (const s of coder.sessions.values()) {
+    if (s.info.checkpoint_id) liveCheckpointIds.add(s.info.checkpoint_id);
+  }
+  const pastOnly = (proj) =>
+    proj.sessions.filter((sess) => !liveCheckpointIds.has(sess.id));
+
   // 2. PAST, for the project the form is pointing at.
   const current = dormant.projects.find((p) => p.current);
-  if (current && current.sessions.length) {
+  const currentPast = current ? pastOnly(current) : [];
+  if (currentPast.length) {
     list.appendChild(el("div", "coder-rail-head", "Past sessions here"));
-    for (const sess of current.sessions) {
+    for (const sess of currentPast) {
       list.appendChild(_dormantRow(current.path, sess, current.available));
     }
   }
 
   // 3. OTHER PROJECTS, collapsed. This is the half that did not exist: a past
   // session is reachable without first typing its project path into the form.
-  const others = dormant.projects.filter((p) => !p.current && p.sessions.length);
+  const others = dormant.projects
+    .filter((p) => !p.current)
+    .map((proj) => ({ proj, sessions: pastOnly(proj) }))
+    .filter((o) => o.sessions.length);
   if (others.length) {
     list.appendChild(el("div", "coder-rail-head", "Other projects"));
-    for (const proj of others) {
+    for (const { proj, sessions } of others) {
       const group = el("details", "coder-rail-project");
       const sum = el("summary");
       sum.appendChild(el("span", "title", proj.name));
       sum.appendChild(el("span", "coder-session-meta",
-        proj.sessions.length + (proj.available ? "" : " · folder missing")));
+        sessions.length + (proj.available ? "" : " · folder missing")));
       group.appendChild(sum);
-      for (const sess of proj.sessions) {
+      for (const sess of sessions) {
         group.appendChild(_dormantRow(proj.path, sess, proj.available));
       }
       list.appendChild(group);
@@ -716,6 +734,43 @@ function _liveSessionForCwd(cwd) {
   return null;
 }
 
+// Whether the live session for a folder is holding the SAME saved conversation
+// the caller asked for, so joining it answers the request instead of switching
+// the user to a conversation they did not pick.
+//
+// True with no id asked for ("continue last session" means whichever is here),
+// and true when the live session reports no checkpoint id at all: unable-to-tell
+// resolves toward joining, because the alternative path offers to END a session
+// and doing that on a guess is worse than the stale behaviour it replaces.
+function _sameCheckpoint(live, wantedId) {
+  if (!wantedId) return true;
+  const held = live.info.checkpoint_id;
+  if (!held) return true;
+  return held === wantedId;
+}
+
+// A folder runs one session at a time, so continuing a DIFFERENT saved
+// conversation for a folder that already has one open means ending the open one
+// first. Asks, then does both steps, rather than silently switching to the
+// wrong session (which is what matching on the folder alone used to do).
+function _offerCheckpointSwap(live, opts) {
+  if (live.busy) {
+    toast("The session open in this folder is busy - wait for it to finish, or "
+      + "end it, to continue a different saved conversation.", true);
+    return;
+  }
+  confirmDanger(
+    "A session is already open here",
+    `"${sessionLabel(live.info)}" is open for this folder, and a folder runs one `
+    + "session at a time. End it and continue the one you picked instead? Its "
+    + "conversation is saved and stays in the list.",
+    "End it and continue",
+    async () => {
+      await closeCoderSession(live);
+      startCoderSession(opts);
+    });
+}
+
 // _liveSessionForCwd alone still races on a rapid double-click: the second
 // click can run before the first POST has resolved and registerSession() has
 // added the new entry, so it would see no live session yet and fire its own
@@ -735,8 +790,12 @@ export async function startCoderSession(opts = {}) {
   if (resume) {
     const already = _liveSessionForCwd(cwd);
     if (already) {
-      activateSession(already.info.id);
-      toast("Already open - switched to it instead of starting another");
+      if (_sameCheckpoint(already, opts.checkpointId)) {
+        activateSession(already.info.id);
+        toast("Already open - switched to it instead of starting another");
+        return;
+      }
+      _offerCheckpointSwap(already, opts);
       return;
     }
     if (_cwdResumeInFlight.has(cwd)) return;
@@ -813,6 +872,14 @@ export async function startCoderSession(opts = {}) {
       headers: authHeaders(),
       body: JSON.stringify(body),
     });
+    // The server refuses a resume naming a checkpoint other than the one this
+    // folder already has open. The check above normally catches that first;
+    // this is the same case arriving from a stale tab or a second window,
+    // where this tab has the live session but its rail is out of date.
+    if (r.status === 409 && resume && opts.checkpointId) {
+      const live = _liveSessionForCwd(cwd);
+      if (live) { _offerCheckpointSwap(live, opts); return; }
+    }
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const info = await r.json();
     // The key has done its one job. Drop it out of the DOM rather than leaving
@@ -1004,7 +1071,13 @@ export async function sendCoderTask() {
 }
 
 export async function endCoderSession() {
-  const s = activeSession();
+  await closeCoderSession(activeSession());
+}
+
+// End ONE named session. endCoderSession() is the toolbar button and always
+// means the active one; the checkpoint swap ends a specific session that may
+// not be active.
+export async function closeCoderSession(s) {
   if (!s) return;
   try {
     await fetch(`/api/coder/sessions/${s.info.id}`, {

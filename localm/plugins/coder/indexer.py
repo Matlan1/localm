@@ -16,6 +16,16 @@ The whole thing is kept under ~3 000 characters so it doesn't dominate
 context.  When the agent writes/edits a file, the map is refreshed for
 that file only (cheap incremental update).
 
+Alongside the forward index (what a file defines) each file also carries a
+best-effort reverse-reference index: call-shaped occurrences of any
+identifier, keyed by name (see _extract_call_sites, FileSummary.refs). This
+is NOT injected into the context string - it would blow the char budget on
+any real codebase - but is queryable on demand via ProjectMap.find_references
+(surfaced as the coder tool find_references), giving blast-radius awareness
+("who else calls this") without a grep round-trip. It rides the exact same
+per-file build()/refresh_file()/_rescan_if_dirty() lifecycle as the forward
+index, so it goes stale and self-heals on the same cadence.
+
 run_shell can write anything a `command` string cannot resolve to a `path`
 arg ahead of time, so it cannot get the same eager per-file refresh - see
 mark_dirty(). Instead it flags the whole map dirty, and the next read
@@ -176,6 +186,81 @@ def _extract_symbols(text: str, lang: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+#  Reverse-reference (call-site) extractor - regex-based, best-effort
+# ---------------------------------------------------------------------------
+
+# Definition-line patterns, used only to keep a definition's own line out of
+# the call-site scan below (so `def foo():` never registers "foo" as a call
+# to itself). Mirrors the language grouping _extract_symbols already uses;
+# a language without its own entry falls back to _GENERIC_DEF_LINE_RE, the
+# same grouping _extract_symbols_generic covers.
+_DEF_LINE_PATTERNS: dict[str, "re.Pattern[str]"] = {
+    "python":     re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+\w"),
+    "javascript": re.compile(r"^\s*(?:export\s+)?(?:async\s+)?(?:function|class)\s+\w"),
+    "typescript": re.compile(r"^\s*(?:export\s+)?(?:async\s+)?(?:function|class)\s+\w"),
+    "go":         re.compile(r"^\s*func\s"),
+    "rust":       re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+\w"),
+    "java":       re.compile(r"^\s*(?:public|private|protected|static|final|abstract|synchronized)\s"),
+    "csharp":     re.compile(r"^\s*(?:public|private|protected|internal|static|virtual|override|sealed)\s"),
+}
+_GENERIC_DEF_LINE_RE = re.compile(r"^\s*(?:def|fn|func|function|class|sub|proc)\s+\w")
+
+# `identifier(` anywhere on a line. \w* and \s* range over disjoint character
+# classes (word chars vs whitespace), so there is no quantifier overlap for a
+# backtracking engine to explore - linear in the line's length regardless of
+# content (verified against a pathological long line in test_indexer.py).
+_CALL_SITE_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+
+# Control-flow / declaration keywords that precede "(" in the languages above
+# without being a call - filtered so the reverse index is not swamped by
+# "if(", "for(", "catch(" noise. Not exhaustive (best-effort, like every other
+# extractor in this module).
+_CALL_SITE_KEYWORDS: frozenset[str] = frozenset({
+    "if", "elif", "else", "for", "foreach", "while", "switch", "case", "catch",
+    "with", "except", "return", "yield", "assert", "del", "raise", "lambda",
+    "def", "class", "async", "await", "function", "fn", "func", "new", "super",
+    "sizeof", "typeof", "instanceof", "throw", "try", "finally", "do", "using",
+})
+
+# Bound on how many call sites one file can contribute to the reverse index -
+# same purpose as _MAX_SYMBOLS above (a pathological/generated file, e.g.
+# minified JS, must not make the in-memory index grow without limit).
+_MAX_REFS_PER_FILE = 500
+
+
+def _extract_call_sites(text: str, lang: str) -> list[tuple[str, int]]:
+    """Best-effort reverse-reference scan: every `identifier(` found outside
+    its own definition line, as (name, 1-based line number).
+
+    Runs per physical line (enumerate(), no second pass to compute line
+    numbers from a byte offset) so a pathological single line costs at most
+    one line's worth of matching; _CALL_SITE_RE itself has no nested
+    quantifiers, so it is linear in the line's length regardless of content.
+
+    A whole definition line is skipped rather than just the defined name, so
+    `def foo(a, b=bar()):` also drops the "bar" call on that line - a
+    deliberate simplification (this is a best-effort, single-repo textual
+    index, not a parser) that trades a rare same-line miss for never
+    double-counting a definition as its own first call site.
+    """
+    if lang not in _SYMBOL_LANGS.values():
+        return []
+    def_re = _DEF_LINE_PATTERNS.get(lang, _GENERIC_DEF_LINE_RE)
+    hits: list[tuple[str, int]] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if def_re.match(line):
+            continue
+        for m in _CALL_SITE_RE.finditer(line):
+            name = m.group(1)
+            if name in _CALL_SITE_KEYWORDS:
+                continue
+            hits.append((name, lineno))
+            if len(hits) >= _MAX_REFS_PER_FILE:
+                return hits
+    return hits
+
+
+# ---------------------------------------------------------------------------
 #  FileSummary
 # ---------------------------------------------------------------------------
 
@@ -190,6 +275,13 @@ class FileSummary:
     # run_shell command. Defaulted, so callers that predate the field still work.
     mtime:   float = 0.0
     size:    int = 0
+    # Best-effort call sites found in this file: (identifier, 1-based line).
+    # See _extract_call_sites(). Rides along with the rest of this file's data
+    # through build()/refresh_file()/_rescan_if_dirty(), so the reverse index
+    # (ProjectMap.find_references) is replaced wholesale whenever this file is,
+    # with no separate incremental bookkeeping to keep in sync. Defaulted, so
+    # callers/cache entries that predate the field still work.
+    refs:    list[tuple[str, int]] = field(default_factory=list)
 
     def one_line(self) -> str:
         """Compact one-liner for the map."""
@@ -375,11 +467,13 @@ class ProjectMap:
                 continue
 
             syms: list[str] = []
+            refs: list[tuple[str, int]] = []
             if lang in _SYMBOL_LANGS.values():
                 syms = _extract_symbols(text, lang)
+                refs = _extract_call_sites(text, lang)
 
             pm.files.append(FileSummary(path=rel, lang=lang, lines=lines, symbols=syms,
-                                         mtime=st.st_mtime, size=st.st_size))
+                                         mtime=st.st_mtime, size=st.st_size, refs=refs))
             count += 1
 
         if cache_path is not None:
@@ -406,7 +500,10 @@ class ProjectMap:
             "files_capped": self.files_capped,
             "files": [
                 {"path": str(f.path), "lang": f.lang, "lines": f.lines,
-                 "symbols": f.symbols, "mtime": f.mtime, "size": f.size}
+                 "symbols": f.symbols, "mtime": f.mtime, "size": f.size,
+                 # json.dumps renders each (name, lineno) tuple as a 2-element
+                 # array; _from_cache_dict() below reverses that on load.
+                 "refs": f.refs}
                 for f in self.files
             ],
         }
@@ -425,10 +522,14 @@ class ProjectMap:
             files = [
                 FileSummary(path=Path(f["path"]), lang=f["lang"], lines=f["lines"],
                             symbols=list(f.get("symbols") or []),
-                            mtime=f["mtime"], size=f["size"])
+                            mtime=f["mtime"], size=f["size"],
+                            # A cache written before this field existed has no
+                            # "refs" key; that reindexes as empty rather than
+                            # rejecting the whole (otherwise-usable) cache.
+                            refs=[(name, lineno) for name, lineno in (f.get("refs") or [])])
                 for f in data["files"]
             ]
-        except (KeyError, TypeError):
+        except (KeyError, TypeError, ValueError):
             return None
         return cls(root=root, files=files,
                    truncated=bool(data.get("truncated", False)),
@@ -513,11 +614,13 @@ class ProjectMap:
             return
 
         syms: list[str] = []
+        refs: list[tuple[str, int]] = []
         if lang in _SYMBOL_LANGS.values():
             syms = _extract_symbols(text, lang)
+            refs = _extract_call_sites(text, lang)
 
         self.files.append(FileSummary(path=rel, lang=lang, lines=lines, symbols=syms,
-                                       mtime=st.st_mtime, size=st.st_size))
+                                       mtime=st.st_mtime, size=st.st_size, refs=refs))
         self.files.sort(key=lambda f: f.path)
 
     # ------------------------------------------------------------------
@@ -645,3 +748,26 @@ class ProjectMap:
     def file_count(self) -> int:
         self._rescan_if_dirty()
         return len(self.files)
+
+    # ------------------------------------------------------------------
+    #  Reverse-reference query
+    # ------------------------------------------------------------------
+
+    def find_references(self, symbol: str) -> list[tuple[Path, int]]:
+        """Call sites of *symbol* across the indexed project.
+
+        Each hit is (relative path, 1-based line number) from a best-effort
+        regex scan (_extract_call_sites) - a textual `symbol(` match outside
+        its own definition line, not a real call graph: a shadowed local of
+        the same name, or a call reached only through an alias or attribute
+        access, is not distinguished from a genuine hit. Single-repo only.
+
+        Reconciles first via _rescan_if_dirty(), exactly like
+        to_context_string()/file_count(), so a caller never reads a stale
+        answer after a run_shell write.
+        """
+        self._rescan_if_dirty()
+        hits = [(f.path, lineno) for f in self.files for name, lineno in f.refs
+                if name == symbol]
+        hits.sort(key=lambda h: (str(h[0]), h[1]))
+        return hits

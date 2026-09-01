@@ -1730,6 +1730,8 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 /* data tables */
 
 .data-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+/* Stands in for the Stop button on an instance row this install cannot stop. */
+.instances-foreign { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
 .data-table th {
   text-align: left; font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.8px; color: var(--text-dim); font-weight: 600;

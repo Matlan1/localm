@@ -442,6 +442,13 @@ def _gpu_placement_fields(engine) -> dict:
     return dict(placement) if placement else {}
 
 
+# switch_engine's eviction loop: how many additional probe attempts an
+# inconclusive-and-nothing-left-to-evict result gets, and the pause between
+# them, before it becomes a caller-visible 503.
+_INCONCLUSIVE_LOAD_RETRIES = 2
+_INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
+
+
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True) -> dict:
     global _engines, _engines_lru, _active_model_name, _last_active_model_name, _engine_factory, _last_activity_per_model
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
@@ -539,6 +546,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             # attempts, making this branch fire again instead of the loop
             # converging to either a successful load or the final 503.
             embedder_evict_attempted = False
+            inconclusive_retries = 0
+            load_attempt_started = time.monotonic()
 
             while True:
                 # Off the event loop: vram_capacity()/gpu_split_shortfall() route
@@ -735,10 +744,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         # the failure modes are not symmetric. A wrong permit hands
                         # a too-big model to the native loader, which "can hard-abort
                         # the process rather than return NULL" (gpu_split_shortfall's
-                        # docstring) - unrecoverable. A wrong refusal is a 503 the
-                        # user can retry, by which time the abandoned probe has
-                        # usually landed and the driver is warm. So refuse, and quote
-                        # no figure, since none was measured.
+                        # docstring) - unrecoverable. A wrong refusal only costs a
+                        # retry, by which time the abandoned probe has usually landed
+                        # and the driver is warm. So refuse-and-retry, quoting no
+                        # figure, since none was measured.
                         #
                         # Two ways the probe fails to complete, and both the long
                         # deadline and wait_for_inflight=True above are aimed at
@@ -748,16 +757,24 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         # the join waits on ITS result instead of taking an instant
                         # BUSY. So reaching here needs the probe to blow the FULL
                         # deadline even after joining, i.e. a genuinely stuck or
-                        # wedged driver rather than an ordinary cold init or
-                        # heartbeat collision.
+                        # wedged driver, or a fresh, still-completing cold init
+                        # elsewhere in this process, rather than an ordinary cold
+                        # init or heartbeat collision this call itself started.
+                        #
+                        # A caller-visible refusal is deferred behind
+                        # _INCONCLUSIVE_LOAD_RETRIES automatic retries: the load
+                        # itself re-probes from scratch instead of reporting a
+                        # transient condition as a request the caller must repeat.
+                        if inconclusive_retries < _INCONCLUSIVE_LOAD_RETRIES:
+                            inconclusive_retries += 1
+                            await asyncio.sleep(_INCONCLUSIVE_LOAD_RETRY_DELAY)
+                            continue
+                        elapsed = time.monotonic() - load_attempt_started
                         raise HTTPException(
-                            503, f"Cannot load '{name}': free VRAM could not be "
-                            f"measured (the GPU probe did not complete within "
-                            f"{discover._GPU_PROBE_CLI_DEADLINE:.0f}s, so the driver "
-                            f"may be stuck), and no idle model could be unloaded to "
-                            f"make room. Refusing rather than load a model that may "
-                            f"not fit. Retry shortly; if this persists, restart the "
-                            f"GPU app holding the driver, or unload another model.")
+                            503, f"Cannot load '{name}': tried measuring free VRAM "
+                            f"{inconclusive_retries + 1} times over about "
+                            f"{elapsed:.0f}s without a conclusive reading, and no "
+                            f"idle model could be freed to make room.")
                     # Local eviction exhausted: before giving up, best-effort ask a
                     # sibling localm instance to release ITS VRAM (multi-instance
                     # coordination, see localm.gpu_registry). Off the event loop (it
@@ -3088,11 +3105,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     every native free has been issued) can confirm the releases actually landed
     before re-exec spawns a fresh worker into them. Best-effort: an
     unmeasurable or wedged probe must not block a restart the user asked for,
-    and vram_capacity() is itself deadline-bounded. Skipped entirely when
-    nothing is loaded (checked via the cheap had_engines/had_embedder reads
-    below, before either probe or unload runs), since list_gpus() re-probes on
-    every call with no TTL cache and a cold reading can itself take several
-    seconds - not worth paying when its result would never be used."""
+    and vram_capacity() is itself deadline-bounded."""
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os.execv below bypasses atexit, the job worker
@@ -3135,7 +3148,6 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         _dbg_swallow("stopping localm-launched ComfyUI instance(s) during restart "
                      "failed (non-fatal); one may be left running")
 
-    # Unload all engines in the multi-model dictionary
     # had_engines asks "is anything ACTUALLY loaded" (worth waiting on), not
     # merely "is the dict non-empty": unload_all_models/idle-unload both KEEP a
     # now-unloaded engine's entry in _engines so a later request reloads it
@@ -3144,30 +3156,31 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # wait's full timeout for nothing - the exact "no delay in the common
     # case" claim below would be false. getattr defaults to False so a test
     # double that does not define .loaded (never holding real VRAM) is
-    # correctly treated as nothing-to-wait-for. Read before any unload runs
-    # (cheap: already-in-memory objects, no I/O) so the free-VRAM probe below
-    # can be skipped for a restart with nothing loaded.
+    # correctly treated as nothing-to-wait-for. Computed before any
+    # unload/release below, and used to gate the free-VRAM read that follows.
     had_engines = any(getattr(e, "loaded", False) for e in _engines.values())
     if not had_engines and _engine is not None and _engine not in _engines.values():
         had_engines = bool(getattr(_engine, "loaded", False))
 
-    # Same cheap, no-I/O pre-check for the embedder (loaded_path() takes a
-    # plain lock and reads already-in-memory state; it does not trigger a load).
-    had_embedder = False
+    # Cheap: a lock check, not a probe. Must run before release_for_exit() below.
+    embedder_had_something = False
     try:
-        from localm.inference import embedder as _embedder_precheck
-        had_embedder = _embedder_precheck.loaded_path() is not None
+        from localm.inference import embedder as _embedder_mod
+        embedder_had_something = _embedder_mod.loaded_path() is not None
     except Exception:
-        _dbg_swallow("embedder loaded-path check during restart failed (non-fatal)")
+        _dbg_swallow("embedder loaded-state check during restart failed (non-fatal)")
 
+    # A subprocess-isolated GPU probe when torch is not resident. See
+    # test_do_restart_skips_vram_wait_when_nothing_was_loaded.
     free_before = None
-    if had_engines or had_embedder:
+    if had_engines or embedder_had_something:
         try:
             from localm.discover import vram_capacity
             free_before = vram_capacity().get("free")
         except Exception:
             _dbg_swallow("free-VRAM read before restart failed (non-fatal)")
 
+    # Unload all engines in the multi-model dictionary
     for engine in list(_engines.values()):
         try:
             engine.unload()

@@ -20,6 +20,7 @@ from ..display import (
     print_success,
     print_warning,
 )
+from ..review_guard import classify_sensitive_changes, render_warning
 from .goal import _run_goal_loop
 
 def _read_multiline() -> str:
@@ -52,6 +53,7 @@ _SLASH_COMMANDS = (
     "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
     "/sessions", "/compact", "/memory", "/remember", "/forget", "/save",
     "/export", "/scope", "/changes", "/diff", "/bg", "/verify", "/goal",
+    "/review",
 )
 
 
@@ -117,6 +119,22 @@ def _setup_readline(agent: Agent) -> None:
             pass
 
 
+def _warn_goal_run_sensitive_changes(agent: Agent, before: dict) -> None:
+    """Print review_guard's warning for the files this goal run touched:
+    entries in agent.changed_files() whose write count exceeds *before*'s.
+    Best-effort: never let this advisory break the REPL.
+
+    See test_goal_run_warning_is_scoped_to_that_run_not_the_whole_session."""
+    try:
+        touched = [f for f in agent.changed_files()
+                  if f["writes"] > before.get(f["path"], 0)]
+        message = render_warning(classify_sensitive_changes(touched))
+        if message:
+            print_warning(message)
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
 def _repl(agent: Agent) -> None:
     _setup_readline(agent)
     while True:
@@ -143,8 +161,12 @@ def _repl(agent: Agent) -> None:
             # Starting a fresh task - discard any stale checkpoint
             agent.clear_checkpoint()
             if agent.goal_cmd is not None:
-                _run_goal_loop(agent, user_input, agent.goal_cmd,
-                               agent.goal_max_iters, agent.cwd)
+                before = {f["path"]: f["writes"] for f in agent.changed_files()}
+                try:
+                    _run_goal_loop(agent, user_input, agent.goal_cmd,
+                                   agent.goal_max_iters, agent.cwd)
+                finally:
+                    _warn_goal_run_sensitive_changes(agent, before)
             else:
                 agent.chat(user_input)
         except KeyboardInterrupt:
@@ -558,6 +580,42 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 f"Goal mode: `{arg}` must exit 0, up to "
                 f"{agent.goal_max_iters} iteration(s) per task, with each "
                 "failure's output fed back for another attempt.")
+
+    elif cmd == "review":
+        diff = agent.session_diff()
+        if not diff.strip():
+            print_info("No changes to review this session.")
+        else:
+            reviewer = agent._reviewer
+            if reviewer is None:
+                # No reviewer configured (coder_review is off) - build one now.
+                from ..reviewer import reviewer_for_agent
+                reviewer = reviewer_for_agent(
+                    agent.backend, agent.mode, agent.restricted, force=True)
+            if reviewer is None:
+                print_warning(
+                    "No reviewer available for this session "
+                    "(restricted sessions run no reviewer).")
+            else:
+                result = reviewer.review(diff, agent._review_task)
+                warning = reviewer.failure_warning(result)
+                model = ("separate reviewer model" if reviewer.heterogeneous
+                          else "review pass")
+                if warning:
+                    print_warning(warning)
+                elif result.approved:
+                    print_success(f"Approved - the {model} found no blocking issues.")
+                    if result.notes:
+                        console.print(f"[dim]{result.notes}[/dim]")
+                else:
+                    n = len(result.blocking)
+                    print_warning(
+                        f"The {model} flagged {n} blocking issue"
+                        f"{'s' if n != 1 else ''}:")
+                    for b in result.blocking:
+                        console.print(f"  - {b}")
+                    if result.notes:
+                        console.print(f"[dim]{result.notes}[/dim]")
 
     elif cmd == "scope":
         if not arg:

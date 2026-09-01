@@ -537,10 +537,21 @@ async def create_session(req: CreateSessionRequest, request: Request):
     if req.resume and not restricted:
         existing = mgr.find_by_cwd(cwd, principal=principal)
         if existing is not None and existing.opened_via_resume:
-            return {**existing.info(), "resumed": False,
-                    "notes": ["Already open - joined the session already "
-                              "running for this folder instead of starting "
-                              "another."]}
+            wanted = req.resume_checkpoint_id
+            if wanted is None or wanted == existing.checkpoint_id:
+                return {**existing.info(), "resumed": False,
+                        "notes": ["Already open - joined the session already "
+                                  "running for this folder instead of starting "
+                                  "another."]}
+            # A DIFFERENT saved conversation was named. Joining would activate
+            # the wrong one while reporting success, and opening a second is
+            # the leak this guard exists to stop, so neither happens: the
+            # caller is told, and decides. See
+            # test_resuming_a_different_checkpoint_does_not_join_the_wrong_one.
+            raise HTTPException(
+                409, "This folder already has a coder session open, and a "
+                     "folder runs one at a time. End that session to continue "
+                     "a different saved conversation here.")
 
     # A per-session model switch changes the one shared engine for EVERYONE, so a
     # scoped key must not trigger it (DoS / interfering with the owner's session).

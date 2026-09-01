@@ -373,18 +373,22 @@ def _canon(p: str) -> str:
         return os.path.normcase(str(p or ""))
 
 
-def _try_whoami(scheme: str, port: int, instance_id: Optional[str],
-                timeout: float, bind_host: Optional[str] = None) -> bool:
-    """One handshake: GET <scheme>://<loopback>:<port>/whoami and confirm it is
-    THIS localm instance (app==localm AND the advertised instance_id matches the
-    registry file - the impostor guard). Always probes loopback: discovery is
-    same-machine, even for a network-bound instance.
+def fetch_whoami(scheme: str, port: int, instance_id: Optional[str],
+                 timeout: float, bind_host: Optional[str] = None) -> Optional[dict]:
+    """One handshake: GET <scheme>://<loopback>:<port>/whoami, returning the
+    verified identity payload, or None if it is not THIS localm instance
+    (app==localm AND the advertised instance_id matches the registry file - the
+    impostor guard). Always probes loopback: discovery is same-machine, even for
+    a network-bound instance.
 
     WHICH loopback comes from the entry's recorded *bind_host*. "Loopback" is
     two addresses, not one: a server bound on ``::1`` has nothing listening on
     127.0.0.1, so hardcoding the IPv4 one reports a healthy IPv6-bound server as
     DEAD. Omitted, it still dials 127.0.0.1, which is what an entry with no
-    recorded bind host wants."""
+    recorded bind host wants.
+
+    The payload carries ``version``, ``root_dir`` and ``mode``; a network-bound
+    instance omits ``root_dir``."""
     import requests
     from localm.bindhost import self_connect_host, url_host
     host = url_host(self_connect_host(bind_host))
@@ -400,19 +404,28 @@ def _try_whoami(scheme: str, port: int, instance_id: Optional[str],
         # Any OTHER error determining verification is unexpected: do NOT silently
         # downgrade to unverified HTTPS - treat the instance as unverifiable.
         logger.debug("could not determine TLS verification for %s: %s; skipping", url, e)
-        return False
+        return None
     try:
         r = requests.get(url, timeout=timeout, verify=verify)
     except requests.RequestException:
-        return False
+        return None
     if r.status_code != 200:
-        return False
+        return None
     try:
         data = r.json()
     except ValueError:
-        return False
-    return (data.get("app") == APP_NAME
-            and data.get("instance_id") == instance_id)
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("app") != APP_NAME or data.get("instance_id") != instance_id:
+        return None
+    return data
+
+
+def _try_whoami(scheme: str, port: int, instance_id: Optional[str],
+                timeout: float, bind_host: Optional[str] = None) -> bool:
+    """Whether ``fetch_whoami`` verifies this entry."""
+    return fetch_whoami(scheme, port, instance_id, timeout, bind_host) is not None
 
 
 def default_probe(entry: dict, *, timeout: float = 0.7) -> bool:
@@ -521,6 +534,81 @@ def snapshot(home: Path, probe: Optional[Callable[[dict], bool]] = None,
         row["alive"] = alive
         rows.append(row)
     rows.sort(key=lambda r: r.get("started") or "")
+    return rows
+
+
+def list_machine_peers(home: Path, *, timeout: float = 0.7) -> list[dict]:
+    """Live localm instances belonging to a DIFFERENT install, in ``snapshot``
+    row shape, each carrying ``same_install: False``.
+
+    ``snapshot`` reads ``<home>/run`` and so sees only instances sharing this
+    install's data dir. This reads the machine-wide coordination registry
+    (:mod:`localm.gpu_registry`), which every non-isolated server writes
+    whatever its LOCALM_HOME, and returns the entries that are NOT in *home*'s
+    own registry.
+
+    A peer is listed only on a verified ``GET /whoami`` handshake, so a stale
+    entry whose port got reused by an unrelated process is never listed;
+    ``root_dir``, ``mode`` and ``version`` come from that handshake rather than
+    from the coordination entry, which does not record them. A network-bound
+    peer omits ``root_dir``. ``started`` is None: the coordination entry records
+    a heartbeat time, not a start time.
+
+    Returns no credential. The coordination entry's ``coordination_token`` is
+    not an attach token and is dropped here, so a caller cannot use these rows
+    to authenticate to another install.
+
+    ``snapshot`` is deliberately NOT widened to cover these: callers that decide
+    whether a model file is held elsewhere (``selfclient.read_model_file_hold``)
+    treat a registry miss as a rule-out, which is only sound while every server
+    they reach shares one registry.
+
+    Best-effort: any failure yields the peers found so far rather than raising.
+    """
+    try:
+        from localm import gpu_registry
+        entries = gpu_registry.list_entries(gpu_registry.registry_dir())
+    except Exception as e:
+        logger.debug("cross-install peer lookup unavailable: %s", e)
+        return []
+
+    own = {str(e.get("instance_id")) for e in list_entries(home)}
+    self_pid = os.getpid()
+    rows: list[dict] = []
+    for entry in entries:
+        iid = entry.get("instance_id")
+        port = entry.get("port")
+        if not iid or not port or str(iid) in own:
+            continue
+        try:
+            pid = int(entry.get("pid", -1) or -1)
+        except (TypeError, ValueError):
+            continue
+        if pid == self_pid or not pid_alive(pid):
+            continue
+        scheme = entry.get("scheme") or "http"
+        host = entry.get("host")
+        try:
+            ident = fetch_whoami(scheme, int(port), iid, timeout, host)
+        except Exception as e:
+            logger.debug("whoami probe failed for cross-install peer %s: %s", iid, e)
+            continue
+        if ident is None:
+            continue
+        rows.append({
+            "instance_id": iid,
+            "pid": pid,
+            "port": port,
+            "host": host,
+            "scheme": scheme,
+            "root_dir": ident.get("root_dir"),
+            "mode": ident.get("mode"),
+            "version": ident.get("version"),
+            "started": None,
+            "alive": True,
+            "same_install": False,
+        })
+    rows.sort(key=lambda r: str(r.get("instance_id") or ""))
     return rows
 
 

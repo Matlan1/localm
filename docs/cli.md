@@ -621,6 +621,19 @@ opened with a shared, scoped key never run a verify command - those sessions hav
 process execution at all. In the GUI the same three controls sit in the coder setup
 form: a verification command, a fix-attempt cap, and a skip-verification toggle.
 
+**Self-review.** An optional reviewer model reads the cumulative diff before the agent
+declares a task done and looks for blocking problems - correctness bugs, security holes,
+broken or missing functionality, or a check weakened just to make it pass. Off by
+default; turn it on with `coder_review` in Settings and it runs automatically, once per
+task, feeding any blocking issue back for one more fix pass. The reviewer can be the
+agent's own model (the default, same-model self-review), a second small model loaded on
+CPU (`coder_reviewer = "local"`), a cloud model (`"openai"`/`"anthropic"`), or a second
+OpenAI-compatible server (a URL) - set with `coder_reviewer` / `coder_reviewer_model`. A
+network reviewer (cloud, or a non-loopback URL) is skipped in privacy mode and for
+restricted sessions, falling back to the local model with a warning. Ask for a second
+opinion on demand, at any point in a REPL session and independent of the `coder_review`
+setting, with `/review`.
+
 **Reproducible runs.** `--seed N` pins the sampler's RNG, so the same seed with the same
 model, prompt and settings reproduces the same output. Measured bit-for-bit on one AMD
 gfx1030 box with the bundled llama.cpp runtime and Qwen2.5-Coder-7B Q6_K: 5/5 identical

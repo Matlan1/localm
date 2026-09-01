@@ -339,6 +339,8 @@ HELP_TEXT = """\
                         changed files may finish (run by the harness, not the model)
   [bold]/goal [cmd|auto|off][/bold] iterate the next task until this command exits 0,
                         re-running the whole task with each failure fed back
+  [bold]/review[/bold]               a reviewer model checks the current diff for blocking
+                        issues right now, even with coder_review off
 
 [dim]Tab completes commands and project paths (where readline is available);
 REPL history persists across sessions in log/full modes, never in privacy.[/dim]

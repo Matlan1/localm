@@ -200,3 +200,88 @@ test("instances-gui: a read-only key (403 on the list) hides the card instead of
   const box = window.document.querySelector("#instances-list");
   assert.equal(box.children.length, 0, "hidden, not an empty-state or an error dump");
 });
+
+// A row from a DIFFERENT install (same_install: false) is listed but carries no
+// Stop button: this server holds no shutdown credential for another install, and
+// the route refuses such an id with 409. Rows with same_install absent or true
+// keep the button, so an older payload renders exactly as before.
+
+const FOREIGN_ROW = {
+  instance_id: "foreigninstance04", self: false, alive: true,
+  same_install: false, root_dir: "/proj/elsewhere", mode: "full",
+  scheme: "http", host: "127.0.0.1", port: 8644,
+  address: "http://127.0.0.1:8644", pid: 444, started: null,
+};
+
+test("instances-gui: an instance of another install is listed", async () => {
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch([SELF_ROW, FOREIGN_ROW], []),
+  });
+  await window.refreshInstancesCard();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const rows = instancesRows(window);
+  assert.equal(rows.length, 1, "the other install's instance is rendered");
+  assert.ok(rows[0].textContent.includes("/proj/elsewhere"),
+    "its directory is shown, so the card really does span installs");
+  assert.ok(rows[0].textContent.includes("http://127.0.0.1:8644"),
+    "its address is shown");
+});
+
+test("instances-gui: an instance of another install gets a label, not a Stop button",
+  async () => {
+    const calls = [];
+    const { window } = loadAppWithPages({
+      fetchImpl: makeFetch([SELF_ROW, FOREIGN_ROW], calls),
+    });
+    window.confirmDanger = () => {
+      throw new Error("confirmDanger must not be reachable for another install");
+    };
+    await window.refreshInstancesCard();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const row = instancesRows(window)[0];
+    const stopBtn = [...row.querySelectorAll("button")]
+      .find((b) => b.textContent === "Stop");
+    assert.equal(stopBtn, undefined,
+      "no Stop button: the route refuses a cross-install id with 409");
+
+    const label = row.querySelector(".instances-foreign");
+    assert.ok(label, "the action cell carries the other-install label instead");
+    assert.equal(label.textContent, "other install");
+    assert.ok(/different LocaLM install/.test(label.title || ""),
+      "the label explains why it cannot be stopped from here");
+    assert.equal(calls.length, 0, "nothing was requested for that row");
+  });
+
+test("instances-gui: a same-install row keeps its Stop button", async () => {
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch(
+      [SELF_ROW, { ...OTHER_ROW, same_install: true }, FOREIGN_ROW], []),
+  });
+  await window.refreshInstancesCard();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const rows = instancesRows(window);
+  assert.equal(rows.length, 2);
+  const own = rows.find((r) => r.textContent.includes("/proj/other"));
+  const foreign = rows.find((r) => r.textContent.includes("/proj/elsewhere"));
+  assert.ok([...own.querySelectorAll("button")].some((b) => b.textContent === "Stop"),
+    "this install's own instance is still stoppable");
+  assert.equal(own.querySelector(".instances-foreign"), null);
+  assert.equal(
+    [...foreign.querySelectorAll("button")].find((b) => b.textContent === "Stop"),
+    undefined);
+});
+
+test("instances-gui: a row with no directory reported renders a placeholder", async () => {
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch([{ ...FOREIGN_ROW, root_dir: null }], []),
+  });
+  await window.refreshInstancesCard();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const cells = instancesRows(window)[0].querySelectorAll("td");
+  assert.equal(cells[0].textContent, "(not reported)",
+    "a network-bound peer omits root_dir from /whoami; the cell says so");
+});
