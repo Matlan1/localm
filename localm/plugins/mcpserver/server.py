@@ -731,7 +731,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         return _text_result(f"Remembered (unverified, id {rec.id}): {rec.text}")
 
     def server_activity(args: dict) -> dict:
-        """What any running localm server on this machine is doing.
+        """What any running localm server of this install is doing.
 
         This MCP server is a SEPARATE PROCESS from the HTTP/GUI server and
         shares no memory with it, so it finds the running instances on disk and
@@ -754,9 +754,10 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         rows = instances.snapshot(home_dir(), include_token=True)
         if not rows:
             return _text_result(
-                "No localm server is running on this machine, so there is "
+                "No localm server of this install is running, so there is "
                 "nothing to ask. This is not the same as a server reporting "
-                "that it is idle.")
+                "that it is idle, and a server started from a different localm "
+                "install keeps its own data directory and is not asked here.")
         lines = []
         for e in rows:
             from localm.bindhost import self_connect_host, url_host
@@ -1374,7 +1375,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         },
         "server_activity": {
             "description": (
-                "What any running localm server on this machine is currently "
+                "What any running localm server of this install is currently "
                 "doing: model downloads, indexing, media generation. Check this "
                 "BEFORE starting a long operation - a pull started from the "
                 "browser or another client is otherwise invisible here, and "
