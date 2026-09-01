@@ -1218,11 +1218,12 @@ async def coder_history(request: Request):
     sessions_dir = _audit._SESSIONS_DIR
     items = []
     if sessions_dir.is_dir():
-        # Coder sessions are the ONLY ones labelled "localcoder"
-        # (AuditLog filename = <ts>_<pid>_<label>.jsonl). Regular GUI chat goes
-        # through the HTTP server as "_server.jsonl" and the CLI chat REPL as
-        # "_chat.jsonl", and all three share this directory - so glob the coder
-        # label only, or coder history lists chat sessions too (coder-history-chat).
+        # Coder sessions are the ONLY ones labelled "localcoder" (AuditLog
+        # filename = <ts>_<pid>_<session_id>_<label>.jsonl). Regular GUI chat
+        # goes through the HTTP server as "_server.jsonl" and the CLI chat REPL
+        # as "_chat.jsonl", and all three share this directory - so glob the
+        # coder label only, or coder history lists chat sessions too
+        # (coder-history-chat).
         for p in sorted(sessions_dir.glob("*_localcoder.jsonl"),
                         key=lambda f: f.stat().st_mtime, reverse=True)[:100]:
             items.append({

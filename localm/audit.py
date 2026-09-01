@@ -13,9 +13,9 @@ privacy (default)
 
 log
     A JSONL audit trail is appended to
-    ``<data dir>/sessions/<YYYY-MM-DD_HHMMSS>_<pid>_<label>.jsonl``
+    ``<data dir>/sessions/<YYYY-MM-DD_HHMMSS>_<pid>_<session_id>_<label>.jsonl``
     for every session.  One event per line:
-    ``{"t": unix_ms, "turn": int, "type": str, "data": any}``
+    ``{"t": unix_ms, "turn": int, "type": str, "session": str, "data": any}``
 
 full
     Everything in ``log`` mode, plus a human-readable Markdown transcript:
@@ -41,6 +41,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -242,11 +243,13 @@ class AuditLog:
     ``NullAuditLog`` is used instead.
     """
 
-    def __init__(self, label: str = "") -> None:
+    def __init__(self, label: str = "", session_id: str = "") -> None:
         ts = time.strftime("%Y-%m-%d_%H%M%S")
         pid = os.getpid()
+        # Falls back to a freshly minted id when the caller passes none.
+        self._session_id = session_id or uuid.uuid4().hex[:8]
         suffix = f"_{label}" if label else ""
-        filename = f"{ts}_{pid}{suffix}.jsonl"
+        filename = f"{ts}_{pid}_{self._session_id}{suffix}.jsonl"
         self._path = _sessions_dir() / filename
         self._turn = 0
         self._warned_write_fail = False  # warn once, not per line, on write failure
@@ -307,10 +310,11 @@ class AuditLog:
     def _write(self, event_type: str, data: Any) -> None:
         try:
             record = {
-                "t":    int(time.time() * 1000),
-                "turn": self._turn,
-                "type": event_type,
-                "data": data,
+                "t":       int(time.time() * 1000),
+                "turn":    self._turn,
+                "type":    event_type,
+                "session": self._session_id,
+                "data":    data,
             }
             self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             self._fh.flush()
@@ -375,17 +379,21 @@ class MarkdownTranscript:
 AuditLogT = Union[AuditLog, NullAuditLog]
 
 
-def make_audit_log(mode: SessionMode, label: str = "") -> AuditLogT:
+def make_audit_log(
+        mode: SessionMode, label: str = "", session_id: str = "") -> AuditLogT:
     """
     Return an appropriate audit log object for the given session mode.
 
     ``privacy`` → NullAuditLog (no disk writes)
     ``log``     → AuditLog (JSONL in <data dir>/sessions/)
     ``full``    → AuditLog (JSONL; markdown is the caller's concern)
+
+    ``session_id``, when the caller has one, is threaded into the AuditLog's
+    filename and every record it writes (see AuditLog.__init__).
     """
     if mode == SessionMode.PRIVACY:
         return NullAuditLog()
-    return AuditLog(label=label)
+    return AuditLog(label=label, session_id=session_id)
 
 
 def make_transcript(mode: SessionMode, label: str = "chat") -> Optional[MarkdownTranscript]:
