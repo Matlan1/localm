@@ -19,13 +19,15 @@ async function waitFor(fn, timeout = 800) {
 
 // Records calls; serves /api/backend (configurable payload) plus the bootstrap
 // endpoints every loadApp() init pass hits.
-function makeFetch(calls, { installed = null, vendor = null, recommended = null } = {}) {
+function makeFetch(calls, { installed = null, vendor = null, recommended = null,
+                            warning = null } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     const method = (opts.method || "GET").toUpperCase();
     calls.push({ u, method, body: opts.body });
     if (u.includes("/api/backend"))
-      return { ok: true, status: 200, json: async () => ({ installed, vendor, recommended }) };
+      return { ok: true, status: 200,
+               json: async () => ({ installed, vendor, recommended, warning }) };
     if (u.includes("/api/gpus"))
       return { ok: true, status: 200, json: async () => ({ gpus: [], main_gpu_index: null }) };
     if (u.endsWith("/v1/config") && method === "GET")
@@ -73,6 +75,43 @@ test("backend row shows the installed value, and the hint shows for NVIDIA+vulka
   assert.ok(await waitFor(() => row.hidden === false), "backend row becomes visible");
   assert.equal(value.textContent, "vulkan");
   assert.ok(await waitFor(() => hint.hidden === false), "hint shows for NVIDIA+vulkan");
+});
+
+test("a runtime-resolution warning from the server shows in the Backend section", async () => {
+  const calls = [];
+  const { window } = loadApp({
+    fetchImpl: makeFetch(calls, {
+      installed: "vulkan", vendor: "amd", recommended: "vulkan",
+      warning: "LLAMA_CPP_LIB=/bad/path does not contain llama.dll; ignoring it",
+    }),
+  });
+  const warn = window.document.getElementById("perf-backend-warning");
+  assert.ok(await waitFor(() => warn.hidden === false));
+  assert.match(warn.textContent, /LLAMA_CPP_LIB/);
+});
+
+test("no runtime-resolution warning from the server hides the notice", async () => {
+  const calls = [];
+  const { window } = loadApp({
+    fetchImpl: makeFetch(calls, { installed: "vulkan", vendor: "amd", recommended: "vulkan" }),
+  });
+  const row = window.document.getElementById("perf-backend-row");
+  const warn = window.document.getElementById("perf-backend-warning");
+  assert.ok(await waitFor(() => row.hidden === false));
+  assert.equal(warn.hidden, true);
+});
+
+test("a runtime-resolution warning shows even with nothing installed yet", async () => {
+  const calls = [];
+  const { window } = loadApp({
+    fetchImpl: makeFetch(calls, {
+      installed: null, vendor: null, recommended: null,
+      warning: "localm_llama_runtime is installed but broken",
+    }),
+  });
+  const warn = window.document.getElementById("perf-backend-warning");
+  assert.ok(await waitFor(() => warn.hidden === false),
+    "the warning is independent of whether a backend marker exists yet");
 });
 
 test("hint stays hidden for AMD+vulkan - a real combination, just not the hinted one", async () => {

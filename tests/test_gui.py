@@ -1450,12 +1450,23 @@ class TestBackendEndpoint:
     auto-switched; see updater._installed_backend()), for the Settings
     display and the NVIDIA+vulkan hint."""
 
-    def test_reports_installed_separately_from_recommended(self, gui_app):
+    @staticmethod
+    def _reset_loader_warnings(monkeypatch):
+        """The runtime-resolution warning latches are module-level and process-
+        global (no per-request reset), so a test asserting the field's DEFAULT
+        must pin a clean baseline rather than trust whatever an earlier test in
+        the same process left behind."""
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "_last_broken_runtime_warning", None, raising=False)
+        monkeypatch.setattr(_loader, "_last_explicit_lib_warning", None, raising=False)
+
+    def test_reports_installed_separately_from_recommended(self, gui_app, monkeypatch):
         """The whole point of this route: "installed" and "recommended" can
         legitimately disagree (that disagreement is exactly what a runtime
         recommendation-policy change produces), and the route must report
         both rather than collapsing them into one value."""
         from localm import hwdetect
+        self._reset_loader_warnings(monkeypatch)
         app, _ = gui_app
         with patch("localm.setup_llama.installed_backend", return_value="amd-rocm"), \
              patch("localm.hwdetect.detect",
@@ -1464,11 +1475,13 @@ class TestBackendEndpoint:
             with TestClient(app) as client:
                 r = client.get("/api/backend")
         assert r.status_code == 200
-        assert r.json() == {"installed": "amd-rocm", "vendor": "amd", "recommended": "vulkan"}
+        assert r.json() == {"installed": "amd-rocm", "vendor": "amd", "recommended": "vulkan",
+                            "warning": None}
 
-    def test_nothing_detected_reports_nulls_not_an_error(self, gui_app):
+    def test_nothing_detected_reports_nulls_not_an_error(self, gui_app, monkeypatch):
         """A total detection failure (no marker, hwdetect raises) must still
         return 200 with honest nulls - never a 500, and never a guessed value."""
+        self._reset_loader_warnings(monkeypatch)
         app, _ = gui_app
         with patch("localm.setup_llama.installed_backend",
                    side_effect=RuntimeError("no marker")), \
@@ -1476,13 +1489,15 @@ class TestBackendEndpoint:
             with TestClient(app) as client:
                 r = client.get("/api/backend")
         assert r.status_code == 200
-        assert r.json() == {"installed": None, "vendor": None, "recommended": None}
+        assert r.json() == {"installed": None, "vendor": None, "recommended": None,
+                            "warning": None}
 
-    def test_nvidia_vendor_reported_when_vulkan_installed(self, gui_app):
+    def test_nvidia_vendor_reported_when_vulkan_installed(self, gui_app, monkeypatch):
         """The exact combination the Settings hint keys on (Part 3): an
         NVIDIA vendor with vulkan actually installed must come through
         distinctly, not be normalised away."""
         from localm import hwdetect
+        self._reset_loader_warnings(monkeypatch)
         app, _ = gui_app
         with patch("localm.setup_llama.installed_backend", return_value="vulkan"), \
              patch("localm.hwdetect.detect",
@@ -1491,7 +1506,25 @@ class TestBackendEndpoint:
             with TestClient(app) as client:
                 r = client.get("/api/backend")
         assert r.status_code == 200
-        assert r.json() == {"installed": "vulkan", "vendor": "nvidia", "recommended": "cuda"}
+        assert r.json() == {"installed": "vulkan", "vendor": "nvidia", "recommended": "cuda",
+                            "warning": None}
+
+    def test_reports_runtime_resolution_warning(self, gui_app, monkeypatch):
+        """A latched _loader warning (a broken localm_llama_runtime install, or
+        a bad LLAMA_CPP_LIB override) reaches this route's "warning" field."""
+        from localm import hwdetect
+        from localm.inference.backends.llamacpp import _loader
+        self._reset_loader_warnings(monkeypatch)
+        monkeypatch.setattr(_loader, "_last_broken_runtime_warning",
+                            "localm_llama_runtime is installed but broken", raising=False)
+        app, _ = gui_app
+        with patch("localm.setup_llama.installed_backend", return_value="vulkan"), \
+             patch("localm.hwdetect.detect", return_value=hwdetect.Detection(vendors=[])), \
+             patch("localm.hwdetect.recommended_install_backend", return_value=None):
+            with TestClient(app) as client:
+                r = client.get("/api/backend")
+        assert r.status_code == 200
+        assert r.json()["warning"] == "localm_llama_runtime is installed but broken"
 
 
 class TestModelEndpoints:

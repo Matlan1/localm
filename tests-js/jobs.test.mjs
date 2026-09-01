@@ -45,7 +45,8 @@ const MODELS = [
 
 // Build a fresh jsdom env per test, install it as the module's globals, and
 // return { window, calls } where calls records every fetch (method + url).
-function makeEnv({ jobs = [JOB], models = MODELS, active = "chat-model" } = {}) {
+function makeEnv({ jobs = [JOB], models = MODELS, active = "chat-model",
+                   schedulerWarning = null } = {}) {
   const dom = new JSDOM(
     `<!DOCTYPE html><html><body><main id="main"></main></body></html>`,
     { url: "http://localhost:8642/" });
@@ -57,7 +58,8 @@ function makeEnv({ jobs = [JOB], models = MODELS, active = "chat-model" } = {}) 
     const method = (opts.method || "GET").toUpperCase();
     calls.push({ url: String(url), method, body: opts.body });
     if (method === "GET" && /\/api\/jobs$/.test(url)) {
-      return { ok: true, status: 200, json: async () => ({ jobs }) };
+      return { ok: true, status: 200,
+               json: async () => ({ jobs, scheduler_warning: schedulerWarning }) };
     }
     if (method === "GET" && /\/api\/models$/.test(url)) {
       return { ok: true, status: 200, json: async () => ({ models, active }) };
@@ -122,6 +124,47 @@ test("the jobs view renders canned job names via textContent", async () => {
 
   const view = win.document.getElementById("view-jobs");
   assert.match(view.textContent, /Nightly digest/, "job name is rendered");
+});
+
+test("a scheduler_warning from the server shows above the jobs list", async () => {
+  const { win } = makeEnv({ schedulerWarning: "RuntimeError: jobs.json unreadable" });
+  const mod = await importJobs();
+  await mod.register({ toast: () => {}, authHeaders: () => ({}) });
+  win.onViewShown("jobs");
+  await settle();
+
+  const view = win.document.getElementById("view-jobs");
+  assert.match(view.textContent, /jobs\.json unreadable/,
+    "the scheduler warning text reaches the view");
+});
+
+test("no scheduler_warning from the server shows nothing extra", async () => {
+  const { win } = makeEnv();   // schedulerWarning defaults to null
+  const mod = await importJobs();
+  await mod.register({ toast: () => {}, authHeaders: () => ({}) });
+  win.onViewShown("jobs");
+  await settle();
+
+  const warn = win.document.querySelector("#view-jobs .key-warn");
+  assert.ok(warn, "the warning element exists");
+  assert.equal(warn.hidden, true, "and stays hidden with no warning");
+});
+
+test("a scheduler_warning clears if a later refresh fails", async () => {
+  const { win } = makeEnv({ schedulerWarning: "RuntimeError: jobs.json unreadable" });
+  const mod = await importJobs();
+  await mod.register({ toast: () => {}, authHeaders: () => ({}) });
+  win.onViewShown("jobs");
+  await settle();
+  const warn = win.document.querySelector("#view-jobs .key-warn");
+  assert.equal(warn.hidden, false, "the warning shows on the first refresh");
+
+  win.fetch = global.fetch = async () => { throw new Error("network down"); };
+  win.onViewShown("jobs");
+  await settle();
+
+  assert.equal(warn.hidden, true,
+    "a stale scheduler warning must not linger next to a load error");
 });
 
 test("Run now issues a POST to /api/jobs/<id>/run", async () => {

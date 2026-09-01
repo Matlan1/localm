@@ -765,6 +765,7 @@
               and how large its context window is. Runtime &amp; GPU holds the persisted next-load
               defaults; these apply right now. The VRAM figure is an estimate.</div>
               <div id="perf-backend-row" class="sub perf-backend-row" hidden>Backend: <span id="perf-backend-value">-</span></div>
+              <div id="perf-backend-warning" class="key-warn" hidden></div>
               <div id="perf-backend-hint" class="perf-backend-hint" hidden>
                 <span>An NVIDIA GPU was detected; the CUDA backend usually performs better than the
                 currently installed Vulkan backend. localm never switches this for you - pick
@@ -859,6 +860,9 @@
                 Show vision projector (.mmproj) files in repository search results
               </label>
             </section>
+
+            <div class="settings-section key-warn" id="owner-key-downgrade-warning"
+                 data-group="security" hidden></div>
 
             <section class="card settings-section" id="owner-key-card" data-group="security" data-sec-label="Owner key">
               <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="key"></span>

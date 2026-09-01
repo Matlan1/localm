@@ -316,6 +316,12 @@ class JobScheduler:
         logger.info(
             "jobs scheduler: tick recovered; scheduled jobs are firing again")
 
+    def tick_error(self) -> Optional[str]:
+        """The current failing-tick signature, or None while ticks are healthy.
+        Reflects _note_tick_error's latch; calling this does not itself run a
+        tick."""
+        return self._last_tick_error
+
     async def _loop(self) -> None:
         assert self._stop is not None
         while not self._stop.is_set():

@@ -355,6 +355,37 @@ def test_tick_catches_runner_error(home):
     assert "kaboom" in results[0]["error"]
 
 
+def test_tick_error_getter_reflects_the_current_failure(home):
+    """tick_error() surfaces the same signature _note_tick_error latches, so a
+    caller with a status surface (GET /api/jobs) sees what only reached the
+    debug log otherwise."""
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    sched = JobScheduler(JobStore())
+    assert sched.tick_error() is None
+
+    sched._note_tick_error(RuntimeError("jobs.json unreadable"))
+    warning = sched.tick_error()
+    assert warning and "jobs.json unreadable" in warning
+
+    # A second, distinct failure updates the signature.
+    sched._note_tick_error(OSError("disk full"))
+    assert "disk full" in sched.tick_error()
+
+
+def test_tick_error_getter_clears_on_recovery(home):
+    """NEGATIVE CASE: once a tick succeeds, tick_error() must go back to None -
+    a stale failure notice must not linger after the scheduler recovers."""
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    sched = JobScheduler(JobStore())
+    sched._note_tick_error(RuntimeError("boom"))
+    assert sched.tick_error() is not None
+
+    sched._note_tick_ok()
+    assert sched.tick_error() is None
+
+
 def test_scheduler_start_noop_without_event_loop(home):
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     sched = JobScheduler(run_job=lambda *a, **k: {})
@@ -741,6 +772,41 @@ def test_plugin_routes_via_engine(home, monkeypatch):
         # delete
         assert c.delete(f"/api/jobs/{jid}").status_code == 200
         assert c.get(f"/api/jobs/{jid}").status_code == 404
+
+
+def test_list_jobs_surfaces_scheduler_warning(home, monkeypatch):
+    """GET /api/jobs carries scheduler_warning: a failing tick halts every
+    scheduled job silently otherwise (own comment in scheduler.py cites
+    AGENTS.md rule 5)."""
+    from pathlib import Path
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+
+    store_root = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "builtin"
+    installed = home / "plugins"
+    from localm.plugins.engine import PluginManager
+    app = FastAPI()
+    mgr = PluginManager(app, store_root=store_root, installed_root=installed)
+    mgr.install("jobs")
+
+    # install() runs plug.py under a synthetic module name (_localm_plugin_jobs),
+    # a SEPARATE module object from localm.plugins.builtin.jobs.plug - reach the
+    # module the route actually bound its closures to via sys.modules.
+    import sys
+    jobs_plug = sys.modules["_localm_plugin_jobs"]
+    with TestClient(app) as c:
+        assert c.get("/api/jobs").json()["scheduler_warning"] is None
+
+        jobs_plug._scheduler._note_tick_error(RuntimeError("jobs.json unreadable"))
+        data = c.get("/api/jobs").json()
+        assert data["scheduler_warning"] and "jobs.json unreadable" in data["scheduler_warning"]
+
+        jobs_plug._scheduler._note_tick_ok()
+        assert c.get("/api/jobs").json()["scheduler_warning"] is None
 
 
 def test_jobs_in_catalog():

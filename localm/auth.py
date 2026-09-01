@@ -1150,6 +1150,9 @@ def _keystore_configured() -> bool:
 # on EVERY request via any_key_configured() -> require_auth, so an unthrottled
 # warning would put one line per request in the log for a persistent state.
 _empty_owner_key_warned = False
+# The message logged for the current downgrade, or None when none is in effect.
+# Read by owner_key_downgrade_warning().
+_empty_owner_key_downgrade_message: Optional[str] = None
 
 
 def _owner_key_present() -> bool:
@@ -1179,33 +1182,50 @@ def _owner_key_present() -> bool:
     cannot be read): when the file is present but unreadable this returns True
     (auth in effect) while verify() matches nothing, so every request is rejected
     (401 / locked) rather than served open - the safe direction."""
-    global _empty_owner_key_warned
+    global _empty_owner_key_warned, _empty_owner_key_downgrade_message
     env = os.environ.get(ENV_VAR)
     if env and env.strip():
         return True
     status, text, _err = _read_owner_key_file()
     if status == _KEY_ABSENT:
+        # Re-arm: the empty-file anomaly this latch tracks no longer holds once
+        # the file is gone, and a later empty file is a fresh occurrence.
+        _empty_owner_key_warned = False
+        _empty_owner_key_downgrade_message = None
         return False                       # genuinely absent -> open by design
     if status == _KEY_UNREADABLE:
         # Present but we cannot read or decode it (a permission/profile change, a
         # parent-directory problem, a directory in its place, undecodable bytes):
         # we cannot tell whether a key exists, so fail CLOSED. Surfaced by
-        # _read_key_file's own warning on the value path.
+        # _read_key_file's own warning on the value path. Re-arm here too: auth
+        # is back in effect, so a stale "server runs in OPEN mode" notice would
+        # contradict this function's own return value.
+        _empty_owner_key_warned = False
+        _empty_owner_key_downgrade_message = None
         return True
     if _key_text_or_none(text) is not None:
         # Re-arm the notice: a server that later drops KEYED -> OPEN (the file is
         # truncated while running) must say so again, or the second downgrade
         # would be the silent one.
         _empty_owner_key_warned = False
+        _empty_owner_key_downgrade_message = None
         return True
     if not _empty_owner_key_warned:
         _empty_owner_key_warned = True
-        logger.warning(
-            "owner key file %s exists but holds no key; treating it as NO key, "
-            "so the server runs in OPEN (keyless) mode - set a key (the "
-            "launcher, `localm key set`, or LOCALM_API_KEY) or delete the file",
-            key_file())
+        _empty_owner_key_downgrade_message = (
+            f"owner key file {key_file()} exists but holds no key; treating it "
+            f"as NO key, so the server runs in OPEN (keyless) mode - set a key "
+            f"(the launcher, `localm key set`, or LOCALM_API_KEY) or delete the "
+            f"file")
+        logger.warning(_empty_owner_key_downgrade_message)
     return False
+
+
+def owner_key_downgrade_warning() -> Optional[str]:
+    """The current empty-owner-key-file downgrade notice, or None when no such
+    downgrade is in effect. Reflects _owner_key_present()'s latch; calling this
+    does not itself read the key file."""
+    return _empty_owner_key_downgrade_message
 
 
 def any_key_configured() -> bool:

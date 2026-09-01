@@ -198,3 +198,120 @@ def test_missing_llama_runtime_stays_silent(monkeypatch):
 
     assert records == [], \
         "a simply-not-yet-installed runtime wheel is the normal pre-setup state, not a warning"
+
+
+# --------------------------------------------------------------------------- #
+#  last_runtime_resolution_warning() surfaces the same warnings beyond --debug
+# --------------------------------------------------------------------------- #
+
+def _reset_runtime_warning_state(monkeypatch, _loader):
+    monkeypatch.setattr(_loader, "_warned_explicit_lib", False)
+    monkeypatch.setattr(_loader, "_last_broken_runtime_warning", None, raising=False)
+    monkeypatch.setattr(_loader, "_last_explicit_lib_warning", None, raising=False)
+
+
+def test_last_runtime_resolution_warning_none_by_default(monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+    _reset_runtime_warning_state(monkeypatch, _loader)
+    assert _loader.last_runtime_resolution_warning() is None
+
+
+def test_last_runtime_resolution_warning_reflects_bad_llama_cpp_lib(tmp_path, monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+    _reset_runtime_warning_state(monkeypatch, _loader)
+    monkeypatch.setenv("LLAMA_CPP_LIB", str(tmp_path / "nope" / "llama.dll"))
+
+    _loader.runtime_binary_dir()
+
+    warning = _loader.last_runtime_resolution_warning()
+    assert warning and "LLAMA_CPP_LIB" in warning
+
+
+def test_last_runtime_resolution_warning_reflects_broken_runtime(monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+    _reset_runtime_warning_state(monkeypatch, _loader)
+    monkeypatch.delenv("LLAMA_CPP_LIB", raising=False)
+    fake = types.ModuleType("localm_llama_runtime")   # no lib_dir() attribute
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", fake)
+
+    _loader.runtime_binary_dir()
+
+    warning = _loader.last_runtime_resolution_warning()
+    assert warning and "broken" in warning
+
+
+def test_last_runtime_resolution_warning_combines_both(tmp_path, monkeypatch):
+    """NEGATIVE-adjacent: both conditions can be true at once (a broken wheel AND
+    a bad override), and neither must silently drop the other."""
+    from localm.inference.backends.llamacpp import _loader
+    _reset_runtime_warning_state(monkeypatch, _loader)
+    monkeypatch.setenv("LLAMA_CPP_LIB", str(tmp_path / "nope" / "llama.dll"))
+    fake = types.ModuleType("localm_llama_runtime")
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", fake)
+
+    _loader.runtime_binary_dir()
+
+    warning = _loader.last_runtime_resolution_warning()
+    assert warning and "LLAMA_CPP_LIB" in warning and "broken" in warning
+
+
+def test_last_runtime_resolution_warning_stays_none_when_runtime_simply_absent(monkeypatch):
+    """NEGATIVE CASE: the normal pre-`setup-llama` state must not manufacture a
+    warning, matching test_missing_llama_runtime_stays_silent."""
+    from localm.inference.backends.llamacpp import _loader
+    _reset_runtime_warning_state(monkeypatch, _loader)
+    monkeypatch.delenv("LLAMA_CPP_LIB", raising=False)
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", None)
+
+    _loader.runtime_binary_dir()
+
+    assert _loader.last_runtime_resolution_warning() is None
+
+
+def test_last_runtime_resolution_warning_clears_when_the_runtime_is_fixed(monkeypatch):
+    """A later CLEAN resolution must clear a stale broken-install warning -
+    otherwise a reinstalled localm_llama_runtime still reads as broken."""
+    from localm.inference.backends.llamacpp import _loader
+    _reset_runtime_warning_state(monkeypatch, _loader)
+    monkeypatch.delenv("LLAMA_CPP_LIB", raising=False)
+    broken = types.ModuleType("localm_llama_runtime")   # no lib_dir() attribute
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", broken)
+    _loader.runtime_binary_dir()
+    assert _loader.last_runtime_resolution_warning() is not None
+
+    fixed = types.ModuleType("localm_llama_runtime")
+    fixed.lib_dir = lambda: None
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", fixed)
+    _loader.runtime_binary_dir()
+    assert _loader.last_runtime_resolution_warning() is None
+
+
+def test_last_runtime_resolution_warning_clears_when_llama_cpp_lib_is_unset(tmp_path, monkeypatch):
+    """Unsetting a bad LLAMA_CPP_LIB override must clear its warning - otherwise
+    the message keeps describing an override that no longer applies."""
+    from localm.inference.backends.llamacpp import _loader
+    _reset_runtime_warning_state(monkeypatch, _loader)
+    monkeypatch.setenv("LLAMA_CPP_LIB", str(tmp_path / "nope" / "llama.dll"))
+    _loader.runtime_binary_dir()
+    assert _loader.last_runtime_resolution_warning() is not None
+
+    monkeypatch.delenv("LLAMA_CPP_LIB", raising=False)
+    _loader.runtime_binary_dir()
+    assert _loader.last_runtime_resolution_warning() is None
+
+
+def test_last_runtime_resolution_warning_clears_when_llama_cpp_lib_is_fixed(tmp_path, monkeypatch):
+    """Pointing LLAMA_CPP_LIB at a directory that DOES contain the library must
+    clear a stale warning from an earlier bad value."""
+    from localm.inference.backends.llamacpp import _loader
+    _reset_runtime_warning_state(monkeypatch, _loader)
+    monkeypatch.setenv("LLAMA_CPP_LIB", str(tmp_path / "nope" / "llama.dll"))
+    _loader.runtime_binary_dir()
+    assert _loader.last_runtime_resolution_warning() is not None
+
+    good_dir = tmp_path / "good"
+    good_dir.mkdir()
+    (good_dir / _loader.lib_filename()).write_bytes(b"")
+    monkeypatch.setenv("LLAMA_CPP_LIB", str(good_dir / _loader.lib_filename()))
+    _loader.runtime_binary_dir()
+    assert _loader.last_runtime_resolution_warning() is None
