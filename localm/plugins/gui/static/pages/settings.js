@@ -1891,6 +1891,39 @@ export async function buildTtsSection(form) {
         if (labels[i]) o.textContent = labels[i];
       }
     }
+    // model gets one extra, CLIENT-ONLY option: picking it reveals a free-text
+    // box for any other Kokoro-compatible repo id. The sentinel value never
+    // reaches the save payload - read() substitutes the text box's value (or
+    // the unchanged original, while it is still empty) instead.
+    if (f.key === "model") {
+      const sel = ctrl.node.querySelector("select");
+      if (sel) {
+        const CUSTOM = "__custom__";
+        const custom = document.createElement("option");
+        custom.value = CUSTOM;
+        custom.textContent = "Custom (type your own)...";
+        sel.appendChild(custom);
+        const box = document.createElement("input");
+        box.type = "text";
+        box.placeholder = "owner/name";
+        box.hidden = true;
+        box.style.marginTop = "0.5rem";
+        box.dataset.key = f.key;
+        ctrl.node.appendChild(box);
+        sel.addEventListener("change", () => {
+          box.hidden = sel.value !== CUSTOM;
+          if (!box.hidden) box.focus();
+        });
+        box.addEventListener("input", () => markSettingDirty(box));
+        box.addEventListener("change", () => markSettingDirty(box));
+        const baseRead = ctrl.read;
+        ctrl.read = () => {
+          if (sel.value !== CUSTOM) return baseRead();
+          const typed = box.value.trim();
+          return typed || ctrl.orig;    // still empty: report unchanged, not a clear
+        };
+      }
+    }
     ctrl.orig = f.value;
     if (!f.is_override) ctrl.node.classList.add("media-inherited");
     _ttsControls.push(ctrl);

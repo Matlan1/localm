@@ -50,6 +50,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   skill gives the assistant operational guidance: how to judge model/quant
   fit before downloading, when to delegate a whole task instead of a single
   chat call, and what image generation needs.
+- **A curated picker for the Kokoro voice model, in Settings > Text-to-speech.**
+  Switching models used to mean typing a raw Hugging Face repo id into a blank
+  box with no discoverability. It now offers the shipped default plus a
+  verified alternate with word-level timestamps, with a "Custom" option that
+  still accepts any other Kokoro-compatible repo id for power users.
+- **The letter grade shown next to each voice (e.g. "Heart (en-us, Female,
+  A)") is now explained in Settings.** It rates that voice's training data,
+  not a version number: higher means more and cleaner training audio.
 
 ### Fixed
 - **The list of other running LocaLM servers now really does cover the whole

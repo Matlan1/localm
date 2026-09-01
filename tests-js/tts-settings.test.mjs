@@ -40,8 +40,15 @@ function ttsPayload({ active = true, voice = "af_heart" } = {}) {
       }),
       ttsField("speed", { widget: "number", label: "Speaking speed", value: 1,
                           default: 1, min: 0.5, max: 2, step: 0.05 }),
-      ttsField("model", { label: "Voice model", value: "onnx-community/K",
-                          default: "onnx-community/K" }),
+      ttsField("model", {
+        widget: "select", label: "Voice model",
+        value: "onnx-community/Kokoro-82M-v1.0-ONNX",
+        default: "onnx-community/Kokoro-82M-v1.0-ONNX",
+        options: ["onnx-community/Kokoro-82M-v1.0-ONNX",
+                  "onnx-community/Kokoro-82M-v1.0-ONNX-timestamped"],
+        option_labels: ["Kokoro 82M v1.0 (default)",
+                        "Kokoro 82M v1.0, with word timestamps"],
+      }),
       ttsField("device", { widget: "select", label: "Compute device", value: "auto",
                            default: "auto", options: ["auto", "webgpu", "wasm"],
                            advanced: true }),
@@ -129,6 +136,65 @@ test("the voice select keeps the ids as values but shows the friendly names", as
   assert.deepEqual([...sel.options].map((o) => o.textContent),
                    ["Heart (en-us, Female, A)", "Onyx (en-us, Male, D)"]);
   assert.equal(sel.value, "af_heart", "the current server value is selected");
+});
+
+test("the model select offers the curated repos plus a Custom option", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  await render(win);
+  const sel = ctrl(section(win), "model").querySelector("select");
+  const values = [...sel.options].map((o) => o.value);
+  assert.ok(values.includes("onnx-community/Kokoro-82M-v1.0-ONNX"));
+  assert.ok(values.includes("onnx-community/Kokoro-82M-v1.0-ONNX-timestamped"));
+  assert.ok(values.includes("__custom__"), "a free-text escape hatch must exist");
+  assert.equal(sel.value, "onnx-community/Kokoro-82M-v1.0-ONNX");
+});
+
+test("picking Custom reveals a text box, hidden again on picking a curated repo", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  await render(win);
+  const wrap = ctrl(section(win), "model");
+  const sel = wrap.querySelector("select");
+  const box = wrap.querySelector("input[type=text]");
+  assert.ok(box.hidden, "the custom box starts hidden");
+  sel.value = "__custom__";
+  sel.dispatchEvent(new win.Event("change", { bubbles: true }));
+  assert.ok(!box.hidden, "picking Custom reveals the text box");
+  sel.value = "onnx-community/Kokoro-82M-v1.0-ONNX-timestamped";
+  sel.dispatchEvent(new win.Event("change", { bubbles: true }));
+  assert.ok(box.hidden, "picking a curated repo hides it again");
+});
+
+test("typing a custom repo id POSTs the typed value, not the sentinel", async () => {
+  const posts = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch({ posts }) });
+  await render(win);
+  const sec = section(win);
+  const wrap = ctrl(sec, "model");
+  const sel = wrap.querySelector("select");
+  const box = wrap.querySelector("input[type=text]");
+  sel.value = "__custom__";
+  sel.dispatchEvent(new win.Event("change", { bubbles: true }));
+  box.value = "someorg/some-other-kokoro-onnx";
+  box.dispatchEvent(new win.Event("input", { bubbles: true }));
+  sec.querySelector(".settings-section-save").click();
+  for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(posts, [{ model: "someorg/some-other-kokoro-onnx" }]);
+});
+
+test("picking Custom with nothing typed yet does not POST an accidental clear", async () => {
+  const posts = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch({ posts }) });
+  await render(win);
+  const sec = section(win);
+  const sel = ctrl(sec, "model").querySelector("select");
+  sel.value = "__custom__";
+  sel.dispatchEvent(new win.Event("change", { bubbles: true }));
+  // Saving some OTHER field must not treat the untouched Custom box as a change.
+  sec.querySelector('[data-field-key="speed"] input').value = "1.5";
+  sec.querySelector(".settings-section-save").click();
+  for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(posts, [{ speed: 1.5 }],
+    "an empty Custom box must not clear the model override");
 });
 
 test("no section when the tts plugin is not active (its settings would do nothing)", async () => {
