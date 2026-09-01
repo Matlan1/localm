@@ -326,11 +326,12 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
     notes: list[str] = []
 
     if mode == "local":
+        from localm.auth import get_api_key
         from localm.plugins.coder.backends.http import HTTPBackend
         backend = HTTPBackend(
             self_url,
             model=model_name,
-            api_key=os.environ.get("LOCALM_API_KEY") or "localm",
+            api_key=get_api_key() or "localm",
             localm_server=True,   # self-connection: grammar sampling available
             native_tools=req.native_tools,
         )
@@ -1653,6 +1654,7 @@ async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest
                                  "(run `localm gui`).")
 
     def _consolidate():
+        from localm.auth import get_api_key
         from localm.plugins.coder.backends.http import HTTPBackend
         from localm.plugins.coder.episodes import EpisodeStore, consolidate
         from localm.textnorm import strip_think
@@ -1664,7 +1666,7 @@ async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest
         backend = HTTPBackend(
             self_url,
             model=active_model(),
-            api_key=os.environ.get("LOCALM_API_KEY") or "localm",
+            api_key=get_api_key() or "localm",
             localm_server=True,
         )
 

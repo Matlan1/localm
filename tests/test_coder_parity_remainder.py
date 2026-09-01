@@ -367,6 +367,39 @@ def test_consolidate_reports_what_it_did(tmp_path, monkeypatch):
         assert body["warning"]
 
 
+def test_consolidate_backend_uses_the_persisted_owner_key(tmp_path, monkeypatch):
+    """The self-call backend consolidate builds must present the real owner
+    key, not the hardcoded "localm" placeholder, once one is configured -
+    the same precedence make_localm_backend already uses."""
+    app, proj, _owner_header = _owner(tmp_path, monkeypatch)
+    from localm import auth
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    auth.set_api_key("file-key-persisted")
+
+    captured = {}
+    import localm.plugins.coder.backends.http as _http
+    real_init = _http.HTTPBackend.__init__
+
+    def _spy_init(self, *a, **kw):
+        captured["api_key"] = kw.get("api_key")
+        return real_init(self, *a, **kw)
+
+    monkeypatch.setattr(_http.HTTPBackend, "__init__", _spy_init)
+    from localm.plugins.coder import episodes as _eps
+    # The route imports consolidate inside its worker, so patching the module
+    # attribute is seen at call time. The stub never calls `complete`.
+    monkeypatch.setattr(
+        _eps, "consolidate",
+        lambda store, **kw: {"groups": 0, "merged": 0, "replaced": 0,
+                             "archived": 0, "skipped": 0})
+    with TestClient(app) as client:
+        r = client.post("/api/coder/episodes/consolidate",
+                        headers={"Authorization": "Bearer file-key-persisted"},
+                        json={"cwd": str(proj)})
+    assert r.status_code == 200, r.text
+    assert captured.get("api_key") == "file-key-persisted"
+
+
 def test_consolidate_needs_the_gui_server(tmp_path, monkeypatch):
     """It takes a model turn, so without the shared services there is nothing to
     ask - said plainly rather than answered with an empty report."""
