@@ -9,6 +9,7 @@
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
 import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, sentShellToken } from "./helpers.js";
+import { syncLanguageFromConfig } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
 import { capsReady, loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
@@ -448,6 +449,7 @@ window.bootAuthProbe = bootAuthProbe;
   if (shouldShowInstallGate()) showInstallGate();
   // Authenticated (or open/loopback mode): load the app.
   syncLogoStyleFromConfig();   // reconcile the wordmark with the shared config
+  syncLanguageFromConfig();    // reconcile the interface language with the shared config
   // R25: hide the startup overlay once the model list resolves (the app is usable)
   // or fails - never leave it stuck over the shell.
   const modelsReady = refreshModels().then(() => populateSetupModels());

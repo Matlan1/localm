@@ -37,10 +37,11 @@ assert.notEqual(loopStart, -1,
   "main.js's window-export loop anchor not found - did its shape change? update this test's anchor to match.");
 const LOOP_SRC = MAIN_JS.slice(loopStart); // the loop is the file's last statement
 
-// main.js iterates a fixed list of 23 imported namespace objects (m0, m1,
-// mIcons, mPk, m2..m20); alias every one of them to the same fixture module
-// so the extracted loop runs, unmodified, against a real live namespace.
-const MOD_PARAM_NAMES = ["m0", "m1", "mIcons", "mPk", "m2", "m3", "m4", "m5", "m6", "m7",
+// main.js iterates a fixed list of 25 imported namespace objects (m0, m1,
+// mI18nEn, mI18n, mIcons, mPk, m2..m20); alias every one of them to the same
+// fixture module so the extracted loop runs, unmodified, against a real live
+// namespace.
+const MOD_PARAM_NAMES = ["m0", "m1", "mI18nEn", "mI18n", "mIcons", "mPk", "m2", "m3", "m4", "m5", "m6", "m7",
   "m8", "m9", "m10", "m11", "m12", "m13", "m14", "m15", "m16", "m17", "m18", "m19", "m20"];
 
 test("window.X tracks a reassigned `export let` binding (RED against a one-time value copy, GREEN against a live getter)", async () => {

@@ -724,8 +724,10 @@ _SW_STATIC = "localm/plugins/gui/static"
 _SW_JS = f"{_SW_STATIC}/sw.js"
 
 # sw.js's SHELL comment promises to precache "every app/* and pages/* module (the
-# import graph)". Matched with globs, not a copied file list.
-_SW_SHELL_MODULE_GLOBS = ("app/*.js", "pages/*.js")
+# import graph)". Matched with globs, not a copied file list. i18n/*.json is on
+# the list for the same reason: an interface language whose catalog is not
+# precached cannot be selected offline.
+_SW_SHELL_MODULE_GLOBS = ("app/*.js", "pages/*.js", "i18n/*.json")
 
 
 def _sw_shell_files(sw_js_text: str) -> set[str]:
@@ -798,9 +800,10 @@ def _sw_cache_derivation_violations() -> list[str]:
 
 def _sw_shell_coverage_problems(shell: set[str], static_root: Path) -> list[str]:
     """SHELL must name real files, and must name every shell module - sw.js promises
-    "every app/* and pages/* module". A SHELL entry with no file behind it is silently
-    dropped at install time (Promise.allSettled), and a module missing from SHELL is not
-    precached at all, so the installed PWA cannot open it offline."""
+    "every app/* and pages/* module", plus every i18n/*.json language catalog. A SHELL
+    entry with no file behind it is silently dropped at install time
+    (Promise.allSettled), and a module missing from SHELL is not precached at all, so
+    the installed PWA cannot open it offline."""
     problems = []
     for url_path in sorted(shell):
         if not (static_root / url_path.lstrip("/")).is_file():
@@ -814,9 +817,9 @@ def _sw_shell_coverage_problems(shell: set[str], static_root: Path) -> list[str]
             if url not in shell:
                 problems.append(
                     f"{_SW_STATIC}{url}: ships but is NOT listed in {_SW_JS}'s SHELL, "
-                    "which promises every app/* and pages/* module - so it is never "
-                    "precached and the installed PWA cannot open it offline. Add it "
-                    "to SHELL.")
+                    "which promises every app/* and pages/* module and every i18n "
+                    "catalog - so it is never precached and the installed PWA cannot "
+                    "open it offline. Add it to SHELL.")
     return problems
 
 

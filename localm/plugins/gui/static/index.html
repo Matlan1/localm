@@ -83,29 +83,36 @@
       <!-- chat (protected #0), models/plugins/settings are kernel pages and
            stay static; the plugin tabs (coder, studio media, knowledge, ...)
            are rendered into nav-plugin-slot by renderNav() from /api/plugins. -->
-      <button id="nav-chat" class="active"><span class="nav-ic" data-icon="chat"></span>Chat</button>
+      <button id="nav-chat" class="active" data-i18n="nav.chat"><span class="nav-ic" data-icon="chat"></span>Chat</button>
       <div id="nav-plugin-slot"></div>
-      <button id="nav-models"><span class="nav-ic" data-icon="models"></span>Models</button>
-      <button id="nav-plugins"><span class="nav-ic" data-icon="plugins"></span>Plugins</button>
-      <button id="nav-settings"><span class="nav-ic" data-icon="settings"></span>Settings</button>
+      <button id="nav-models" data-i18n="nav.models"><span class="nav-ic" data-icon="models"></span>Models</button>
+      <button id="nav-plugins" data-i18n="nav.plugins"><span class="nav-ic" data-icon="plugins"></span>Plugins</button>
+      <button id="nav-settings" data-i18n="nav.settings"><span class="nav-ic" data-icon="settings"></span>Settings</button>
     </nav>
 
     <div id="conversations">
-      <h3>Conversations <button id="new-conv" class="section-head-btn" data-icon="plus" title="New conversation"></button></h3>
-      <input type="text" id="conv-search" placeholder="search chats…" spellcheck="false">
+      <h3 data-i18n="sidebar.conversations">Conversations <button id="new-conv" class="section-head-btn" data-icon="plus"
+            title="New conversation" data-i18n-title="sidebar.newConversation"></button></h3>
+      <input type="text" id="conv-search" placeholder="search chats…" data-i18n-placeholder="sidebar.searchChats"
+             spellcheck="false">
       <div id="conv-list"></div>
     </div>
 
     <div id="model-box">
-      <label for="model-select">Model</label>
+      <label for="model-select" data-i18n="sidebar.model">Model</label>
       <select id="model-select"></select>
       <div id="model-status"><span class="job-state" id="status-text">connecting…</span></div>
       <div id="model-split-line" class="sub" hidden></div>
       <button type="button" id="activity-pill" class="job-state st-running"
-              style="display:none; cursor:pointer;" title="Click for details"></button>
-      <div id="hw-stats" class="hw-stats" title="Live system load (CPU / RAM / VRAM / GPU)" hidden></div>
-      <button type="button" class="btn-secondary" id="sidebar-unload-btn" title="Unload the active model from memory (it reloads automatically on the next chat request)" hidden>unload model</button>
-      <button class="btn-secondary theme-btn" id="theme-toggle" title="Toggle light/dark"><span class="btn-ic" data-icon="theme"></span>theme</button>
+              style="display:none; cursor:pointer;" title="Click for details"
+              data-i18n-title="sidebar.activityDetails"></button>
+      <div id="hw-stats" class="hw-stats" title="Live system load (CPU / RAM / VRAM / GPU)"
+           data-i18n-title="sidebar.systemLoad" hidden></div>
+      <button type="button" class="btn-secondary" id="sidebar-unload-btn"
+              title="Unload the active model from memory (it reloads automatically on the next chat request)"
+              data-i18n-title="sidebar.unloadModelTitle" data-i18n="sidebar.unloadModel" hidden>unload model</button>
+      <button class="btn-secondary theme-btn" id="theme-toggle" title="Toggle light/dark"
+              data-i18n-title="sidebar.toggleTheme" data-i18n="sidebar.theme"><span class="btn-ic" data-icon="theme"></span>theme</button>
     </div>
   </aside>
 
@@ -118,12 +125,13 @@
     <!-- Mobile top bar: hamburger to open the sidebar drawer. Hidden on desktop
          (the sidebar is always visible there). -->
     <div id="mobile-topbar">
-      <button id="nav-toggle" aria-label="Open menu" aria-controls="sidebar"
+      <button id="nav-toggle" aria-label="Open menu" data-i18n-aria-label="topbar.openMenu" aria-controls="sidebar"
               aria-expanded="false" data-icon="menu"></button>
       <div class="mtb-title">local<span>m</span></div>
       <!-- New-chat compose button: on a phone the sidebar (with its + button) is
            a closed drawer, so surface "new chat" right in the top bar. -->
-      <button id="mtb-new" aria-label="New chat" data-icon="plus" title="New chat"></button>
+      <button id="mtb-new" aria-label="New chat" data-i18n-aria-label="topbar.newChat" data-icon="plus"
+              title="New chat" data-i18n-title="topbar.newChat"></button>
     </div>
 
     <!-- ============ CHAT ============ -->
@@ -131,58 +139,69 @@
       <div id="chat-messages"></div>
       <div class="composer-wrap">
         <div id="params">
-          <div class="full sub" style="margin:2px 0 8px">Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings &rsaquo; Chat</b> (system prompt, sampling); set one here to override it for this conversation only.</div>
-          <div class="full"><label>Persona - a saved system prompt + sampling defaults</label>
+          <div class="full sub" style="margin:2px 0 8px" data-i18n-rich="chat.params.intro">Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings &rsaquo; Chat</b> (system prompt, sampling); set one here to override it for this conversation only.</div>
+          <div class="full"><label data-i18n="chat.persona.label">Persona - a saved system prompt + sampling defaults</label>
             <div class="row">
-              <select id="p-persona"><option value="">(none)</option></select>
-              <button class="btn-secondary" id="persona-save" title="Save the current system prompt and sampling values under a name">save…</button>
-              <button class="btn-secondary" id="persona-delete" title="Delete the selected persona">delete</button>
+              <select id="p-persona"><option value="" data-i18n="chat.none">(none)</option></select>
+              <button class="btn-secondary" id="persona-save" data-i18n="chat.persona.save"
+                      title="Save the current system prompt and sampling values under a name"
+                      data-i18n-title="chat.persona.saveTitle">save…</button>
+              <button class="btn-secondary" id="persona-delete" data-i18n="chat.persona.delete"
+                      title="Delete the selected persona" data-i18n-title="chat.persona.deleteTitle">delete</button>
             </div>
           </div>
-          <div class="full"><label>System prompt <span class="sub">(blank = your Settings &rsaquo; Chat default)</span></label><textarea id="p-system" rows="3" placeholder="Blank = use your default from Settings"></textarea></div>
-          <div><label>Temperature</label><input id="p-temperature" type="number" step="0.05" min="0" max="2" placeholder="default"></div>
-          <div class="full check-row"><label title="Lets the model search the web and read pages mid-conversation (uses the server's network policy). Off = fully offline chat."><input type="checkbox" id="p-web"> <span class="lbl-ic" data-icon="web"></span> Web access - the model may search and read pages</label></div>
-          <div class="full check-row"><label title="Recalls facts localm has learned about you and adds them to the prompt. Add facts with /remember, view/edit with /memory. Blocked in privacy mode."><input type="checkbox" id="p-memory" checked> <span class="lbl-ic" data-icon="memory"></span> Memory - remind the model what it knows about you</label></div>
-          <div class="full check-row"><label title="Reads each finished reply aloud. Install the tts plugin for neural Kokoro voices; otherwise the browser's built-in offline voice is used. Every assistant message also has a speaker button."><input type="checkbox" id="p-speak"> <span class="lbl-ic" data-icon="speak"></span> Speak replies aloud</label></div>
-          <div class="full" id="voice-row" style="display:none"><label title="Which voice reads replies aloud, remembered in this browser. Neural Kokoro voices with the tts plugin installed, otherwise your browser's offline voices."><span class="lbl-ic" data-icon="voice"></span> Voice <span class="sub">(this browser)</span></label><select id="p-voice"></select></div>
-          <div class="full"><label><span class="lbl-ic" data-icon="book"></span> Knowledge - ground replies in an indexed collection (manage on the Knowledge page)</label><select id="p-kb"><option value="">(none)</option></select></div>
+          <div class="full"><label data-i18n="chat.systemPrompt">System prompt <span class="sub" data-i18n="chat.systemPrompt.hint">(blank = your Settings &rsaquo; Chat default)</span></label><textarea id="p-system" rows="3" placeholder="Blank = use your default from Settings" data-i18n-placeholder="chat.systemPrompt.placeholder"></textarea></div>
+          <div><label data-i18n="chat.temperature">Temperature</label><input id="p-temperature" type="number" step="0.05" min="0" max="2" placeholder="default" data-i18n-placeholder="chat.default"></div>
+          <div class="full check-row"><label title="Lets the model search the web and read pages mid-conversation (uses the server's network policy). Off = fully offline chat." data-i18n-title="chat.web.title" data-i18n="chat.web"><input type="checkbox" id="p-web"> <span class="lbl-ic" data-icon="web"></span> Web access - the model may search and read pages</label></div>
+          <div class="full check-row"><label title="Recalls facts localm has learned about you and adds them to the prompt. Add facts with /remember, view/edit with /memory. Blocked in privacy mode." data-i18n-title="chat.memory.title" data-i18n="chat.memory"><input type="checkbox" id="p-memory" checked> <span class="lbl-ic" data-icon="memory"></span> Memory - remind the model what it knows about you</label></div>
+          <div class="full check-row"><label title="Reads each finished reply aloud. Install the tts plugin for neural Kokoro voices; otherwise the browser's built-in offline voice is used. Every assistant message also has a speaker button." data-i18n-title="chat.speak.title" data-i18n="chat.speak"><input type="checkbox" id="p-speak"> <span class="lbl-ic" data-icon="speak"></span> Speak replies aloud</label></div>
+          <div class="full" id="voice-row" style="display:none"><label title="Which voice reads replies aloud, remembered in this browser. Neural Kokoro voices with the tts plugin installed, otherwise your browser's offline voices." data-i18n-title="chat.voice.title" data-i18n="chat.voice"><span class="lbl-ic" data-icon="voice"></span> Voice <span class="sub" data-i18n="chat.voice.hint">(this browser)</span></label><select id="p-voice"></select></div>
+          <div class="full"><label data-i18n="chat.knowledge"><span class="lbl-ic" data-icon="book"></span> Knowledge - ground replies in an indexed collection (manage on the Knowledge page)</label><select id="p-kb"><option value="" data-i18n="chat.none">(none)</option></select></div>
           <!-- Sampling knobs whose blank state already means "use the tuned
                default", plus the grammar box. Folded away so Temperature and the
                system prompt are not buried among six numbers nobody sets.
                Programmatic writers (applyPersona, /persona) call
                revealFilledAdvanced so a restored value is never left hidden. -->
           <details class="adv-fold full" id="p-advanced">
-            <summary>Advanced <span class="adv-fold-hint">sampling, seed, grammar</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="chat.advanced.hint">sampling, seed, grammar</span><span class="job-state adv-fold-count" hidden></span></summary>
             <div class="adv-fold-body">
-              <div><label>Top-p</label><input id="p-top-p" type="number" step="0.05" min="0" max="1" placeholder="default"></div>
-              <div><label>Top-k</label><input id="p-top-k" type="number" step="1" min="1" placeholder="default"></div>
-              <div><label>Repeat penalty</label><input id="p-repeat-penalty" type="number" step="0.05" min="0.5" max="2" placeholder="default"></div>
-              <div><label>Max tokens</label><input id="p-max-tokens" type="number" step="64" min="1" placeholder="default"></div>
-              <div><label>Seed</label><input id="p-seed" type="number" step="1" placeholder="random"></div>
-              <div class="full"><label>GBNF grammar (constrains output; local models only)</label><textarea id="p-grammar" rows="3" placeholder='root ::= "yes" | "no"' spellcheck="false"></textarea></div>
+              <div><label data-i18n="chat.topP">Top-p</label><input id="p-top-p" type="number" step="0.05" min="0" max="1" placeholder="default" data-i18n-placeholder="chat.default"></div>
+              <div><label data-i18n="chat.topK">Top-k</label><input id="p-top-k" type="number" step="1" min="1" placeholder="default" data-i18n-placeholder="chat.default"></div>
+              <div><label data-i18n="chat.repeatPenalty">Repeat penalty</label><input id="p-repeat-penalty" type="number" step="0.05" min="0.5" max="2" placeholder="default" data-i18n-placeholder="chat.default"></div>
+              <div><label data-i18n="chat.maxTokens">Max tokens</label><input id="p-max-tokens" type="number" step="64" min="1" placeholder="default" data-i18n-placeholder="chat.default"></div>
+              <div><label data-i18n="chat.seed">Seed</label><input id="p-seed" type="number" step="1" placeholder="random" data-i18n-placeholder="chat.random"></div>
+              <div class="full"><label data-i18n="chat.grammar">GBNF grammar (constrains output; local models only)</label><textarea id="p-grammar" rows="3" placeholder='root ::= "yes" | "no"' spellcheck="false"></textarea></div>
             </div>
           </details>
         </div>
         <div id="attach-chips"></div>
         <div class="composer">
-          <button class="attach" id="chat-attach" data-icon="attach" title="Attach images or documents (pdf, docx, txt, md, …)"></button>
-          <button class="attach" id="chat-mic" data-icon="mic" title="Hold a thought, speak it - click to record, click again to transcribe (needs the [voice] extra)"></button>
-          <button class="attach chat-camera" id="chat-camera" data-icon="camera" title="Take a photo with the camera"></button>
+          <button class="attach" id="chat-attach" data-icon="attach"
+                  title="Attach images or documents (pdf, docx, txt, md, …)"
+                  data-i18n-title="chat.attach"></button>
+          <button class="attach" id="chat-mic" data-icon="mic"
+                  title="Hold a thought, speak it - click to record, click again to transcribe (needs the [voice] extra)"
+                  data-i18n-title="chat.mic"></button>
+          <button class="attach chat-camera" id="chat-camera" data-icon="camera"
+                  title="Take a photo with the camera" data-i18n-title="chat.camera"></button>
           <input type="file" id="chat-file" accept="image/*,.pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
           <input type="file" id="chat-camera-file" accept="image/*" capture="environment" style="display:none">
           <div id="context-gauge-container" class="context-gauge-container">
             <div id="context-gauge-bar" class="context-gauge-bar"></div>
           </div>
-          <textarea id="chat-input" rows="1" placeholder="Message the model…" title="Enter to send · Shift+Enter for a new line"></textarea>
-          <button class="send" id="chat-send" data-icon="send" title="Send"></button>
+          <textarea id="chat-input" rows="1" placeholder="Message the model…" data-i18n-placeholder="chat.inputPlaceholder"
+                    title="Enter to send · Shift+Enter for a new line" data-i18n-title="chat.inputTitle"></textarea>
+          <button class="send" id="chat-send" data-icon="send" title="Send" data-i18n-title="chat.send"></button>
         </div>
         <div class="composer-row">
           <span>
-            <button id="toggle-params" class="composer-action"><span class="btn-ic" data-icon="sliders"></span>parameters</button>
+            <button id="toggle-params" class="composer-action" data-i18n="chat.parameters"><span class="btn-ic" data-icon="sliders"></span>parameters</button>
             &nbsp;&nbsp;
-            <button id="export-conv" class="composer-action" title="Download this conversation"><span class="btn-ic" data-icon="export"></span>export</button>
+            <button id="export-conv" class="composer-action" title="Download this conversation"
+                    data-i18n-title="chat.exportTitle" data-i18n="chat.export"><span class="btn-ic" data-icon="export"></span>export</button>
             &nbsp;&nbsp;
-            <button id="compact-conv" class="composer-action" title="Summarise older messages to free context"><span class="btn-ic" data-icon="compact"></span>compact</button>
+            <button id="compact-conv" class="composer-action" title="Summarise older messages to free context"
+                    data-i18n-title="chat.compactTitle" data-i18n="chat.compact"><span class="btn-ic" data-icon="compact"></span>compact</button>
           </span>
           <span id="chat-usage"></span>
         </div>
@@ -694,16 +713,18 @@
     <!-- ============ SETTINGS ============ -->
     <section id="view-settings" class="view">
       <div class="page settings-page">
-        <h2>Settings</h2>
-        <div class="sub">Stored in <code>config.json</code> in your data directory. Pick a section on the left;
+        <h2 data-i18n="settings.title">Settings</h2>
+        <div class="sub" data-i18n-rich="settings.intro">Stored in <code>config.json</code> in your data directory. Pick a section on the left;
         each one saves on its own. Engine values apply on the next model load.</div>
         <!-- Searches every group at once, so a setting can be found without
              knowing which of the seven sections it lives in. -->
         <input type="search" id="settings-filter" class="settings-filter"
                placeholder="Search all settings" aria-label="Search all settings"
+               data-i18n-placeholder="settings.search" data-i18n-aria-label="settings.search"
                spellcheck="false" autocomplete="off">
         <div class="settings-layout">
-          <nav id="settings-nav" class="settings-nav" aria-label="Settings sections"></nav>
+          <nav id="settings-nav" class="settings-nav" aria-label="Settings sections"
+               data-i18n-aria-label="settings.sections"></nav>
           <div id="settings-content" class="settings-content">
             <!-- Shown only when a search matches nothing (filled by applySettingsFilter). -->
             <div id="settings-filter-empty" class="sub settings-filter-empty" hidden></div>
@@ -787,12 +808,20 @@
 
             <section class="card settings-section" id="sec-appearance" data-group="system" data-sec-label="Appearance">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="theme"></span>
-                <div class="card-head-text"><h3>Appearance</h3></div></div>
-              <label>Logo style</label>
-              <div class="sub">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
+                <div class="card-head-text"><h3 data-i18n="appearance.title">Appearance</h3></div></div>
+              <label for="lang-select" data-i18n="appearance.language">Interface language</label>
+              <!-- Options are the LANGUAGES registry (app/i18n.js), each named in its
+                   own language, and are filled in by renderLanguagePicker(). -->
+              <select id="lang-select"></select>
+              <div class="sub" data-i18n="appearance.language.help">The language the interface is shown in. Saved on the server, so it
+              follows this instance to every browser that connects to it. Parts of the app that are
+              not translated yet stay in English.</div>
+
+              <label data-i18n="appearance.logoStyle">Logo style</label>
+              <div class="sub" data-i18n="appearance.logoStyle.help">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
               <div id="logo-style-picker" class="logo-style-picker"></div>
 
-              <label class="check">
+              <label class="check" data-i18n="appearance.showMmproj">
                 <input type="checkbox" id="show-mmproj-files">
                 Show vision projector (.mmproj) files in repository search results
               </label>
