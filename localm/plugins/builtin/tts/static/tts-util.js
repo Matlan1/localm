@@ -163,7 +163,7 @@ export function loadToast({ cached = false, secureContext = true } = {}) {
 // audible-to-the-log rather than silent, per rule 5. If it ever fires on the
 // default path, something has regressed.
 export function repairAudioTransient(samples, sampleRate) {
-  const report = { count: 0, peak: 0, firstIndex: -1, zeroedThrough: -1 };
+  const report = { count: 0, peak: 0, firstIndex: -1, zeroedThrough: -1, beyondHead: 0 };
   const n = samples ? samples.length : 0;
   if (!n) return report;
   const bad = (v) => !Number.isFinite(v) || Math.abs(v) > 1;
@@ -192,11 +192,29 @@ export function repairAudioTransient(samples, sampleRate) {
       samples[j] = Number.isFinite(samples[j]) ? samples[j] * (i / fade) : 0;
     }
   }
+  // beyondHead counts only samples the head pass above never zeroed - i.e. bad
+  // samples at or past `head`, which clamping can neutralise but not repair.
   for (let i = 0; i < n; i++) {           // anything left out of range: clamp only
     const v = samples[i];
+    const wasBad = !Number.isFinite(v) || v > 1 || v < -1;
     if (!Number.isFinite(v)) samples[i] = 0;
     else if (v > 1) samples[i] = 1;
     else if (v < -1) samples[i] = -1;
+    if (wasBad && i >= head) report.beyondHead++;
   }
   return report;
+}
+
+// True only when a repaired chunk still carries corruption outside the
+// repairable leading transient, on the one device that can ever reach here -
+// auto never selects webgpu (see pickDevice). See tts.test.mjs.
+export function shouldAbortForCorruption(report, device) {
+  return !!(report && report.beyondHead > 0 && device === "webgpu");
+}
+
+// True when a passive (not user-initiated) model warm-up may proceed without
+// asking - the model is already cached, or net_mode allows a fetch with no
+// prompt. See tts-net-gate.test.mjs.
+export function shouldWarmPassively(cached, netMode) {
+  return !!cached || netMode === "allow";
 }

@@ -994,7 +994,12 @@ $("chat-mic").onclick = toggleMic;
  *  (the good Win11 voices are Narrator-only or cloud), which is exactly why the
  *  tts plugin exists. */
 export let ttsProvider = null;   // {name, voices(), getVoice(), setVoice(id),
-                          //  speaking(), ready(), speak(text, opts), stop()}
+                          //  speaking(), ready(opts), speak(text, opts), stop()}
+                          // speak()'s opts may carry onEnd: a callback the
+                          // provider is free to ignore, fired when THIS
+                          // utterance stops for any reason. ready()'s opts may
+                          // carry passive: true, a hint that this call must not
+                          // prompt or fetch unless it is already free to.
 
 /** Install (or clear, with null) the active TTS provider, then refresh the
  *  voice picker. Called by a client plugin's register(ctx). */
@@ -1012,31 +1017,40 @@ export function selectedBrowserVoice() {
 }
 
 /** Read text aloud. With toggle: true (the speak action) a second call stops
- *  instead; auto-speak replaces the current utterance. */
+ *  instead; auto-speak replaces the current utterance. opts.onEnd, if given,
+ *  fires when THIS utterance stops (naturally, interrupted, or errored) -
+ *  never when this call only stopped a prior one. Returns whether a new
+ *  utterance actually started. */
 export function speak(text, opts = {}) {
   const clean = stripThink(text).replace(/[*_`#>\[\]()]/g, " ").trim();
   if (ttsProvider) {
     if (ttsProvider.speaking()) {
       ttsProvider.stop();
-      if (opts.toggle) return;
+      if (opts.toggle) return false;
     }
-    if (clean) ttsProvider.speak(clean, opts);
-    return;
+    if (clean) {
+      ttsProvider.speak(clean, opts);
+      return true;
+    }
+    return false;
   }
   if (!window.speechSynthesis) {
     toast("This browser has no speech synthesis", true);
-    return;
+    return false;
   }
   if (speechSynthesis.speaking) {
     speechSynthesis.cancel();
-    if (opts.toggle) return;
+    if (opts.toggle) return false;
   }
   if (clean) {
     const u = new SpeechSynthesisUtterance(clean);
     const v = selectedBrowserVoice();
     if (v) u.voice = v;
+    if (opts.onEnd) { u.onend = opts.onEnd; u.onerror = opts.onEnd; }
     speechSynthesis.speak(u);
+    return true;
   }
+  return false;
 }
 
 // The chat voice picker is a PER-BROWSER choice, stored here. The tts plugin's
@@ -2176,6 +2190,12 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     return;
   } else if ($("p-speak").checked && full) {
     speak(full);   // read the finished reply aloud (offline browser voices)
+  } else if (full && ttsProvider && typeof ttsProvider.ready === "function") {
+    // Warm the voice model now, while the reply is on screen, so the cold
+    // model-compile cost is already paid by the time a manual "speak" click
+    // happens. passive: true skips this unless it needs no download prompt.
+    ttsProvider.ready({ passive: true })
+      .catch((e) => console.debug("[tts] passive warm-up skipped:", e));
   }
 }
 

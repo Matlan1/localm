@@ -1857,8 +1857,9 @@ TTS_FIELDS: list = [
              "Custom to enter any other Kokoro-compatible repo id.",
              options=[repo for repo, _ in TTS_MODEL_OPTIONS]),
     TtsField("device", Widget.SELECT, "Compute device",
-             "auto uses the GPU (WebGPU) when the browser has one and falls "
-             "back to WASM. Force wasm if the GPU path misbehaves.",
+             "webgpu currently produces corrupted, buzzing audio on many "
+             "GPUs, so auto always uses wasm instead. Pick webgpu only to "
+             "test whether that has been fixed.",
              options=list(TTS_DEVICES), advanced=True),
     TtsField("dtype", Widget.SELECT, "Model precision",
              "auto picks fp32 (clean audio). q8/fp16 download less but sound "

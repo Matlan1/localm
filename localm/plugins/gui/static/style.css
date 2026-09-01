@@ -2034,6 +2034,9 @@ div:has(> .data-table) { overflow-x: auto; }
   border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.action:hover { color: var(--accent); border-color: var(--accent); }
+.msg-meta button.action.speaking {
+  color: var(--accent); border-color: var(--accent); animation: mic-pulse 1.2s infinite;
+}
 
 /* F11: "used N memories" chip on an assistant turn (chat.js buildMemoryChip). */
 .msg-meta button.mem-chip {

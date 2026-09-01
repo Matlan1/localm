@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UTIL = join(HERE, "..", "localm", "plugins", "builtin", "tts", "static", "tts-util.js");
 const TTS_JS = join(HERE, "..", "localm", "plugins", "builtin", "tts", "static", "tts.js");
-const { planModelFetch, NetGateError } = await import(pathToFileURL(UTIL).href);
+const { planModelFetch, NetGateError, shouldWarmPassively } = await import(pathToFileURL(UTIL).href);
 
 // ---- planModelFetch: pure decision ------------------------------------- //
 
@@ -56,6 +56,24 @@ test("NetGateError is a real Error subclass carrying its own name", () => {
   assert.ok(e instanceof Error);
   assert.equal(e.name, "NetGateError");
   assert.equal(e.message, "refused");
+});
+
+// ---- shouldWarmPassively: pure decision --------------------------------- //
+test("shouldWarmPassively: an already-cached model may always warm, in any mode", () => {
+  assert.equal(shouldWarmPassively(true, "ask"), true);
+  assert.equal(shouldWarmPassively(true, "off"), true);
+  assert.equal(shouldWarmPassively(true, "allow"), true);
+  assert.equal(shouldWarmPassively(true, undefined), true);
+});
+
+test("shouldWarmPassively: net_mode=allow may warm uncached, no prompt needed", () => {
+  assert.equal(shouldWarmPassively(false, "allow"), true);
+});
+
+test("shouldWarmPassively: net_mode=ask/off must NOT warm uncached - that needs a prompt", () => {
+  assert.equal(shouldWarmPassively(false, "ask"), false);
+  assert.equal(shouldWarmPassively(false, "off"), false);
+  assert.equal(shouldWarmPassively(false, undefined), false);
 });
 
 // ---- requestDownloadConsent: the confirmation dialog itself ------------ //
@@ -255,4 +273,76 @@ test("load(): net_mode=ask offers the dialog; declining reverts to the browser v
   assert.match(errToast.msg, /net_mode=ask/);
   assert.match(errToast.msg, /not granted/);
   assert.equal(calls.registerTTS.at(-1), null);
+});
+
+// ---- ready({ passive: true }): the proactive warm-up ---------------------- //
+// jsdom defines no global `caches`, so modelCached() resolves false here in
+// every case - exactly the "never downloaded before" state that makes the
+// net_mode branch the only thing under test.
+
+test("ready({passive:true}): net_mode=ask and uncached never opens the dialog, never fetches", async () => {
+  const win = installModalShell();
+  installFetchEnv(win, { netMode: "ask" });
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+
+  const provider = calls.registerTTS[0];
+  const result = await provider.ready({ passive: true });
+  assert.equal(result, null, "declined silently - not an error the caller must catch");
+  assert.equal(win.$("modal").style.display, "none",
+    "a passive warm-up must never surprise the user with a consent prompt");
+  assert.equal(calls.toasts.length, 0, "a declined passive warm-up is not a failure");
+  assert.equal(calls.registerTTS.length, 1,
+    "must not fall back to the browser voice - the Kokoro provider is still fine");
+});
+
+test("ready({passive:true}): net_mode=off and uncached never opens the dialog, never fetches", async () => {
+  const win = installModalShell();
+  installFetchEnv(win, { netMode: "off" });
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+
+  const provider = calls.registerTTS[0];
+  const result = await provider.ready({ passive: true });
+  assert.equal(result, null);
+  assert.equal(win.$("modal").style.display, "none");
+  assert.equal(calls.toasts.length, 0);
+});
+
+test("ready({passive:true}): net_mode=allow and uncached proceeds straight to a real load attempt", async () => {
+  const win = installModalShell();
+  installFetchEnv(win, { netMode: "allow" });
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+
+  const provider = calls.registerTTS[0];
+  // Same boundary as the net_mode=off+allowDownloadsWhenOff test above: proceeding
+  // means attempting the real vendor import, which jsdom cannot execute. Reaching
+  // that failure (rather than a gate refusal) is exactly what proves it proceeded.
+  await provider.ready({ passive: true }).catch(() => {});
+  assert.equal(win.$("modal").style.display, "none",
+    "allow never needs a prompt, passive or not");
+});
+
+test("ready({passive:true}): a real click already loading is reused, not raced", async () => {
+  const win = installModalShell();
+  installFetchEnv(win, { netMode: "ask" });
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+
+  const provider = calls.registerTTS[0];
+  const clickPromise = provider.ready();               // a real click: net_mode=ask offers the dialog
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(win.$("modal-title").textContent, "Download voice model?");
+
+  // A passive warm-up firing while that real load is in flight must not open a
+  // second dialog or start a second fetch - it just rides the same promise.
+  const passivePromise = provider.ready({ passive: true });
+  clickButtonNamed(win, "Not now");
+  await assert.rejects(clickPromise);
+  await assert.rejects(passivePromise);
 });
