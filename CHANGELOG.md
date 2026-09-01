@@ -94,6 +94,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   reads back the per-text window the runtime actually granted and trims to it,
   so those builds keep working. Unaffected builds behave exactly as before, and
   the warning that a runtime ignored the request still appears in the log.
+- **The GPU load figure now reads the card's own sensor on older AMD boards
+  too.** It already showed whole-card load, whichever program was causing it,
+  on recent Radeons. On an older board, or an older driver, the sensor it asks
+  for is not available, and it quietly fell back to a Windows counter that
+  reports whichever part of the card is busiest - so a video call's encoder
+  could read as high load while the card was otherwise idle, or generation
+  could sit near 100% and barely register. Those boards are now asked through
+  the older AMD interfaces they do answer, and the Windows counter is used only
+  when the card answers through neither.
 - **The list of other running LocaLM servers now really does cover the whole
   machine.** Settings > Server & network said it listed every server running on
   this machine, but it only ever saw servers that share this install's data
