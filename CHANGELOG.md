@@ -229,6 +229,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   playback usually starts right away by the time you click.
 
 ### Security
+- **A shortcut or linked folder inside your project no longer leads the coder
+  out of it.** The coder refuses to read a file outside the project you pointed
+  it at, but two things that walk the project - the file tree it shows you and
+  the index it builds at startup - followed a linked folder straight out and
+  reported back what they found there: the names and sizes of files elsewhere
+  on your disk, and for source files the names of the functions inside them.
+  On Windows a junction was the more likely way in, because it does not look
+  like a link to the tools that were meant to skip one. Both now stop at the
+  edge of the project, and the tree tells you when it left a link unfollowed
+  rather than quietly omitting it.
 - **The coder now refuses a small set of catastrophic shell commands outright,
   instead of relying on you being there to say no.** Until now the only thing
   standing between the model and a command like a recursive delete of your home
