@@ -740,7 +740,7 @@ class GGUFEmbedder:
         self._effective_seq_ctx. A single text is already truncated to fit
         that per-sequence window, so it always fits alone; a group of multiple
         texts is shrunk automatically when their combined length would
-        overflow."""
+        overflow. See test_pack_groups_bounds_by_n_ctx_not_by_the_sliced_window."""
         groups: List[List[int]] = []
         current: List[int] = []
         current_tokens = 0
