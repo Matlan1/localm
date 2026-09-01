@@ -543,10 +543,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
                         "notes": ["Already open - joined the session already "
                                   "running for this folder instead of starting "
                                   "another."]}
-            # A DIFFERENT saved conversation was named. Joining would activate
-            # the wrong one while reporting success, and opening a second is
-            # the leak this guard exists to stop, so neither happens: the
-            # caller is told, and decides. See
+            # A DIFFERENT saved conversation was named: it is neither joined
+            # nor opened alongside the running one. See
             # test_resuming_a_different_checkpoint_does_not_join_the_wrong_one.
             raise HTTPException(
                 409, "This folder already has a coder session open, and a "

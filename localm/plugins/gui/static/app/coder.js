@@ -162,13 +162,11 @@ export function renderCoderSessionList() {
     }
   }
 
-  // A session is checkpointed after every completed task, not only when it
-  // closes, so a session that is open RIGHT NOW also has a saved checkpoint on
-  // disk and the dormant listing returns it like any other. It is already
-  // listed under "Open" above, so showing it again as past would offer to
-  // continue a conversation the user is currently sitting in. Matching on the
-  // checkpoint id alone is enough: it is unique per conversation, and a
-  // checkpoint that moves projects moves its file with it.
+  // A session is checkpointed after every completed task, not only at close, so
+  // a session that is open right now also has a saved checkpoint on disk and the
+  // dormant listing returns it. Rows whose checkpoint is live are dropped here;
+  // it is listed under "Open" above instead. The checkpoint id is unique per
+  // conversation and moves with its file, so it identifies a row on its own.
   const liveCheckpointIds = new Set();
   for (const s of coder.sessions.values()) {
     if (s.info.checkpoint_id) liveCheckpointIds.add(s.info.checkpoint_id);
@@ -750,14 +748,10 @@ function _liveSessionForCwd(cwd) {
   return null;
 }
 
-// Whether the live session for a folder is holding the SAME saved conversation
-// the caller asked for, so joining it answers the request instead of switching
-// the user to a conversation they did not pick.
-//
-// True with no id asked for ("continue last session" means whichever is here),
-// and true when the live session reports no checkpoint id at all: unable-to-tell
-// resolves toward joining, because the alternative path offers to END a session
-// and doing that on a guess is worse than the stale behaviour it replaces.
+// Whether the live session for a folder holds the SAME saved conversation the
+// caller asked for. True when no id was asked for, and true when the live
+// session reports no checkpoint id: unknown resolves toward joining, never
+// toward offering to end a session.
 function _sameCheckpoint(live, wantedId) {
   if (!wantedId) return true;
   const held = live.info.checkpoint_id;
@@ -767,8 +761,7 @@ function _sameCheckpoint(live, wantedId) {
 
 // A folder runs one session at a time, so continuing a DIFFERENT saved
 // conversation for a folder that already has one open means ending the open one
-// first. Asks, then does both steps, rather than silently switching to the
-// wrong session (which is what matching on the folder alone used to do).
+// first. Asks before doing both steps.
 function _offerCheckpointSwap(live, opts) {
   if (live.busy) {
     toast("The session open in this folder is busy - wait for it to finish, or "
@@ -889,9 +882,8 @@ export async function startCoderSession(opts = {}) {
       body: JSON.stringify(body),
     });
     // The server refuses a resume naming a checkpoint other than the one this
-    // folder already has open. The check above normally catches that first;
-    // this is the same case arriving from a stale tab or a second window,
-    // where this tab has the live session but its rail is out of date.
+    // folder already has open. Reached when this tab holds the live session but
+    // its rail is out of date: a stale tab, or a second window.
     if (r.status === 409 && resume && opts.checkpointId) {
       const live = _liveSessionForCwd(cwd);
       if (live) { _offerCheckpointSwap(live, opts); return; }
@@ -1090,9 +1082,7 @@ export async function endCoderSession() {
   await closeCoderSession(activeSession());
 }
 
-// End ONE named session. endCoderSession() is the toolbar button and always
-// means the active one; the checkpoint swap ends a specific session that may
-// not be active.
+// End ONE named session. endCoderSession() always means the active one.
 export async function closeCoderSession(s) {
   if (!s) return;
   try {
