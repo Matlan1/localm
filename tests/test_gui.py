@@ -1391,6 +1391,59 @@ class TestCompanionEndpoint:
         assert data["lan"] == "192.168.1.50"
         assert data["tailscale"] == "100.101.102.103"
 
+    def test_does_not_block_the_event_loop(self, monkeypatch):
+        """companion_addresses() can block on real DNS/socket calls
+        (_host_ips's gethostbyname_ex). A restart's fresh process has never run
+        this yet, so a slow lookup on the first Settings-page reconnect must not
+        freeze every other request - mirrors imgproxy's own event-loop proof."""
+        from unittest.mock import MagicMock
+
+        from localm import tls
+        from localm.plugins.gui.routes import system as system_routes
+
+        BLOCK_S = 2.0
+
+        def _slow_addrs():
+            time.sleep(BLOCK_S)
+            return {"lan": "192.168.1.50", "tailscale": ""}
+
+        monkeypatch.setattr(tls, "companion_addresses", _slow_addrs)
+
+        app = FastAPI()
+        system_routes.register(app, MagicMock())
+        endpoint = next(r.endpoint for r in app.routes
+                        if getattr(r, "path", None) == "/api/companion")
+
+        async def _drive():
+            trivial_done = []
+
+            async def _trivial():
+                for _ in range(3):
+                    await asyncio.sleep(0)
+                trivial_done.append(time.monotonic())
+
+            t0 = time.monotonic()
+            trivial = asyncio.ensure_future(_trivial())
+            main = asyncio.ensure_future(endpoint())
+            try:
+                await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
+            except asyncio.TimeoutError:
+                main.cancel()
+                raise AssertionError(
+                    "a concurrent trivial coroutine never got to run while "
+                    "companion_addresses() was in flight - /api/companion is "
+                    "on the event loop, so one slow DNS lookup freezes the "
+                    "whole server")
+            elapsed = trivial_done[0] - t0
+            resp = await asyncio.wait_for(main, timeout=BLOCK_S + 10)
+            return elapsed, resp
+
+        elapsed, resp = asyncio.run(_drive())
+        assert elapsed < BLOCK_S * 0.5, (
+            f"an unrelated coroutine took {elapsed:.2f}s while a {BLOCK_S}s "
+            "companion_addresses() call was in flight - the event loop was blocked")
+        assert resp["lan"] == "192.168.1.50"
+
 
 class TestBackendEndpoint:
     """GET /api/backend - the actually-installed llama.cpp backend (never
@@ -4332,6 +4385,69 @@ class TestPairingQR:
         app, _ = gui_app
         with TestClient(app) as client:
             assert client.get("/api/pairing/qr").status_code == 401
+
+    def test_does_not_block_the_event_loop(self, monkeypatch):
+        """qrcode (and the PIL it pulls in for its image backends) is imported
+        cold on first use in the process - a fresh restart has never touched it
+        yet, and that first import alone measured 10+s in a captured hang-alarm
+        trace. Mirrors imgproxy's own event-loop proof: patch the underlying
+        slow primitive (QRCode.make, reached by every caller of the module-level
+        qrcode import) rather than the route's own nested helper, which is not
+        importable from outside register()."""
+        from unittest.mock import MagicMock
+
+        import qrcode
+
+        from localm import auth
+        from localm.plugins.gui.routes import pairing as pairing_routes
+
+        BLOCK_S = 2.0
+        monkeypatch.setattr(auth, "get_api_key", lambda: "ownerkey123")
+
+        orig_make = qrcode.QRCode.make
+
+        def _slow_make(self, *a, **kw):
+            time.sleep(BLOCK_S)
+            return orig_make(self, *a, **kw)
+
+        monkeypatch.setattr(qrcode.QRCode, "make", _slow_make)
+
+        app = FastAPI()
+        pairing_routes.register(app, MagicMock())
+        endpoint = next(r.endpoint for r in app.routes
+                        if getattr(r, "path", None) == "/api/pairing/qr"
+                        and "GET" in r.methods)
+
+        async def _drive():
+            trivial_done = []
+
+            async def _trivial():
+                for _ in range(3):
+                    await asyncio.sleep(0)
+                trivial_done.append(time.monotonic())
+
+            t0 = time.monotonic()
+            trivial = asyncio.ensure_future(_trivial())
+            main = asyncio.ensure_future(endpoint())
+            try:
+                await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
+            except asyncio.TimeoutError:
+                main.cancel()
+                raise AssertionError(
+                    "a concurrent trivial coroutine never got to run while "
+                    "the QR render was in flight - /api/pairing/qr is on the "
+                    "event loop, so the first pairing-QR request after a "
+                    "restart freezes the whole server")
+            elapsed = trivial_done[0] - t0
+            resp = await asyncio.wait_for(main, timeout=BLOCK_S + 10)
+            return elapsed, resp
+
+        elapsed, resp = asyncio.run(_drive())
+        assert elapsed < BLOCK_S * 0.5, (
+            f"an unrelated coroutine took {elapsed:.2f}s while a {BLOCK_S}s "
+            "QR render was in flight - the event loop was blocked")
+        assert resp.status_code == 200
+        assert b"<svg" in resp.body
 
 
 @pytest.fixture

@@ -65,6 +65,7 @@ NET_MOD_CALLS = (
     {("requests", c) for c in
      ("get", "post", "put", "delete", "head", "patch", "request")}
     | {("socket", "create_connection"), ("socket", "getaddrinfo"),
+       ("socket", "gethostbyname"), ("socket", "gethostbyname_ex"),
        ("httpx", "get"), ("httpx", "post"), ("httpx", "request")}
 )
 

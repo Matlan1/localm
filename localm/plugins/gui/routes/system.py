@@ -81,10 +81,16 @@ def register(app: FastAPI, ctx) -> None:
         interface), so it never shows the meaningless loopback address. On the
         default loopback bind (``localm gui``) no phone can connect yet, so
         ``network_bind`` is False and the card explains how to bind to the
-        network instead."""
+        network instead.
+
+        Runs off-thread: companion_addresses() can block on DNS/socket calls
+        (_host_ips's gethostbyname_ex, _iface_ips's psutil scan), same reason
+        /api/stats offloads its own probe so a slow lookup never blocks the
+        event loop."""
         from localm import tls
         bind_host = getattr(app.state, "bind_host", "127.0.0.1")
-        addrs = tls.companion_addresses()
+        loop = asyncio.get_running_loop()
+        addrs = await loop.run_in_executor(get_plugin_executor(), tls.companion_addresses)
         return {
             "network_bind": not _web._is_loopback_host(bind_host),
             "lan": addrs.get("lan") or "",

@@ -7,10 +7,13 @@ The hand-built QR-SVG helper is a nested function inside register().
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import Response
 
 from localm import scopes
+from localm.executor import get_plugin_executor
 from localm.inference.http_server import require_scope
 
 
@@ -50,12 +53,18 @@ def register(app: FastAPI, ctx) -> None:
         scan it on the onboarding screen and SAVE the key - no typing. Owner scope
         only: it carries the key. 404 in open mode (no key -> nothing to pair).
         Rendered server-side; never cached. For a scoped/limited key the Keys &
-        devices manager POSTs the freshly-minted key to the sibling endpoint."""
+        devices manager POSTs the freshly-minted key to the sibling endpoint.
+
+        Runs off-thread: qrcode/PIL are imported cold on first use in this
+        process, which can itself take several seconds - keep that off the
+        event loop the same way the other startup-time GUI probes do."""
         from localm import auth
         key = auth.get_api_key()
         if not key:
             raise HTTPException(404, "No API key configured - nothing to pair.")
-        return Response(content=_pairing_qr_svg(key), media_type="image/svg+xml",
+        loop = asyncio.get_running_loop()
+        svg = await loop.run_in_executor(get_plugin_executor(), _pairing_qr_svg, key)
+        return Response(content=svg, media_type="image/svg+xml",
                         headers={"Cache-Control": "no-store"})
 
     @app.post("/api/pairing/qr",
@@ -75,6 +84,8 @@ def register(app: FastAPI, ctx) -> None:
         from localm import auth
         if auth.verify(key.strip()) is None:
             raise HTTPException(400, "Not a current localm key (mint one first).")
-        return Response(content=_pairing_qr_svg(key.strip()),
+        loop = asyncio.get_running_loop()
+        svg = await loop.run_in_executor(get_plugin_executor(), _pairing_qr_svg, key.strip())
+        return Response(content=svg,
                         media_type="image/svg+xml",
                         headers={"Cache-Control": "no-store"})
