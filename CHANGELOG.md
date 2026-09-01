@@ -239,11 +239,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   refuses a recursive delete aimed at a drive root, a home directory or a
   system directory; commands that format or overwrite a disk; writes that would
   overwrite or delete your SSH, GnuPG, AWS, Docker or Kubernetes credentials;
-  downloaded scripts piped straight into a shell; a force push at master or
-  main; and "git reset --hard", which throws away uncommitted work. Each
-  refusal says which rule stopped it and what to do instead. Ordinary commands
-  are unaffected, including ones that look similar such as deleting a build
-  directory or force-pushing your own feature branch.
+  downloaded scripts piped straight into a shell; a force push or a remote
+  branch deletion aimed at master or main, whether written as a flag or as a
+  refspec; and "git reset --hard", which throws away uncommitted work. The
+  same push rule covers the coder's built-in push action, not only a push it
+  types as a shell command. Each refusal says which rule stopped it and what
+  to do instead. Ordinary commands are unaffected, including ones that look
+  similar such as deleting a build directory or force-pushing your own
+  feature branch.
 
 ## [0.1.5] - 2026-08-26
 
