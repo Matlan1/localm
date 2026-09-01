@@ -49,6 +49,7 @@ from .agents import (
 from .parallel import tool_dispatch_parallel
 from .media import tool_generate_image
 from .rag import tool_rag_list_collections, tool_rag_search
+from .references import tool_find_references
 from .tasks import tool_read_todos, tool_set_todos
 
 @dataclass
@@ -78,7 +79,7 @@ class ToolDef:
 # git_commit/git_push, web_search/fetch_url, generate_image, read_env, spawn_agent,
 # and every dynamically-registered MCP, plugin or skill tool.
 SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
-    "read_file", "list_dir", "tree", "grep", "search_files",
+    "read_file", "list_dir", "tree", "grep", "search_files", "find_references",
     "write_file", "edit_file", "edit_files", "patch_file", "search_replace",
     "edit_notebook_cell",
     "git_status", "git_diff", "git_log",
@@ -292,6 +293,21 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "max_per_file":     {"type": "int", "description": "Matches shown per file (0 = all; default 20)",       "required": False},
             "max_output_lines": {"type": "int", "description": "Output lines before stopping (0 = no cap; default 300)", "required": False},
             "max_file_bytes":   {"type": "int", "description": "Skip files larger than this (0 = no cap; default 4 MB)",  "required": False},
+        },
+    ),
+    "find_references": ToolDef(
+        name="find_references",
+        fn=tool_find_references,
+        description=(
+            "Find call sites of a symbol in the indexed project - who calls "
+            "this before you change its signature. Best-effort and "
+            "single-repo (a regex reverse index, not a real call graph): a "
+            "shadowed local of the same name, or a call reached only through "
+            "an alias or attribute access, is not distinguished from a "
+            "genuine hit. Use grep for an exhaustive search."
+        ),
+        params={
+            "symbol": {"type": "string", "description": "Function/method/class name to find call sites of", "required": True},
         },
     ),
     "git_status": ToolDef(

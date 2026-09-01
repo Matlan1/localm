@@ -7,7 +7,11 @@ into node_modules / .git / system dirs) before the file cap is ever checked.
 Also mark_dirty() / _rescan_if_dirty(): the stat-diff + listdir reconciliation
 that keeps the map from going stale after a run_shell write (which - unlike
 write_file/edit_file - has no `path` arg to refresh_file() ahead of time; see
-execution.py's _refresh_map_for_tool and context.py's _build_messages)."""
+execution.py's _refresh_map_for_tool and context.py's _build_messages).
+
+Also ProjectMap.find_references() / _extract_call_sites(): the reverse-
+reference (call-site) index that rides the same per-file build/refresh/rescan
+lifecycle as the forward symbol index above."""
 
 import json
 import os
@@ -467,3 +471,197 @@ def test_save_cache_never_raises_on_write_failure(tmp_path):
     blocker = tmp_path / "blocker"
     blocker.write_text("x", encoding="utf-8")
     pm.save_cache(blocker / "sub" / "cache.json")   # must not raise
+
+
+# --------------------------------------------------------------------------- #
+#  Reverse-reference index: find_references() / _extract_call_sites()         #
+# --------------------------------------------------------------------------- #
+
+def test_find_references_reports_call_sites_across_files(tmp_path):
+    """The ticket's exact fixture shape: a function defined in file A, called
+    from files B and C. The definition's own line in A must never count as a
+    call site of itself."""
+    (tmp_path / "a.py").write_text(
+        "def helper(x):\n    return x + 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text(
+        "from a import helper\n\ndef run():\n    return helper(1)\n",
+        encoding="utf-8")
+    (tmp_path / "c.py").write_text(
+        "from a import helper\n\nresult = helper(2)\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path)
+
+    hits = pm.find_references("helper")
+    by_path = {str(p).replace("\\", "/"): ln for p, ln in hits}
+    assert set(by_path) == {"b.py", "c.py"}
+    assert by_path["b.py"] == 4   # "    return helper(1)"
+    assert by_path["c.py"] == 3   # "result = helper(2)"
+
+
+def test_find_references_excludes_the_definition_line(tmp_path):
+    (tmp_path / "a.py").write_text(
+        "def helper(x):\n    return x + 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("helper(1)\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path)
+
+    hits = pm.find_references("helper")
+    assert not any(str(p).replace("\\", "/") == "a.py" for p, _ in hits)
+    assert [str(p).replace("\\", "/") for p, _ in hits] == ["b.py"]
+
+
+def test_find_references_updates_after_an_edit(tmp_path):
+    """Mirrors test_rescan_picks_up_a_modified_file for the reverse index:
+    an edit that drops one call and adds a call to a different symbol must be
+    reflected after mark_dirty()."""
+    (tmp_path / "a.py").write_text(
+        "def helper(x):\n    return x + 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text(
+        "def run():\n    return helper(1)\n", encoding="utf-8")
+    (tmp_path / "c.py").write_text("result = helper(2)\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path)
+    assert len(pm.find_references("helper")) == 2
+
+    (tmp_path / "b.py").write_text(
+        "def run():\n    return other(1)\n", encoding="utf-8")
+    pm.mark_dirty()
+    hits = pm.find_references("helper")
+    assert [str(p).replace("\\", "/") for p, _ in hits] == ["c.py"]
+    other_hits = pm.find_references("other")
+    assert [str(p).replace("\\", "/") for p, _ in other_hits] == ["b.py"]
+
+
+def test_find_references_updates_after_the_call_site_file_is_deleted(tmp_path):
+    (tmp_path / "a.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("helper()\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path)
+    assert len(pm.find_references("helper")) == 1
+
+    (tmp_path / "b.py").unlink()
+    pm.mark_dirty()
+    assert pm.find_references("helper") == []
+
+
+def test_find_references_empty_for_unknown_symbol(tmp_path):
+    (tmp_path / "a.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path)
+    assert pm.find_references("nonexistent_symbol") == []
+
+
+def test_find_references_reconciles_via_rescan_like_other_reads(tmp_path):
+    """Mirrors test_rescan_is_a_noop_until_marked_dirty: a stale read before
+    mark_dirty(), a correct one after - find_references self-heals on the
+    same cadence as to_context_string()/file_count()."""
+    (tmp_path / "a.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("helper()\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path)
+    assert len(pm.find_references("helper")) == 1
+
+    (tmp_path / "b.py").write_text("nothing_here = 1\n", encoding="utf-8")
+    assert len(pm.find_references("helper")) == 1   # stale until marked dirty
+    pm.mark_dirty()
+    assert pm.find_references("helper") == []
+
+
+def test_recursive_call_in_the_defining_file_is_still_a_reference(tmp_path):
+    """A def line is skipped, but a genuine call from elsewhere in the SAME
+    file (e.g. recursion) is a real reference and must still be found."""
+    (tmp_path / "a.py").write_text(
+        "def factorial(n):\n"
+        "    if n <= 1:\n"
+        "        return 1\n"
+        "    return n * factorial(n - 1)\n",
+        encoding="utf-8")
+    pm = ProjectMap.build(tmp_path)
+    hits = pm.find_references("factorial")
+    assert [(str(p).replace("\\", "/"), ln) for p, ln in hits] == [("a.py", 4)]
+
+
+def test_call_site_index_survives_cache_round_trip(tmp_path):
+    """Mirrors test_save_cache_then_load_reconcile_round_trips_unchanged: the
+    reverse index must not be silently dropped by a cache save/load cycle."""
+    (tmp_path / "a.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("helper()\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    pm = ProjectMap.build(tmp_path)
+    pm.save_cache(cache)
+
+    loaded = ProjectMap.load_cached_and_reconcile(tmp_path, cache)
+    assert loaded is not None
+    hits = loaded.find_references("helper")
+    assert [str(p).replace("\\", "/") for p, _ in hits] == ["b.py"]
+
+
+def test_call_site_cache_load_tolerates_a_cache_written_before_refs_existed(tmp_path):
+    """A cache saved by an older build with no "refs" key per file must still
+    load (reindexing that file's refs as empty), never reject the whole
+    otherwise-usable cache - same tolerance to_cache_dict's other optional
+    keys already get (see _from_cache_dict's `symbols` handling)."""
+    (tmp_path / "a.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    pm = ProjectMap.build(tmp_path)
+    pm.save_cache(cache)
+
+    data = json.loads(cache.read_text(encoding="utf-8"))
+    for f in data["files"]:
+        f.pop("refs", None)
+    cache.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = ProjectMap.load_cached_and_reconcile(tmp_path, cache)
+    assert loaded is not None
+    assert loaded.find_references("helper") == []
+
+
+def test_call_site_cache_load_rejects_a_malformed_refs_entry(tmp_path):
+    """Mirrors test_load_reconcile_returns_none_for_wrong_shape: a hand-edited
+    or corrupt "refs" entry (wrong arity) must fall back to a full build(),
+    never raise and never be silently trusted."""
+    (tmp_path / "a.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    pm = ProjectMap.build(tmp_path)
+    pm.save_cache(cache)
+
+    data = json.loads(cache.read_text(encoding="utf-8"))
+    data["files"][0]["refs"] = [["helper", 4, "extra"]]   # wrong arity
+    cache.write_text(json.dumps(data), encoding="utf-8")
+
+    assert ProjectMap.load_cached_and_reconcile(tmp_path, cache) is None
+
+
+def test_call_site_extraction_is_bounded_per_file(tmp_path):
+    from localm.plugins.coder.indexer import _MAX_REFS_PER_FILE
+    text = "\n".join(f"call{i}()" for i in range(_MAX_REFS_PER_FILE + 50))
+    (tmp_path / "many.py").write_text(text, encoding="utf-8")
+    pm = ProjectMap.build(tmp_path)
+    fs = next(f for f in pm.files if f.path.name == "many.py")
+    assert len(fs.refs) == _MAX_REFS_PER_FILE
+
+
+def test_call_site_pattern_is_linear_on_a_pathological_long_line():
+    """The chip's own requirement: a fixed, non-model-supplied pattern must
+    still be proven linear before shipping. _CALL_SITE_RE's \\w* and \\s*
+    range over disjoint character classes, and \\b rejects every position
+    inside a uniform word-character run in O(1) (no boundary exists there),
+    so a huge run with no trailing "(" - the worst case for this pattern - is
+    O(n) rather than the O(n^2) a naive per-position retry would cost without
+    that \\b guard. 200k chars with no match at all: linear finishes in
+    milliseconds, quadratic would not finish in any reasonable test timeout."""
+    from localm.plugins.coder.indexer import _extract_call_sites
+    pathological = "a" * 200_000 + "\n"
+    start = time.monotonic()
+    hits = _extract_call_sites(pathological, "python")
+    elapsed = time.monotonic() - start
+    assert hits == []
+    assert elapsed < 2.0, f"call-site scan took {elapsed:.2f}s on a pathological line"
+
+
+def test_call_site_pattern_is_linear_on_many_short_tokens():
+    """A different pathological shape: thousands of short word-runs each
+    followed by a real \\b boundary (a space), so _CALL_SITE_RE is genuinely
+    ATTEMPTED at every token rather than rejected outright by \\b - the case
+    the previous test's O(1)-rejection reasoning does not cover."""
+    from localm.plugins.coder.indexer import _extract_call_sites
+    pathological = "a " * 100_000
+    start = time.monotonic()
+    hits = _extract_call_sites(pathological, "python")
+    elapsed = time.monotonic() - start
+    assert hits == []
+    assert elapsed < 2.0, f"call-site scan took {elapsed:.2f}s on a pathological line"

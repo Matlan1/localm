@@ -29,7 +29,7 @@ from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
-    _PATCH_MODE_ELIGIBLE_TOOLS, _SCOPE_PATH_ARGS,
+    _PATCH_MODE_ELIGIBLE_TOOLS, _PROJECT_MAP_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SKILL_STATE_TOOLS, _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
@@ -570,11 +570,13 @@ class _ExecutionMixin:
         args = dict(call.args)
         if call.name in _PARENT_AGENT_TOOLS:
             args["_parent_agent"] = self
-        # The task-list tools operate on THIS session's state (tools/tasks.py), and
-        # use_skill arms this session's active-skill restriction (skills.py).
+        # The task-list tools operate on THIS session's state (tools/tasks.py),
+        # use_skill arms this session's active-skill restriction (skills.py), and
+        # find_references reads this session's live ProjectMap (tools/references.py).
         # Injected after the copy, so a model-supplied "_session" cannot win and
         # choose its own restriction.
-        if call.name in _TODO_TOOLS or call.name in _SKILL_STATE_TOOLS:
+        if call.name in _TODO_TOOLS or call.name in _SKILL_STATE_TOOLS \
+                or call.name in _PROJECT_MAP_TOOLS:
             args["_session"] = self
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:

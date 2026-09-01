@@ -228,6 +228,12 @@ _TODO_TOOLS: frozenset[str] = frozenset({"set_todos", "read_todos"})
 # _TODO_TOOLS: injected identically, but they touch unrelated state.
 _SKILL_STATE_TOOLS: frozenset[str] = frozenset({"use_skill"})
 
+# Tools that read THIS session's live ProjectMap (tools/references.py), so the
+# dispatcher hands them the Agent as the same hidden `_session` arg. Separate
+# set again: injected identically to _TODO_TOOLS/_SKILL_STATE_TOOLS, but reads
+# project-index state rather than writing session state.
+_PROJECT_MAP_TOOLS: frozenset[str] = frozenset({"find_references"})
+
 # Fraction of estimated context window at which compaction is triggered
 _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
 

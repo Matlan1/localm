@@ -34,7 +34,7 @@ class RolePreset:
 
 # Building blocks: each role's allowed_tools is a union of these sets.
 _READ_ONLY = frozenset({
-    "read_file", "list_dir", "tree", "grep", "search_files",
+    "read_file", "list_dir", "tree", "grep", "search_files", "find_references",
 })
 # Inspecting git state runs no hook and changes nothing (unlike git_commit /
 # git_create_branch / git_push, which are excluded from every role below).
