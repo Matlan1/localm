@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GUI model routes: registry list/load, VRAM estimate, pull/remove/alias, and
-HuggingFace discovery.
+HuggingFace/CivitAI discovery.
 
 The active-model accessor, the model-switch callable, and the background job
 manager are unpacked from the register ``ctx`` into ``active_model`` /
@@ -924,28 +924,30 @@ def register(app: FastAPI, ctx) -> None:
         return {"status": "relocated", "model": req.model, "path": str(p.resolve())}
 
     # ------------------------ model discovery --------------------- #
-    # Search HuggingFace for GGUF and/or HF (transformers) models and show per-quant
-    # "fits your VRAM" badges for GGUF files. net_mode=off blocks it.
+    # Search HuggingFace or CivitAI and show per-quant/per-file "fits your VRAM"
+    # (HF) or license/NSFW/scan-status (CivitAI) badges. net_mode=off blocks it.
 
     def _discover_status(e: Exception) -> int:
         msg = str(e)
         if "net_mode" in msg:
             return 403          # blocked by the network kill switch
         if "request failed" in msg:
-            return 502          # HF unreachable
-        return 422              # bad repo / no GGUF files / bad format token
+            return 502          # HF/CivitAI unreachable
+        return 422              # bad repo / no files / bad format token / bad type
 
     async def _run_discover(fn):
-        """Run *fn* off the event loop; map DiscoverError to its HTTP status.
+        """Run *fn* off the event loop; map DiscoverError/ModelSourceError to its
+        HTTP status.
 
-        A browser has no CLI to run, so a net_mode=off refusal (DiscoverError.off)
-        gets its own GUI-native remedy here rather than the message's own
-        CLI-flavored one (`localm config net_mode ask`)."""
+        A browser has no CLI to run, so a net_mode=off refusal (`e.off`) gets its
+        own GUI-native remedy here rather than the message's own CLI-flavored one
+        (`localm config net_mode ask`)."""
         from localm.discover import DiscoverError
+        from localm.model_manager.sources import ModelSourceError
         loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(get_plugin_executor(), fn)
-        except DiscoverError as e:
+        except (DiscoverError, ModelSourceError) as e:
             if e.off:
                 raise HTTPException(
                     _discover_status(e),
@@ -973,7 +975,20 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/discover/search", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def discover_search(q: str = "", limit: int = 20, formats: str = "gguf",
-                               types: str = ""):
+                               types: str = "", source: str = "hf",
+                               nsfw: bool = False):
+        # `source` picks the provider; everything else keeps its existing meaning
+        # for that provider. CivitAI results are returned close to CivitAI's own
+        # shape (license flags, nsfw/nsfwLevel, modelVersions) rather than forced
+        # through the HF result schema, which has no equivalent fields.
+        if source == "civitai":
+            from localm.model_manager.sources import civitai_search
+            wanted_types = [t.strip() for t in types.split(",") if t.strip()]
+            data = await _run_discover(
+                lambda: civitai_search(q, limit=limit,
+                                        types=wanted_types or None, nsfw=nsfw))
+            return {"query": q, "source": "civitai", "results": data["items"],
+                    "next_cursor": data.get("next_cursor")}
         # `formats` is a CSV of {gguf, hf} and `types` a CSV of MODEL_TYPES, both from
         # the search-page checkboxes. Empty tokens are dropped; hf_search raises
         # DiscoverError if none stay valid. An empty or absent `types` means an
@@ -993,11 +1008,18 @@ def register(app: FastAPI, ctx) -> None:
         for r in results:
             if r.get("size_bytes"):
                 r["fit"] = fit_label(r["size_bytes"], total)
-        return {"query": q, "results": results, "vram": vram,
+        return {"query": q, "source": "hf", "results": results, "vram": vram,
                 "hf_backend_available": hf_backend_available()}
 
     @app.get("/api/discover/files", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def discover_files(repo: str):
+    async def discover_files(repo: str, source: str = "hf",
+                              legacy_formats: bool = False):
+        # For source=civitai, `repo` is a CivitAI model VERSION id, not a repo.
+        if source == "civitai":
+            from localm.model_manager.sources import civitai_list_files
+            files = await _run_discover(
+                lambda: civitai_list_files(repo, include_legacy_formats=legacy_formats))
+            return {"repo": repo.strip(), "source": "civitai", "files": files}
         from localm.discover import fit_label, hf_gguf_files
         files = await _run_discover(lambda: hf_gguf_files(repo))
         vram, total = await _vram_total()
