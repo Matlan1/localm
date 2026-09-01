@@ -20,6 +20,7 @@ from ..display import (
     print_success,
     print_warning,
 )
+from ..review_guard import classify_sensitive_changes, render_warning
 from .goal import _run_goal_loop
 
 def _read_multiline() -> str:
@@ -117,6 +118,22 @@ def _setup_readline(agent: Agent) -> None:
             pass
 
 
+def _warn_goal_run_sensitive_changes(agent: Agent, before: dict) -> None:
+    """Print review_guard's warning for the files this goal run touched:
+    entries in agent.changed_files() whose write count exceeds *before*'s.
+    Best-effort: never let this advisory break the REPL.
+
+    See test_goal_run_warning_is_scoped_to_that_run_not_the_whole_session."""
+    try:
+        touched = [f for f in agent.changed_files()
+                  if f["writes"] > before.get(f["path"], 0)]
+        message = render_warning(classify_sensitive_changes(touched))
+        if message:
+            print_warning(message)
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
 def _repl(agent: Agent) -> None:
     _setup_readline(agent)
     while True:
@@ -143,8 +160,12 @@ def _repl(agent: Agent) -> None:
             # Starting a fresh task - discard any stale checkpoint
             agent.clear_checkpoint()
             if agent.goal_cmd is not None:
-                _run_goal_loop(agent, user_input, agent.goal_cmd,
-                               agent.goal_max_iters, agent.cwd)
+                before = {f["path"]: f["writes"] for f in agent.changed_files()}
+                try:
+                    _run_goal_loop(agent, user_input, agent.goal_cmd,
+                                   agent.goal_max_iters, agent.cwd)
+                finally:
+                    _warn_goal_run_sensitive_changes(agent, before)
             else:
                 agent.chat(user_input)
         except KeyboardInterrupt:
