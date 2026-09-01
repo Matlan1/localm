@@ -243,10 +243,26 @@ def test_a_hung_child_is_bounded_and_reported(repo):
         time.sleep(0.2)
 
 
-def test_two_hung_children_do_not_double_the_parents_wait(repo):
+def test_two_hung_children_do_not_double_the_parents_wait(repo, monkeypatch):
     """Both children hanging still cost ONE budget, not one budget each: the
-    wait shares a single deadline instead of restarting per future."""
+    wait shares a single deadline instead of restarting per future.
+
+    Verified by WHEN each child is sealed as timed out, not by the
+    dispatch's total wall-clock time. Total elapsed also counts two real
+    `git worktree add` calls plus a `git worktree prune`, whose duration
+    tracks disk/OS load rather than the deadline logic this test targets;
+    the seal-time spread does not, since nothing runs between the two
+    seals below except in-process bookkeeping.
+    """
     release = threading.Event()
+    seals: list[tuple[str, float]] = []
+    real_seal = par._ChildOutcome.seal
+
+    def observed_seal(self, status, detail):
+        real_seal(self, status, detail)
+        seals.append((status, self._sealed_at))
+
+    monkeypatch.setattr(par._ChildOutcome, "seal", observed_seal)
 
     def hang(agent):
         release.wait(timeout=30)
@@ -260,13 +276,23 @@ def test_two_hung_children_do_not_double_the_parents_wait(repo):
             repo, tasks=["a", "b"], timeout_s=3, _parent_agent=parent,
         )
         elapsed = time.monotonic() - started
-        assert elapsed < 6, (
-            f"two hung children blocked the parent for {elapsed:.1f}s on a 3s "
-            "budget - the per-future timeout is restarting instead of sharing "
-            "one deadline"
-        )
+
+        # A generous ceiling against a genuine hang; real worktree setup and
+        # teardown are included here and vary with box load.
+        assert elapsed < 20, f"dispatch_parallel took {elapsed:.1f}s"
         assert res.output.lower().count("budget") >= 2 or \
             res.output.lower().count("timeout") >= 2
+
+        # Both children were given up on, and within the same instant - not
+        # one `timeout_s` apart, which is what a per-future restart looks like.
+        timeout_seals = [t for status, t in seals if status == "timeout"]
+        assert len(timeout_seals) == 2, seals
+        spread = max(timeout_seals) - min(timeout_seals)
+        assert spread < 1.5, (
+            f"the two children were sealed {spread:.1f}s apart on a 3s "
+            "budget - the per-future timeout is restarting instead of "
+            "sharing one deadline"
+        )
     finally:
         release.set()
         time.sleep(0.2)
