@@ -147,6 +147,46 @@ test("ordinary markdown still renders (the sanitizer is not just eating everythi
     "a safe https link must survive sanitisation intact");
 });
 
+test("renderMarkdown opens changelog-shaped reference links in a new tab", () => {
+  // CHANGELOG.md's own footer format: "[0.1.5]: https://github.com/...".
+  const win = loadRealPipeline();
+  const t = render(win,
+    "## [0.1.5] - 2026-08-20\n\nSee the [0.1.5] release on GitHub.\n\n"
+    + "[0.1.5]: https://github.com/Matlan1/localm/releases/tag/v0.1.5");
+  const a = t.querySelector("a");
+  assert.ok(a, "reference-style link was lost");
+  assert.equal(a.getAttribute("href"),
+    "https://github.com/Matlan1/localm/releases/tag/v0.1.5");
+  assert.equal(a.getAttribute("target"), "_blank",
+    "a changelog link must open in a new tab, not navigate the app window away "
+    + "(the native window has no address bar or back button)");
+  assert.equal(a.getAttribute("rel"), "noopener",
+    "a target=_blank link must carry rel=noopener");
+});
+
+test("renderMarkdown opens chat-reply-shaped inline links in a new tab too", () => {
+  // The same renderer serves chat replies, so an ordinary [text](url) link
+  // must get the same treatment as the changelog's reference-style ones.
+  const win = loadRealPipeline();
+  const t = render(win, "See [the localm repo](https://github.com/Matlan1/localm) for details.");
+  const a = t.querySelector("a");
+  assert.ok(a, "inline link was lost");
+  assert.equal(a.getAttribute("href"), "https://github.com/Matlan1/localm");
+  assert.equal(a.getAttribute("target"), "_blank");
+  assert.equal(a.getAttribute("rel"), "noopener");
+});
+
+test("a link inside a <think> block also opens in a new tab", () => {
+  const win = loadRealPipeline();
+  const t = render(win, "<think>see [source](https://example.com)</think>done");
+  const det = t.querySelector("details.think-block");
+  assert.ok(det, "no think block was produced");
+  const a = det.querySelector("a");
+  assert.ok(a, "think-block link was lost");
+  assert.equal(a.getAttribute("target"), "_blank");
+  assert.equal(a.getAttribute("rel"), "noopener");
+});
+
 test("a model-authored <form> survives sanitisation, so the CSP must confine it", () => {
   // Pins the PREMISE of the `form-action 'none'` CSP directive rather than the
   // directive itself (jsdom enforces no CSP). If a future DOMPurify starts

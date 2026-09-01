@@ -162,6 +162,41 @@ def test_run_native_window_returns_true_when_the_window_actually_loads(monkeypat
     window.show.assert_called_once()
 
 
+def test_run_native_window_enables_text_selection(monkeypatch):
+    """pywebview's text_select defaults to False, which injects
+    body{user-select:none} CSS on every navigation - selecting or copying text
+    in the native window depends on this being passed explicitly."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, _ = _fake_webview(loaded=True)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is True
+    fake.create_window.assert_called_once()
+    assert fake.create_window.call_args.kwargs.get("text_select") is True
+
+
+def test_run_native_window_start_debug_off_by_default(monkeypatch):
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+    fake, _ = _fake_webview(loaded=True)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is True
+    fake.start.assert_called_once()
+    assert fake.start.call_args.kwargs.get("debug") is False
+
+
+def test_run_native_window_start_debug_on_when_localm_debug_set(monkeypatch):
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.setenv("LOCALM_DEBUG", "1")
+    fake, _ = _fake_webview(loaded=True)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is True
+    fake.start.assert_called_once()
+    assert fake.start.call_args.kwargs.get("debug") is True
+
+
 def test_run_native_window_forces_qt_backend_on_linux(monkeypatch):
     """pywebview's default Linux order tries GTK first (webview/guilib.py), which
     this project never installs (see pyproject.toml's desktop extra) - forcing
