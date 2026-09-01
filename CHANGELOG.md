@@ -71,6 +71,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   (Models, Plugins, Coder, Knowledge, Studio, and the individual settings
   descriptions) is still English only; adding another language now means adding
   one catalog file rather than changing the app.
+- **Optional Hugging Face and CivitAI API tokens.** Set them in Settings
+  under Library, or the `HF_TOKEN` / `CIVITAI_API_KEY` environment
+  variables, to raise rate limits and reach gated or login-required models
+  on search and download. Neither is required: search and downloads keep
+  working anonymously with nothing set.
 
 ### Fixed
 - **The list of other running LocaLM servers now really does cover the whole
