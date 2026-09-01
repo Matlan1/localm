@@ -85,6 +85,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   exact model name.
 
 ### Fixed
+- **Embedding long text no longer fails on runtime builds that ignore the
+  shared-cache request.** localm asks its embedding runtime for one shared
+  attention cache so several texts can be encoded in a single pass. Some builds
+  silently ignore that and hand each text a much smaller private slice instead;
+  anything longer than that slice was then rejected, and embedding requests
+  (with the RAG indexing built on them) failed with a server error. localm now
+  reads back the per-text window the runtime actually granted and trims to it,
+  so those builds keep working. Unaffected builds behave exactly as before, and
+  the warning that a runtime ignored the request still appears in the log.
 - **The list of other running LocaLM servers now really does cover the whole
   machine.** Settings > Server & network said it listed every server running on
   this machine, but it only ever saw servers that share this install's data

@@ -458,8 +458,9 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         return None
 
 
-def _warn_if_context_config_drifted(api, ctx, requested_n_ctx: int) -> None:
-    """Best-effort, log-only comparison of what this embedder REQUESTED for its
+def _warn_if_context_config_drifted(api, ctx,
+                                    requested_n_ctx: int) -> Optional[int]:
+    """Best-effort comparison of what this embedder REQUESTED for its
     context (n_ctx, and kv_unified=True - see configure_embed_context) against
     what the loaded native runtime actually reports, via llama_n_ctx /
     llama_n_ctx_seq - the closest observable proxy for kv_unified, since
@@ -468,8 +469,13 @@ def _warn_if_context_config_drifted(api, ctx, requested_n_ctx: int) -> None:
     With kv_unified honoured, n_ctx_seq is close to n_ctx; a runtime that
     silently falls back to slicing n_ctx across n_seq_max private KV slots
     instead reports a much smaller n_ctx_seq, which is what a large embedding
-    batch failing native decode looks like. This can only OBSERVE and log the
-    drift, not explain it.
+    batch failing native decode looks like.
+
+    Returns the sliced per-sequence capacity when that drift is detected and
+    the runtime reported a positive figure; returns None when the window is
+    intact, when the accessor is absent, and when the probe failed. The
+    returned figure and the warning are produced by the same branch on the
+    same threshold, so they never disagree about whether a drift is real.
 
     Never raises: a probe failure here must not take down an otherwise-working
     embedder, and this never changes what was actually configured."""
@@ -478,15 +484,15 @@ def _warn_if_context_config_drifted(api, ctx, requested_n_ctx: int) -> None:
         actual_n_ctx_seq = api.llama_n_ctx_seq(ctx)
     except Exception as e:
         logger.debug("embedder context drift check failed: %s", e)
-        return
+        return None
     if actual_n_ctx != requested_n_ctx:
         logger.warning(
             "embedder: requested n_ctx=%d but the loaded context reports "
             "n_ctx=%d - the runtime may not honour the requested context size",
             requested_n_ctx, actual_n_ctx)
     if not isinstance(actual_n_ctx_seq, int):
-        return                    # no accessor (older build), or a non-int
-                                   # probe result - nothing usable to compare
+        return None              # no accessor (older build), or a non-int
+                                 # probe result - nothing usable to compare
     # A generous margin, not exact equality: kv_unified honoured can still
     # leave n_ctx_seq a hair under n_ctx on some builds. Below half is only
     # reachable via the sliced-KV fallback (n_ctx / n_seq_max, with n_seq_max
@@ -499,6 +505,8 @@ def _warn_if_context_config_drifted(api, ctx, requested_n_ctx: int) -> None:
             "kv_unified was likely not honoured by this runtime build, and a "
             "large embedding batch may fail to decode",
             requested_n_ctx, actual_n_ctx_seq)
+        return actual_n_ctx_seq if actual_n_ctx_seq > 0 else None
+    return None
 
 
 class GGUFEmbedder:
@@ -591,24 +599,32 @@ class GGUFEmbedder:
                 self._model = None
                 raise RuntimeError("failed to create embedding context")
         self._mem = api.llama_get_memory(self._ctx) if api.has_memory_api() else None
-        _warn_if_context_config_drifted(api, self._ctx, self.n_ctx)
+        sliced_seq_ctx = _warn_if_context_config_drifted(
+            api, self._ctx, self.n_ctx)
+        # Per-sequence token budget for _tokenize. Equals n_ctx unless the
+        # runtime sliced the KV cache into private per-sequence slots.
+        self._effective_seq_ctx = (
+            self.n_ctx if sliced_seq_ctx is None else sliced_seq_ctx)
 
     def _tokenize(self, text: str) -> List[int]:
-        """Tokenize *text*, truncated to fit n_ctx. Returns ``[]`` only for
-        the degenerate retokenize-failure case below - a real success always
-        yields at least the BERT CLS/SEP special tokens, so an empty list is
-        an unambiguous "could not tokenize this at all" signal to callers,
-        never a legitimate zero-token text."""
+        """Tokenize *text*, truncated to fit ``self._effective_seq_ctx`` -
+        n_ctx, or the smaller window the runtime granted per sequence.
+
+        Returns ``[]`` only for the degenerate retokenize-failure case below -
+        a real success always yields at least the BERT CLS/SEP special tokens,
+        so an empty list is an unambiguous "could not tokenize this at all"
+        signal to callers, never a legitimate zero-token text."""
         api = self._api
         raw = (text or " ").encode("utf-8")
-        buf = (self._llama_token * self.n_ctx)()
-        n = api.llama_tokenize(self._vocab, raw, len(raw), buf, self.n_ctx,
+        buf = (self._llama_token * self._effective_seq_ctx)()
+        n = api.llama_tokenize(self._vocab, raw, len(raw), buf,
+                               self._effective_seq_ctx,
                                True, True)   # add_special (BERT CLS/SEP), parse_special
         if n < 0:
             # Over-long input: llama_tokenize returns -(tokens needed) and
             # writes NOTHING into the short buffer, so the zero-filled buffer
             # must not be read as tokens. Retokenize into a right-sized buffer
-            # and truncate explicitly to the context window.
+            # and truncate explicitly to the per-sequence window.
             needed = -n
             full = (self._llama_token * needed)()
             n2 = api.llama_tokenize(self._vocab, raw, len(raw), full, needed,
@@ -617,17 +633,17 @@ class GGUFEmbedder:
                 logger.warning(
                     "embedder: retokenize of an over-long text failed (%d)", n2)
                 return []
-            # Keep the first n_ctx tokens but preserve the FINAL token of the
-            # full sequence: with add_special=True on the BERT-family models
-            # this embedder serves, that is the [SEP] the pooled encoding
-            # expects.
-            for i in range(self.n_ctx):
+            # Keep the first _effective_seq_ctx tokens but preserve the
+            # FINAL token of the full sequence: with add_special=True on the
+            # BERT-family models this embedder serves, that is the [SEP] the
+            # pooled encoding expects.
+            for i in range(self._effective_seq_ctx):
                 buf[i] = full[i]
-            buf[self.n_ctx - 1] = full[n2 - 1]
-            n = self.n_ctx
+            buf[self._effective_seq_ctx - 1] = full[n2 - 1]
+            n = self._effective_seq_ctx
             logger.debug(
                 "embedder: input of %d tokens truncated to the %d-token window",
-                n2, self.n_ctx)
+                n2, self._effective_seq_ctx)
         if n <= 0:
             return []
         return list(buf[:n])
@@ -717,10 +733,14 @@ class GGUFEmbedder:
         to ``self._n_seq_max`` texts, never letting a group's SUMMED token
         count exceed ``self.n_ctx`` (== n_ubatch here) - llama.cpp's own hard
         constraint for this non-causal 'encoder' architecture ("encoder
-        requires n_ubatch >= n_tokens"). A single text is already truncated to
-        fit n_ctx by _tokenize, so it always fits alone; a group of multiple
+        requires n_ubatch >= n_tokens"). n_ubatch is fixed at the REQUESTED
+        n_ctx and is NOT reduced when a runtime slices the KV cache, so this
+        SUMMED bound stays on self.n_ctx; the per-SEQUENCE bound that does
+        move with such a runtime is applied by _tokenize against
+        self._effective_seq_ctx. A single text is already truncated to fit
+        that per-sequence window, so it always fits alone; a group of multiple
         texts is shrunk automatically when their combined length would
-        overflow."""
+        overflow. See test_pack_groups_bounds_by_n_ctx_not_by_the_sliced_window."""
         groups: List[List[int]] = []
         current: List[int] = []
         current_tokens = 0
