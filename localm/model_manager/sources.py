@@ -2,8 +2,8 @@
 """Model source seam: search() / list_files() / resolve_download(), the same
 three operations across every model provider the model manager knows about.
 
-Internal to model_manager, not a plugins/contract.py capability (ADR-0015
-Decision 1) - HFSource and CivitAISource are the only two implementations.
+Internal to model_manager, not a plugins/contract.py capability - HFSource
+and CivitAISource are the only two implementations.
 """
 
 from __future__ import annotations
@@ -90,13 +90,9 @@ class HFSource:
 # --------------------------------------------------------------------------- #
 
 # CivitAI ModelType -> (registry.MODEL_TYPES value, ComfyUI models/ subfolder -
-# see media/managed_comfy.py _MODEL_FOLDER_TYPES). Verified against the live
-# /api/v1/models response (real `type` values seen across a 100-item
-# Most-Downloaded sample: Checkpoint, LORA, TextualInversion, Upscaler,
-# Controlnet, Poses, VAE) and against the ComfyUI subfolder taxonomy. A
-# CivitAI type absent from this table has no entry here on purpose and is
-# excluded from search results and refused by resolve_download, rather than
-# mis-filed under a folder ComfyUI does not scan for that role.
+# see media/managed_comfy.py _MODEL_FOLDER_TYPES). A CivitAI type absent from
+# this table is excluded from search results and refused by resolve_download,
+# rather than mis-filed under a folder ComfyUI does not scan for that role.
 #
 # Controlnet/Upscaler have no registry.MODEL_TYPES value (the frozenset has no
 # "controlnet"/"upscaler" member); they still route to a real ComfyUI
@@ -165,8 +161,7 @@ def _civitai_get(path: str, params: Optional[dict] = None) -> dict:
 
 def _passes_content_policy(item: dict) -> bool:
     """Hard exclusion for minor-tagged content, applied regardless of the nsfw
-    toggle - a distinct policy category, not a maturity level (ADR-0015
-    Decision 3)."""
+    toggle - a distinct policy category, not a maturity level."""
     return item.get("minor") is not True
 
 

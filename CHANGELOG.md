@@ -28,6 +28,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   said yourself, and if it contradicts a fact you typed, it goes to the same
   accept/reject review as any other suggestion instead of overwriting you.
   Both tools are refused in privacy mode.
+- **CivitAI models can now be searched and pulled from the command line**,
+  alongside HuggingFace: `localm search --source civitai <query>` and
+  `localm pull civitai:<versionId>`. A downloaded file is verified against
+  CivitAI's own checksum and lands in the active ComfyUI's matching
+  `models/<type>` folder (checkpoints, LoRAs, VAEs, textual inversions) so
+  workflows can find it directly, rather than in localm's own flat models
+  folder. NSFW results are excluded by default, and content flagged as
+  depicting a minor is always excluded. Files in an older, riskier format are
+  hidden unless you explicitly ask to see them. A GUI for this is coming in a
+  follow-up.
 
 ### Fixed
 - **The list of other running LocaLM servers now really does cover the whole

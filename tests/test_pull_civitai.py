@@ -264,8 +264,8 @@ class TestPullCivitaiFileSSRF:
 
     def test_real_ssrf_resolver_refuses_a_redirect_TO_a_private_target(
             self, fake_registry, tmp_path, monkeypatch):
-        """The representative CivitAI threat model (ADR-0015 Decision 3): the
-        STARTING url is the legitimate public civitai.com download endpoint -
+        """The representative CivitAI threat model: the STARTING url is the
+        legitimate public civitai.com download endpoint -
         exactly what resolve_download() returns for a real pull - and only the
         redirect it answers with points at a private address. This isolates
         _ssrf_resolve_final_url's own per-hop re-validation: the immediately-
