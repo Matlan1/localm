@@ -1133,3 +1133,136 @@ def test_the_mtp_draft_charge_does_not_scale_with_the_split_device_count():
 
     with pytest.raises(RuntimeError, match="Context too large"):
         check(4)
+
+# --- mtp_enabled override plumbing + the bench-mtp comparison ----------------
+
+
+@pytest.mark.parametrize("cfg_value,override,expected", [
+    (False, True, True),
+    (True, False, False),
+    (False, None, False),
+    (True, None, True),
+])
+def test_create_backend_mtp_override_beats_the_config_key(
+        cfg_value, override, expected):
+    """An explicit mtp_enabled= wins over the stored setting; None reads it.
+
+    bench-mtp measures both arms in one process against one config, so without
+    this the MTP-on arm would silently re-read mtp_enabled and both arms would
+    run identically.
+    """
+    from localm.inference import engine as engine_mod
+
+    captured = {}
+
+    class _FakeBackend:
+        def __init__(self, *a, **kw):
+            captured.update(kw)
+
+    cfg = dict(DEFAULT_CONFIG)
+    cfg["mtp_enabled"] = cfg_value
+    with patch.object(engine_mod, "load_config", return_value=cfg), \
+         patch("localm.inference.backends.gguf.GgufBackend", _FakeBackend):
+        engine_mod.create_backend("model.gguf", mtp_enabled=override)
+
+    assert captured["mtp_enabled"] is expected
+
+
+def test_engine_forwards_the_mtp_override_to_create_backend():
+    """Engine(mtp_enabled=...) reaches create_backend rather than being dropped."""
+    from localm.inference import engine as engine_mod
+
+    seen = {}
+
+    def _fake_create_backend(model_path, **kw):
+        seen.update(kw)
+        return MagicMock()
+
+    with patch.object(engine_mod, "create_backend", _fake_create_backend):
+        engine_mod.Engine("model.gguf", mtp_enabled=True)
+    assert seen["mtp_enabled"] is True
+
+
+def _bench_mtp_result(rates_off, rates_on, supports=True, status=None,
+                      placement=None):
+    """Build a _mtp_probe_arm double returning fixed rates per arm."""
+    def _arm(model_path, display, mtp_enabled, gen_tokens, ctx, gpu_layers):
+        return ((rates_on if mtp_enabled else rates_off), supports, status,
+                placement)
+    return _arm
+
+
+def test_bench_mtp_stops_when_the_model_has_no_draft_head(cli_runner):
+    """A model without a usable MTP head gets a plain answer, not a comparison.
+
+    Reporting a ratio here would attribute ordinary run-to-run noise to a
+    setting that is doing nothing for this model.
+    """
+    from localm.cli import models as models_mod
+
+    with patch.object(models_mod, "get_model_info",
+                      return_value=("model.gguf", None)), \
+         patch.object(models_mod, "_mtp_probe_arm",
+                      _bench_mtp_result([100.0], [100.0], supports=False,
+                                        status="unsupported_arch")):
+        res = cli_runner.invoke(models_mod.bench_mtp, ["model.gguf"])
+
+    assert res.exit_code == 0, res.output
+    assert "no usable MTP draft head" in res.output
+    assert "faster" not in res.output
+
+
+@pytest.mark.parametrize("off,on,phrase", [
+    ([50.0], [70.0], "MTP is 1.40x faster"),
+    ([100.0], [60.0], "MTP is slower"),
+    ([100.0], [101.0], "No meaningful difference"),
+])
+def test_bench_mtp_reports_the_measured_verdict(cli_runner, off, on, phrase):
+    from localm.cli import models as models_mod
+
+    with patch.object(models_mod, "get_model_info",
+                      return_value=("model.gguf", None)), \
+         patch.object(models_mod, "_mtp_probe_arm",
+                      _bench_mtp_result(off, on)):
+        res = cli_runner.invoke(models_mod.bench_mtp,
+                                ["model.gguf", "--rounds", "1"])
+
+    assert res.exit_code == 0, res.output
+    assert phrase in res.output
+
+
+def test_bench_mtp_names_cpu_offload_when_mtp_loses(cli_runner):
+    """A partially offloaded model is told why, since that is fixable."""
+    from localm.cli import models as models_mod
+
+    placement = {"gpu_layers_offloaded": 12, "gpu_layers_total": 28,
+                 "degraded": True}
+    with patch.object(models_mod, "get_model_info",
+                      return_value=("model.gguf", None)), \
+         patch.object(models_mod, "_mtp_probe_arm",
+                      _bench_mtp_result([100.0], [60.0], placement=placement)):
+        res = cli_runner.invoke(models_mod.bench_mtp,
+                                ["model.gguf", "--rounds", "1"])
+
+    assert "12 of 28 layers are on the GPU" in res.output
+
+
+def test_bench_mtp_never_writes_the_setting(cli_runner):
+    """The command measures and reports; applying the result stays the user's
+    call, so a run must leave mtp_enabled exactly as it found it."""
+    from localm.cli import models as models_mod
+    from localm.config import load_config, save_config
+
+    cfg = load_config()
+    cfg["mtp_enabled"] = False
+    save_config(cfg)
+
+    with patch.object(models_mod, "get_model_info",
+                      return_value=("model.gguf", None)), \
+         patch.object(models_mod, "_mtp_probe_arm",
+                      _bench_mtp_result([50.0], [70.0])):
+        res = cli_runner.invoke(models_mod.bench_mtp,
+                                ["model.gguf", "--rounds", "1"])
+
+    assert res.exit_code == 0, res.output
+    assert load_config()["mtp_enabled"] is False

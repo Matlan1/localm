@@ -113,6 +113,176 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
                   "generation after the first token.[/dim]")
 
 
+# Prompts the MTP comparison generates from. Draft acceptance varies by the kind
+# of text being written, so a single prompt would measure one workload and
+# report it as the model's answer.
+_MTP_PROBE_PROMPTS = (
+    "Write a short paragraph about a cat exploring a garden.",
+    "Write a Python function that returns the longest increasing subsequence "
+    "of a list of integers. Include a docstring.",
+    "Explain in a few sentences why the sky appears blue.",
+)
+
+# Sampling for the comparison. Deliberately NOT greedy: at temperature 0 the
+# draft and the target both sample greedily, drafts are accepted far more often
+# than in ordinary use, and the measured speedup comes out too high.
+_MTP_PROBE_SAMPLING = dict(temperature=0.8, top_p=0.95, top_k=40,
+                           repeat_penalty=1.1)
+_MTP_PROBE_SEED = 20260901
+
+
+def _mtp_probe_arm(model_path, display, mtp_enabled, gen_tokens, ctx,
+                   gpu_layers):
+    """Load *model_path* with MTP forced on or off and return
+    ``(decode rates, supports_mtp, mtp_status, gpu_placement)``."""
+    import time as _time
+
+    from ..inference.engine import Engine
+
+    engine = Engine(str(model_path), n_ctx=ctx, n_gpu_layers=gpu_layers,
+                    display_name=display, mtp_enabled=mtp_enabled)
+    engine.load()
+    rates = []
+    try:
+        # A discarded generation absorbs one-off native warm-up, which would
+        # otherwise land entirely on whichever arm ran first.
+        for _ in engine.chat_stream([{"role": "user", "content": "Say hello."}],
+                                    max_tokens=8, seed=_MTP_PROBE_SEED,
+                                    **_MTP_PROBE_SAMPLING):
+            pass
+        for prompt in _MTP_PROBE_PROMPTS:
+            first_at = None
+            generated = 0
+            for _token in engine.chat_stream(
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=gen_tokens, seed=_MTP_PROBE_SEED,
+                    **_MTP_PROBE_SAMPLING):
+                if first_at is None:
+                    first_at = _time.perf_counter()
+                generated += 1
+            if first_at is None or generated < 2:
+                continue
+            decode_s = _time.perf_counter() - first_at
+            if decode_s > 0:
+                rates.append((generated - 1) / decode_s)
+        backend = getattr(engine, "_backend", None)
+        return (rates, bool(getattr(backend, "supports_mtp", False)),
+                getattr(backend, "last_mtp_status", None),
+                engine.gpu_placement)
+    finally:
+        engine.unload()
+
+
+@main.command()
+@click.argument("model", shell_complete=_complete_model_name)
+@click.option("-n", "--gen-tokens", default=160, show_default=True,
+              help="Tokens to generate per prompt.")
+@click.option("--rounds", default=2, show_default=True,
+              type=click.IntRange(1, 5),
+              help="Times to repeat the paired measurement.")
+@click.option("-c", "--ctx",        default=None, type=int)
+@click.option("-g", "--gpu-layers", default=None, type=click.IntRange(0, 1000))
+def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers):
+    """Measure whether Multi-Token Prediction makes MODEL faster on this machine.
+
+    Loads MODEL twice per round, once with MTP off and once with MTP on, and
+    generates the same prompts through each. Reports the decode throughput of
+    both and which setting won.
+
+    Whether speculation pays depends on the model, the quantisation, how much
+    of it fits on the GPU, and the speed of this specific machine, so it is
+    measured here rather than predicted. Nothing is written to your config:
+    the MTP setting is left exactly as it was.
+    """
+    import statistics as _stats
+
+    from rich.markup import escape
+
+    info = get_model_info(model, allow_direct_path=True)
+    if info is None:
+        console.print(f"[red]Model not found:[/red] {escape(model)}")
+        sys.exit(1)
+    model_path, _hint = info
+
+    console.print(f"Comparing MTP on/off for [cyan]{escape(model)}[/cyan] "
+                  f"({rounds} round(s), {len(_MTP_PROBE_PROMPTS)} prompts each)…")
+
+    off_rates, on_rates = [], []
+    placement = None
+    for rnd in range(rounds):
+        for enabled in (False, True):
+            console.print(f"  round {rnd + 1}, MTP "
+                          f"{'on' if enabled else 'off'} … ", end="")
+            try:
+                rates, sup, st, plc = _mtp_probe_arm(
+                    model_path, model, enabled, gen_tokens, ctx, gpu_layers)
+            except Exception as e:
+                console.print()
+                console.print(f"[red]Run failed:[/red] {escape(str(e))}")
+                sys.exit(1)
+            console.print("done")
+            placement = plc or placement
+            if enabled:
+                on_rates += rates
+                if not sup:
+                    console.print(
+                        f"\n[yellow]{escape(model)} has no usable MTP draft "
+                        f"head[/yellow]"
+                        + (f" ({escape(str(st))})" if st else "")
+                        + ".\nMTP would stay inactive for this model, so the "
+                          "setting makes no difference to it.")
+                    return
+            else:
+                off_rates += rates
+
+    if not off_rates or not on_rates:
+        console.print("[red]Not enough generated tokens to time.[/red] "
+                      "Try a larger --gen-tokens.")
+        sys.exit(1)
+
+    off_med = _stats.median(off_rates)
+    on_med = _stats.median(on_rates)
+    ratio = on_med / off_med if off_med > 0 else 0.0
+
+    from rich.table import Table
+    table = Table(title=f"MTP comparison - {escape(model)}")
+    table.add_column("MTP", justify="left")
+    table.add_column("decode tok/s", justify="right")
+    table.add_column("spread", justify="right")
+    for name, vals in (("off", off_rates), ("on", on_rates)):
+        table.add_row(name, f"{_stats.median(vals):.1f}",
+                      f"{min(vals):.1f} - {max(vals):.1f}")
+    console.print(table)
+
+    # 3% either way is inside the run-to-run spread seen on an idle machine, so
+    # a smaller difference is reported as no difference rather than a winner.
+    if ratio >= 1.03:
+        console.print(
+            f"[green]MTP is {ratio:.2f}x faster for this model[/green] "
+            f"({on_med:.1f} vs {off_med:.1f} tok/s).\n"
+            "Turn it on in Settings > Engine > Multi-Token Prediction, or set "
+            "[cyan]mtp_enabled[/cyan] to true.")
+    elif ratio <= 0.97:
+        console.print(
+            f"[yellow]MTP is slower for this model[/yellow] "
+            f"({on_med:.1f} vs {off_med:.1f} tok/s, {ratio:.2f}x). "
+            "Leave it off.")
+        if placement and placement.get("degraded"):
+            console.print(
+                f"[dim]Only {placement['gpu_layers_offloaded']} of "
+                f"{placement['gpu_layers_total']} layers are on the GPU. "
+                "Speculation pays when checking two tokens costs about what "
+                "checking one costs, which stops holding once layers run on "
+                "the CPU. Fitting the whole model on the GPU, or a smaller "
+                "quantisation, changes this answer.[/dim]")
+    else:
+        console.print(
+            f"[dim]No meaningful difference for this model "
+            f"({on_med:.1f} vs {off_med:.1f} tok/s, {ratio:.2f}x).[/dim]")
+    console.print("[dim]Measured on this machine only. Another model, "
+                  "quantisation, or GPU can give the opposite answer, and a "
+                  "busy machine skews the result - close other heavy work "
+                  "before trusting a close call.[/dim]")
 
 
 # ------------------------------------------------------------------ #

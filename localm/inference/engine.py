@@ -89,12 +89,17 @@ def create_backend(
     n_ctx: Optional[int] = None,
     n_gpu_layers: Optional[int] = None,
     device: Optional[str] = None,
+    mtp_enabled: Optional[bool] = None,
 ) -> BaseBackend:
     """
     Return the appropriate backend for the given model path, without loading it.
 
     model_path:   HF model directory  →  HFBackend
                   *.gguf file         →  GgufBackend
+
+    mtp_enabled:  None reads the ``mtp_enabled`` config key; True or False
+                  overrides it for this backend only, leaving the stored
+                  setting untouched.
     """
     cfg = load_config()
 
@@ -114,7 +119,8 @@ def create_backend(
             ctx_auto=bool(cfg.get("ctx_auto", False)),
             n_gpu_layers_auto=bool(cfg.get("n_gpu_layers_auto", True)),
             n_cpu_moe=int(cfg.get("n_cpu_moe", 0) or 0),
-            mtp_enabled=bool(cfg.get("mtp_enabled", False)),
+            mtp_enabled=(bool(cfg.get("mtp_enabled", False))
+                         if mtp_enabled is None else bool(mtp_enabled)),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
         )
 
@@ -193,6 +199,7 @@ class Engine:
         n_gpu_layers: Optional[int] = None,
         device: Optional[str] = None,
         display_name: Optional[str] = None,
+        mtp_enabled: Optional[bool] = None,
     ) -> None:
         self.model_path = model_path
         self.display_name = display_name or model_display_name(model_path)
@@ -206,6 +213,7 @@ class Engine:
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
             device=device,
+            mtp_enabled=mtp_enabled,
         )
         self.active_requests = 0
         # Set True by an unload/eviction path for the duration of the native
