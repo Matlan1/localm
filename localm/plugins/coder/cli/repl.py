@@ -53,6 +53,7 @@ _SLASH_COMMANDS = (
     "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
     "/sessions", "/compact", "/memory", "/remember", "/forget", "/save",
     "/export", "/scope", "/changes", "/diff", "/bg", "/verify", "/goal",
+    "/review",
 )
 
 
@@ -579,6 +580,42 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 f"Goal mode: `{arg}` must exit 0, up to "
                 f"{agent.goal_max_iters} iteration(s) per task, with each "
                 "failure's output fed back for another attempt.")
+
+    elif cmd == "review":
+        diff = agent.session_diff()
+        if not diff.strip():
+            print_info("No changes to review this session.")
+        else:
+            reviewer = agent._reviewer
+            if reviewer is None:
+                # No reviewer configured (coder_review is off) - build one now.
+                from ..reviewer import reviewer_for_agent
+                reviewer = reviewer_for_agent(
+                    agent.backend, agent.mode, agent.restricted, force=True)
+            if reviewer is None:
+                print_warning(
+                    "No reviewer available for this session "
+                    "(restricted sessions run no reviewer).")
+            else:
+                result = reviewer.review(diff, agent._review_task)
+                warning = reviewer.failure_warning(result)
+                model = ("separate reviewer model" if reviewer.heterogeneous
+                          else "review pass")
+                if warning:
+                    print_warning(warning)
+                elif result.approved:
+                    print_success(f"Approved - the {model} found no blocking issues.")
+                    if result.notes:
+                        console.print(f"[dim]{result.notes}[/dim]")
+                else:
+                    n = len(result.blocking)
+                    print_warning(
+                        f"The {model} flagged {n} blocking issue"
+                        f"{'s' if n != 1 else ''}:")
+                    for b in result.blocking:
+                        console.print(f"  - {b}")
+                    if result.notes:
+                        console.print(f"[dim]{result.notes}[/dim]")
 
     elif cmd == "scope":
         if not arg:

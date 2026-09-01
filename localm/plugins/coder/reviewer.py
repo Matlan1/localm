@@ -210,7 +210,7 @@ def _is_privacy(mode) -> bool:
         return False
 
 
-def reviewer_for_agent(agent_backend, mode, restricted: bool):
+def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = False):
     """Build the Reviewer for an Agent, or None when review is off / not allowed.
 
     Config (global config.py):
@@ -226,6 +226,11 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool):
     non-owner) session - those fall back to the local same-model reviewer with a
     warning. The "local" CPU reviewer stays on-machine and is allowed in privacy
     mode.
+
+    *force* bypasses the ``coder_review`` master switch for an explicit,
+    on-demand review request (e.g. the REPL's ``/review`` command). Every other
+    gate below - restricted session, privacy-mode network fallback - still
+    applies regardless of *force*.
     """
     from .display import print_warning
     try:
@@ -234,7 +239,7 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool):
     except Exception:
         cfg = {}
 
-    if not bool(cfg.get("coder_review", False)):
+    if not force and not bool(cfg.get("coder_review", False)):
         return None
     if restricted:
         return None   # a shared, non-owner session runs no reviewer
