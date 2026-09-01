@@ -1179,8 +1179,9 @@ if ($("server-shutdown")) {
 }
 
 // The GUI form of `localm ps` / `localm stop <id>`. /api/instances returns every
-// registered instance, this one included and flagged `self`; the card below
-// filters `self` out client-side.
+// live instance on this machine, this one included and flagged `self`; the card
+// below filters `self` out client-side. A row with `same_install: false` belongs
+// to another install and gets a label instead of a Stop button.
 //
 // Guarded by a generation counter and written with one replaceChildren(), same
 // as refreshModelsPage above: a stale in-flight fetch never overwrites a newer
@@ -1219,11 +1220,21 @@ export async function refreshInstancesCard() {
   const tbody = el("tbody");
   for (const inst of rows) {
     const tr = el("tr");
-    tr.appendChild(el("td", "", inst.root_dir || ""));
+    tr.appendChild(el("td", "", inst.root_dir || "(not reported)"));
     tr.appendChild(el("td", "", inst.mode || "?"));
     tr.appendChild(el("td", "", inst.address || ""));
     tr.appendChild(el("td", "", inst.alive ? "live" : "no answer"));
     const actionsTd = el("td");
+    if (inst.same_install === false) {
+      const note = el("span", "instances-foreign", "other install");
+      note.title = "This server belongs to a different LocaLM install, which " +
+        "keeps its own data folder. Stop it from that install's own window, or " +
+        "from the terminal it was started in.";
+      actionsTd.appendChild(note);
+      tr.appendChild(actionsTd);
+      tbody.appendChild(tr);
+      continue;
+    }
     const stopBtn = el("button", "btn-secondary btn-danger", "Stop");
     stopBtn.onclick = () => {
       confirmDanger("Stop this instance?",

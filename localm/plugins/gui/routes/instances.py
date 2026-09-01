@@ -1,9 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GUI form of `localm ps` / `localm stop <id>`.
 
-  GET  /api/instances              - every registered instance, this one included
-                                      (`self: true` on it), read-only.
-  POST /api/instances/{id}/stop    - stop ONE OTHER instance by id or id prefix.
+  GET  /api/instances              - every live instance on this machine, this
+                                      one included (`self: true` on it) and
+                                      instances of other installs flagged
+                                      `same_install: false`, read-only.
+  POST /api/instances/{id}/stop    - stop ONE OTHER instance OF THIS INSTALL by
+                                      id or id prefix.
+
+Listing spans installs; stopping does not. An instance of another install is
+found through the machine-wide coordination registry, which records no attach
+token for it, so the graceful `POST /v1/server/shutdown` below has no credential
+to present and only a hard OS kill would remain. A hard kill skips that
+instance's model unload and leaves ITS crash marker armed (this process can only
+disarm markers under its OWN data dir), so the next start of that install would
+report a crash that did not happen. Those rows carry no Stop button.
 
 The stop route is gated on scopes.ADMIN (the owner), not CONFIG_WRITE like the
 sibling /v1/server/shutdown|restart (localm/inference/routes/admin.py): stopping
@@ -30,22 +41,37 @@ from localm.inference.http_server import require_scope
 # OTHER instance's registry file), which is server-internal and must not reach a
 # network client. `token` is already stripped by snapshot()'s own default.
 _LIST_FIELDS = ("instance_id", "alive", "root_dir", "mode", "scheme", "host",
-                "port", "pid", "started", "version")
+                "port", "pid", "started", "version", "same_install")
 
 
 def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/instances", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     def instances_list_ep():
-        """Every registered localm instance on this machine - the GUI form of
-        `localm ps`. Read-only; reaps dead entries first (snapshot()'s default),
-        same as the CLI. The instance serving THIS request carries `self: true`
-        so a caller can tell it apart from one it might actually need to stop."""
+        """Every live localm instance on this machine - the GUI form of
+        `localm ps`, widened past it.
+
+        Two sources: this install's own registry (`snapshot`, which reaps dead
+        entries first, same as the CLI) and the machine-wide coordination
+        registry for instances of OTHER installs, which have their own
+        LOCALM_HOME and appear in no registry this one can read. The latter
+        carry `same_install: false` and are listed only on a verified /whoami
+        handshake. The instance serving THIS request carries `self: true`.
+
+        The second source is read ONLY by a server that advertises itself into
+        that same registry - an `--isolated` run or a bare test app registers
+        nowhere (http_server.py gates its coordination entry on exactly this
+        condition), and reading a registry it does not write would let a run
+        documented as invisible to discovery both see and probe every other
+        localm on the box."""
         from localm import instances
         from localm.bindhost import url_host
         from localm.config import home_dir
         self_id = getattr(app.state, "instance_id", None)
-        rows = instances.snapshot(home_dir())
+        home = home_dir()
+        rows = [dict(r, same_install=True) for r in instances.snapshot(home)]
+        if self_id and not getattr(app.state, "instance_isolated", False):
+            rows += instances.list_machine_peers(home)
         out = []
         for r in rows:
             row = {k: r.get(k) for k in _LIST_FIELDS}
@@ -63,8 +89,9 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/instances/{instance_id}/stop",
               dependencies=[Depends(require_scope(scopes.ADMIN))])
     def instance_stop_ep(instance_id: str):
-        """Stop ONE running instance (matched by id or id prefix, same as
-        `localm stop <id>`). Mirrors cli/models.py's stop_cmd for a single
+        """Stop ONE running instance OF THIS INSTALL (matched by id or id
+        prefix, same as `localm stop <id>`); an id belonging to another
+        install's instance is refused with 409. Mirrors cli/models.py's stop_cmd for a single
         target: a graceful `POST /v1/server/shutdown` using the target's own
         attach token (selfclient.self_request, the same hoisted helper the
         CLI/MCP already share), falling back to instances.kill_pid - a direct
@@ -86,6 +113,22 @@ def register(app: FastAPI, ctx) -> None:
         matches = [e for e in instances.list_entries(home)
                    if str(e.get("instance_id", "")).startswith(instance_id)]
         if not matches:
+            # Same gate as the listing route: a server that registers in no
+            # machine-wide registry does not read one either.
+            peers = (instances.list_machine_peers(home)
+                     if getattr(app.state, "instance_id", None)
+                     and not getattr(app.state, "instance_isolated", False)
+                     else [])
+            if any(str(p.get("instance_id", "")).startswith(instance_id)
+                   for p in peers):
+                raise HTTPException(
+                    409,
+                    f"Instance {instance_id!r} belongs to a different localm "
+                    "install, which keeps its own data directory. This server "
+                    "holds no shutdown credential for it and will not kill it "
+                    "outright, because that would skip its model unload and "
+                    "leave it reporting a crash on next start. Stop it from "
+                    "that install, or from the terminal it was started in.")
             raise HTTPException(404, f"No running instance matches {instance_id!r}.")
         if len(matches) > 1:
             candidates = ", ".join(str(e.get("instance_id", ""))[:8] for e in matches)

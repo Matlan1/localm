@@ -19,6 +19,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   approved, or the list of blocking issues plus the reviewer's notes.
 
 ### Fixed
+- **The list of other running LocaLM servers now really does cover the whole
+  machine.** Settings > Server & network said it listed every server running on
+  this machine, but it only ever saw servers that share this install's data
+  folder. A second LocaLM installed somewhere else stayed invisible while it was
+  running, holding the graphics card and answering on its own port, which was
+  exactly when you needed to know about it. Those servers are now listed too,
+  marked "other install", with their directory and address. They carry no Stop
+  button on purpose: this app holds no shutdown credential for another install,
+  and ending one outright would skip its model unload and leave it reporting a
+  crash that never happened, so it has to be stopped from its own window or the
+  terminal it was started in.
 - **A stuck GPU-detection helper could wedge VRAM measurement for the rest of
   the run.** When it happened, loading any model afterward refused with "free
   VRAM could not be measured," even though the graphics driver itself was
