@@ -85,6 +85,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   exact model name.
 
 ### Fixed
+- **A crashed run's native fault trace, when attached to a bug report, was
+  checked only for your home folder name, not for stray credentials.** The
+  report's other attachments (the recent log tail, an event-loop hang trace)
+  were already checked for API keys, tokens, and passwords before being
+  included. The native trace now gets that same check, so a credential that
+  happened to land in it can no longer ship in an uploaded report.
 - **Embedding long text no longer fails on runtime builds that ignore the
   shared-cache request.** localm asks its embedding runtime for one shared
   attention cache so several texts can be encoded in a single pass. Some builds
