@@ -36,6 +36,7 @@ def auth(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
     import localm.auth as a
     monkeypatch.setattr(a, "_empty_owner_key_warned", False, raising=False)
+    monkeypatch.setattr(a, "_empty_owner_key_downgrade_message", None, raising=False)
     return a
 
 
@@ -149,6 +150,58 @@ def test_empty_owner_key_is_surfaced_not_silent(auth):
     assert [ln for ln in recent_activity() if str(path) in ln], (
         "an empty owner key silently dropped the server to open mode - the "
         "notice never reached the always-on breadcrumb buffer")
+
+
+def test_owner_key_downgrade_warning_reflects_the_notice(auth):
+    """owner_key_downgrade_warning() carries the same text as the log notice,
+    for a caller with a status surface (GET /v1/keys) rather than --debug."""
+    assert auth.owner_key_downgrade_warning() is None
+    path = _write_key_file(auth, "")
+    assert auth.any_key_configured() is False
+    warning = auth.owner_key_downgrade_warning()
+    assert warning and str(path) in warning
+
+
+def test_owner_key_downgrade_warning_clears_on_recovery(auth):
+    """The getter must re-arm exactly like the log notice: once a real key is
+    set the warning clears, so a stale downgrade notice does not linger."""
+    _write_key_file(auth, "")
+    assert auth.any_key_configured() is False
+    assert auth.owner_key_downgrade_warning() is not None
+
+    _write_key_file(auth, "a-real-key-value\n")
+    assert auth.any_key_configured() is True
+    assert auth.owner_key_downgrade_warning() is None
+
+
+def test_owner_key_downgrade_warning_clears_when_the_file_is_deleted(auth):
+    """The empty-file downgrade this warning describes no longer holds once the
+    file is gone (the exact remedy the message itself suggests), so the message
+    must clear rather than keep describing a file that does not exist."""
+    path = _write_key_file(auth, "")
+    assert auth.any_key_configured() is False
+    assert auth.owner_key_downgrade_warning() is not None
+
+    path.unlink()
+    assert auth.any_key_configured() is False       # still open - absence is fine
+    assert auth.owner_key_downgrade_warning() is None
+
+
+def test_owner_key_downgrade_warning_clears_when_the_file_becomes_unreadable(auth):
+    """NEGATIVE-adjacent: if the empty file is later replaced by something
+    unreadable, any_key_configured() flips to True (fail closed) - a stale
+    "server runs in OPEN mode" message at that point would directly contradict
+    auth being back in effect."""
+    path = _write_key_file(auth, "")
+    assert auth.any_key_configured() is False
+    assert auth.owner_key_downgrade_warning() is not None
+
+    path.unlink()
+    path.mkdir()                    # a directory in its place: unreadable as a key
+    assert auth.any_key_configured() is True         # fail closed
+    assert auth.owner_key_downgrade_warning() is None, (
+        "a stale 'OPEN mode' warning while auth is fail-closed contradicts "
+        "any_key_configured()'s own answer")
 
 
 def test_empty_owner_key_warning_does_not_spam_the_request_path(auth):

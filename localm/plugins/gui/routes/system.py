@@ -165,6 +165,7 @@ def register(app: FastAPI, ctx) -> None:
         same reason /api/gpus and /api/stats offload their own probes so a
         slow driver never blocks the event loop."""
         from localm import hwdetect, setup_llama
+        from localm.inference.backends.llamacpp import _loader
         loop = asyncio.get_running_loop()
 
         def _read():
@@ -180,6 +181,7 @@ def register(app: FastAPI, ctx) -> None:
                 recommended = hwdetect.recommended_install_backend(det)
             except Exception:
                 pass
-            return {"installed": installed, "vendor": vendor, "recommended": recommended}
+            return {"installed": installed, "vendor": vendor, "recommended": recommended,
+                    "warning": _loader.last_runtime_resolution_warning()}
 
         return await loop.run_in_executor(get_plugin_executor(), _read)

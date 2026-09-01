@@ -73,6 +73,11 @@ def _ggml_glob() -> str:
     return "libggml*.so*"          # also matches versioned libggml.so.N
 
 
+# The message logged for the current broken-install warning, or None. Read by
+# last_runtime_resolution_warning().
+_last_broken_runtime_warning: Optional[str] = None
+
+
 def _candidate_dirs() -> List[Path]:
     """Directories that may hold the native library, in priority order."""
     dirs: List[Path] = []
@@ -92,26 +97,32 @@ def _candidate_dirs() -> List[Path]:
 
     # The self-contained location: binaries bundled in the venv via the
     # localm-llama-runtime wheel (populated by `localm setup-llama`).
+    global _last_broken_runtime_warning
     try:
         import localm_llama_runtime
         d = localm_llama_runtime.lib_dir()
         if d:
             dirs.append(Path(d))
+        _last_broken_runtime_warning = None    # this resolution was clean
     except ImportError:
+        _last_broken_runtime_warning = None    # not installed yet, not broken
         pass   # the wheel is not installed yet - normal before `localm setup-llama`
     except Exception as e:
         # Anything other than "not installed" (e.g. an AttributeError from a
         # broken or incomplete install that resolves as an empty namespace
         # package with no lib_dir()) is reported here.
-        logger.warning(
-            "localm_llama_runtime is installed but broken (%r); skipping it "
-            "as a runtime candidate. Try reinstalling it: "
-            "uv pip install -e ./runtime", e)
+        _last_broken_runtime_warning = (
+            f"localm_llama_runtime is installed but broken ({e!r}); skipping it "
+            f"as a runtime candidate. Try reinstalling it: uv pip install -e ./runtime")
+        logger.warning(_last_broken_runtime_warning)
 
     return dirs
 
 
 _warned_explicit_lib = False
+# The message logged for the current bad-LLAMA_CPP_LIB warning, or None. Read
+# by last_runtime_resolution_warning().
+_last_explicit_lib_warning: Optional[str] = None
 
 
 def runtime_binary_dir() -> Optional[Path]:
@@ -127,19 +138,37 @@ def runtime_binary_dir() -> Optional[Path]:
             continue
     # Warn once per process, naming the bad path, when an explicit LLAMA_CPP_LIB
     # override does not actually yield the library and the fallback is used.
-    global _warned_explicit_lib
+    global _warned_explicit_lib, _last_explicit_lib_warning
     explicit = os.environ.get("LLAMA_CPP_LIB")
-    if explicit and not _warned_explicit_lib:
+    if not explicit:
+        _warned_explicit_lib = False
+        _last_explicit_lib_warning = None
+    else:
         p = Path(explicit)
         explicit_dir = p.parent if p.suffix else p
-        if result != explicit_dir:
+        if result == explicit_dir:
+            # The override resolves correctly (now, or as always): nothing to
+            # warn about, and a fix must clear any earlier warning.
+            _warned_explicit_lib = False
+            _last_explicit_lib_warning = None
+        elif not _warned_explicit_lib:
             _warned_explicit_lib = True
-            logger.warning(
-                "LLAMA_CPP_LIB=%s does not contain %s; ignoring it and falling back to %s.",
-                explicit, name,
-                f"the provisioned runtime ({result})" if result
-                else "no runtime (none found - run 'localm setup-llama')")
+            fallback_desc = (f"the provisioned runtime ({result})" if result
+                             else "no runtime (none found - run 'localm setup-llama')")
+            _last_explicit_lib_warning = (
+                f"LLAMA_CPP_LIB={explicit} does not contain {name}; ignoring it "
+                f"and falling back to {fallback_desc}.")
+            logger.warning(_last_explicit_lib_warning)
     return result
+
+
+def last_runtime_resolution_warning() -> Optional[str]:
+    """The current runtime-resolution warning text (a broken localm_llama_runtime
+    install, a bad LLAMA_CPP_LIB override, or both joined), or None when neither
+    is in effect. Reflects whatever _candidate_dirs()/runtime_binary_dir() have
+    already logged in this process; calling this does not itself probe anything."""
+    parts = [w for w in (_last_broken_runtime_warning, _last_explicit_lib_warning) if w]
+    return "; ".join(parts) if parts else None
 
 
 def rocm_runtime_dirs() -> List[Path]:

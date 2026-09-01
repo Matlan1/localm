@@ -19,14 +19,20 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def list_keys_ep(caller: Optional[set] = Depends(caller_scopes)):
-        from localm.auth import list_keys
+        from localm.auth import list_keys, owner_key_downgrade_warning
         from localm.config import load_config
         # is_owner lets the GUI hide owner-only (privileged) scope choices from a
         # mere keys:admin device; presets ride along so a keys:admin key WITHOUT
         # config:read can still see the quick-select bundles.
         is_owner = caller is not None and scopes.ADMIN in caller
         presets = load_config().get("key_presets", [])
-        return {"keys": list_keys(), "is_owner": is_owner, "presets": presets}
+        # Not owner-gated. In open mode caller is None and an is_owner gate
+        # would hide this in exactly the case it matters. In protected mode via
+        # a scoped keystore, a non-owner keys:admin caller can also reach this
+        # field - the same exposure list_keys() already gives that caller class
+        # on this same route, unconditionally.
+        return {"keys": list_keys(), "is_owner": is_owner, "presets": presets,
+                "owner_key_warning": owner_key_downgrade_warning()}
 
     @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def create_key_ep(request: Request, response: Response, body: dict,

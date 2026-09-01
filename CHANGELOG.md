@@ -134,6 +134,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "This server requires an API key" - even though one genuinely was set. The
   Coder's own request back into this same server was using the wrong
   credential in that case; it now uses the key you actually set.
+- **Settings > Security now tells you if your owner key silently stopped
+  working.** If the key file exists but is (or becomes) empty, localm falls
+  back to running without a key - previously visible only in the debug log,
+  now shown right in the Owner key section.
+- **The Jobs page now tells you if scheduled jobs have stopped firing.** A
+  persistent scheduling failure (for example a corrupted job store) used to
+  silently halt every scheduled job with no visible sign; it now shows as a
+  warning on the Jobs page.
+- **Settings > Runtime & GPU now warns you when the llama.cpp runtime could
+  not be resolved as configured** - a broken runtime install, or an invalid
+  `LLAMA_CPP_LIB` override, used to be reported only to the debug log.
 - **Embedding long text no longer fails on runtime builds that ignore the
   shared-cache request.** localm asks its embedding runtime for one shared
   attention cache so several texts can be encoded in a single pass. Some builds

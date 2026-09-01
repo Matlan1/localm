@@ -613,6 +613,48 @@ def test_keys_endpoint_returns_owner_flag_and_presets(auth, monkeypatch):
         assert isinstance(km["presets"], list)
 
 
+def test_keys_endpoint_surfaces_owner_key_downgrade_warning(auth, monkeypatch):
+    """GET /v1/keys carries owner_key_warning when the owner-key file has been
+    downgraded (present but empty). Not owner-gated: the downgrade puts the
+    server in OPEN mode, where the caller authenticates with the shell token
+    rather than an owner key - an is_owner gate would hide the warning in
+    exactly the case it matters."""
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+
+    monkeypatch.setattr(auth, "_empty_owner_key_warned", False, raising=False)
+    monkeypatch.setattr(auth, "_empty_owner_key_downgrade_message", None, raising=False)
+    auth.key_file().parent.mkdir(parents=True, exist_ok=True)
+    auth.key_file().write_text("", encoding="utf-8")
+
+    app = create_app(None)
+    with TestClient(app) as client:
+        # Open mode's management gate refuses a no-Origin caller without the
+        # shell token the GUI shell injects (test_open_mode_management_gate.py).
+        headers = {"Authorization": f"Bearer {app.state.shell_token}"}
+        data = client.get("/v1/keys", headers=headers).json()
+        assert data["owner_key_warning"] and "auth.key" in data["owner_key_warning"]
+        assert auth.owner_key_downgrade_warning() == data["owner_key_warning"]
+
+
+def test_keys_endpoint_reports_no_owner_key_warning_when_keyed(auth, monkeypatch):
+    """NEGATIVE CASE: a real owner key must not manufacture a warning."""
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+
+    monkeypatch.setattr(auth, "_empty_owner_key_warned", False, raising=False)
+    monkeypatch.setattr(auth, "_empty_owner_key_downgrade_message", None, raising=False)
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+
+    app = create_app(None)
+    with TestClient(app) as client:
+        data = client.get(
+            "/v1/keys", headers={"Authorization": "Bearer ownersecret"}).json()
+        assert not data["owner_key_warning"]
+
+
 def test_model_read_routes_require_models_read_scope(auth, monkeypatch):
     """SECURITY.md promises every /v1 route is auth-gated when a key is set.
     /v1/models and /v1/models/{id} must require models:read; /health stays open."""

@@ -115,11 +115,23 @@ export function shouldShowBackendHint(data, dismissed) {
  *  its own (see updater._installed_backend()); this only ever informs. */
 export async function refreshBackendInfo() {
   const row = $("perf-backend-row"), valueEl = $("perf-backend-value"), hint = $("perf-backend-hint");
+  const warnEl = $("perf-backend-warning");
   if (!row || !valueEl || !hint) return;
   try {
     const r = await fetch("/api/backend", { headers: authHeaders() });
-    if (!r.ok) { row.hidden = true; hint.hidden = true; return; }
+    if (!r.ok) {
+      row.hidden = true; hint.hidden = true;
+      if (warnEl) warnEl.hidden = true;
+      return;
+    }
     const data = await r.json();
+    // Independent of "installed": a runtime-resolution warning (a broken
+    // localm_llama_runtime install, a bad LLAMA_CPP_LIB override) can be set
+    // even before setup-llama has ever provisioned a marker.
+    if (warnEl) {
+      warnEl.textContent = data.warning || "";
+      warnEl.hidden = !data.warning;
+    }
     if (!data.installed) { row.hidden = true; hint.hidden = true; return; }
     valueEl.textContent = data.installed;
     row.hidden = false;
@@ -127,7 +139,10 @@ export async function refreshBackendInfo() {
     try { dismissed = localStorage.getItem(BACKEND_HINT_DISMISSED_KEY) === "1"; }
     catch (e) { /* storage blocked - treat as not dismissed */ }
     hint.hidden = !shouldShowBackendHint(data, dismissed);
-  } catch (e) { row.hidden = true; hint.hidden = true; }   // server unreachable - stay hidden, not broken
+  } catch (e) {   // server unreachable - stay hidden, not broken
+    row.hidden = true; hint.hidden = true;
+    if (warnEl) warnEl.hidden = true;
+  }
 }
 
 /** Wire the hint's Dismiss button: hides it now, and (mirroring

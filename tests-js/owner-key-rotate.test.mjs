@@ -78,6 +78,54 @@ test("owner key: card shows for the owner", async () => {
                  .classList.contains("sec-hidden"));
 });
 
+test("owner key: a downgrade warning from the server shows in the card", async () => {
+  const win = await ownerPanel({
+    "GET /v1/keys": () => ({
+      status: 200,
+      body: { keys: [], is_owner: true, presets: [],
+              owner_key_warning: "owner key file /home/auth.key exists but holds "
+                + "no key; the server runs in OPEN (keyless) mode" },
+    }),
+  });
+  await win.refreshOwnerKeyPanel();
+  const warn = win.document.getElementById("owner-key-downgrade-warning");
+  assert.equal(warn.hidden, false);
+  assert.match(warn.textContent, /OPEN \(keyless\) mode/);
+});
+
+test("owner key: no warning from the server hides the notice", async () => {
+  const win = await ownerPanel({});   // OWNER has no owner_key_warning field
+  await win.refreshOwnerKeyPanel();
+  const warn = win.document.getElementById("owner-key-downgrade-warning");
+  assert.equal(warn.hidden, true);
+});
+
+test("owner key: the downgrade warning still shows when this caller is not the owner", async () => {
+  // The exact scenario the warning exists for: the downgrade puts the server
+  // in OPEN mode, where a caller reading /v1/keys is no longer recognised as
+  // owner (is_owner: false) - the warning must reach them anyway, even though
+  // the rotate-controls card itself correctly stays hidden.
+  const { window } = loadAppWithPages({
+    fetchImpl: router({
+      "GET /v1/keys": () => ({
+        status: 200,
+        body: { keys: [], is_owner: false, presets: [],
+                owner_key_warning: "owner key file /home/auth.key exists but holds "
+                  + "no key; the server runs in OPEN (keyless) mode" },
+      }),
+    }),
+  });
+  await tick();
+  await window.refreshOwnerKeyPanel();
+
+  assert.ok(window.document.getElementById("owner-key-card")
+                  .classList.contains("sec-hidden"),
+    "the rotate-controls card stays hidden for a non-owner caller");
+  const warn = window.document.getElementById("owner-key-downgrade-warning");
+  assert.equal(warn.hidden, false, "but the warning itself must still show");
+  assert.match(warn.textContent, /OPEN \(keyless\) mode/);
+});
+
 test("owner key: Generate posts an empty body and shows the new key once", async () => {
   let posted = null;
   const win = await ownerPanel({

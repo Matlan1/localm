@@ -882,6 +882,7 @@ export async function refreshKeysPanel() {
 // keys:admin device is not shown a control it cannot use; it is never the control.
 export async function refreshOwnerKeyPanel() {
   const card = $("owner-key-card"), box = $("owner-key-secret");
+  const warn = $("owner-key-downgrade-warning");
   if (!card || !box) return;
 
   // A settings SECTION, so show/hide via the class the section nav reads, exactly as
@@ -890,14 +891,24 @@ export async function refreshOwnerKeyPanel() {
     card.classList.toggle("sec-hidden", hidden);
     if (typeof buildSettingsNav === "function") buildSettingsNav();
   };
+  const setWarnHidden = (hidden, text) => {
+    if (!warn) return;
+    warn.hidden = hidden;
+    warn.textContent = hidden ? "" : (text || "");
+    if (typeof buildSettingsNav === "function") buildSettingsNav();
+  };
   // Same probe the keys card uses. /v1/keys reports is_owner, and a non-ok answer
   // means this caller is not even a key minter.
   try {
     const r = await fetch("/v1/keys", { headers: authHeaders() });
-    if (!r.ok) { setHidden(true); return; }
+    if (!r.ok) { setHidden(true); setWarnHidden(true); return; }
     const data = await r.json();
+    // Independent of is_owner: the downgrade this reports can put the server
+    // in OPEN mode, where this caller is no longer recognised as owner - the
+    // warning must still reach them, unlike the rotate controls below.
+    setWarnHidden(!data.owner_key_warning, data.owner_key_warning);
     if (!data.is_owner) { setHidden(true); return; }
-  } catch (e) { setHidden(true); return; }
+  } catch (e) { setHidden(true); setWarnHidden(true); return; }
   setHidden(false);
 
   const rotate = async (body, verb) => {

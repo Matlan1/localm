@@ -142,6 +142,9 @@ export function register(ctx) {
     "re-syncs a knowledge collection, on an interval or cron schedule. Runs " +
     "happen in the background while the server is up; use Run now to trigger " +
     "one immediately."));
+  const schedWarnEl = el("div", "key-warn");
+  schedWarnEl.hidden = true;
+  page.appendChild(schedWarnEl);
 
   // Add-job form card.
   page.appendChild(buildForm());
@@ -183,9 +186,15 @@ export function register(ctx) {
     try {
       const data = await api("");
       renderList((data && data.jobs) || []);
+      const warning = data && data.scheduler_warning;
+      schedWarnEl.hidden = !warning;
+      schedWarnEl.textContent = warning
+        ? `Scheduled jobs are not running: ${warning}` : "";
     } catch (e) {
       clear(listEl);
       listEl.appendChild(emptyStateEl("warning", "Could not load jobs", e.message));
+      schedWarnEl.hidden = true;
+      schedWarnEl.textContent = "";
     }
   }
 

@@ -340,7 +340,8 @@ async def list_jobs(request: Request):
     # principal's scheduled jobs.
     from localm.inference.http_server import job_owner_ok
     return {"jobs": [_job_dict(j) for j in _store().list()
-                     if job_owner_ok(request, getattr(j, "owner", None))]}
+                     if job_owner_ok(request, getattr(j, "owner", None))],
+            "scheduler_warning": _scheduler.tick_error() if _scheduler else None}
 
 
 @_router.post("/api/jobs")
