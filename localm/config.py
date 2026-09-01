@@ -286,7 +286,9 @@ DEFAULT_CONFIG: dict = {
     # native MTP/next-n prediction heads (e.g. DeepSeek-V3/R1, Qwen MTP models).
     # True = active when model supports it; False = force standard autoregressive.
     # Off by default: speculation only pays when verifying two tokens costs about
-    # what verifying one costs, which holds for a large model and not a small one.
+    # what verifying one costs, which holds while the whole model is resident on
+    # the GPU and stops holding once layers run on the CPU. `localm bench-mtp`
+    # measures it per model rather than predicting it from the model's size.
     # See test_mtp_default_is_off_until_speculation_is_measured_to_pay.
     "mtp_enabled": False,
     # VRAM (MB) that n_gpu_layers_auto/ctx_auto/_check_vram always reserve beyond

@@ -235,8 +235,9 @@ CORE_FIELDS: list = [
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("mtp_enabled", Widget.TOGGLE, "Multi-Token Prediction (MTP)",
                  "Speculative drafting on models with MTP/next-n heads. Off by "
-                 "default: it pays on large models and costs a little on small "
-                 "ones, so try it and keep it if your model gets faster.",
+                 "default: it speeds some models up and slows others down, "
+                 "depending on the model and this machine. Run "
+                 "`localm bench-mtp <model>` to measure which yours is.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or

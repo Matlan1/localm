@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **`localm bench-mtp MODEL` answers whether Multi-Token Prediction is worth
+  turning on for a model.** The MTP setting helps some models and slows others
+  down, and which is which depends on the model, the quantisation, how much of
+  it fits on your GPU, and how fast your machine is - so instead of guessing,
+  this loads the model both ways, generates the same prompts through each, and
+  tells you which was faster and by how much. It changes nothing: applying the
+  answer stays your call. If the model has no MTP head it says so rather than
+  reporting a meaningless number, and if MTP loses while part of the model is
+  running on the CPU it points that out, since fitting the whole model on the
+  GPU can change the answer.
 - **`/review` in the coder REPL.** Asks the reviewer model for a second opinion
   on the current diff right now, instead of waiting for the automatic pre-done
   pass. Works even when `coder_review` (the automatic pass's own on/off switch,
