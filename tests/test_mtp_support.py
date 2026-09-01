@@ -1107,8 +1107,8 @@ def test_the_mtp_draft_charge_does_not_scale_with_the_split_device_count():
     buffer, carrying less than one buffer of slack. Arm 2 is the control: the
     same total at 4 devices is refused.
     """
-    # llama.cpp b10375: graph_mtp builds one block at model.layers[n_layer()]
-    # (src/models/qwen35.cpp, src/models/deepseek2.cpp); src/llama-model.cpp
+    # llama.cpp b10375: every src/models/ graph_mtp builds ONE block in the
+    # nextn tail range at or above hparams.n_layer(); src/llama-model.cpp
     # :1360-1366 assigns that block and the output head to the last device.
     ov = GgufBackend._VRAM_OVERHEAD_BYTES
     weights = 3 * 1024 ** 3
