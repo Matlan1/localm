@@ -363,20 +363,23 @@ class HangAlarm:
         except Exception:
             logger.debug("hang-alarm surface hook failed", exc_info=True)
 
-    def _maybe_restart(self, reason: str) -> None:
+    def _maybe_restart(self, reason: str) -> bool:
+        """True when a restart is already in flight (from this or an earlier
+        call) or was just dispatched by this call; False when none will
+        happen (storm-suppressed or allow_restart is False)."""
         if self._restart_latched:
-            return
+            return True
         if not self.allow_restart:
-            return
+            return False
         now_epoch = time.time()
         if _storm_active(now_epoch):
             # Keep the surface up but refuse to loop: a hang that survives
             # restarts will not be fixed by a fourth one.
             self._set_active(
                 "storm",
-                "auto-restart suppressed (%d recent hang restarts) - restart "
-                "manually once the cause is fixed" % len(_restart_history()))
-            return
+                "auto-restart suppressed (%d recent hang restarts) - please "
+                "file a bug report" % len(_restart_history()))
+            return False
         self._restart_latched = True
         _record_restart(now_epoch)
         logger.critical(
@@ -390,7 +393,17 @@ class HangAlarm:
             # have left is the surface.
             logger.critical("hang-alarm restart action FAILED", exc_info=True)
             self._set_active("restart-failed",
-                             "automatic restart failed - restart manually")
+                             "automatic restart failed - please file a bug report")
+            return False
+        return True
+
+    def trigger_restart(self, reason: str) -> bool:
+        """External entry point for a caller outside this module (e.g. a GPU
+        probe that is still wedged after its own in-request retries). Shares
+        the same latch and storm guard as the loop-freeze/transport-death
+        detectors below, so this process attempts at most one self-restart
+        regardless of which symptom triggers it first."""
+        return self._maybe_restart(reason)
 
     # -- detectors ---------------------------------------------------------
 

@@ -709,11 +709,89 @@ class TestInconclusiveProbeRetriesBeforeRefusing:
             f"the refusal must state how many attempts were already made "
             f"automatically: {r.text[:200]}")
         for instruction in ("restart the gpu app", "retry shortly",
-                            "unload another model"):
+                            "unload another model", "restart manually",
+                            "restart it yourself", "restart the server"):
             assert instruction not in r.text.lower(), (
                 f"the refusal must state what happened, not instruct the "
                 f"user what to do next ({instruction!r} found): {r.text[:200]}")
+        assert "file a bug report" in r.text.lower(), (
+            f"with no automatic self-restart available (no hang alarm under "
+            f"pytest), the true last resort must point at filing a report: "
+            f"{r.text[:200]}")
         assert not hs._engines.get("model-a", FakeEngine("x")).loaded
+
+
+class _FakeHangAlarm:
+    def __init__(self, *, will_restart: bool):
+        self.will_restart = will_restart
+        self.calls = []
+
+    def trigger_restart(self, reason):
+        self.calls.append(reason)
+        return self.will_restart
+
+
+class TestSwitchEngineEscalatesToSelfRestartWhenStillInconclusive:
+    """When switch_engine's own in-request retries are exhausted, it must ask
+    the server's existing seamless self-restart mechanism (hang_alarm) before
+    ever refusing outright - never instruct the user to restart anything
+    themselves, only to file a bug report as the true last resort."""
+
+    def test_calls_trigger_restart_with_a_reason_naming_the_model(self, monkeypatch):
+        monkeypatch.setattr(hs, "_INCONCLUSIVE_LOAD_RETRY_DELAY", 0)
+        _install_fakes(monkeypatch, free=None)
+        _flaky_probe_double(monkeypatch, timeout_calls=10 ** 6, free_once_ok=10 * 1024 ** 3)
+        fake_alarm = _FakeHangAlarm(will_restart=True)
+        monkeypatch.setattr(hs, "_hang_alarm_instance", fake_alarm)
+
+        client = TestClient(hs.create_app(None))
+        _chat(client, "model-a")
+
+        assert len(fake_alarm.calls) == 1, fake_alarm.calls
+        assert "model-a" in fake_alarm.calls[0], fake_alarm.calls
+
+    def test_restart_triggered_message_describes_automatic_action_not_instructions(
+            self, monkeypatch):
+        monkeypatch.setattr(hs, "_INCONCLUSIVE_LOAD_RETRY_DELAY", 0)
+        _install_fakes(monkeypatch, free=None)
+        _flaky_probe_double(monkeypatch, timeout_calls=10 ** 6, free_once_ok=10 * 1024 ** 3)
+        monkeypatch.setattr(hs, "_hang_alarm_instance", _FakeHangAlarm(will_restart=True))
+
+        client = TestClient(hs.create_app(None))
+        r = _chat(client, "model-a")
+
+        assert r.status_code == 503, r.text
+        assert "restart" in r.text.lower() and "automatic" in r.text.lower(), r.text[:200]
+        for instruction in ("restart the gpu app", "restart manually",
+                            "restart it yourself", "restart the server",
+                            "file a bug report"):
+            assert instruction not in r.text.lower(), (
+                f"a restart is already in flight - the message must not also "
+                f"claim recovery failed or instruct the user "
+                f"({instruction!r} found): {r.text[:200]}")
+
+    def test_restart_not_triggered_falls_through_to_bug_report_message(self, monkeypatch):
+        """trigger_restart() returning False (storm-suppressed, disabled, or
+        the restart action itself failed) must fall through to exactly the
+        same passive, file-a-report refusal as when no hang alarm exists."""
+        monkeypatch.setattr(hs, "_INCONCLUSIVE_LOAD_RETRY_DELAY", 0)
+        _install_fakes(monkeypatch, free=None)
+        _flaky_probe_double(monkeypatch, timeout_calls=10 ** 6, free_once_ok=10 * 1024 ** 3)
+        fake_alarm = _FakeHangAlarm(will_restart=False)
+        monkeypatch.setattr(hs, "_hang_alarm_instance", fake_alarm)
+
+        client = TestClient(hs.create_app(None))
+        r = _chat(client, "model-a")
+
+        assert r.status_code == 503, r.text
+        assert len(fake_alarm.calls) == 1, fake_alarm.calls
+        assert "file a bug report" in r.text.lower(), r.text[:200]
+        for instruction in ("restart the gpu app", "restart manually",
+                            "restart it yourself", "restart the server"):
+            assert instruction not in r.text.lower(), (
+                f"no restart is happening - the message must never instruct "
+                f"the user to restart anything ({instruction!r} found): "
+                f"{r.text[:200]}")
 
 
 def _fake_stat_size(monkeypatch, path: Path, size_bytes: int):

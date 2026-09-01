@@ -314,9 +314,70 @@ def test_storm_guard_suppresses_restart_but_keeps_surfacing(monkeypatch):
         time.sleep(1.0)
         assert "restart" not in spy.kinds(), spy.events
         assert any("suppressed" in t for t in spy.texts("surface")), spy.events
+        assert any("file a bug report" in t for t in spy.texts("surface")), spy.events
+        assert not any("restart manually" in t for t in spy.texts("surface")), spy.events
     finally:
         alarm.stop()
         rl.close()
+
+
+def test_trigger_restart_dispatches_and_returns_true(monkeypatch):
+    """trigger_restart is the external entry point for a caller outside this
+    module (e.g. switch_engine's GPU-probe-wedge escalation), sharing the same
+    latch/storm guard as the loop-freeze/transport-death detectors."""
+    monkeypatch.delenv("LOCALM_HANG_RESTART_HISTORY", raising=False)
+    spy = _Spy()
+    alarm = _make_alarm(spy)
+    assert alarm.trigger_restart("gpu probe still wedged") is True
+    assert spy.texts("restart") == ["gpu probe still wedged"]
+
+
+def test_trigger_restart_true_when_already_latched(monkeypatch):
+    """A second trigger (from any source) after a restart is already in
+    flight reports True - a restart IS happening - without dispatching a
+    second one."""
+    monkeypatch.delenv("LOCALM_HANG_RESTART_HISTORY", raising=False)
+    spy = _Spy()
+    alarm = _make_alarm(spy)
+    assert alarm.trigger_restart("first") is True
+    assert alarm.trigger_restart("second") is True
+    assert spy.texts("restart") == ["first"]
+
+
+def test_trigger_restart_false_when_disabled(monkeypatch):
+    monkeypatch.delenv("LOCALM_HANG_RESTART_HISTORY", raising=False)
+    spy = _Spy()
+    alarm = _make_alarm(spy, allow_restart=False)
+    assert alarm.trigger_restart("gpu probe still wedged") is False
+    assert "restart" not in spy.kinds()
+
+
+def test_trigger_restart_false_when_storm_suppressed(monkeypatch):
+    now = time.time()
+    monkeypatch.setenv(
+        "LOCALM_HANG_RESTART_HISTORY",
+        ",".join(f"{now - off:.0f}" for off in (60, 120, 180)))
+    spy = _Spy()
+    alarm = _make_alarm(spy)
+    assert alarm.trigger_restart("gpu probe still wedged") is False
+    assert "restart" not in spy.kinds()
+    assert any("file a bug report" in t for t in spy.texts("surface")), spy.events
+
+
+def test_restart_action_failure_surface_names_bug_report_not_restart_manually(monkeypatch):
+    """If the restart callback itself raises (os.execv never returns on
+    success, so an exception means recovery failed), the loudest state left
+    is the surface - and it must not instruct the user to restart anything."""
+    monkeypatch.delenv("LOCALM_HANG_RESTART_HISTORY", raising=False)
+    spy = _Spy()
+
+    def _boom(reason):
+        raise RuntimeError("execv failed")
+
+    alarm = _make_alarm(spy, restart=_boom)
+    assert alarm.trigger_restart("gpu probe still wedged") is False
+    assert any("file a bug report" in t for t in spy.texts("surface")), spy.events
+    assert not any("restart manually" in t for t in spy.texts("surface")), spy.events
 
 
 def test_record_restart_appends_and_trims(monkeypatch):
