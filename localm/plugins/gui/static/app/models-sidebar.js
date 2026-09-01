@@ -5,6 +5,7 @@
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
 import { $, GIB, authHeaders, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
+import { t } from "./i18n.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
 export const modelSelect = $("model-select");
@@ -781,7 +782,7 @@ export async function refreshModels() {
       // all that is owed here is a status line that names the real cause. The
       // generic branch below would say "models unavailable (HTTP 403)", which
       // reads as a server fault rather than a page that needs reloading.
-      setStatus("err", "page out of date - reload to reconnect");
+      setStatus("err", t("sidebar.status.pageStale"));
       return;
     }
     if (!r.ok) {
@@ -789,7 +790,7 @@ export async function refreshModels() {
       // (e.g. FastAPI's {"detail": ...}); the empty-list fallback below would
       // then silently show an empty dropdown + "ok / no model" status, masking
       // the server error. Surface it instead.
-      setStatus("err", `models unavailable (HTTP ${r.status})`);
+      setStatus("err", t("sidebar.status.modelsUnavailable", { status: r.status }));
       return;
     }
     const data = await r.json();
@@ -834,7 +835,7 @@ export async function refreshModels() {
       const willServe = modelCache.active || modelCache.resumable || "";
       const placeholder = document.createElement("option");
       placeholder.value = "";
-      placeholder.textContent = "No model loaded";
+      placeholder.textContent = t("sidebar.noModelLoaded");
       placeholder.disabled = true;
       if (!willServe) placeholder.selected = true;
       modelSelect.appendChild(placeholder);
@@ -853,7 +854,7 @@ export async function refreshModels() {
     // "no model" only when nothing will serve the next message either - a
     // resumable model reloads on it, so reporting "no model" would contradict
     // both the dropdown above and what the server actually does.
-    if (!_statusBusy) setStatus("ok", data.active || data.resumable || "no model");
+    if (!_statusBusy) setStatus("ok", data.active || data.resumable || t("sidebar.status.noModel"));
     // Present only when there is something to unload - not merely a courtesy,
     // the model this targets (modelCache.active) is the ONLY thing that makes
     // its click handler well-defined.
@@ -879,7 +880,7 @@ export async function refreshModels() {
     }
     _modelsEverRefreshed = true;
   } catch (e) {
-    setStatus("err", "server unreachable");
+    setStatus("err", t("sidebar.status.serverUnreachable"));
   }
 }
 
@@ -911,7 +912,7 @@ export function renderModelSplitLine(split) {
 // claim success or reset status here (that would flash the abandoned model's
 // name). Callers should skip their success toast for it.
 export async function switchModel(model) {
-  setStatus("busy", "loading " + model + "…");
+  setStatus("busy", t("sidebar.status.loading", { model }));
   const r = await fetch("/api/models/load", {
     method: "POST",
     headers: authHeaders(),
@@ -968,7 +969,7 @@ modelSelect.onchange = async () => {
       refreshPerfEstimate();
     }
   } catch (e) {
-    setStatus("err", "load failed");
+    setStatus("err", t("sidebar.status.loadFailed"));
     toast("Model load failed: " + e.message, true);
     refreshModels();
   }
@@ -987,7 +988,7 @@ if (sidebarUnloadBtn) {
     const model = modelCache.active;
     if (!model) return;   // hidden whenever there's nothing to unload; guard anyway
     sidebarUnloadBtn.disabled = true;
-    setStatus("busy", "unloading " + model + "…");
+    setStatus("busy", t("sidebar.status.unloading", { model }));
     try {
       const r = await fetch("/api/models/unload", {
         method: "POST",
@@ -996,7 +997,7 @@ if (sidebarUnloadBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        setStatus("err", "unload failed");
+        setStatus("err", t("sidebar.status.unloadFailed"));
         toast(data.detail || "Unload failed", true);
         return;
       }
@@ -1034,7 +1035,7 @@ if (sidebarUnloadBtn) {
       refreshModels();
       refreshPerfEstimate();
     } catch (e) {
-      setStatus("err", "unload failed");
+      setStatus("err", t("sidebar.status.unloadFailed"));
       toast("Unload failed: " + e.message, true);
     } finally {
       sidebarUnloadBtn.disabled = false;
@@ -1042,3 +1043,6 @@ if (sidebarUnloadBtn) {
   };
 }
 
+// The model dropdown's placeholder and the status pill are written by
+// refreshModels, so they are redrawn when the interface language changes.
+document.addEventListener("localm:language", () => { refreshModels(); });

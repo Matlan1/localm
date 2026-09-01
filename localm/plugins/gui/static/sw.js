@@ -11,7 +11,8 @@ const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry plus every app/* and pages/* module.
   "/app/main.js",
-  "/app/client-log.js", "/app/helpers.js", "/app/icons.js", "/app/picker.js", "/app/theme.js",
+  "/app/client-log.js", "/app/helpers.js", "/app/i18n-en.js", "/app/i18n.js",
+  "/app/icons.js", "/app/picker.js", "/app/theme.js",
   "/app/logo.js", "/app/tabs.js", "/app/models-sidebar.js", "/app/chat.js",
   "/app/cmdk.js", "/app/settings-perf.js", "/app/coder.js", "/app/slash.js",
   "/app/init.js", "/app/media-gallery.js",
@@ -19,6 +20,8 @@ const SHELL = [
   "/pages/dispatch.js", "/pages/models.js", "/pages/images.js",
   "/pages/plugins.js", "/pages/settings.js", "/pages/workflow.js",
   "/pages/music.js", "/pages/video.js", "/pages/knowledge.js",
+  // Interface translations. English is in /app/i18n-en.js, imported by the app.
+  "/i18n/de.json",
   "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png",
   "/manifest.webmanifest",
   "/vendor/marked.min.js", "/vendor/purify.min.js", "/vendor/highlight.min.js",

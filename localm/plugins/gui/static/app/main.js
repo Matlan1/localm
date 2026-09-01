@@ -11,6 +11,8 @@
  * binding through the module itself. */
 import * as m0 from "./client-log.js";
 import * as m1 from "./helpers.js";
+import * as mI18nEn from "./i18n-en.js";
+import * as mI18n from "./i18n.js";
 import * as mIcons from "./icons.js";
 import * as mPk from "./picker.js";
 import * as m2 from "./theme.js";
@@ -33,7 +35,7 @@ import * as m18 from "../pages/music.js";
 import * as m19 from "../pages/video.js";
 import * as m20 from "../pages/knowledge.js";
 
-for (const mod of [m0, m1, mIcons, mPk, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16, m17, m18, m19, m20]) {
+for (const mod of [m0, m1, mI18nEn, mI18n, mIcons, mPk, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16, m17, m18, m19, m20]) {
   for (const name of Object.keys(mod)) {
     try {
       Object.defineProperty(window, name, { get: () => mod[name], configurable: true, enumerable: true });

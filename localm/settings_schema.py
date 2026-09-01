@@ -71,6 +71,10 @@ _EMBEDDING_POOLING = ["mean", "auto", "cls", "last", "none"]
 # Sidebar wordmark treatments (see config.py logo_style). Shared by the web GUI
 # logo picker and the desktop launcher; kept here so PATCH /v1/config validates.
 LOGO_STYLE_IDS = ["local-m", "loca-lm", "localm"]
+# Interface languages the web GUI ships. "en" is built into the app; every
+# other id must have a static/i18n/<id>.json catalog. Pinned to the GUI's own
+# LANGUAGES registry by test_language_ids_match_the_gui_registry.
+LANGUAGE_IDS = ["en", "de"]
 # Chat avatars (user_avatar / model_avatar_default / model_avatar_overrides, see
 # config.py). A value is "", a short emoji/text glyph, or a raster data URI -
 # never a URL or path. See test_avatar_value_rejects_url_or_path.
@@ -502,6 +506,13 @@ CORE_FIELDS: list = [
     SettingField("logo_style", Widget.HIDDEN, "Logo style",
                  "Sidebar wordmark, chosen with the logo picker and shared with "
                  "the desktop launcher.",
+                 group="General"),
+    # HIDDEN: chosen with the language picker in the GUI (Settings -> Appearance),
+    # which names each language in its own language, not a form control whose
+    # own label would be in a language the reader may not have.
+    SettingField("language", Widget.HIDDEN, "Interface language",
+                 "Language the web GUI is shown in. Anything not translated "
+                 "yet stays in English.",
                  group="General"),
     # OFF means the project list is NOT WRITTEN, never "written but hidden" -
     # see plugins/coder/projects.py, whose privacy-mode refusal is NOT covered
@@ -1273,6 +1284,11 @@ def _validate_one(key: str, val, field: "SettingField", default):
             if s in LOGO_STYLE_IDS:
                 return s
             raise ValueError(f"{key}: {val!r} is not one of {LOGO_STYLE_IDS}")
+        if key == "language":
+            s = str(val)
+            if s in LANGUAGE_IDS:
+                return s
+            raise ValueError(f"{key}: {val!r} is not one of {LANGUAGE_IDS}")
         if key == "key_presets":
             return _validate_key_presets(val)
         if key == "main_gpu_index":

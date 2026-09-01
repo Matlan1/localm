@@ -58,6 +58,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The letter grade shown next to each voice (e.g. "Heart (en-us, Female,
   A)") is now explained in Settings.** It rates that voice's training data,
   not a version number: higher means more and cleaner training audio.
+- **The interface can now be shown in German, and the language is a setting.**
+  Settings > System > Appearance has an "Interface language" picker; the choice
+  is saved on the server, so it follows the instance to every browser that
+  connects to it, and `localm config language de` sets the same thing from the
+  command line. The chat view and the app's shell - the sidebar, its navigation,
+  the conversation list, the model box, the message composer and the chat
+  parameters drawer - are translated, along with the Settings page's own
+  headings, search box, section navigation and Appearance card. Everything not
+  translated yet stays in English rather than going blank, and switching
+  language takes effect immediately without a reload. The rest of the app
+  (Models, Plugins, Coder, Knowledge, Studio, and the individual settings
+  descriptions) is still English only; adding another language now means adding
+  one catalog file rather than changing the app.
 
 ### Fixed
 - **The list of other running LocaLM servers now really does cover the whole

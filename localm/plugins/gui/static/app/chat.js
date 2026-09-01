@@ -7,6 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { openMemoryModal, runCompletion, speak, setWebAskSession } from "./settings-perf.js";
@@ -182,12 +183,8 @@ export async function compactConversation(conv) {
   const lostBranches = pruneBranches(conv);
   saveConversations(conv);
   renderChat();
-  const base = summary ? "Older messages summarised to free context"
-                       : "Older messages trimmed (summarisation unavailable)";
-  toast(lostBranches
-    ? `${base} (${lostBranches} alternative branch${lostBranches > 1 ? "es" : ""} `
-      + `from the older messages ${lostBranches > 1 ? "were" : "was"} archived)`
-    : base);
+  const base = t(summary ? "chat.compact.summarised" : "chat.compact.trimmed");
+  toast(lostBranches ? tn("chat.compact.archived", lostBranches, { base }) : base);
   return true;
 }
 
@@ -336,9 +333,10 @@ export async function refreshCtxLimit() {
           const hint = document.createElement("div");
           hint.id = "privacy-hint";
           hint.className = "privacy-hint";
-          hint.textContent = "privacy mode - this session only";
-          hint.title = "The server runs in privacy mode: conversations are " +
-            "not saved (here or on disk) and vanish on reload. Export still works.";
+          hint.dataset.i18n = "chat.privacyHint";
+          hint.dataset.i18nTitle = "chat.privacyHint.title";
+          hint.textContent = t("chat.privacyHint");
+          hint.title = t("chat.privacyHint.title");
           h.after(hint);
         }
       } else {
@@ -478,7 +476,7 @@ export function deleteConversationRemote(convId) {
     // Deleting is privacy-relevant and the UI copy is already gone: a failed
     // server delete must not pass silently - the server copy would resurrect
     // on the next load while the user believes it was deleted.
-    toast("Could not delete the conversation on the server - it may reappear", true);
+    toast(t("chat.conv.deleteFailed"), true);
     console.error("conversation delete failed: " + (e && e.message ? e.message : e));
   });
 }
@@ -573,10 +571,10 @@ export async function initServerConversations() {
       const hint = document.createElement("div");
       hint.id = "persist-hint";
       hint.className = "privacy-hint";
-      hint.textContent = "history saved on this machine";
-      hint.title = "Conversations are stored in the localm data directory " +
-        "(chats/) because the server runs in log or full mode. They survive " +
-        "browser reloads and profile wipes.";
+      hint.dataset.i18n = "chat.persistHint";
+      hint.dataset.i18nTitle = "chat.persistHint.title";
+      hint.textContent = t("chat.persistHint");
+      hint.title = t("chat.persistHint.title");
       h.after(hint);
     }
   } catch (e) { /* store unavailable - localStorage keeps working */ }
@@ -705,7 +703,7 @@ export function buildConvItem(conv, snippet) {
   item.appendChild(fold);
 
   const del = el("button", "del", "×");
-  del.title = "Delete conversation";
+  del.title = t("chat.conv.delete");
   del.onclick = (e) => {
     e.stopPropagation();
     chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
@@ -788,10 +786,10 @@ export function renderConvList() {
            "::chats", loose);
 
   if (term && !visible.length) {
-    list.appendChild(el("div", "privacy-hint", "no matching chats"));
+    list.appendChild(el("div", "privacy-hint", t("chat.conv.noMatches")));
   } else if (!term && !chat.conversations.length) {
-    list.appendChild(emptyState("chat", "No conversations yet",
-      "Start one with the + above."));
+    list.appendChild(emptyState("chat", t("chat.conv.empty"),
+      t("chat.conv.empty.hint")));
   }
 }
 
@@ -844,7 +842,7 @@ export function openImageLightbox(src, name) {
     document.removeEventListener("keydown", onKey);
   };
   function onKey(e) { if (e.key === "Escape") dismiss(); }
-  const save = el("button", "btn-secondary", "Save");
+  const save = el("button", "btn-secondary", t("chat.image.save"));
   save.onclick = () => {
     const a = document.createElement("a");
     a.href = src;
@@ -853,12 +851,12 @@ export function openImageLightbox(src, name) {
     a.click();
     a.remove();
   };
-  const copy = el("button", "btn-secondary", "Copy image");
+  const copy = el("button", "btn-secondary", t("chat.image.copy"));
   copy.onclick = async () => {
     const ok = await copyImageSrc(src);
-    toast(ok ? "Image copied" : "Could not copy the image - use Save instead", !ok);
+    toast(t(ok ? "chat.image.copied" : "chat.image.copyFailedSave"), !ok);
   };
-  const close = el("button", "btn-secondary", "Close");
+  const close = el("button", "btn-secondary", t("chat.image.close"));
   close.onclick = dismiss;
   bar.appendChild(save);
   bar.appendChild(copy);
@@ -1010,7 +1008,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     // imageFilename uses the ORIGINAL url (a data: URI or /api path) for a sane
     // download name, while img.src is the resolved displayable source.
     img.style.cursor = "zoom-in";
-    img.title = "Click to view, save, or copy";
+    img.title = t("chat.image.viewTitle");
     img.addEventListener("click", () => openImageLightbox(img.src, imageFilename(url)));
     body.appendChild(img);
   }
@@ -1032,7 +1030,7 @@ export function addMessageRow(container, role, text, opts = {}) {
   }
   row.appendChild(body);
   const meta = el("div", "msg-meta");
-  const copy = el("button", "copy-btn", "copy");
+  const copy = el("button", "copy-btn", t("chat.copy"));
   copy.onclick = async () => {
     const plain = stripThink(text) || text;
     const firstImg = body.querySelector(".msg-img");
@@ -1041,30 +1039,30 @@ export function addMessageRow(container, role, text, opts = {}) {
     // text+image message the text copy is kept; the image is in the lightbox.
     if (!plain && firstImg && firstImg.src) {
       const ok = await copyImageSrc(firstImg.src);
-      copy.textContent = ok ? "copied" : "copy";
-      if (!ok) toast("Could not copy the image - open it and use Save", true);
-      else setTimeout(() => (copy.textContent = "copy"), 1200);
+      copy.textContent = t(ok ? "chat.copied" : "chat.copy");
+      if (!ok) toast(t("chat.image.copyFailedOpen"), true);
+      else setTimeout(() => (copy.textContent = t("chat.copy")), 1200);
       return;
     }
     try {
       await navigator.clipboard.writeText(plain);
-      copy.textContent = "copied";
-      setTimeout(() => (copy.textContent = "copy"), 1200);
+      copy.textContent = t("chat.copied");
+      setTimeout(() => (copy.textContent = t("chat.copy")), 1200);
     } catch (e) {
       // Matches the image branch above: a real failure (permission denied,
       // insecure context) must never be reported as "copied" - that is
       // claiming a step happened that did not (AGENTS.md rule 5).
-      toast("Could not copy - your browser blocked clipboard access", true);
+      toast(t("chat.copyBlocked"), true);
     }
   };
   meta.appendChild(copy);
   if (opts.variant) {
     const nav = el("span", "variant");
     const prev = el("button", "action", "‹");
-    prev.title = "Previous variant";
+    prev.title = t("chat.variant.previous");
     prev.onclick = opts.variant.prev;
     const next = el("button", "action", "›");
-    next.title = "Next variant";
+    next.title = t("chat.variant.next");
     next.onclick = opts.variant.next;
     nav.appendChild(prev);
     nav.appendChild(el("span", "k", `${opts.variant.k}/${opts.variant.n}`));
@@ -1093,8 +1091,8 @@ export function buildEmptyHint() {
   big.appendChild(accent);
   div.appendChild(big);
   div.appendChild(document.createTextNode(
-    "Chat with " + (modelCache.active || "your local model") + ". Everything stays on this machine."));
-  const tip = el("div", "", "Type / for commands - /generate-image creates images locally.");
+    t("chat.empty.blurb", { model: modelCache.active || t("chat.empty.yourModel") })));
+  const tip = el("div", "", t("chat.empty.tip"));
   tip.style.marginTop = "10px";
   tip.style.fontSize = "13px";
   div.appendChild(tip);
@@ -1156,7 +1154,7 @@ export function renderChat() {
     if (m.role === "assistant" && m.model) {
       const currentModel = m.model === "MODEL" ? (modelCache.active || m.model) : m.model;
       if (lastAssistantModel && currentModel !== lastAssistantModel) {
-        box.appendChild(el("div", "model-switch", "switched to " + currentModel));
+        box.appendChild(el("div", "model-switch", t("chat.switchedTo", { model: currentModel })));
       }
       lastAssistantModel = currentModel;
     }
@@ -1262,7 +1260,7 @@ export function forkAt(conv, index) {
 
 /** Switch the fork at *index* one sibling left/right (dir = ±1). */
 export function switchBranch(conv, index, dir) {
-  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
   const rec = forkRecord(conv, parentIdAt(conv, index), false);
   if (!rec || rec.tails.length < 2) return;
   const n = rec.tails.length;
@@ -1313,7 +1311,7 @@ export function editMessage(conv, index) {
   // Editing forks the branch tree (forkAt); doing that mid-stream parks the
   // messages before the streaming reply has landed, corrupting the branch
   // state. Bail while a reply streams, like switchBranch / regenerate do.
-  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
   const m = conv.messages[index];
   $("chat-input").value = msgText(m);
   autoGrow($("chat-input"));
@@ -1356,7 +1354,7 @@ export function branchesLostByRevert(conv, index) {
  *  SAME branch. Reverting past a fork point destroys the sibling branches in the
  *  removed region, so confirm first when that would happen (the safeguard). */
 export function revertTo(conv, index) {
-  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
   if (index < 0 || index >= conv.messages.length) return;
   const text = msgText(conv.messages[index]);
   const lost = branchesLostByRevert(conv, index);
@@ -1552,13 +1550,12 @@ export async function ingestSharedFiles() {
     if (failed > 0) {
       console.error("share-inbox clear: " + failed + " item(s) could not be " +
                     "deleted server-side - retried on the next share ingest");
-      toast(`${failed} shared item${failed > 1 ? "s" : ""} could not be ` +
-            `cleared from the server`, true);
+      toast(tn("chat.share.clearFailed", failed), true);
     }
   }).catch((e) => {
     console.error("share-inbox clear failed: " + (e && e.message ? e.message : e));
   });
-  if (imgs) toast(`${imgs} image${imgs > 1 ? "s" : ""} shared into chat`);
+  if (imgs) toast(tn("chat.share.imagesIn", imgs));
 }
 
 /** Drag-and-drop files anywhere on the chat view to attach them, with a
@@ -1587,3 +1584,12 @@ export function setupChatDropZone() {
 }
 setupChatDropZone();
 
+// The conversation list and the message area hold text built here rather than
+// marked up in index.html, so they are rebuilt when the interface language
+// changes. Skipped while a reply is streaming: renderChat() replaces the
+// element the stream is writing into.
+document.addEventListener("localm:language", () => {
+  if (chat.abort) return;
+  renderConvList();
+  renderChat();
+});

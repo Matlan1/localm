@@ -4,6 +4,7 @@
 
 // --- ES module imports ---
 import { $, authHeaders } from "./helpers.js";
+import { t } from "./i18n.js";
 
 // The three sidebar wordmark styles. The choice is stored in server config
 // (logo_style) and cached in localStorage. The blue half is rendered into the
@@ -68,7 +69,7 @@ export function renderLogoPicker() {
     tile.type = "button";
     tile.className = "logo-tile" + (style.id === current ? " active" : "");
     tile.dataset.style = style.id;
-    tile.title = "Use the " + style.white + style.blue + " wordmark";
+    tile.title = t("appearance.logoStyle.tile", { name: style.white + style.blue });
     drawWordmark(tile, style);
     tile.onclick = () => setLogoStyle(style.id);
     wrap.appendChild(tile);

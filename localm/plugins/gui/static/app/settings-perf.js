@@ -9,6 +9,7 @@
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
 import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, renderMarkdown, revealFilledAdvanced, streamJob, stripThink, toast } from "./helpers.js";
+import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -1691,7 +1692,7 @@ export async function refreshPersonas() {
     sel.replaceChildren();
     const none = document.createElement("option");
     none.value = "";
-    none.textContent = "(none)";
+    none.textContent = t("chat.none");
     sel.appendChild(none);
     for (const p of personaCache) {
       const opt = document.createElement("option");
@@ -2222,7 +2223,7 @@ export async function refreshKbSelect() {
     sel.replaceChildren();
     const none = document.createElement("option");
     none.value = "";
-    none.textContent = "(none)";
+    none.textContent = t("chat.none");
     sel.appendChild(none);
     for (const c of data.collections) {
       const opt = document.createElement("option");
@@ -2426,3 +2427,9 @@ if ($("mtb-new")) {
   $("mtb-new").onclick = () => { newConversation(); showView("chat"); closeNav(); };
 }
 
+// The Persona and Knowledge dropdowns replace their own "(none)" option, so
+// they are rebuilt when the interface language changes.
+document.addEventListener("localm:language", () => {
+  refreshPersonas();
+  refreshKbSelect();
+});

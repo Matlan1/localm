@@ -5,6 +5,7 @@
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, authHeaders, clearImageProxyCache, confirmDanger, el, fileToAvatarDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
+import { t } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
@@ -1162,7 +1163,7 @@ export function buildSettingsNav() {
     const link = el("button", "settings-nav-link" + (meta.cat ? " " + meta.cat : ""));
     link.dataset.target = g.id;
     link.appendChild(iconEl(meta.icon || "settings", "nav-ic"));
-    link.appendChild(document.createTextNode(g.label));
+    link.appendChild(document.createTextNode(t("settings.group." + g.id)));
     link.onclick = () => {
       clearSettingsFilter();     // picking a group means leaving the search view
       _activeSettingsGroup = g.id;
@@ -1173,6 +1174,10 @@ export function buildSettingsNav() {
   const target = settingsTargetGroup(content);
   if (target) showSettingsGroup(target);
 }
+
+// The nav labels are built from the catalog, so they are redrawn when the
+// interface language changes.
+document.addEventListener("localm:language", () => buildSettingsNav());
 
 /** Which group the settings page should be SHOWING: the user's explicit choice if it
  *  still has a visible section, else the first group that does (Model). Extracted from

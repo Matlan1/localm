@@ -392,6 +392,10 @@ DEFAULT_CONFIG: dict = {
     # loca-lm (Loca white + LM blue), localm (lowercase, m blue). Console
     # command, app icon, and shortcut are fixed regardless.
     "logo_style": "local-m",
+    # Interface language for the web GUI, as a LANGUAGE_IDS id ("en", "de").
+    # The GUI reads it at boot and loads static/i18n/<id>.json; English is
+    # built in and is the fallback for anything a catalog does not carry.
+    "language": "en",
     # Standalone app window (localm[desktop] extra): its own close button hides
     # it to the tray by default, leaving the server running; Stop quits. True
     # makes the close button quit the whole app and stop the server instead.
