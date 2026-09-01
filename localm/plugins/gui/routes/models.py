@@ -351,8 +351,9 @@ def register(app: FastAPI, ctx) -> None:
         _require_registered(req.model)
         # Route every switch through the coordinator so a new selection preempts an
         # in-flight load instead of queuing behind it. The coordinator returns the
-        # authoritative status: loaded, already_active, or superseded (a newer
-        # selection took over, which is not an error).
+        # authoritative status: loaded, already_active, superseded (a newer
+        # selection took over), or cancelled (aborted for any other reason) -
+        # none of these is an error.
         try:
             result = await switch_model(req.model)
         except Exception as e:

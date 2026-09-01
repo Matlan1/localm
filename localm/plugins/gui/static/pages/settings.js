@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, authHeaders, clearImageProxyCache, confirmDanger, el, fileToAvatarDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
@@ -1449,6 +1449,9 @@ export async function refreshSettingsPage() {
   refreshCompanion();
   refreshKeysPanel();
   refreshOwnerKeyPanel();
+  // Wires the wallpaper picker (a static card, never rebuilt above) only from
+  // this auth-gated point, never at module load. See keygate.test.mjs.
+  setupChatBackgroundPicker();
 }
 
 /** Mark which folder list the current RAG indexing MODE actually uses (Allowed in
@@ -1731,21 +1734,40 @@ function buildAvatarPicker(initial) {
   return { node: wrap, getValue: () => value };
 }
 
-/** One row of the per-model override list: a model-id text field beside its
- * own avatar picker, and a remove button that detaches the row. */
-function buildAvatarOverrideRow(modelId, iconValue) {
+/** One row of the per-model override list: a model-id <select> (populated from
+ * *installedNames*, the real registry keys /api/models returns) beside its own
+ * avatar picker, and a remove button that detaches the row.
+ *
+ * modelId is always kept as a selectable option even when it is not in
+ * installedNames, so an override saved for a model that is currently
+ * uninstalled (or temporarily missing) is never silently dropped or
+ * rewritten to a different model just because the picker rendered. */
+function buildAvatarOverrideRow(modelId, iconValue, installedNames) {
   const row = el("div", "avatar-override-row");
-  const idInput = document.createElement("input");
-  idInput.type = "text";
-  idInput.placeholder = "model id (exact)";
-  idInput.value = modelId || "";
-  idInput.className = "avatar-override-id";
+  const idSelect = document.createElement("select");
+  idSelect.className = "avatar-override-id";
+  const names = [...new Set(installedNames || [])];
+  if (modelId && !names.includes(modelId)) names.push(modelId);
+  if (!names.length) {
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "No models installed";
+    placeholder.disabled = true;
+    idSelect.appendChild(placeholder);
+  }
+  for (const name of names) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = (installedNames || []).includes(name) ? name : `${name} (not installed)`;
+    idSelect.appendChild(opt);
+  }
+  idSelect.value = modelId || "";
   const picker = buildAvatarPicker(iconValue);
   const removeBtn = el("button", "btn-secondary", "Remove");
   removeBtn.type = "button";
   removeBtn.onclick = () => row.remove();
-  row.append(idInput, picker.node, removeBtn);
-  return { node: row, getModelId: () => idInput.value.trim(), getValue: picker.getValue };
+  row.append(idSelect, picker.node, removeBtn);
+  return { node: row, getModelId: () => idSelect.value, getValue: picker.getValue };
 }
 
 /** The Avatars section: user_avatar / model_avatar_default /
@@ -1758,9 +1780,10 @@ function buildAvatarOverrideRow(modelId, iconValue) {
  * matching the flat form's own tolerance for a field it cannot find. */
 export async function buildAvatarsSection(form, fields) {
   const userField = (fields || []).find((f) => f.key === "user_avatar");
+  const nameField = (fields || []).find((f) => f.key === "user_name");
   const modelField = (fields || []).find((f) => f.key === "model_avatar_default");
   const overridesField = (fields || []).find((f) => f.key === "model_avatar_overrides");
-  if (!userField || !modelField || !overridesField) return;
+  if (!userField || !nameField || !modelField || !overridesField) return;
 
   let current;
   try {
@@ -1770,6 +1793,18 @@ export async function buildAvatarsSection(form, fields) {
   } catch (e) {
     return;   // best-effort: skip this refresh rather than show a broken panel
   }
+
+  // Real installed model names, for the per-model override picker below.
+  // Best-effort exactly like the /v1/config fetch above: an empty list just
+  // means every override row falls back to its own preserved current value.
+  let installedModels = [];
+  try {
+    const mr = await fetch("/api/models?type=llm", { headers: authHeaders() });
+    if (mr.ok) {
+      const md = await mr.json();
+      installedModels = Array.isArray(md.models) ? md.models.map((m) => m.name) : [];
+    }
+  } catch (e) { /* ignored - rows fall back to their own current value */ }
 
   const panel = el("section", "card settings-section");
   panel.id = "settings-sec-avatars";
@@ -1784,7 +1819,14 @@ export async function buildAvatarsSection(form, fields) {
 
   const userPicker = buildAvatarPicker(current.user_avatar || "");
   const userRow = el("div", "avatar-field-row");
-  userRow.append(el("div", "avatar-field-label", "Your icon"), userPicker.node);
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.placeholder = "Your name (shown instead of \"You\")";
+  nameInput.value = current.user_name || "";
+  nameInput.className = "avatar-name-input";
+  nameInput.addEventListener("input", () => markSettingDirty(nameInput));
+  nameInput.addEventListener("change", () => markSettingDirty(nameInput));
+  userRow.append(el("div", "avatar-field-label", "Your icon"), userPicker.node, nameInput);
   panel.appendChild(userRow);
 
   const modelPicker = buildAvatarPicker(current.model_avatar_default || "");
@@ -1798,14 +1840,14 @@ export async function buildAvatarsSection(form, fields) {
   overridesBox.appendChild(overridesList);
   const rows = [];
   for (const [mid, icon] of Object.entries(current.model_avatar_overrides || {})) {
-    const row = buildAvatarOverrideRow(mid, icon);
+    const row = buildAvatarOverrideRow(mid, icon, installedModels);
     rows.push(row);
     overridesList.appendChild(row.node);
   }
   const addBtn = el("button", "btn-secondary", "Add override");
   addBtn.type = "button";
   addBtn.onclick = () => {
-    const row = buildAvatarOverrideRow("", "");
+    const row = buildAvatarOverrideRow("", "", installedModels);
     rows.push(row);
     overridesList.appendChild(row.node);
   };
@@ -1813,8 +1855,9 @@ export async function buildAvatarsSection(form, fields) {
   panel.appendChild(overridesBox);
 
   _settingsControls = _settingsControls.filter((c) =>
-    !["user_avatar", "model_avatar_default", "model_avatar_overrides"].includes(c.field.key));
+    !["user_avatar", "user_name", "model_avatar_default", "model_avatar_overrides"].includes(c.field.key));
   _settingsControls.push({ field: userField, node: userRow, read: () => userPicker.getValue() });
+  _settingsControls.push({ field: nameField, node: userRow, read: () => nameInput.value.trim() });
   _settingsControls.push({ field: modelField, node: modelRow, read: () => modelPicker.getValue() });
   _settingsControls.push({
     field: overridesField, node: overridesBox,
@@ -1838,6 +1881,75 @@ export async function buildAvatarsSection(form, fields) {
   panel.appendChild(actions);
 
   form.appendChild(panel);
+}
+
+/* ---------------- Chat background (Settings -> System -> Appearance) ------ */
+
+/** Wire the "Chat background" upload/preview/clear controls in the static
+ *  Appearance card (index.html #sec-appearance, alongside the logo picker).
+ *  Self-contained: its own GET /v1/config to seed the preview, each action
+ *  PATCHes /v1/config immediately, with the same optimistic-apply-then-PATCH
+ *  shape setupResidencyControls in settings-perf.js uses - but unlike that
+ *  function, this one projects the new value onto other live surfaces
+ *  (applyChatBackground's CSS var, the preview swatch) before the PATCH
+ *  resolves, so a failed save must roll both back to the last
+ *  server-confirmed value, not just report the failure. No-op if the card is
+ *  absent. */
+export function setupChatBackgroundPicker() {
+  const preview = $("chat-bg-preview"), fileInput = $("chat-bg-file"),
+        uploadBtn = $("chat-bg-upload"), clearBtn = $("chat-bg-clear");
+  if (!preview || !fileInput || !uploadBtn || !clearBtn) return;
+
+  let current = "";   // last value confirmed persisted on the server
+
+  const renderPreview = (value) => {
+    const src = safeAvatarImageSrc(value);
+    preview.style.backgroundImage = src ? `url("${src}")` : "";
+    preview.classList.toggle("empty", !src);
+  };
+
+  const save = async (value) => {
+    applyChatBackground(value);
+    try {
+      const r = await fetch("/v1/config", {
+        method: "PATCH", headers: authHeaders(),
+        body: JSON.stringify({ chat_background: value }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      current = value;
+      return true;
+    } catch (e) {
+      applyChatBackground(current);
+      renderPreview(current);
+      toast("Could not save background: " + e.message, true);
+      return false;
+    }
+  };
+
+  fetch("/v1/config", { headers: authHeaders() })
+    .then((r) => (r.ok ? r.json() : {}))
+    .then((cfg) => {
+      current = cfg.chat_background || "";
+      renderPreview(current);
+    })
+    .catch(() => { /* server unreachable - stays on the empty placeholder */ });
+
+  uploadBtn.onclick = () => fileInput.click();
+  fileInput.onchange = async () => {
+    const f = fileInput.files[0];
+    fileInput.value = "";
+    if (!f) return;
+    let dataUri;
+    try {
+      dataUri = await fileToBackgroundDataUri(f);
+    } catch (e) { toast(e.message, true); return; }
+    renderPreview(dataUri);
+    if (await save(dataUri)) toast("Background saved");
+  };
+  clearBtn.onclick = async () => {
+    renderPreview("");
+    if (await save("")) toast("Background cleared");
+  };
 }
 
 /* ---------------- Text-to-speech (the tts plugin's own block) -------------- */

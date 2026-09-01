@@ -81,8 +81,56 @@ permanent public record of what shipped and are never rewritten; the in-progress
   variables, to raise rate limits and reach gated or login-required models
   on search and download. Neither is required: search and downloads keep
   working anonymously with nothing set.
+- **Chat messages can now show a background image.** Set it in Settings >
+  System > Appearance, next to the logo picker; Clear removes it.
+- **You can set your own display name for chat messages**, shown next to your
+  messages instead of "You". Set it in Settings > Chat > Avatars.
+- **The per-model icon override in Settings > Chat > Avatars now offers a
+  dropdown of your installed models** instead of requiring you to type an
+  exact model name.
 
 ### Fixed
+- **A crashed run's native fault trace, when attached to a bug report, was
+  checked only for your home folder name, not for stray credentials.** The
+  report's other attachments (the recent log tail, an event-loop hang trace)
+  were already checked for API keys, tokens, and passwords before being
+  included. The native trace now gets that same check, so a credential that
+  happened to land in it can no longer ship in an uploaded report.
+
+- **The browser tab notices when localm has restarted.** The offline cache was
+  also storing the small status reply the page uses to tell one running localm
+  from another, and then serving that stored copy back forever without ever
+  asking the server again. Because that reply is exactly how the page spots a
+  restart, the "reconnecting" overlay could sit there indefinitely after
+  localm came back up. Status replies are no longer cached; only the interface
+  files are.
+
+- **The coder's delegated-work summary no longer loses its status and its
+  "diff truncated" notice.** In `/changes` and `/diff`, the summary of work done
+  on another branch is printed with each entry's state in square brackets. Those
+  brackets were being read as formatting and silently removed, so the state
+  disappeared, and so did the note saying a long diff had been cut short along
+  with the command to see the rest. A truncated diff could therefore read as a
+  complete one.
+
+- **Embedding long text no longer fails on runtime builds that ignore the
+  shared-cache request.** localm asks its embedding runtime for one shared
+  attention cache so several texts can be encoded in a single pass. Some builds
+  silently ignore that and hand each text a much smaller private slice instead;
+  anything longer than that slice was then rejected, and embedding requests
+  (with the RAG indexing built on them) failed with a server error. localm now
+  reads back the per-text window the runtime actually granted and trims to it,
+  so those builds keep working. Unaffected builds behave exactly as before, and
+  the warning that a runtime ignored the request still appears in the log.
+- **The GPU load figure now reads the card's own sensor on older AMD boards
+  too.** It already showed whole-card load, whichever program was causing it,
+  on recent Radeons. On an older board, or an older driver, the sensor it asks
+  for is not available, and it quietly fell back to a Windows counter that
+  reports whichever part of the card is busiest - so a video call's encoder
+  could read as high load while the card was otherwise idle, or generation
+  could sit near 100% and barely register. Those boards are now asked through
+  the older AMD interfaces they do answer, and the Windows counter is used only
+  when the card answers through neither.
 - **The list of other running LocaLM servers now really does cover the whole
   machine.** Settings > Server & network said it listed every server running on
   this machine, but it only ever saw servers that share this install's data
@@ -118,6 +166,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   asking you to try again yourself. If it still cannot get a clear reading
   after those automatic attempts, it says so plainly rather than suggesting
   something to go do about it.
+- **If those automatic retries still cannot get a clear reading, localm now
+  tries restarting itself before giving up** - the same seamless in-place
+  restart Settings' restart button uses, with no interruption beyond a brief
+  reconnect. Only when even that is not possible does it ask you to file a
+  bug report, and it no longer suggests restarting anything yourself.
 - **Restarting the server could take noticeably longer than it needed to,
   even with nothing loaded at the time.** It always checked how much free
   graphics memory was available before restarting, even when there was
@@ -232,8 +285,51 @@ permanent public record of what shipped and are never rewritten; the in-progress
   up on demand, at that very first click. It now warms up in the background
   as soon as a reply finishes, when that needs no extra download prompt, so
   playback usually starts right away by the time you click.
+- **`localm serve`, and `localm gui` when it attaches to an already-running
+  instance, said it was "Opening" the address even when nothing was going to
+  open.** `serve` never opens a browser, so every `serve` startup that
+  attached printed a claim that wasn't true. That line now just states where
+  the server can be reached, accurate whether or not a browser actually opens.
+- **A model load aborted for an unrelated reason reported a made-up "superseded
+  by a newer request: None" instead of what actually happened.** This showed up
+  as the error when using the API or the coder plugin's model switcher, if the
+  load was cut short by something other than picking a different model. The
+  real reason is now shown instead; picking a genuinely different model while
+  one is still loading is unaffected and still reports it as superseded.
+- **An embedding model that failed to load could leave its worker process
+  running in the background.** This worker handles semantic search and agent
+  memory, and a load that failed cleanly, such as a broken or misconfigured
+  model file, was never cleaned up, so repeated failed attempts each left
+  one more stranded process behind, still holding memory. That worker is
+  now shut down whenever a load fails this way.
 
 ### Security
+- **A model can no longer take over your terminal through the coder's own
+  output.** Text a model produced was printed to the terminal without being
+  made inert first, on several paths: the narration it writes alongside a tool
+  call, its final answer whenever that looked like Markdown, the reviewer's
+  verdict shown by `/review`, the project memory shown by `/memory`, the file
+  paths in `/changes`, and the background-job labels in `/bg`. A model could
+  therefore embed a raw terminal control sequence and clear your screen or
+  overwrite lines already printed, hiding what it had actually done; it could
+  render a clickable link whose visible text said one thing and whose
+  destination was another; or it could emit one malformed tag and abort the
+  turn outright. All of it is now escaped, so it renders as the literal text it
+  is. The same applies to the line naming which sub-agent is asking before a
+  confirmation prompt: a sub-agent could previously make that line vanish by
+  putting a malformed tag in its own name, leaving you approving a command with
+  no idea which agent had requested it.
+
+- **A shortcut or linked folder inside your project no longer leads the coder
+  out of it.** The coder refuses to read a file outside the project you pointed
+  it at, but two things that walk the project - the file tree it shows you and
+  the index it builds at startup - followed a linked folder straight out and
+  reported back what they found there: the names and sizes of files elsewhere
+  on your disk, and for source files the names of the functions inside them.
+  On Windows a junction was the more likely way in, because it does not look
+  like a link to the tools that were meant to skip one. Both now stop at the
+  edge of the project, and the tree tells you when it left a link unfollowed
+  rather than quietly omitting it.
 - **The coder now refuses a small set of catastrophic shell commands outright,
   instead of relying on you being there to say no.** Until now the only thing
   standing between the model and a command like a recursive delete of your home
@@ -244,11 +340,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   refuses a recursive delete aimed at a drive root, a home directory or a
   system directory; commands that format or overwrite a disk; writes that would
   overwrite or delete your SSH, GnuPG, AWS, Docker or Kubernetes credentials;
-  downloaded scripts piped straight into a shell; a force push at master or
-  main; and "git reset --hard", which throws away uncommitted work. Each
-  refusal says which rule stopped it and what to do instead. Ordinary commands
-  are unaffected, including ones that look similar such as deleting a build
-  directory or force-pushing your own feature branch.
+  downloaded scripts piped straight into a shell; a force push or a remote
+  branch deletion aimed at master or main, whether written as a flag or as a
+  refspec; and "git reset --hard", which throws away uncommitted work. The
+  same push rule covers the coder's built-in push action, not only a push it
+  types as a shell command. Each refusal says which rule stopped it and what
+  to do instead. Ordinary commands are unaffected, including ones that look
+  similar such as deleting a build directory or force-pushing your own
+  feature branch.
 
 ## [0.1.5] - 2026-08-26
 

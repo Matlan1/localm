@@ -188,6 +188,20 @@ class TestBuildReportRendersCrashDetail:
             context={"recent_log_tail": f"opened {home_str}\\run\\x"})
         assert home_str not in text
 
+    def test_native_trace_secrets_are_scrubbed(self):
+        text = br.build_report(
+            "localm server crashed (recovered on the next start)",
+            reason="ended without a clean shutdown",
+            error=None,
+            context={"native_trace":
+                     "Current thread 0x1: SIGSEGV\n"
+                     "Authorization: Bearer CANARY9NATIVETRACE\n"},
+        )
+        assert "## Native fault trace" in text
+        assert "SIGSEGV" in text
+        assert "CANARY9NATIVETRACE" not in text
+        assert "Authorization: <redacted>" in text
+
 
 class TestCheckAndReportAttachesContent:
     def test_recovered_crash_report_includes_log_tail(self, tmp_path, monkeypatch):

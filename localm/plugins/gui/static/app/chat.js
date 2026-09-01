@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { $, applyChatBackground, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -28,8 +28,10 @@ export const chat = {
   systemDefault: "", // default system prompt from Settings; a blank drawer inherits it
   toolGrammar: true, // chat_tool_grammar from /v1/config - grammar-constrain web-tool calls
   userAvatar: "",           // user_avatar from /v1/config: "", an emoji/glyph, or a data: URI
+  userName: "",             // user_name from /v1/config: "" falls back to "You"
   modelAvatarDefault: "",   // model_avatar_default from /v1/config, same shape
   modelAvatarOverrides: {}, // model_avatar_overrides from /v1/config: {model_id: icon}
+  chatBackground: "",       // chat_background from /v1/config: "", or a data: URI
   // Set once a backend REFUSES a web-tool grammar request; never cleared until
   // reload. Kept separate from toolGrammar (the config preference, refreshed
   // by refreshCtxLimit's 30s poll) - a config refresh must not resurrect a
@@ -244,8 +246,11 @@ export async function refreshCtxLimit() {
       chat.systemDefault = (cfg.chat_system_prompt || "").trim();
       chat.toolGrammar = cfg.chat_tool_grammar !== false;
       chat.userAvatar = cfg.user_avatar || "";
+      chat.userName = (cfg.user_name || "").trim();
       chat.modelAvatarDefault = cfg.model_avatar_default || "";
       chat.modelAvatarOverrides = cfg.model_avatar_overrides || {};
+      chat.chatBackground = cfg.chat_background || "";
+      applyChatBackground(chat.chatBackground);
       // The coder session rail's side. Applied here because this is the one boot
       // round trip that already has the config in hand - a second fetch just for a
       // panel side would be a request per page load for a value that never changes
@@ -989,7 +994,7 @@ function speakToggle(btn, text) {
 export function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
   const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || "Model");
-  const roleEl = el("div", "msg-role", opts.label || (role === "user" ? "You" : mName));
+  const roleEl = el("div", "msg-role", opts.label || (role === "user" ? (chat.userName || "You") : mName));
   const avatarEl = buildAvatarEl(avatarInfoFor(role, mName));
   if (avatarEl) {
     // Wrap only when there is an avatar. See

@@ -108,3 +108,17 @@ test("a superseded load skips the toast entirely, degraded or not", async () => 
   assert.equal(toastEl.textContent, "",
     "an abandoned load must not toast anything, even a degraded one");
 });
+
+test("a cancelled (not superseded) load also skips the toast, not a false success", async () => {
+  const { window } = loadApp();
+  stubLoad(window, {
+    status: "cancelled", model: "abandoned",
+    reason: "the model was unloaded while it was still loading",
+  });
+
+  await selectAndLoad(window, "abandoned");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.equal(toastEl.textContent, "",
+    "a load cancelled for a reason other than supersession must not read as a success");
+});

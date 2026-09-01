@@ -12,6 +12,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape as _markup_escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
@@ -34,6 +35,21 @@ def _sanitized_text(s: str, *, style: str | None = None) -> Text:
     a markdown link's ``[label]`` - raises MarkupError from a plain
     console.print) and so a raw ANSI escape cannot reach the terminal."""
     return Text(_strip_esc(s), style=style)
+
+
+def safe_markup(s) -> str:
+    """*s* rendered inert for use inside a Rich markup string.
+
+    Returns a ``str`` with every ANSI escape byte removed and every markup
+    tag escaped, so the value renders as the literal text it is. Use this for
+    any externally-controlled value (model output, a model-chosen path or
+    label, a tool result, an exception message) that is interpolated into a
+    markup string or passed to a bare ``console.print``.
+
+    ``_sanitized_text`` is the equivalent for a value that is printed on its
+    own and needs no surrounding markup; this one composes into an f-string.
+    """
+    return _markup_escape(_strip_esc(str(s)))
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +157,7 @@ def print_assistant_response(text: str, name: str = "Agent") -> None:
         return
     if any(marker in text for marker in ("```", "**", "##", "- ", "1. ")):
         try:
-            console.print(Markdown(text))
+            console.print(Markdown(_strip_esc(text)))
             return
         except Exception:
             pass

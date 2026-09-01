@@ -31,7 +31,8 @@ from .constants import (
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
     _PATCH_MODE_ELIGIBLE_TOOLS, _PROJECT_MAP_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
-    _SHELL_EXEC_TOOLS, _SKILL_STATE_TOOLS, _SHELL_UNSCOPED_TOOLS,
+    _SHELL_EXEC_TOOLS, _SHELL_GUARDED_TOOLS, _SKILL_STATE_TOOLS,
+    _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
 )
 from .scope import _scope_pattern
@@ -284,7 +285,7 @@ class _ExecutionMixin:
         self._audit.notice("scope_shell_path", msg)
 
     def _shell_guard_verdict(self, call: ToolCall):
-        """Classify a shell call against the reject-list in shell_guard.
+        """Classify a guarded call against the reject-list in shell_guard.
 
         Returns ``(refusal, unchecked)``: the first matching refusal, and
         whether the check FAILED to run. A check that raises returns
@@ -294,22 +295,27 @@ class _ExecutionMixin:
         silenced. See test_a_classifier_failure_denies_rather_than_allows.
         """
         print_warning = _agent.print_warning
-        for arg_name in _SHELL_COMMAND_ARGS.get(call.name, ("command",)):
-            command = str(call.args.get(arg_name) or "")
-            if not command.strip():
-                continue
-            try:
-                refusal = shell_guard.classify(command, self.cwd)
-            except Exception as exc:
-                msg = (f"{call.name}: the shell safety check could not run "
-                       f"({type(exc).__name__}: {exc}), so this command now "
-                       "requires confirmation before it can run.")
-                print_warning(msg)
-                self._emit("info", text=msg)
-                self._audit.notice("shell_guard_error", msg)
-                return None, True
-            if refusal is not None:
+        try:
+            if call.name == "git_push":
+                refusal = shell_guard.classify_git_push(
+                    str(call.args.get("remote") or ""),
+                    str(call.args.get("branch") or ""))
                 return refusal, False
+            for arg_name in _SHELL_COMMAND_ARGS.get(call.name, ("command",)):
+                command = str(call.args.get(arg_name) or "")
+                if not command.strip():
+                    continue
+                refusal = shell_guard.classify(command, self.cwd)
+                if refusal is not None:
+                    return refusal, False
+        except Exception as exc:
+            msg = (f"{call.name}: the shell safety check could not run "
+                   f"({type(exc).__name__}: {exc}), so this call now "
+                   "requires confirmation before it can run.")
+            print_warning(msg)
+            self._emit("info", text=msg)
+            self._audit.notice("shell_guard_error", msg)
+            return None, True
         return None, False
 
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
@@ -432,7 +438,7 @@ class _ExecutionMixin:
         # falls through to needs_confirm below.
         # See test_a_dangerous_command_is_blocked_under_auto_approve.
         shell_unchecked = False
-        if call.name in _SHELL_EXEC_TOOLS:
+        if call.name in _SHELL_GUARDED_TOOLS:
             refusal, shell_unchecked = self._shell_guard_verdict(call)
             if refusal is not None:
                 result = ToolResult.error(refusal.message())

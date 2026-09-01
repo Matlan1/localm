@@ -362,6 +362,30 @@ class TestCleanEmbedErrorKeepsTheWorker:
             "a dropped runner must have its queues/handles released, not leaked")
 
 
+class TestCleanLoadErrorReapsTheWorker:
+    """spawn_and_load's clean ("error", msg) branch shuts the worker down
+    before raising. Compare TestCleanEmbedErrorKeepsTheWorker above, which
+    pins the opposite contract for embed()'s per-call error."""
+
+    def test_a_clean_load_error_shuts_the_worker_down(self):
+        # An unrecognized keyword argument makes GGUFEmbedder(**payload) raise
+        # a TypeError before any native code runs; _runner_main's own except
+        # Exception turns that into a clean ("error", msg) envelope.
+        r = EmbedderRunner()
+        params = dict(_DUMMY_LOAD_PARAMS, not_a_real_param="boom")
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                r.spawn_and_load(params, timeout=30.0)
+            assert "not_a_real_param" in str(ei.value), (
+                "expected the child's own exception message verbatim, got: "
+                f"{ei.value!r}")
+            assert not r.is_alive(), (
+                "a clean load error left the worker process alive and "
+                "unreachable")
+        finally:
+            r.shutdown(grace=0)
+
+
 class TestCpuOnlyHidesGpuDevices:
     """cpu_only must hide GPU devices from the runtime BEFORE anything native
     loads - n_gpu_layers=0 alone only controls weight placement, and a large

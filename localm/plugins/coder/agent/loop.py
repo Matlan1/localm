@@ -12,6 +12,7 @@ import localm.plugins.coder.agent as _agent
 from ..display import (
     console, print_assistant_response, print_info, print_success,
     print_tool_call, print_tool_error, print_tool_result, print_turn_divider,
+    safe_markup,
 )
 from ..parser import looks_like_tool_attempt, split_response
 from ..tools import ToolResult
@@ -362,7 +363,7 @@ class _LoopMixin:
                 if interactive:
                     for seg in segments:
                         if isinstance(seg, str) and seg.strip():
-                            console.print(seg.strip())
+                            console.print(safe_markup(seg.strip()))
 
                 # The event-sink (GUI) surface streamed the RAW response live,
                 # before parse_tool_calls could know which spans were real calls,

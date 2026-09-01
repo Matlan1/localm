@@ -1326,7 +1326,8 @@ class _OverflowApi:
                 float(toks[-1] if toks else 0), float(len(toks))]
 
 
-def _stub_embedder(n_ctx=8, n_seq_max=emb._EMBED_BATCH_TARGET):
+def _stub_embedder(n_ctx=8, n_seq_max=emb._EMBED_BATCH_TARGET,
+                   effective_seq_ctx=None):
     import ctypes
     import threading
     e = emb.GGUFEmbedder.__new__(emb.GGUFEmbedder)
@@ -1342,6 +1343,9 @@ def _stub_embedder(n_ctx=8, n_seq_max=emb._EMBED_BATCH_TARGET):
     # A real GGUFEmbedder always has this set by __init__; matched here so a
     # stub-based test that embeds more than one text at once behaves the same.
     e._n_seq_max = n_seq_max
+    # Also set by __init__: the per-sequence token budget, which equals n_ctx
+    # unless the runtime sliced the KV cache.
+    e._effective_seq_ctx = n_ctx if effective_seq_ctx is None else effective_seq_ctx
     return e
 
 
@@ -1724,9 +1728,9 @@ def test_embedding_context_requests_a_shared_kv_cache():
 # makes native embed batches fail to decode. llama.cpp exposes no getter for
 # kv_unified once a context exists, so llama_n_ctx_seq is the closest
 # observable proxy: sliced (kv_unified not honoured) hands each sequence
-# n_ctx/n_seq_max tokens instead of the full shared n_ctx. This is a DIAGNOSTIC
-# ONLY (a log line) - it cannot fix or explain a drift, only make it loud
-# instead of silent.
+# n_ctx/n_seq_max tokens instead of the full shared n_ctx. The probe both
+# warns AND returns the granted window; what consumes that return value is
+# covered further down, under "the measurement is acted on".
 
 class _FakeCtxApi:
     """Stands in for the llamacpp _api module: only the two calls
@@ -1815,6 +1819,131 @@ def test_llama_n_ctx_seq_reads_the_native_value(monkeypatch):
     mock_dll.llama_n_ctx_seq.return_value = 64
     monkeypatch.setattr(_api, "load_lib", lambda: mock_dll)
     assert _api.llama_n_ctx_seq(object()) == 64
+
+
+# --------------------------------------------------------------------------- #
+#  THE MEASUREMENT IS ACTED ON, NOT ONLY LOGGED                                #
+# --------------------------------------------------------------------------- #
+#
+# The section above covers the WARNING. This covers the token budget the same
+# probe feeds. Two separate native constraints bound an embed batch, and they
+# must not be conflated:
+#
+#   per-SEQUENCE   a sequence must fit its own KV slot   -> _effective_seq_ctx
+#   SUMMED         n_ubatch >= all tokens in the batch   -> self.n_ctx
+#
+# llama.cpp fixes n_ubatch from the REQUESTED n_ctx before the kv_unified
+# branch that derives n_ctx_seq ever runs, so only the per-sequence bound moves
+# when a runtime slices the KV cache. Clamping the summed bound too would split
+# batches that decode perfectly well.
+
+
+def test_drift_check_returns_the_sliced_capacity():
+    """The one call that warns also hands back the granted window, from the
+    same branch on the same threshold, so the two can never disagree."""
+    assert emb._warn_if_context_config_drifted(
+        _FakeCtxApi(2048, 64), object(), 2048) == 64
+
+
+def test_drift_check_returns_none_when_the_window_is_intact():
+    assert emb._warn_if_context_config_drifted(
+        _FakeCtxApi(2048, 2048), object(), 2048) is None
+
+
+def test_drift_check_returns_none_on_older_build_with_no_accessor():
+    assert emb._warn_if_context_config_drifted(
+        _FakeCtxApi(2048, None), object(), 2048) is None
+
+
+def test_drift_check_returns_none_when_the_probe_raises():
+    class _BrokenApi:
+        def llama_n_ctx(self, ctx):
+            raise RuntimeError("native call failed")
+
+    assert emb._warn_if_context_config_drifted(
+        _BrokenApi(), object(), 2048) is None
+
+
+def test_drift_check_still_warns_but_returns_none_on_a_zero_capacity(caplog):
+    """A reported capacity of 0 is drift, so the warning still fires, but it
+    is not a usable budget - clamping to it would give _tokenize a zero-length
+    buffer. The caller keeps n_ctx and the warning stands."""
+    caplog.set_level(logging.WARNING, logger="localm")
+    assert emb._warn_if_context_config_drifted(
+        _FakeCtxApi(2048, 0), object(), 2048) is None
+    assert any("kv_unified" in r.getMessage() for r in caplog.records)
+
+
+def test_tokenize_truncates_to_the_sliced_window_not_the_requested_one():
+    """The 503 this fixes: a text that fits n_ctx but not the runtime's real
+    per-sequence slot used to be handed to native decode at full length."""
+    e = _stub_embedder(n_ctx=64, effective_seq_ctx=8)
+    assert len(e._tokenize("x" * 40)) == 8
+
+
+def test_tokenize_keeps_the_full_window_when_there_is_no_drift():
+    """The unaffected runtime must behave exactly as before: 64, not 8."""
+    e = _stub_embedder(n_ctx=64)
+    assert e._effective_seq_ctx == 64
+    assert len(e._tokenize("x" * 200)) == 64
+
+
+def test_clamped_truncation_still_preserves_the_final_token():
+    """Truncation keeps the FINAL token (the [SEP] the pooled encoding needs),
+    and that has to follow the clamped window rather than n_ctx."""
+    e = _stub_embedder(n_ctx=64, effective_seq_ctx=8)
+    text = "x" * 39 + "y"
+    toks = e._tokenize(text)
+    full = e._api._tokens_for(text.encode("utf-8"))
+    assert len(toks) == 8
+    assert toks[-1] == full[-1]
+
+
+def test_pack_groups_bounds_by_n_ctx_not_by_the_sliced_window():
+    """The SUMMED bound stays on n_ctx even on a sliced runtime: 8 sequences
+    of 8 tokens is one legal batch (each fits its own slot, and the total
+    equals n_ubatch). Clamping this bound to 8 would make it 8 batches."""
+    e = _stub_embedder(n_ctx=64, effective_seq_ctx=8, n_seq_max=32)
+    assert e._pack_groups([[0] * 8 for _ in range(8)]) == [list(range(8))]
+
+
+class TestEffectiveSeqCtxWiring:
+    """__init__ has to STORE what the probe measured, not just log it.
+
+    Drives the real GGUFEmbedder.__init__ against the mocked _api boundary, so
+    the wiring is covered rather than only the helper it calls: a probe that
+    returns the right number and a constructor that ignores it look identical
+    from the helper's own tests."""
+
+    def _load(self, monkeypatch, n_ctx_seq):
+        import localm.inference.backends.llamacpp._api as api_module
+        TestGGUFEmbedderLoadStderrWrapping()._patch_native_calls(monkeypatch, [])
+        # llama_model_n_ctx_train is stubbed at 512, so n_ctx auto-resolves to 512.
+        monkeypatch.setattr(api_module, "llama_n_ctx", lambda ctx: 512)
+        monkeypatch.setattr(api_module, "llama_n_ctx_seq", lambda ctx: n_ctx_seq)
+        return emb.GGUFEmbedder("<stub-path>", n_gpu_layers=0)
+
+    def test_sliced_runtime_clamps_the_token_budget(self, monkeypatch):
+        e = self._load(monkeypatch, 16)
+        try:
+            assert e.n_ctx == 512
+            assert e._effective_seq_ctx == 16
+        finally:
+            e.close()
+
+    def test_honoured_runtime_leaves_the_budget_at_n_ctx(self, monkeypatch):
+        e = self._load(monkeypatch, 512)
+        try:
+            assert e._effective_seq_ctx == e.n_ctx == 512
+        finally:
+            e.close()
+
+    def test_older_build_with_no_accessor_leaves_the_budget_at_n_ctx(self, monkeypatch):
+        e = self._load(monkeypatch, None)
+        try:
+            assert e._effective_seq_ctx == e.n_ctx == 512
+        finally:
+            e.close()
 
 
 # --------------------------------------------------------------------------- #

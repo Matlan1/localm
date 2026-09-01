@@ -14,6 +14,9 @@ import asyncio
 import threading
 import time
 
+import pytest
+from fastapi import HTTPException
+
 from localm.inference import http_server as hs
 from localm.inference.backends.base import ModelLoadCancelled
 
@@ -51,6 +54,30 @@ class FakeEngine:
         self._loaded = True
         if self._log is not None:
             self._log.append(self.display_name)
+
+    def unload(self):
+        self._loaded = False
+
+
+class _AlwaysCancelsEngine:
+    """Engine stand-in whose load() always raises ModelLoadCancelled for a
+    reason that has nothing to do with a newer selection - the runner torn
+    down mid-load, or the test-only fault injector - never a supersession."""
+
+    def __init__(self, name, reason):
+        self.display_name = name
+        self._loaded = False
+        self._reason = reason
+
+    @property
+    def loaded(self):
+        return self._loaded
+
+    def set_load_cancel(self, event):
+        pass
+
+    def load(self):
+        raise ModelLoadCancelled(self._reason)
 
     def unload(self):
         self._loaded = False
@@ -135,6 +162,66 @@ def test_rapid_switches_coalesce_to_latest():
     assert res_c["status"] == "loaded"
     assert log == ["C"]                        # only the final model loaded
     assert hs._engine.display_name == "C"
+
+
+# ---------------------------------------------------------------------------
+#  A cancelled-but-not-superseded load must report the real reason
+# ---------------------------------------------------------------------------
+
+def test_non_supersession_cancellation_is_not_reported_as_superseded():
+    """A load cancelled for a reason unrelated to a newer selection (an
+    API-routed, preempt=False request has no supersession mechanism at all)
+    must carry the real reason, not a fabricated 'superseded by' claim."""
+
+    async def scenario():
+        _reset_switch_state()
+        engine = _AlwaysCancelsEngine(
+            "A", reason="the model was unloaded while it was still loading")
+        return await hs.switch_engine("A", lambda n: engine, preempt=False)
+
+    res = asyncio.run(scenario())
+    assert res["status"] == "cancelled"
+    assert res["reason"] == "the model was unloaded while it was still loading"
+    assert "by" not in res
+
+
+def test_preempted_switch_with_nothing_newer_is_also_not_superseded():
+    """Even under preempt=True, a cancellation that did NOT come from a newer
+    selection (nothing else ever changed _switch_desired away from this call's
+    own name) must not claim supersession either."""
+
+    async def scenario():
+        _reset_switch_state()
+        engine = _AlwaysCancelsEngine("A", reason="forced cancellation (test-only)")
+        return await hs.switch_engine("A", lambda n: engine, preempt=True)
+
+    res = asyncio.run(scenario())
+    assert res["status"] == "cancelled"
+    assert res["reason"] == "forced cancellation (test-only)"
+
+
+def test_get_engine_reports_the_real_cancellation_reason_not_none():
+    """get_engine's 503 for a cancelled (not superseded) load must show the
+    actual reason. Before the fix, get_engine always calls switch_engine with
+    preempt=False, so _switch_desired is never this call's own concern and the
+    503 fabricated 'superseded by a newer request: None'."""
+
+    async def scenario():
+        _reset_switch_state()
+        hs._active_model_name = "A"
+        hs._default_model_name = None
+        engine = _AlwaysCancelsEngine(
+            "A", reason="the model was unloaded while it was still loading")
+        hs._engine_factory = lambda n: engine
+        with pytest.raises(HTTPException) as exc_info:
+            await hs.get_engine("A")
+        return exc_info.value
+
+    exc = asyncio.run(scenario())
+    assert exc.status_code == 503
+    assert "the model was unloaded while it was still loading" in exc.detail
+    assert "superseded" not in exc.detail
+    assert "None" not in exc.detail
 
 
 def test_reselecting_the_loading_model_does_not_restart_it():

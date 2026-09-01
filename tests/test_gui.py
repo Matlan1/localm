@@ -2266,6 +2266,34 @@ class TestSessionExtras:
                                 json={"model": "model-b"})
         assert r.status_code == 503
 
+    def test_set_model_reports_the_real_cancellation_reason_not_a_fabricated_supersession(
+            self, tmp_path):
+        """A load cancelled for a reason OTHER than a newer switch (switch_model
+        returns {"status": "cancelled", "reason": ...}, never "superseded")
+        must surface that real reason, not a fabricated 'superseded by a newer
+        request: None'."""
+        from localm.plugins.engine import PluginManager
+        app = FastAPI()
+        PluginManager(app, external_root=tmp_path / "noplugins").install("coder")
+
+        async def switch_model(name):
+            return {"status": "cancelled", "model": name,
+                    "reason": "the model was unloaded while it was still loading"}
+
+        attach_gui(app, self_url="http://127.0.0.1:9/v1",
+                  switch_model=switch_model, active_model=lambda: "model-a")
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path)}).json()["id"]
+                r = client.post(f"/api/coder/sessions/{sid}/model",
+                                json={"model": "model-b"})
+        assert r.status_code == 503
+        detail = r.json()["detail"]
+        assert "the model was unloaded while it was still loading" in detail
+        assert "superseded" not in detail
+        assert "None" not in detail
+
     def test_replay_rebuilds_history(self, coder_app, tmp_path):
         app, _ = coder_app
         with TestClient(app) as client:

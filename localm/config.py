@@ -396,6 +396,9 @@ DEFAULT_CONFIG: dict = {
     # The GUI reads it at boot and loads static/i18n/<id>.json; English is
     # built in and is the fallback for anything a catalog does not carry.
     "language": "en",
+    # A background image behind chat messages: "" or a data:image URI. See
+    # settings_schema.py's _validate_background_value / _AVATAR_DATA_URI_RE.
+    "chat_background": "",
     # Standalone app window (localm[desktop] extra): its own close button hides
     # it to the tray by default, leaving the server running; Stop quits. True
     # makes the close button quit the whole app and stop the server instead.
@@ -660,6 +663,7 @@ DEFAULT_CONFIG: dict = {
     # Chat avatars: an emoji or a small data:image URI, never a URL. See
     # settings_schema.py's _validate_avatar_value / _AVATAR_DATA_URI_RE.
     "user_avatar": "",
+    "user_name": "",
     "model_avatar_default": "",
     "model_avatar_overrides": {},
     # After an image is generated, ask ComfyUI to release VRAM and reload the chat

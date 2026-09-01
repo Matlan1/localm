@@ -896,6 +896,51 @@ export function fileToAvatarDataUri(file, maxSize = 128) {
   });
 }
 
+/** Reads an image file client-side and resolves a data:image/jpeg;base64,...
+ * URI downscaled so its longest edge is at most maxSize, encoded as JPEG
+ * (not PNG - a downscaled photo is far smaller as JPEG at this resolution)
+ * at the given quality. Kept well under settings_schema.py's
+ * _BACKGROUND_MAX_DATA_URI_LEN regardless of the source file's size, and read
+ * entirely in-browser (no server round trip). Same shape as
+ * fileToAvatarDataUri, kept separate rather than parameterized: the two
+ * pickers want different output formats and default sizes. */
+export function fileToBackgroundDataUri(file, maxSize = 1920, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    if (!file.type || !file.type.startsWith("image/")) {
+      reject(new Error("choose an image file"));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("could not read the file"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("could not decode the image"));
+      img.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Apply (or clear) the chat wallpaper: sets the --chat-bg-image custom
+ * property #chat-messages reads (style.css). value is "" or a data:image/...
+ * URI; anything safeAvatarImageSrc will not rebuild (an unset field, or a
+ * near-miss value) clears the wallpaper rather than reaching a background-image
+ * url(). */
+export function applyChatBackground(value) {
+  const src = safeAvatarImageSrc(value);
+  document.documentElement.style.setProperty("--chat-bg-image", src ? `url("${src}")` : "none");
+}
+
 export function autoGrow(textarea) {
   textarea.style.height = "auto";
   textarea.style.height = Math.min(textarea.scrollHeight, 220) + "px";

@@ -361,17 +361,23 @@ _HOST_VIS_OPT_OUT = frozenset({"0", "false", "off", "no", ""})
 def _force_vulkan_dedicated_vram(binary_dir: Path) -> None:
     """On a Windows Vulkan build, keep model weights in DEDICATED VRAM.
 
-    By default ggml-vulkan allocates the model into HOST-VISIBLE video memory
-    whenever the device exposes a large host-visible + device-local heap, which
-    resizable-BAR and UMA systems do. On Windows/WDDM that allocation is
-    physically backed by SHARED system RAM, so the entire model runs at PCIe
-    speed. Setting GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM makes ggml-vulkan
-    allocate DEVICE_LOCAL (dedicated VRAM) plus a staging buffer instead, so the
-    model stays in VRAM and any compute-buffer overflow falls to host memory.
+    On a resizable-BAR device ggml-vulkan allocates the model into HOST-VISIBLE
+    video memory. On Windows/WDDM that allocation is physically backed by SHARED
+    system RAM, so the entire model runs at PCIe speed. Setting
+    GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM makes ggml-vulkan allocate DEVICE_LOCAL
+    (dedicated VRAM) plus a staging buffer instead, so the model stays in VRAM
+    and any compute-buffer overflow falls to host memory.
 
     Scope: only a Vulkan build (the var is ggml-vulkan-specific), only on Windows
     (on Linux/amdgpu host-visible VRAM is real device memory), and only when the
     user has not opted out.
+
+    NO EFFECT ON AN INTEGRATED GPU. ggml-vulkan selects the model buffer's memory
+    in one if/else-if chain that tests its own UMA flag, set from Vulkan's
+    deviceType == eIntegratedGpu, BEFORE it tests this variable. An integrated
+    device therefore takes the UMA branch and keeps its host-visible preference
+    whatever this variable is set to; only a device Vulkan reports as discrete
+    reaches the branch this function is arming.
 
     OPTING OUT MEANS REMOVING THE VARIABLE, NOT SETTING IT TO "0". ggml switches
     on PRESENCE, never on value:

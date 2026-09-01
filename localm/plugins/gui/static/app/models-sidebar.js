@@ -906,11 +906,12 @@ export function renderModelSplitLine(split) {
 }
 
 // Switch the active model. Returns the server status object
-// ({status: "loaded" | "already_active" | "superseded", model, ...}).
-// "superseded" means another model was selected while this one was still loading:
-// the server aborted this load and the newer selection owns the UI, so we do NOT
-// claim success or reset status here (that would flash the abandoned model's
-// name). Callers should skip their success toast for it.
+// ({status: "loaded" | "already_active" | "superseded" | "cancelled", model, ...}).
+// "superseded" means another model was selected while this one was still loading;
+// "cancelled" means the load was aborted for some other reason. Either way the
+// server aborted this load, so we do NOT claim success or reset status here
+// (that would flash a model that never actually loaded). Callers should skip
+// their success toast for both.
 export async function switchModel(model) {
   setStatus("busy", t("sidebar.status.loading", { model }));
   const r = await fetch("/api/models/load", {
@@ -920,7 +921,7 @@ export async function switchModel(model) {
   });
   if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
   const data = await r.json().catch(() => ({ status: "loaded", model }));
-  if (data.status === "superseded") return data;
+  if (data.status === "superseded" || data.status === "cancelled") return data;
   setStatus("ok", data.model || model);
   // Publish the newly active model NOW. refreshModels() is the only other writer
   // and it polls every 30s, so without this the client believes no model is
@@ -928,8 +929,9 @@ export async function switchModel(model) {
   // modelCache.active and would falsely refuse "No model loaded" for up to ~30s
   // after a sidebar load actually succeeded (REG-471). Use the name the SERVER
   // reports (an alias may resolve to a different one); the next poll reconciles
-  // the rest of the cache. Deliberately after the superseded return: that load
-  // was abandoned, so claiming it would publish a model that is not loaded.
+  // the rest of the cache. Deliberately after the superseded/cancelled return:
+  // that load was abandoned, so claiming it would publish a model that is not
+  // loaded.
   modelCache.active = data.model || model;
   return data;
 }
@@ -960,7 +962,9 @@ modelSelect.onchange = async () => {
     const res = await switchModel(model);
     // Superseded: a newer selection is now loading - stay quiet and let its own
     // handler report when it lands, instead of toasting a model we abandoned.
-    if (!res || res.status !== "superseded") {
+    // Cancelled: the load was aborted for some other reason - also not a
+    // success worth toasting.
+    if (!res || (res.status !== "superseded" && res.status !== "cancelled")) {
       toastLoadResult(res, model);
       // The Settings "Live tuning" VRAM estimate defaults to the active model
       // server-side, but only re-fetches on its own slider input - refresh it

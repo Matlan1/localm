@@ -20,7 +20,8 @@ WHAT IT BLOCKS (rule ids are stable and are named in the refusal message):
 ``secrets-write``     a write, delete or permission change on a credential path
 ``remote-exec-pipe``  downloaded content fed straight into an interpreter
 ``git-force-push``    a force push at a protected branch, at every ref, or a
-                      remote delete of a protected branch
+                      remote delete of a protected branch, whether written as a
+                      flag or as a ``+ref`` / ``:ref`` refspec
 ``git-hard-reset``    ``git reset --hard``, which discards uncommitted work
 
 WHAT IT IS NOT. This is a floor against the accidental and the model-error
@@ -43,6 +44,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 _HOME = "<home>"
+BSLASH = chr(92)
 
 # The characters a backslash escapes inside a double-quoted shell string.
 _DQ_ESCAPABLE = '"\\$`'
@@ -333,14 +335,24 @@ def _lex(text: str) -> list[_Segment]:
             i += 1
             continue
         if ch == "|":
+            if pending is not None and not cur:
+                i += 1
+                continue
             if i + 1 < n and text[i + 1] == "|":
                 flush_segment(True)
+                i += 2
+            elif i + 1 < n and text[i + 1] == "&":
+                flush_segment(False)
                 i += 2
             else:
                 flush_segment(False)
                 i += 1
             continue
         if ch == "&":
+            if pending is not None and not cur:
+                cur.append(ch)
+                i += 1
+                continue
             if i + 1 < n and text[i + 1] == "&":
                 flush_segment(True)
                 i += 2
@@ -483,6 +495,23 @@ def _canon(raw: str) -> Optional[str]:
     return None
 
 
+def _join(base: Optional[str], tail: str) -> Optional[str]:
+    """Join *tail* onto *base* lexically, or None when *base* cannot resolve it.
+
+    Handles the <home> sentinel, which no canonical absolute form recognises,
+    and strips a trailing separator off *base*, so a base of "/" does not
+    produce the doubled leading slash that POSIX reserves for a UNC root.
+    """
+    if base is None:
+        return None
+    text = tail.replace(BSLASH, "/")
+    stem = base.rstrip("/")
+    if base == _HOME or base.startswith(_HOME + "/"):
+        joined = posixpath.normpath(stem + "/" + text)
+        return None if joined.startswith("..") else joined
+    return _canon(posixpath.normpath(stem + "/" + text))
+
+
 def _norm_target(token: str, cwd: Optional[str]) -> Optional[str]:
     """Canonical form of a path-like *token*, or None when it is not one.
 
@@ -500,7 +529,7 @@ def _norm_target(token: str, cwd: Optional[str]) -> Optional[str]:
     while len(tok) > 1 and tok[-1] in "/\\":
         tok = tok[:-1]
     if not tok:
-        return _canon(cwd) if cwd else None
+        return _join(cwd, ".")
 
     lowered = tok.lower()
     for marker in ("${home}", "$home", "%userprofile%", "%homepath%",
@@ -515,9 +544,7 @@ def _norm_target(token: str, cwd: Optional[str]) -> Optional[str]:
     direct = _canon(tok)
     if direct is not None:
         return direct
-    if cwd is None:
-        return None
-    return _canon(posixpath.normpath((cwd + "/" + tok).replace("\\", "/")))
+    return _join(cwd, tok)
 
 
 def _target_kind(norm: Optional[str]) -> Optional[str]:
@@ -747,6 +774,16 @@ def _rule_secrets_write(name: str, args: Sequence[str],
     return None
 
 
+def _is_force_refspec(arg: str) -> bool:
+    """True for a +ref refspec, which forces the push with no flag present."""
+    return arg.startswith("+") and len(arg) > 1
+
+
+def _is_delete_refspec(arg: str) -> bool:
+    """True for a :ref refspec, which deletes the ref on the remote."""
+    return arg.startswith(":") and len(arg) > 1
+
+
 def _protected_refspecs(args: Sequence[str]) -> list[str]:
     """Protected branch names appearing as the destination of a refspec."""
     found = []
@@ -786,8 +823,11 @@ def _rule_git(name: str, args: Sequence[str]) -> Optional[ShellRefusal]:
                      "git checkout <ref> -- <path>.")
 
     if sub == "push":
-        forcing = any(a in _GIT_FORCE_FLAGS for a in sub_args)
-        deleting = any(a in ("--delete", "-d") for a in sub_args)
+        operands = [a for a in sub_args if not a.startswith("-")]
+        forcing = (any(a in _GIT_FORCE_FLAGS for a in sub_args)
+                   or any(_is_force_refspec(a) for a in operands))
+        deleting = (any(a in ("--delete", "-d") for a in sub_args)
+                    or any(_is_delete_refspec(a) for a in operands))
         if "--mirror" in sub_args:
             return ShellRefusal(
                 rule="git-force-push", matched="git push --mirror",
@@ -807,6 +847,21 @@ def _rule_git(name: str, args: Sequence[str]) -> Optional[ShellRefusal]:
                     reason="it " + verb + " " + branch + " on the remote.",
                     guidance="Push to a feature branch and open a pull request.")
     return None
+
+
+def _cd_destination(args: Sequence[str], current: Optional[str]) -> Optional[str]:
+    """Where a cd moves to, or None when it cannot be resolved lexically.
+
+    A bare cd goes to the home sentinel. "cd -" returns to a previous directory
+    this module does not track, so it resolves to None, which makes every later
+    relative target unclassifiable rather than wrongly attributed.
+    """
+    operands = [a for a in args if not _is_flag(a)]
+    if not operands:
+        return _HOME
+    if operands[0] == "-":
+        return None
+    return _norm_target(operands[0], current)
 
 
 def _first_command(text: str) -> str:
@@ -876,6 +931,24 @@ def _collect(text: str, depth: int, base: int) -> tuple[list[_Segment], int]:
     return out, nxt
 
 
+def classify_git_push(remote: str, branch: str) -> Optional[ShellRefusal]:
+    """Refuse a git_push TOOL call that would force or delete a protected ref.
+
+    The tool takes argv parts rather than a command line, and appends *branch*
+    to the git argv verbatim, so a refspec such as "+main" or ":main" reaches
+    git as a force or a delete without any flag being present. The same rule
+    that governs a shell "git push" is applied here.
+
+    Returns the refusal, or None when nothing matched.
+    """
+    args = ["push"]
+    if remote:
+        args.append(remote)
+    if branch:
+        args.append(branch)
+    return _rule_git("git", args)
+
+
 def classify(command: str, cwd: Optional[Path | str] = None) -> Optional[ShellRefusal]:
     """Refuse *command* when it matches a reject-list rule, else return None.
 
@@ -907,16 +980,19 @@ def classify(command: str, cwd: Optional[Path | str] = None) -> Optional[ShellRe
     if pipe_refusal is not None:
         return pipe_refusal
 
+    current = cwd_s
     for seg in segments:
         name, args = _argv(seg)
         if not name:
             continue
         for refusal in (
-            _rule_root_wipe(name, args, cwd_s),
-            _rule_device_wipe(name, args, seg.redirects, cwd_s),
-            _rule_secrets_write(name, args, seg.redirects, cwd_s),
+            _rule_root_wipe(name, args, current),
+            _rule_device_wipe(name, args, seg.redirects, current),
+            _rule_secrets_write(name, args, seg.redirects, current),
             _rule_git(name, args),
         ):
             if refusal is not None:
                 return refusal
+        if name == "cd":
+            current = _cd_destination(args, current)
     return None

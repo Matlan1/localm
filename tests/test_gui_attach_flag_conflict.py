@@ -127,3 +127,30 @@ def test_gui_same_model_still_attaches(running):
     assert result.exit_code == 0, result.output
     assert "attaching" in flat
     assert "cannot apply" not in flat
+
+
+def test_gui_attach_no_browser_does_not_claim_it_is_opening(running, monkeypatch):
+    opened = {"native": False, "web": False}
+    monkeypatch.setattr("localm.appface.run_native_window",
+                        lambda *a, **k: opened.__setitem__("native", True))
+    monkeypatch.setattr("webbrowser.open",
+                        lambda *a, **k: opened.__setitem__("web", True))
+    result = CliRunner().invoke(guicli.main, ["--no-browser"])
+    flat = _flat(result.output)
+    assert result.exit_code == 0, result.output
+    assert "attaching" in flat
+    assert "opening" not in flat
+    assert "8793" in result.output
+    assert not opened["native"] and not opened["web"], "must not attempt to open anything"
+
+
+def test_gui_attach_without_no_browser_still_opens(running, monkeypatch):
+    opened = {"native": False, "web": False}
+    monkeypatch.setattr("localm.appface.run_native_window",
+                        lambda *a, **k: opened.__setitem__("native", True) or False)
+    monkeypatch.setattr("webbrowser.open",
+                        lambda *a, **k: opened.__setitem__("web", True))
+    result = CliRunner().invoke(guicli.main, [])
+    assert result.exit_code == 0, result.output
+    assert opened["native"], "should try a native window first"
+    assert opened["web"], "should fall back to the browser when no native window"
