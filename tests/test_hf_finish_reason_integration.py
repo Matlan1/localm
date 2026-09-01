@@ -148,3 +148,24 @@ def test_natural_eos_reports_stop(stop_model_dir):
         assert "".join(chunks) == ""
     finally:
         be.unload()
+
+
+def test_max_tokens_zero_reaches_real_generation_without_raising(stop_model_dir):
+    """max_tokens=0 is the "unlimited" sentinel (settings_schema.py's
+    max_tokens field, and the GGUF backend's own convention). Through this
+    real (non-mocked) HFBackend.chat_stream() call it must reach
+    model.generate() as a real positive budget, not the 0 transformers
+    itself rejects with ValueError. stop_model_dir forces eos as the very
+    first token, so this stays fast regardless of the resolved budget."""
+    from localm.inference.backends.hf import HFBackend
+
+    be = HFBackend(str(stop_model_dir), device="cpu")
+    be.load()
+    try:
+        chunks = list(be.chat_stream(_MESSAGES, temperature=0.0, max_tokens=0))
+        assert be.last_finish_reason == "stop", (
+            f"expected the forced eos to report 'stop', got {be.last_finish_reason!r}"
+        )
+        assert "".join(chunks) == ""
+    finally:
+        be.unload()

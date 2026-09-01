@@ -354,6 +354,19 @@ def test_validate_update_keeps_finite_numbers():
     assert ss.validate_update({"main_gpu_index": 1}) == {"main_gpu_index": 1}
 
 
+def test_max_tokens_zero_is_the_unlimited_sentinel_and_is_accepted():
+    """0 means unlimited (both the GGUF and HF backends treat it that way),
+    not an invalid runaway-guard value - the min bound must let it through."""
+    assert ss.validate_update({"max_tokens": 0}) == {"max_tokens": 0}
+
+
+def test_max_tokens_negative_still_rejected():
+    """Only the exact 0 sentinel is unlimited; a negative value has no
+    meaning and stays rejected."""
+    with pytest.raises(ValueError, match="max_tokens"):
+        ss.validate_update({"max_tokens": -1})
+
+
 def test_to_number_rejects_non_finite_directly():
     """Unit-level: _to_number itself is the guard, independent of field bounds.
 

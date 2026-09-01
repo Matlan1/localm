@@ -90,6 +90,10 @@ def register(app: FastAPI, ctx) -> None:
         # (localStorage is scoped by origin only, not by data directory).
         from localm.config import instance_id
         cfg["instance_id"] = instance_id()
+        # The live bound port, which may differ from the persisted "port"
+        # default after an explicit -p override or an auto-bump onto a
+        # different free port.
+        cfg["instance_port"] = getattr(request.app.state, "instance_port", None)
         return cfg
 
     @app.get("/v1/config/schema",
@@ -120,7 +124,7 @@ def register(app: FastAPI, ctx) -> None:
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
         readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
-                    "instance_id"}
+                    "instance_id", "instance_port"}
         # `confirm` is this route's own protocol flag, not a config key: stripped
         # here alongside the read-only extras so validate_update never sees it.
         confirm = bool(body.get("confirm"))

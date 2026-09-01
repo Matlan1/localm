@@ -175,6 +175,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   page being stuck. It now pulses and counts the seconds since the last
   activity for as long as a task is running, including through a silent
   gap.
+- **Settings' "Server port" could show the wrong port.** If the server was
+  actually running on a different port than the one saved in Settings (an
+  explicit port on the command line, or an automatic move to a free port
+  because the saved one was busy), the field only ever showed the saved
+  value. It now also shows the port the server is actually running on
+  whenever the two differ.
+- **"Max tokens per reply" could not be set to unlimited.** Entering 0 was
+  rejected, even though 0 already means unlimited for several other similar
+  settings. It is now accepted here too, with the same meaning: no
+  runaway-guard limit, bounded only by the model's context window.
 
 ### Security
 - **The coder now refuses a small set of catastrophic shell commands outright,

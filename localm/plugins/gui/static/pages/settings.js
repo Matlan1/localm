@@ -475,6 +475,14 @@ export function buildSettingControl(field) {
     wrap.appendChild(input);
   }
   if (field.help) wrap.appendChild(el("div", "sub", field.help));
+  // The server port: show the LIVE bound port when it is known and differs
+  // from the persisted default above (an explicit -p override, or an
+  // auto-bump onto a different free port never gets written back to disk).
+  if (field.key === "port" && field.live_port != null && field.live_port !== value) {
+    const saved = value == null ? "The saved value" : `The saved value (${value})`;
+    wrap.appendChild(el("div", "sub",
+      `Currently running on port ${field.live_port}. ${saved} takes effect on the next restart.`));
+  }
   if (field.action) {
     const actRow = el("div", "");
     actRow.style.marginTop = "0.5rem";
@@ -1275,6 +1283,20 @@ export async function refreshSettingsPage() {
     return;
   }
   if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+
+  // The live bound port: GET /v1/config/schema only ever carries the PERSISTED
+  // "port" default, never what the server actually bound (an explicit -p
+  // override, or an auto-bump onto a different free port, never gets written
+  // back to disk). Best-effort - a failed fetch just leaves live_port unset,
+  // and the field renders its persisted value only, same as before this.
+  const portField = fields.find((f) => f.key === "port");
+  if (portField) {
+    try {
+      const cr = await fetch("/v1/config", { headers: authHeaders() });
+      if (cr.ok) portField.live_port = (await cr.json()).instance_port ?? null;
+    } catch (e) { /* live_port stays unset */ }
+  }
+  if (myToken !== _settingsRenderToken) return;
 
   // Host-path fields (folder/path/pathlist) are hidden from a caller without host
   // filesystem access, and that decision reads caps.fsAccess - which starts at the

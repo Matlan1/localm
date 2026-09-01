@@ -222,6 +222,27 @@ def _eos_token_ids(model, tokenizer) -> set:
     return {int(raw)}
 
 
+def _resolve_max_new_tokens(max_tokens: int, context_capacity: Optional[int],
+                             n_prompt: Optional[int]) -> int:
+    """Translate ``max_tokens`` into the ``max_new_tokens`` transformers'
+    ``generate()`` will accept.
+
+    ``max_tokens<=0`` is this codebase's "unlimited" sentinel (see the GGUF
+    backend's ``LlamaCpp._fit_generation_budget``), but ``generate()`` itself
+    raises ``ValueError`` for a non-positive ``max_new_tokens`` - there is no
+    equivalent sentinel on the transformers side. A positive ``max_tokens``
+    passes through unchanged. Unlimited resolves to the room left in the
+    context window (``context_capacity - n_prompt``, floored at 1) when both
+    are known, else a fixed fallback (``DEFAULT_CONFIG["max_tokens"]``).
+    """
+    if max_tokens > 0:
+        return max_tokens
+    if context_capacity and n_prompt is not None:
+        return max(1, context_capacity - n_prompt)
+    from localm.config import DEFAULT_CONFIG
+    return DEFAULT_CONFIG["max_tokens"]
+
+
 class _FinishReasonObserver:
     """Installed as one of ``model.generate()``'s ``stopping_criteria`` to
     record WHY generation ended, without influencing the decision itself -
@@ -910,6 +931,7 @@ class HFWorker:
 
         # Check prompt token length against context capacity before generate
         input_ids = inputs.get("input_ids")
+        n_prompt = None
         if input_ids is not None and self.context_capacity:
             n_prompt = int(input_ids.shape[-1])
             if n_prompt > self.context_capacity:
@@ -918,6 +940,9 @@ class HFWorker:
                     f"Conversation ({n_prompt} tokens) has outgrown the maximum "
                     f"context window (context_capacity={self.context_capacity})."
                 )
+
+        effective_max_new_tokens = _resolve_max_new_tokens(
+            max_tokens, self.context_capacity, n_prompt)
 
         # --- Streaming generation ---
         streamer = TextIteratorStreamer(
@@ -934,7 +959,7 @@ class HFWorker:
         gen_kwargs: dict = {
             **inputs,
             "streamer": streamer,
-            "max_new_tokens": max_tokens,
+            "max_new_tokens": effective_max_new_tokens,
             "repetition_penalty": repeat_penalty,
             "stopping_criteria": StoppingCriteriaList([finish_observer]),
         }
@@ -985,7 +1010,7 @@ class HFWorker:
         # "length" only when the budget ran out with no EOS ever produced.
         if finish_observer.ended_on_eos:
             self.last_finish_reason = "stop"
-        elif finish_observer.generated >= max_tokens:
+        elif finish_observer.generated >= effective_max_new_tokens:
             self.last_finish_reason = "length"
         else:
             self.last_finish_reason = "stop"

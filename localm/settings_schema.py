@@ -364,8 +364,8 @@ CORE_FIELDS: list = [
                  group="Chat", owner="chat", min=0, step=0.05),
     SettingField("max_tokens", Widget.NUMBER, "Max tokens per reply",
                  "Upper limit on tokens per reply, a runaway guard not a target. "
-                 "Thinking models need plenty of room.",
-                 group="Chat", owner="chat", min=1, step=1),
+                 "Thinking models need plenty of room. 0 = unlimited.",
+                 group="Chat", owner="chat", min=0, step=1),
     SettingField("chat_tool_grammar", Widget.TOGGLE,
                  "Grammar-constrain chat tool calls",
                  "Once the model starts a <tool_call> (the web search/fetch tool), "

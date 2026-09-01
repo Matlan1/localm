@@ -679,6 +679,52 @@ class TestConfigInstanceId:
         assert got2["instance_id"] == got["instance_id"]
 
 
+# --------------------------------------------------------------------------- #
+#  /v1/config instance_port: the live bound port, which can differ from the
+#  persisted "port" default (an explicit -p override, or an auto-bump onto a
+#  different free port, is never written back to disk).
+# --------------------------------------------------------------------------- #
+
+class TestConfigInstancePort:
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+        from localm.inference.http_server import create_app
+        import localm.config as cfg
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+        app = create_app(None)
+        return TestClient(
+            app, headers={"Authorization": f"Bearer {app.state.shell_token}"})
+
+    def test_instance_port_reflects_app_state(self, client):
+        # A bare create_app() (no instances.advertise() context, as in every
+        # test client here) never sets instance_port - confirm the absence is
+        # reported as None rather than raising.
+        assert client.get("/v1/config").json()["instance_port"] is None
+        # Once a surface advertises a live port (instances.advertise(), or an
+        # explicit -p override that differs from the persisted default), the
+        # route must reflect exactly that value, not the persisted "port" key.
+        client.app.state.instance_port = 1111
+        got = client.get("/v1/config").json()
+        assert got["instance_port"] == 1111
+        assert got["port"] != 1111, "persisted default is the untouched 8642, not the live port"
+
+    def test_instance_port_is_readonly_on_patch(self, client):
+        # Same contract as instance_id above: echoing the whole GET response
+        # back through PATCH must not be rejected for instance_port, and PATCH
+        # must never be able to overwrite it (the server bind is not a setting).
+        client.app.state.instance_port = 1111
+        got = client.get("/v1/config").json()
+        r = client.patch("/v1/config", json=got)
+        assert r.status_code == 200
+        assert client.get("/v1/config").json()["instance_port"] == 1111
+
+
 class TestInstanceIdUnit:
     """Direct unit coverage of config.instance_id(), independent of the HTTP layer."""
 
