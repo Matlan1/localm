@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "localm",
+  "description": "Chat, manage models, and delegate coding tasks to localm, an offline local LLM engine, through its MCP server.",
+  "owner": {
+    "name": "Matlan1"
+  },
+  "plugins": [
+    {
+      "name": "localm",
+      "source": "./",
+      "description": "Chat, manage models, and delegate coding tasks to localm, an offline local LLM engine, through its MCP server."
+    }
+  ]
+}
