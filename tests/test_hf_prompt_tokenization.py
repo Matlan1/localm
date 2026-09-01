@@ -31,6 +31,7 @@ def test_chat_tokenization_suppresses_double_bos(monkeypatch):
     be._processor = None
     be._is_multimodal = False
     be._model = MagicMock()
+    be.context_capacity = None   # __init__'s own pre-load default
 
     tok = MagicMock()
     tok.apply_chat_template.return_value = "<bos>hello"
