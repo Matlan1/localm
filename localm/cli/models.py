@@ -148,7 +148,7 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
                    "which belongs to ComfyUI, not localm's chat-model catalog).")
 def pull(model_spec, name, sha256, redownload, mmproj, type, store,
          comfy_dest_dir, register):
-    """Download a model from HuggingFace or a URL.
+    """Download a model from HuggingFace, CivitAI, or a URL.
 
     \b
     Full HF model (transformers format, for multimodal / HF-native models):
@@ -158,6 +158,13 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
     Single GGUF file (quantized, lighter, works with GGUF backend):
       localm pull llama3.2-3b
       localm pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
+
+    \b
+    CivitAI model VERSION id (checkpoints/LoRAs/VAEs for image generation;
+    find one with `localm search --source civitai`). Lands in the active
+    ComfyUI's models/<type> folder, not <data dir>/models:
+      localm pull civitai:135867
+      localm pull civitai:135867:99264
 
     \b
     Direct URL:
@@ -179,25 +186,41 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
 
 @main.command("search")
 @click.argument("query", nargs=-1)
-@click.option("-n", "--limit", default=10, show_default=True, help="Max repos.")
+@click.option("-n", "--limit", default=10, show_default=True, help="Max repos/models.")
 @click.option("--files", "list_files", is_flag=True,
-              help="Treat QUERY as one repo id and list its GGUF files "
-                   "with per-quant VRAM fit.")
-def search_cmd(query, limit, list_files):
-    """Search HuggingFace for GGUF models (empty query = most downloaded).
+              help="Treat QUERY as one repo id (--source hf) or one model "
+                   "VERSION id (--source civitai) and list its downloadable "
+                   "files.")
+@click.option("--source", default="hf", show_default=True,
+              type=click.Choice(["hf", "civitai"], case_sensitive=False),
+              help="Which model source to search.")
+@click.option("--nsfw", is_flag=True,
+              help="(--source civitai only) include NSFW results. Off by "
+                   "default; a minor-flagged result is excluded either way.")
+@click.option("--legacy-formats", "legacy_formats", is_flag=True,
+              help="(--source civitai, with --files) also list legacy "
+                   "PickleTensor/unknown-format files, hidden by default.")
+def search_cmd(query, limit, list_files, source, nsfw, legacy_formats):
+    """Search HuggingFace or CivitAI for models (empty query = most downloaded).
 
     \b
     Examples:
       localm search qwen2.5 7b instruct
       localm search bartowski/Qwen2.5-7B-Instruct-GGUF --files
+      localm search --source civitai detail tweaker
+      localm search --source civitai --files 135867
     """
     from rich.console import Console
     from rich.markup import escape
 
-    from ..discover import (DiscoverError, fit_label, hf_gguf_files,
-                           hf_search, vram_capacity)
     console = Console()
     text = " ".join(query).strip()
+    if source.lower() == "civitai":
+        _search_civitai(console, text, limit, list_files, nsfw, legacy_formats)
+        return
+
+    from ..discover import (DiscoverError, fit_label, hf_gguf_files,
+                           hf_search, vram_capacity)
     try:
         if list_files:
             if not text:
@@ -245,6 +268,60 @@ def search_cmd(query, limit, list_files):
             console.print("\n[dim]list quants:  localm search <repo> "
                           "--files[/dim]")
     except DiscoverError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        sys.exit(1)
+
+
+def _search_civitai(console, text, limit, list_files, nsfw, legacy_formats):
+    """The --source civitai half of search_cmd, split out to keep that
+    command's HF-shaped body unchanged."""
+    from rich.markup import escape
+
+    from ..model_manager.sources import (
+        ModelSourceError, civitai_list_files, civitai_search)
+    try:
+        if list_files:
+            if not text:
+                console.print("[red]--files needs a CivitAI model VERSION id, "
+                              "e.g. localm search --source civitai --files "
+                              "135867[/red]")
+                sys.exit(1)
+            files = civitai_list_files(text, include_legacy_formats=legacy_formats)
+            if not files:
+                console.print("[dim](no downloadable files - retry with "
+                              "--legacy-formats if you expect one of the "
+                              "riskier formats)[/dim]")
+                return
+            for f in files:
+                fmt = (f.get("metadata") or {}).get("format") or "?"
+                size_kb = f.get("sizeKB") or 0
+                scan = f.get("virusScanResult") or "?"
+                # name/fmt/scan come from CivitAI's own file metadata.
+                console.print(
+                    f"  [cyan]{escape(str(f.get('id')))}[/cyan]  "
+                    f"{size_kb / 1024**2:6.2f} GB  [dim]{escape(fmt)}[/dim]  "
+                    f"scan:{escape(scan)}  {escape(f.get('name', '?'))}")
+            console.print(f"\n[dim]pull one:  localm pull civitai:{escape(text)}"
+                          f"[/dim]")
+        else:
+            result = civitai_search(text, limit=limit, nsfw=nsfw)
+            items = result["items"]
+            if not items:
+                console.print("[dim](no CivitAI models found)[/dim]")
+                return
+            for it in items:
+                versions = it.get("modelVersions") or []
+                latest = versions[0].get("id") if versions else None
+                stats = it.get("stats") or {}
+                # name/type/creator come from CivitAI's own model metadata.
+                console.print(
+                    f"[cyan]{escape(str(it.get('name', '?')))}[/cyan] "
+                    f"[dim]({escape(str(it.get('type', '?')))})[/dim]  "
+                    f"⬇ {stats.get('downloadCount', 0):,}  "
+                    f"[dim]version:{escape(str(latest))}[/dim]")
+            console.print("\n[dim]list files:  localm search --source civitai "
+                          "--files <version>[/dim]")
+    except ModelSourceError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
 
