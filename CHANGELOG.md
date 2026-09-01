@@ -68,6 +68,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   when the launcher opens or when the new "rescan" button is used, rather
   than freezing the window while it scans.
 
+### Security
+- **The coder now refuses a small set of catastrophic shell commands outright,
+  instead of relying on you being there to say no.** Until now the only thing
+  standing between the model and a command like a recursive delete of your home
+  directory was the confirmation prompt, and an unattended run skips that
+  prompt entirely: with auto-approve on, "ls" and a command that wipes a disk
+  took exactly the same path. A fixed safety check now runs on every command
+  the model writes, before anything else, and cannot be approved past. It
+  refuses a recursive delete aimed at a drive root, a home directory or a
+  system directory; commands that format or overwrite a disk; writes that would
+  overwrite or delete your SSH, GnuPG, AWS, Docker or Kubernetes credentials;
+  downloaded scripts piped straight into a shell; a force push at master or
+  main; and "git reset --hard", which throws away uncommitted work. Each
+  refusal says which rule stopped it and what to do instead. Ordinary commands
+  are unaffected, including ones that look similar such as deleting a build
+  directory or force-pushing your own feature branch.
+
 ## [0.1.5] - 2026-08-26
 
 ### Added

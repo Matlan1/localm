@@ -94,6 +94,11 @@ _WRAPPERS = frozenset({
     "sudo", "doas", "nohup", "time", "nice", "ionice", "stdbuf", "command",
     "builtin", "exec", "setsid", "env", "xargs", "script", "unbuffer",
 })
+# Shell keywords and grouping tokens that stand before a real command.
+_SHELL_KEYWORDS = frozenset({
+    "if", "then", "else", "elif", "fi", "while", "until", "for", "do",
+    "done", "case", "esac", "select", "function", "{", "}", "!",
+})
 # Wrapper flags that consume the token after them.
 _WRAPPER_FLAGS_WITH_VALUE = frozenset({
     "-u", "--user", "-g", "--group", "-I", "-i", "--replace", "-n",
@@ -352,7 +357,7 @@ def _lex(text: str) -> list[_Segment]:
             flush_segment(True)
             i += 1
             continue
-        if ch in ";\n":
+        if ch in ";\n()":
             flush_segment(True)
             i += 1
             continue
@@ -421,6 +426,9 @@ def _peel(tokens: Sequence[str]) -> int:
             i += 1
             continue
         wrapper = _base(tokens[i])
+        if wrapper in _SHELL_KEYWORDS:
+            i += 1
+            continue
         if wrapper in _WRAPPERS:
             i += 1
             while i < n:
