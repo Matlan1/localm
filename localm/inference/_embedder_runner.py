@@ -363,12 +363,13 @@ class EmbedderRunner:
 
     def spawn_and_load(self, params: dict, timeout: float = LOAD_TIMEOUT_DEFAULT) -> dict:
         """Spawn the child and load the model. Returns ``{"dim": N}`` on
-        success. Raises RuntimeError on a genuine load failure, a child crash
-        (native abort - detected via is_alive(), never an exception this
-        process had to catch), or a timeout (the child is killed)."""
+        success. Raises RuntimeError on a genuine load failure (the worker is
+        shut down first), a child crash (native abort - detected via
+        is_alive(), never an exception this process had to catch), or a
+        timeout (the child is killed)."""
         self._spawn()
         self._req_q.put(("load", params))
-        return self._wait(timeout, "load")
+        return self._wait(timeout, "load", shutdown_on_error=True)
 
     def embed(self, texts: List[str], timeout: float = _EMBED_TIMEOUT_DEFAULT) -> List[List[float]]:
         """Embed *texts* via the isolated worker. Raises RuntimeError on a
@@ -382,7 +383,14 @@ class EmbedderRunner:
         self._req_q.put(("embed", texts))
         return self._wait(timeout, "embed")
 
-    def _wait(self, timeout: float, label: str):
+    def _wait(self, timeout: float, label: str, *, shutdown_on_error: bool = False):
+        """Block for the next response envelope for *label*.
+
+        With shutdown_on_error=True, a clean ("error", ...) result also
+        shuts the worker down before raising. spawn_and_load passes True;
+        embed leaves the default False. See
+        test_a_clean_load_error_shuts_the_worker_down and
+        TestCleanEmbedErrorKeepsTheWorker."""
         deadline = time.monotonic() + timeout
         result = None
         while result is None:
@@ -405,6 +413,8 @@ class EmbedderRunner:
         if kind == "ok":
             return result[1]
         if kind == "error":
+            if shutdown_on_error:
+                self.shutdown(grace=0)
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the embedding worker: {result!r}")
 
