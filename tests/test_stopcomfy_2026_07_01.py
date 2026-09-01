@@ -131,6 +131,60 @@ def test_restart_still_attempts_a_launch_when_nothing_is_running_at_all(monkeypa
     assert calls["killed"] == []
 
 
+def test_restart_holds_the_launch_lock_across_the_ownership_check_and_stop(monkeypatch):
+    """TOCTOU regression guard: without a lock spanning the ownership read and
+    the stop, a concurrent restart_comfy() on the same url can pop the
+    tracked proc between the two, making a genuine owner falsely conclude
+    "not ours". Pin the mechanism that prevents it: the per-url launch lock
+    must be held for that whole span."""
+    from localm.media import comfy_client as cc
+    calls = _patch_common(monkeypatch, cc, alive_after=False)
+    url = "http://127.0.0.1:8188"
+    cc._remember_spawned(url, _FakeProc(pid=321))
+    lock = cc._launch_lock_for(url)
+    seen_locked_during_stop = []
+
+    def _spy_stop_comfy(api_url=None):
+        seen_locked_during_stop.append(lock.locked())
+        return True, "Stopped the ComfyUI that localm launched."
+
+    monkeypatch.setattr(cc, "stop_comfy", _spy_stop_comfy)
+    monkeypatch.setattr(cc, "ensure_comfy", lambda **kw: (True, "ComfyUI is up."))
+
+    cc.restart_comfy(url)
+
+    assert seen_locked_during_stop == [True]
+    assert not lock.locked()                             # released once restart_comfy returns
+    assert calls == {"interrupt": 0, "vram": 0, "killed": []}   # stop_comfy was the spy, not the real one
+
+
+def test_restart_does_not_deadlock_under_concurrent_restarts(monkeypatch):
+    """Sanity check for the lock added above: two real, overlapping
+    restart_comfy() calls on the same url must both resolve rather than
+    wait on each other forever."""
+    import threading
+    from localm.media import comfy_client as cc
+    _patch_common(monkeypatch, cc, alive_after=False)
+    url = "http://127.0.0.1:8188"
+    cc._remember_spawned(url, _FakeProc(pid=321))
+    monkeypatch.setattr(cc, "ensure_comfy", lambda **kw: (True, "ComfyUI is up."))
+    results = {}
+
+    def _run(name):
+        results[name] = cc.restart_comfy(url)
+
+    threads = [threading.Thread(target=_run, args=(n,), name=n) for n in ("A", "B")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert not any(t.is_alive() for t in threads), "restart_comfy deadlocked under contention"
+    assert len(results) == 2
+    for name, (ok, msg) in results.items():
+        assert ok, (name, msg)
+
+
 # --------------------------------------------------------------------------- #
 #  routes
 # --------------------------------------------------------------------------- #
