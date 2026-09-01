@@ -996,3 +996,65 @@ class TestRecommendedBackendMatchesInstallPolicy:
         not vulkan."""
         diag = self._diag_with(monkeypatch, ["nvidia"], "linux")
         assert diag["recommended_backend"] == "cuda"
+
+
+# A credential also arrives JSON-SERIALISED, not only as a query parameter or a
+# header line: the GUI's console capture calls JSON.stringify on any non-string,
+# non-Error argument (static/app/client-log.js), and that ring is attached to a
+# share-intended report. The quote before the colon means neither the query nor
+# the header pattern sees it. Covered by _JSON_SECRET_RE.
+
+def test_scrub_secrets_redacts_json_serialised_credentials():
+    out = bugreport._scrub_secrets(
+        '{"api_key":"CANARY1","token": "CANARY2",'
+        '"openai_api_key":"CANARY3","x_auth":"CANARY4"}')
+    for canary in ("CANARY1", "CANARY2", "CANARY3", "CANARY4"):
+        assert canary not in out, out
+    # The KEY survives; only the value goes, same as the query/header patterns.
+    assert '"api_key":<redacted>' in out
+    assert '"token": <redacted>' in out
+
+
+def test_scrub_secrets_redacts_a_nested_json_credential():
+    out = bugreport._scrub_secrets('POST /v1/x body={"auth":{"access_token":"CANARY5"}}')
+    assert "CANARY5" not in out, out
+    # The surrounding structure is intact - the redaction stops at the value.
+    assert out.startswith("POST /v1/x body=")
+    assert out.rstrip().endswith("}}")
+
+
+def test_scrub_secrets_leaves_non_credential_json_fields_intact():
+    """Over-redaction destroys a report's diagnostic value. A bare "key" is
+    ordinary data (a model name), and a boolean flag shows whether auth was ON."""
+    for intact in ('{"key": "gpt-4-turbo"}',
+                   '{"has_token": false}',
+                   '{"require_auth": true}',
+                   '{"auth_mode": "none"}'):
+        assert bugreport._scrub_secrets(intact) == intact
+
+
+def test_scrub_secrets_json_redaction_is_idempotent():
+    once = bugreport._scrub_secrets('{"api_key":"CANARY6","model":"llama-3"}')
+    twice = bugreport._scrub_secrets(once)
+    assert once == twice
+    assert "CANARY6" not in once
+    assert '"model":"llama-3"' in once
+
+
+def test_build_report_scrubs_json_credentials_in_every_context_block():
+    """Each context-supplied block a share-intended report carries goes through
+    the full scrub, not just the ones whose producer happens to scrub at source."""
+    ctx = {
+        "client": {"console": ['fetch failed {"api_key":"CANARY7"}']},
+        "recent_log_tail": 'GET /v1/models {"token":"CANARY8"}',
+        "native_trace": 'frame body={"password":"CANARY9"}',
+        "hang_traces": 'stall {"secret":"CANARY10"}',
+    }
+    text = bugreport.build_report("summary", context=ctx)
+    for canary in ("CANARY7", "CANARY8", "CANARY9", "CANARY10"):
+        assert canary not in text, f"{canary} survived into the report:\n{text}"
+    # Positive control: the blocks really were rendered, so the assertions above
+    # cannot pass by the sections being absent.
+    for heading in ("Browser / client", "Recent log (tail)",
+                    "Native fault trace", "Server hang trace"):
+        assert heading in text, f"{heading} block missing:\n{text}"

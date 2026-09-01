@@ -337,15 +337,47 @@ _HEADER_SECRET_RE = re.compile(
 )
 
 
+# The same credential arrives JSON-SERIALISED when an object is logged instead
+# of a string: the GUI's console capture calls ``JSON.stringify`` on any
+# non-string, non-Error argument (static/app/client-log.js), and that ring is
+# attached to a share-intended report. The quote before the colon defeats
+# _HEADER_SECRET_RE, and there is no ``=`` for _QUERY_SECRET_RE, so
+# ``{"api_key":"..."}`` reaches the report in the clear while the unquoted
+# ``api_key: ...`` beside it is redacted.
+#
+# Same policy as the two above and NOT a value-shape widening: the quoted JSON
+# key IS the name, so this matches the NAME, keeps it, and drops only the
+# value. The short generic names (key, auth, sig) stay prefix-only here for the
+# reason branch 3 gives above - a bare ``"key": "gpt-4"`` is ordinary data.
+# The value stops at the JSON structural characters rather than at whitespace,
+# so a redaction never eats the rest of the object.
+_JSON_SECRET_RE = re.compile(
+    r"(?i)([\"'](?:"
+    r"(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"|access[_-]?token|signature)"
+    r"|[A-Za-z0-9]+[_-](?:key|auth|sig)"
+    r")[\"']\s*:\s*)"
+    # Same flag carve-out as _QUERY_SECRET_RE: ``"has_token": false`` survives.
+    # The leading ``\s*`` is load-bearing: the ``\s*`` inside the name group can
+    # give the separator space back on backtracking, so without it the guard is
+    # tested one character too late and matches nothing.
+    r"(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"[\"']?\s*(?:[,}\]]|$))"
+    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^,}\]\s]*)"
+)
+
+
 def _scrub_query_and_header_secrets(text: str) -> str:
-    """Redact credential-ish URL query parameters and HTTP header lines, by
-    NAME (see the regexes above). Idempotent: the ``<redacted>`` replacement
-    contains none of the delimiters the value patterns stop on, so a second
-    pass matches nothing new and leaves an already-redacted value unchanged."""
+    """Redact credential-ish URL query parameters, HTTP header lines and JSON
+    object keys, by NAME (see the regexes above). Idempotent: the
+    ``<redacted>`` replacement contains none of the delimiters the value
+    patterns stop on, so a second pass matches nothing new and leaves an
+    already-redacted value unchanged."""
     if not text:
         return text
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
     text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _JSON_SECRET_RE.sub(r"\1<redacted>", text)
     return text
 
 
@@ -891,7 +923,8 @@ def build_report(summary: str, reason: str = "",
         parts += ["", "## Native fault trace", "```", _scrub_secrets(str(native))[:4000], "```"]
     tail = ctx.get("recent_log_tail")
     if tail:
-        parts += ["", "## Recent log (tail)", "```", _scrub_home(str(tail))[:4000], "```"]
+        parts += ["", "## Recent log (tail)", "```",
+                  _scrub_secrets(str(tail))[:4000], "```"]
     elif ctx.get("log_unavailable"):
         # Say the log could not be COLLECTED rather than rendering nothing: an
         # omitted section is indistinguishable from a clean run. The reason is
@@ -904,7 +937,7 @@ def build_report(summary: str, reason: str = "",
         parts += ["", "## Server hang trace (event-loop stall)",
                   "The hang watchdog captured every thread's stack when the server "
                   "froze (the top of the main thread is the blocking call):",
-                  "```", _scrub_home(str(hang))[:8000], "```"]
+                  "```", _scrub_secrets(str(hang))[:8000], "```"]
 
     # Always-on in-memory breadcrumbs (INFO+; no chat content) so even a non-debug
     # report shows what the app was doing right before the problem.
