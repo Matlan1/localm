@@ -49,12 +49,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   sub-agent) can check who else calls something before touching its
   signature, without a manual grep round-trip.
 - **localm's MCP server now ships as a portable Agent Plugin bundle** (a
-  `plugin.json` manifest, `.mcp.json`, and a `skills/localm/` skill at the
-  repo root), loadable in Claude Code with `claude --plugin-dir <path to
-  this repo>` instead of pasting the MCP server's JSON config by hand. The
-  skill gives the assistant operational guidance: how to judge model/quant
-  fit before downloading, when to delegate a whole task instead of a single
-  chat call, and what image generation needs.
+  `plugin.json` manifest, `.mcp.json`, a `marketplace.json`, and a
+  `skills/localm/` skill at the repo root), instead of pasting the MCP
+  server's JSON config by hand. Install it persistently with `claude plugin
+  marketplace add Matlan1/localm` followed by `claude plugin install
+  localm@localm`, or load it for one session only with `claude --plugin-dir
+  <path to this repo>`. The skill gives the assistant operational guidance:
+  how to judge model/quant fit before downloading, when to delegate a whole
+  task instead of a single chat call, and what image generation needs.
 - **A curated picker for the Kokoro voice model, in Settings > Text-to-speech.**
   Switching models used to mean typing a raw Hugging Face repo id into a blank
   box with no discoverability. It now offers the shipped default plus a
