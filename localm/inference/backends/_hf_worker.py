@@ -996,15 +996,28 @@ class HFWorker:
         if cancel_event is not None:
             gen_kwargs["stopping_criteria"].append(_CancelCriteria(cancel_event))
 
-        thread = threading.Thread(
-            target=model.generate, kwargs=gen_kwargs, daemon=True
-        )
+        generation_errors: List[Exception] = []
+
+        def _run_generate() -> None:
+            try:
+                model.generate(**gen_kwargs)
+            except Exception as exc:
+                generation_errors.append(exc)
+            finally:
+                # Always unblocks the streamer loop below via StopIteration,
+                # even when generate() raised before reaching its own normal
+                # end() call. Safe to call more than once.
+                streamer.end()
+
+        thread = threading.Thread(target=_run_generate, daemon=True)
         thread.start()
 
         for token_text in streamer:
             yield token_text
 
         thread.join()
+        if generation_errors:
+            raise generation_errors[0]
         # EOS wins over the length budget whenever both are true at once
         # (mirrors llama.py's _generate - see _FinishReasonObserver above);
         # "length" only when the budget ran out with no EOS ever produced.

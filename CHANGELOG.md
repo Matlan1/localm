@@ -90,6 +90,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   exact model name.
 
 ### Fixed
+- **A HuggingFace model's generation failure could leave a reply stuck for
+  fifteen minutes instead of failing right away.** If generation hit a real
+  error partway through (an out-of-memory condition, a bad setting, or a
+  similar failure), the reply just sat there with no new text until a generic
+  "stalled" timeout eventually gave up, with no indication of what had
+  actually gone wrong. The real error now surfaces within seconds, with its
+  actual cause, instead of after the long wait.
+
 - **A crashed run's native fault trace, when attached to a bug report, was
   checked only for your home folder name, not for stray credentials.** The
   report's other attachments (the recent log tail, an event-loop hang trace)
