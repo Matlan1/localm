@@ -19,6 +19,7 @@ from ..display import (
     print_info,
     print_success,
     print_warning,
+    safe_markup,
 )
 from ..review_guard import classify_sensitive_changes, render_warning
 from .goal import _run_goal_loop
@@ -263,8 +264,9 @@ def _handle_command(raw: str, agent: Agent) -> bool:
                           if e["changed_files"] else "")
                 when = e["interrupted_at"] or "unknown time"
                 console.print(
-                    f"  [bold]{e['id']}[/bold]  {e['title']}  "
-                    f"[dim]({e['turns']} turns{changed}, {when})[/dim]")
+                    f"  [bold]{safe_markup(e['id'])}[/bold]  "
+                    f"{safe_markup(e['title'])}  "
+                    f"[dim]({e['turns']} turns{changed}, {safe_markup(when)})[/dim]")
 
     elif cmd == "resume":
         # No id -> the most recent (the zero-argument default); an id from
@@ -327,12 +329,13 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 badge = "new" if f["created"] else "edited"
                 gone = "" if f["exists"] else "  [red](deleted since)[/red]"
                 console.print(
-                    f"  [cyan]{f['path']}[/cyan]  [dim]{badge}, "
-                    f"{f['writes']} write(s) via {f['last_tool']}[/dim]{gone}"
+                    f"  [cyan]{safe_markup(f['path'])}[/cyan]  [dim]{badge}, "
+                    f"{f['writes']} write(s) via {safe_markup(f['last_tool'])}"
+                    f"[/dim]{gone}"
                 )
             print_info("Use /diff [path] for the cumulative changes.")
         if delegated:
-            console.print(delegated)
+            console.print(safe_markup(delegated))
 
     elif cmd == "diff":
         diff = agent.session_diff(arg or None)
@@ -348,7 +351,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             from rich.syntax import Syntax
             console.print(Syntax(diff, "diff", theme="monokai", line_numbers=False))
         if delegated:
-            console.print(delegated)
+            console.print(safe_markup(delegated))
 
     elif cmd == "bg":
         # "/bg", not "/jobs": an installed jobs plugin owns that noun for
@@ -369,8 +372,9 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 for r in running:
                     age = time.time() - r["started_at"]
                     console.print(
-                        f"  [cyan]{r['id']}[/cyan]  {r['kind']:<6} "
-                        f"{r['label']}  [dim]{age:.0f}s[/dim]")
+                        f"  [cyan]{safe_markup(r['id'])}[/cyan]  "
+                        f"{safe_markup(r['kind']):<6} "
+                        f"{safe_markup(r['label'])}  [dim]{age:.0f}s[/dim]")
             if done:
                 console.print("[bold]Finished[/bold]")
                 for r in done:
@@ -384,8 +388,11 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                             extra += f", branch {res['branch']}"
                     flag = "[red]" if r["state"] in ("failed", "killed") else "[dim]"
                     console.print(
-                        f"  [cyan]{r['id']}[/cyan]  {r['kind']:<6} "
-                        f"{r['label']}  {flag}{r['state']}{extra and ' - ' + extra}[/]")
+                        f"  [cyan]{safe_markup(r['id'])}[/cyan]  "
+                        f"{safe_markup(r['kind']):<6} "
+                        f"{safe_markup(r['label'])}  {flag}"
+                        f"{safe_markup(r['state'])}"
+                        f"{extra and ' - ' + safe_markup(extra)}[/]")
         # The table is bounded, so a long session outgrows it. What fell off is
         # reported per KIND.
         dropped = dict(registry.dropped_undrained_by_kind)
@@ -441,7 +448,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
     elif cmd == "memory":
         mem = agent._memory
         if mem:
-            console.print(f"[dim]{mem}[/dim]")
+            console.print(f"[dim]{safe_markup(mem)}[/dim]")
         else:
             print_info("No memory file. Use /remember <text> to create one.")
 
@@ -606,16 +613,16 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 elif result.approved:
                     print_success(f"Approved - the {model} found no blocking issues.")
                     if result.notes:
-                        console.print(f"[dim]{result.notes}[/dim]")
+                        console.print(f"[dim]{safe_markup(result.notes)}[/dim]")
                 else:
                     n = len(result.blocking)
                     print_warning(
                         f"The {model} flagged {n} blocking issue"
                         f"{'s' if n != 1 else ''}:")
                     for b in result.blocking:
-                        console.print(f"  - {b}")
+                        console.print(f"  - {safe_markup(b)}")
                     if result.notes:
-                        console.print(f"[dim]{result.notes}[/dim]")
+                        console.print(f"[dim]{safe_markup(result.notes)}[/dim]")
 
     elif cmd == "scope":
         if not arg:

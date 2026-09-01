@@ -91,6 +91,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   were already checked for API keys, tokens, and passwords before being
   included. The native trace now gets that same check, so a credential that
   happened to land in it can no longer ship in an uploaded report.
+
+- **The browser tab notices when localm has restarted.** The offline cache was
+  also storing the small status reply the page uses to tell one running localm
+  from another, and then serving that stored copy back forever without ever
+  asking the server again. Because that reply is exactly how the page spots a
+  restart, the "reconnecting" overlay could sit there indefinitely after
+  localm came back up. Status replies are no longer cached; only the interface
+  files are.
+
+- **The coder's delegated-work summary no longer loses its status and its
+  "diff truncated" notice.** In `/changes` and `/diff`, the summary of work done
+  on another branch is printed with each entry's state in square brackets. Those
+  brackets were being read as formatting and silently removed, so the state
+  disappeared, and so did the note saying a long diff had been cut short along
+  with the command to see the rest. A truncated diff could therefore read as a
+  complete one.
+
 - **Embedding long text no longer fails on runtime builds that ignore the
   shared-cache request.** localm asks its embedding runtime for one shared
   attention cache so several texts can be encoded in a single pass. Some builds
@@ -260,6 +277,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   playback usually starts right away by the time you click.
 
 ### Security
+- **A model can no longer take over your terminal through the coder's own
+  output.** Text a model produced was printed to the terminal without being
+  made inert first, on several paths: the narration it writes alongside a tool
+  call, its final answer whenever that looked like Markdown, the reviewer's
+  verdict shown by `/review`, the project memory shown by `/memory`, the file
+  paths in `/changes`, and the background-job labels in `/bg`. A model could
+  therefore embed a raw terminal control sequence and clear your screen or
+  overwrite lines already printed, hiding what it had actually done; it could
+  render a clickable link whose visible text said one thing and whose
+  destination was another; or it could emit one malformed tag and abort the
+  turn outright. All of it is now escaped, so it renders as the literal text it
+  is. The same applies to the line naming which sub-agent is asking before a
+  confirmation prompt: a sub-agent could previously make that line vanish by
+  putting a malformed tag in its own name, leaving you approving a command with
+  no idea which agent had requested it.
+
 - **A shortcut or linked folder inside your project no longer leads the coder
   out of it.** The coder refuses to read a file outside the project you pointed
   it at, but two things that walk the project - the file tree it shows you and
