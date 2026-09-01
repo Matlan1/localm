@@ -362,6 +362,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   to do instead. Ordinary commands are unaffected, including ones that look
   similar such as deleting a build directory or force-pushing your own
   feature branch.
+- **Two coder sessions started close together no longer share one activity
+  log.** The file behind a session's log was named only by the second it
+  started and the process id, so two sessions begun within the same second on
+  the same running server landed on the identical file and their command
+  history interleaved into it - including a scoped or restricted session's
+  history mixing with an unrelated one. Each session now gets its own file,
+  and every entry in it is tagged with the session that wrote it.
 
 ## [0.1.5] - 2026-08-26
 
