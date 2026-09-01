@@ -99,7 +99,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "stalled" timeout eventually gave up, with no indication of what had
   actually gone wrong. The real error now surfaces within seconds, with its
   actual cause, instead of after the long wait.
-
+- **Repairing a damaged Knowledge collection could silently drop its semantic
+  search, with no warning.** Repair recomputes embeddings by default, and is
+  meant to ask before proceeding when that will not happen and existing
+  embeddings would be lost - but it always assumed an embedding model was
+  available, so the warning never showed even when none was installed. Repair
+  now checks first, and asks before dropping to keyword-only search when it
+  would.
 - **A crashed run's native fault trace, when attached to a bug report, was
   checked only for your home folder name, not for stray credentials.** The
   report's other attachments (the recent log tail, an event-loop hang trace)

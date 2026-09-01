@@ -184,7 +184,8 @@ class TestApiModeIndexesHeadless:
             assert "localm gui" not in r.text.lower(), (
                 "the GUI is no longer why a job registry might be missing")
 
-    def test_add_logs_embed_degrade_when_headless(self, api_mode_app, caplog):
+    def test_add_logs_embed_degrade_when_headless(self, api_mode_app, caplog,
+                                                    monkeypatch):
         """A headless /add whose embedder is broken must not silently report
         ordinary success. add_paths' on_progress-or-noop (store.py) discards the
         "embeddings unavailable ... indexing lexical-only" line entirely when
@@ -201,7 +202,17 @@ class TestApiModeIndexesHeadless:
         loaded fresh by ``PluginManager`` via ``importlib`` under a private
         ``sys.modules`` key, so monkeypatching the normally-imported
         ``localm.plugins.builtin.rag.plug`` would silently miss the live
-        route entirely."""
+        route entirely.
+
+        ``_self_services`` additionally withholds ``self_embed`` when no
+        embedding model resolves on disk (``resolve_embedding_model_path``),
+        which this hermetic ``LOCALM_HOME`` never has - so that check is
+        patched open here to isolate the scenario under test (a resolvable
+        but unreachable embedder), the same way ``test_rag.py`` patches it for
+        ``GET /api/rag/embedding``."""
+        from localm.inference import embedder as emb
+        monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                            lambda *, allow_download=None: "/models/embeddings/fake.gguf")
         api_mode_app.state.self_url = "http://127.0.0.1:1"   # nothing listens
         api_mode_app.state.active_model = lambda: "test-model"
         with TestClient(api_mode_app) as c:
@@ -301,22 +312,48 @@ class TestApiModeIndexesHeadless:
 #  Self-services derived from the kernel's bind coordinates                    #
 # --------------------------------------------------------------------------- #
 
-def test_self_services_derived_from_kernel_state_when_headless():
+def test_self_services_derived_from_kernel_state_when_headless(monkeypatch):
     """attach_gui (the GUI shell) is the only setter of app.state.self_url /
     active_model, but a bare ``localm serve`` still advertises its bind
     coordinates (instance_scheme / instance_port). The rag plugin derives
     self_url + a live-engine active_model from those, so self-embedding (and the
     format / image self-classify helpers) work headless instead of every index
-    silently degrading to lexical-only."""
+    silently degrading to lexical-only, provided an embedding model actually
+    resolves - patched open here since this is a test of the DERIVATION, not of
+    embedder installedness (see the sibling test below for that)."""
     from types import SimpleNamespace
 
+    from localm.inference import embedder as emb
     from localm.plugins.builtin.rag import plug
 
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: "/models/embeddings/fake.gguf")
     # No self_url / active_model published, but advertise()-style coordinates are.
     req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         instance_scheme="http", instance_port=8699)))
     self_embed, self_classify, self_describe = plug._self_services(req)
     assert self_embed is not None
+    assert self_classify is not None
+    assert self_describe is not None
+
+
+def test_self_services_withholds_self_embed_when_no_embedder_installed():
+    """The GUI-shell-attached (or kernel-derived) case is not on its own enough
+    to promise self-embedding: without an embedding model actually resolving on
+    disk, self_embed must be None even though self_classify/self_describe (which
+    key off active_model, not the embedder) are still returned - otherwise a
+    caller relying on self_embed's mere presence (e.g. rag_repair's
+    would_lose_embeddings guard) never sees the degrade."""
+    from types import SimpleNamespace
+
+    from localm.plugins.builtin.rag import plug
+
+    # No embedding model configured in this hermetic LOCALM_HOME, so
+    # resolve_embedding_model_path is genuinely None here - nothing patched.
+    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        instance_scheme="http", instance_port=8699)))
+    self_embed, self_classify, self_describe = plug._self_services(req)
+    assert self_embed is None
     assert self_classify is not None
     assert self_describe is not None
 
