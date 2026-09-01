@@ -185,12 +185,18 @@ def _embedder_download_status(request: Request | None) -> dict:
     an installed embedding model, and whether THIS caller could fetch it with
     one click via the SAME one-time action the Knowledge page offers (POST
     /api/rag/embedding/download - reused here, not duplicated). Mirrors
-    rag.plug.rag_embedding_status's can_download gate exactly (a known internal
-    key, not yet on disk, net_mode not off unless downloads are exempted while
-    off, caller holds config:write) so the two surfaces never disagree about
-    whether the button would work. Withholds the model name (returns
-    embedder_model: None) whenever can_download is False, so a caller who could
-    not act on it is not told what it is either."""
+    rag.plug.rag_embedding_status's can_download gate (a known internal key,
+    not yet on disk, net_mode not off unless downloads are exempted while off,
+    caller holds config:write) so the two surfaces never disagree about
+    whether the button would work - PLUS two checks that gate is not itself
+    exposed to: the download route lives on the rag PLUGIN's router, which
+    is (a) absent entirely (404) whenever rag is not installed/enabled, and
+    (b) gated on the "rag" SCOPE at the router-mount level, checked before
+    the route's own config:write check ever runs - a caller scoped to
+    "memory"+"config:write" but not "rag" would 403 there regardless of
+    holding config:write. Withholds the model name (returns embedder_model:
+    None) whenever can_download is False, so a caller who could not act on
+    it is not told what it is either."""
     try:
         from localm import scopes
         from localm.config import load_config
@@ -203,8 +209,18 @@ def _embedder_download_status(request: Request | None) -> dict:
         if (model in KNOWN_EMBEDDING_MODELS
                 and not resolve_embedding_model_path(allow_download=False)
                 and (network_mode() != "off" or downloads_allowed_when_off())):
+            rag_mounted = False
+            if request is not None:
+                from starlette.routing import NoMatchFound
+                try:
+                    request.app.router.url_path_for("rag_embedding_download")
+                    rag_mounted = True
+                except NoMatchFound:
+                    rag_mounted = False
             held = _hs.caller_scopes(request) if request is not None else None
-            if held is None or scopes.grants(held, scopes.CONFIG_WRITE):
+            if (rag_mounted
+                    and (held is None or scopes.grants(held, "rag"))
+                    and (held is None or scopes.grants(held, scopes.CONFIG_WRITE))):
                 return {"can_download_embedder": True, "embedder_model": model}
     except Exception as e:
         from localm.debuglog import logger
