@@ -71,6 +71,33 @@ test("the service worker still bypasses API traffic and handles shell assets", (
   assert.equal(swHandles(h, "/app.js"), true, "shell assets are SW-handled (cache-first)");
 });
 
+test("the service worker never intercepts the server-state endpoints", () => {
+  // /whoami, /health and /debug/* are server state, not shell assets. They sit
+  // outside the /api and /v1 prefixes, so without an explicit bypass they fall
+  // into the cache-first branch: cached on the first ok response, then served
+  // from Cache Storage forever, never reaching the server again.
+  //
+  // fetch(..., {cache: "no-store"}) does NOT prevent this. That option governs
+  // the HTTP cache; Cache Storage is a separate store the SW consults itself.
+  //
+  // /whoami is the load-bearing one. It carries instance_id, which the reconnect
+  // overlay polls to notice a RESTARTED server (pages/models.js). Served from a
+  // frozen cache entry the id can never change, so the reconnect never completes.
+  const h = loadSW();
+  assert.equal(swHandles(h, "/whoami"), false,
+    "/whoami must stay live: a cached instance_id breaks reconnect detection");
+  assert.equal(swHandles(h, "/health"), false, "/health must stay live");
+  assert.equal(swHandles(h, "/debug/stacks"), false, "/debug/* must stay live");
+
+  // The bypass must not have swallowed the shell. These are the near-miss
+  // prefixes: a path that merely STARTS with a bypassed word is still an asset.
+  assert.equal(swHandles(h, "/app/helpers.js"), true, "shell assets still cached");
+  assert.equal(swHandles(h, "/healthy-icon.png"), true,
+    "a static asset whose name merely starts with a bypassed word stays cached");
+  assert.equal(swHandles(h, "/whoami-widget.js"), true,
+    "the bypass matches whole path segments, not prefixes");
+});
+
 // Load the SW with a caches mock that reports `existingKeys` and records every
 // caches.delete() call, so we can drive the activate handler and assert WHICH
 // caches it purges.

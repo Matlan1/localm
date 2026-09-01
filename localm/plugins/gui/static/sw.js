@@ -60,9 +60,12 @@ self.addEventListener("fetch", (e) => {
   if (req.method !== "GET") return;                       // never touch writes
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;        // only our own origin
-  // API, model and plugin traffic and the CA cert are always live, never
-  // cached, and must reach the network.
-  if (/^\/(api|v1|plugins|localm-ca\.crt)(\/|$)/.test(url.pathname)) return;
+  // API, model and plugin traffic, the CA cert, and the server-state
+  // endpoints (/whoami, /health, /debug/*) are always live, never cached, and
+  // must reach the network. Only the static shell below is cached.
+  // See "the service worker never intercepts the server-state endpoints".
+  if (/^\/(api|v1|plugins|localm-ca\.crt|whoami|health|debug)(\/|$)/
+      .test(url.pathname)) return;
 
   // Navigations: network-first, falling back to the cached shell when offline.
   if (req.mode === "navigate") {

@@ -108,11 +108,11 @@ def _serialised_confirm_handler(parent: Any, child_label: str):
             # Another child has held the human's attention past the budget: deny,
             # and say why.
             try:
-                from ..display import console
+                from ..display import console, safe_markup
                 console.print(
-                    f"    [yellow]sub-agent '{child_label}': confirmation channel "
-                    f"busy for {_CONFIRM_WAIT_S}s - denying "
-                    f"{getattr(call, 'name', 'tool')}[/yellow]"
+                    f"    [yellow]sub-agent '{safe_markup(child_label)}': "
+                    f"confirmation channel busy for {_CONFIRM_WAIT_S}s - denying "
+                    f"{safe_markup(getattr(call, 'name', 'tool'))}[/yellow]"
                 )
             except Exception:
                 pass
@@ -142,10 +142,10 @@ def _announce_asker(child_label: str, call) -> None:
     asking on the approval card itself.
     """
     try:
-        from ..display import console
+        from ..display import console, safe_markup
         console.print(
-            f"    [cyan]sub-agent '{child_label}' is asking to run "
-            f"{getattr(call, 'name', 'a tool')}[/cyan]"
+            f"    [cyan]sub-agent '{safe_markup(child_label)}' is asking to run "
+            f"{safe_markup(getattr(call, 'name', 'a tool'))}[/cyan]"
         )
     except Exception:
         # Attribution is a display aid; never let it break a confirmation flow.
