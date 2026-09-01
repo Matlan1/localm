@@ -79,6 +79,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   message, and the model list refreshes automatically in the background
   when the launcher opens or when the new "rescan" button is used, rather
   than freezing the window while it scans.
+- **In the coder REPL, running several `/goal` tasks in one session could let
+  a task that rewrites the test it is judged against go unflagged until you
+  quit the REPL.** The warning about edited test or CI-config files now shows
+  right after each `/goal` task finishes, not only when the session ends.
 
 ## [0.1.5] - 2026-08-26
 
