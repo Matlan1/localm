@@ -86,6 +86,9 @@ _AVATAR_MAX_GLYPH_LEN = 16
 # bigger edge than an avatar (see helpers.js fileToBackgroundDataUri) and
 # encoded as JPEG, not PNG. See test_background_value_rejects_oversized_data_uri.
 _BACKGROUND_MAX_DATA_URI_LEN = 3_000_000
+# How much of a REJECTED chat_background value to echo back in its error
+# message. See test_background_value_rejects_a_huge_garbage_string_without_reflecting_it.
+_BACKGROUND_ERROR_PREVIEW_LEN = 200
 # user_name (see config.py): a plain display string, never rendered as markup
 # (chat.js's el() sets it via textContent). Capped so it cannot overflow the
 # message-row layout.
@@ -1285,9 +1288,11 @@ def _validate_background_value(key: str, val) -> str:
                 f"{key}: image is too large ({len(s)} bytes encoded, max "
                 f"{_BACKGROUND_MAX_DATA_URI_LEN})")
         return s
+    shown = s if len(s) <= _BACKGROUND_ERROR_PREVIEW_LEN else (
+        s[:_BACKGROUND_ERROR_PREVIEW_LEN] + "...")
     raise ValueError(
         f"{key}: must be an uploaded png/jpeg/gif/webp image, never a URL or "
-        f"a path, got {s!r}")
+        f"a path, got {shown!r}")
 
 
 def _validate_user_name(key: str, val) -> str:

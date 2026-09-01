@@ -63,6 +63,40 @@ test("with chat_background unset, the preview stays on the empty placeholder", a
   assert.equal(preview.classList.contains("empty"), true);
 });
 
+test("a failed save rolls the live wallpaper and the preview back to the last confirmed value, not the attempted one", async () => {
+  const goodUri = "data:image/jpeg;base64,iVBORw0KGgo=";
+  const config = { chat_background: goodUri };
+  const fetchImpl = async (url, opts = {}) => {
+    const method = opts.method || "GET";
+    if (url === "/v1/config/schema") {
+      return { ok: true, status: 200, json: async () => SCHEMA, text: async () => "" };
+    }
+    if (url === "/v1/config" && method === "GET") {
+      return { ok: true, status: 200, json: async () => config, text: async () => "" };
+    }
+    if (url === "/v1/config" && method === "PATCH") {
+      // The server rejects this attempt - config on disk is UNCHANGED.
+      return { ok: false, status: 400, json: async () => ({ detail: "rejected" }), text: async () => "rejected" };
+    }
+    return {
+      ok: true, status: 200, text: async () => "",
+      json: async () => ({ models: [], active: "", conversations: [], plugins: [] }),
+    };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await render(win);
+
+  win.document.getElementById("chat-bg-clear").click();
+  await new Promise((r) => setTimeout(r, 200));
+
+  const preview = win.document.getElementById("chat-bg-preview");
+  const cssVar = win.document.documentElement.style.getPropertyValue("--chat-bg-image").trim();
+  assert.equal(preview.classList.contains("empty"), false,
+    "the preview must roll back to the still-persisted image, not stay on the rejected clear");
+  assert.equal(cssVar, `url("${goodUri}")`,
+    "the live wallpaper must roll back to the last confirmed value, not the attempted (rejected) one");
+});
+
 test("Clear PATCHes chat_background to empty and resets the preview", async () => {
   const uri = "data:image/jpeg;base64,iVBORw0KGgo=";
   const config = { chat_background: uri };

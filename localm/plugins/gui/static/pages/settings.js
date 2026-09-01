@@ -1888,12 +1888,19 @@ export async function buildAvatarsSection(form, fields) {
 /** Wire the "Chat background" upload/preview/clear controls in the static
  *  Appearance card (index.html #sec-appearance, alongside the logo picker).
  *  Self-contained: its own GET /v1/config to seed the preview, each action
- *  PATCHes /v1/config immediately - same "saves immediately" pattern as
- *  setupResidencyControls in settings-perf.js. No-op if the card is absent. */
+ *  PATCHes /v1/config immediately, with the same optimistic-apply-then-PATCH
+ *  shape setupResidencyControls in settings-perf.js uses - but unlike that
+ *  function, this one projects the new value onto other live surfaces
+ *  (applyChatBackground's CSS var, the preview swatch) before the PATCH
+ *  resolves, so a failed save must roll both back to the last
+ *  server-confirmed value, not just report the failure. No-op if the card is
+ *  absent. */
 export function setupChatBackgroundPicker() {
   const preview = $("chat-bg-preview"), fileInput = $("chat-bg-file"),
         uploadBtn = $("chat-bg-upload"), clearBtn = $("chat-bg-clear");
   if (!preview || !fileInput || !uploadBtn || !clearBtn) return;
+
+  let current = "";   // last value confirmed persisted on the server
 
   const renderPreview = (value) => {
     const src = safeAvatarImageSrc(value);
@@ -1909,8 +1916,11 @@ export function setupChatBackgroundPicker() {
         body: JSON.stringify({ chat_background: value }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      current = value;
       return true;
     } catch (e) {
+      applyChatBackground(current);
+      renderPreview(current);
       toast("Could not save background: " + e.message, true);
       return false;
     }
@@ -1918,7 +1928,10 @@ export function setupChatBackgroundPicker() {
 
   fetch("/v1/config", { headers: authHeaders() })
     .then((r) => (r.ok ? r.json() : {}))
-    .then((cfg) => renderPreview(cfg.chat_background || ""))
+    .then((cfg) => {
+      current = cfg.chat_background || "";
+      renderPreview(current);
+    })
     .catch(() => { /* server unreachable - stays on the empty placeholder */ });
 
   uploadBtn.onclick = () => fileInput.click();

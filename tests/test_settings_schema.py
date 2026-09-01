@@ -549,6 +549,17 @@ def test_background_value_rejects_oversized_data_uri():
         ss.validate_update({"chat_background": huge})
 
 
+def test_background_value_rejects_a_huge_garbage_string_without_reflecting_it():
+    """A value that fails the data-URI match entirely (never reaches the size
+    check below) must not have its raised error message grow with the input -
+    unlike the oversized-but-matching case, this branch has no other bound."""
+    huge_garbage = "x" * 5_000_000
+    with pytest.raises(ValueError) as exc:
+        ss.validate_update({"chat_background": huge_garbage})
+    assert len(str(exc.value)) < 1000
+    assert huge_garbage not in str(exc.value)
+
+
 def test_background_value_accepts_up_to_the_cap():
     prefix = "data:image/jpeg;base64,"
     at_cap = prefix + ("A" * (ss._BACKGROUND_MAX_DATA_URI_LEN - len(prefix)))
