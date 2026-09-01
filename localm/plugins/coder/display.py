@@ -322,22 +322,22 @@ HELP_TEXT = """\
   [bold]/approve[/bold]              toggle auto-approve for destructive tools
   [bold]/history[/bold]              show turn count, context usage, and index size
   [bold]/changes[/bold]              list every file this session has changed
-  [bold]/diff [path][/bold]          cumulative diff of session changes (all or one file)
+  [bold]/diff \\[path][/bold]          cumulative diff of session changes (all or one file)
   [bold]/undo[/bold]                 revert the last file write or edit
   [bold]/sessions[/bold]             list this project's saved (interrupted) sessions
-  [bold]/resume [id][/bold]          resume the most recent interrupted session, or a
+  [bold]/resume \\[id][/bold]          resume the most recent interrupted session, or a
                         specific one by id from /sessions
   [bold]/compact[/bold]              summarise old turns to free context space
   [bold]/memory[/bold]               show current project memory
   [bold]/remember <text>[/bold]      append a note to LOCALCODER.md
   [bold]/forget <pattern>[/bold]     remove memory bullets matching pattern
   [bold]/save[/bold]                 save conversation to JSON
-  [bold]/export [path][/bold]        export session transcript to Markdown
-  [bold]/scope [glob][/bold]         show or set the file-access scope (e.g. src/**/*.py)
+  [bold]/export \\[path][/bold]        export session transcript to Markdown
+  [bold]/scope \\[glob][/bold]         show or set the file-access scope (e.g. src/**/*.py)
   [bold]/scope clear[/bold]          remove the active scope restriction
-  [bold]/verify [cmd|auto|off][/bold] command that must exit 0 before a turn that
+  [bold]/verify \\[cmd|auto|off][/bold] command that must exit 0 before a turn that
                         changed files may finish (run by the harness, not the model)
-  [bold]/goal [cmd|auto|off][/bold] iterate the next task until this command exits 0,
+  [bold]/goal \\[cmd|auto|off][/bold] iterate the next task until this command exits 0,
                         re-running the whole task with each failure fed back
   [bold]/review[/bold]               a reviewer model checks the current diff for blocking
                         issues right now, even with coder_review off
