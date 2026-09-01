@@ -577,6 +577,24 @@ _MEMORY_WRITE_OFF_MSG = (
     "personal memory from an external client is opt-in and separate from enabling "
     "the memory plugin. Relaunch the server with: localm mcp --memory-write")
 
+# HuggingFace repos pull_model's MCP-client-supplied `repo` may target
+# directly. An already-registered model's own source is accepted too - see
+# _known_pull_repo().
+KNOWN_PULL_REPOS = frozenset({
+    "bartowski/Qwen2.5-7B-Instruct-GGUF",
+    "TheBloke/Mixtral-8x7B-v0.1-GGUF",
+})
+
+
+def _known_pull_repo(repo: str) -> bool:
+    """True when *repo* is in KNOWN_PULL_REPOS, or matches an
+    already-registered model's HuggingFace source."""
+    if repo in KNOWN_PULL_REPOS:
+        return True
+    from localm.config import load_registry
+    reg = load_registry()
+    return any(info.get("source") == f"hf:{repo}" for info in reg.values())
+
 
 def _coder_available() -> bool:
     """True when the coder plugin is installed on disk AND enabled, the same
@@ -918,6 +936,12 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                     "'localm add <path>' on the host.", is_error=True)
         except OSError:
             pass          # unreadable/oversized path: not a local add, fall through
+        if not _known_pull_repo(repo):
+            return _text_result(
+                f"Refusing to pull {repo!r} over MCP: it must be a known repo "
+                f"{tuple(KNOWN_PULL_REPOS)} or match an already-registered "
+                "model's source. Pull it with 'localm pull "
+                f"{repo}' on the host first, then retry.", is_error=True)
         spec = f"{repo}:{args['file']}" if args.get("file") else repo
 
         from localm.model_manager.pull import pull_model as _pull
