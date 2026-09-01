@@ -86,7 +86,7 @@ def test_a_bad_collection_name_is_refused_at_definition_time(home):
     with pytest.raises(ValueError):
         _rag_job(collection="../escape")
     with pytest.raises(ValueError):
-        _rag_job(collection="has spaces")
+        _rag_job(collection="kb.backup")
 
 
 def test_other_kinds_still_require_a_prompt(home):

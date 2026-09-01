@@ -30,8 +30,8 @@ written exactly once, at acquisition, and never rewritten.
 The lock file is ``<data dir>/rag/<name>.lock``, a SIBLING of the collection
 directory rather than a file inside it: ``delete_collection``'s rmtree would
 destroy an inside lock while it was held, and a stray file in the collection
-directory reads as collection data. Collection names are ``[A-Za-z0-9_-]{1,64}``
-(``check_collection_name``), so ``<name>.lock`` can never collide with a
+directory reads as collection data. ``check_collection_name`` forbids ``.``
+in a collection name, so ``<name>.lock`` can never collide with a
 collection directory, and ``collection_names()`` only lists directories that
 hold a meta.json, so the lock file is never mistaken for a collection.
 
