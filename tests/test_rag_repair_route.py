@@ -193,6 +193,26 @@ class TestRepairEmbeddingsLossGuard:
             assert Collection("kb").stats()["has_vectors"] is False, (
                 "an explicit confirm means the user accepted the drop")
 
+    def test_needs_confirm_when_gui_shell_attached_but_no_embedder_installed(
+            self, repair_app):
+        """The GUI-reachable case: self_url/active_model published exactly as
+        attach_gui does (a GUI shell IS attached), but this fresh LOCALM_HOME
+        has no embedding model on disk. _self_services must withhold
+        self_embed here too, not only when no shell is attached at all -
+        otherwise this guard is unreachable from the GUI's own repair click."""
+        app, home = repair_app
+        app.state.self_url = "http://127.0.0.1:0/v1"
+        app.state.active_model = lambda: "dummy-chat-model"
+        with TestClient(app) as c:
+            c.post("/api/rag/collections", json={"name": "kb"})
+            self._hybrid_collection(home)
+            r = c.post("/api/rag/collections/kb/repair", json={})
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["needs_confirm"] is True
+            assert "job_id" not in data
+            assert Collection("kb").stats()["has_vectors"] is True
+
     def test_no_confirm_needed_when_collection_has_no_vectors(self, repair_app):
         """Nothing at risk (BM25-only already): no confirm is requested. The
         CLI's own guard is gated on coll.stats().get('has_vectors') the same
