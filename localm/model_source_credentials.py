@@ -41,7 +41,9 @@ def _read_all() -> dict:
 
 def _write_all(records: dict) -> bool:
     from localm.config import atomic_write_private
-    return atomic_write_private(credentials_path(), json.dumps(records, indent=2))
+    path = credentials_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return atomic_write_private(path, json.dumps(records, indent=2))
 
 
 def get_credential(key: str) -> Optional[str]:

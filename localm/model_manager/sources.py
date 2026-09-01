@@ -57,21 +57,33 @@ class HFSource:
 
     name = "hf"
 
-    def search(self, query: str = "", *, limit: int = 20, **kwargs) -> dict:
+    def search(self, query: str = "", *, limit: int = 20,
+               token: Optional[str] = None, **kwargs) -> dict:
         from .. import discover
-        return {"items": discover.hf_search(query, limit=limit, **kwargs)}
+        if token is None:
+            from ..model_source_credentials import get_hf_token
+            token = get_hf_token()
+        return {"items": discover.hf_search(query, limit=limit, token=token, **kwargs)}
 
-    def list_files(self, ref: str, **kwargs) -> list[dict]:
+    def list_files(self, ref: str, *, token: Optional[str] = None,
+                   **kwargs) -> list[dict]:
         from .. import discover
-        return discover.hf_gguf_files(ref)
+        if token is None:
+            from ..model_source_credentials import get_hf_token
+            token = get_hf_token()
+        return discover.hf_gguf_files(ref, token=token)
 
     def resolve_download(self, ref: str, file: object, *,
-                          model_type: str = "llm") -> ResolvedDownload:
+                          model_type: str = "llm",
+                          token: Optional[str] = None) -> ResolvedDownload:
         """Descriptive only. Real HF pulls dispatch through pull_model(), whose
         resumable local-dir download and split-file assembly stay unchanged."""
         from huggingface_hub import hf_hub_url
 
         from .pull import _HF_ENDPOINT, _hf_file_sha256
+        if token is None:
+            from ..model_source_credentials import get_hf_token
+            token = get_hf_token()
         filename = file["file"] if isinstance(file, dict) else str(file)
         size = file.get("size_bytes") if isinstance(file, dict) else None
         return ResolvedDownload(
@@ -80,7 +92,7 @@ class HFSource:
             source_tag=f"hf:{ref}",
             model_type=model_type,
             size_bytes=size,
-            sha256=_hf_file_sha256(ref, filename),
+            sha256=_hf_file_sha256(ref, filename, token=token),
             comfy_subfolder=None,
         )
 
@@ -136,11 +148,16 @@ class CivitAIError(ModelSourceError):
     """A CivitAI-specific ModelSourceError - see the base class docstring."""
 
 
-def _civitai_get(path: str, params: Optional[dict] = None) -> dict:
+def _civitai_get(path: str, params: Optional[dict] = None, *,
+                  api_key: Optional[str] = None) -> dict:
     """Policy-checked GET against the CivitAI public API, returning parsed
     JSON. Same SSRF/redirect-revalidation treatment discover._get gives every
     HF metadata call - every hop is re-checked, so a redirect from civitai.com
-    cannot bounce this into a private address."""
+    cannot bounce this into a private address.
+
+    *api_key*: optional CivitAI API key, sent as an Authorization header
+    (CivitAI's own convention). Raises rate limits and lets gated resources
+    resolve; omitted, the request runs anonymously exactly as before."""
     import json as _json
     import urllib.parse
 
@@ -148,10 +165,12 @@ def _civitai_get(path: str, params: Optional[dict] = None) -> dict:
     full = CIVITAI_API + path
     if params:
         full += "?" + urllib.parse.urlencode(params, doseq=True)
+    extra_headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     try:
         _final, _ctype, body = netpolicy.safe_fetch_bytes(
             full, max_bytes=32 * 1024 * 1024, timeout=_CIVITAI_TIMEOUT,
-            allow_when_off=netpolicy.downloads_allowed_when_off())
+            allow_when_off=netpolicy.downloads_allowed_when_off(),
+            extra_headers=extra_headers)
         return _json.loads(body.decode("utf-8"))
     except netpolicy.NetworkPolicyError as e:
         raise CivitAIError(f"CivitAI request failed: {e}", off=e.off)
@@ -170,7 +189,8 @@ def civitai_search(query: str = "", *, limit: int = 20,
                     base_models: "Optional[list[str]]" = None,
                     tag: Optional[str] = None, period: Optional[str] = None,
                     sort: Optional[str] = None, nsfw: bool = False,
-                    cursor: Optional[str] = None) -> dict:
+                    cursor: Optional[str] = None,
+                    api_key: Optional[str] = None) -> dict:
     """Search CivitAI models. *nsfw* defaults to False regardless of CivitAI's
     own server default, mirroring rather than merely inheriting it. Every
     result also passes the hard minor-exclusion check independent of *nsfw*.
@@ -201,7 +221,7 @@ def civitai_search(query: str = "", *, limit: int = 20,
     if cursor:
         params["cursor"] = cursor
 
-    data = _civitai_get("/api/v1/models", params)
+    data = _civitai_get("/api/v1/models", params, api_key=api_key)
     items = [it for it in data.get("items", [])
              if isinstance(it, dict) and it.get("type") in CIVITAI_TYPE_MAP
              and _passes_content_policy(it)]
@@ -210,12 +230,13 @@ def civitai_search(query: str = "", *, limit: int = 20,
 
 
 def civitai_list_files(version_id: object, *,
-                        include_legacy_formats: bool = False) -> list[dict]:
+                        include_legacy_formats: bool = False,
+                        api_key: Optional[str] = None) -> list[dict]:
     """The downloadable files for one CivitAI model VERSION id, each still
     carrying its own hashes/scan-status/format fields for display. Defaults to
     CIVITAI_SAFE_FORMATS only; include_legacy_formats=True also returns
     PickleTensor/Other/unset-format files."""
-    data = _civitai_get(f"/api/v1/model-versions/{version_id}")
+    data = _civitai_get(f"/api/v1/model-versions/{version_id}", api_key=api_key)
     out = []
     for f in data.get("files", []):
         if not isinstance(f, dict):
@@ -240,20 +261,30 @@ def _pick_civitai_file(files: "list[dict]", file_id: Optional[object]) -> Option
 
 
 class CivitAISource:
-    """CivitAI, via its public v1 API. Anonymous only in this unit - a token
-    (when a credential store exists) only raises rate limits and unlocks
-    gated resources, never a precondition for search or download."""
+    """CivitAI, via its public v1 API. A token only raises rate limits and
+    unlocks gated resources - never a precondition for search or download.
+    Resolved from model_source_credentials.get_civitai_api_key() when a
+    caller does not pass api_key explicitly."""
 
     name = "civitai"
 
-    def search(self, query: str = "", *, limit: int = 20, **kwargs) -> dict:
-        return civitai_search(query, limit=limit, **kwargs)
+    def search(self, query: str = "", *, limit: int = 20,
+               api_key: Optional[str] = None, **kwargs) -> dict:
+        if api_key is None:
+            from ..model_source_credentials import get_civitai_api_key
+            api_key = get_civitai_api_key()
+        return civitai_search(query, limit=limit, api_key=api_key, **kwargs)
 
-    def list_files(self, ref: object, **kwargs) -> list[dict]:
-        return civitai_list_files(ref, **kwargs)
+    def list_files(self, ref: object, *, api_key: Optional[str] = None,
+                   **kwargs) -> list[dict]:
+        if api_key is None:
+            from ..model_source_credentials import get_civitai_api_key
+            api_key = get_civitai_api_key()
+        return civitai_list_files(ref, api_key=api_key, **kwargs)
 
     def resolve_download(self, ref: object, file: object, *,
-                          include_legacy_formats: bool = False) -> ResolvedDownload:
+                          include_legacy_formats: bool = False,
+                          api_key: Optional[str] = None) -> ResolvedDownload:
         """*ref* is a CivitAI model-VERSION id. *file* is a file id, or a file
         dict already carrying one (from list_files()). Re-fetches the version
         (and the owning model, for the authoritative minor flag) rather than
@@ -265,14 +296,17 @@ class CivitAISource:
         Never resolves the actual download redirect (that target is a
         time-boxed pre-signed URL - see pull.py's _ssrf_resolve_final_url,
         called once, immediately before the transfer)."""
+        if api_key is None:
+            from ..model_source_credentials import get_civitai_api_key
+            api_key = get_civitai_api_key()
         version_id = ref
-        version = _civitai_get(f"/api/v1/model-versions/{version_id}")
+        version = _civitai_get(f"/api/v1/model-versions/{version_id}", api_key=api_key)
         model_id = version.get("modelId")
         if model_id is None:
             raise CivitAIError(
                 f"CivitAI version {version_id} has no owning model id - "
                 "cannot confirm its content-policy flags, refusing to resolve.")
-        model = _civitai_get(f"/api/v1/models/{model_id}")
+        model = _civitai_get(f"/api/v1/models/{model_id}", api_key=api_key)
         if not _passes_content_policy(model):
             raise CivitAIError(
                 f"CivitAI model {model_id} is excluded from download "

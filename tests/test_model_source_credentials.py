@@ -152,6 +152,22 @@ def test_oversized_value_rejected(isolated_home):
         set_credentials({"hf_token": "x" * 5000})
 
 
+def test_set_credentials_creates_the_home_dir_if_missing(tmp_path, monkeypatch):
+    """The home directory does not exist yet here (unlike isolated_home's
+    fixture, which pre-creates it) - set_credentials must create it itself,
+    matching sessions.py's own atomic-write convention, rather than assuming
+    some earlier startup step already ran."""
+    import localm.config as cfg
+    home = tmp_path / ".localm"
+    assert not home.exists()
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    from localm.model_source_credentials import get_hf_token, set_credentials
+    set_credentials({"hf_token": "hf_first_write"})
+    assert get_hf_token() == "hf_first_write"
+
+
 def test_batched_apply_is_one_file_write(isolated_home):
     """Both keys land from a single call without clobbering each other - the
     read-modify-write must merge, not overwrite key-by-key."""

@@ -15,6 +15,7 @@ from localm.netpolicy import (
     html_to_text,
     network_mode,
     safe_fetch,
+    safe_fetch_bytes,
     web_search,
 )
 
@@ -315,6 +316,74 @@ class TestSafeFetch:
             headers={"Content-Type": "text/plain"}, body=b"x" * 500_000))
         _, _, text = safe_fetch("https://example.com/big", max_bytes=1000)
         assert len(text) <= 65536   # stops after the first chunk crosses the cap
+
+
+# ------------------------------------------------------------------ #
+#  safe_fetch_bytes: extra_headers (ADR-0015's optional bearer tokens) #
+# ------------------------------------------------------------------ #
+
+class TestSafeFetchBytesExtraHeaders:
+    """extra_headers is how HF/CivitAI credentials (model_source_credentials.py)
+    reach the actual outbound request. Every existing caller omits it, so the
+    default-None path must still send exactly the two fixed headers it always
+    has - these are the regression check for that."""
+
+    def _public_dns(self, monkeypatch):
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+
+    def test_no_extra_headers_by_default(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        seen = {}
+
+        def fake_get(url, **kw):
+            seen.update(kw.get("headers") or {})
+            return _FakeResponse(body=b"ok")
+
+        _patch_session(monkeypatch, get=fake_get)
+        safe_fetch_bytes("https://example.com/a")
+        assert set(seen) == {"User-Agent", "Host"}
+
+    def test_extra_headers_are_sent(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        seen = {}
+
+        def fake_get(url, **kw):
+            seen.update(kw.get("headers") or {})
+            return _FakeResponse(body=b"ok")
+
+        _patch_session(monkeypatch, get=fake_get)
+        safe_fetch_bytes("https://example.com/a",
+                         extra_headers={"Authorization": "Bearer secret-token"})
+        assert seen["Authorization"] == "Bearer secret-token"
+        # The fixed pair is still present alongside it.
+        assert "User-Agent" in seen and "Host" in seen
+
+    def test_extra_headers_cannot_override_host_or_user_agent(self, monkeypatch):
+        """A caller-supplied header dict must never be able to spoof the
+        pinned Host or the User-Agent this module presents to every server -
+        both are security-relevant (Host backs the redirect-revalidation
+        story; a caller-chosen value here would defeat the whole point of
+        pinning it)."""
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        seen = {}
+
+        def fake_get(url, **kw):
+            seen.update(kw.get("headers") or {})
+            return _FakeResponse(body=b"ok")
+
+        _patch_session(monkeypatch, get=fake_get)
+        safe_fetch_bytes("https://example.com/a", extra_headers={
+            "Host": "evil.example", "User-Agent": "attacker-agent",
+            "Authorization": "Bearer secret-token",
+        })
+        assert seen["Host"] == "example.com"
+        assert seen["User-Agent"] != "attacker-agent"
+        assert seen["Authorization"] == "Bearer secret-token"
 
 
 # ------------------------------------------------------------------ #

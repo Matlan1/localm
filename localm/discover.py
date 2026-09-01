@@ -121,7 +121,15 @@ def _ensure_online() -> None:
             off=True)
 
 
-def _get(url: str, params: Optional[dict] = None) -> object:
+def _hf_auth_headers(token: Optional[str]) -> Optional[dict]:
+    """{"Authorization": "Bearer <token>"} when *token* is set, else None -
+    HF's own REST API convention. Optional throughout: every call site below
+    works anonymously when no token is configured."""
+    return {"Authorization": f"Bearer {token}"} if token else None
+
+
+def _get(url: str, params: Optional[dict] = None, *,
+         token: Optional[str] = None) -> object:
     """Policy-checked GET returning parsed JSON.
 
     Routes through ``netpolicy.safe_fetch_bytes`` so the request is pinned to the
@@ -139,7 +147,8 @@ def _get(url: str, params: Optional[dict] = None) -> object:
     try:
         _final, _ctype, body = netpolicy.safe_fetch_bytes(
             full, max_bytes=32 * 1024 * 1024, timeout=int(_TIMEOUT),
-            allow_when_off=netpolicy.downloads_allowed_when_off())
+            allow_when_off=netpolicy.downloads_allowed_when_off(),
+            extra_headers=_hf_auth_headers(token))
         return _json.loads(body.decode("utf-8"))
     except netpolicy.NetworkPolicyError as e:
         raise DiscoverError(f"HuggingFace request failed: {e}", off=e.off)
@@ -409,7 +418,7 @@ def _type_fmt_filter(model_type: Optional[str], fmt: str) -> dict:
 
 
 def _run_query(query: str, limit: int, fmt: str, model_type: Optional[str],
-                classify: bool) -> list[dict]:
+                classify: bool, token: Optional[str] = None) -> list[dict]:
     """One HF /api/models query for a single (format, type), rows tagged *fmt*.
 
     ``classify`` requests the pipeline_tag/library_name/tags expand fields and
@@ -444,7 +453,7 @@ def _run_query(query: str, limit: int, fmt: str, model_type: Optional[str],
             expand += ["gguf"]
     if expand:
         params["expand[]"] = expand
-    data = _get(f"{HF_API}/api/models", params)
+    data = _get(f"{HF_API}/api/models", params, token=token)
     return _rows_from_items(data, limit, fmt=fmt, classify=classify)
 
 
@@ -460,7 +469,8 @@ def _spec_key(model_type: Optional[str], fmt: str):
 
 def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf",),
               model_type: Optional[str] = None,
-              model_types: Optional[Sequence[str]] = None) -> list[dict]:
+              model_types: Optional[Sequence[str]] = None,
+              token: Optional[str] = None) -> list[dict]:
     """Search HF for model repos. Empty query = most downloaded.
 
     Two independent axes, both from explicit GUI controls:
@@ -481,7 +491,11 @@ def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf"
     ``detected_type`` is present only when a type was requested (display only,
     never a filter on results). With NEITHER *model_types* nor *model_type* (the
     CLI ``localm search`` / MCP ``search_models`` default) the query shape and
-    response are the plain, unscoped ones."""
+    response are the plain, unscoped ones.
+
+    *token*: optional HF API token, sent as an Authorization header. Raises
+    rate limits and lets gated repos appear in results; omitted, every query
+    runs anonymously exactly as before."""
     _ensure_online()
     limit = max(1, min(int(limit), 50))
 
@@ -533,7 +547,7 @@ def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf"
     per_query: list[list[dict]] = []
     for mt, fmt in query_specs:
         lst: list[dict] = []
-        for item in _run_query(query, limit, fmt, mt, classify):
+        for item in _run_query(query, limit, fmt, mt, classify, token=token):
             existing = seen.get(item["id"])
             if existing:
                 for f in item["formats"]:
@@ -584,18 +598,21 @@ def hf_backend_available() -> bool:
         return False
 
 
-def hf_gguf_files(repo: str) -> list[dict]:
+def hf_gguf_files(repo: str, token: Optional[str] = None) -> list[dict]:
     """
     List the GGUF files of *repo* with size and quant label. Split files
     (``-00001-of-0000N``) are grouped into one logical entry whose ``file``
     is the first part (what ``localm pull repo:file`` expects) and whose
     size is the sum of all parts. Sorted smallest-first.
+
+    *token*: optional HF API token (see hf_search) - required for a gated
+    repo's tree to be visible at all.
     """
     _ensure_online()
     repo = repo.strip().strip("/")
     if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
         raise DiscoverError(f"Not a HuggingFace repo id: {repo}")
-    tree = _get(f"{HF_API}/api/models/{repo}/tree/main")
+    tree = _get(f"{HF_API}/api/models/{repo}/tree/main", token=token)
     if not isinstance(tree, list):
         raise DiscoverError(f"Unexpected tree response for {repo}")
 

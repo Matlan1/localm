@@ -13,6 +13,12 @@ from localm.model_manager import sources
 @pytest.fixture(autouse=True)
 def _online(monkeypatch):
     monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+    # HFSource/CivitAISource resolve a token from model_source_credentials
+    # when the caller does not pass one explicitly, which falls back to these
+    # env vars - strip them so a real HF_TOKEN on the machine running the
+    # tests can never leak into an assertion here.
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("CIVITAI_API_KEY", raising=False)
 
 
 def _mock_civitai(monkeypatch, by_path: dict, seen: "list | None" = None):
@@ -248,13 +254,15 @@ class TestHFSource:
             "localm.discover.hf_search",
             lambda query, limit=20, **kw: calls.append((query, limit, kw)) or [{"id": "x/y"}])
         result = sources.HFSource().search("qwen", limit=5)
-        assert calls == [("qwen", 5, {})]
+        # No HF_TOKEN configured (see the _online fixture): token resolves to
+        # None, so this remains the plain anonymous call it always was.
+        assert calls == [("qwen", 5, {"token": None})]
         assert result == {"items": [{"id": "x/y"}]}
 
     def test_list_files_delegates_to_discover_hf_gguf_files(self, monkeypatch):
         monkeypatch.setattr(
             "localm.discover.hf_gguf_files",
-            lambda repo: [{"file": "a.gguf"}] if repo == "org/repo" else [])
+            lambda repo, token=None: [{"file": "a.gguf"}] if repo == "org/repo" else [])
         assert sources.HFSource().list_files("org/repo") == [{"file": "a.gguf"}]
 
     def test_resolve_download_is_descriptive_only(self, monkeypatch):
@@ -262,7 +270,8 @@ class TestHFSource:
             "huggingface_hub.hf_hub_url",
             lambda repo_id, filename, endpoint=None: f"{endpoint}/{repo_id}/resolve/main/{filename}")
         monkeypatch.setattr(
-            "localm.model_manager.pull._hf_file_sha256", lambda repo_id, filename: "abc123")
+            "localm.model_manager.pull._hf_file_sha256",
+            lambda repo_id, filename, token=None: "abc123")
         resolved = sources.HFSource().resolve_download(
             "org/repo", {"file": "model.gguf", "size_bytes": 42}, model_type="llm")
         assert resolved.source_tag == "hf:org/repo"
@@ -270,6 +279,128 @@ class TestHFSource:
         assert resolved.filename == "model.gguf"
         assert resolved.size_bytes == 42
         assert resolved.sha256 == "abc123"
+
+    def test_search_uses_the_configured_hf_token(self, monkeypatch):
+        """The credential store (ADR-0015) is the default source of the token
+        when a caller does not pass one explicitly."""
+        from localm.model_source_credentials import set_credentials
+        set_credentials({"hf_token": "hf_configured_token"})
+        calls = []
+        monkeypatch.setattr(
+            "localm.discover.hf_search",
+            lambda query, limit=20, **kw: calls.append(kw) or [])
+        sources.HFSource().search("qwen")
+        assert calls == [{"token": "hf_configured_token"}]
+
+    def test_search_explicit_token_overrides_the_stored_one(self, monkeypatch):
+        from localm.model_source_credentials import set_credentials
+        set_credentials({"hf_token": "hf_stored"})
+        calls = []
+        monkeypatch.setattr(
+            "localm.discover.hf_search",
+            lambda query, limit=20, **kw: calls.append(kw) or [])
+        sources.HFSource().search("qwen", token="hf_explicit")
+        assert calls == [{"token": "hf_explicit"}]
+
+    def test_list_files_and_resolve_download_use_the_configured_token(self, monkeypatch):
+        from localm.model_source_credentials import set_credentials
+        set_credentials({"hf_token": "hf_configured_token"})
+        seen = {}
+        monkeypatch.setattr(
+            "localm.discover.hf_gguf_files",
+            lambda repo, token=None: seen.setdefault("list_files_token", token) or [])
+        sources.HFSource().list_files("org/repo")
+        assert seen["list_files_token"] == "hf_configured_token"
+
+        monkeypatch.setattr(
+            "huggingface_hub.hf_hub_url",
+            lambda repo_id, filename, endpoint=None: "https://example/resolved")
+        monkeypatch.setattr(
+            "localm.model_manager.pull._hf_file_sha256",
+            lambda repo_id, filename, token=None: seen.setdefault("resolve_token", token))
+        sources.HFSource().resolve_download("org/repo", {"file": "m.gguf"})
+        assert seen["resolve_token"] == "hf_configured_token"
+
+
+# ------------------------------------------------------------------ #
+#  A configured token/key actually reaches the real HTTP layer         #
+# ------------------------------------------------------------------ #
+
+class TestAuthHeaderReachesTheRealFetch:
+    """Everything above mocks discover.py/pull.py's own functions. These prove
+    the header survives all the way to netpolicy.safe_fetch_bytes - the actual
+    call that would leave this machine - for both providers, present when
+    configured and absent when not."""
+
+    def test_civitai_search_sends_no_auth_header_when_unconfigured(self, monkeypatch):
+        captured = {}
+
+        def fake(url, **kw):
+            captured.update(kw)
+            return url, "application/json", b'{"items": [], "metadata": {}}'
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        sources.CivitAISource().search("x")
+        assert captured.get("extra_headers") is None
+
+    def test_civitai_search_sends_the_configured_key_as_a_bearer_header(self, monkeypatch):
+        from localm.model_source_credentials import set_credentials
+        set_credentials({"civitai_api_key": "civ_configured_key"})
+        captured = {}
+
+        def fake(url, **kw):
+            captured.update(kw)
+            return url, "application/json", b'{"items": [], "metadata": {}}'
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        sources.CivitAISource().search("x")
+        assert captured.get("extra_headers") == {"Authorization": "Bearer civ_configured_key"}
+
+    def test_civitai_resolve_download_sends_the_key_on_both_lookups(self, monkeypatch):
+        from localm.model_source_credentials import set_credentials
+        set_credentials({"civitai_api_key": "civ_configured_key"})
+        calls = []
+
+        def fake(url, **kw):
+            calls.append(kw.get("extra_headers"))
+            parsed = urllib.parse.urlparse(url)
+            payload = ({"id": 135867, "modelId": 122359,
+                        "model": {"type": "LORA"}, "files": [{
+                            "id": 99264, "primary": True,
+                            "metadata": {"format": "SafeTensor"},
+                            "downloadUrl": "https://civitai.com/dl/99264",
+                        }]}
+                       if "model-versions" in parsed.path else _model_item())
+            return url, "application/json", _json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        sources.CivitAISource().resolve_download(135867, None)
+        assert len(calls) == 2, "both the version and the model lookup must run"
+        assert all(c == {"Authorization": "Bearer civ_configured_key"} for c in calls)
+
+    def test_hf_search_sends_no_auth_header_when_unconfigured(self, monkeypatch):
+        captured = {}
+
+        def fake(url, **kw):
+            captured.update(kw)
+            return url, "application/json", b"[]"
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        sources.HFSource().search("qwen")
+        assert captured.get("extra_headers") is None
+
+    def test_hf_search_sends_the_configured_token_as_a_bearer_header(self, monkeypatch):
+        from localm.model_source_credentials import set_credentials
+        set_credentials({"hf_token": "hf_configured_token"})
+        captured = {}
+
+        def fake(url, **kw):
+            captured.update(kw)
+            return url, "application/json", b"[]"
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        sources.HFSource().search("qwen")
+        assert captured.get("extra_headers") == {"Authorization": "Bearer hf_configured_token"}
 
 
 def test_get_source_returns_the_registered_sources():

@@ -458,6 +458,7 @@ def safe_fetch_bytes(
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
     allow_when_off: bool = False,
+    extra_headers: Optional[dict] = None,
 ) -> tuple[str, str, bytes]:
     """
     Policy-checked GET returning RAW bytes. Returns (final_url, content_type,
@@ -471,6 +472,11 @@ def safe_fetch_bytes(
 
     *allow_when_off*: forwarded to every hop's check_url - see that function's
     docstring for who may pass True.
+
+    *extra_headers*: sent on every hop alongside the fixed User-Agent/Host
+    pair below, which always win on a key collision - a caller-supplied dict
+    can add a header (e.g. an optional Authorization bearer token) but can
+    never override the pinned Host or User-Agent.
 
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
@@ -486,7 +492,8 @@ def safe_fetch_bytes(
                 timeout=timeout,
                 stream=True,
                 allow_redirects=False,
-                headers={"User-Agent": _USER_AGENT, "Host": _host_header(parsed)},
+                headers={**(extra_headers or {}),
+                         "User-Agent": _USER_AGENT, "Host": _host_header(parsed)},
             )
             try:
                 if resp.is_redirect or resp.is_permanent_redirect:

@@ -513,14 +513,18 @@ def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
 
 
 
-def _hf_file_sha256(repo_id: str, filename: str) -> Optional[str]:
+def _hf_file_sha256(repo_id: str, filename: str,
+                     token: Optional[str] = None) -> Optional[str]:
     """
     Ask the HuggingFace API for a file's LFS sha256 without downloading it.
     Returns None when offline, on any API error, or for non-LFS files.
+
+    *token*: optional HF API token - needed for a gated repo's metadata.
     """
     try:
         from huggingface_hub import HfApi
-        info = HfApi(endpoint=_HF_ENDPOINT).get_paths_info(repo_id, [filename])
+        info = HfApi(endpoint=_HF_ENDPOINT).get_paths_info(
+            repo_id, [filename], token=token)
         if info:
             lfs = getattr(info[0], "lfs", None)
             digest = getattr(lfs, "sha256", None) if lfs else None
