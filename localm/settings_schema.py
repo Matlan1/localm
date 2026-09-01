@@ -1801,6 +1801,15 @@ TTS_SPEED_MIN, TTS_SPEED_MAX = 0.5, 2.0
 # and would fail opaquely inside transformers.js at load time.
 _HF_REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+# Every entry must ship every voice id in voices.json, and be a repo the
+# vendored runtime can actually phonemize (English only).
+TTS_MODEL_OPTIONS = [
+    ("onnx-community/Kokoro-82M-v1.0-ONNX",
+     "Kokoro 82M v1.0 (default)"),
+    ("onnx-community/Kokoro-82M-v1.0-ONNX-timestamped",
+     "Kokoro 82M v1.0, with word timestamps"),
+]
+
 
 @dataclass
 class TtsField:
@@ -1821,13 +1830,16 @@ class TtsField:
 TTS_FIELDS: list = [
     TtsField("voice", Widget.SELECT, "Default voice",
              "The voice new browsers read replies in. Each browser can pick its "
-             "own in chat, which overrides this for that browser."),
+             "own in chat, which overrides this for that browser. The A-F "
+             "grade rates its training data; higher is better."),
     TtsField("speed", Widget.NUMBER, "Speaking speed",
              "Playback rate for the generated voice. 1.0 is normal.",
              min=TTS_SPEED_MIN, max=TTS_SPEED_MAX, step=0.05),
-    TtsField("model", Widget.TEXT, "Voice model",
+    TtsField("model", Widget.SELECT, "Voice model",
              "Hugging Face repo id of the Kokoro model the browser downloads "
-             "once and then caches. Blank uses the shipped default."),
+             "once and then caches. Blank uses the shipped default. Pick "
+             "Custom to enter any other Kokoro-compatible repo id.",
+             options=[repo for repo, _ in TTS_MODEL_OPTIONS]),
     TtsField("device", Widget.SELECT, "Compute device",
              "auto uses the GPU (WebGPU) when the browser has one and falls "
              "back to WASM. Force wasm if the GPU path misbehaves.",
@@ -1919,6 +1931,9 @@ def tts_schema_json(block: Optional[dict], *, is_owner: bool = True) -> list:
             if f.key == "voice":
                 from localm.plugins.builtin.tts.settings import voices
                 d["option_labels"] = [v["label"] for v in voices()]
+            elif f.key == "model":
+                by_repo = dict(TTS_MODEL_OPTIONS)
+                d["option_labels"] = [by_repo[o] for o in options]
         for attr in ("min", "max", "step"):
             if getattr(f, attr) is not None:
                 d[attr] = getattr(f, attr)
@@ -1994,6 +2009,12 @@ def _coerce_tts_value(f: "TtsField", val):
     options = _tts_options(f)
     if f.widget == Widget.SELECT:
         if options and s not in options:
+            if f.key == "model":
+                if _HF_REPO_ID.match(s):
+                    return s
+                raise ValueError(
+                    f"model: must be a Hugging Face repo id like "
+                    f"'onnx-community/Kokoro-82M-v1.0-ONNX', got {val!r}")
             shown = ", ".join(options[:12]) + ("..." if len(options) > 12 else "")
             raise ValueError(f"{f.key}: {val!r} is not one of: {shown}")
         if not options:
@@ -2002,12 +2023,6 @@ def _coerce_tts_value(f: "TtsField", val):
             # usable instead of silently accepting anything.
             if not re.fullmatch(r"[a-z]{2}_[a-z0-9]+", s):
                 raise ValueError(f"{f.key}: {val!r} is not a Kokoro voice id")
-        return s
-    if f.key == "model":
-        if not _HF_REPO_ID.match(s):
-            raise ValueError(
-                f"model: must be a Hugging Face repo id like "
-                f"'onnx-community/Kokoro-82M-v1.0-ONNX', got {val!r}")
         return s
     if f.key in ("library", "wasm_paths"):
         return _tts_relative_asset(f.key, s)
