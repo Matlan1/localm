@@ -43,6 +43,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   indexed for call sites of a symbol, so it (and a read-only reviewer
   sub-agent) can check who else calls something before touching its
   signature, without a manual grep round-trip.
+- **localm's MCP server now ships as a portable Agent Plugin bundle** (a
+  `plugin.json` manifest, `.mcp.json`, and a `skills/localm/` skill at the
+  repo root), loadable in Claude Code with `claude --plugin-dir <path to
+  this repo>` instead of pasting the MCP server's JSON config by hand. The
+  skill gives the assistant operational guidance: how to judge model/quant
+  fit before downloading, when to delegate a whole task instead of a single
+  chat call, and what image generation needs.
 
 ### Fixed
 - **The list of other running LocaLM servers now really does cover the whole
@@ -148,6 +155,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a task that rewrites the test it is judged against go unflagged until you
   quit the REPL.** The warning about edited test or CI-config files now shows
   right after each `/goal` task finishes, not only when the session ends.
+- **The coder's "working…" pill could sit motionless for minutes during a
+  long generation, with nothing to show it was still going.** It previously
+  only changed once new content actually appeared, so a long quiet stretch
+  before the first token (or between tool calls) looked identical to the
+  page being stuck. It now pulses and counts the seconds since the last
+  activity for as long as a task is running, including through a silent
+  gap.
 
 ### Security
 - **The coder now refuses a small set of catastrophic shell commands outright,

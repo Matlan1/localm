@@ -112,6 +112,23 @@ Click the tool icon in the Claude Desktop message input and select `chat`. Enter
 
 The tool appears in the tool call panel with the model's response.
 
+## Quick start: Claude Code (Agent Plugin)
+
+This repo carries a `plugin.json`, `.mcp.json`, and a `localm` skill at its
+root, so Claude Code can load the MCP server as a plugin instead of a manual
+config paste:
+
+```bash
+localm plugin install mcp
+claude --plugin-dir /path/to/this/repo
+```
+
+`--plugin-dir` loads it for that one session, including the `localm` skill
+(operational guidance on picking a model/quant, when to delegate a whole
+task versus a single chat call, and what image generation needs). A
+persistent install via `claude plugin install` needs the repo registered
+with a marketplace, which is not set up yet.
+
 ## Coder + external MCP servers
 
 The coder agent (localm coder) can load external MCP servers alongside localm's tools, adding specialized tools (file search, database query, API calls).

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "localm": {
+      "type": "stdio",
+      "command": "localm",
+      "args": ["mcp"]
+    }
+  }
+}
