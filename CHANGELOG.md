@@ -45,6 +45,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   app stop responding - most visibly, the Plugins page's list would stop
   loading. Reopening a session you already have open now does nothing more
   than bring it to the front, the same as every other session in the list.
+- **Opening a DIFFERENT past coder session for a folder that already had one
+  open switched to the open one and said it had worked.** Every past session
+  in a folder was treated as the same session, so picking the second one in
+  the list quietly left you in the first, reporting "already open". Picking a
+  different saved conversation now offers to end the open one and continue the
+  one you actually picked, since a folder runs one session at a time. Reopening
+  the session that is already open still just brings it to the front.
+- **The session that is currently open is no longer also listed under "past
+  sessions".** A running session is saved as you go, so it appeared in both
+  lists at once and could be "continued" while you were already sitting in it.
+- **Reopening a past coder session no longer drops turns that only ran tools.**
+  A step that read or wrote a file and said nothing else vanished from the
+  restored conversation, so reopening it read as though that work had never
+  happened. Those turns now appear, naming the tools that ran.
 - **Restarting the server from Settings could leave the page stuck on a
   reconnecting screen instead of coming back.** The page could reload before
   the old server had actually finished shutting down, landing back on the

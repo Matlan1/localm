@@ -531,8 +531,12 @@ def test_resume_recap_strips_a_bare_json_tool_call(tmp_path, monkeypatch):
     assert b.resume_from_checkpoint() is True
 
     texts = [e["text"] for e in b.history if e.get("type") == "history"]
-    # The pure-call third message (no prose) contributes no row at all.
-    assert texts == ["write it out", "Let me check that file."]
+    # The pure-call third message keeps a row naming the tool, and the raw JSON
+    # is still gone from it - which is what this test is actually about.
+    assert texts == ["write it out", "Let me check that file.",
+                     "(ran write_file, no other output)"]
+    assert not any("{" in t or "args" in t or "out.py" in t for t in texts), \
+        "raw tool-call JSON leaked into the recap"
 
 
 def test_find_by_cwd_is_scoped_by_principal(tmp_path, monkeypatch):
@@ -559,3 +563,172 @@ def test_find_by_cwd_is_scoped_by_principal(tmp_path, monkeypatch):
         "the owner (principal=None) must not be silently joined to a "
         "scoped key's session either")
     assert mgr.find_by_cwd(tmp_path / "elsewhere", principal="alice") is None
+
+
+def _saved_checkpoint(client, owner, proj, text):
+    """Create a plain session in *proj*, give it one message, persist it, then
+    close it - leaving exactly one more saved checkpoint on disk. Returns its
+    checkpoint id, which is what a /api/coder/dormant row carries."""
+    r = client.post("/api/coder/sessions", headers=owner,
+                    json={"cwd": str(proj), "mode": "log"})
+    assert r.status_code == 200
+    sid = r.json()["id"]
+    cid = r.json()["checkpoint_id"]
+    _seed_checkpoint(client.app, sid, [{"role": "user", "content": text}])
+    client.delete(f"/api/coder/sessions/{sid}", headers=owner)
+    return cid
+
+
+def test_info_reports_the_loaded_checkpoint_id(tmp_path, monkeypatch):
+    """A session must say WHICH saved conversation it holds, not only its own
+    live id. Without it neither the join guard nor the session rail can tell
+    "the checkpoint you clicked is already open" from "a different one is"."""
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        first = _saved_checkpoint(client, owner, proj, "the older one")
+
+        fresh = client.post("/api/coder/sessions", headers=owner,
+                            json={"cwd": str(proj), "mode": "log"})
+        fresh_cid = fresh.json()["checkpoint_id"]
+        assert fresh_cid, "a fresh session still has a checkpoint identity"
+        assert fresh_cid != first, "a fresh session is not the saved one"
+        client.delete(f"/api/coder/sessions/{fresh.json()['id']}", headers=owner)
+
+        back = client.post("/api/coder/sessions", headers=owner,
+                           json={"cwd": str(proj), "mode": "log",
+                                 "resume": True, "resume_checkpoint_id": first})
+        assert back.json()["resumed"] is True
+        assert back.json()["checkpoint_id"] == first, (
+            "after resuming a particular checkpoint the session must report "
+            "THAT id, not the one it was constructed with")
+
+
+def test_resuming_a_different_checkpoint_does_not_join_the_wrong_one(
+        tmp_path, monkeypatch):
+    """Clicking a DIFFERENT past session for a folder that already has one open
+    must not silently activate the open one and report success.
+
+    The cwd-only join guard answered "this folder has a live session" when the
+    question was "is the conversation I clicked the one that is live" - so a
+    user asking for conversation B was handed A while being told it worked."""
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        first = _saved_checkpoint(client, owner, proj, "conversation A")
+        second = _saved_checkpoint(client, owner, proj, "conversation B")
+        assert first != second
+
+        a = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log", "resume": True,
+                              "resume_checkpoint_id": first})
+        assert a.status_code == 200
+        assert a.json()["checkpoint_id"] == first
+
+        b = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log", "resume": True,
+                              "resume_checkpoint_id": second})
+        assert b.status_code != 200, (
+            "asking for a different saved conversation must not report success")
+        assert b.status_code == 409
+        live = app.state.coder_sessions.list(is_owner=True)
+        assert len(live) == 1, "refusing must not open a second Agent either"
+        assert live[0]["checkpoint_id"] == first, "the live session is untouched"
+
+
+def test_resuming_the_same_checkpoint_still_joins_the_open_session(
+        tmp_path, monkeypatch):
+    """THE LEAK GUARD, with an explicit id (the null-id form is covered by
+    test_resuming_an_open_session_joins_it_instead_of_starting_a_second).
+
+    Re-clicking the row that is ALREADY open must still join, never open a
+    second CoderSession: each one holds its own events stream that nothing
+    tears down, and two agents may then edit one directory at once. Only the
+    DIFFERENT-checkpoint case stops joining."""
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        saved = _saved_checkpoint(client, owner, proj, "conversation A")
+
+        a = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log", "resume": True,
+                              "resume_checkpoint_id": saved})
+        assert a.status_code == 200
+        first_id = a.json()["id"]
+
+        for attempt in range(2):
+            b = client.post("/api/coder/sessions", headers=owner,
+                            json={"cwd": str(proj), "mode": "log",
+                                  "resume": True,
+                                  "resume_checkpoint_id": saved})
+            assert b.status_code == 200, f"re-click {attempt} was refused"
+            assert b.json()["id"] == first_id
+            assert b.json()["resumed"] is False
+            assert len(app.state.coder_sessions.list(is_owner=True)) == 1, (
+                "a second live CoderSession was created for the same "
+                "checkpoint - this is the connection leak returning")
+
+        c = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log", "resume": True})
+        assert c.status_code == 200, "the continue-last form must still join"
+        assert c.json()["id"] == first_id
+        assert len(app.state.coder_sessions.list(is_owner=True)) == 1
+
+
+def test_recap_keeps_a_row_for_a_tool_only_turn(tmp_path, monkeypatch):
+    """A turn whose entire content was a tool call must still appear in the
+    resumed feed. The model's own restored context keeps it either way; the
+    human-visible recap dropped it, so reopening a checkpoint read as though
+    the work had never happened."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    proj = tmp_path / "proj"; proj.mkdir()
+    from localm.plugins.coder.sessions import CoderSession
+
+    a = CoderSession(proj, _StubBackend(), auto_approve=True, auto_verify=False,
+                     mode="log")
+    a.agent._messages = [
+        {"role": "user", "content": "fix the typo in a.py"},
+        {"role": "assistant", "content":
+            '<tool_call>{"name": "read_file", "args": {"path": "a.py"}}</tool_call>'},
+        {"role": "user", "content": "<tool_result>ok</tool_result>"},
+        {"role": "assistant", "content": "Done, fixed it."},
+    ]
+    a.agent._turns = 4
+    a.persist_checkpoint()
+
+    b = CoderSession(proj, _StubBackend(), auto_approve=True, auto_verify=False,
+                     mode="log")
+    assert b.resume_from_checkpoint() is True
+    texts = [e["text"] for e in b.history if e.get("type") == "history"]
+    assert texts == ["fix the typo in a.py",
+                     "(ran read_file, no other output)",
+                     "Done, fixed it."]
+
+
+def test_recap_rows_names_tools_and_still_drops_empty_turns():
+    """recap_rows is the one builder behind both the resumed feed and the
+    tool-only placeholder, so its edge cases are pinned here rather than only
+    through a session."""
+    from localm.plugins.coder.sessions import recap_rows
+    names = {"read_file", "write_file"}
+
+    assert recap_rows([{"role": "assistant", "content": "   "}], names) == []
+    assert recap_rows([{"role": "user", "content": "<tool_result>x</tool_result>"}],
+                      names) == []
+    rows = recap_rows([{"role": "assistant", "content": (
+        '<tool_call>{"name": "read_file", "args": {}}</tool_call>'
+        '<tool_call>{"name": "read_file", "args": {}}</tool_call>'
+        '<tool_call>{"name": "write_file", "args": {}}</tool_call>')}], names)
+    assert [r["text"] for r in rows] == [
+        "(ran read_file, write_file, no other output)"]
+    rows = recap_rows([{"role": "assistant", "content": (
+        'Reading it.\n<tool_call>{"name": "read_file", "args": {}}</tool_call>')}],
+        names)
+    assert [r["text"] for r in rows] == ["Reading it."]
