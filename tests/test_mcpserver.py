@@ -1385,13 +1385,15 @@ class TestModelDiscoveryTools:
 
     def test_pull_model_rejects_repo_not_known_or_registered(self):
         server, _ = _server()
-        with patch("localm.config.load_registry", return_value={}):
+        with patch("localm.config.load_registry", return_value={}), \
+             patch("localm.model_manager.pull.pull_model", return_value=True) as mock_pull:
             r = self._call(server, "pull_model",
                            {"repo": "some-unvetted-org/some-unvetted-model-gguf",
                             "name": "m"})
         assert r["result"]["isError"] is True
         assert "Refusing to pull" in r["result"]["content"][0]["text"]
         assert "some-unvetted-org/some-unvetted-model-gguf" in r["result"]["content"][0]["text"]
+        mock_pull.assert_not_called()
 
     def test_pull_model_accepts_repo_matching_registered_model_source(self):
         """A repo outside KNOWN_PULL_REPOS is still accepted once the operator
