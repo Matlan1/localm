@@ -1491,7 +1491,8 @@ export function reconcileActiveView() {
 
 /* ---- assistant memory ---- */
 
-export const memory = { text: "", writable: false, corrections: [] };
+export const memory = { text: "", writable: false, corrections: [],
+                         canDownloadEmbedder: false, embedderModel: null };
 
 export async function refreshMemory() {
   try {
@@ -1503,6 +1504,10 @@ export async function refreshMemory() {
     // Pending supersede proposals: the system spotted a later statement that
     // contradicts a saved fact but never auto-overwrites it (memory-audit [9]).
     memory.corrections = Array.isArray(data.corrections) ? data.corrections : [];
+    // Semantic recall degraded to lexical-only for lack of an installed
+    // embedding model, and this caller could fetch it in one click.
+    memory.canDownloadEmbedder = !!data.can_download_embedder;
+    memory.embedderModel = data.embedder_model || null;
   } catch (e) { /* server unreachable */ }
 }
 
@@ -1583,6 +1588,36 @@ export async function synthesizeMemoryNow(statusEl) {
   }
 }
 
+export async function downloadMemoryEmbedder(btn) {
+  // One-time fetch of the configured embedding model via the SAME route the
+  // Knowledge page's "Download now" button uses (POST /api/rag/embedding/download).
+  // Writes nothing: no model switch, no config change.
+  const label = `Download '${memory.embedderModel}' now`;
+  if (btn) { btn.disabled = true; btn.textContent = "Downloading…"; }
+  let success = false;
+  try {
+    const r = await fetch("/api/rag/embedding/download",
+                          { method: "POST", headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    if (data.job_id) {
+      const end = await streamJob(data.job_id, () => {});
+      success = end.status === "done";
+      toast(success ? "Embedding model ready - semantic recall will resume"
+                    : "Embedding model download did not complete", !success);
+    } else {
+      success = true;                    // already installed
+      toast("Already installed");
+    }
+    await refreshMemory();
+  } catch (e) {
+    toast("Download failed: " + e.message, true);
+  } finally {
+    if (btn && !success) { btn.disabled = false; btn.textContent = label; }
+  }
+  return success;
+}
+
 export function openMemoryModal() {
   openModal("Memory - what the model knows about you", (body) => {
     body.appendChild(el("div", "sub", memory.writable
@@ -1591,6 +1626,22 @@ export function openMemoryModal() {
         "one fact per line; Save replaces the list."
       : "Read-only: privacy mode blocks memory writes (no new traces). " +
         "Existing memory is still recalled while the memory toggle is on."));
+    if (memory.canDownloadEmbedder) {
+      const hint = el("div", "sub",
+        `Semantic recall is off until '${memory.embedderModel}' is downloaded ` +
+        `once (network access is set to "ask", so it is not fetched ` +
+        `automatically).`);
+      hint.style.marginTop = "6px";
+      body.appendChild(hint);
+      const dlBtn = el("button", "btn-secondary",
+        `Download '${memory.embedderModel}' now`);
+      dlBtn.id = "mem-embed-download";
+      dlBtn.style.marginTop = "6px";
+      dlBtn.onclick = async () => {
+        if (await downloadMemoryEmbedder(dlBtn)) { hint.remove(); dlBtn.remove(); }
+      };
+      body.appendChild(dlBtn);
+    }
     const ta = document.createElement("textarea");
     ta.value = memory.text;
     ta.rows = 14;

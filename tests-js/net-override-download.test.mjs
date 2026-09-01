@@ -142,3 +142,67 @@ test("clicking Download-now POSTs the download route and streams the job", async
                                    && c.opts && c.opts.method === "POST").length, 0,
     "the download action must never touch the model-switch route");
 });
+
+/* ---- Memory modal: the same Download-now hint, for a Memory-only user ---- */
+
+function memFetch(memoryBody, calls) {
+  return async (url, opts = {}) => {
+    const u = String(url);
+    calls.push({ url: u, opts });
+    if (u === "/api/memory" && !(opts && opts.method)) {
+      return { ok: true, status: 200, json: async () => memoryBody };
+    }
+    if (u === "/api/rag/embedding/download") {
+      return { ok: true, status: 200, json: async () => ({ job_id: "j3" }) };
+    }
+    return { ok: true, status: 200, text: async () => "", json: async () => ({}) };
+  };
+}
+
+const MEM_BLOCKED = {
+  text: "", writable: true, items: [], corrections: [],
+  can_download_embedder: true, embedder_model: "bge-small-en-v1.5",
+};
+
+test("memory modal offers a Download-now hint when can_download_embedder is true", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: memFetch(MEM_BLOCKED, calls) });
+  await win.refreshMemory();
+  win.openMemoryModal();
+  const body = win.document.getElementById("modal-body");
+  assert.match(body.textContent, /Semantic recall is off/,
+    "explains why recall is degraded");
+  const btn = win.document.getElementById("mem-embed-download");
+  assert.ok(btn, "the download button exists");
+  assert.match(btn.textContent, /bge-small-en-v1\.5/, "labels the configured model");
+});
+
+test("no can_download_embedder renders neither hint nor button", async () => {
+  const calls = [];
+  const body = { ...MEM_BLOCKED, can_download_embedder: false, embedder_model: null };
+  const { window: win } = loadAppWithPages({ fetchImpl: memFetch(body, calls) });
+  await win.refreshMemory();
+  win.openMemoryModal();
+  assert.equal(win.document.getElementById("mem-embed-download"), null);
+  assert.doesNotMatch(
+    win.document.getElementById("modal-body").textContent, /Semantic recall is off/);
+});
+
+test("clicking Download-now POSTs the SAME route the Knowledge page uses, and clears on success",
+  async () => {
+    const calls = [];
+    const { window: win } = loadAppWithPages({ fetchImpl: memFetch(MEM_BLOCKED, calls) });
+    runScript(win, `streamJob = () => Promise.resolve({ status: "done" });`);
+    await win.refreshMemory();
+    win.openMemoryModal();
+    win.document.getElementById("mem-embed-download").click();
+    await tick(); await tick(); await tick();
+    const posts = calls.filter((c) => c.url === "/api/rag/embedding/download");
+    assert.equal(posts.length, 1, "one POST to the SAME download route Knowledge uses");
+    assert.equal((posts[0].opts || {}).method, "POST");
+    assert.equal(win.document.getElementById("mem-embed-download"), null,
+      "the button is removed once the download completes");
+    assert.doesNotMatch(
+      win.document.getElementById("modal-body").textContent, /Semantic recall is off/,
+      "the hint text is removed too");
+  });

@@ -429,11 +429,19 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     if allow_download is None:
         allow_download = network_mode() == "allow"
     if not allow_download:
-        reason = (
-            f"embedding model {name!r} not present and not auto-downloading "
-            f"(net_mode={network_mode()}); use the one-time download action, "
-            "or set net_mode=allow, to enable semantic search (memory/RAG use "
-            "lexical BM25 until then)")
+        mode = network_mode()
+        if mode == "ask":
+            reason = (
+                f"embedding model {name!r} not present; net_mode=ask does not "
+                "auto-fetch it, but the one-time download action will fetch it "
+                "right now - use it, or set net_mode=allow to auto-fetch on "
+                "future misses too (memory/RAG use lexical BM25 until then)")
+        else:
+            reason = (
+                f"embedding model {name!r} not present and not auto-downloading "
+                f"(net_mode={mode}); use the one-time download action, "
+                "or set net_mode=allow, to enable semantic search (memory/RAG use "
+                "lexical BM25 until then)")
         _set_resolve_outcome(name, reason)
         logger.info(reason)
         return None
