@@ -38,6 +38,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   asking you to try again yourself. If it still cannot get a clear reading
   after those automatic attempts, it says so plainly rather than suggesting
   something to go do about it.
+- **Restarting the server could take noticeably longer than it needed to,
+  even with nothing loaded at the time.** It always checked how much free
+  graphics memory was available before restarting, even when there was
+  nothing using any and no reason to wait for memory to be freed. That check
+  is now skipped whenever there is nothing to release, so a restart with no
+  model loaded completes much faster.
 - **Clicking an already-open coder session now switches to it instead of
   opening it again.** Clicking a session that was already running started a
   second, independent copy of it every time, each holding its own connection
