@@ -69,6 +69,68 @@ def test_spawned_pid_reflects_liveness(monkeypatch):
     cc._take_spawned(url)
 
 
+def test_restart_does_not_relaunch_a_still_running_foreign_comfy(monkeypatch):
+    """The reported bug: restarting a ComfyUI localm did not launch must not
+    report a green success as if a fresh instance came up - nothing did."""
+    from localm.media import comfy_client as cc
+    calls = _patch_common(monkeypatch, cc, alive_after=True)   # alive, but not ours
+    url = "http://127.0.0.1:8188"
+    # no _remember_spawned -> localm did not launch it
+    launches = []
+    monkeypatch.setattr(cc, "ensure_comfy",
+                        lambda **kw: launches.append(kw) or (True, "should not be reached"))
+
+    ok, msg = cc.restart_comfy(url)
+
+    assert ok
+    assert "did not launch" in msg.lower()
+    assert "nothing was restarted" in msg.lower()
+    assert calls["interrupt"] == 1                      # the render was still aborted
+    assert calls["killed"] == []                         # the foreign process was left alone
+    assert launches == []                                 # no relaunch was attempted
+
+
+def test_restart_relaunches_when_localm_launched_it(monkeypatch):
+    """Regression guard: the ordinary case - localm's own ComfyUI - must still
+    stop and relaunch exactly as before."""
+    from localm.media import comfy_client as cc
+    calls = _patch_common(monkeypatch, cc, alive_after=False)
+    url = "http://127.0.0.1:8188"
+    cc._remember_spawned(url, _FakeProc(pid=777))
+    launches = []
+    monkeypatch.setattr(cc, "ensure_comfy",
+                        lambda **kw: launches.append(kw) or (True, "ComfyUI is up."))
+
+    ok, msg = cc.restart_comfy(url, wait_seconds=42)
+
+    assert ok
+    assert msg == "ComfyUI is up."
+    assert calls["killed"] == [777]                      # our old process was terminated
+    assert len(launches) == 1                             # ensure_comfy was actually asked to relaunch
+    assert launches[0]["api_url"] == url
+    assert launches[0]["wait_seconds"] == 42
+
+
+def test_restart_still_attempts_a_launch_when_nothing_is_running_at_all(monkeypatch):
+    """Not-ours-and-not-alive is a DIFFERENT case from the reported bug: there
+    is no foreign process to leave running, so restart must still try to
+    bring one up rather than silently doing nothing."""
+    from localm.media import comfy_client as cc
+    calls = _patch_common(monkeypatch, cc, alive_after=False)   # not ours, not alive either
+    url = "http://127.0.0.1:8188"
+    # no _remember_spawned -> localm did not launch it, and it is not alive
+    launches = []
+    monkeypatch.setattr(cc, "ensure_comfy",
+                        lambda **kw: launches.append(kw) or (True, "ComfyUI is up."))
+
+    ok, msg = cc.restart_comfy(url)
+
+    assert ok
+    assert msg == "ComfyUI is up."
+    assert len(launches) == 1                              # a launch was attempted
+    assert calls["killed"] == []
+
+
 # --------------------------------------------------------------------------- #
 #  routes
 # --------------------------------------------------------------------------- #

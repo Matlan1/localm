@@ -1735,9 +1735,19 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
                   wait_seconds: Optional[int] = None,
                   launch_cmd: Optional[str] = None,
                   workdir: Optional[str] = None) -> tuple[bool, str]:
-    """Stop the ComfyUI localm launched (if any), then launch a fresh one. Only
-    meaningful when localm has a launch command configured."""
-    stop_comfy(api_url)
+    """Stop the ComfyUI localm launched (if any), then launch a fresh one. When
+    the target was not launched by localm and is still running after the
+    stop, nothing is relaunched - only meaningful when localm has a launch
+    command configured."""
+    url = (api_url or default_api_url()).rstrip("/")
+    launched_by_us = spawned_pid(url) is not None
+    stop_comfy(url)
+    if not launched_by_us and is_comfy_confirmed(url):
+        return True, (
+            "Aborted the in-flight render and cleared the queue, but localm "
+            "did not launch this ComfyUI, so nothing was restarted - restart "
+            "it where you started it."
+        )
     return ensure_comfy(api_url=api_url, on_progress=on_progress,
                         wait_seconds=wait_seconds, launch_cmd=launch_cmd,
                         workdir=workdir)
