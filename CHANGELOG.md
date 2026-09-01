@@ -11,6 +11,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **`/review` in the coder REPL.** Asks the reviewer model for a second opinion
+  on the current diff right now, instead of waiting for the automatic pre-done
+  pass. Works even when `coder_review` (the automatic pass's own on/off switch,
+  off by default) is off, and reports the same verdict that pass reads:
+  approved, or the list of blocking issues plus the reviewer's notes.
+
 ### Fixed
 - **A stuck GPU-detection helper could wedge VRAM measurement for the rest of
   the run.** When it happened, loading any model afterward refused with "free
