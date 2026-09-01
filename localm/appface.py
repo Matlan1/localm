@@ -155,7 +155,7 @@ def run_native_window(url: str, name: str = "LocaLM", *,
         return False
     try:
         window = webview.create_window(name, url, width=1280, height=860,
-                                       min_size=(760, 500))
+                                       min_size=(760, 500), text_select=True)
     except Exception:
         logger.debug("appface: native window creation failed", exc_info=True)
         return False

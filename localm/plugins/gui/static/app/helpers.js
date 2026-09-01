@@ -584,6 +584,15 @@ function proxyRemoteImages(root, scope) {
   });
 }
 
+/** Every `<a href>` under *root* opens in a new tab/window instead of the
+ *  current one. */
+function secureExternalLinks(root) {
+  root.querySelectorAll("a[href]").forEach((a) => {
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+  });
+}
+
 /** True if the main reply body rendered to something the user can actually see.
  *  A reply can be a non-empty STRING yet render to nothing: a tiny model that
  *  emits only an unterminated / empty ```code fence produces an empty <pre><code>
@@ -645,6 +654,7 @@ export function renderMarkdown(target, text, opts = {}) {
   // On `target`, not `main`, so the think block's sink is covered by the same
   // call. Idempotent across a streaming re-render: an already-proxied src is
   // same-origin, so the second pass leaves it alone.
+  secureExternalLinks(target);
   proxyRemoteImages(target, opts.imageScope);
   // Never leave a blank reply bubble. On a SETTLED render (opts.final - a reload
   // or post-stream renderChat, never a mid-stream shell) a body that rendered to

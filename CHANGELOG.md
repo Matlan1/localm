@@ -198,6 +198,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   rejected, even though 0 already means unlimited for several other similar
   settings. It is now accepted here too, with the same meaning: no
   runaway-guard limit, bounded only by the model's context window.
+- **Text in the app window (the standalone desktop window, not a browser tab)
+  could not be selected or copied.** The window now allows selecting text and
+  copying it with Ctrl+C.
+- **Clicking an outbound link in the app window, such as the changelog's
+  release link, navigated the whole window away to that page instead of
+  opening it.** The app window has no address bar or back button, so there
+  was no way back short of restarting the app. Outbound links, including
+  those in chat replies, now open in your regular browser instead.
 
 ### Security
 - **The coder now refuses a small set of catastrophic shell commands outright,
