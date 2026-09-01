@@ -1200,15 +1200,20 @@ def test_bench_mtp_stops_when_the_model_has_no_draft_head(cli_runner):
     """
     from localm.cli import models as models_mod
 
+    # Rates that WOULD read as a 1.40x win, so dropping the early return prints
+    # a verdict instead of nothing and this test fails rather than passing on a
+    # tie it arranged for itself.
     with patch.object(models_mod, "get_model_info",
                       return_value=("model.gguf", None)), \
          patch.object(models_mod, "_mtp_probe_arm",
-                      _bench_mtp_result([100.0], [100.0], supports=False,
+                      _bench_mtp_result([50.0], [70.0], supports=False,
                                         status="unsupported_arch")):
         res = cli_runner.invoke(models_mod.bench_mtp, ["model.gguf"])
 
     assert res.exit_code == 0, res.output
     assert "no usable MTP draft head" in res.output
+    assert "decode tok/s" not in res.output, (
+        "the comparison table was printed for a model with no draft head")
     assert "faster" not in res.output
 
 
