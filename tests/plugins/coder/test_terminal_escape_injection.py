@@ -36,12 +36,18 @@ PAYLOADS = [
 
 
 def _assert_inert(out: str, payload: str) -> None:
-    """The three properties every one of these sites must hold."""
+    """The two properties every one of these sites must hold.
+
+    The ESC BYTE is the only thing that may be removed. Everything else in the
+    payload must still be there, as literal text: a site that drops the escape
+    AND swallows the surrounding characters is the silent-deletion defect, not
+    a fix. So the needle is the payload with its escape bytes stripped, never
+    the raw payload (which can never survive) and never a bare substring of it
+    (which would pass on a site that ate the rest).
+    """
     assert ESC not in out, "a raw ANSI escape reached the terminal"
-    # The payload survives as literal text rather than being parsed away. The
-    # link case keeps its label; the others keep the whole string.
-    needle = "click to continue" if payload == LINK else payload
-    assert needle in out, f"content was silently eaten: {payload!r} not in {out!r}"
+    needle = payload.replace(ESC, "")
+    assert needle in out, f"content was silently eaten: {needle!r} not in {out!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +217,10 @@ class TestSubAgentAttributionSurvives:
         out = capsys.readouterr().out
         assert "sub-agent" in out, "the attribution line was suppressed"
         assert "run_shell" in out
-        assert ESC not in out
+        # The LABEL itself must survive too, not just the surrounding words: a
+        # label eaten by the markup parser leaves a line that still says
+        # "sub-agent ... is asking to run run_shell" while naming nobody.
+        _assert_inert(out, "child" + payload)
 
 
 # ---------------------------------------------------------------------------
