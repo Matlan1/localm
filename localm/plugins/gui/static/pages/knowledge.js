@@ -552,6 +552,22 @@ function kbConfirmRepair(name, detail) {
   });
 }
 
+/** Whether a repair started right now would actually re-embed: a fresh read of
+ *  embedder status, never the page's last-rendered snapshot. Stays true (the
+ *  server decides) unless the status is a CONFIRMED "not_installed" - "ready"
+ *  and "unknown" (withheld for a non-owner key) both keep the prior default,
+ *  since declaring false here would force the server to skip embedding even
+ *  when it is in fact available. */
+async function repairWillEmbed() {
+  try {
+    const r = await fetch("/api/rag/embedding", { headers: authHeaders() });
+    const st = await r.json().catch(() => ({}));
+    return !(r.ok && st.status === "not_installed");
+  } catch (e) {
+    return true;
+  }
+}
+
 export async function kbRepairCollection(name) {
   const log = $("kb-log");
   log.style.display = "block";
@@ -560,7 +576,8 @@ export async function kbRepairCollection(name) {
     const post = (body) => fetch(
       `/api/rag/collections/${encodeURIComponent(name)}/repair`,
       { method: "POST", headers: authHeaders(), body: JSON.stringify(body) });
-    let r = await post({});
+    const embed = await repairWillEmbed();
+    let r = await post({ embed });
     let data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || r.statusText);
     if (data.needs_confirm) {
@@ -568,7 +585,7 @@ export async function kbRepairCollection(name) {
         log.textContent += "Cancelled.\n";
         return;
       }
-      r = await post({ confirm: true });
+      r = await post({ embed, confirm: true });
       data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.detail || r.statusText);
     }

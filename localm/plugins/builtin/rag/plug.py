@@ -419,7 +419,14 @@ def _self_services(request: Request):
     already-supported degrade paths in the store layer (lexical-only search, no
     format tie-break, no image description) - the same fallback used when
     embed=False or the embedder itself is unavailable, so this never crashes the
-    request."""
+    request.
+
+    ``self_embed`` is additionally withheld (None) whenever no embedding model
+    currently resolves to a file (``resolve_embedding_model_path``, the same
+    check ``GET /api/rag/embedding`` reports as ``installed``), regardless of
+    whether the GUI shell or kernel coordinates are present. ``self_classify``
+    and ``self_describe`` are unaffected: both key off ``active_model``, the
+    chat model, not the embedder."""
     self_url = getattr(request.app.state, "self_url", None)
     active_model = getattr(request.app.state, "active_model", None)
     if not self_url or active_model is None:
@@ -429,7 +436,10 @@ def _self_services(request: Request):
             active_model = derived_active
     if not self_url or active_model is None:
         return None, None, None
-    return (_make_self_embed(self_url, active_model),
+    from localm.inference.embedder import resolve_embedding_model_path
+    self_embed = (_make_self_embed(self_url, active_model)
+                  if resolve_embedding_model_path(allow_download=False) else None)
+    return (self_embed,
             _make_self_classify(self_url, active_model),
             _make_self_describe_image(self_url, active_model))
 
