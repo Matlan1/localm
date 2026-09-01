@@ -108,6 +108,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   server that was already on its way out rather than the freshly restarted
   one. It now waits for confirmation that a genuinely new server process has
   come up before reloading.
+- **The first page load right after a server restart could freeze the whole
+  server for ten-plus seconds, twice in a row.** The Settings page fetches the
+  Companion-app address and the device-pairing QR code as soon as it loads,
+  and both of those ran in a way that blocked every other request while they
+  worked, including the ordinary "are you back up yet" checks a restart itself
+  waits on - so the very first reload after a restart could make an otherwise
+  healthy, freshly restarted server look stuck or unreachable. Both now run
+  without blocking anything else.
 - **A blocked or failing Kokoro voice download could show a raw, unhelpful
   error instead of the "allow huggingface.co" guidance.** This happened
   whenever the browser had already cached part of the voice model from an
