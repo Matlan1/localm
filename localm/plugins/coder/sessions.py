@@ -79,6 +79,65 @@ class _PendingConfirm:
     approved: bool = False
 
 
+def _tool_only_recap(calls: list, malformed: int) -> str:
+    """The recap row for a turn whose prose is empty but which did call tools.
+
+    Names up to 6 distinct tools in call order, then "and N more". Returns ""
+    when there is nothing to report, which the caller treats as "drop the row".
+    """
+    parts = []
+    if calls:
+        names, seen = [], set()
+        for c in calls:
+            name = getattr(c, "name", "") or "?"
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+        shown = names[:6]
+        listed = ", ".join(shown)
+        if len(names) > len(shown):
+            listed += f" and {len(names) - len(shown)} more"
+        parts.append(f"ran {listed}")
+    if malformed:
+        parts.append(f"{malformed} unreadable tool call"
+                     f"{'s' if malformed != 1 else ''}")
+    return f"({', '.join(parts)}, no other output)" if parts else ""
+
+
+def recap_rows(messages: list, tool_names: set) -> list:
+    """Readable feed rows summarising a saved conversation.
+
+    One row per user/assistant message with surviving prose, tool-call markup
+    removed. Tool-result envelopes and steering notes are dropped. A turn whose
+    content was ENTIRELY tool calls keeps a row naming them (see
+    test_recap_keeps_a_row_for_a_tool_only_turn): dropping it silently is
+    indistinguishable, in the feed, from the turn never having happened.
+
+    Each row is ``{"role": ..., "text": ...}``; text is capped at 4000 chars.
+    """
+    rows = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        # Same splitter as the Markdown transcript (parser.strip_tool_calls):
+        # it recognises every shape parse_tool_calls does, not just the XML
+        # wrapper, so a persisted ```json-fenced or bare-JSON call is removed
+        # here too rather than surviving into the recap as fence markers or a
+        # raw JSON blob.
+        calls, text, malformed = strip_tool_calls(content, tool_names=tool_names)
+        text = text.strip()
+        if text.startswith("<tool_result") or "[user steering note" in text:
+            continue
+        if not text:
+            text = _tool_only_recap(calls, malformed)
+            if not text:
+                continue
+        rows.append({"role": role, "text": text[:4000]})
+    return rows
+
+
 class CoderSession:
     """One GUI coder session: an Agent, its event queue, and its worker thread."""
 
@@ -709,12 +768,22 @@ class CoderSession:
         except Exception:
             pass
 
+    @property
+    def checkpoint_id(self) -> str:
+        """Which saved conversation this session reads and writes.
+
+        The same id a /api/coder/dormant row carries, so the two can be
+        compared directly. Minted when the Agent is constructed and replaced by
+        a successful resume, so it always names the conversation currently
+        loaded, never the one this session started life with.
+        """
+        return self.agent._checkpoint_id
+
     def resume_from_checkpoint(self, checkpoint_id: Optional[str] = None) -> bool:
         """Load a saved conversation back into the agent and replay a readable
         recap into the feed. The model gets the FULL restored history; the feed
-        rows are a visual summary. True when something was restored. Tool-call
-        markup is stripped from the recap, and tool-result envelopes and
-        steering notes are skipped.
+        rows are a visual summary built by :func:`recap_rows`. True when
+        something was restored.
 
         *checkpoint_id* is None, the default, to restore this cwd's MOST RECENT
         conversation. Pass an id from ``list_checkpoints()`` to continue one
@@ -742,24 +811,8 @@ class CoderSession:
         # agent package lazily, at the point of use.
         import localm.plugins.coder.agent as _agent
         tool_names = set(_agent.TOOL_REGISTRY) - self.agent.disabled_tools
-        for m in self.agent._messages:
-            role = m.get("role")
-            content = m.get("content")
-            if role not in ("user", "assistant") or not isinstance(content, str):
-                continue
-            # Same splitter as the Markdown transcript
-            # (parser.strip_tool_calls): it recognises every shape
-            # parse_tool_calls does, not just the XML wrapper, so a persisted
-            # ```json-fenced or bare-JSON call is removed here too rather than
-            # surviving into the recap as fence markers or a raw JSON blob.
-            # _calls and the malformed count are discarded: this recap surfaces
-            # surviving prose only, and drops the row when there is none.
-            _calls, text, _malformed = strip_tool_calls(content, tool_names=tool_names)
-            text = text.strip()
-            if not text or text.startswith("<tool_result") \
-                    or "[user steering note" in text:
-                continue
-            self._push({"type": "history", "role": role, "text": text[:4000]})
+        for row in recap_rows(self.agent._messages, tool_names):
+            self._push({"type": "history", "role": row["role"], "text": row["text"]})
         return True
 
     def info(self) -> dict:
@@ -770,6 +823,12 @@ class CoderSession:
         uses."""
         return {
             "id": self.id,
+            # Which SAVED conversation is loaded here, as opposed to "id", which
+            # names this live session. Lets a caller tell "the checkpoint I
+            # asked for is already open" apart from "a DIFFERENT one is", and
+            # lets the session rail hide a checkpoint that is already live from
+            # its past-sessions list.
+            "checkpoint_id": self.checkpoint_id,
             "cwd": str(self.cwd),
             "model": self.model,
             "mode": self.mode,
