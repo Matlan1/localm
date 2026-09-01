@@ -689,6 +689,40 @@ class TestEmbeddingRoutes:
         finally:
             emb.reset_embedder()
 
+    def test_ask_mode_message_distinct_from_off(self, tmp_path, monkeypatch):
+        """netpolicy.py's documented 'ask' contract: allowed, but surfaces
+        confirmation first - NOT the same refusal as net_mode=off. The lazy/
+        auto resolve path (allow_download=None, what get_embedder() and every
+        memory/RAG caller actually uses) must say the one-time download
+        action will work RIGHT NOW under ask, and must not collapse into
+        off's wording."""
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
+        from localm.inference import embedder as emb
+        try:
+            monkeypatch.setattr(_cfg, "load_config", lambda: {"net_mode": "ask"})
+            emb.reset_embedder()
+            assert emb.resolve_embedding_model_path() is None
+            ask_reason = emb.last_error()
+            assert ask_reason is not None and "net_mode=ask" in ask_reason
+            assert "right now" in ask_reason, \
+                "ask must say the one-time action works NOW, not just name the mode"
+
+            monkeypatch.setattr(_cfg, "load_config", lambda: {"net_mode": "off"})
+            emb.reset_embedder()
+            assert emb.resolve_embedding_model_path() is None
+            off_reason = emb.last_error()
+            assert off_reason is not None and "net_mode=off" in off_reason
+
+            assert ask_reason != off_reason, \
+                "ask and off must not collapse into the identical refusal text"
+            assert "right now" not in off_reason, \
+                "off's own wording must stay untouched by the ask-mode split"
+        finally:
+            emb.reset_embedder()
+
     def test_download_route_short_circuits_when_installed(self, rag_client,
                                                           monkeypatch):
         from localm.inference.embedder import (
@@ -701,3 +735,67 @@ class TestEmbeddingRoutes:
                               headers=_hdr(OWNER_KEY))
         assert r.status_code == 200
         assert r.json()["status"] == "already_installed"
+
+
+# --------------------------------------------------------------------------- #
+#  6. GET /api/memory's can_download_embedder must never advertise an action  #
+#     the rag PLUGIN's own mount-level gate would refuse                     #
+# --------------------------------------------------------------------------- #
+
+class TestMemoryEmbedderDownloadHint:
+    def test_withheld_when_rag_not_installed(self, tmp_path, monkeypatch):
+        """rag is a SEPARATE, optional plugin from memory (no `requires` link
+        between them). With only memory installed, POST
+        /api/rag/embedding/download does not exist at all - the hint must not
+        offer an action that would 404."""
+        _isolated_home(tmp_path, monkeypatch)
+        from localm.inference.embedder import reset_embedder
+        reset_embedder()
+        from localm.inference.http_server import create_app
+        app = create_app(None)
+        from localm.plugins.engine import PluginManager
+        PluginManager(app, external_root=tmp_path / "noplugins").install("memory")
+        try:
+            with TestClient(app) as c:
+                body = c.get("/api/memory", headers=_hdr(OWNER_KEY)).json()
+                assert body["can_download_embedder"] is False
+                assert body["embedder_model"] is None
+                # Confirm the premise the hint must respect: the route is
+                # genuinely absent, not merely unauthorized.
+                r = c.post("/api/rag/embedding/download", headers=_hdr(OWNER_KEY))
+                assert r.status_code == 404
+        finally:
+            reset_embedder()
+
+    def test_withheld_without_the_rag_scope(self, tmp_path, monkeypatch):
+        """rag installed, but a key scoped to memory+config:write (no "rag")
+        hits the download route's MOUNT-level scope gate (require_scope("rag"),
+        checked before the route's own config:write check ever runs) and 403s
+        regardless of holding config:write. The hint must not offer this key
+        an action it cannot take; an owner/rag-scoped caller is unaffected."""
+        _isolated_home(tmp_path, monkeypatch)
+        from localm.inference.embedder import reset_embedder
+        reset_embedder()
+        from localm import auth
+        mem_writer = auth.create_key(
+            "memadmin", ["memory", "config:write"], allow_privileged=True)["key"]
+        from localm.inference.http_server import create_app
+        app = create_app(None)
+        from localm.plugins.engine import PluginManager
+        pm = PluginManager(app, external_root=tmp_path / "noplugins")
+        pm.install("memory")
+        pm.install("rag")
+        try:
+            with TestClient(app) as c:
+                body = c.get("/api/memory", headers=_hdr(mem_writer)).json()
+                assert body["can_download_embedder"] is False
+                assert body["embedder_model"] is None
+                # Confirm the premise: this exact key really is refused there.
+                r = c.post("/api/rag/embedding/download", headers=_hdr(mem_writer))
+                assert r.status_code == 403
+                # The owner key, which passes every scope gate, still gets it.
+                owner_body = c.get("/api/memory", headers=_hdr(OWNER_KEY)).json()
+                assert owner_body["can_download_embedder"] is True
+                assert owner_body["embedder_model"]
+        finally:
+            reset_embedder()
