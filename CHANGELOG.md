@@ -83,6 +83,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a task that rewrites the test it is judged against go unflagged until you
   quit the REPL.** The warning about edited test or CI-config files now shows
   right after each `/goal` task finishes, not only when the session ends.
+- **The coder's "working…" pill could sit motionless for minutes during a
+  long generation, with nothing to show it was still going.** It previously
+  only changed once new content actually appeared, so a long quiet stretch
+  before the first token (or between tool calls) looked identical to the
+  page being stuck. It now pulses and counts the seconds since the last
+  activity for as long as a task is running, including through a silent
+  gap.
 
 ### Security
 - **The coder now refuses a small set of catastrophic shell commands outright,
