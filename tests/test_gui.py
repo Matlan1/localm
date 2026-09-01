@@ -3337,7 +3337,7 @@ class TestRagEndpoints:
                                json={"name": "kb1"}).status_code == 409
             # invalid name
             assert client.post("/api/rag/collections",
-                               json={"name": "a b"}).status_code == 400
+                               json={"name": "a/b"}).status_code == 400
             data = client.get("/api/rag/collections").json()
             assert [c["name"] for c in data["collections"]] == ["kb1"]
             detail = client.get("/api/rag/collections/kb1").json()

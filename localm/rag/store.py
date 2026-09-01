@@ -100,7 +100,10 @@ from .extract import (BLACKLISTED_SUFFIXES, SECRET_SUFFIXES,
 ClassifyFn = Callable[[str], Optional[str]]
 DescribeImageFn = Callable[[bytes, str], Optional[str]]
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Printable, 1-64 characters, no control chars, no path separators, no
+# Windows-reserved punctuation, and no ".". See
+# test_dot_rejected_would_collide_with_lock_sibling.
+_NAME_RE = re.compile(r'\A[^\x00-\x1f\x7f./\\:*?"<>|]{1,64}\Z')
 
 # Windows reserved device names: they match _NAME_RE but mkdir raises on them.
 _RESERVED_NAMES = {"con", "prn", "aux", "nul",
@@ -494,9 +497,13 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
 
 def check_collection_name(name: str) -> str:
     """Validate a collection name, returning it, or raise ``ValueError``."""
-    if not _NAME_RE.match(name or ""):
+    name = name or ""
+    if not _NAME_RE.match(name):
         raise ValueError(
-            "Collection names must be 1-64 letters, digits, '-' or '_'")
+            'Collection names must be 1-64 characters and cannot contain '
+            '. / \\ : * ? " < > | or control characters')
+    if name != name.strip():
+        raise ValueError("Collection names cannot start or end with whitespace")
     if name.lower() in _RESERVED_NAMES:
         raise ValueError(f"'{name}' is a reserved device name and cannot be used")
     return name

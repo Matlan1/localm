@@ -177,12 +177,12 @@ class TestCollectionDimReport:
         construct as a Collection must not silently vanish from the report:
         best-effort here means naming the failure, not folding it into a
         false "nothing to see"."""
-        rogue = rag_home / "not a valid name!"
+        rogue = rag_home / "not.a.valid.name"
         rogue.mkdir(parents=True)
         (rogue / "meta.json").write_text("{}", encoding="utf-8")
         report = _report(384)
         assert len(report["unknown"]) == 1
-        assert "not a valid name!" in report["unknown"][0]["name"]
+        assert "not.a.valid.name" in report["unknown"][0]["name"]
         assert report["unknown"][0]["reason"]
 
     def test_no_collections_at_all_reports_cleanly(self, rag_home):
@@ -366,7 +366,7 @@ class TestEmbeddingSetConfirmGate:
         'reason' field has no such exposure because its only reader is _setup(),
         which logs just the collection NAME and never re-serializes 'reason';
         this route serializes its whole report straight into JSON."""
-        rogue = rag_home / "not a valid name!"
+        rogue = rag_home / "not.a.valid.name"
         rogue.mkdir(parents=True)
         (rogue / "meta.json").write_text("{}", encoding="utf-8")
 
@@ -378,14 +378,14 @@ class TestEmbeddingSetConfirmGate:
         data = r.json()
         assert len(data["collections"]) == 1
         entry = data["collections"][0]
-        assert entry["name"] == "not a valid name!"
+        assert entry["name"] == "not.a.valid.name"
         assert entry["reason"] == "could not be read"
         # The property under test: nothing exception-shaped in the RESPONSE.
         body_text = r.text
         assert "ValueError" not in body_text
         assert "Traceback" not in body_text
         # The failure is still surfaced, just server-side: noted, not muted.
-        assert "not a valid name!" in caplog.text
+        assert "not.a.valid.name" in caplog.text
         assert "ValueError" in caplog.text
 
     def test_confirming_after_a_dry_run_actually_switches(

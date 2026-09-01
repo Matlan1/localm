@@ -63,6 +63,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and ending one outright would skip its model unload and leave it reporting a
   crash that never happened, so it has to be stopped from its own window or the
   terminal it was started in.
+- **Knowledge collection names refused spaces and emoji, even though the rest
+  of the name was fine.** Trying to create a collection called "my research
+  notes" or add an emoji to the name failed with a 400 error. Spaces and
+  Unicode (including emoji) are now allowed; a name still can't contain a
+  path separator, a period, or other characters that aren't safe on disk.
 - **A stuck GPU-detection helper could wedge VRAM measurement for the rest of
   the run.** When it happened, loading any model afterward refused with "free
   VRAM could not be measured," even though the graphics driver itself was

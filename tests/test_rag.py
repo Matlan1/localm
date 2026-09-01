@@ -262,7 +262,37 @@ class TestCollection:
         assert delete_collection("kb1", base=base) is False
 
     def test_invalid_names_rejected(self, tmp_path):
-        for bad in ("", "a b", "../x", "x" * 65):
+        for bad in ("", "../x", "x" * 65):
+            with pytest.raises(ValueError):
+                Collection(bad, base=tmp_path)
+
+    def test_spaces_and_unicode_names_allowed(self, tmp_path, docs_dir):
+        base = tmp_path / "rag"
+        for name in ("my research notes", "笔记 🎉", "Café menu"):
+            c = Collection(name, base=base).create()
+            assert c.exists()
+            assert name in collection_names(base)
+            c.add_paths([docs_dir])
+            # a fresh instance re-derives the same on-disk name and reloads it
+            c2 = Collection(name, base=base)
+            assert c2.stats()["n_chunks"] == c.stats()["n_chunks"]
+            assert c2.query("ROCm runtime", k=1)
+
+    def test_path_unsafe_characters_still_rejected(self, tmp_path):
+        for bad in ('a/b', 'a\\b', 'a\x00b', 'a\tb', 'a\nb',
+                    'a:b', 'a*b', 'a?b', 'a"b', 'a<b', 'a>b', 'a|b'):
+            with pytest.raises(ValueError):
+                Collection(bad, base=tmp_path)
+
+    def test_dot_rejected_would_collide_with_lock_sibling(self, tmp_path):
+        # A name containing "." could otherwise equal another collection's
+        # sibling "<name>.lock" file, e.g. "kb.lock" vs the lock for "kb".
+        for bad in (".", "..", "kb.lock", "v1.2 notes"):
+            with pytest.raises(ValueError):
+                Collection(bad, base=tmp_path)
+
+    def test_whitespace_padded_or_only_names_rejected(self, tmp_path):
+        for bad in (" kb", "kb ", " ", "  "):
             with pytest.raises(ValueError):
                 Collection(bad, base=tmp_path)
 
