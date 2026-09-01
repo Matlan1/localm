@@ -14,7 +14,7 @@
  * net_mode=ask requires a one-time confirmation) before it is ever made.
  */
 
-import { NetGateError, classifyLoadError, loadToast, planModelFetch, pickDevice, pickDtype, repairAudioTransient } from "./tts-util.js";
+import { NetGateError, classifyLoadError, loadToast, planModelFetch, pickDevice, pickDtype, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
 
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
 
@@ -105,8 +105,9 @@ export async function register(ctx) {
   let loadPromise = null;
   let announced = false;
   let activeDevice = null;   // the backend that actually built the model (see build())
-  let repairWarned = false;    // warn once per page, not once per sentence
-  let splitterWarned = false;  // ditto (see speak())
+  let repairWarned = false;      // warn once per page, not once per sentence
+  let corruptionWarned = false;  // ditto, for the harder webgpu abort case
+  let splitterWarned = false;    // ditto (see speak())
 
   // R08: is this Kokoro model already in the transformers.js browser cache?
   // Used to avoid a misleading "first run downloads" toast on a hard reload, and
@@ -231,8 +232,29 @@ export async function register(ctx) {
     }
   }
 
-  function ensureLoaded() {
+  let passiveCheck = null;   // dedupes overlapping passive-warmup eligibility checks
+
+  // opts.passive: called after a reply finishes, before the user has clicked
+  // anything. Only proceeds when it needs no download-consent prompt; a bare
+  // ensureLoaded() (a real click, or a passive check that already cleared this
+  // gate) is unaffected and behaves exactly as before.
+  function ensureLoaded(opts = {}) {
     if (kokoro) return Promise.resolve(kokoro);
+    if (opts.passive) {
+      if (loadPromise) return loadPromise;
+      if (passiveCheck) return passiveCheck;
+      passiveCheck = (async () => {
+        try {
+          const cached = await modelCached();
+          const policy = await currentNetPolicy();
+          if (!shouldWarmPassively(cached, policy.mode)) return null;
+          return await ensureLoaded();
+        } finally {
+          passiveCheck = null;
+        }
+      })();
+      return passiveCheck;
+    }
     if (!loadPromise) {
       loadPromise = load().then(
         (k) => (kokoro = k),
@@ -267,6 +289,19 @@ export async function register(ctx) {
   let queue = [];          // pending object URLs
   let token = 0;           // bumped on stop/new utterance to cancel stale work
   let speaking = false;
+  let endCallback = null;  // the current utterance's opts.onEnd, if any
+
+  // Fires and clears whatever endCallback is currently registered. Called
+  // whenever the active utterance stops, however it stops - queue drained,
+  // interrupted by a new speak(), or an explicit stop(). See
+  // chat-speak-indicator.test.mjs and chat.js's speakToggle.
+  function fireEnd() {
+    const cb = endCallback;
+    endCallback = null;
+    if (cb) {
+      try { cb(); } catch (e) { console.error("[tts] onEnd callback failed:", e); }
+    }
+  }
 
   function clearQueue() {
     for (const u of queue) URL.revokeObjectURL(u);
@@ -275,7 +310,7 @@ export async function register(ctx) {
   function playNext(myToken) {
     if (myToken !== token) return;
     const url = queue.shift();
-    if (!url) { speaking = false; return; }      // drained: done for now
+    if (!url) { speaking = false; fireEnd(); return; }   // drained: done for now
     player.src = url;
     player.play().catch(() => {});
     player.onended = () => {
@@ -291,12 +326,14 @@ export async function register(ctx) {
     player.onended = null;
     player.removeAttribute("src");
     clearQueue();
+    fireEnd();
   }
 
-  async function speak(text, _opts = {}) {
+  async function speak(text, opts = {}) {
     stop();                                       // reset any prior utterance
     const myToken = ++token;
     speaking = true;
+    endCallback = opts.onEnd || null;
     let k;
     try {
       k = await ensureLoaded();
@@ -304,6 +341,7 @@ export async function register(ctx) {
       // The load failure was already surfaced (console.error + toast) inside
       // ensureLoaded's handler; just abandon this utterance (RULE 5: not hidden).
       speaking = false;
+      if (myToken === token) fireEnd();
       return;
     }
     if (myToken !== token) return;                // superseded while loading
@@ -351,6 +389,19 @@ export async function register(ctx) {
             activeDevice + " backend. Audio must lie in [-1,1]; this is a backend fault, " +
             "not a repair we want to be needed.");
         }
+        if (shouldAbortForCorruption(rep, activeDevice)) {
+          console.warn("[tts] refusing further webgpu playback: " + rep.beyondHead +
+            " sample(s) out of range beyond the repairable leading transient");
+          if (!corruptionWarned) {
+            corruptionWarned = true;
+            ctx.toast(
+              "Kokoro's WebGPU voice produced corrupted audio on this GPU (a " +
+              "known issue) - stopped. Switch Compute device to wasm in " +
+              "Settings → Text-to-speech.", true);
+          }
+          stop();
+          return;
+        }
         const url = URL.createObjectURL(chunk.audio.toBlob());
         const wasIdle = queue.length === 0 && player.paused;
         queue.push(url);
@@ -360,7 +411,10 @@ export async function register(ctx) {
       // Surface the synthesis failure too (RULE 5): a generic toast alone hides
       // whether it was an OOM, a bad voice id, or a model-runtime fault.
       console.error("[tts] Kokoro synthesis failed:", e);
-      if (myToken === token) ctx.toast("Voice synthesis failed", true);
+      if (myToken === token) {
+        ctx.toast("Voice synthesis failed", true);
+        fireEnd();
+      }
       speaking = false;
     }
   }

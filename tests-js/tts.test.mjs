@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UTIL = join(HERE, "..", "localm", "plugins", "builtin", "tts", "static", "tts-util.js");
-const { pickDevice, pickDtype, classifyLoadError, loadToast, repairAudioTransient } = await import(pathToFileURL(UTIL).href);
+const { pickDevice, pickDtype, classifyLoadError, loadToast, repairAudioTransient, shouldAbortForCorruption } = await import(pathToFileURL(UTIL).href);
 
 // ---- integration: the whole tts.js module graph loads ------------------ //
 test("tts.js loads as a module and exports register (the tts-util import resolves)", async () => {
@@ -172,11 +172,41 @@ test("a LATE out-of-range sample is clamped, never zeroed away", () => {
   assert.equal(rep.count, 1);
   assert.equal(rep.firstIndex, late);
   assert.equal(rep.zeroedThrough, -1, "a mid-utterance fault must not zero the head");
+  assert.equal(rep.beyondHead, 1, "a mid-utterance fault is outside the repairable window");
   assert.equal(a[late], -1, "clamped to the range floor");
   // Float32Array rounds 0.4 to 0.4000000059604645, so compare with a tolerance
   // rather than exactly - an exact compare here fails on storage precision, not
   // on behaviour.
   assert.ok(Math.abs(a[0] - 0.4) < 1e-6, "untouched audio before it stays untouched");
+});
+
+test("a fault confined to the leading transient reports beyondHead: 0", () => {
+  const rep = repairAudioTransient(gpuLikeChunk(), SR);
+  assert.equal(rep.count, 1);
+  assert.equal(rep.beyondHead, 0,
+    "the single leading-transient sample is inside the repairable head window");
+});
+
+// ---- shouldAbortForCorruption: refuse further webgpu playback ----------- //
+test("shouldAbortForCorruption: true only when corruption reaches beyond the head AND the device is webgpu", () => {
+  assert.equal(shouldAbortForCorruption({ beyondHead: 1 }, "webgpu"), true);
+  assert.equal(shouldAbortForCorruption({ beyondHead: 5 }, "webgpu"), true);
+});
+
+test("shouldAbortForCorruption: false for the repairable leading-transient case, even on webgpu", () => {
+  assert.equal(shouldAbortForCorruption({ beyondHead: 0 }, "webgpu"), false);
+});
+
+test("shouldAbortForCorruption: false off webgpu, however corrupted - auto never selects webgpu", () => {
+  assert.equal(shouldAbortForCorruption({ beyondHead: 5 }, "wasm"), false);
+  assert.equal(shouldAbortForCorruption({ beyondHead: 5 }, null), false);
+  assert.equal(shouldAbortForCorruption({ beyondHead: 5 }, undefined), false);
+});
+
+test("shouldAbortForCorruption: false on a missing/empty report", () => {
+  assert.equal(shouldAbortForCorruption(null, "webgpu"), false);
+  assert.equal(shouldAbortForCorruption(undefined, "webgpu"), false);
+  assert.equal(shouldAbortForCorruption({ beyondHead: 0 }, "webgpu"), false);
 });
 
 test("non-finite samples are reported and neutralised", () => {

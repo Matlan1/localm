@@ -55,6 +55,17 @@ def test_schema_exposes_the_user_facing_fields_and_hides_the_deployment_ones():
     assert "af_heart" in fields["voice"]["options"]
 
 
+def test_device_help_does_not_claim_auto_uses_webgpu():
+    # pickDevice() (tts-util.js) has auto always resolve to wasm - webgpu
+    # corrupts Kokoro's audio on many GPUs. The help text used to say the
+    # opposite ("auto uses the GPU (WebGPU)..."), which pointed a user
+    # straight at the broken path.
+    help_text = {f["key"]: f["help"] for f in ss.tts_schema_json({})}["device"]
+    assert "auto uses the gpu" not in help_text.lower()
+    assert "webgpu" in help_text.lower()
+    assert "wasm" in help_text.lower()
+
+
 def test_schema_flags_the_admin_only_script_url_fields():
     assert ss.tts_admin_only_fields() == {"library", "wasm_paths"}
     fields = {f["key"]: f for f in ss.tts_schema_json({})}

@@ -206,6 +206,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   opening it.** The app window has no address bar or back button, so there
   was no way back short of restarting the app. Outbound links, including
   those in chat replies, now open in your regular browser instead.
+- **An explicit WebGPU voice setting could keep producing corrupted, buzzing
+  audio instead of stopping.** Kokoro's WebGPU backend has a known audio
+  corruption bug on many GPUs, which is why the default already avoided it;
+  forcing WebGPU in Settings still hit it. Playback now stops and tells you
+  to switch back to WASM the moment real corruption is detected, instead of
+  continuing to play the noise. The Settings help text for this option was
+  also actively wrong, saying WebGPU is what the default uses when it is not.
+- **The chat "speak aloud" button gave no sign it was playing, or that
+  clicking it again would stop it.** It now shows while a reply is being
+  read aloud, with the icon swapping to a stop button, so it is clear both
+  that audio is playing and how to stop it.
+- **The first "speak aloud" click after loading the page could take several
+  seconds before any audio started.** The voice model was only ever warmed
+  up on demand, at that very first click. It now warms up in the background
+  as soon as a reply finishes, when that needs no extra download prompt, so
+  playback usually starts right away by the time you click.
 
 ### Security
 - **The coder now refuses a small set of catastrophic shell commands outright,

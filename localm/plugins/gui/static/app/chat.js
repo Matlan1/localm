@@ -957,6 +957,35 @@ function buildAvatarEl(info) {
   return av;
 }
 
+// The one message-row speak button currently marked "playing", if any - only
+// one utterance ever plays at a time, so at most one button is ever active.
+let activeSpeakBtn = null;
+
+function setSpeakButtonActive(btn, active) {
+  btn.classList.toggle("speaking", active);
+  btn.replaceChildren(iconEl(active ? "stop" : "speak", "ic"));
+  btn.title = active ? "Stop speaking" : "Speak this reply aloud";
+}
+
+/** The "Speak this reply aloud" button's click handler: starts, or stops,
+ *  speaking this message, and keeps the clicked button's own active/playing
+ *  indicator in sync with what actually happens (including the utterance
+ *  ending on its own, via speak()'s onEnd). See chat-speak-indicator.test.mjs. */
+function speakToggle(btn, text) {
+  const started = speak(text, {
+    toggle: true,
+    onEnd: () => {
+      if (activeSpeakBtn === btn) {
+        setSpeakButtonActive(btn, false);
+        activeSpeakBtn = null;
+      }
+    },
+  });
+  if (activeSpeakBtn && activeSpeakBtn !== btn) setSpeakButtonActive(activeSpeakBtn, false);
+  activeSpeakBtn = started ? btn : null;
+  setSpeakButtonActive(btn, started);
+}
+
 export function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
   const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || "Model");
@@ -1073,7 +1102,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     const btn = el("button", "action");
     if (icon) { btn.appendChild(iconEl(icon, "ic")); btn.title = label; }
     else btn.textContent = label;
-    btn.onclick = fn;
+    btn.onclick = () => fn(btn);
     meta.appendChild(btn);
   }
   if (opts.memory && opts.memory.n > 0) meta.appendChild(buildMemoryChip(opts.memory));
@@ -1165,7 +1194,7 @@ export function renderChat() {
       actions.push(["revert", () => revertTo(conv, i)]);
     }
     if (m.role === "assistant" && !tag) {
-      actions.push(["Speak this reply aloud", () => speak(msgText(m), { toggle: true }), "speak"]);
+      actions.push(["Speak this reply aloud", (btn) => speakToggle(btn, msgText(m)), "speak"]);
     }
     if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
       actions.push(["regenerate", () => regenerate(conv)]);
