@@ -304,6 +304,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now shut down whenever a load fails this way.
 
 ### Security
+- **A bug report now hides credentials that were logged as structured data, not
+  just ones written as plain settings.** A report already blanked out things
+  like `api_key=...` and `Authorization:` headers before you sent it, but a
+  credential that reached the report inside a block of JSON, which is the form
+  the browser records an error object in, slipped through and was sent in the
+  clear. Those are now blanked out too, and the surrounding detail is kept so
+  the report stays useful. Two report sections that relied on being cleaned up
+  earlier in the process now get the full treatment where they are written, so
+  a credential cannot reach them by a route nobody anticipated.
 - **A model can no longer take over your terminal through the coder's own
   output.** Text a model produced was printed to the terminal without being
   made inert first, on several paths: the narration it writes alongside a tool
