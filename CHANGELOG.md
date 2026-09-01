@@ -144,6 +144,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   asking you to try again yourself. If it still cannot get a clear reading
   after those automatic attempts, it says so plainly rather than suggesting
   something to go do about it.
+- **If those automatic retries still cannot get a clear reading, localm now
+  tries restarting itself before giving up** - the same seamless in-place
+  restart Settings' restart button uses, with no interruption beyond a brief
+  reconnect. Only when even that is not possible does it ask you to file a
+  bug report, and it no longer suggests restarting anything yourself.
 - **Restarting the server could take noticeably longer than it needed to,
   even with nothing loaded at the time.** It always checked how much free
   graphics memory was available before restarting, even when there was

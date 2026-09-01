@@ -128,6 +128,14 @@ _switch_cancel: Optional["threading.Event"] = None
 # {"instance_id", "port", "host", "scheme", "token"}.
 _gpu_coord: Optional[dict] = None
 
+# The running server's HangAlarm instance (see localm.inference._hang_alarm),
+# None until lifespan startup constructs one and None whenever recovery is
+# disabled (LOCALM_HANG_RECOVERY=off) or the process is under pytest. Read by
+# switch_engine to trigger the same seamless self-restart the loop-freeze and
+# transport-death detectors use, for a GPU probe still wedged after its own
+# in-request retries.
+_hang_alarm_instance = None
+
 # Hang watchdog: a monotonic heartbeat bumped every _HEARTBEAT_INTERVAL_S by
 # _hang_heartbeat_loop (an async task ON the loop) and read by the off-loop
 # watchdog thread + the debug request log + GET /debug/stacks. A growing (now
@@ -770,11 +778,27 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                             await asyncio.sleep(_INCONCLUSIVE_LOAD_RETRY_DELAY)
                             continue
                         elapsed = time.monotonic() - load_attempt_started
+                        # Escalate to the same seamless self-restart the hang
+                        # alarm's own loop-freeze/transport-death detectors use,
+                        # sharing its latch and storm guard. See
+                        # TestSwitchEngineEscalatesToSelfRestartWhenStillInconclusive.
+                        restarting = (
+                            _hang_alarm_instance.trigger_restart(
+                                f"GPU probe still inconclusive after "
+                                f"{inconclusive_retries + 1} attempts loading '{name}'")
+                            if _hang_alarm_instance is not None else False)
+                        if restarting:
+                            raise HTTPException(
+                                503, f"Cannot load '{name}' right now: the server "
+                                "detected a stuck GPU check and is restarting "
+                                "automatically. This page will reconnect once it "
+                                "comes back up.")
                         raise HTTPException(
                             503, f"Cannot load '{name}': tried measuring free VRAM "
                             f"{inconclusive_retries + 1} times over about "
-                            f"{elapsed:.0f}s without a conclusive reading, and no "
-                            f"idle model could be freed to make room.")
+                            f"{elapsed:.0f}s without a conclusive reading, could not "
+                            "free anything, and automatic recovery is unavailable. "
+                            "Please file a bug report if this keeps happening.")
                     # Local eviction exhausted: before giving up, best-effort ask a
                     # sibling localm instance to release ITS VRAM (multi-instance
                     # coordination, see localm.gpu_registry). Off the event loop (it
@@ -3542,7 +3566,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
                 _mode_now = _ha.recovery_mode()
                 if _mode_now != "off":
-                    global _hang_dump_loop
+                    global _hang_dump_loop, _hang_alarm_instance
                     _hang_dump_loop = asyncio.get_running_loop()
                     hang_alarm = _ha.HangAlarm(
                         heartbeat_gap=lambda: (
@@ -3559,6 +3583,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                         starvation_after=_ha.starvation_seconds(),
                         allow_restart=(_mode_now == "restart"),
                     ).start()
+                    _hang_alarm_instance = hang_alarm
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("hang alarm startup failed (continuing): %s", e)
