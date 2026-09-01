@@ -781,7 +781,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         # Escalate to the same seamless self-restart the hang
                         # alarm's own loop-freeze/transport-death detectors use,
                         # sharing its latch and storm guard. See
-                        # test_switch_engine_escalates_to_self_restart_when_still_inconclusive.
+                        # TestSwitchEngineEscalatesToSelfRestartWhenStillInconclusive.
                         restarting = (
                             _hang_alarm_instance.trigger_restart(
                                 f"GPU probe still inconclusive after "
