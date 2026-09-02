@@ -124,7 +124,7 @@ localm setup-llama   # provision the native GGUF backend for your GPU (see GPU s
 
 Needs Python **exactly 3.12.x already on your machine** - unlike the self-contained installers above, `pip install` does not provision its own Python, it installs into whatever interpreter ran the command.
 
-**Set `LOCALM_HOME` before you do anything else.** The self-contained installers above always ask where data should live; a plain `pip install` never does. Leave `LOCALM_HOME` unset and localm falls back to a directory *inside your Python environment* (`localm info` prints the path actually in use) - the next `pip install --upgrade localm` can wipe it. Set it once, in your shell profile or however you persist environment variables:
+**Set `LOCALM_HOME` before you do anything else.** The self-contained installers above always ask where data should live; a plain `pip install` never does. Leave `LOCALM_HOME` unset and localm falls back to a directory *inside your Python environment* (`localm info` prints the path actually in use). An upgrade does not delete it, but every model you download then lands inside your site-packages directory, and removing or recreating that environment takes your models, chats and settings with it. Set it once, in your shell profile or however you persist environment variables:
 
 ```bash
 export LOCALM_HOME=~/localm-data              # Linux/macOS
