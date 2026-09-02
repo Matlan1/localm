@@ -22,7 +22,6 @@ from localm.inference.backends.base import (
 )
 from localm.inference.engine import Engine
 from localm.inference.http_server import create_app
-from localm.plugins.builtin.chat.plug import _ROLE_WORD_INSTRUCTION
 from tests._bare_llama import make_bare_llama
 
 
@@ -145,11 +144,14 @@ class TestPreDispatchContextCapacityGuard:
         app = create_app(engine)
         client = TestClient(app)
 
-        # /v1/completions has no system-message field, so the always-on
-        # role-word inlet always inserts _ROLE_WORD_INSTRUCTION ahead of the
-        # prompt; _messages_prompt_text joins the two with a single space.
+        # /v1/completions has no system-message field to opt the role-word
+        # nudge out via a "third person" mention, but the nudge's OWN
+        # _nudge_fits_capacity guard skips it anyway at this capacity (the
+        # ~190-char instruction exceeds 10% of 100) - the same guard
+        # /v1/chat/completions relies on, applied uniformly regardless of
+        # which route built the message list. So the prompt is unmodified.
         oversized_prompt = "x" * 150
-        expected_tokens = len(_ROLE_WORD_INSTRUCTION) + 1 + len(oversized_prompt)
+        expected_tokens = len(oversized_prompt)
         resp = client.post(
             "/v1/completions",
             json={
@@ -169,8 +171,9 @@ class TestPreDispatchContextCapacityGuard:
         app = create_app(engine)
         client = TestClient(app)
 
+        # Same capacity-guard skip as the non-streaming case above.
         oversized_prompt = "x" * 150
-        expected_tokens = len(_ROLE_WORD_INSTRUCTION) + 1 + len(oversized_prompt)
+        expected_tokens = len(oversized_prompt)
         resp = client.post(
             "/v1/completions",
             json={
