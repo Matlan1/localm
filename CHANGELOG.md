@@ -102,6 +102,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   exact model name.
 
 ### Fixed
+- **The "Other instances" list (Models page) could take several seconds to
+  refresh when more than one localm server was running.** Each running
+  instance was checked one at a time, so the wait added up with every extra
+  instance. They are now all checked at once, so the list loads about as
+  fast as the slowest single instance instead of the sum of all of them.
 - **A HuggingFace model's generation failure could leave a reply stuck for
   fifteen minutes instead of failing right away.** If generation hit a real
   error partway through (an out-of-memory condition, a bad setting, or a
