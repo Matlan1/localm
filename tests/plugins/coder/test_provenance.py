@@ -496,3 +496,46 @@ def test_compressing_an_oversized_block_keeps_the_range_over_what_survives():
     covered = "".join(str(out)[a:b] for a, b in spans)
     assert "S" * 100 in covered and "E" * 100 in covered
     assert "elided to save context" not in covered
+
+
+def test_a_real_turn_leaves_the_untrusted_range_on_the_message_it_sends():
+    """The combined user message the loop builds must still carry the ranges.
+
+    This is the hop where the blocks become ONE message. A plain str.join here
+    would drop every range while every other test in this file still passed.
+    """
+    from unittest.mock import MagicMock, patch as _patch
+    from localm.textguard import untrusted_spans_of
+
+    def _make_agent(cwd):
+        from localm.plugins.coder.agent import Agent
+        backend = MagicMock()
+        backend.model_id = "test-model"
+        backend.native_tools = False
+        with _patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+             _patch("localm.plugins.coder.agent.make_audit_log"), \
+             _patch("localm.plugins.coder.agent.load_memory", return_value=""):
+            MockPM.build.return_value.file_count.return_value = 0
+            return Agent(backend=backend, cwd=cwd)
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        agent = _make_agent(Path(td))
+        block = build_result_block(
+            "fetch_url", ToolResult(True, "PAGE " + _EXOTIC), untrusted=True)
+        responses = iter([
+            '{"name": "fetch_url", "args": {"url": "http://x"}}',
+            "Done.",
+        ])
+        with _patch.object(agent, "_call_llm",
+                           side_effect=lambda *a, **k: next(responses)), \
+             _patch.object(agent, "_execute_tools", return_value=[block]):
+            agent.run_task("fetch the page")
+
+    fed = [m for m in agent._messages
+           if m["role"] == "user" and str(m["content"]).startswith("<tool_result")]
+    assert fed, "the tool result was never fed back as a user message"
+    spans = untrusted_spans_of(fed[-1]["content"])
+    assert spans, "the loop dropped the untrusted range when combining blocks"
+    covered = "".join(str(fed[-1]["content"])[a:b] for a, b in spans)
+    assert _EXOTIC in covered
