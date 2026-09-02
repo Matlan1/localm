@@ -367,6 +367,10 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/phone.md](docs/phone.md) | Using localm from your phone: the installable PWA companion |
 | [docs/native-app.md](docs/native-app.md) | The native `LocaLM.exe` launcher: how it works, `make-launcher`, the freeze trade-off |
 
+### Test coverage
+
+Every CI run measures coverage (`pytest --cov=localm`) and publishes it to that run's own summary page, which is not otherwise linked from anywhere. As a snapshot: the `full-ci` matrix run for [PR #1572](https://github.com/Matlan1/localm/pull/1572) (2026-08-27, windows-latest leg) measured **81%** combined statement+branch coverage, clearing the repository's 78% coverage floor (`pyproject.toml`, `[tool.coverage.report] fail_under`) with headroom to spare. A second, independent set of floors covers the trust-boundary modules least tolerant of a silent regression - `bindhost.py`, `scopes.py`, `pathsafe.py`, `netpolicy.py`, `auth.py`, `tls.py`, `config.py`, `portmux.py` - each with its own minimum (see `scripts/check_coverage_floors.py`, or run it with `--report` for the current numbers). This paragraph is a hand-updated snapshot, not a live badge, and can go stale between refreshes; the enforced numbers are always the CI gates themselves.
+
 ---
 
 ## Getting help
