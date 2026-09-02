@@ -55,6 +55,10 @@ from .gguf import (
     gguf_embedding_signal,
     gguf_is_mmproj,
     gguf_registry_metadata,
+    gguf_capability_metadata,
+    gguf_tool_use_signal,
+    gguf_context_length,
+    chat_template_tool_signal,
     missing_split_parts,
     split_gguf_parts,
 )
@@ -145,6 +149,8 @@ __all__ = [
     "_hash_with_progress", "_has_gguf_magic",
     "_gguf_first_parts", "_GGUF_MIN_BYTES", "gguf_embedding_signal", "gguf_is_mmproj",
     "gguf_registry_metadata", "_GGUF_SETTLE_SECONDS", "_gguf_recently_written",
+    "gguf_capability_metadata", "gguf_tool_use_signal", "gguf_context_length",
+    "chat_template_tool_signal",
     # registry
     "MODEL_SHORTCUTS", "_SHORTCUT_SIZES", "resolve_spec", "get_model_path",
     "get_model_info", "find_sibling_mmproj", "get_model_mmproj", "_hf_is_vision",

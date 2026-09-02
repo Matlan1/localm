@@ -52,6 +52,7 @@ def register(app: FastAPI, ctx) -> None:
     _audit_exchange = _hs._audit_exchange
     _pin_engine = _hs._pin_engine
     _memory_used_header = _hs._memory_used_header
+    _capability_route_header = _hs._capability_route_header
 
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest, request: Request):
@@ -70,7 +71,23 @@ def register(app: FastAPI, ctx) -> None:
         if not req.model and not (_hs._active_model_name or _hs._default_model_name):
             raise HTTPException(400, "Model parameter is required and cannot be empty")
 
-        engine = await _hs.get_engine(req.model)
+        # Plain-dict messages for the backend. Hoisted above engine resolution
+        # because capability routing reads them to decide which model answers.
+        messages = _protocol_messages_to_dicts(req.messages)
+
+        # Capability routing. Blocking (a registry read plus a probe per
+        # candidate), so it runs in an executor. Its target replaces req.model
+        # ONLY when the request pinned no model - plan_capability_route decides
+        # that with the same test get_engine uses, and never moves a pinned one.
+        _loop = asyncio.get_running_loop()
+        route = await _loop.run_in_executor(
+            None, _hs.plan_capability_route, req.model, messages,
+            req.required_capabilities)
+        if route.has_gap:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("capability routing: %s", route.describe())
+
+        engine = await _hs.get_engine(route.resolved if route.routed else req.model)
         # Report the model that actually answered when the request named none.
         # Both an omitted field (None) and an explicit "" are falsy and fall through
         # to engine.display_name; an explicit "localm" echoes back unchanged.
@@ -82,9 +99,6 @@ def register(app: FastAPI, ctx) -> None:
         streaming_handoff = False
         try:
             _touch_activity(engine.display_name)
-
-            # Convert pydantic Messages to plain dicts for the backend
-            messages = _protocol_messages_to_dicts(req.messages)
 
             # Chat-pipeline hooks. The inlet runs here, so token counting and
             # inference see the transformed messages. The per-request context is
@@ -257,6 +271,9 @@ def register(app: FastAPI, ctx) -> None:
                         # already ran, so ctx.state is populated. No-op when memory
                         # did not run this turn.
                         **_memory_used_header(ctx),
+                        # Which model answered and why, when the choice needed
+                        # explaining. No-op otherwise.
+                        **_capability_route_header(route),
                     },
                 )
             resp = await _complete(engine, messages, reported_model, sem,
@@ -265,6 +282,8 @@ def register(app: FastAPI, ctx) -> None:
                                    request=request, prompt_tokens=prompt_tokens, **gen_kwargs)
             for _hk, _hv in _memory_used_header(ctx).items():
                 resp.headers[_hk] = _hv          # same surface, non-streaming
+            for _hk, _hv in _capability_route_header(route).items():
+                resp.headers[_hk] = _hv
             return resp
         finally:
             if not streaming_handoff:

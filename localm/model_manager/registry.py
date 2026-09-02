@@ -33,7 +33,7 @@ from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_is_mmproj
-from .gguf import gguf_registry_metadata
+from .gguf import gguf_capability_metadata, gguf_registry_metadata
 from .gguf import _gguf_metadata_probe
 
 MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'unknown'})
@@ -1422,6 +1422,8 @@ def _register(
     mmproj: Optional[Path] = None,
     architecture: Optional[str] = None,
     expert_count: Optional[int] = None,
+    tool_use: Optional[bool] = None,
+    context_length: Optional[int] = None,
 ) -> None:
     """*mmproj*, when given, is a vision projector already verified and placed
     on disk (pull.py's job) and is recorded on the entry so get_model_mmproj
@@ -1436,7 +1438,16 @@ def _register(
     model's header WAS read and genuinely has no experts) and must stay written
     and distinct from an entry that was never checked at all (the key absent
     entirely) - collapsing the two would show a real MoE model as
-    confirmed-dense the moment a caller defaults a missing field to 0."""
+    confirmed-dense the moment a caller defaults a missing field to 0.
+
+    ``tool_use`` / ``context_length`` are the routing capabilities read from the
+    same header (gguf_capability_metadata). Unlike the two above they are read
+    HERE rather than passed in, so every registration path captures them without
+    each call site having to remember; a caller that already has them can pass
+    them and skip the read. They obey the same ``is not None`` rule for the same
+    reason: a stored ``tool_use=False`` is a real answer (the model's own chat
+    template was read and renders no tool calls) and must stay distinct from a
+    key never written, which means nobody has looked."""
     entry = {"path": str(path.resolve()), "source": source, "model_type": model_type}
     if sha256:
         entry["sha256"] = sha256.lower()
@@ -1446,6 +1457,15 @@ def _register(
         entry["architecture"] = architecture
     if expert_count is not None:
         entry["expert_count"] = expert_count
+    if (tool_use is None and context_length is None
+            and path.suffix.lower() == ".gguf"):
+        cmeta = gguf_capability_metadata(path)
+        tool_use = cmeta.get("tool_use")
+        context_length = cmeta.get("context_length")
+    if tool_use is not None:
+        entry["tool_use"] = tool_use
+    if context_length is not None:
+        entry["context_length"] = context_length
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
     # a parallel pull, sync_models_dir) can't clobber this entry.
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
@@ -1645,6 +1665,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
 
     flagged = restored = pruned = 0
     backfilled = 0
+    cap_backfilled = 0
     mmproj_backfilled = 0
     mmproj_attempts = 0    # network round-trips spent this call (cap input);
                             # mmproj_backfilled counts only real SUCCESSES -
@@ -1660,6 +1681,10 @@ def sync_models_dir(prune: Optional[bool] = None, *,
     # docstring for that cost). A handful per call makes steady progress across
     # a few ordinary restarts instead.
     _BACKFILL_CAP = 5
+    # Same shape and the same reasoning as _BACKFILL_CAP, for the routing
+    # capabilities (tool_use / context_length). A separate budget so neither
+    # set of keys can starve the other.
+    _CAPABILITY_BACKFILL_CAP = 5
     # mmproj backfill: SAME shape (bounded, opportunistic, self-correcting
     # across ordinary restarts) but a much more expensive unit of work - an HF
     # repo listing plus, when found, a real file download, not a local read -
@@ -1673,7 +1698,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
 
     def _reconcile(reg: dict) -> None:
         nonlocal flagged, restored, pruned, note, backed_up, backfilled
-        nonlocal mmproj_backfilled, mmproj_attempts
+        nonlocal mmproj_backfilled, mmproj_attempts, cap_backfilled
 
         # Managed models = those whose file lives under the models folder.
         managed = [
@@ -1719,6 +1744,23 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                     if gmeta.get("expert_count") is not None:
                         entry["expert_count"] = gmeta["expert_count"]
                     backfilled += 1
+                # Routing-capability backfill (tool_use / context_length), on
+                # the same bounded, opportunistic, self-correcting shape. Its
+                # OWN counter and cap rather than sharing _BACKFILL_CAP: the two
+                # sets of keys were added at different times, so a registry full
+                # of entries that already carry architecture but not these would
+                # never reach this block if the architecture branch owned the
+                # budget, and vice versa.
+                if (cap_backfilled < _CAPABILITY_BACKFILL_CAP
+                        and path.suffix.lower() == ".gguf"
+                        and "tool_use" not in entry
+                        and "context_length" not in entry):
+                    cmeta = gguf_capability_metadata(path)
+                    if cmeta.get("tool_use") is not None:
+                        entry["tool_use"] = cmeta["tool_use"]
+                    if cmeta.get("context_length") is not None:
+                        entry["context_length"] = cmeta["context_length"]
+                    cap_backfilled += 1
                 # mmproj backfill (see _MMPROJ_BACKFILL_CAP above): an
                 # already-registered LLM pulled from an hf: source, with no
                 # mmproj recorded, gets the same same-repo auto-attach a fresh

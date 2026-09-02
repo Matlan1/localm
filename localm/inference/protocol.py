@@ -6,7 +6,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ------------------------------------------------------------------ #
@@ -157,6 +157,36 @@ class ChatRequest(BaseModel):
     grammar_lazy: bool = False
     grammar_triggers: Optional[List[str]] = None
     seed: Optional[int] = None     # RNG seed for reproducible generation
+    # Capabilities the answering model must have, e.g. ["tool_use"]. Consulted
+    # ONLY when no model is pinned: with an explicit `model`, a gap is reported
+    # and the pinned model still answers.
+    #
+    # Deliberately not named `tools` and deliberately not the OpenAI
+    # tools/tool_choice schema. Accepting that shape would advertise
+    # tool-calling protocol support this server does not implement; this field
+    # claims only what it does, which is to steer model selection. Vision and
+    # context length need no entry here - both are derived from the request
+    # itself (an image part, the prompt's size).
+    required_capabilities: Optional[List[str]] = None
+
+    @field_validator("required_capabilities")
+    @classmethod
+    def _known_capabilities(cls, v):
+        """Reject an unrecognised capability name instead of ignoring it.
+
+        A typo that silently routed nowhere would look identical to "no
+        installed model qualifies", so the caller would never learn the name was
+        wrong. Imported lazily: the capability module pulls in the registry, and
+        this module is imported at server start."""
+        if v is None:
+            return v
+        from localm.model_manager.capabilities import BOOLEAN_CAPABILITIES
+        unknown = [c for c in v if c not in BOOLEAN_CAPABILITIES]
+        if unknown:
+            raise ValueError(
+                f"unknown capability {unknown}; "
+                f"expected any of {list(BOOLEAN_CAPABILITIES)}")
+        return v
 
 
 # ------------------------------------------------------------------ #

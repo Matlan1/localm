@@ -1391,3 +1391,184 @@ def gguf_registry_metadata(path: Path, meta: Optional[dict] = None) -> dict:
     expert_count = gguf_expert_count(path) if architecture is not None else None
     return {"architecture": architecture, "expert_count": expert_count}
 
+
+
+# ------------------------------------------------------------------ #
+#  Static capability metadata (tool-use, context length)               #
+# ------------------------------------------------------------------ #
+
+# A THIRD read bound, larger than _GGUF_META_PROBE_BYTES and smaller than
+# _GGUF_TENSOR_PROBE_BYTES. llama.cpp's converter writes tokenizer.chat_template
+# AFTER the tokenizer vocabulary arrays, not before them: measured on a real
+# 151k-token-vocab export, general.architecture sits at byte 24 and
+# <arch>.context_length at byte 833, while the chat template lands at 5.66 MiB
+# behind 5.9 MiB of tokens/token_type/merges arrays. The 4 MiB probe therefore
+# cannot reach it. This covers roughly 2.5x that vocabulary size; a file whose
+# metadata runs past it reports the truncation as "unknown" rather than a guess.
+_GGUF_CAPABILITY_PROBE_BYTES = 16 * 1024 * 1024
+
+_GGUF_CONTEXT_LENGTH_SUFFIX = ".context_length"
+
+_GGUF_CHAT_TEMPLATE_KEY = "tokenizer.chat_template"
+
+# Substrings that mark a chat template as rendering STRUCTURED tool calls.
+# Every one is a Jinja control construct or an OpenAI message field that only a
+# tool-aware template contains, never ordinary prose about tools: the tools
+# variable used in a conditional or a loop, the assistant tool_calls field, the
+# tool-result tool_call_id field, the literal <tool_call> tag several families
+# emit, and the older function-calling spelling.
+_GGUF_TOOL_TEMPLATE_MARKERS = (
+    "tool_calls", "tool_call_id", "<tool_call", "if tools", "in tools",
+    "tools is defined", "tools %}", "function_call", "if functions",
+)
+
+
+def chat_template_tool_signal(template: Optional[str]) -> Optional[bool]:
+    """Whether a chat template renders STRUCTURED tool calls - a TRI-STATE.
+
+    ``True``  the template drives tool-call formatting (see
+              ``_GGUF_TOOL_TEMPLATE_MARKERS``).
+    ``False`` the template was read and drives none.
+    ``None``  no template was read, so there is nothing to judge.
+
+    Shared by the GGUF reader below and by the HuggingFace-directory reader in
+    registry.py, so one template answers the same way whichever format carried
+    it."""
+    if template is None:
+        return None
+    low = template.lower()
+    return any(m in low for m in _GGUF_TOOL_TEMPLATE_MARKERS)
+
+
+def _gguf_capability_probe(path: Path) -> dict:
+    """Best-effort read of the GGUF header metadata behind the tool-use and
+    context-length capability signals.
+
+    Returns ``{"chat_template": Optional[str], "context_length": Optional[int],
+    "complete": bool}``. ``complete`` is True only when the KV walk visited
+    every declared entry without truncating or hitting a malformed value, and it
+    is the whole point of this return shape: with it, a ``chat_template`` of
+    None means the file DECLARES no template (a real answer), and without it the
+    same None means the read never got that far (no answer at all). Collapsing
+    the two would report every big-vocabulary model as confirmed tool-incapable.
+
+    Reads one bounded prefix (see ``_GGUF_CAPABILITY_PROBE_BYTES``), never the
+    whole model, and never raises.
+
+    Keys are collected by FULL name and resolved against ``general.architecture``
+    at the end, so key order does not matter and an mmproj's parallel
+    ``clip.*`` metadata block can never be read as the LLM's own."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_CAPABILITY_PROBE_BYTES)
+    except OSError:
+        return {"chat_template": None, "context_length": None, "complete": False}
+
+    architecture = None
+    chat_template = None
+    ctx_by_key: dict = {}
+    complete = False
+    try:
+        if buf[:4] != b"GGUF":
+            return {"chat_template": None, "context_length": None,
+                    "complete": False}
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return {"chat_template": None, "context_length": None,
+                    "complete": False}
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            if key == _GGUF_CHAT_TEMPLATE_KEY and vtype == _GGUF_TYPE_STRING:
+                chat_template, off = _gguf_read_string(buf, off)
+                continue
+            if key.endswith(_GGUF_CONTEXT_LENGTH_SUFFIX):
+                try:
+                    val, off = _gguf_read_scalar(buf, off, vtype)
+                    ctx_by_key[key] = val
+                    continue
+                except struct.error:
+                    # A non-scalar value under this key is not a context length;
+                    # skip it like any other unread value rather than abandoning
+                    # the walk.
+                    pass
+            off = _gguf_skip_value(buf, off, vtype)
+        complete = True
+    except (struct.error, IndexError, UnicodeDecodeError):
+        pass
+
+    context_length = None
+    if architecture is not None:
+        raw = ctx_by_key.get(f"{architecture}{_GGUF_CONTEXT_LENGTH_SUFFIX}")
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            context_length = raw
+    return {"chat_template": chat_template, "context_length": context_length,
+            "complete": complete}
+
+
+def gguf_tool_use_signal(path: Path, meta: Optional[dict] = None) -> Optional[bool]:
+    """Whether a GGUF model is known to support STRUCTURED tool calls, read from
+    its own baked-in chat template - a TRI-STATE.
+
+    ``True``  its template renders tool calls.
+    ``False`` its template was read and renders none, OR the header was walked
+              in full and declares no template at all.
+    ``None``  the header could not be read far enough to tell.
+
+    llama.cpp's converter copies the source model's HuggingFace chat template
+    into ``tokenizer.chat_template`` verbatim, so a tool-calling fine-tune
+    carries its own ``{% if tools %}`` branch and ``<tool_call>`` formatting in
+    the file itself - hard metadata, never a filename guess.
+
+    This answers "known to reliably emit structured tool calls", NOT "can be used
+    for tool work at all": localm's coder drives tools by PROMPTING for
+    ``<tool_call>`` XML and parsing the reply, which works against any
+    instruction-following model. A ``False`` here is a fitness signal, never a
+    refusal.
+
+    *meta*, when given, is an already-computed ``_gguf_capability_probe(path)``
+    result, so a caller reading both capabilities pays one read."""
+    if meta is None:
+        meta = _gguf_capability_probe(path)
+    template = meta.get("chat_template")
+    if template is None:
+        return False if meta.get("complete") else None
+    return chat_template_tool_signal(template)
+
+
+def gguf_context_length(path: Path, meta: Optional[dict] = None) -> Optional[int]:
+    """The trained context window of a GGUF model, from its own
+    ``<architecture>.context_length`` header key. ``None`` when the header could
+    not be read or states no positive context length.
+
+    The pre-load counterpart to ``llama_model_n_ctx_train()``, which needs the
+    model already resident and so cannot inform a decision about WHICH model to
+    load.
+
+    *meta*, when given, is an already-computed ``_gguf_capability_probe(path)``
+    result (see ``gguf_tool_use_signal``)."""
+    if meta is None:
+        meta = _gguf_capability_probe(path)
+    return meta.get("context_length")
+
+
+def gguf_capability_metadata(path: Path) -> dict:
+    """``{"tool_use": Optional[bool], "context_length": Optional[int]}`` for a
+    GGUF file, to persist on its registry entry at registration time - the same
+    one-read-at-registration shape as ``gguf_registry_metadata``.
+
+    Both are None together when the header could not be read at all: genuinely
+    UNKNOWN, never coerced to a false "no tools" that would rule a real
+    tool-calling model out of routing the moment a caller trusted it. Callers
+    persist a value only when it ``is not None``, so a stored ``False`` (a real
+    template that renders no tool calls) stays distinct from a key never
+    written."""
+    meta = _gguf_capability_probe(path)
+    return {"tool_use": gguf_tool_use_signal(path, meta=meta),
+            "context_length": gguf_context_length(path, meta=meta)}
