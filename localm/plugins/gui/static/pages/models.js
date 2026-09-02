@@ -5,6 +5,7 @@
 // --- ES module imports ---
 import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast } from "../app/helpers.js";
+import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { modelCache, refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
@@ -141,11 +142,7 @@ function _groupingActive() {
 // The note naming how many rows the All tab left out and where to find them.
 // Also stands in for the empty state when every model is one of the hidden ones.
 export function otherHiddenNote(n) {
-  const one = n === 1;
-  return el("div", "sub models-other-note",
-    `${n} model${one ? "" : "s"} of a type with no tab of its own ` +
-    `${one ? "is" : "are"} not listed here - see the Other tab, ` +
-    `or tick "show other types here".`);
+  return el("div", "sub models-other-note", tn("models.otherHiddenNote", n));
 }
 
 // Show each display toggle only in the views it applies to.
@@ -166,11 +163,11 @@ let pendingPullTypeHint = null;
 // (case-insensitive). The header row, the click/keydown handlers and the
 // comparator all read this one list.
 const MODEL_COLUMNS = [
-  { key: "name", label: "Name", sortable: true, kind: "string", get: (m) => m.name || "" },
-  { key: "model_type", label: "Role", sortable: true, kind: "string", get: (m) => m.model_type || "llm" },
-  { key: "source", label: "Source", sortable: true, kind: "string", get: (m) => m.source || "" },
-  { key: "size_bytes", label: "Size", sortable: true, kind: "number", get: (m) => m.size_bytes },
-  { key: "mtime", label: "Modified", sortable: true, kind: "number", get: (m) => m.mtime },
+  { key: "name", label: "models.col.name", sortable: true, kind: "string", get: (m) => m.name || "" },
+  { key: "model_type", label: "models.col.role", sortable: true, kind: "string", get: (m) => m.model_type || "llm" },
+  { key: "source", label: "models.col.source", sortable: true, kind: "string", get: (m) => m.source || "" },
+  { key: "size_bytes", label: "models.col.size", sortable: true, kind: "number", get: (m) => m.size_bytes },
+  { key: "mtime", label: "models.col.modified", sortable: true, kind: "number", get: (m) => m.mtime },
   { key: "actions", label: "", sortable: false },
 ];
 const _SORTABLE_KEYS = MODEL_COLUMNS.filter((c) => c.sortable).map((c) => c.key);
@@ -239,7 +236,7 @@ export async function refreshModelsPage() {
       // Expired or absent session. Show the in-page key gate rather than falling
       // through to the models=[] path, which would read as "No models yet". Not
       // gated on myGen.
-      showKeyGate("This LocaLM server requires an API key.");
+      showKeyGate(t("models.keyRequired"));
       return;
     }
     if (!r.ok) {
@@ -247,14 +244,14 @@ export async function refreshModelsPage() {
       // returns a body with no `models` array. Surface the status instead of
       // falling through to the empty-list path.
       if (myGen !== _modelsRenderGen) return;
-      box.replaceChildren(el("div", "sub", `Could not load models (HTTP ${r.status})`));
+      box.replaceChildren(el("div", "sub", t("models.loadError", { status: r.status })));
       return;
     }
     const data = await r.json();
     models = (data && Array.isArray(data.models)) ? data.models : [];
   } catch (e) {
     if (myGen !== _modelsRenderGen) return;
-    box.replaceChildren(el("div", "sub", "Error loading models: " + e.message));
+    box.replaceChildren(el("div", "sub", t("models.loadException", { message: e.message })));
     return;
   }
 
@@ -290,8 +287,7 @@ export async function refreshModelsPage() {
     // hiding all of it; the empty state otherwise.
     box.replaceChildren(hiddenOther
       ? otherHiddenNote(hiddenOther)
-      : emptyState("models", "No models yet",
-                   "Pull a model above, or search HuggingFace to add your first one."));
+      : emptyState("models", t("models.empty.text"), t("models.empty.hint")));
     return;
   }
 
@@ -306,7 +302,7 @@ export async function refreshModelsPage() {
   const thead = el("thead");
   const hr = el("tr");
   for (const col of MODEL_COLUMNS) {
-    const th = el("th", "", col.label);
+    const th = el("th", "", col.label ? t(col.label) : "");
     if (col.sortable) {
       th.classList.add("sortable");
       th.tabIndex = 0;
@@ -369,19 +365,19 @@ export async function refreshModelsPage() {
       nameLine.appendChild(el("span", "arch-badge", m.architecture));
     }
     if (m.expert_count > 0) {
-      nameLine.appendChild(el("span", "moe-badge moe-confirmed", MOE_LABEL.confirmed));
+      nameLine.appendChild(el("span", "moe-badge moe-confirmed", t(MOE_LABEL.confirmed)));
     }
     const visBadge = visionBadge(m.vision);
     if (visBadge) nameLine.appendChild(visBadge);
-    if (m.active) nameLine.appendChild(el("span", "active-tag job-state st-ok", "active"));
+    if (m.active) nameLine.appendChild(el("span", "active-tag job-state st-ok", t("models.tag.active")));
     // Independent of "active": a model can sit resident in VRAM without being
     // the one currently serving requests. Wears job-state's "on" variant rather
     // than active-tag, so it looks distinct and does not trigger the
     // tr:has(.active-tag) row highlight.
-    else if (m.loaded) nameLine.appendChild(el("span", "loaded-tag job-state on", "loaded"));
+    else if (m.loaded) nameLine.appendChild(el("span", "loaded-tag job-state on", t("models.tag.loaded")));
     // The file behind this entry is gone (moved or deleted). The relocate
     // action in the actions cell below is the fix.
-    if (m.missing) nameLine.appendChild(el("span", "missing-tag job-state st-error", "missing"));
+    if (m.missing) nameLine.appendChild(el("span", "missing-tag job-state st-error", t("models.tag.missing")));
     tr.appendChild(nameTd);
     
     // Role column. The set-type control IS this column - one pill that both
@@ -396,14 +392,14 @@ export async function refreshModelsPage() {
     // use/alias).
     const typeSel = el("select", "model-type-select type-badge type-" + roleType);
     typeSel.title = untagged
-      ? "No type is recorded for this model - pick one"
-      : "Change this model's type";
-    typeSel.setAttribute("aria-label", `Model type for ${m.name}`);
+      ? t("models.typeSelect.titleUnset")
+      : t("models.typeSelect.titleChange");
+    typeSel.setAttribute("aria-label", t("models.typeSelect.ariaLabel", { name: m.name }));
     if (untagged) {
       // A placeholder, not a value: "not set" is not a MODEL_TYPES member and
       // the set-type route rejects it, so it is disabled and can never be
       // chosen or posted. Rendered only while no type is recorded.
-      const none = el("option", "", "not set");
+      const none = el("option", "", t("models.typeSelect.notSet"));
       none.value = "";
       none.disabled = true;
       none.selected = true;
@@ -423,8 +419,8 @@ export async function refreshModelsPage() {
           body: JSON.stringify({ model: m.name, model_type: typeSel.value }),
         });
         const data = await r.json().catch(() => ({}));
-        if (!r.ok) { toast(data.detail || "Set type failed", true); return; }
-        toast(`Set '${m.name}' type to ${typeSel.value}`);
+        if (!r.ok) { toast(data.detail || t("models.setType.failed"), true); return; }
+        toast(t("models.setType.toast", { name: m.name, type: typeSel.value }));
         refreshModelsPage();
         refreshPerfEstimate();
       } finally { typeSel.disabled = false; }
@@ -440,18 +436,18 @@ export async function refreshModelsPage() {
     tr.appendChild(el("td", "mono shrink-cell", fmtModelDate(m.mtime)));
 
     const actions = el("td", "actions-cell");
-    const detail = el("button", "secondary", "info");
+    const detail = el("button", "secondary", t("models.action.info"));
     detail.onclick = () => showModelDetail(m.name);
     actions.appendChild(detail);
 
     // Not gated on isLlm below: any model type can be an externally-referenced
     // file that gets moved. Rendered only when the file is missing.
     if (m.missing) {
-      const relocateBtn = el("button", "secondary", "relocate");
-      relocateBtn.title = "Point this entry at the file's new location";
+      const relocateBtn = el("button", "secondary", t("models.action.relocate"));
+      relocateBtn.title = t("models.relocate.title");
       relocateBtn.onclick = async () => {
         const path = await promptText(
-          `New location for '${m.name}' (a .gguf file, or a HuggingFace model folder):`,
+          t("models.relocate.prompt", { name: m.name }),
           m.last_path || "");
         if (!path || !path.trim()) return;
         const r = await fetch("/api/models/relocate", {
@@ -459,8 +455,8 @@ export async function refreshModelsPage() {
           body: JSON.stringify({ model: m.name, new_path: path.trim() }),
         });
         const data = await r.json().catch(() => ({}));
-        if (r.ok) { toast(`Relocated '${m.name}'`); refreshModelsPage(); }
-        else toast(data.detail || "Relocate failed", true);
+        if (r.ok) { toast(t("models.relocate.toast", { name: m.name })); refreshModelsPage(); }
+        else toast(data.detail || t("models.relocate.failed"), true);
       };
       actions.appendChild(relocateBtn);
     }
@@ -469,13 +465,13 @@ export async function refreshModelsPage() {
     const isLlm = !m.model_type || m.model_type === "llm";
     if (isLlm) {
       if (!m.active) {
-        const use = el("button", "primary", "use");
+        const use = el("button", "primary", t("models.action.use"));
         use.onclick = async () => {
           // An inline busy label on the button itself, alongside the sidebar
           // #status-text pill switchModel() drives.
           const prevLabel = use.textContent;
           use.disabled = true;
-          use.textContent = "loading…";
+          use.textContent = t("models.use.loading");
           try {
             const res = await switchModel(m.name);
             if (!res || (res.status !== "superseded" && res.status !== "cancelled")) {
@@ -486,14 +482,14 @@ export async function refreshModelsPage() {
               refreshPerfEstimate();
             }
           } catch (e) {
-            toast("Load failed: " + e.message, true);
+            toast(t("models.use.loadFailed", { message: e.message }), true);
           } finally { use.disabled = false; use.textContent = prevLabel; }
         };
         actions.appendChild(use);
       }
-      const aliasBtn = el("button", "secondary", "alias");
+      const aliasBtn = el("button", "secondary", t("models.action.alias"));
       aliasBtn.onclick = async () => {
-        const name = await promptText(`New alias for '${m.name}':`);
+        const name = await promptText(t("models.alias.prompt", { name: m.name }));
         if (!name) return;
         const r = await fetch("/api/models/alias", {
           method: "POST", headers: authHeaders(),
@@ -502,15 +498,16 @@ export async function refreshModelsPage() {
         const data = await r.json().catch(() => ({}));
         // Report the alias the SERVER stored, not the raw text: aliases are
         // sanitized server-side ("daily driver" -> "daily-driver").
-        if (r.ok) { toast(`Aliased as '${data.alias || name.trim()}'`); refreshModelsPage(); }
-        else toast(data.detail || "Alias failed", true);
+        if (r.ok) {
+          toast(t("models.alias.toast", { alias: data.alias || name.trim() }));
+          refreshModelsPage();
+        } else toast(data.detail || t("models.alias.failed"), true);
       };
       actions.appendChild(aliasBtn);
-      const renameBtn = el("button", "secondary", "rename");
-      renameBtn.title = "Rename this model (unlike alias, the old name stops working; "
-        + "any OTHER name already pointing at the same file is unaffected)";
+      const renameBtn = el("button", "secondary", t("models.action.rename"));
+      renameBtn.title = t("models.rename.title");
       renameBtn.onclick = async () => {
-        const name = await promptText(`Rename '${m.name}' to:`, m.name);
+        const name = await promptText(t("models.rename.prompt", { name: m.name }), m.name);
         if (!name || name.trim() === m.name) return;
         const r = await fetch("/api/models/rename", {
           method: "POST", headers: authHeaders(),
@@ -520,7 +517,7 @@ export async function refreshModelsPage() {
         // Same as alias above: the server sanitizes the name, so report what it
         // actually stored, not the raw text typed in.
         if (r.ok) {
-          let msg = `Renamed to '${data.new_name || name.trim()}'`;
+          let msg = t("models.rename.toast", { name: data.new_name || name.trim() });
           // The server's migration notes - what it updated, and what it could
           // NOT reach (e.g. a per-project .localcoder/config.toml) - are shown
           // to the user, not left in the server log alone.
@@ -529,13 +526,12 @@ export async function refreshModelsPage() {
           }
           toast(msg);
           refreshModelsPage();
-        } else toast(data.detail || "Rename failed", true);
+        } else toast(data.detail || t("models.rename.failed"), true);
       };
       actions.appendChild(renameBtn);
       if (m.loaded) {
-        const unload = el("button", "secondary", "unload");
-        unload.title = "Release this model from GPU/CPU memory (it reloads "
-          + "automatically on the next chat request)";
+        const unload = el("button", "secondary", t("models.action.unload"));
+        unload.title = t("models.unload.title");
         unload.onclick = async () => {
           unload.disabled = true;
           try {
@@ -544,16 +540,16 @@ export async function refreshModelsPage() {
               body: JSON.stringify({ model: m.name }),
             });
             const data = await r.json().catch(() => ({}));
-            if (!r.ok) { toast(data.detail || "Unload failed", true); return; }
+            if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
             // unload_one_model() (http_server.py) answers HTTP 200 for an
             // in-use engine too - a request is mid-generation against it, so
             // nothing was released. Report that rather than "Unloaded".
             if (data.status === "in_use") {
-              toast(`'${m.name}' is still generating - try again once it finishes`, true);
+              toast(t("models.unload.inUse", { name: m.name }), true);
               refreshModelsPage();
               return;
             }
-            toast(`Unloaded '${m.name}'`);
+            toast(t("models.unload.toast", { name: m.name }));
             refreshModelsPage();
             refreshPerfEstimate();
           } finally { unload.disabled = false; }
@@ -561,28 +557,27 @@ export async function refreshModelsPage() {
         actions.appendChild(unload);
       }
       if (!m.active) {
-        const rm = el("button", "danger", "remove");
+        const rm = el("button", "danger", t("models.action.remove"));
         rm.onclick = () => {
-          confirmDanger(`Remove '${m.name}'?`,
-            "The file is deleted only when this is its last name and it lives " +
-            "in the data directory.", "Remove", async () => {
+          confirmDanger(t("models.remove.confirmTitle", { name: m.name }),
+            t("models.remove.confirmBody"), t("models.remove.confirmLabel"), async () => {
               const r = await fetch("/api/models/remove", {
                 method: "POST", headers: authHeaders(),
                 body: JSON.stringify({ model: m.name }),
               });
               const data = await r.json().catch(() => ({}));
-              if (!r.ok) { toast(data.detail || "Remove failed", true); return; }
+              if (!r.ok) { toast(data.detail || t("models.remove.failed"), true); return; }
               const end = await streamJob(data.job_id, null);
               // "disconnected" (streamJob gave up reconnecting, or the job was
               // already gone) is not the same outcome as the remove having
               // failed. refreshModelsPage() below shows the current state either
               // way.
               if (end.status === "done") {
-                toast(`Removed '${m.name}'`);
+                toast(t("models.remove.toast", { name: m.name }));
               } else if (end.status === "disconnected") {
-                toast("Lost connection - check the list below for the current state", true);
+                toast(t("models.remove.disconnected"), true);
               } else {
-                toast("Remove failed", true);
+                toast(t("models.remove.failed"), true);
               }
               refreshModelsPage();
             });
@@ -603,27 +598,34 @@ export async function showModelDetail(name) {
   const r = await fetch(`/v1/models/${encodeURIComponent(name)}`, {
     headers: authHeaders() });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(data.detail || "Lookup failed", true); return; }
-  openModal("Model - " + name, (body) => {
+  if (!r.ok) { toast(data.detail || t("models.detail.lookupFailed"), true); return; }
+  openModal(t("models.detail.title", { name }), (body) => {
     // Same three-state read as the list: `model_type` alone would render the
     // route's "llm" default as though it had been chosen.
     const modelUntagged = data.model_type_recorded === false;
     const modelType = modelUntagged ? "unset" : (data.model_type || "llm");
+    // rowKind is a stable internal discriminator, never localized: the
+    // "Type" row's own display label IS translated, so the special-case
+    // branch below cannot key off it directly.
     const rows = [
-      ["Path", data.path],
-      ["Type", null],
-      ["Source", data.source],
-      ["Size", fmtSize(data.size_bytes)],
-      ["SHA256", data.sha256 || "(not computed yet - hashes lazily on use)"],
-      ["Aliases", data.aliases.length ? data.aliases.join(", ") : "(none)"],
-      ["Status", data.active ? (data.loaded ? "active, loaded" : "active, not loaded") : "registered"],
+      ["path", t("models.detail.path"), data.path],
+      ["type", t("models.detail.type"), null],
+      ["source", t("models.detail.source"), data.source],
+      ["size", t("models.detail.size"), fmtSize(data.size_bytes)],
+      ["sha256", t("models.detail.sha256"), data.sha256 || t("models.detail.sha256Pending")],
+      ["aliases", t("models.detail.aliases"),
+        data.aliases.length ? data.aliases.join(", ") : t("chat.none")],
+      ["status", t("models.detail.status"),
+        data.active ? (data.loaded ? t("models.detail.statusActiveLoaded")
+                                    : t("models.detail.statusActiveNotLoaded"))
+                    : t("models.detail.statusRegistered")],
     ];
-    for (const [k, v] of rows) {
+    for (const [rowKind, label, v] of rows) {
       const row = el("div", "log-entry");
-      row.appendChild(el("span", "t", k));
-      if (k === "Type") {
+      row.appendChild(el("span", "t", label));
+      if (rowKind === "type") {
         row.appendChild(el("span", "type-badge type-" + modelType,
-                            modelUntagged ? "not set" : modelType));
+                            modelUntagged ? t("models.typeSelect.notSet") : modelType));
         // Rendered beside the type, not as a row of its own, so an unconfirmed
         // capability renders nothing at all.
         const visBadge = visionBadge(data.vision);
@@ -658,14 +660,18 @@ export const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
 // moe: "confirmed" (the model's own architecture header says MoE) or "likely"
 // (a name-pattern guess, e.g. "8x7B"/"A3B" in the repo id - see discover.py's
 // _moe_signal). The label and tooltip keep the two distinct.
-const MOE_LABEL = { confirmed: "MoE", likely: "MoE?" };
+//
+// Values are catalog key names; t() resolves them at each render site below.
+const MOE_LABEL = { confirmed: "models.moe.confirmed", likely: "models.moe.likely" };
 
 // Model CAPABILITY pills - what a model can DO, separate from the
 // .fit.fits/.tight/.too-big scale, which grades file SIZE against VRAM. Vision
 // is the only capability with a detector (registry.model_vision_capability, the
 // same lookup the load path uses).
-const CAP_LABEL = { vision: "vision" };
-const CAP_TITLE = { vision: "Accepts image input on this install - a vision projector (mmproj) or HF vision metadata was found beside the model" };
+//
+// Values are catalog key names; t() resolves them at each render site below.
+const CAP_LABEL = { vision: "models.cap.vision" };
+const CAP_TITLE = { vision: "models.cap.visionTitle" };
 
 /** The vision pill for a `vision` field, or null when there must be no pill.
  *
@@ -675,11 +681,12 @@ const CAP_TITLE = { vision: "Accepts image input on this install - a vision proj
  *  render nothing. */
 function visionBadge(v) {
   if (v !== true) return null;
-  const badge = el("span", "cap-badge cap-vision", CAP_LABEL.vision);
-  badge.title = CAP_TITLE.vision;
+  const badge = el("span", "cap-badge cap-vision", t(CAP_LABEL.vision));
+  badge.title = t(CAP_TITLE.vision);
   return badge;
 }
-const MOE_TITLE = { likely: "Inferred from the repo name - not confirmed by the model's own header" };
+// Catalog key name; t() resolves it at each render site below.
+const MOE_TITLE = { likely: "models.moe.likelyTitle" };
 
 export const FMT_LABEL = { gguf: "GGUF", hf: "HF" };
 
@@ -860,8 +867,8 @@ function discRepoRow(m, gpus) {
     head.appendChild(el("span", "arch-badge", m.architecture));
   }
   if (m.moe) {
-    const moeBadge = el("span", "moe-badge moe-" + m.moe, MOE_LABEL[m.moe] || "MoE");
-    if (MOE_TITLE[m.moe]) moeBadge.title = MOE_TITLE[m.moe];
+    const moeBadge = el("span", "moe-badge moe-" + m.moe, MOE_LABEL[m.moe] ? t(MOE_LABEL[m.moe]) : "MoE");
+    if (MOE_TITLE[m.moe]) moeBadge.title = t(MOE_TITLE[m.moe]);
     head.appendChild(moeBadge);
   }
   if (m.param_count) {
@@ -2679,7 +2686,7 @@ if (unloadAllBtn) {
         method: "POST", headers: authHeaders(), body: JSON.stringify({}),
       });
       const data = await r.json().catch(() => ({}));
-      if (!r.ok) { toast(data.detail || "Unload failed", true); return; }
+      if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
       // unloaded_models lists only chat engines; the shared embedding model has
       // its own lifecycle (localm.inference.embedder) and is reported via
       // embedder_unloaded, so it is counted too.
@@ -2690,22 +2697,28 @@ if (unloadAllBtn) {
       const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
       let msg;
       if (n && skipped.length) {
-        msg = `Unloaded ${n} model(s); ${skipped.length} still generating - try again once finished`;
+        msg = t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
       } else if (n) {
-        msg = `Unloaded ${n} model(s)`;
+        msg = t("models.unloadAll.allUnloaded", { n });
       } else if (skipped.length) {
-        msg = `${skipped.length} model(s) still generating - try again once finished`;
+        msg = t("models.unloadAll.stillGenerating", { skipped: skipped.length });
       } else {
-        msg = "Nothing was loaded";
+        msg = t("models.unloadAll.nothingLoaded");
       }
       toast(msg, skipped.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
     } catch (e) {
-      toast("Unload failed: " + e.message, true);
+      toast(t("models.unloadAll.failedException", { message: e.message }), true);
     } finally {
       unloadAllBtn.disabled = false;
     }
   };
 }
+
+// The table is painted from a fetched /api/models response, not marked up in
+// index.html, so it is redrawn when the interface language changes.
+document.addEventListener("localm:language", () => {
+  refreshModelsPage();
+});
 
