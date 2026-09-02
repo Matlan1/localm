@@ -130,6 +130,24 @@ class ContextCapacityExceededError(ValueError):
     """
 
 
+class PretokenizerUnsafeInputError(ValueError):
+    """Raised when text would be handed to one of llama.cpp's pre-tokenizer
+    regexes that aborts the process on it, so the request is refused up front.
+
+    A GGUF's ``tokenizer.ggml.pre`` selects the regex list ``unicode_regex_split``
+    runs. Several of those regexes throw ``std::regex_error`` on a long run of
+    characters from one character class; the throw is rethrown by ``unicode.cpp``
+    and caught by nothing between there and Python, so the worker dies with an
+    uncaught native fault instead of returning. ``pretokenizer_guard.check_text``
+    detects the input in pure Python before it reaches native code and raises
+    this instead.
+
+    A ValueError subclass carried across IPC as a typed error, for the reason
+    given on :class:`ContextCapacityExceededError`: the check runs before any
+    native call, so the loaded model is unharmed and the worker keeps serving.
+    """
+
+
 class ModelLoadCancelled(Exception):
     """Raised by ``load()`` when an in-flight model load was aborted because a
     newer model selection superseded it (preemptive model switching).

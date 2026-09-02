@@ -44,6 +44,7 @@ from localm.inference.backends.base import (
     ImageDecodeUnavailable,
     InvalidGrammarError,
     ModelLoadCancelled,
+    PretokenizerUnsafeInputError,
     TriggerValidatorUnavailableError,
     UnsupportedInputError,
     VisionInputError,
@@ -5143,6 +5144,7 @@ _BACKEND_ERROR_STATUS: tuple = (
     (InvalidGrammarError, 400),
     (EmbedBatchTooLargeError, 413),
     (ContextCapacityExceededError, 413),
+    (PretokenizerUnsafeInputError, 400),
 )
 
 # The same classes as a plain tuple, for use as an `except` clause. Derived from

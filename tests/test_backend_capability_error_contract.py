@@ -32,6 +32,7 @@ from localm.inference.backends.base import (
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
     InvalidGrammarError,
+    PretokenizerUnsafeInputError,
     TriggerValidatorUnavailableError,
     UnsupportedInputError,
     VisionInputError,
@@ -273,6 +274,7 @@ class TestBackendErrorStatusTable:
         (TriggerValidatorUnavailableError("probe pool busy"), 503),
         (EmbedBatchTooLargeError("too many"), 413),
         (ContextCapacityExceededError("too long"), 413),
+        (PretokenizerUnsafeInputError("run too long"), 400),
     ])
     def test_each_family_maps_to_its_status(self, exc, status):
         assert backend_error_status(exc) == status
