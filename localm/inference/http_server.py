@@ -1081,6 +1081,52 @@ def _resolve_unnamed_model_name() -> str | None:
     return _active_model_name or _last_active_model_name or _default_model_name
 
 
+def _model_is_pinned(model_name: str | None) -> bool:
+    """Whether the request named a model EXPLICITLY.
+
+    The one discriminator behind the never-swap-an-explicit-pin rule, and the
+    same test get_engine already uses to decide whether to resolve an unnamed
+    request (peer_routing in routes/chat.py derives the same one independently).
+    It lives here as a named function so capability routing cannot drift from
+    the resolution path it gates: an empty/absent model, or the "localm"
+    sentinel, is "no preference"; anything else is the user's choice."""
+    name = (model_name or "").strip()
+    return bool(name) and name != "localm"
+
+
+def plan_capability_route(model_name: str | None, messages: list,
+                          required_capabilities=None):
+    """The capability-routing decision for one request, without applying it.
+
+    Blocking (registry read plus per-candidate capability probes), so an async
+    caller must run it in an executor.
+
+    Returns a ``RoutingDecision``. Its ``resolved`` differs from ``current``
+    only when the request pinned NO model: ``_model_is_pinned`` above decides
+    that, and ``plan_route`` refuses to move a pinned one, so a pinned request
+    gets a decision that reports the gap and changes nothing.
+
+    Needs are derived from the request wherever the request already states them
+    - an image part means vision, the prompt's estimated size means a context
+    window - and from *required_capabilities* for the two that nothing in an
+    OpenAI-shaped request can express."""
+    from localm.inference import capability_routing as _cr
+    from localm.inference.backends.base import messages_contain_image
+    from localm.model_manager import capabilities as _caps
+
+    wanted = list(required_capabilities or ())
+    if messages_contain_image(messages) and _caps.VISION not in wanted:
+        wanted.append(_caps.VISION)
+    needs = _cr.CapabilityNeeds(
+        capabilities=tuple(wanted),
+        min_context=_cr.context_need(messages) if messages else None,
+    )
+    pinned = _model_is_pinned(model_name)
+    current = (model_name or "").strip() if pinned else _resolve_unnamed_model_name()
+    resident = [n for n, e in _engines.items() if getattr(e, "loaded", False)]
+    return _cr.plan_route(current, needs, pinned=pinned, resident=resident)
+
+
 async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
     """Resolve the engine for *model_name*, loading it if necessary.
 
@@ -5116,6 +5162,38 @@ async def _generate_full(engine, messages: list, request=None, *,
             await watcher
         except (asyncio.CancelledError, Exception):
             pass
+
+
+def _capability_route_header(route) -> dict:
+    """Observability: render a capability-routing decision into a response-header
+    dict so a user can answer "why did this request use that model".
+
+    Empty when nothing about the choice needs explaining - no needs stated, or
+    the model that would have answered already met them - so an ordinary request
+    carries no extra header.
+
+    Reports the gap tri-state as measured: ``"absent"`` for a confirmed no,
+    ``"unknown"`` for never inspected. Those are different facts and a client
+    must be able to tell them apart, so they are not flattened into one flag.
+    Compact ASCII JSON, header-safe:
+    ``{"resolved","requested","routed","pinned","gaps":{cap:"absent"|"unknown"},
+    "unmet":[...]}``."""
+    if route is None or not getattr(route, "has_gap", False):
+        return {}
+    payload = {
+        "resolved": route.resolved,
+        "requested": route.current,
+        "routed": route.routed,
+        "pinned": route.pinned,
+        "gaps": {c: ("absent" if s is False else "unknown")
+                 for c, s in route.gaps.items()},
+        "unmet": list(route.unmet),
+    }
+    try:
+        blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return {}
+    return {"X-Localm-Model-Routing": blob}
 
 
 def _memory_used_header(ctx) -> dict:
