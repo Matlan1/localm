@@ -459,7 +459,8 @@ test("every data-i18n key in index.html resolves in the English catalog", async 
 
 // The migrated modules. A file added here must have its t() keys in the catalog.
 const T_CALL_FILES = ["app/chat.js", "app/models-sidebar.js", "app/logo.js",
-                      "app/settings-perf.js", "pages/settings.js", "pages/plugins.js"];
+                      "app/settings-perf.js", "pages/settings.js", "pages/plugins.js",
+                      "app/slash.js", "app/cmdk.js"];
 
 /** Key-shaped string literals inside a balanced t(...) / tn(...) call. */
 function tCallKeys(src) {

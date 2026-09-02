@@ -5,6 +5,7 @@
 // --- ES module imports ---
 import { newConversation } from "./chat.js";
 import { $, el } from "./helpers.js";
+import { t } from "./i18n.js";
 import { exportConversation } from "./settings-perf.js";
 import { VIEWS, isSettingsView, showView } from "./tabs.js";
 import { gotoSettingsSection } from "../pages/settings.js";
@@ -21,16 +22,16 @@ export function cmdkCommands() {
     if (!$("view-" + v)) continue;
     const nav = $("nav-" + v);
     const label = ((nav ? nav.textContent : v) || v).trim() || v;
-    cmds.push({ label: "Go to " + label, run: () => showView(v) });
+    cmds.push({ label: t("cmdk.goTo", { view: label }), run: () => showView(v) });
   }
-  cmds.push({ label: "New chat", run: () => { newConversation(); showView("chat"); } });
-  cmds.push({ label: "Toggle light/dark theme", run: () => $("theme-toggle").click() });
-  cmds.push({ label: "Export conversation", run: () => exportConversation() });
+  cmds.push({ label: t("topbar.newChat"), run: () => { newConversation(); showView("chat"); } });
+  cmds.push({ label: t("cmdk.toggleTheme"), run: () => $("theme-toggle").click() });
+  cmds.push({ label: t("cmdk.exportConversation"), run: () => exportConversation() });
   // Jump to the Keys & devices manager. Offered only while its panel is not
   // gated-hidden for this key.
   const keysCard = $("keys-card");
   if (keysCard && !keysCard.classList.contains("sec-hidden")) {
-    cmds.push({ label: "Manage keys & devices", run: () => {
+    cmds.push({ label: t("cmdk.manageKeys"), run: () => {
       showView("settings");
       if (typeof gotoSettingsSection === "function") gotoSettingsSection("keys-card");
     } });
