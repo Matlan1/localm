@@ -842,10 +842,17 @@ class TestTheGatesRefuseAndTheReportsEstimate:
 
 class TestTheEmbeddingsUsageCountIsSafeAndUnchanged:
     """The /v1/embeddings usage total is counted with the CHAT engine's
-    tokenizer, which can be a different model from the embedder that produced
-    the vectors - so it can refuse text the embedder was happy with, AFTER the
-    vectors exist. It must not fail a request that succeeded, and it must be
-    byte-for-byte unchanged when nothing refuses."""
+    tokenizer, AFTER the vectors exist, so a refusal there would fail a request
+    that already succeeded.
+
+    DEFENSIVE RATHER THAN REACHABLE TODAY, matching the comment at the site: the
+    only backend whose ``count_tokens`` can refuse is ``GgufBackend``, whose
+    ``embed()`` raises ``NotImplementedError`` and is refused earlier in the
+    route. These tests drive the arithmetic with a mock engine, which is what
+    lets them exercise a path the real backends cannot currently reach.
+
+    Both halves matter: unchanged when nothing refuses, and degrading rather
+    than failing when something does."""
 
     def _client(self, count_side_effect):
         from fastapi.testclient import TestClient
@@ -887,81 +894,57 @@ class TestEveryCountingCallIsClassified:
     non-streaming chat usage count in http_server.py, which is the default shape
     for most API clients.
 
-    Every `engine.count_tokens` / `engine.count_messages_tokens` call in the two
-    server files must be one of:
+    Every counting call in the server files must be one of:
 
     * routed through ``count_tokens_or_estimate`` - it REPORTS ON FINISHED WORK,
       so a refusal degrades to an estimate rather than discarding a completed
       generation; or
-    * inside a ``PretokenizerUnsafeInputError`` handler - it GATES the work, so a
-      refusal answers 400.
+    * inside a ``try`` whose own ``except`` names
+      :class:`PretokenizerUnsafeInputError` - it GATES the work, so a refusal
+      answers 400; or
+    * inside an ``if prompt_tokens is None:`` branch, which is dead for the
+      reason asserted by ``test_the_dead_branches_really_are_dead``.
 
-    A raw call that is neither reaches the generic handler as an opaque 500.
+    A raw call that is none of those reaches the generic handler as an opaque
+    500.
     """
 
-    SERVER_FILES = ("localm/inference/http_server.py",
-                    "localm/inference/routes/chat.py")
+    # Every module that can hold a route-level counting call, discovered rather
+    # than listed, so a third route module cannot be added invisibly.
+    @staticmethod
+    def _server_files():
+        from pathlib import Path
 
-    # Counting calls inside an `if prompt_tokens is None:` fallback are dead
-    # today, because every caller passes a computed prompt_tokens that the route
-    # has already guarded. That precondition is asserted below rather than
-    # trusted, so a future caller that stops passing it fails this test instead
-    # of silently reviving an unguarded count.
+        root = Path(__file__).resolve().parents[1]
+        files = ["localm/inference/http_server.py"]
+        files += sorted(
+            str(p.relative_to(root)).replace("\\", "/")
+            for p in (root / "localm/inference/routes").glob("*.py")
+            if p.name != "__init__.py")
+        return files
+
+    # Matches the ATTRIBUTE on any receiver (`engine.`, `eng.`, `self._engine.`,
+    # or a continuation line carrying only `.count_tokens`). Almost every site
+    # here passes the method as a REFERENCE to run_in_executor rather than
+    # calling it syntactically, so requiring a paren matched nothing at all.
+    CALL_RE = r"\.count_tokens\b|\.count_messages_tokens\b"
+    # The indirect form, which the dotted pattern cannot see.
+    GETATTR_RE = r"getattr\s*\([^)]*['\"]count_(?:messages_)?tokens['\"]"
     DEAD_BRANCH = "if prompt_tokens is None:"
 
-    def _calls(self):
-        """(file, lineno, enclosing def, source line) for every raw counting call."""
-        import re
+    def _lines(self, rel):
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1]
-        out = []
-        for rel in self.SERVER_FILES:
-            lines = (root / rel).read_text(encoding="utf-8").splitlines()
-            enclosing = "?"
-            for i, line in enumerate(lines, 1):
-                d = re.match(r"\s*(?:async\s+)?def\s+(\w+)", line)
-                if d:
-                    enclosing = d.group(1)
-                if re.search(r"engine\.count_tokens|engine\.count_messages_tokens", line):
-                    out.append((rel, i, enclosing, line))
-        return out
+        return (root / rel).read_text(encoding="utf-8").splitlines()
 
-    def _guarded_region(self, rel, lineno):
-        """True when this line sits under a PretokenizerUnsafeInputError handler
-        within the same function."""
-        import re
-        from pathlib import Path
+    def _walk_out(self, lines, lineno):
+        """Yield (index, line) for each enclosing line, outermost-last.
 
-        root = Path(__file__).resolve().parents[1]
-        lines = (root / rel).read_text(encoding="utf-8").splitlines()
-        # Walk back to the enclosing def; a handler for this error anywhere in
-        # that function's body before or after means the call is inside a try
-        # whose except names it.
-        start = 0
-        for i in range(lineno - 1, -1, -1):
-            if re.match(r"\s*(?:async\s+)?def\s+\w+", lines[i]):
-                start = i
-                break
-        end = len(lines)
-        for i in range(lineno, len(lines)):
-            if re.match(r"(?:async\s+)?def\s+\w+|class\s+\w+", lines[i]):
-                end = i
-                break
-        body = "\n".join(lines[start:end])
-        return "except PretokenizerUnsafeInputError" in body
-
-    def test_the_enumeration_finds_something(self):
-        # A scan that matched nothing would pass every assertion below.
-        calls = self._calls()
-        assert len(calls) >= 8, f"the scan found only {len(calls)} counting calls"
-
-    def _in_dead_branch(self, rel, lineno):
-        """True when the call sits inside an `if prompt_tokens is None:` block."""
-        from pathlib import Path
-
-        root = Path(__file__).resolve().parents[1]
-        lines = (root / rel).read_text(encoding="utf-8").splitlines()
+        Walks by INDENTATION from the call outwards, so it reports the lines
+        that actually contain the call rather than whatever happens to precede
+        it - which is what defeated the previous version of this check.
+        """
         call = lines[lineno - 1]
         indent = len(call) - len(call.lstrip())
         for i in range(lineno - 2, -1, -1):
@@ -971,21 +954,137 @@ class TestEveryCountingCallIsClassified:
             probe_indent = len(probe) - len(probe.lstrip())
             if probe_indent >= indent:
                 continue
-            # First line at a shallower indent decides: either it opens the dead
-            # branch, or the call is outside it.
-            if self.DEAD_BRANCH in probe:
-                return True
+            yield i, probe
             indent = probe_indent
+            if indent == 0:
+                return
+
+    def _enclosing_def(self, lines, lineno):
+        import re
+
+        for _, probe in self._walk_out(lines, lineno):
+            m = re.match(r"\s*(?:async\s+)?def\s+(\w+)", probe)
+            if m:
+                return m.group(1)
+        return "?"
+
+    def _try_names_the_error(self, lines, try_idx, indent):
+        """True when the ``try:`` at *try_idx* has an ``except`` naming the
+        refusal. Only that try's OWN handlers count, at its own indent."""
+        for j in range(try_idx + 1, len(lines)):
+            line = lines[j]
+            if not line.strip():
+                continue
+            line_indent = len(line) - len(line.lstrip())
+            if line_indent > indent:
+                continue                      # still inside the try body
+            if line_indent < indent:
+                return False                  # dedented out of the statement
+            stripped = line.strip()
+            if stripped.startswith("except"):
+                if "PretokenizerUnsafeInputError" in stripped:
+                    return True
+                continue
+            if stripped.startswith(("else:", "finally:")):
+                continue
+            return False                      # the try statement ended
         return False
+
+    def _guarded(self, lines, lineno):
+        """True when an ENCLOSING try names the refusal in its own except."""
+        import re
+
+        for idx, probe in self._walk_out(lines, lineno):
+            stripped = probe.strip()
+            if stripped == "try:":
+                if self._try_names_the_error(
+                        lines, idx, len(probe) - len(probe.lstrip())):
+                    return True
+            if re.match(r"\s*(?:async\s+)?def\s+\w+", probe):
+                return False                  # left the function
+        return False
+
+    def _in_dead_branch(self, lines, lineno):
+        return any(self.DEAD_BRANCH in probe
+                   for _, probe in self._walk_out(lines, lineno))
+
+    def _calls(self):
+        import re
+
+        out = []
+        for rel in self._server_files():
+            lines = self._lines(rel)
+            for i, line in enumerate(lines, 1):
+                if re.search(self.CALL_RE, line) or re.search(self.GETATTR_RE, line):
+                    out.append((rel, i, self._enclosing_def(lines, i), line))
+        return out
+
+    # The counting calls that exist today. An exact figure, not a floor: a floor
+    # lets calls VANISH silently, which is how a previous version of this test
+    # (">= 3" against 6) could not fail.
+    EXPECTED_CALLS = 11
+
+    def test_the_enumeration_finds_exactly_what_is_there(self):
+        calls = self._calls()
+        assert len(calls) == self.EXPECTED_CALLS, (
+            f"expected {self.EXPECTED_CALLS} counting calls, found {len(calls)}. "
+            "If this is a deliberate change, update EXPECTED_CALLS and classify "
+            "the new call:\n  " + "\n  ".join(
+                f"{r}:{n} in {f}(): {ln.strip()}" for r, n, f, ln in calls))
+
+    def test_the_guard_check_can_answer_no(self):
+        """A classifier that answers GUARDED for everything would pass every
+        assertion below. Feed it a call with no try at all and require a NO."""
+        probe = [
+            "def handler():",
+            "    x = engine.count_tokens(text)",
+        ]
+        assert self._guarded(probe, 2) is False
+        guarded = [
+            "def handler():",
+            "    try:",
+            "        x = engine.count_tokens(text)",
+            "    except PretokenizerUnsafeInputError:",
+            "        raise",
+        ]
+        assert self._guarded(guarded, 3) is True
+        # An except in the same function but on a DIFFERENT try must not count.
+        elsewhere = [
+            "def handler():",
+            "    try:",
+            "        other()",
+            "    except PretokenizerUnsafeInputError:",
+            "        raise",
+            "    x = engine.count_tokens(text)",
+        ]
+        assert self._guarded(elsewhere, 6) is False
+
+    def test_the_pattern_sees_the_shapes_that_matter(self):
+        import re
+
+        for shape in ("n = engine.count_tokens(t)",
+                      "n = eng.count_tokens(t)",
+                      "n = backend.count_messages_tokens(m)",
+                      "n = self._engine.count_tokens(t)",
+                      "    .count_tokens(t)",
+                      "run_in_executor(None, engine.count_tokens, text)",
+                      'n = getattr(engine, "count_tokens")(t)'):
+            assert re.search(self.CALL_RE, shape) or re.search(self.GETATTR_RE, shape), \
+                f"the scan cannot see: {shape}"
+        # A name that merely CONTAINS the words must not match, or the count
+        # becomes noise rather than an enumeration.
+        assert not re.search(self.CALL_RE, "self.count_tokens_total = 0")
+        assert not re.search(self.CALL_RE, "def count_tokens(self, text):")
 
     def test_every_counting_call_is_guarded_or_routed_or_dead(self):
         unclassified = []
         for rel, lineno, func, line in self._calls():
+            lines = self._lines(rel)
             if "count_tokens_or_estimate" in line:
                 continue                                   # reports on finished work
-            if self._guarded_region(rel, lineno):
+            if self._guarded(lines, lineno):
                 continue                                   # gates the work, answers 400
-            if self._in_dead_branch(rel, lineno):
+            if self._in_dead_branch(lines, lineno):
                 continue                                   # unreachable, pinned below
             unclassified.append(f"{rel}:{lineno} in {func}(): {line.strip()}")
         assert not unclassified, (
@@ -1002,36 +1101,27 @@ class TestEveryCountingCallIsClassified:
 
         root = Path(__file__).resolve().parents[1]
         src = (root / "localm/inference/routes/chat.py").read_text(encoding="utf-8")
-        handlers = ("_stream_sse", "_complete", "_stream_sse_completion")
         found = 0
-        for name in handlers:
+        for name in ("_stream_sse", "_complete", "_stream_sse_completion"):
             for m in re.finditer(rf"\b{name}\(", src):
-                # The call's argument list runs to the matching close paren; a
-                # conservative window of the next 600 characters covers every
-                # multi-line call site in this file.
-                window = src[m.start():m.start() + 600]
+                # Read to the call's own matching close paren rather than a
+                # fixed window, so a neighbouring call's kwarg can never satisfy
+                # this by proximity.
+                depth, end = 0, None
+                for j in range(m.end() - 1, len(src)):
+                    if src[j] == "(":
+                        depth += 1
+                    elif src[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            end = j
+                            break
+                assert end is not None, f"unbalanced call at {name}"
                 found += 1
-                assert "prompt_tokens=prompt_tokens" in window, (
+                assert "prompt_tokens=prompt_tokens" in src[m.start():end], (
                     f"{name}() is called without passing prompt_tokens, which "
                     f"revives an unguarded counting call in http_server.py")
         assert found >= 3, f"expected the three handler call sites, found {found}"
-
-
-@pytest.fixture(autouse=True)
-def _gguf_backend_class_is_not_mutated():
-    """Runs after EVERY test in this file, not just at one collected moment.
-
-    A test that assigns or deletes an attribute on the real GgufBackend class
-    changes it for the rest of the process; deleting `loaded` in particular drops
-    resolution to BaseBackend's abstract stub, which returns None and silently
-    turns every later token count into the chars/4 heuristic. That escapes this
-    file, so it is checked per test rather than once.
-    """
-    yield
-    assert vars(_GgufBackend).get("loaded") is _ORIGINAL_GGUF_LOADED, \
-        "a test in this file mutated GgufBackend.loaded, which leaks into every " \
-        "test that runs after it in this process"
-
 
 class TestNonStreamingChatSurvivesARefusedUsageCount:
     """`stream: false` is the default shape for most API clients, and its usage
