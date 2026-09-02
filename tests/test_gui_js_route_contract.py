@@ -11,6 +11,11 @@ would make the test's coverage depend on fixture state. Route paths are declared
 as literals repo-wide (``@_router.get("/api/coder/sessions")``, no router
 prefixes), so scanning the source sees all of them, deterministically.
 
+A fetch with no matching ``@app.get()``-style declaration is also checked
+against the GUI's static directory: a bare filename interpolation with a fixed
+extension (``/i18n/${id}.json``) is what the catch-all static mount serves, so
+it counts as declared only while a matching file actually exists on disk.
+
 Limits: a ``fetch(url)`` whose URL is built in a variable is not seen, and a
 route that is declared in source but never registered on the app still counts as
 declared. This catches the "route deleted, caller left behind" class.
@@ -82,6 +87,25 @@ def _declared_routes() -> set:
     return routes
 
 
+# A fetch whose filename is a bare interpolation with a fixed extension:
+# `/dir/${expr}.ext`. No @app.get() can declare this shape; it is served by the
+# catch-all static mount (web.py's `app.mount("/", _RevalidatingStatic(...))`),
+# which serves whatever file already exists under _STATIC.
+_STATIC_DYNAMIC_FETCH = re.compile(
+    r"^/([A-Za-z0-9_-]+)/\$\{[^{}]*\}(\.[A-Za-z0-9]+)$")
+
+
+def _served_by_static_mount(raw: str) -> bool:
+    """Whether *raw* (a fetch() literal) is a dynamic-filename request the
+    static mount can serve, checked against the files actually on disk."""
+    m = _STATIC_DYNAMIC_FETCH.match(raw.split("?")[0])
+    if not m:
+        return False
+    directory, suffix = m.groups()
+    d = _STATIC / directory
+    return d.is_dir() and any(p.suffix == suffix for p in d.iterdir() if p.is_file())
+
+
 def _js_fetches() -> dict:
     """{normalized path: {"raw": literal, "files": [...]}} for every GUI fetch."""
     found: dict = {}
@@ -122,6 +146,21 @@ def test_matcher_handles_params_and_interpolation():
                         _norm_route("/api/coder/sessions/{session_id}/undo"))
 
 
+def test_static_mount_matcher_rejects_a_nonexistent_asset():
+    """Negative case: the matcher must be able to FAIL, or it proves nothing."""
+    assert not _served_by_static_mount("/i18n/${id}.nope")
+    assert not _served_by_static_mount("/does-not-exist/${id}.json")
+    assert not _served_by_static_mount("/i18n/de.json")  # no interpolation at all
+    # ...and it must still accept a fetch the static mount really does serve.
+    assert _served_by_static_mount("/i18n/${id}.json")
+
+
+def test_i18n_catalog_fetch_is_seen_by_the_static_mount_matcher():
+    """Guards the scanner itself: if this fallback silently stopped matching,
+    the German-language catalog fetch would read as an undeclared route."""
+    assert _served_by_static_mount("/i18n/${id}.json")
+
+
 def test_every_gui_fetch_hits_a_declared_route():
     routes = _declared_routes()
     fetches = _js_fetches()
@@ -132,9 +171,12 @@ def test_every_gui_fetch_hits_a_declared_route():
         candidates = [path]
         if info["trailing_slash"]:
             candidates.append(path.rstrip("/") + "/" + _WILD)
-        if not any(_matches(c, r) for c in candidates for r in routes):
-            broken.append(f"  {info['raw']!r} -> no such route "
-                          f"(called from {', '.join(sorted(info['files']))})")
+        if any(_matches(c, r) for c in candidates for r in routes):
+            continue
+        if _served_by_static_mount(info["raw"]):
+            continue
+        broken.append(f"  {info['raw']!r} -> no such route "
+                      f"(called from {', '.join(sorted(info['files']))})")
     assert not broken, (
         "GUI JavaScript fetches paths that no Python route declares:\n"
         + "\n".join(broken))
