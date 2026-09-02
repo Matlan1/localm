@@ -82,12 +82,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   command line. The chat view and the app's shell - the sidebar, its navigation,
   the conversation list, the model box, the message composer and the chat
   parameters drawer - are translated, along with the Settings page's own
-  headings, search box, section navigation and Appearance card, and the
-  Plugins page. Everything not translated yet stays in English rather than
-  going blank, and switching language takes effect immediately without a
-  reload. The rest of the app (Models, Coder, Knowledge, Studio, and the
-  individual settings descriptions) is still English only; adding another
-  language now means adding one catalog file rather than changing the app.
+  headings, search box, section navigation and Appearance card, the
+  Plugins page, and the Images page. Everything not translated yet stays in
+  English rather than going blank, and switching language takes effect
+  immediately without a reload. The rest of the app (Models, Coder,
+  Knowledge, Music and Video in Studio, and the individual settings
+  descriptions) is still English only; adding another language now means
+  adding one catalog file rather than changing the app.
 - **Optional Hugging Face and CivitAI API tokens.** Set them in Settings
   under Library, or the `HF_TOKEN` / `CIVITAI_API_KEY` environment
   variables, to raise rate limits and reach gated or login-required models
@@ -100,6 +101,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The per-model icon override in Settings > Chat > Avatars now offers a
   dropdown of your installed models** instead of requiring you to type an
   exact model name.
+
+### Changed
+- **The two installers explain themselves more consistently.** `setup.bat`
+  now tells you a backend pick is load-tested and falls back to Vulkan
+  rather than swapping silently (matching `setup.sh`), and points a failed
+  PyTorch/transformers install at `docs/gpu-setup.md` instead of leaving you
+  with no next step. `setup.sh`'s closing summary now also confirms when an
+  application-menu entry was created.
 
 ### Fixed
 - **The "Other instances" list (Models page) could take several seconds to
@@ -380,6 +389,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   meant the update checker could not confirm a downloaded build was genuinely
   newer before installing it. Release builds now carry a fallback copy of
   their own version number, so this case is now rare.
+- **A chat request could be rejected as too large for a very small context
+  model even though your own message fit comfortably.** Every chat turn adds
+  a short style nudge to the model's instructions; on a normal-sized context
+  that costs nothing you would notice, but on a tiny one it could push an
+  otherwise-small request past the model's context limit by itself. The
+  nudge is now skipped when the model's context is too small to absorb it,
+  so a request that actually fits succeeds instead of being refused.
 
 ### Security
 - **Chatting with certain models no longer crashes the server outright.** For a
@@ -485,6 +501,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   pointed. It is now dropped the moment a redirect crosses to a different
   host, matching what a browser or a standard HTTP client already does by
   default.
+- **A crafted search pattern from the model could corrupt memory in the
+  coder's `grep` and `search_replace` tools, rather than just run slowly.**
+  These tools already bounded how long a model-supplied pattern is allowed
+  to run, since the pattern is attacker-influenced input, but two bugs in
+  the bundled regex engine sat underneath that bound: one could write past
+  the end of an internal buffer while compiling certain patterns, the other
+  could read past the end of one while matching and let the stray byte
+  decide whether a search reported a match that was never really there.
+  Neither needed a slow or memory-hungry pattern to trigger, so the existing
+  time and size limits could not catch them. Upgrading the bundled regex
+  engine closes both; the limits themselves are unchanged.
 
 ## [0.1.5] - 2026-08-26
 

@@ -55,8 +55,8 @@ dependencies = [
     # install has no transformers, so relying on the transitive path would leave
     # this guard absent precisely where nobody would think to look for it. See
     # localm/plugins/coder/tools/files.py _compile_model_pattern.
-    "regex>=2026.7.19",
-    "huggingface-hub>=1.28.0",
+    "regex>=2026.8.31",
+    "huggingface-hub>=1.29.0",
     "pydantic>=2.13.4",
     "fastapi>=0.141.1",
     # fastapi's own requirement is only starlette>=0.46.0, too weak to rely on:
@@ -401,3 +401,66 @@ exclude_also = [
 # the EXECUTED fraction of the code did not shrink; whether what runs is
 # actually checked is a question this number cannot answer.
 fail_under = 78
+
+# Mutation testing (mutmut) for six of the eight trust-boundary modules, run
+# only by the opt-in `mutation-test` job in .github/workflows/ci.yml.
+# localm/tls.py and localm/portmux.py are not in only_mutate: every test that
+# performs real (non-mocked) TLS certificate generation raises "Algorithm
+# must be a registered hash algorithm" under mutmut's instrumented import
+# path, in both files' own dedicated tests, regardless of whether tls.py
+# itself is in only_mutate - a mutmut/cryptography interaction, not a localm
+# defect. only_mutate takes a glob per file/tree; pytest_add_cli_args_test_selection
+# must list every test file that exercises one of the included modules,
+# dedicated or incidental, since mutate_only_covered_lines derives coverage
+# from that same pytest scope.
+[tool.mutmut]
+source_paths = ["localm"]
+only_mutate = [
+    "localm/bindhost.py",
+    "localm/scopes.py",
+    "localm/pathsafe.py",
+    "localm/netpolicy.py",
+    "localm/auth.py",
+    "localm/config.py",
+]
+mutate_only_covered_lines = true
+also_copy = ["scripts"]
+pytest_add_cli_args = ["-m", "not integration"]
+pytest_add_cli_args_test_selection = [
+    "tests/test_bindhost.py",
+    "tests/test_bindhost_adversarial.py",
+    "tests/test_scopes.py",
+    "tests/test_pathsafe_confined_name.py",
+    "tests/test_pathsafe_confined_under.py",
+    "tests/test_registry_confinement.py",
+    "tests/test_rag_confinement.py",
+    "tests/test_jobs_cwd_unc_guard.py",
+    "tests/test_media_paths.py",
+    "tests/test_admin_fs_routes.py",
+    "tests/plugins/coder/test_confine.py",
+    "tests/test_upload.py",
+    "tests/test_mcpserver.py",
+    "tests/test_coder_resume.py",
+    "tests/test_comfy_cli_markup_escaping.py",
+    "tests/test_cli_comfy_workflow.py",
+    "tests/plugins/coder/test_skills.py",
+    "tests/test_netpolicy.py",
+    "tests/test_netpolicy_ssrf_phase3.py",
+    "tests/test_auth.py",
+    "tests/test_auth_kdf.py",
+    # test_auth_network_1_loopback_gate.py performs real TLS cert
+    # generation - see the module comment above. auth.py's other five
+    # dedicated test files are unaffected.
+    "tests/test_auth_network_4_session_revalidation.py",
+    "tests/test_auth_reg579_empty_key_file.py",
+    "tests/test_auth_secret_write_perms.py",
+    "tests/test_config_admin_gating.py",
+    "tests/test_config_atomic_concurrency.py",
+    "tests/test_config_corruption.py",
+    "tests/test_config_cross_process_lock.py",
+    "tests/test_config_delta_persistence.py",
+    "tests/test_config_plugin_state_gate.py",
+    "tests/test_config_reg586_reg566_regressions.py",
+    "tests/test_config_schema_endpoint.py",
+    "tests/test_config_validation.py",
+]

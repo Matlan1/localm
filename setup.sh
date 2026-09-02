@@ -43,6 +43,9 @@ ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes m
   read -r -p "$prompt" ans || ans=""
   echo "${ans:-$def}"
 }
+uv_manual_hint() {  # the manual uv-install command; used from two call sites below
+  say "      curl -LsSf https://astral.sh/uv/install.sh | sh"
+}
 # heartbeat_start SECS "MESSAGE" / heartbeat_stop - print MESSAGE every SECS
 # seconds while a following long, quiet command is still running (a uv
 # download, a venv build, a torch install), so it never looks identical to a
@@ -233,7 +236,7 @@ if [ "$uv_present" != 1 ]; then
   case "$getuv" in
     [Nn]*)
       say "  Setup needs uv. Install it, then re-run setup.sh:"
-      say "      curl -LsSf https://astral.sh/uv/install.sh | sh"
+      uv_manual_hint
       exit 1
       ;;
   esac
@@ -264,7 +267,7 @@ if [ "$uv_present" != 1 ]; then
     say "  [!] uv still is not callable after the install attempt."
     say "      Open a new shell (so the updated PATH applies) and run setup.sh again,"
     say "      or install uv manually first:"
-    say "      curl -LsSf https://astral.sh/uv/install.sh | sh"
+    uv_manual_hint
     offer_report "localm setup could not install uv" "setup.sh tried Astral's installer but uv was still not callable afterwards."
     exit 1
   fi
@@ -762,6 +765,9 @@ else
   say "    ./localm.sh <args>      will NOT work until it is fixed"
   say "    .venv/bin/localm ...    will NOT work until it is fixed"
   say "  Fix it with:  uv pip install -p .venv -e \".[${EXTRAS}]\" --reinstall"
+fi
+if [ -n "$SHORTCUT" ]; then
+  say "    A LocaLM entry was also added to your application menu."
 fi
 say ""
 say "  The GUI launcher uses Tk; localm's bundled Python includes it, so it"

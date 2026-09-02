@@ -5,6 +5,9 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports ---
+import { t } from "./i18n.js";
+
 export const $ = (id) => document.getElementById(id);
 
 // Read a JSON value from localStorage without letting a CORRUPT entry crash the
@@ -220,9 +223,9 @@ export function formatToolCalls(text) {
       const name = (block.match(/"name"\s*:\s*"(\w+)"/) || [])[1] || "";
       const arg = (block.match(/"(?:query|url)"\s*:\s*"([^"]*)"/) || [])[1] || "";
       const what =
-        name === "web_search" ? `web search: "${arg}"` :
-        name === "fetch_url"  ? `read page: ${arg || ""}` :
-        arg ? `web request: ${arg}` : "web request";
+        name === "web_search" ? t("common.toolCall.webSearch", { arg }) :
+        name === "fetch_url"  ? t("common.toolCall.readPage", { arg: arg || "" }) :
+        arg ? t("common.toolCall.webRequest", { arg }) : t("common.toolCall.webRequestBare");
       return `\n> 🌐 *${what}*\n`;
     });
 }
@@ -368,18 +371,13 @@ function askOriginConsent(origin) {
       $("modal").style.display = "none";
       resolve(value);
     };
-    openModal("Load images from this site?", (body) => {
-      body.appendChild(el("p", "",
-        "A reply wants to show an image from " + origin + ". Loading it tells "
-        + "that site someone is reading this reply, and the address itself can "
-        + "carry information out. This machine makes the request, not your "
-        + "browser."));
-      body.appendChild(el("p", "",
-        "Your answer is remembered for this site in this conversation only."));
+    openModal(t("common.imageConsent.title"), (body) => {
+      body.appendChild(el("p", "", t("common.imageConsent.body", { origin })));
+      body.appendChild(el("p", "", t("common.imageConsent.remember")));
       const row = el("div", "actions");
-      const no = el("button", "btn-secondary", "Do not load");
+      const no = el("button", "btn-secondary", t("common.imageConsent.decline"));
       no.onclick = () => finish(false);
-      const yes = el("button", "btn-secondary", "Show images from this site");
+      const yes = el("button", "btn-secondary", t("common.imageConsent.allow"));
       yes.onclick = () => finish(true);
       row.appendChild(no);
       row.appendChild(yes);
@@ -445,14 +443,14 @@ class ImageOriginDeclined extends Error {
 /** One sentence saying why an image did not load, for the placeholder below. */
 function proxyRefusalText(e) {
   if (e instanceof ImageOriginDeclined) {
-    return "You chose not to load images from " + e.origin + " in this chat.";
+    return t("common.imageProxy.declined", { origin: e.origin });
   }
   if (e instanceof ImageProxyRefused) {
     if (e.detail) return e.detail;
-    if (e.status === 403) return "This localm refused to fetch it.";
-    return "This localm could not fetch it (HTTP " + e.status + ").";
+    if (e.status === 403) return t("common.imageProxy.refused");
+    return t("common.imageProxy.failed", { status: e.status });
   }
-  return "This localm could not reach it.";
+  return t("common.imageProxy.unreachable");
 }
 
 /** One attempt at the proxy route. *consented* adds the reader's per-origin
@@ -526,7 +524,7 @@ function showBlockedImage(img, reason) {
   note.title = reason;
   const alt = (img.getAttribute("alt") || "").trim();
   note.appendChild(el("span", "img-blocked-label",
-                      alt ? "Image not shown (" + alt + ")" : "Image not shown"));
+                      alt ? t("common.image.notShownWithAlt", { alt }) : t("common.image.notShown")));
   note.appendChild(el("span", "img-blocked-why", reason));
   if (img.parentNode) img.parentNode.replaceChild(note, img);
 }
@@ -635,7 +633,7 @@ export function renderMarkdown(target, text, opts = {}) {
       det.appendChild(document.createElement("div"));
       target.insertBefore(det, target.firstChild);
     }
-    det.querySelector("summary").textContent = open ? "Thinking…" : "Thoughts";
+    det.querySelector("summary").textContent = open ? t("common.reasoning.thinking") : t("common.reasoning.thoughts");
     det.querySelector("div").innerHTML = DOMPurify.sanitize(marked.parse(think));
     if (!det.dataset.userset) det.open = open;
   } else if (det) {
@@ -662,7 +660,7 @@ export function renderMarkdown(target, text, opts = {}) {
   // model whose <think> works but whose answer is a bare empty ```code fence).
   // Gated on final so a slow model is never flashed a false "no reply" early.
   if (opts.final && !mainHasVisibleContent(main)) {
-    main.replaceChildren(el("div", "md-empty", "(no reply text)"));
+    main.replaceChildren(el("div", "md-empty", t("common.reply.empty")));
   }
   // LaTeX math: $...$, $$...$$, \(...\), \[...\]. KaTeX only rewrites text
   // nodes after sanitisation, so this stays XSS-safe.
@@ -798,7 +796,7 @@ export function openArtifact(code, lang) {
   frame.srcdoc = artifactSrcdoc(code, lang);
   body.appendChild(frame);
   const title = pane.querySelector(".artifact-title");
-  if (title) title.textContent = "Artifact (" + lang + ")";
+  if (title) title.textContent = t("common.artifact.title", { lang });
   pane.hidden = false;
   // Wire the controls lazily (idempotent): the GUI init does not run under the
   // test harness, and this keeps them working regardless of load order.
@@ -823,11 +821,11 @@ export function enhanceCodeBlock(pre) {
   if (!pre.querySelector(".copy-btn")) {
     const btn = document.createElement("button");
     btn.className = "copy-btn";
-    btn.textContent = "copy";
+    btn.textContent = t("common.codeBlock.copy");
     btn.onclick = () => {
       navigator.clipboard.writeText(pre.querySelector("code")?.innerText || pre.innerText);
-      btn.textContent = "copied";
-      setTimeout(() => (btn.textContent = "copy"), 1200);
+      btn.textContent = t("common.codeBlock.copied");
+      setTimeout(() => (btn.textContent = t("common.codeBlock.copy")), 1200);
     };
     pre.appendChild(btn);
   }
@@ -836,8 +834,8 @@ export function enhanceCodeBlock(pre) {
   if (lang && !pre.querySelector(".canvas-btn")) {
     const cbtn = document.createElement("button");
     cbtn.className = "canvas-btn";
-    cbtn.textContent = "canvas";
-    cbtn.title = "Render this " + lang.toUpperCase() + " in a sandboxed canvas";
+    cbtn.textContent = t("common.codeBlock.canvas");
+    cbtn.title = t("common.codeBlock.canvasTitle", { lang: lang.toUpperCase() });
     cbtn.onclick = () => openArtifact(codeEl?.innerText || codeEl?.textContent || "", lang);
     pre.appendChild(cbtn);
   }
@@ -872,14 +870,14 @@ export function safeAvatarImageSrc(value) {
 export function fileToAvatarDataUri(file, maxSize = 128) {
   return new Promise((resolve, reject) => {
     if (!file.type || !file.type.startsWith("image/")) {
-      reject(new Error("choose an image file"));
+      reject(new Error(t("common.imageFile.chooseImage")));
       return;
     }
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("could not read the file"));
+    reader.onerror = () => reject(new Error(t("common.imageFile.readFailed")));
     reader.onload = () => {
       const img = new Image();
-      img.onerror = () => reject(new Error("could not decode the image"));
+      img.onerror = () => reject(new Error(t("common.imageFile.decodeFailed")));
       img.onload = () => {
         const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
         const w = Math.max(1, Math.round(img.width * scale));
@@ -907,14 +905,14 @@ export function fileToAvatarDataUri(file, maxSize = 128) {
 export function fileToBackgroundDataUri(file, maxSize = 1920, quality = 0.85) {
   return new Promise((resolve, reject) => {
     if (!file.type || !file.type.startsWith("image/")) {
-      reject(new Error("choose an image file"));
+      reject(new Error(t("common.imageFile.chooseImage")));
       return;
     }
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("could not read the file"));
+    reader.onerror = () => reject(new Error(t("common.imageFile.readFailed")));
     reader.onload = () => {
       const img = new Image();
-      img.onerror = () => reject(new Error("could not decode the image"));
+      img.onerror = () => reject(new Error(t("common.imageFile.decodeFailed")));
       img.onload = () => {
         const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
         const w = Math.max(1, Math.round(img.width * scale));
@@ -972,7 +970,7 @@ export function updateAdvancedCount(fold) {
   const n = foldFilledCount(fold);
   const badge = fold.querySelector("summary .adv-fold-count");
   if (badge) {
-    badge.textContent = n ? n + " set" : "";
+    badge.textContent = n ? t("common.advancedFold.setCount", { n }) : "";
     badge.hidden = !n;
   }
   return n;
@@ -1201,7 +1199,7 @@ export function confirmDanger(title, message, confirmLabel, onConfirm) {
   openModal(title, (body) => {
     body.appendChild(el("p", "", message));
     const row = el("div", "actions");
-    const cancel = el("button", "btn-secondary", "Cancel");
+    const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
     cancel.onclick = () => ($("modal").style.display = "none");
     const ok = el("button", "btn-secondary btn-danger", confirmLabel);
     ok.onclick = () => { $("modal").style.display = "none"; onConfirm(); };
@@ -1239,9 +1237,9 @@ export function promptText(title, defaultValue) {
       input.value = defaultValue || "";
       body.appendChild(input);
       const row = el("div", "actions");
-      const cancel = el("button", "btn-secondary", "Cancel");
+      const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
       cancel.onclick = () => finish(null);
-      const ok = el("button", "btn-secondary", "OK");
+      const ok = el("button", "btn-secondary", t("common.modal.ok"));
       ok.onclick = () => finish(input.value);
       row.appendChild(cancel);
       row.appendChild(ok);
@@ -1286,17 +1284,17 @@ function _offerModelDownload(missingModel, log, plugin) {
       $("modal").style.display = "none";
       resolve(value);
     };
-    openModal(`Missing model: ${filename}`, (body) => {
+    openModal(t("common.modelDownload.title", { filename }), (body) => {
       body.appendChild(el("p", "",
-        `This workflow needs '${filename}' (${fmtBytes(source.size_bytes)}), `
-        + "which isn't installed."));
-      body.appendChild(el("p", "", `Source: ${source.repo} / ${source.file}`));
+        t("common.modelDownload.body", { filename, size: fmtBytes(source.size_bytes) })));
+      body.appendChild(el("p", "",
+        t("common.modelDownload.source", { repo: source.repo, file: source.file })));
       const row = el("div", "actions");
-      const skip = el("button", "btn-secondary", "Not now");
+      const skip = el("button", "btn-secondary", t("common.modelDownload.notNow"));
       skip.onclick = () => finish(true);
-      const dl = el("button", "btn-secondary", "Download");
+      const dl = el("button", "btn-secondary", t("common.modelDownload.download"));
       dl.onclick = async () => {
-        dl.disabled = true; skip.disabled = true; dl.textContent = "Starting…";
+        dl.disabled = true; skip.disabled = true; dl.textContent = t("common.modelDownload.starting");
         try {
           const r = await fetch("/api/models/pull-comfy-source", {
             method: "POST", headers: authHeaders(),
@@ -1308,7 +1306,7 @@ function _offerModelDownload(missingModel, log, plugin) {
           $("modal").style.display = "none";
           if (log) {
             log.style.display = "block";
-            log.textContent += `Downloading ${filename} from ${source.repo}…\n`;
+            log.textContent += t("common.modelDownload.progress", { filename, repo: source.repo }) + "\n";
           }
           const end = await streamJob(data.job_id, (line) => {
             if (log) { log.textContent += line + "\n"; log.scrollTop = log.scrollHeight; }
@@ -1316,7 +1314,7 @@ function _offerModelDownload(missingModel, log, plugin) {
           if (end.status !== "done") toast(`Download ${end.status}: ${filename}`, true);
           resolve(true);
         } catch (e) {
-          toast("Download failed: " + e.message, true);
+          toast(t("common.modelDownload.failed", { message: e.message }), true);
           resolve(false);
         }
       };
@@ -1341,9 +1339,7 @@ function _offerModelDownload(missingModel, log, plugin) {
  *  the real generate call's own preflight_models() gate remains authoritative. */
 function _reportUncuratedMiss(missingModel, log) {
   const { filename, class_type, input_name } = missingModel;
-  const msg = `'${filename}' is missing (needed by ${class_type}.${input_name}) - `
-    + "localm has no automatic download source for it. Add it to your ComfyUI "
-    + "installation's matching models folder, then try again.";
+  const msg = t("common.modelDownload.uncuratedMissing", { filename, class_type, input_name });
   toast(msg, true);
   if (log) {
     log.style.display = "block";

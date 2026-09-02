@@ -155,12 +155,15 @@ def test_currency_does_not_call_a_lexically_larger_older_tag_newer(
 def test_currency_skips_releases_whose_assets_are_not_uploaded_yet(currency, monkeypatch):
     """Upstream publishes a release before its ~25 archives finish uploading.
     Counting one of those as "behind" overstates the gap and would point the
-    advance step at a tag that cannot be downloaded yet."""
+    advance step at a tag that cannot be downloaded yet. Every entry is flagged
+    prerelease, matching what ggml-org/llama.cpp actually sends, so this also
+    pins that the asset/draft checks are what exclude b99999 and b99997 - not
+    the prerelease flag."""
     payload = [
-        {"tag_name": "b99999", "draft": False, "prerelease": False, "assets": []},
-        {"tag_name": "b99998", "draft": False, "prerelease": False,
+        {"tag_name": "b99999", "draft": False, "prerelease": True, "assets": []},
+        {"tag_name": "b99998", "draft": False, "prerelease": True,
          "assets": [{"name": "x"}]},
-        {"tag_name": "b99997", "draft": True, "prerelease": False,
+        {"tag_name": "b99997", "draft": True, "prerelease": True,
          "assets": [{"name": "x"}]},
     ]
     monkeypatch.setattr(currency.urllib.request, "urlopen",
@@ -168,6 +171,23 @@ def test_currency_skips_releases_whose_assets_are_not_uploaded_yet(currency, mon
     tags, err = currency.upstream_tags()
     assert err == ""
     assert tags == ["b99998"], "asset-less and draft releases are not candidates"
+
+
+def test_currency_treats_a_prerelease_flagged_release_as_a_real_candidate(
+        currency, monkeypatch):
+    """Every release ggml-org/llama.cpp publishes is flagged prerelease, with no
+    signal value: a real, asset-bearing, non-draft release must still surface."""
+    payload = [
+        {"tag_name": "b99999", "draft": False, "prerelease": True,
+         "assets": [{"name": "x"}] * 16},
+    ]
+    monkeypatch.setattr(currency.urllib.request, "urlopen",
+                        lambda *a, **k: _FakeHTTP(payload))
+    tags, err = currency.upstream_tags()
+    assert err == ""
+    assert tags == ["b99999"], (
+        "a prerelease-flagged, asset-bearing, non-draft release must survive "
+        "the filter")
 
 
 def _boom(*a, **k):

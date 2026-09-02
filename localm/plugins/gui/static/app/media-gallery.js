@@ -14,6 +14,7 @@
 
 import { lsSetScoped } from "./chat.js";
 import { $, authHeaders, confirmDanger, el, fetchImageURL, openModal, promptText, toast } from "./helpers.js";
+import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { pickDirectory } from "./picker.js";
 
@@ -41,12 +42,12 @@ export function reportMediaLoadFailure(player, what, onFail) {
   player.addEventListener("error", () => {
     const err = player.error;
     const why = {
-      1: "loading was aborted",
-      2: "a network error",
-      3: "the file could not be decoded",
-      4: "this browser refused the source",
-    }[err && err.code] || "an unknown error";
-    toast(`Could not play ${what}: ${why}.`, true);
+      1: t("mediaGallery.playError.aborted"),
+      2: t("mediaGallery.playError.network"),
+      3: t("mediaGallery.playError.decode"),
+      4: t("mediaGallery.playError.refused"),
+    }[err && err.code] || t("mediaGallery.playError.unknown");
+    toast(t("mediaGallery.playFailed", { what, why }), true);
     if (onFail) onFail();
   });
 }
@@ -106,13 +107,15 @@ export function createGallery(cfg) {
       const r = await fetch(`/api/${cfg.slug}/history`, { headers: authHeaders() });
       if (!r.ok) {
         // Show the failure in the grid instead of leaving it blank.
-        grid.replaceChildren(emptyState("warning", `Could not load ${cfg.plural}`,
-          `The server returned HTTP ${r.status}. Try refreshing the page.`));
+        grid.replaceChildren(emptyState("warning",
+          t("mediaGallery.loadFailed", { plural: t(`${cfg.itemKey}.other`) }),
+          t("mediaGallery.loadFailedHttp", { status: r.status })));
         return;
       }
       state.items = (await r.json())[cfg.listKey] || [];
     } catch (e) {
-      grid.replaceChildren(emptyState("warning", `Could not load ${cfg.plural}`,
+      grid.replaceChildren(emptyState("warning",
+        t("mediaGallery.loadFailed", { plural: t(`${cfg.itemKey}.other`) }),
         `${(e && e.message) || e}`));
       return;
     }
@@ -129,14 +132,15 @@ export function createGallery(cfg) {
     grid.replaceChildren();
     renderBulkBar();
     if (!state.items.length) {
-      grid.appendChild(emptyState(cfg.emptyIcon, cfg.emptyTitle, cfg.emptyHint));
+      grid.appendChild(emptyState(cfg.emptyIcon, t(cfg.emptyTitleKey), t(cfg.emptyHintKey)));
       return;
     }
     const shown = state.showAll ? state.items : state.items.slice(0, GRID_DEFAULT);
     for (const item of shown) grid.appendChild(buildCard(item));
     if (state.items.length > GRID_DEFAULT) {
       const toggle = el("button", "btn-secondary media-show-all",
-        state.showAll ? "show fewer" : `show all (${state.items.length})`);
+        state.showAll ? t("mediaGallery.showFewer")
+                      : t("mediaGallery.showAll", { count: state.items.length }));
       toggle.onclick = () => { state.showAll = !state.showAll; render(); };
       grid.appendChild(toggle);
     }
@@ -166,14 +170,14 @@ export function createGallery(cfg) {
     const acts = el("div", "thumb-acts");
     const dl = el("button", "download");
     dl.appendChild(iconEl("download"));
-    dl.title = "Download";
+    dl.title = t("mediaGallery.download");
     dl.onclick = (e) => {
       e.stopPropagation();
-      download(item.name).catch((err) => toast("Download failed: " + err.message, true));
+      download(item.name).catch((err) => toast(t("mediaGallery.downloadFailed", { message: err.message }), true));
     };
     const del = el("button", "danger");
     del.appendChild(iconEl("trash"));
-    del.title = "Delete from disk";
+    del.title = t("mediaGallery.deleteFromDisk");
     del.onclick = (e) => {
       e.stopPropagation();
       confirmDelete(item);
@@ -187,14 +191,15 @@ export function createGallery(cfg) {
   }
 
   function confirmDelete(item, alsoClose) {
-    confirmDanger(`Delete "${item.name}"?`, "This removes the file from disk.",
-      "Delete", async () => {
+    confirmDanger(t("mediaGallery.confirmDeleteOne.title", { name: item.name }),
+      t("mediaGallery.confirmDeleteOne.body"),
+      t("mediaGallery.delete"), async () => {
         try {
           await apiDelete(item.name);
-          toast("Deleted " + item.name);
+          toast(t("mediaGallery.deletedOne", { name: item.name }));
           if (alsoClose) closeModal();
           refresh();
-        } catch (err) { toast("Delete failed: " + err.message, true); }
+        } catch (err) { toast(t("mediaGallery.deleteFailed", { message: err.message }), true); }
       });
   }
 
@@ -206,11 +211,12 @@ export function createGallery(cfg) {
     bar.style.display = n ? "flex" : "none";
     bar.replaceChildren();
     if (!n) return;
-    bar.appendChild(el("span", "count", `${n} selected`));
+    bar.appendChild(el("span", "count", tn("mediaGallery.bulkSelected", n)));
 
-    const move = el("button", "btn-secondary", "move to folder…");
+    const move = el("button", "btn-secondary", t("mediaGallery.moveToFolder"));
     move.onclick = async () => {
-      const dest = await pickDirectory(`Move ${n} ${n === 1 ? cfg.noun : cfg.plural} to…`,
+      const dest = await pickDirectory(
+        t("mediaGallery.bulkMoveTitle", { n, item: tn(cfg.itemKey, n) }),
         localStorage.getItem(cfg.moveDestKey) || "");
       if (!dest) return;
       let moved = 0, failed = 0;
@@ -219,27 +225,29 @@ export function createGallery(cfg) {
         catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
       }
       lsSetScoped(cfg.moveDestKey, dest);
-      toast(`Moved ${moved} ${cfg.plural}` + (failed ? `, ${failed} failed` : ""));
+      toast(t("mediaGallery.movedCount", { moved, plural: t(`${cfg.itemKey}.other`) })
+        + (failed ? t("mediaGallery.andFailedSuffix", { failed }) : ""));
       state.selected.clear();
       refresh();
     };
 
-    const del = el("button", "btn-secondary btn-danger", "delete");
+    const del = el("button", "btn-secondary btn-danger", t("mediaGallery.deleteLower"));
     del.onclick = () => {
-      confirmDanger(`Delete ${n} ${n === 1 ? cfg.noun : cfg.plural}?`,
-        "This removes the files from disk.", "Delete", async () => {
+      confirmDanger(t("mediaGallery.confirmDeleteBulk.title", { n, item: tn(cfg.itemKey, n) }),
+        t("mediaGallery.confirmDeleteBulk.body"), t("mediaGallery.delete"), async () => {
           let deleted = 0, failed = 0;
           for (const name of [...state.selected]) {
             try { await apiDelete(name); deleted++; }
             catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
           }
-          toast(`Deleted ${deleted} ${cfg.plural}` + (failed ? `, ${failed} failed` : ""));
+          toast(t("mediaGallery.deletedCount", { deleted, plural: t(`${cfg.itemKey}.other`) })
+            + (failed ? t("mediaGallery.andFailedSuffix", { failed }) : ""));
           state.selected.clear();
           refresh();
         });
     };
 
-    const clear = el("button", "btn-secondary", "clear selection");
+    const clear = el("button", "btn-secondary", t("mediaGallery.clearSelection"));
     clear.onclick = () => { state.selected.clear(); render(); };
 
     bar.append(move, del, clear);
@@ -255,65 +263,66 @@ export function createGallery(cfg) {
       }
 
       if (cfg.reuse && item.meta && Object.keys(item.meta).length) {
-        const reuse = el("button", "btn-secondary", "reuse settings");
-        reuse.title = `Fill the generation form with this ${cfg.noun}'s settings`;
+        const reuse = el("button", "btn-secondary", t("mediaGallery.reuseSettings"));
+        reuse.title = t("mediaGallery.reuseSettingsTitle", { noun: tn(cfg.itemKey, 1) });
         reuse.onclick = () => {
           cfg.reuse(item);
           closeModal();
-          toast("Settings restored - tweak and generate");
+          toast(t("mediaGallery.reuseToast"));
         };
         actions.appendChild(reuse);
       }
 
-      const dl = el("button", "btn-secondary", "download");
+      const dl = el("button", "btn-secondary", t("mediaGallery.downloadLower"));
       dl.onclick = () =>
-        download(item.name).catch((e) => toast("Download failed: " + e.message, true));
+        download(item.name).catch((e) => toast(t("mediaGallery.downloadFailed", { message: e.message }), true));
       actions.appendChild(dl);
 
-      const copyPath = el("button", "btn-secondary", "copy path");
+      const copyPath = el("button", "btn-secondary", t("mediaGallery.copyPath"));
       copyPath.title = item.path || "";
       copyPath.onclick = async () => {
         try {
           await navigator.clipboard.writeText(item.path || item.name);
-          toast("Path copied");
-        } catch (e) { toast("Copy failed: " + e.message, true); }
+          toast(t("mediaGallery.pathCopied"));
+        } catch (e) { toast(t("mediaGallery.copyPathFailed", { message: e.message }), true); }
       };
       actions.appendChild(copyPath);
 
-      const rename = el("button", "btn-secondary", "rename…");
+      const rename = el("button", "btn-secondary", t("mediaGallery.rename"));
       rename.onclick = async () => {
         // promptText() reuses the shared #modal and replaces this detail
         // view's content, so every path except success re-opens the view.
-        const newName = await promptText("New name:", item.name);
+        const newName = await promptText(t("mediaGallery.renamePromptLabel"), item.name);
         if (!newName || newName.trim() === item.name) { showDetail(item); return; }
         try {
           const name = await apiRename(item.name, newName.trim());
-          toast("Renamed to " + name);
+          toast(t("mediaGallery.renamed", { name }));
           closeModal();
           refresh();
         } catch (e) {
-          toast(e.message || "Rename failed", true);
+          toast(e.message || t("mediaGallery.renameFailed"), true);
           showDetail(item);
         }
       };
       actions.appendChild(rename);
 
-      const move = el("button", "btn-secondary", "move to folder…");
+      const move = el("button", "btn-secondary", t("mediaGallery.moveToFolder"));
       move.onclick = async () => {
-        const dest = await pickDirectory(`Move ${cfg.noun} to…`,
+        const dest = await pickDirectory(
+          t("mediaGallery.moveSingleTitle", { noun: tn(cfg.itemKey, 1) }),
           localStorage.getItem(cfg.moveDestKey) || "");
         if (!dest) return;
         try {
           const path = await apiMove(item.name, dest);
           lsSetScoped(cfg.moveDestKey, dest);
-          toast("Moved to " + path);
+          toast(t("mediaGallery.movedTo", { path }));
           closeModal();
           refresh();
-        } catch (e) { toast("Move failed: " + e.message, true); }
+        } catch (e) { toast(t("mediaGallery.moveFailed", { message: e.message }), true); }
       };
       actions.appendChild(move);
 
-      const del = el("button", "btn-secondary btn-danger", "delete");
+      const del = el("button", "btn-secondary btn-danger", t("mediaGallery.deleteLower"));
       del.onclick = () => confirmDelete(item, true);
       actions.appendChild(del);
 
@@ -330,6 +339,11 @@ export function createGallery(cfg) {
       }
     });
   }
+
+  // The grid, bulk bar and empty state are painted from fetched data, not
+  // marked up in index.html, so they are re-fetched and redrawn when the
+  // interface language changes.
+  document.addEventListener("localm:language", refresh);
 
   return { refresh, render, showDetail, state, ctx };
 }
@@ -349,10 +363,10 @@ function previewFailed(wrap, why) {
 export function imagePreview(item, ctx) {
   const wrap = el("div", "thumb-face");
   const img = document.createElement("img");
-  img.addEventListener("error", () => previewFailed(wrap, "Preview unavailable"));
+  img.addEventListener("error", () => previewFailed(wrap, t("mediaGallery.previewUnavailable")));
   ctx.fileURL(item.name, img, "load")
     .then((url) => (img.src = url))
-    .catch(() => previewFailed(wrap, "Could not load this image"));
+    .catch(() => previewFailed(wrap, t("mediaGallery.imageLoadFailed")));
   wrap.appendChild(img);
   return wrap;
 }
@@ -372,12 +386,12 @@ export function videoPreview(item, ctx) {
       try { v.currentTime = Math.min(0.1, v.duration / 2); } catch (e) { /* keep frame 0 */ }
     }
   });
-  v.addEventListener("error", () => previewFailed(wrap, "Preview unavailable"));
+  v.addEventListener("error", () => previewFailed(wrap, t("mediaGallery.previewUnavailable")));
   ctx.fileURL(item.name, v, "loadeddata")
     .then((url) => (v.src = url))
-    .catch(() => previewFailed(wrap, "Could not load this clip"));
+    .catch(() => previewFailed(wrap, t("mediaGallery.clipLoadFailed")));
   wrap.appendChild(v);
-  wrap.appendChild(el("span", "thumb-badge", durationLabel(item) || "clip"));
+  wrap.appendChild(el("span", "thumb-badge", durationLabel(item) || t("mediaGallery.clipBadgeFallback")));
   return wrap;
 }
 
@@ -392,7 +406,7 @@ export function musicPreview(item, ctx) {
   let player = null;
   const play = el("button", "audio-play");
   play.type = "button";
-  play.title = "Play this track";
+  play.title = t("mediaGallery.playTrack");
   play.appendChild(iconEl("play", "btn-ic"));
   const stop = () => {
     if (!player) return;
@@ -404,7 +418,7 @@ export function musicPreview(item, ctx) {
     player.remove();
     player = null;
     play.replaceChildren(iconEl("play", "btn-ic"));
-    play.title = "Play this track";
+    play.title = t("mediaGallery.playTrack");
   };
   play.onclick = async (e) => {
     e.stopPropagation();               // the card itself opens the detail view
@@ -424,9 +438,9 @@ export function musicPreview(item, ctx) {
       player.src = url;
       wrap.appendChild(player);
       play.replaceChildren(iconEl("stop", "btn-ic"));
-      play.title = "Stop";
+      play.title = t("mediaGallery.stopTrack");
     } catch (err) {
-      toast("Could not load the track: " + err.message, true);
+      toast(t("mediaGallery.trackLoadFailed", { message: err.message }), true);
     } finally {
       play.disabled = false;
     }
@@ -473,7 +487,7 @@ export function playerDetail(tag, what) {
         _detailURL = url;
         player.src = url;
       })
-      .catch((e) => toast(`Could not load the ${what}: ${e.message}`, true));
+      .catch((e) => toast(t("mediaGallery.mediaLoadFailedGeneric", { what, message: e.message }), true));
     body.appendChild(player);
   };
 }
@@ -499,10 +513,9 @@ export function bindReloadToggle(plugin, checkboxId) {
         body: JSON.stringify({ reload_after: value }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      toast(value ? "Chat model reloads after each generation"
-                  : "This backend stays loaded - chat model reloads on next message");
+      toast(value ? t("mediaGallery.reloadOn") : t("mediaGallery.reloadOff"));
     } catch (e) {
-      toast("Could not save setting: " + e.message, true);
+      toast(t("mediaGallery.saveSettingFailed", { message: e.message }), true);
       box.checked = !value;      // revert: the write failed
     }
   };
