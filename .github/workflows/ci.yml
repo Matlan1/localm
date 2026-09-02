@@ -403,12 +403,12 @@ jobs:
         continue-on-error: true
         run: python scripts/check_comfyui_pin.py
 
-  # Mutation testing (mutmut) for six of the eight trust-boundary modules
+  # Mutation testing (mutmut) for the eight trust-boundary modules
   # scripts/check_coverage_floors.py tracks - see pyproject.toml
-  # [tool.mutmut] for which two are excluded and why. ubuntu-latest only,
-  # and there is no matrix dimension on this job at all, so it structurally
-  # cannot run on windows-latest: mutmut has no native Windows support and
-  # refuses to run there ("please use the WSL"). Opt-in via the
+  # [tool.mutmut]. ubuntu-latest only, and there is no matrix dimension on
+  # this job at all, so it structurally cannot run on windows-latest: mutmut
+  # has no native Windows support and refuses to run there ("please use the
+  # WSL"). Opt-in via the
   # `mutation-test` PR label (same mechanism as `full-ci` above) or a manual
   # dispatch; never runs on push or schedule. Read-only: it never fails the
   # build on survivors.
@@ -445,7 +445,7 @@ jobs:
       - name: Mutation test the trust-boundary modules
         timeout-minutes: 170
         continue-on-error: true
-        run: mutmut run
+        run: python scripts/mutmut_run.py run
 
       - name: Export mutation stats
         if: always()
