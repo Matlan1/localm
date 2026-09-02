@@ -357,3 +357,46 @@ class TestAgentClose:
         # No .localcoder/sessions directory should exist
         sessions_dir = tmp_path / ".localcoder" / "sessions"
         assert not sessions_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+#  _write_session_markdown collision (REG: coder session markdown transcript
+#  collision - the sibling of the audit-log collision fixed by
+#  TestSessionIdentity in test_audit_modes.py)
+# ---------------------------------------------------------------------------
+
+class TestSessionMarkdownIdentity:
+    """Two coder sessions in the SAME project, closed within the same second,
+    must not land on one transcript file. The filename used to be built from
+    a bare one-second-resolution timestamp with no session identity at all,
+    so the second session's close() silently overwrote the first session's
+    entire transcript (write_text, not append)."""
+
+    def test_checkpoint_id_is_part_of_the_filename(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        agent._messages = [{"role": "user", "content": "hi"}]
+        agent._turns = 1
+
+        result = agent.close()
+        assert agent._checkpoint_id in result.name
+
+    def test_two_sessions_same_second_get_distinct_transcript_files(self, tmp_path):
+        a1 = _make_agent(tmp_path, SessionMode.FULL)
+        a1._messages = [{"role": "user", "content": "message from session A"}]
+        a1._turns = 1
+        a2 = _make_agent(tmp_path, SessionMode.FULL)
+        a2._messages = [{"role": "user", "content": "message from session B"}]
+        a2._turns = 1
+
+        with patch("time.strftime", return_value="2026-01-01_000000"):
+            path1 = a1.close()
+            path2 = a2.close()
+
+        assert path1 != path2
+        assert path1.exists() and path2.exists()
+        text1 = path1.read_text(encoding="utf-8")
+        text2 = path2.read_text(encoding="utf-8")
+        assert "message from session A" in text1
+        assert "message from session B" in text2
+        assert "message from session B" not in text1
+        assert "message from session A" not in text2
