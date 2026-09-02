@@ -8,7 +8,10 @@ dist-info. The updater compares this live value against the latest GitHub Releas
 tag, so it must reflect the files on disk right now - hence a file read.
 
 Falls back to the installed distribution metadata (non-editable installs have no
-repo-root ``VERSION`` next to the package), then to ``"unknown"``. Never raises.
+repo-root ``VERSION`` next to the package), then to the release build's baked-in
+``localm/_build_version.py`` constant (shipped only inside a signed release
+build; absent in a source checkout or an editable install), then to
+``"unknown"``. Never raises.
 """
 
 from __future__ import annotations
@@ -22,8 +25,8 @@ def version_file() -> Path:
 
 
 def read_version() -> str:
-    """The running version string. VERSION file (live) > installed metadata >
-    ``"unknown"``. Never raises."""
+    """The running version string. VERSION file (live) > installed metadata > the
+    release build's baked-in constant > ``"unknown"``. Never raises."""
     try:
         text = version_file().read_text(encoding="utf-8").strip()
         if text:
@@ -34,7 +37,15 @@ def read_version() -> str:
         from importlib.metadata import version
         return version("localm")
     except Exception:
-        return "unknown"
+        pass
+    try:
+        from localm._build_version import VERSION as _baked
+        text = str(_baked).strip()
+        if text:
+            return text
+    except Exception:
+        pass
+    return "unknown"
 
 
 def normalize(tag: str) -> str:

@@ -373,6 +373,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "Opening the GUI" or picking a model "on the Models page" - none of which
   `--api-mode` ever mounts. Those lines are now api-mode-aware and describe
   what is actually available instead.
+- **localm can now identify its own version in more situations**, instead of
+  falling back to "unknown." An install with no readable version file next to
+  it and no usable package metadata (uncommon, but possible on a damaged or
+  unusual install) previously could not tell what it was running - which also
+  meant the update checker could not confirm a downloaded build was genuinely
+  newer before installing it. Release builds now carry a fallback copy of
+  their own version number, so this case is now rare.
 
 ### Security
 - **Chatting with certain models no longer crashes the server outright.** For a
