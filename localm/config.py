@@ -709,6 +709,11 @@ DEFAULT_CONFIG: dict = {
     # "ask" is the state that DOES close the channel for an arbitrary host: the
     # route refuses until the GUI has asked the reader about that origin.
     "gui_proxy_remote_images": REMOTE_IMAGE_OFF,
+    # Render a self-contained HTML/SVG reply block in the sandboxed artifact
+    # canvas. Off hides the canvas button everywhere; owner_only hides it from
+    # every caller that is not the owner.
+    "gui_preview_enabled": True,
+    "gui_preview_owner_only": False,
     "coder_rail_side": "right",
     "coder_remember_projects": True,
     "coder_projects_remembered": 20,

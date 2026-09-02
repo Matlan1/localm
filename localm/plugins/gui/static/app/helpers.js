@@ -783,8 +783,52 @@ export function artifactSrcdoc(code, lang) {
     + code + "</body></html>";
 }
 
+/* Whether this caller is offered the canvas button. Starts true so the default
+ * install renders it before /api/capabilities lands; the server's answer
+ * overwrites it and refreshPreviewButtons() retracts buttons already drawn. */
+let _previewAllowed = true;
+
+/** Record whether the artifact canvas is offered to this caller. */
+export function setPreviewAllowed(allowed) {
+  _previewAllowed = allowed !== false;
+}
+
+/** Whether the artifact canvas is currently offered to this caller. */
+export function isPreviewAllowed() {
+  return _previewAllowed;
+}
+
+/** Add or remove *pre*'s canvas button for the current preview permission. Only
+ *  ever touches the canvas button, never the copy button: a <pre> with no <code>
+ *  child (a job-log pane) is left completely alone. */
+function applyCanvasButton(pre) {
+  const codeEl = pre.querySelector("code");
+  const lang = _previewAllowed ? artifactLang(codeEl) : null;
+  const existing = pre.querySelector(".canvas-btn");
+  if (!lang) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (existing) return;
+  const cbtn = document.createElement("button");
+  cbtn.className = "canvas-btn";
+  cbtn.textContent = t("common.codeBlock.canvas");
+  cbtn.title = t("common.codeBlock.canvasTitle", { lang: lang.toUpperCase() });
+  cbtn.onclick = () => openArtifact(codeEl?.innerText || codeEl?.textContent || "", lang);
+  pre.appendChild(cbtn);
+}
+
+/** Re-apply the current preview permission to every rendered code block under
+ *  *root* (default: the document): adds a missing canvas button when allowed,
+ *  removes one when not. Closes an open pane when no longer allowed. */
+export function refreshPreviewButtons(root) {
+  (root || document).querySelectorAll("pre").forEach(applyCanvasButton);
+  if (!_previewAllowed) closeArtifact();
+}
+
 /** Open the artifact pane and render *code* in the hard-sandboxed iframe. */
 export function openArtifact(code, lang) {
+  if (!_previewAllowed) return;
   const pane = document.getElementById("artifact-pane");
   if (!pane) return;
   const body = pane.querySelector(".artifact-body");
@@ -829,16 +873,7 @@ export function enhanceCodeBlock(pre) {
     };
     pre.appendChild(btn);
   }
-  const codeEl = pre.querySelector("code");
-  const lang = artifactLang(codeEl);
-  if (lang && !pre.querySelector(".canvas-btn")) {
-    const cbtn = document.createElement("button");
-    cbtn.className = "canvas-btn";
-    cbtn.textContent = t("common.codeBlock.canvas");
-    cbtn.title = t("common.codeBlock.canvasTitle", { lang: lang.toUpperCase() });
-    cbtn.onclick = () => openArtifact(codeEl?.innerText || codeEl?.textContent || "", lang);
-    pre.appendChild(cbtn);
-  }
+  applyCanvasButton(pre);
 }
 
 /** Create an element with class and (safe) text content. */

@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, renderMarkdown, revealFilledAdvanced, streamJob, stripThink, toast } from "./helpers.js";
+import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, setPreviewAllowed, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -1277,6 +1277,10 @@ export async function refreshPluginCommands() {
     pluginCommands.suggest = data.suggest_plugins !== false;
     pluginState = data.plugins || [];
     caps.fsAccess = data.fs_access || "none";
+    // Server decides who is offered the artifact canvas; re-walk already
+    // rendered blocks so a cold-load render picks the button up or loses it.
+    setPreviewAllowed(data.preview !== false);
+    refreshPreviewButtons();
     if (data.core) applyCoreTabVisibility(data.core);
     // Reveal the bug-report "Send to maintainer" button only when an upload
     // endpoint is configured (otherwise the report is saved-to-file + emailed).
