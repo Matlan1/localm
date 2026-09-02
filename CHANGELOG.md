@@ -116,6 +116,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   It shows the detected and installed runtime and installs it in one click
   if nothing is there yet, then tells you how many models you have with a
   shortcut to add one. Nothing runs until you click it.
+- **LocaLM now has a graphical installer, so you never have to answer setup
+  questions in a console.** Double-click `setup-gui.bat` (Windows) or run
+  `./setup-gui.sh` (Linux/macOS): a window asks which inference runtime to use
+  (your hardware's recommendation is already selected), where models and data
+  should live, whether the GUI opens as its own app window or a browser tab,
+  and whether you want a desktop shortcut and a global `localm` command. It
+  then installs with a progress bar and a live log, and offers to start LocaLM
+  when it finishes. It performs exactly the same install as `setup.bat` /
+  `setup.sh`, which are unchanged and remain available for anyone who prefers
+  them.
 
 ### Changed
 - **The two installers explain themselves more consistently.** `setup.bat`
