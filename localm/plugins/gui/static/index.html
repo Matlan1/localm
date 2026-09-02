@@ -708,24 +708,25 @@
     <!-- ============ PLUGINS ============ -->
     <section id="view-plugins" class="view">
       <div class="page">
-        <h2>Plugins</h2>
-        <div class="sub">LocaLM is a model loader plus a plugin engine. Only chat is active out of
+        <h2 data-i18n="plugins.title">Plugins</h2>
+        <div class="sub" data-i18n="plugins.intro">LocaLM is a model loader plus a plugin engine. Only chat is active out of
         the box; install the others as you need them. Enabling or disabling a plugin takes effect
         instantly - no restart, no model reload.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="plugins"></span>
-            <div class="card-head-text"><h3>First-party plugins</h3></div></div>
+            <div class="card-head-text"><h3 data-i18n="plugins.firstParty">First-party plugins</h3></div></div>
           <div id="catalog-table"></div>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="plugins"></span>
-            <div class="card-head-text"><h3>External plugins</h3></div></div>
-          <div class="sub">A third-party plugin is a folder with a <code>plugin.toml</code> manifest
+            <div class="card-head-text"><h3 data-i18n="plugins.external">External plugins</h3></div></div>
+          <div class="sub" data-i18n-rich="plugins.externalIntro">A third-party plugin is a folder with a <code>plugin.toml</code> manifest
           under <code>~/.localm/plugins/</code>; it can add a CLI command and export tools to the
           coder agent. Installation is a local directory copy.</div>
           <div class="row">
-            <input type="text" id="plugin-source" placeholder="path to a plugin folder" spellcheck="false">
-            <button class="btn-primary" id="plugin-install">Install</button>
+            <input type="text" id="plugin-source" placeholder="path to a plugin folder" spellcheck="false"
+                   data-i18n-placeholder="plugins.sourcePlaceholder">
+            <button class="btn-primary" id="plugin-install" data-i18n="plugins.install">Install</button>
           </div>
           <div id="plugins-table"></div>
         </div>
