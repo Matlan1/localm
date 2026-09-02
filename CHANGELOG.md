@@ -494,6 +494,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   pointed. It is now dropped the moment a redirect crosses to a different
   host, matching what a browser or a standard HTTP client already does by
   default.
+- **A crafted search pattern from the model could corrupt memory in the
+  coder's `grep` and `search_replace` tools, rather than just run slowly.**
+  These tools already bounded how long a model-supplied pattern is allowed
+  to run, since the pattern is attacker-influenced input, but two bugs in
+  the bundled regex engine sat underneath that bound: one could write past
+  the end of an internal buffer while compiling certain patterns, the other
+  could read past the end of one while matching and let the stray byte
+  decide whether a search reported a match that was never really there.
+  Neither needed a slow or memory-hungry pattern to trigger, so the existing
+  time and size limits could not catch them. Upgrading the bundled regex
+  engine closes both; the limits themselves are unchanged.
 
 ## [0.1.5] - 2026-08-26
 
