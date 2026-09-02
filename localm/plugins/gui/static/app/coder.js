@@ -8,6 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, lsSetScoped } from "./chat.js";
 import { $, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
+import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, refreshModels } from "./models-sidebar.js";
 import { pickDirectory } from "./picker.js";
@@ -34,17 +35,23 @@ export function sessionLabel(info) {
   return `${dir} (${info.id.slice(0, 6)})`;
 }
 
-// docs/gui-design.md rule 6: state renders as a .job-state pill. "working…"
+// docs/gui-design.md rule 6: state renders as a .job-state pill. "working"
 // maps to st-running, "idle" to st-pending (existing neutral variant), "error"
 // to st-error; the empty string (setup mode, no active session) gets no
-// variant, matching the base pill's dim/no-background look.
-function setCoderState(text) {
+// variant, matching the base pill's dim/no-background look. The key is kept
+// on the node's dataset so a later language change can redraw the same state.
+const CODER_STATE = {
+  working: { key: "coder.state.working", cls: "st-running" },
+  idle: { key: "coder.state.idle", cls: "st-pending" },
+  error: { key: "coder.state.error", cls: "st-error" },
+  "": { key: "", cls: "" },
+};
+function setCoderState(stateKey) {
   const node = $("coder-state");
-  node.textContent = text;
-  node.className = "job-state" + (
-    text === "working…" ? " st-running" :
-    text === "idle" ? " st-pending" :
-    text === "error" ? " st-error" : "");
+  const spec = CODER_STATE[stateKey] || CODER_STATE[""];
+  node.dataset.stateKey = stateKey;
+  node.textContent = spec.key ? t(spec.key) : "";
+  node.className = "job-state" + (spec.cls ? " " + spec.cls : "");
 }
 
 // Updates the busy pill with the seconds elapsed since the active session's
@@ -58,7 +65,7 @@ export function tickCoderBusyIndicator() {
   const node = $("coder-state");
   if (!node.classList.contains("st-running")) return;
   const secs = Math.max(0, Math.floor((Date.now() - s.lastEventAt) / 1000));
-  node.textContent = `working… ${secs}s`;
+  node.textContent = t("coder.state.workingElapsed", { secs });
 }
 setInterval(tickCoderBusyIndicator, 1000);
 
@@ -70,7 +77,7 @@ export function renderSessionSelect() {
   if (!coder.activeId && coder.sessions.size) {
     const opt = document.createElement("option");
     opt.value = "";
-    opt.textContent = "(new session)";
+    opt.textContent = t("coder.session.newOption");
     opt.selected = true;
     sel.appendChild(opt);
   }
@@ -111,31 +118,31 @@ export const dormant = { projects: [], note: "", loaded: false };
 
 function _when(iso) {
   if (!iso) return "";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const mins = Math.floor((Date.now() - t) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return mins + "m ago";
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return "";
+  const mins = Math.floor((Date.now() - ts) / 60000);
+  if (mins < 1) return t("coder.session.justNow");
+  if (mins < 60) return t("coder.session.minsAgo", { mins });
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return hrs + "h ago";
-  return Math.floor(hrs / 24) + "d ago";
+  if (hrs < 24) return t("coder.session.hoursAgo", { hrs });
+  return t("coder.session.daysAgo", { days: Math.floor(hrs / 24) });
 }
 
 function _dormantRow(projectPath, sess, available) {
   const item = el("div", "coder-session-item dormant");
-  item.appendChild(el("span", "title", sess.title || "(untitled session)"));
-  const meta = [_when(sess.interrupted_at), (sess.turns || 0) + " turns"]
+  item.appendChild(el("span", "title", sess.title || t("coder.session.untitled")));
+  const meta = [_when(sess.interrupted_at), tn("coder.session.turnsCount", sess.turns || 0)]
     .filter(Boolean).join(" · ");
   item.appendChild(el("span", "coder-session-meta", meta));
   if (available) {
-    item.title = "Continue this session";
+    item.title = t("coder.session.continueTitle");
     item.onclick = () => startCoderSession(
       { resume: true, cwd: projectPath, checkpointId: sess.id });
   } else {
     // The conversation is still here, the FOLDER is not. Offering a click that
     // then fails at the server is worse than saying so up front.
     item.classList.add("unavailable");
-    item.title = "The project folder is missing, so this session cannot be continued";
+    item.title = t("coder.session.unavailableTitle");
   }
   return item;
 }
@@ -147,14 +154,14 @@ export function renderCoderSessionList() {
 
   // 1. LIVE. Always from memory, always first: these are running right now.
   if (coder.sessions.size) {
-    list.appendChild(el("div", "coder-rail-head", "Open"));
+    list.appendChild(el("div", "coder-rail-head", t("coder.rail.open")));
     for (const [id, s] of coder.sessions) {
       const item = el("div", "coder-session-item" + (id === coder.activeId ? " active" : ""));
       item.appendChild(el("span", "title", sessionLabel(s.info)));
       if (s.busy) {
         const badge = el("span", "badge");
         badge.appendChild(iconEl("clock", "ic"));
-        badge.title = "Busy";
+        badge.title = t("coder.session.busyTitle");
         item.appendChild(badge);
       }
       item.onclick = () => activateSession(id);
@@ -178,7 +185,7 @@ export function renderCoderSessionList() {
   const current = dormant.projects.find((p) => p.current);
   const currentPast = current ? pastOnly(current) : [];
   if (currentPast.length) {
-    list.appendChild(el("div", "coder-rail-head", "Past sessions here"));
+    list.appendChild(el("div", "coder-rail-head", t("coder.rail.pastHere")));
     for (const sess of currentPast) {
       list.appendChild(_dormantRow(current.path, sess, current.available));
     }
@@ -191,13 +198,13 @@ export function renderCoderSessionList() {
     .map((proj) => ({ proj, sessions: pastOnly(proj) }))
     .filter((o) => o.sessions.length);
   if (others.length) {
-    list.appendChild(el("div", "coder-rail-head", "Other projects"));
+    list.appendChild(el("div", "coder-rail-head", t("coder.rail.otherProjects")));
     for (const { proj, sessions } of others) {
       const group = el("details", "coder-rail-project");
       const sum = el("summary");
       sum.appendChild(el("span", "title", proj.name));
       sum.appendChild(el("span", "coder-session-meta",
-        sessions.length + (proj.available ? "" : " · folder missing")));
+        sessions.length + (proj.available ? "" : t("coder.rail.folderMissingSuffix"))));
       group.appendChild(sum);
       for (const sess of sessions) {
         group.appendChild(_dormantRow(proj.path, sess, proj.available));
@@ -207,7 +214,7 @@ export function renderCoderSessionList() {
   }
 
   if (!list.childNodes.length) {
-    list.appendChild(el("div", "coder-session-empty", "No sessions yet"));
+    list.appendChild(el("div", "coder-session-empty", t("coder.rail.empty")));
   }
 
   // The note is PERMANENT, not an empty state, and its text comes from the
@@ -271,9 +278,9 @@ export function activateSession(id) {
   const s = coder.sessions.get(id);
   if (s) {
     $("coder-cwd").textContent = s.info.cwd;
-    setCoderState(s.busy ? "working…" : "idle");
+    setCoderState(s.busy ? "working" : "idle");
     $("coder-usage").textContent = s.info.total_tokens
-      ? `${s.info.total_tokens} tok · turn ${s.info.turns}` : "";
+      ? t("coder.usage.tokTurn", { tokens: s.info.total_tokens, turn: s.info.turns }) : "";
   }
   // "patch" only exists for a patch-mode session: in any other session the
   // writes went to disk, so the button would download an empty file and read
@@ -294,9 +301,8 @@ export function activateSession(id) {
     // stays in the tooltip and in session.info(), so nothing is lost.
     let where = bi.target;
     try { where = new URL(bi.target).host || bi.target; } catch { /* keep raw */ }
-    remote.textContent = `remote: ${where}`;
-    remote.title = "This session sends your prompts and the file contents it "
-                 + "reads to " + bi.target + ". They leave this machine.";
+    remote.textContent = t("coder.remote.badge", { host: where });
+    remote.title = t("coder.remote.tooltip", { target: bi.target });
     remote.style.display = "";
   } else {
     remote.style.display = "none";
@@ -402,7 +408,7 @@ export function todoHint(items) {
     String(t && typeof t === "object" ? (t.text ?? "") : (t ?? "")).trim());
   const done = lines.filter((l) => /^\[[xXvV✓✔]\]/.test(l)).length;
   const active = lines.find((l) => /^\[[>*~@]\]/.test(l)) || "";
-  const label = `${done}/${lines.length} done`;
+  const label = t("coder.todo.progress", { done, total: lines.length });
   return active ? `${label} · ${active.replace(/^\[.\]\s*/, "")}` : label;
 }
 
@@ -444,26 +450,26 @@ export function resolveConfirmCard(s, confirmId, approved, timedOut) {
   entry.title.replaceChildren();
   entry.title.appendChild(iconEl(!timedOut && approved ? "check" : "close", "btn-ic"));
   entry.title.appendChild(document.createTextNode(timedOut
-    ? "Timed out - rejected " + entry.tool
-    : (approved ? "Approved " : "Rejected ") + entry.tool));
+    ? t("coder.confirm.timedOut", { tool: entry.tool })
+    : t(approved ? "coder.confirm.approved" : "coder.confirm.rejected") + entry.tool));
 }
 
 export function buildConfirmCard(s, ev) {
   const card = el("div", "confirm-card");
   const inner = el("div", "inner");
   const title = el("div", "title");
-  title.appendChild(document.createTextNode("Approve "));
+  title.appendChild(document.createTextNode(t("coder.confirm.approvePrefix")));
   title.appendChild(el("span", "name", ev.tool));
-  title.appendChild(document.createTextNode("?"));
+  title.appendChild(document.createTextNode(t("coder.confirm.approveSuffix")));
   inner.appendChild(title);
   // Which sub-agent is asking. Parallel dispatch serialises several children onto
   // this one channel, so without it two identical cards arrive with nothing to
   // tell them apart. Absent for the session's own agent - its card is unchanged.
   if (ev.agent) {
     const who = el("div", "asker");
-    who.appendChild(document.createTextNode("sub-agent "));
+    who.appendChild(document.createTextNode(t("coder.confirm.askerPrefix")));
     who.appendChild(el("span", "name", ev.agent));
-    who.appendChild(document.createTextNode(" is asking"));
+    who.appendChild(document.createTextNode(t("coder.confirm.askerSuffix")));
     inner.appendChild(who);
   }
   if (ev.diff) {
@@ -472,15 +478,15 @@ export function buildConfirmCard(s, ev) {
     inner.appendChild(el("pre", "diff", JSON.stringify(ev.args, null, 2)));
   }
   const buttons = el("div", "buttons");
-  const yes = el("button", "btn-primary", "Approve");
-  const no = el("button", "btn-danger", "Reject");
+  const yes = el("button", "btn-primary", t("coder.confirm.approveBtn"));
+  const no = el("button", "btn-danger", t("coder.confirm.rejectBtn"));
   // "always allow" lives inside .buttons so the answered-state CSS hides it
   const allowCb = document.createElement("input");
   allowCb.type = "checkbox";
   const allowLabel = el("label", "always-allow");
   allowLabel.appendChild(allowCb);
   allowLabel.appendChild(document.createTextNode(
-    ` always allow ${ev.tool} this session`));
+    t("coder.confirm.alwaysAllow", { tool: ev.tool })));
   const answer = async (approved) => {
     try {
       const r = await fetch(`/api/coder/sessions/${s.info.id}/confirm`, {
@@ -494,15 +500,15 @@ export function buildConfirmCard(s, ev) {
       if (!r.ok) {
         // Already answered elsewhere (another tab) or timed out server-side -
         // the confirm_resolved event carries the real outcome.
-        toast("Confirmation was no longer pending", true);
+        toast(t("coder.confirm.noLongerPending"), true);
         return;
       }
       if (approved && allowCb.checked) {
-        toast(`${ev.tool} auto-approved for the rest of this session`);
+        toast(t("coder.confirm.autoApprovedToast", { tool: ev.tool }));
       }
       resolveConfirmCard(s, ev.confirm_id, approved, false);
     } catch (e) {
-      toast("Failed to answer confirmation: " + e.message, true);
+      toast(t("coder.confirm.answerFailed") + e.message, true);
     }
   };
   yes.onclick = () => answer(true);
@@ -558,10 +564,12 @@ export function handleCoderEvent(s, ev) {
       s.info.turns = ev.turn;
       s.info.total_tokens = ev.total_tokens;
       if (s.info.id === coder.activeId) {
-        setCoderState("working…");
-        const ctx = ev.ctx_ratio ? ` · ctx ${Math.round(ev.ctx_ratio * 100)}%` : "";
-        if (ev.total_tokens)
-          $("coder-usage").textContent = `${ev.total_tokens} tok · turn ${ev.turn}${ctx}`;
+        setCoderState("working");
+        const ctx = ev.ctx_ratio ? t("coder.usage.ctx", { pct: Math.round(ev.ctx_ratio * 100) }) : "";
+        if (ev.total_tokens) {
+          $("coder-usage").textContent =
+            t("coder.usage.tokTurn", { tokens: ev.total_tokens, turn: ev.turn }) + ctx;
+        }
       }
       break;
     }
@@ -590,8 +598,8 @@ export function handleCoderEvent(s, ev) {
         // replayed from a session recorded before this field existed; show
         // nothing rather than a fabricated number.
         const took = typeof ev.duration_s === "number"
-          ? ` · ${ev.duration_s.toFixed(1)}s` : "";
-        state.textContent = (ev.summary || (ev.ok ? "ok" : "failed")) + took;
+          ? t("coder.tool.duration", { duration: ev.duration_s.toFixed(1) }) : "";
+        state.textContent = (ev.summary || t(ev.ok ? "coder.tool.ok" : "coder.tool.failed")) + took;
         state.className = "state job-state " + (ev.ok ? "st-ok" : "st-error");
         if (ev.output && !card.querySelector(".body .diff")) {
           card.querySelector(".body").textContent = ev.output;
@@ -612,7 +620,7 @@ export function handleCoderEvent(s, ev) {
       // replayed user message (emitted client-side on send; replay rebuilds it)
       flushAssistantBlock(s);
       addMessageRow(s.feedEl, "user", ev.text,
-        ev.queued ? { cls: "web-note", label: "Queued" } : {});
+        ev.queued ? { cls: "web-note", label: t("coder.task.queuedLabel") } : {});
       break;
     }
     case "info": {
@@ -627,7 +635,7 @@ export function handleCoderEvent(s, ev) {
       const eps = ev.episodes || [];
       if (!eps.length) break;
       flushAssistantBlock(s);
-      const label = `Recalled ${eps.length} past lesson${eps.length > 1 ? "s" : ""}: ` +
+      const label = tn("coder.episodes.recalled", eps.length) +
         eps.map((e) => `${e.lesson || ""} (${e.id})`).join(" · ");
       feedAppend(s, el("div", "feed-info", label));
       break;
@@ -637,12 +645,12 @@ export function handleCoderEvent(s, ev) {
       // assistant row because it is multi-paragraph prose, but labelled, so it
       // cannot be mistaken on replay for a turn that actually ran.
       flushAssistantBlock(s);
-      feedAppend(s, el("div", "feed-info", `Estimate for: ${ev.task || ""}`));
+      feedAppend(s, el("div", "feed-info", t("coder.estimate.forLabel", { task: ev.task || "" })));
       addMessageRow(s.feedEl, "assistant", ev.text || "");
       if (ev.total_tokens) {
         feedAppend(s, el("div", "feed-info",
-          `Planning turn used ${ev.total_tokens} tokens ` +
-          `(${ev.prompt_tokens ?? "?"} prompt). Nothing was run or written.`));
+          t("coder.estimate.usage",
+            { tokens: ev.total_tokens, prompt: ev.prompt_tokens ?? "?" })));
       }
       break;
     }
@@ -670,11 +678,11 @@ export function handleCoderEvent(s, ev) {
       // an unqualified "Task finished" would claim a verification that never
       // happened. ok stays the run's own outcome; this names the gate's.
       const verifyNote = ev.verify_state === "inconclusive"
-        ? " (not verified)" : "";
-      let finalLine = (ev.ok ? "Task finished" : "Task ended") + verifyNote +
-        ` - ${ev.turns} turns, ${ev.total_tokens} tokens`;
+        ? t("coder.final.notVerified") : "";
+      let finalLine = t(ev.ok ? "coder.final.taskFinished" : "coder.final.taskEnded") + verifyNote +
+        t("coder.final.turnsTokens", { turns: ev.turns, tokens: ev.total_tokens });
       if (ev.changed_files?.length) {
-        finalLine += ` · ${ev.changed_files.length} file(s) changed (see "files")`;
+        finalLine += tn("coder.final.filesChanged", ev.changed_files.length);
       }
       feedAppend(s, el("div", "feed-final", finalLine));
       break;
@@ -683,7 +691,7 @@ export function handleCoderEvent(s, ev) {
       flushAssistantBlock(s);
       s.busy = false;
       if (s.info.id === coder.activeId) setCoderState("error");
-      toast("Agent error: " + ev.text, true);
+      toast(t("coder.event.agentError") + ev.text, true);
       break;
     }
     case "closed": {
@@ -722,7 +730,7 @@ export function populateSetupModels() {
   sel.innerHTML = "";
   const current = document.createElement("option");
   current.value = "";
-  current.textContent = "active model (" + (modelCache.active || "?") + ")";
+  current.textContent = t("coder.setup.activeModelOption", { name: modelCache.active || "?" });
   sel.appendChild(current);
   for (const m of modelCache.models || []) {
     if (m.active) continue;
@@ -764,16 +772,13 @@ function _sameCheckpoint(live, wantedId) {
 // first. Asks before doing both steps.
 function _offerCheckpointSwap(live, opts) {
   if (live.busy) {
-    toast("The session open in this folder is busy - wait for it to finish, or "
-      + "end it, to continue a different saved conversation.", true);
+    toast(t("coder.session.busyCannotSwap"), true);
     return;
   }
   confirmDanger(
-    "A session is already open here",
-    `"${sessionLabel(live.info)}" is open for this folder, and a folder runs one `
-    + "session at a time. End it and continue the one you picked instead? Its "
-    + "conversation is saved and stays in the list.",
-    "End it and continue",
+    t("coder.session.alreadyOpenTitle"),
+    t("coder.session.alreadyOpenBody", { label: sessionLabel(live.info) }),
+    t("coder.session.endAndContinue"),
     async () => {
       await closeCoderSession(live);
       startCoderSession(opts);
@@ -795,13 +800,13 @@ export async function startCoderSession(opts = {}) {
   // there would start a session in the wrong folder while looking correct.
   if (opts.cwd) $("setup-cwd").value = opts.cwd;
   const cwd = $("setup-cwd").value.trim();
-  if (!cwd) { toast("Enter a project directory", true); return; }
+  if (!cwd) { toast(t("coder.setup.enterDirectory"), true); return; }
   if (resume) {
     const already = _liveSessionForCwd(cwd);
     if (already) {
       if (_sameCheckpoint(already, opts.checkpointId)) {
         activateSession(already.info.id);
-        toast("Already open - switched to it instead of starting another");
+        toast(t("coder.session.alreadyOpenSwitched"));
         return;
       }
       _offerCheckpointSwap(already, opts);
@@ -912,11 +917,11 @@ export async function startCoderSession(opts = {}) {
     // otherwise a ticked box and an ignored one look identical (AGENTS.md
     // rule 5). The server decides; this only relays.
     for (const note of info.notes || []) toast(note, true);
-    if (info.resumed) toast("Resumed your last session in this folder");
-    else if (resume && !info.notes?.length) toast("No saved session to resume - started fresh");
+    if (info.resumed) toast(t("coder.session.resumedToast"));
+    else if (resume && !info.notes?.length) toast(t("coder.session.noSavedResume"));
     refreshModels();
   } catch (e) {
-    toast("Failed to start session: " + e.message, true);
+    toast(t("coder.session.startFailed") + e.message, true);
   } finally {
     $("setup-start").disabled = false;
     if (resume) _cwdResumeInFlight.delete(cwd);
@@ -929,7 +934,7 @@ export async function startCoderSession(opts = {}) {
 export let _coderContinueBtn = null;
 export function coderContinueButton() {
   if (_coderContinueBtn) return _coderContinueBtn;
-  const btn = el("button", "btn-secondary coder-continue", "Continue last session");
+  const btn = el("button", "btn-secondary coder-continue", t("coder.session.continueLast"));
   btn.style.display = "none";
   btn.onclick = () => startCoderSession({ resume: true });
   const start = $("setup-start");
@@ -948,12 +953,12 @@ export async function refreshResumable() {
     const d = await r.json();
     if (r.ok && d.resumable) {
       const when = d.interrupted_at
-        ? new Date(d.interrupted_at).toLocaleString() : "earlier";
-      btn.textContent = `Continue last session (${d.turns} turns, ${when})`;
+        ? new Date(d.interrupted_at).toLocaleString() : t("coder.session.earlier");
+      btn.textContent = t("coder.session.continueLastDetail", { turns: d.turns, when });
       btn.style.display = "";
     } else {
       if (r.ok && d.unreadable) {
-        toast("A saved session was found for this project but could not be read");
+        toast(t("coder.session.foundButUnreadable"));
       }
       btn.style.display = "none";
     }
@@ -972,7 +977,7 @@ export async function reattachSessions() {
     }
     if (!coder.activeId && data.sessions.length) {
       activateSession(data.sessions[data.sessions.length - 1].id);
-      toast("Reattached to a running coder session");
+      toast(t("coder.session.reattached"));
     } else {
       // Sessions may exist without one being activated (e.g. the host did not
       // auto-open a session). Still surface them in the selector + bar so the
@@ -994,8 +999,9 @@ export function renderCoderAttachChips() {
   coder.docs.forEach((doc, i) => {
     const chip = el("span", "chip");
     chip.appendChild(iconEl("file", "ic"));
+    const trimmedPart = doc.truncated ? t("coder.attach.trimmedSuffix") : "";
     chip.appendChild(el("span", "", doc.name +
-      ` (${(doc.chars / 1000).toFixed(1)}k chars${doc.truncated ? ", trimmed" : ""})`));
+      t("coder.attach.sizeSuffix", { kb: (doc.chars / 1000).toFixed(1), trimmed: trimmedPart })));
     const rm = el("button", "", "×");
     rm.onclick = () => { coder.docs.splice(i, 1); renderCoderAttachChips(); };
     chip.appendChild(rm);
@@ -1007,7 +1013,7 @@ export async function attachCoderDocument(file) {
   const b64 = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
-    reader.onerror = () => reject(new Error("could not read file"));
+    reader.onerror = () => reject(new Error(t("coder.attach.readError")));
     reader.readAsDataURL(file);
   });
   const r = await fetch("/api/rag/extract", {
@@ -1061,10 +1067,10 @@ export async function sendCoderTask() {
     if (!r.ok) throw new Error(data.detail || r.statusText);
     if (data.status === "queued") {
       // Mid-task steering: the agent reads it at the next turn boundary
-      toast("Queued - the agent picks it up at the next turn");
+      toast(t("coder.task.queuedToast"));
     } else {
       s.busy = true;
-      setCoderState("working…");
+      setCoderState("working");
       renderSessionSelect();
     }
     // The user message arrives back through the event stream (so replay
@@ -1074,7 +1080,7 @@ export async function sendCoderTask() {
     coder.docs = [];
     renderCoderAttachChips();
   } catch (e) {
-    toast("Failed to send task: " + e.message, true);
+    toast(t("coder.task.sendFailed") + e.message, true);
   }
 }
 
@@ -1125,7 +1131,7 @@ if (_railFlip) _railFlip.onclick = async () => {
     // saved - a side that silently reverts on the next load is worse than one
     // that refuses now and says why.
     applyCoderRailSide(next === "left" ? "right" : "left");
-    toast("Could not save which side the session list sits on", true);
+    toast(t("coder.rail.saveSideFailed"), true);
   }
 };
 // Arrow wrapper: a bare `.onclick = startCoderSession` would pass the click
@@ -1155,24 +1161,18 @@ function syncCoderBackendFields() {
     // Deliberately does NOT try to classify the URL as local or remote. The
     // server already does that with the canonical classifier, and a second
     // one here would diverge exactly on the awkward input the first exists for.
-    text = "A URL on this machine (Ollama, LM Studio, vLLM) stays local. A URL "
-         + "anywhere else sends your prompts and the file contents the agent "
-         + "reads off this machine.";
+    text = t("coder.backend.hint.url");
   } else {
     const who = mode === "openai" ? "OpenAI" : "Anthropic";
-    text = `Sends your prompts and the file contents the agent reads to ${who}. `
-         + "They leave this machine, and it spends your credit with them.";
+    text = t("coder.backend.hint.provider", { who });
   }
   // Grammar-constrained tool calls are a localm-server capability, so every
   // other option loses them. Said here rather than discovered later.
-  text += " Grammar-constrained tool calls are off for this option.";
+  text += t("coder.backend.hint.noGrammar");
   if ($("setup-mode").value === "privacy") {
     text += remote
-      ? " This session is set to privacy, which keeps everything on this "
-        + "machine, so it will refuse this. Set session persistence to log or "
-        + "full to use it."
-      : " This session is set to privacy, so it will refuse this URL unless it "
-        + "is on this machine.";
+      ? t("coder.backend.hint.privacyRemote")
+      : t("coder.backend.hint.privacyUrl");
   }
   hint.textContent = text;
   hint.style.display = "";
@@ -1203,7 +1203,7 @@ $("setup-cancel").onclick = () => {
    form imports pickDirectory from there. */
 
 $("setup-browse").onclick = async () => {
-  const dir = await pickDirectory("Pick a project directory",
+  const dir = await pickDirectory(t("coder.setup.pickDirectoryTitle"),
                                   $("setup-cwd").value.trim());
   if (dir) {
     $("setup-cwd").value = dir;
@@ -1223,7 +1223,7 @@ $("coder-stop").onclick = async () => {
   if (!s) return;
   await fetch(`/api/coder/sessions/${s.info.id}/stop`, {
     method: "POST", headers: authHeaders() });
-  toast("Stop requested - agent halts at the next safe point");
+  toast(t("coder.session.stopRequested"));
 };
 $("coder-end").onclick = endCoderSession;
 
@@ -1237,7 +1237,7 @@ $("coder-undo").onclick = async () => {
     toast(data.summary);
     feedAppend(s, el("div", "feed-info", data.summary));
   } else {
-    toast(data.detail || "Nothing to undo", true);
+    toast(data.detail || t("coder.undo.nothing"), true);
   }
 };
 
@@ -1248,12 +1248,33 @@ $("coder-compact").onclick = async () => {
     method: "POST", headers: authHeaders() });
   const data = await r.json();
   if (r.ok) {
-    toast("History compacted");
-    feedAppend(s, el("div", "feed-info", "Conversation history compacted."));
+    toast(t("coder.compact.done"));
+    feedAppend(s, el("div", "feed-info", t("coder.compact.feedNote")));
   } else {
-    toast(data.detail || "Nothing to compact", true);
+    toast(data.detail || t("coder.compact.nothing"), true);
   }
 };
+
+// Redraws the active session's state pill, usage line, remote badge, and
+// both session listings for the new language.
+function repaintCoderI18n() {
+  renderSessionSelect();
+  const node = $("coder-state");
+  setCoderState(node.dataset.stateKey || "");
+  const s = activeSession();
+  if (!s) return;
+  $("coder-usage").textContent = s.info.total_tokens
+    ? t("coder.usage.tokTurn", { tokens: s.info.total_tokens, turn: s.info.turns }) : "";
+  const bi = s.info.backend_info;
+  if (bi && bi.leaves_machine) {
+    let where = bi.target;
+    try { where = new URL(bi.target).host || bi.target; } catch { /* keep raw */ }
+    const remote = $("coder-remote");
+    remote.textContent = t("coder.remote.badge", { host: where });
+    remote.title = t("coder.remote.tooltip", { target: bi.target });
+  }
+}
+document.addEventListener("localm:language", repaintCoderI18n);
 
 /** Audit-entry modal shared by the live-session log and past-session history.
  *  A filter box narrows entries by substring (type, turn, or payload). */

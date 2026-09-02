@@ -212,8 +212,8 @@
     <section id="view-coder" class="view">
       <div id="coder-main">
       <div id="coder-bar">
-        <select id="session-select" title="Switch session"></select>
-        <button class="btn-secondary" id="session-new"><span class="btn-ic" data-icon="plus"></span>new</button>
+        <select id="session-select" title="Switch session" data-i18n-title="coder.session.switchTitle"></select>
+        <button class="btn-secondary" id="session-new" data-i18n="coder.session.newBtn"><span class="btn-ic" data-icon="plus"></span>new</button>
         <span class="cwd" id="coder-cwd"></span>
         <span id="coder-state" class="job-state"></span>
         <!-- Shown for the LIFE of a session whose model is not on this machine,
@@ -223,112 +223,112 @@
              vocabulary (gui-design rule 6). -->
         <span id="coder-remote" class="job-state st-warn" style="display:none"></span>
         <span class="spacer"></span>
-        <button class="btn-secondary" id="coder-undo" title="Revert the last file write">undo</button>
-        <button class="btn-secondary" id="coder-files" title="Files changed this session, with diffs">files</button>
-        <button class="btn-secondary" id="coder-patch" style="display:none" title="Download the diff this patch-mode session captured instead of writing">patch</button>
-        <button class="btn-secondary" id="coder-controls" title="Auto-approve, scope, verification and working directory for this running session">controls</button>
-        <button class="btn-secondary" id="coder-memory" title="This project's LOCALCODER.md memory, which the agent reads every turn">memory</button>
-        <button class="btn-secondary" id="coder-bg" title="Background jobs this session started">bg</button>
-        <button class="btn-secondary" id="coder-compact" title="Summarise old turns to free context">compact</button>
-        <button class="btn-secondary" id="coder-export" title="Download this session's feed as markdown, or the last task's result as JSON">export</button>
-        <button class="btn-secondary" id="coder-log" title="View the audit log">log</button>
-        <button class="btn-secondary" id="coder-history" title="Browse past session logs">history</button>
-        <button class="btn-secondary" id="coder-stop">Stop</button>
-        <button class="btn-secondary" id="coder-end">End</button>
+        <button class="btn-secondary" id="coder-undo" title="Revert the last file write" data-i18n-title="coder.bar.undoTitle" data-i18n="coder.bar.undoBtn">undo</button>
+        <button class="btn-secondary" id="coder-files" title="Files changed this session, with diffs" data-i18n-title="coder.bar.filesTitle" data-i18n="coder.bar.filesBtn">files</button>
+        <button class="btn-secondary" id="coder-patch" style="display:none" title="Download the diff this patch-mode session captured instead of writing" data-i18n-title="coder.bar.patchTitle" data-i18n="coder.bar.patchBtn">patch</button>
+        <button class="btn-secondary" id="coder-controls" title="Auto-approve, scope, verification and working directory for this running session" data-i18n-title="coder.bar.controlsTitle" data-i18n="coder.bar.controlsBtn">controls</button>
+        <button class="btn-secondary" id="coder-memory" title="This project's LOCALCODER.md memory, which the agent reads every turn" data-i18n-title="coder.bar.memoryTitle" data-i18n="coder.bar.memoryBtn">memory</button>
+        <button class="btn-secondary" id="coder-bg" title="Background jobs this session started" data-i18n-title="coder.bar.bgTitle" data-i18n="coder.bar.bgBtn">bg</button>
+        <button class="btn-secondary" id="coder-compact" title="Summarise old turns to free context" data-i18n-title="coder.bar.compactTitle" data-i18n="coder.bar.compactBtn">compact</button>
+        <button class="btn-secondary" id="coder-export" title="Download this session's feed as markdown, or the last task's result as JSON" data-i18n-title="coder.bar.exportTitle" data-i18n="coder.bar.exportBtn">export</button>
+        <button class="btn-secondary" id="coder-log" title="View the audit log" data-i18n-title="coder.bar.logTitle" data-i18n="coder.bar.logBtn">log</button>
+        <button class="btn-secondary" id="coder-history" title="Browse past session logs" data-i18n-title="coder.bar.historyTitle" data-i18n="coder.bar.historyBtn">history</button>
+        <button class="btn-secondary" id="coder-stop" data-i18n="coder.bar.stopBtn">Stop</button>
+        <button class="btn-secondary" id="coder-end" data-i18n="coder.bar.endBtn">End</button>
       </div>
 
       <div id="coder-setup">
         <div class="card-head"><span class="ic cat-ic cat-green" data-icon="coder"></span>
-          <div class="card-head-text"><h2>Coder session</h2></div></div>
-        <div class="sub">Destructive actions ask for your approval below, unless you enable
+          <div class="card-head-text"><h2 data-i18n="coder.setup.title">Coder session</h2></div></div>
+        <div class="sub" data-i18n="coder.setup.intro">Destructive actions ask for your approval below, unless you enable
         auto-approve. Runs the localcoder agent against a project directory; it can read,
         write, and run code.</div>
-        <label for="setup-cwd">Project directory</label>
+        <label for="setup-cwd" data-i18n="coder.setup.cwdLabel">Project directory</label>
         <div class="row">
-          <input type="text" id="setup-cwd" placeholder="path to your project" spellcheck="false">
-          <button class="btn-secondary" id="setup-browse" title="Pick the project directory">browse…</button>
+          <input type="text" id="setup-cwd" placeholder="path to your project" spellcheck="false" data-i18n-placeholder="coder.setup.cwdPlaceholder">
+          <button class="btn-secondary" id="setup-browse" title="Pick the project directory" data-i18n-title="coder.setup.browseTitle" data-i18n="coder.setup.browseBtn">browse…</button>
         </div>
         <div class="grid2">
           <div>
-            <label for="setup-model">Model (switches the active engine)</label>
+            <label for="setup-model" data-i18n="coder.setup.modelLabel">Model (switches the active engine)</label>
             <select id="setup-model"></select>
           </div>
           <div>
-            <label for="setup-mode">Session persistence</label>
+            <label for="setup-mode" data-i18n="coder.setup.modeLabel">Session persistence</label>
             <select id="setup-mode">
-              <option value="privacy" selected>privacy - nothing saved</option>
-              <option value="log">log - JSONL audit trail</option>
-              <option value="full">full - audit + markdown transcript</option>
+              <option value="privacy" selected data-i18n="coder.setup.mode.privacy">privacy - nothing saved</option>
+              <option value="log" data-i18n="coder.setup.mode.log">log - JSONL audit trail</option>
+              <option value="full" data-i18n="coder.setup.mode.full">full - audit + markdown transcript</option>
             </select>
           </div>
           <div>
-            <label for="setup-max-turns">Max turns</label>
-            <input type="number" id="setup-max-turns" placeholder="default (40)" min="1" step="1">
+            <label for="setup-max-turns" data-i18n="coder.setup.maxTurnsLabel">Max turns</label>
+            <input type="number" id="setup-max-turns" placeholder="default (40)" min="1" step="1" data-i18n-placeholder="coder.setup.maxTurnsPlaceholder">
           </div>
           <div>
-            <label for="setup-temperature">Temperature</label>
-            <input type="number" id="setup-temperature" placeholder="default" min="0" max="2" step="0.05">
+            <label for="setup-temperature" data-i18n="coder.setup.temperatureLabel">Temperature</label>
+            <input type="number" id="setup-temperature" placeholder="default" min="0" max="2" step="0.05" data-i18n-placeholder="coder.setup.temperaturePlaceholder">
           </div>
           <div>
-            <label for="setup-seed" title="The same seed with the same model, prompt and settings reproduces the same output. Leave blank for a fresh random seed each run.">Seed (reproducible runs)</label>
-            <input type="number" id="setup-seed" placeholder="random" step="1">
+            <label for="setup-seed" title="The same seed with the same model, prompt and settings reproduces the same output. Leave blank for a fresh random seed each run." data-i18n-title="coder.setup.seedTitle" data-i18n="coder.setup.seedLabel">Seed (reproducible runs)</label>
+            <input type="number" id="setup-seed" placeholder="random" step="1" data-i18n-placeholder="coder.setup.seedPlaceholder">
           </div>
         </div>
         <div class="grid2">
           <div>
-            <label for="setup-backend" title="Which model server answers this session. Anything other than this localm sends your prompts and the file contents the agent reads off your machine.">Model server</label>
+            <label for="setup-backend" title="Which model server answers this session. Anything other than this localm sends your prompts and the file contents the agent reads off your machine." data-i18n-title="coder.setup.backendTitle" data-i18n="coder.setup.backendLabel">Model server</label>
             <select id="setup-backend">
-              <option value="local" selected>this localm (offline)</option>
-              <option value="url">OpenAI-compatible URL</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
+              <option value="local" selected data-i18n="coder.setup.backend.local">this localm (offline)</option>
+              <option value="url" data-i18n="coder.setup.backend.url">OpenAI-compatible URL</option>
+              <option value="openai" data-i18n="coder.setup.backend.openai">OpenAI</option>
+              <option value="anthropic" data-i18n="coder.setup.backend.anthropic">Anthropic</option>
             </select>
           </div>
           <div id="setup-backend-model-wrap" style="display:none">
-            <label for="setup-backend-model">Model name at that server</label>
-            <input type="text" id="setup-backend-model" placeholder="provider default" spellcheck="false">
+            <label for="setup-backend-model" data-i18n="coder.setup.backendModelLabel">Model name at that server</label>
+            <input type="text" id="setup-backend-model" placeholder="provider default" spellcheck="false" data-i18n-placeholder="coder.setup.backendModelPlaceholder">
           </div>
         </div>
         <div id="setup-backend-url-wrap" style="display:none">
-          <label for="setup-backend-url">Endpoint URL</label>
+          <label for="setup-backend-url" data-i18n="coder.setup.backendUrlLabel">Endpoint URL</label>
           <input type="text" id="setup-backend-url" placeholder="http://127.0.0.1:11434/v1" spellcheck="false">
         </div>
         <div id="setup-backend-key-wrap" style="display:none">
-          <label for="setup-backend-key" title="Held for this session only and never written to disk. Leave blank to use OPENAI_API_KEY / ANTHROPIC_API_KEY from the environment.">API key (this session only, never saved)</label>
-          <input type="password" id="setup-backend-key" placeholder="from the environment if blank" spellcheck="false" autocomplete="off">
+          <label for="setup-backend-key" title="Held for this session only and never written to disk. Leave blank to use OPENAI_API_KEY / ANTHROPIC_API_KEY from the environment." data-i18n-title="coder.setup.backendKeyTitle" data-i18n="coder.setup.backendKeyLabel">API key (this session only, never saved)</label>
+          <input type="password" id="setup-backend-key" placeholder="from the environment if blank" spellcheck="false" autocomplete="off" data-i18n-placeholder="coder.setup.backendKeyPlaceholder">
         </div>
         <!-- The consequence of the choice, shown ON SELECT and kept visible.
              Not a tooltip: hover does not exist on touch, and Companion means
              phones are a supported target. For the off-machine options this is
              not documentation, it is the consent surface. -->
         <div id="setup-backend-hint" class="sub" style="display:none"></div>
-        <label for="setup-scope">Scope (optional glob - file tools are confined to matching paths)</label>
+        <label for="setup-scope" data-i18n="coder.setup.scopeLabel">Scope (optional glob - file tools are confined to matching paths)</label>
         <input type="text" id="setup-scope" placeholder="src/**/*.py" spellcheck="false">
-        <label for="setup-system" title="Overrides this project's .localcoder/system.md for this session; leave blank to use that file. Extra guidance prepended to the agent's system prompt: conventions, style, constraints.">Custom instructions (optional - conventions, style, constraints)</label>
-        <textarea id="setup-system" placeholder="e.g. Always run pytest before finishing. Prefer guard clauses." spellcheck="false" rows="2"></textarea>
+        <label for="setup-system" title="Overrides this project's .localcoder/system.md for this session; leave blank to use that file. Extra guidance prepended to the agent's system prompt: conventions, style, constraints." data-i18n-title="coder.setup.systemTitle" data-i18n="coder.setup.systemLabel">Custom instructions (optional - conventions, style, constraints)</label>
+        <textarea id="setup-system" placeholder="e.g. Always run pytest before finishing. Prefer guard clauses." spellcheck="false" rows="2" data-i18n-placeholder="coder.setup.systemPlaceholder"></textarea>
         <div class="grid2">
           <div>
-            <label for="setup-verify" title="The harness runs this command and reads its exit code before a turn that changed files may finish, so the agent cannot declare success the check does not agree with. Leave blank to use the project's detected check.">Verification command (exit 0 = done)</label>
-            <input type="text" id="setup-verify" placeholder="detected automatically" spellcheck="false">
+            <label for="setup-verify" title="The harness runs this command and reads its exit code before a turn that changed files may finish, so the agent cannot declare success the check does not agree with. Leave blank to use the project's detected check." data-i18n-title="coder.setup.verifyTitle" data-i18n="coder.setup.verifyLabel">Verification command (exit 0 = done)</label>
+            <input type="text" id="setup-verify" placeholder="detected automatically" spellcheck="false" data-i18n-placeholder="coder.setup.verifyPlaceholder">
           </div>
           <div>
-            <label for="setup-verify-retries" title="How many times the agent is asked to fix a failing check before the task is reported as not verified.">Verification fix attempts</label>
-            <input type="number" id="setup-verify-retries" placeholder="default (2)" min="1" max="50" step="1">
+            <label for="setup-verify-retries" title="How many times the agent is asked to fix a failing check before the task is reported as not verified." data-i18n-title="coder.setup.verifyRetriesTitle" data-i18n="coder.setup.verifyRetriesLabel">Verification fix attempts</label>
+            <input type="number" id="setup-verify-retries" placeholder="default (2)" min="1" max="50" step="1" data-i18n-placeholder="coder.setup.verifyRetriesPlaceholder">
           </div>
         </div>
         <div class="checks">
-          <label><input type="checkbox" id="setup-auto"> Auto-approve destructive tools</label>
-          <label title="Destructive tools report what they would do without touching anything"><input type="checkbox" id="setup-dry"> Dry run (nothing is written or executed)</label>
-          <label title="Only bites with auto-approve, which is what it carves an exception out of: file writes go through, shell commands still stop for you."><input type="checkbox" id="setup-interactive-confirm"> Still confirm shell commands (with auto-approve)</label>
-          <label title="File writes are captured as a unified diff instead of being applied. Download it from the session toolbar when you are done."><input type="checkbox" id="setup-patch"> Patch mode (collect a diff, write nothing)</label>
-          <label title="Run no exit-code check at all, even when this project has an obvious one."><input type="checkbox" id="setup-no-verify"> Skip verification</label>
-          <label title="Ask the model server for the OpenAI-compatible native tools API. localm's own server does not implement it and will say so; it uses grammar-constrained tool calls instead."><input type="checkbox" id="setup-native-tools"> Native tools API (if the server supports it)</label>
+          <label data-i18n="coder.controls.autoApproveLabel"><input type="checkbox" id="setup-auto"> Auto-approve destructive tools</label>
+          <label title="Destructive tools report what they would do without touching anything" data-i18n-title="coder.setup.dryTitle" data-i18n="coder.setup.dryLabel"><input type="checkbox" id="setup-dry"> Dry run (nothing is written or executed)</label>
+          <label title="Only bites with auto-approve, which is what it carves an exception out of: file writes go through, shell commands still stop for you." data-i18n-title="coder.setup.interactiveConfirmTitle" data-i18n="coder.setup.interactiveConfirmLabel"><input type="checkbox" id="setup-interactive-confirm"> Still confirm shell commands (with auto-approve)</label>
+          <label title="File writes are captured as a unified diff instead of being applied. Download it from the session toolbar when you are done." data-i18n-title="coder.setup.patchTitle" data-i18n="coder.setup.patchLabel"><input type="checkbox" id="setup-patch"> Patch mode (collect a diff, write nothing)</label>
+          <label title="Run no exit-code check at all, even when this project has an obvious one." data-i18n-title="coder.setup.noVerifyTitle" data-i18n="coder.setup.noVerifyLabel"><input type="checkbox" id="setup-no-verify"> Skip verification</label>
+          <label title="Ask the model server for the OpenAI-compatible native tools API. localm's own server does not implement it and will say so; it uses grammar-constrained tool calls instead." data-i18n-title="coder.setup.nativeToolsTitle" data-i18n="coder.setup.nativeToolsLabel"><input type="checkbox" id="setup-native-tools"> Native tools API (if the server supports it)</label>
         </div>
         <div class="actions">
-          <button class="btn-primary" id="setup-start">Start session</button>
-          <button class="btn-secondary" id="setup-cancel" style="display:none" title="Return to the running session without starting a new one">&#8617; back to session</button>
-          <button class="btn-secondary" id="setup-history" title="Browse audit logs of past sessions (log/full modes)">past sessions</button>
-          <button class="btn-secondary" id="setup-episodes" title="Lessons the coder has stored from past sessions on this project">lessons</button>
+          <button class="btn-primary" id="setup-start" data-i18n="coder.setup.startBtn">Start session</button>
+          <button class="btn-secondary" id="setup-cancel" style="display:none" title="Return to the running session without starting a new one" data-i18n-title="coder.setup.cancelTitle" data-i18n="coder.setup.cancelBtn">&#8617; back to session</button>
+          <button class="btn-secondary" id="setup-history" title="Browse audit logs of past sessions (log/full modes)" data-i18n-title="coder.setup.historyTitle" data-i18n="coder.setup.historyBtn">past sessions</button>
+          <button class="btn-secondary" id="setup-episodes" title="Lessons the coder has stored from past sessions on this project" data-i18n-title="coder.setup.episodesTitle" data-i18n="coder.setup.episodesBtn">lessons</button>
         </div>
       </div>
 
@@ -337,19 +337,19 @@
       <div class="composer-wrap" id="coder-composer" style="display:none">
         <div id="coder-attach-chips"></div>
         <div class="composer">
-          <button class="attach" id="coder-attach" data-icon="attach" title="Attach text files - their content is added to your message"></button>
+          <button class="attach" id="coder-attach" data-icon="attach" title="Attach text files - their content is added to your message" data-i18n-title="coder.composer.attachTitle"></button>
           <input type="file" id="coder-file" accept=".pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
-          <textarea id="coder-input" rows="1" placeholder="Describe a task for the agent…" title="Enter to send · Shift+Enter for a new line"></textarea>
-          <button class="send" id="coder-send" data-icon="send" title="Send"></button>
+          <textarea id="coder-input" rows="1" placeholder="Describe a task for the agent…" title="Enter to send · Shift+Enter for a new line" data-i18n-placeholder="coder.composer.inputPlaceholder" data-i18n-title="chat.inputTitle"></textarea>
+          <button class="send" id="coder-send" data-icon="send" title="Send" data-i18n-title="chat.send"></button>
         </div>
         <div class="composer-row">
-          <button class="btn-secondary" id="coder-estimate" title="Plan the task in the composer without running it: one turn, no tools, nothing written">estimate</button>
+          <button class="btn-secondary" id="coder-estimate" title="Plan the task in the composer without running it: one turn, no tools, nothing written" data-i18n-title="coder.composer.estimateTitle" data-i18n="coder.composer.estimateBtn">estimate</button>
           <span id="coder-usage"></span>
         </div>
       </div>
       </div>
       <aside id="coder-sessions">
-        <h3>Sessions <button id="coder-new-session" class="section-head-btn" data-icon="plus" title="Start a new coder session"></button><button id="coder-rail-flip" class="section-head-btn" data-icon="sliders" title="Move this list to the other side"></button></h3>
+        <h3 data-i18n="coder.rail.sessionsHeading">Sessions <button id="coder-new-session" class="section-head-btn" data-icon="plus" title="Start a new coder session" data-i18n-title="coder.rail.newSessionTitle"></button><button id="coder-rail-flip" class="section-head-btn" data-icon="sliders" title="Move this list to the other side" data-i18n-title="coder.rail.flipTitle"></button></h3>
         <div id="coder-session-list"></div>
         <p id="coder-rail-note" class="coder-rail-note"></p>
       </aside>

@@ -486,6 +486,32 @@ test("the models page redraws its table headers and row badges when the language
       "the vision capability pill must be rebuilt in German too");
   });
 
+test("the coder state pill, usage line and remote badge redraw when the language changes",
+  async () => {
+    const { window } = await loadIn(null);
+    runScript(window, `
+      coder.sessions.set("s1", { info: { id: "s1", cwd: "/p/proj", total_tokens: 12,
+                                         turns: 2, patch_mode: false,
+                                         backend_info: { backend: "anthropic", leaves_machine: true,
+                                                         target: "https://api.anthropic.com/v1" } },
+                                 busy: true, feedEl: document.createElement("div") });
+      activateSession("s1");
+    `);
+    const state = () => window.document.getElementById("coder-state").textContent;
+    const usage = () => window.document.getElementById("coder-usage").textContent;
+    const remote = () => window.document.getElementById("coder-remote").textContent;
+    assert.equal(state(), "working…", "starts in English");
+    assert.equal(usage(), "12 tok · turn 2");
+    assert.equal(remote(), "remote: api.anthropic.com");
+
+    runScript(window, 'window.__p = applyLanguage("de");');
+    await window.__p;
+
+    assert.equal(state(), "läuft…", "the state pill must be rebuilt in German");
+    assert.equal(usage(), "12 Tok. · Runde 2", "the usage line must be rebuilt in German");
+    assert.equal(remote(), "extern: api.anthropic.com", "the remote badge must be rebuilt in German");
+  });
+
 /* ================================================================ */
 /*  Drift gates                                                      */
 /* ================================================================ */
@@ -508,9 +534,9 @@ test("every data-i18n key in index.html resolves in the English catalog", async 
 // The migrated modules. A file added here must have its t() keys in the catalog.
 const T_CALL_FILES = ["app/chat.js", "app/models-sidebar.js", "app/logo.js",
                       "app/settings-perf.js", "app/helpers.js", "app/media-gallery.js",
-                      "app/slash.js", "app/cmdk.js", "app/picker.js",
                       "pages/settings.js", "pages/plugins.js", "pages/images.js",
-                      "pages/models.js", "pages/knowledge.js"];
+                      "app/slash.js", "app/cmdk.js", "app/picker.js",
+                      "pages/models.js", "pages/knowledge.js", "app/coder.js"];
 
 /** Key-shaped string literals inside a balanced t(...) / tn(...) call. */
 function tCallKeys(src) {
