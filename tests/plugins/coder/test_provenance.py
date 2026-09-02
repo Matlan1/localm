@@ -539,3 +539,48 @@ def test_a_real_turn_leaves_the_untrusted_range_on_the_message_it_sends():
     assert spans, "the loop dropped the untrusted range when combining blocks"
     covered = "".join(str(fed[-1]["content"])[a:b] for a, b in spans)
     assert _EXOTIC in covered
+
+
+# --------------------------------------------------------------------------- #
+#  A TRUSTED tool whose output is itself annotated (AUD-PROVDEFANG stage 2)     #
+#                                                                              #
+#  A delegated sub-agent result stays OUTSIDE the untrusted fence on purpose,   #
+#  so the parent can act on it. That decision is about the FENCE, not about     #
+#  tokenisation: the freeform text it embeds still must not parse as a role     #
+#  delimiter. ToolResult.to_xml therefore has to carry ranges through the       #
+#  trusted frame, which a plain f-string cannot do.                             #
+# --------------------------------------------------------------------------- #
+
+def test_the_trusted_frame_carries_ranges_the_output_already_had():
+    from localm.textguard import compose, untrusted_span, untrusted_spans_of
+    output = compose("sub-agent said: ", untrusted_span("SUMMARY " + _EXOTIC))
+    block = build_result_block("spawn_agent", ToolResult(True, output),
+                               untrusted=False)
+    spans = untrusted_spans_of(block)
+    assert spans, "the trusted frame dropped the range its output carried"
+    covered = "".join(str(block)[a:b] for a, b in spans)
+    assert _EXOTIC in covered
+    # The frame localm writes itself stays outside the range.
+    assert "<tool_result" in str(block)[:spans[0][0]]
+    assert "sub-agent said: " not in covered
+
+
+def test_the_trusted_frame_is_unchanged_for_output_with_no_ranges():
+    """Constitution item 4: no annotation means EXACTLY today's behaviour."""
+    r = ToolResult(True, "plain " + _EXOTIC)
+    block = build_result_block("read_file", r, untrusted=False)
+    assert type(block) is str
+    assert block == (
+        '<tool_result name="read_file" status="ok">\n'
+        "plain " + _EXOTIC + "\n</tool_result>"
+    )
+
+
+def test_an_annotated_trusted_result_still_reads_as_an_ordinary_string():
+    from localm.textguard import compose, untrusted_span
+    output = compose("x ", untrusted_span("y"))
+    block = build_result_block("spawn_agent", ToolResult(True, output),
+                               untrusted=False)
+    assert isinstance(block, str)
+    assert block.startswith("<tool_result")
+    assert block.endswith("</tool_result>")

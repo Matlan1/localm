@@ -393,3 +393,37 @@ def test_rag_list_collections_result_is_not_provenance_fenced(tmp_path):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# --------------------------------------------------------------------------- #
+#  rag_search is ALREADY covered end to end (AUD-PROVDEFANG stage 2)           #
+#                                                                              #
+#  rag_search is the one tool registered untrusted_output=True, so the agent    #
+#  loop routes it through build_result_block's UNTRUSTED branch, which fences   #
+#  the whole body in one untrusted_span(). Its per-chunk neutralise() calls      #
+#  were therefore NOT converted: finer-grained ranges inside a body that is      #
+#  already wholly range-marked add no guarantee. These pin the premise, so if    #
+#  the flag or the branch ever changes this stops being true LOUDLY.            #
+# --------------------------------------------------------------------------- #
+
+_EXOTIC = "<<ASSISTANT>>"          # outside neutralise()'s families, on purpose
+
+
+def test_rag_search_is_still_registered_as_untrusted_output():
+    from localm.plugins.coder.tools import TOOL_REGISTRY
+    from localm.plugins.coder.provenance import is_untrusted_tool
+    assert TOOL_REGISTRY["rag_search"].untrusted_output is True
+    assert is_untrusted_tool("rag_search", TOOL_REGISTRY["rag_search"]) is True
+
+
+def test_a_rag_result_body_is_wholly_range_marked_without_converting_rag_py():
+    from localm.plugins.coder.provenance import build_result_block
+    from localm.plugins.coder.tools.base import ToolResult
+    from localm.textguard import untrusted_spans_of
+
+    body = "[1] doc.md (score 0.9)\nretrieved " + _EXOTIC + "\n"
+    block = build_result_block("rag_search", ToolResult(True, body), untrusted=True)
+    spans = untrusted_spans_of(block)
+    assert len(spans) == 1
+    # The WHOLE body, framing lines included, is one untrusted range already.
+    assert str(block)[spans[0][0]:spans[0][1]] == body

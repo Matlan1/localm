@@ -231,7 +231,7 @@ class _LoopMixin:
                 # on this thread only, at the same point as steering notes so the
                 # model reads the result before its next call.
                 for note in self._drain_background_agents():
-                    self._add_user(f"[background sub-agent result]\n{note}")
+                    self._add_user(compose("[background sub-agent result]\n", note))
                     self._emit("info", text="background sub-agent result absorbed")
                     if interactive:
                         print_info("(background sub-agent finished)")

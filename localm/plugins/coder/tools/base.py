@@ -51,14 +51,22 @@ class ToolResult:
         # that mutation invisible.
         return cls(ok=False, output=message, summary=f"ERROR: {head}", changes=changes)
 
-    def to_xml(self, tool_name: str) -> str:
+    def to_xml(self, tool_name: str):
+        """The ``<tool_result>`` frame for this result.
+
+        When ``output`` carries untrusted character ranges, the frame is built
+        with ``compose()`` so those ranges survive into the returned text,
+        shifted past the opening tag. Output with no ranges returns the plain
+        string this has always returned.
+        """
         status = "ok" if self.ok else "error"
         trunc  = ' truncated="true"' if self.truncated else ""
-        return (
-            f'<tool_result name="{tool_name}" status="{status}"{trunc}>\n'
-            f"{self.output}\n"
-            f"</tool_result>"
-        )
+        head = f'<tool_result name="{tool_name}" status="{status}"{trunc}>\n'
+        tail = "\n</tool_result>"
+        from localm.textguard import compose, untrusted_spans_of
+        if untrusted_spans_of(self.output):
+            return compose(head, self.output, tail)
+        return f"{head}{self.output}{tail}"
 
 
 _MAX_OUTPUT = 8_000   # chars - truncate large outputs to spare context

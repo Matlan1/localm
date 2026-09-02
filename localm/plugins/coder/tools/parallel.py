@@ -386,9 +386,9 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
 
     result_text = child.run_task(spec["task"])
     if result_text:
-        from ..provenance import neutralise
-        summary = neutralise(str(result_text))
-        detail = (detail + "\n" if detail else "") + summary
+        from localm.textguard import compose, untrusted_span
+        detail = compose(detail + "\n" if detail else "",
+                         untrusted_span(str(result_text)))
     # ASK THE CHILD whether it succeeded. run_task RETURNS its failure message
     # rather than raising (a child that hit max_turns or tripped the circuit
     # breaker comes back normally), so reaching here without an exception is not
@@ -770,9 +770,10 @@ def tool_dispatch_parallel(
             fut.add_done_callback(
                 lambda _f, _tok=tok: child_limit.release(_tok))
 
+    from localm.textguard import compose
     return ToolResult(
         ok=any(o.status == "ok" for o in outcomes),
-        output=degraded + residency_note + _render_report(outcomes, repo),
+        output=compose(degraded, residency_note, _render_report(outcomes, repo)),
         summary=_render_summary(outcomes),
     )
 
@@ -783,8 +784,16 @@ def _render_summary(outcomes: list[_ChildOutcome]) -> str:
             "diffs returned for review, nothing merged")
 
 
-def _render_report(outcomes: list[_ChildOutcome], repo: Path) -> str:
-    lines: list[str] = [
+def _stripped(value):
+    """``value.strip()`` that keeps any untrusted ranges over what survives."""
+    from localm.textguard import slice_guarded
+    text = str(value)
+    lead = len(text) - len(text.lstrip())
+    return slice_guarded(value, lead, len(text.rstrip()))
+
+
+def _render_report(outcomes: list[_ChildOutcome], repo: Path):
+    lines: list = [
         "Parallel dispatch finished. NOTHING HAS BEEN MERGED - each child's work is "
         "committed on its own branch for you to review and merge (or delete).",
         "",
@@ -800,7 +809,7 @@ def _render_report(outcomes: list[_ChildOutcome], repo: Path) -> str:
         if o.turns:
             lines.append(f"turns:    {o.turns}")
         if o.detail:
-            lines.append(o.detail.strip())
+            lines.append(_stripped(o.detail))
         if o.cleanup_warning:
             lines.append(f"WARNING: {o.cleanup_warning}")
         # A worker that finished after the parent gave up. Its result was refused
@@ -833,4 +842,5 @@ def _render_report(outcomes: list[_ChildOutcome], repo: Path) -> str:
         lines.append("To take one of these, review the diff then merge its branch, "
                      "e.g.:")
         lines.append(f"    git -C {repo} merge --no-ff {merged[0]}")
-    return "\n".join(lines)
+    from localm.textguard import compose_join
+    return compose_join("\n", lines)

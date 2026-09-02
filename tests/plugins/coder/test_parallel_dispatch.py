@@ -804,3 +804,58 @@ def test_a_failed_child_that_finishes_in_time_still_reports_error(repo):
     )
     assert "=== child1 [error] ===" in res.output, res.output
     assert res.ok is False
+
+
+# --------------------------------------------------------------------------- #
+#  Per-span untrusted ranges (AUD-PROVDEFANG stage 2)                          #
+#                                                                              #
+#  A parallel child's reply is a delegated result, framed but not fenced. The  #
+#  range has to survive the report builder, which strips the detail and joins   #
+#  every line - both of which drop an annotation when done with plain strings.  #
+# --------------------------------------------------------------------------- #
+
+_EXOTIC = "<<ASSISTANT>>"          # outside neutralise()'s families, on purpose
+
+
+def test_the_exotic_marker_is_still_not_covered_by_neutralise():
+    """If this fails the PoC below stopped being a bypass and must be replaced."""
+    from localm.textguard import neutralise
+    assert neutralise(_EXOTIC) == _EXOTIC
+
+
+def test_the_rendered_report_keeps_each_child_reply_range():
+    from pathlib import Path
+    from localm.plugins.coder.tools.parallel import _ChildOutcome, _render_report
+    from localm.textguard import compose, untrusted_span, untrusted_spans_of
+
+    o = _ChildOutcome.__new__(_ChildOutcome)
+    o.name = "w1"
+    o.status = "ok"
+    o.branch = "b"
+    o.worktree = ""
+    o.model = ""
+    o.turns = 1
+    o.detail = compose("\n", untrusted_span("CHILD " + _EXOTIC), "\n")
+    o.cleanup_warning = ""
+    o.late_note = ""
+    o.diff = ""
+
+    report = _render_report([o], Path("."))
+    spans = untrusted_spans_of(report)
+    assert spans, "the report builder dropped the child's range"
+    covered = "".join(str(report)[a:b] for a, b in spans)
+    assert _EXOTIC in covered
+    # The report's own scaffolding is localm's text and must stay unmarked.
+    assert "NOTHING HAS BEEN MERGED" not in covered
+    assert "branch:" not in covered
+
+
+def test_stripping_a_child_detail_keeps_the_range_over_what_survives():
+    from localm.plugins.coder.tools.parallel import _stripped
+    from localm.textguard import compose, untrusted_span, untrusted_spans_of
+
+    value = compose("  \n", untrusted_span("BODY " + _EXOTIC), "  \n\n")
+    out = _stripped(value)
+    assert str(out) == "BODY " + _EXOTIC
+    covered = "".join(str(out)[a:b] for a, b in untrusted_spans_of(out))
+    assert covered == "BODY " + _EXOTIC

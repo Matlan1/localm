@@ -773,11 +773,11 @@ class AgentJob(BackgroundJob):
         return self._outcome
 
     def _result_for(self, poll_value) -> Optional[dict]:
-        # Neutralise the child's text at the single point where it becomes
-        # readable by the parent loop.
-        from .provenance import neutralise
+        # Defang and range-mark the child's text at the single point where it
+        # becomes readable by the parent loop.
+        from localm.textguard import compose, untrusted_span
         payload = {
-            "summary": neutralise(poll_value.get("summary") or ""),
+            "summary": compose(untrusted_span(poll_value.get("summary") or "")),
             "turns": poll_value.get("turns", 0),
         }
         if poll_value.get("error"):

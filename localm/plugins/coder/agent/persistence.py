@@ -230,9 +230,10 @@ class _PersistenceMixin:
                     # Say plainly that it did not finish its task. The summary text
                     # states it.
                     verdict = "finished" if child_ok else "DID NOT COMPLETE its task"
-                    notes.append(
+                    from localm.textguard import compose
+                    notes.append(compose(
                         f"Background sub-agent '{label}' ({job_id}) {verdict} after "
-                        f"{result.get('turns', 0)} turn(s).{where}\n\n{body}")
+                        f"{result.get('turns', 0)} turn(s).{where}\n\n", body))
 
                 for w in (st.get("warnings") or []):
                     notes.append(f"  (warning from {job_id}: {w})")
