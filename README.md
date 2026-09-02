@@ -90,6 +90,12 @@ If localm ever fails to start (or setup itself fails), you can still file a bug 
 > `git clone --depth 1 --branch v0.1.0 https://github.com/Matlan1/localm.git`
 > then follow the setup below inside the clone.
 
+### Prefer a window? Use the graphical installer
+
+Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS) and the whole install happens in a window: pick your inference runtime (your hardware's recommendation is preselected), where data should live, whether the GUI opens as an app window or a browser tab, and whether you want a desktop shortcut and a global `localm` command. Then it installs, with a progress bar and a live log, and offers to start LocaLM when it is done.
+
+It performs exactly the same install as the console setup below, asking the same questions in the same order. Everything after this section describes the console path; if you used the window, you are already finished.
+
 ### Recommended (Windows): self-contained setup
 
 Clone anywhere and double-click `setup.bat`. It installs `uv` (the Python package manager it builds on) for you if you do not already have it, creates a private `.venv` inside the clone (always Python 3.12), installs localm into it, detects your GPU and provisions the matching llama.cpp backend (see [GPU setup](#gpu-setup)), and asks where data should live:

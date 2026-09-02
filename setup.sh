@@ -162,6 +162,17 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
+# ---- point at the graphical installer ---------------------------------------
+# Same install, same questions, in a window. Mentioned here rather than only in
+# the README because the person who would rather not answer questions in a
+# console is, by definition, already looking at one. Only offered when there is
+# a display to open it on.
+if [ -x "./setup-gui.sh" ] && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] || [ "$(uname -s)" = "Darwin" ]; }; then
+  say ""
+  say "  Prefer a window? Ctrl+C and run ./setup-gui.sh instead - it performs"
+  say "  this same setup graphically. Otherwise, carry on here."
+fi
+
 # ---- portable vs shared: where localm's Python tooling lives ----------------
 # Portable pulls uv ITSELF (when we have to install it below), its managed Python,
 # and its wheel cache INTO this folder, so the clone is truly self-contained

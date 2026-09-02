@@ -30,6 +30,16 @@ if /i "%~1"=="uninstall"   goto uninstall
 if /i "%~1"=="--uninstall" goto uninstall
 if /i "%~1"=="--rollback"  goto uninstall
 
+rem ---- point at the graphical installer -------------------------------------
+rem  Same install, same questions, in a window. Mentioned here rather than only
+rem  in the README because the person who would rather not answer questions in a
+rem  console is, by definition, already looking at one.
+if exist "setup-gui.bat" (
+    echo.
+    echo  Prefer a window? Close this and double-click setup-gui.bat instead -
+    echo  it performs this same setup graphically. Otherwise, carry on here.
+)
+
 rem ---- portable vs shared: where localm's Python tooling lives ---------------
 rem  Portable pulls uv ITSELF (when we have to install it below), its managed
 rem  Python, and its wheel cache INTO this folder, so the clone is truly
