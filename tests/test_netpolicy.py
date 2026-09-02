@@ -3,6 +3,7 @@
 
 
 import logging
+import urllib.parse
 
 import pytest
 
@@ -384,6 +385,48 @@ class TestSafeFetchBytesExtraHeaders:
         assert seen["Host"] == "example.com"
         assert seen["User-Agent"] != "attacker-agent"
         assert seen["Authorization"] == "Bearer secret-token"
+
+    def test_extra_headers_stripped_on_cross_host_redirect(self, monkeypatch):
+        """A redirect to a DIFFERENT host must not carry the caller's
+        credential with it - the same protection requests' own redirect
+        handling provides by default, which this module's manual
+        redirect-revalidation loop must not silently drop."""
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        seen_by_host = {}
+
+        def fake_get(url, **kw):
+            host = urllib.parse.urlparse(url).hostname
+            seen_by_host[host] = dict(kw.get("headers") or {})
+            if host == "example.com":
+                return _FakeResponse(status=302, redirect="https://other.example/b")
+            return _FakeResponse(body=b"ok")
+
+        _patch_session(monkeypatch, get=fake_get)
+        safe_fetch_bytes("https://example.com/a",
+                         extra_headers={"Authorization": "Bearer secret-token"})
+        assert seen_by_host["example.com"].get("Authorization") == "Bearer secret-token"
+        assert "Authorization" not in seen_by_host["other.example"], (
+            "the Authorization header leaked to a DIFFERENT host across a redirect")
+
+    def test_extra_headers_survive_a_same_host_redirect(self, monkeypatch):
+        """Only a HOST CHANGE strips the credential - an ordinary same-host
+        redirect (e.g. a trailing-slash normalization) must still carry it,
+        or every legitimate HF/CivitAI redirect would silently lose auth."""
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        calls = []
+
+        def fake_get(url, **kw):
+            calls.append(dict(kw.get("headers") or {}))
+            if len(calls) == 1:
+                return _FakeResponse(status=302, redirect="https://example.com/b")
+            return _FakeResponse(body=b"ok")
+
+        _patch_session(monkeypatch, get=fake_get)
+        safe_fetch_bytes("https://example.com/a",
+                         extra_headers={"Authorization": "Bearer secret-token"})
+        assert calls[1].get("Authorization") == "Bearer secret-token"
 
 
 # ------------------------------------------------------------------ #

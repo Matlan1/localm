@@ -476,14 +476,18 @@ def safe_fetch_bytes(
     *extra_headers*: sent on every hop alongside the fixed User-Agent/Host
     pair below, which always win on a key collision - a caller-supplied dict
     can add a header (e.g. an optional Authorization bearer token) but can
-    never override the pinned Host or User-Agent.
+    never override the pinned Host or User-Agent. Stripped entirely on any
+    hop whose host differs from the ORIGINAL request's host, so a redirect
+    can never carry a caller's credential to a different host.
 
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
     current = url
+    original_host = urllib.parse.urlparse(url).hostname
     for _ in range(_MAX_REDIRECTS + 1):
         check_url(current, allow_when_off=allow_when_off)
         parsed = urllib.parse.urlparse(current)
+        hop_headers = extra_headers if parsed.hostname == original_host else None
         # Pin the socket to the just-validated IP for this hop; each redirect
         # target is independently re-checked and re-pinned.
         with _session_for(current) as session:
@@ -492,7 +496,7 @@ def safe_fetch_bytes(
                 timeout=timeout,
                 stream=True,
                 allow_redirects=False,
-                headers={**(extra_headers or {}),
+                headers={**(hop_headers or {}),
                          "User-Agent": _USER_AGENT, "Host": _host_header(parsed)},
             )
             try:
