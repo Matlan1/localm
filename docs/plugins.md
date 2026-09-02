@@ -495,3 +495,8 @@ which enumerates every builtin so a new one is covered the moment it ships):
   (see `AGENTS.md`).
 - **Tested**: behaviour changes are covered by a test that fails before the fix;
   `python scripts/check_hygiene.py` and `pytest -m "not integration"` pass.
+  This bullet is about contributing a plugin into the localm repo itself,
+  where those scripts live; an independent third-party plugin shipped from
+  outside the repo (e.g. by someone who installed localm via `pip install
+  localm`) has no access to them and should verify equivalently by its own
+  means instead.

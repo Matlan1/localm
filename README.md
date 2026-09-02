@@ -71,7 +71,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 ## Requirements
 
-- **Python 3.12** (the project pins `requires-python = >=3.12,<3.13`). The installers build a 3.12 venv, and the `[gpu]` ROCm torch wheels are cp312-only.
+- **Python 3.12** (the project pins `requires-python = >=3.12,<3.13`). The self-contained installers below build their own 3.12 venv regardless of your system Python; a plain `pip install localm` does not - it installs into whatever interpreter runs it, so that interpreter must already be 3.12.x. The `[gpu]` ROCm torch wheels are cp312-only either way.
 
 - **For GGUF GPU inference:** a compiled `llama.dll` + GPU runtime DLLs. `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup)). The installer detects your hardware and chooses the backend automatically.
 
@@ -79,7 +79,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 Run `localm doctor` after installing to check Python, the native library, GPU driver, VRAM, and optional packages in one shot.
 
-If localm ever fails to start (or setup itself fails), you can still file a bug report: double-click `report-issue.bat` (Windows) or run `bash report-issue.sh` (Linux/macOS) from the clone. It shows you exactly what will be sent, files an account-less GitHub issue (no GitHub login needed), and works even with a broken or missing install.
+If localm ever fails to start (or setup itself fails), you can still file a bug report. From a clone: double-click `report-issue.bat` (Windows) or run `bash report-issue.sh` (Linux/macOS). No clone (e.g. a pip install)? Run `localm bug-report -m "..."` instead. Either way it shows you exactly what will be sent and files an account-less GitHub issue (no GitHub login needed); the batch/shell scripts additionally work even with a broken or missing install.
 
 ---
 
@@ -115,6 +115,26 @@ curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | 
 
 This clones localm to `~/localm`, creates a private `.venv`, detects your GPU, and provisions the matching backend non-interactively. For the interactive version (`bash setup.sh` from a clone, same prompts as `setup.bat` above), GPU-backend details, and macOS's experimental status, see [docs/linux-setup.md](docs/linux-setup.md).
 
+### `pip install localm` (no clone needed)
+
+```bash
+pip install localm
+localm setup-llama   # provision the native GGUF backend for your GPU (see GPU setup)
+```
+
+Needs Python **exactly 3.12.x already on your machine** - unlike the self-contained installers above, `pip install` does not provision its own Python, it installs into whatever interpreter ran the command.
+
+**Set `LOCALM_HOME` before you do anything else.** The self-contained installers above always ask where data should live; a plain `pip install` never does. Leave `LOCALM_HOME` unset and localm falls back to a directory *inside your Python environment* (`localm info` prints the path actually in use) - the next `pip install --upgrade localm` can wipe it. Set it once, in your shell profile or however you persist environment variables:
+
+```bash
+export LOCALM_HOME=~/localm-data              # Linux/macOS
+setx LOCALM_HOME %USERPROFILE%\localm-data     # Windows (new shells only)
+```
+
+Extras install the normal pip way, e.g. `pip install "localm[coder,rag]"` - see the extras table below for what each one adds. `localm doctor` reports what is installed and what is missing at any point.
+
+The pip package covers the CLI, the server, and every plugin. It does not include the desktop shortcut, the native `LocaLM.exe` app window, or the interactive plugin-picking wizard the self-contained installers above provide; use one of those instead if you want them.
+
 ### Manual (any OS)
 
 This path uses `uv` directly, so it assumes `uv` is installed (the `setup.bat` /
@@ -149,6 +169,7 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | Extra | What it adds |
 |---|---|
 | `coder` | The AI coding agent (opt-in marker; deps are already core) |
+| `browser` | The browser plugin: an automated web browser the coder can drive (`playwright`) |
 | `desktop` | Native OS app window for `localm gui` instead of a browser tab (`pywebview`; see [native app](docs/native-app.md)) |
 | `gpu` | AMD RDNA2 ROCm 7.13 stack: torch, transformers, rocm-sdk (Windows, Python 3.12) |
 | `audio` | Audio multimodal input (`soundfile`) |
@@ -305,7 +326,7 @@ localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
 localm plugin setup             # pick a starter set interactively
 ```
 
-The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[rag]"` alongside `localm plugin install rag`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[rag]"` alongside `localm plugin install rag`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
 
 **Third-party plugins** are folders containing a `plugin.toml` manifest and Python files. Install a third-party plugin from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](docs/plugins.md) for the full authoring contract.
 

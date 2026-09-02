@@ -52,10 +52,37 @@ Prerequisites:
 - For the graphical launcher: Tk - `sudo apt install python3-tk` (Debian/Ubuntu),
   `sudo dnf install python3-tkinter` (Fedora), etc. The web GUI needs only a browser.
 
+## pip install
+
+```sh
+pip install localm
+```
+
+No clone needed. Needs Python **exactly 3.12.x already on your machine** -
+`pip install` does not provision its own interpreter the way `setup.sh` does.
+There is no `./localm.sh`, `./localm-launcher.sh`, or `.venv/` - `localm` is a
+normal console script on your `PATH` once installed, so every command below
+that shows `.venv/bin/localm ...` or `./localm.sh ...` is just `localm ...`
+for you.
+
+Set `LOCALM_HOME` before you do anything else: `setup.sh` above always asks
+where data should live, but a plain `pip install` never does, and with
+nothing set it falls back to a directory inside your Python environment - the
+next `pip install --upgrade localm` can wipe it.
+
+```sh
+export LOCALM_HOME=~/localm-data
+```
+
+Then provision the native GGUF backend the same way as any other install -
+see the next section.
+
 ## The native llama.cpp library (GGUF backend)
 
 `setup.sh` provisions this for you from the official llama.cpp releases - pick a
-backend (or let auto-detect choose) and it downloads the matching Linux build:
+backend (or let auto-detect choose) and it downloads the matching Linux build
+(a pip install: run the same `setup-llama` command as plain `localm setup-llama
+--backend ...`, no `.venv/bin/` prefix):
 
 ```sh
 .venv/bin/localm setup-llama --backend vulkan   # any GPU, no vendor toolkit
@@ -146,6 +173,14 @@ treat it as best-effort until confirmed on real hardware.
 .venv/bin/localm --help      # everything else
 ```
 
+The `./localm.sh` / `./localm-launcher.sh` wrappers and the `.venv/` they call
+into are created by `setup.sh` inside the clone. A `pip install localm` has
+none of that - `localm` is already on `PATH`, so the same commands are just
+`localm gui`, `localm run <model>`, `localm --help`.
+
 Data lives in `./home` (portable, the default) or a custom path you pick during
 setup (recorded in `localm-home.cfg`) - there is no silent per-user fallback to a
-shared `~/.localm`. Override at any time with `LOCALM_HOME=/path`.
+shared `~/.localm`. Override at any time with `LOCALM_HOME=/path`. That
+portable `./home` default only applies to a source checkout (`setup.sh`); a
+`pip install` has no portable mode - see [pip install](#pip-install) above,
+set `LOCALM_HOME` explicitly.

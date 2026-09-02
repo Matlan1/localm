@@ -4,10 +4,13 @@ This page covers two related but independent things: running the GUI in its own
 app window instead of a browser tab, and the server's process identity
 (`LocaLM.exe`, the taskbar/tray icon). Neither requires the other.
 
-By default the localm server runs as `LocaLM.exe` in Task Manager (not
-`python.exe`), launches from a double-click or a desktop shortcut, and carries the
-LocaLM icon on the taskbar, in the tray, and on the file itself. `setup.bat` /
-`setup.sh` build this launcher for you; you can also (re)build it yourself.
+`setup.bat` / `setup.sh` build a launcher so the localm server runs as
+`LocaLM.exe` in Task Manager (not `python.exe`), launches from a double-click
+or a desktop shortcut, and carries the LocaLM icon on the taskbar, in the
+tray, and on the file itself. An install without those scripts - `pip install
+localm`, or a manual `uv`/`pip` install - does not get this automatically;
+run `localm make-launcher` yourself to build the same thing (see "Build it"
+below).
 
 ## App window, not a browser tab
 
@@ -77,15 +80,17 @@ localm make-launcher            # build for this OS (idempotent)
 localm make-launcher --force    # rebuild (use after a Python upgrade)
 ```
 
-- **Windows** creates `.venv\localm-app\LocaLM.exe` and launches it as
-  `LocaLM.exe -m localm gui`. Task Manager then shows `LocaLM.exe` as a single
-  process (no `python.exe`). `setup.bat` points the desktop shortcut at it.
-- **Linux** creates `.venv/bin/LocaLM` and writes a `LocaLM.desktop` you can copy
-  to `~/.local/share/applications/`. A process monitor then shows `LocaLM`.
-  (`setup.sh` also writes an application-menu entry.)
+- **Windows** creates `<venv>\localm-app\LocaLM.exe` (`<venv>` is wherever
+  localm is installed - `.venv` for a source checkout, your own environment
+  for `pip install localm`) and launches it as `LocaLM.exe -m localm gui`.
+  Task Manager then shows `LocaLM.exe` as a single process (no `python.exe`).
+  `setup.bat` points the desktop shortcut at it.
+- **Linux** creates `<venv>/bin/LocaLM` and writes a `LocaLM.desktop` you can
+  copy to `~/.local/share/applications/`. A process monitor then shows
+  `LocaLM`. (`setup.sh` also writes an application-menu entry.)
 
-Everything stays **inside the clone's own `.venv`** - nothing is installed
-system-wide.
+Everything stays **inside that Python environment's own venv** - nothing is
+installed system-wide.
 
 The graphical launcher (`launcher.pyw` / the "Launcher" shortcut) automatically
 spawns modes through `LocaLM.exe` when it is built, so the Web GUI's console-less

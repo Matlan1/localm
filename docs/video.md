@@ -130,7 +130,7 @@ Either way, uploaded workflows are stored per-plugin under the localm data direc
 
 Parameters are injected by role, so node ids do not matter: the graph just needs a `KSampler` wired with `positive` / `negative` / `latent_image` inputs and a `CreateVideo` node for fps.
 
-The older `wan_workflow_local.json` file dropped next to `localm/video_gen/wan_workflow.json` still works (it is gitignored) but is superseded by the Workflow card above: on first load, any existing override there is migrated into the new per-plugin store automatically, keeping it selected and preserving your current setup.
+The older `wan_workflow_local.json` file dropped next to `localm/video_gen/wan_workflow.json` still works for a from-source checkout (it is gitignored) but is superseded by the Workflow card above: on first load, any existing override there is migrated into the new per-plugin store automatically, keeping it selected and preserving your current setup. There is no equivalent path inside a `pip install localm` (no reachable `localm/video_gen/` folder to write into) - use the Workflow card above instead.
 
 ## Picking models per slot
 

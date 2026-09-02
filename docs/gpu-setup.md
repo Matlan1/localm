@@ -261,7 +261,13 @@ what the current process itself has allocated.
 GGUF inference needs no PyTorch - this section is only for HF-format models. The
 installer auto-detects your GPU and installs the matching torch wheels. To do it
 by hand, use the line for your hardware - if you are not sure which NVIDIA line
-applies, ask localm's own detector rather than guessing:
+applies, ask localm's own detector rather than guessing. The commands below use
+`.venv` because that is what the self-contained installers create; if you
+installed with `pip install localm` there is no `.venv` to point at - drop
+`-p .venv` (or `uv pip install -p .venv`'s `-p .venv`) and run the plain `python
+-m localm.hwdetect torch-args cuda` / `pip install torch torchvision --index-url
+...` in whatever environment `localm` is already installed into.
+
 `.venv/bin/python -m localm.hwdetect torch-args cuda` (Windows:
 `.venv\Scripts\python -m localm.hwdetect torch-args cuda`) prints the exact
 `uv pip install` arguments for the card actually in this machine.
@@ -281,7 +287,10 @@ uv pip install -p .venv torch torchvision --index-url https://download.pytorch.o
 # AMD on Linux - upstream ROCm wheels (broad gfx support):
 uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
 
-# AMD on Windows, RX 6000 / RDNA2 (gfx103X) - localm's bundled self-contained build:
+# AMD on Windows, RX 6000 / RDNA2 (gfx103X) - localm's bundled self-contained build.
+# `-e ".[gpu]"` is an editable install and needs a source checkout to point at;
+# for `pip install localm` use the non-editable equivalent instead:
+#   pip install --upgrade "localm[gpu]"
 uv pip install -p .venv -e ".[gpu]"
 
 # AMD on Windows, RX 7000 / 9000 (RDNA3 / RDNA4) - AMD's Windows ROCm wheels (public preview):
