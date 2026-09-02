@@ -1329,9 +1329,10 @@ def _memory_inlet(messages, ctx):
         block = _mem.render_memories(block_records)
         if not block:
             return None
+        from localm.textguard import compose
         for m in messages:
             if m.get("role") == "system" and isinstance(m.get("content"), str):
-                m["content"] = block + "\n\n" + m["content"]
+                m["content"] = compose(block, "\n\n", m["content"])
                 return messages
         messages.insert(0, {"role": "system", "content": block})
         return messages
