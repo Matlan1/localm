@@ -382,6 +382,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "Opening the GUI" or picking a model "on the Models page" - none of which
   `--api-mode` ever mounts. Those lines are now api-mode-aware and describe
   what is actually available instead.
+- **A chat request could be rejected as too large for a very small context
+  model even though your own message fit comfortably.** Every chat turn adds
+  a short style nudge to the model's instructions; on a normal-sized context
+  that costs nothing you would notice, but on a tiny one it could push an
+  otherwise-small request past the model's context limit by itself. The
+  nudge is now skipped when the model's context is too small to absorb it,
+  so a request that actually fits succeeds instead of being refused.
 
 ### Security
 - **Chatting with certain models no longer crashes the server outright.** For a

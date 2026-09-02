@@ -94,6 +94,7 @@ def register(app: FastAPI, ctx) -> None:
                     scopes=tuple(caller_scopes(request) or ()),
                 )
                 ctx.state["client_id"] = request.headers.get("x-client-id", "")
+                ctx.state["capacity"] = engine.context_capacity()
                 if pipeline.has("inlet"):
                     messages = await pipeline.run_inlet(messages, ctx)
 
@@ -441,6 +442,7 @@ def register(app: FastAPI, ctx) -> None:
                     scopes=tuple(caller_scopes(request) or ()),
                 )
                 ctx.state["client_id"] = request.headers.get("x-client-id", "")
+                ctx.state["capacity"] = engine.context_capacity()
                 if pipeline.has("inlet"):
                     messages = await pipeline.run_inlet(messages, ctx)
 
