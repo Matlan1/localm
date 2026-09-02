@@ -74,7 +74,7 @@ dependencies = [
     # QR codes: the companion pairing flow renders a key QR server-side and the
     # GUI/CLI print LAN-URL QRs. Core so phone pairing works out of the box.
     "qrcode>=8.2",
-    "zeroconf>=0.150.0",
+    "zeroconf>=0.151.3",
     # Windows VRAM reporting: gpu_usage.py's PDH source reads the vendor-neutral
     # WDDM counter Task Manager itself uses, via win32pdh from pywin32. It is the
     # ONLY device-global VRAM source on a non-AMD Windows GPU - the preferred
