@@ -994,8 +994,13 @@ class _CountingCallScanner:
         a broad one is correctly reported as the dead code it is.
         """
         for anc in self._ancestors(node):
-            if isinstance(anc, (self._ast.FunctionDef, self._ast.AsyncFunctionDef)):
-                return "unguarded"                        # left the function
+            if isinstance(anc, (self._ast.FunctionDef, self._ast.AsyncFunctionDef,
+                                self._ast.Lambda)):
+                # A lambda's body runs where it is CALLED, not where it is
+                # written, so an enclosing try does not protect it - the same
+                # argument as a nested def. routes/chat.py already has a
+                # counting call inside a lambda.
+                return "unguarded"
             if not isinstance(anc, self._ast.Try):
                 continue
             if not self._in_body_of(node, anc):
@@ -1148,6 +1153,18 @@ class TestTheClassifierCanRejectAndIsNotFooled:
                     raise
         """) == "unguarded"
 
+    def test_a_try_does_not_guard_a_lambda_defined_inside_it(self):
+        # Same argument as the nested def: the body runs when the lambda is
+        # CALLED, which may be long after the try has exited. This shape is
+        # already present in routes/chat.py.
+        assert self._verdict("""
+            def f():
+                try:
+                    fn = lambda t: engine.count_tokens(t)
+                except PretokenizerUnsafeInputError:
+                    raise
+        """) == "unguarded"
+
     def test_a_handler_body_is_not_the_try_body(self):
         assert self._verdict("""
             def f():
@@ -1243,6 +1260,18 @@ class TestEveryCountingCallIsClassified:
 
     A call that is none of those reaches the generic handler as an opaque 500,
     which is how the non-streaming chat usage count shipped broken.
+
+    TWO KNOWN GAPS, both erring toward "this guard is weaker than it looks"
+    rather than toward passing a broken product path, and neither present in the
+    files scanned today:
+
+    * an ``except`` naming the error through an IMPORT ALIAS reads as guarded,
+      because the check compares handler names textually;
+    * a call inside a GENERATOR EXPRESSION assigned to a name reads as guarded.
+      Unlike a lambda this one is genuinely ambiguous - a genexp consumed in
+      place runs eagerly inside the try, while a stored one does not - and
+      list/set/dict comprehensions are eager, so treating them as transparent is
+      correct for every shape but that one.
     """
 
     EXPECTED_CALLS = 11
