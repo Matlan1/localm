@@ -916,6 +916,14 @@ class CoderSession:
             self.agent.close()
         except Exception:
             pass
+        # A browser this session opened outlives it otherwise: it is a real
+        # Chromium plus its driver, holding the session's cookies and storage,
+        # and nothing else ever closes it.
+        try:
+            from .tools.browser import close_for_owner
+            close_for_owner(getattr(self.agent, "job_owner", ""))
+        except Exception:
+            pass
 
 
 class SessionManager:

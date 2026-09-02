@@ -106,6 +106,13 @@ class BrowserSession:
             loop.run_until_complete(self._launch())
         except BaseException as exc:                 # noqa: BLE001
             self._start_error = exc
+            # A launch that got as far as starting Chromium and then failed
+            # still owns a browser and a driver, and this session is in no
+            # registry, so nothing else can ever close them.
+            try:
+                loop.run_until_complete(self._teardown())
+            except BaseException:                    # noqa: BLE001
+                pass
             self._ready.set()
             return
         self._ready.set()

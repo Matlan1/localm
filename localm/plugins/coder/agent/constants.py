@@ -224,7 +224,13 @@ _MCP_SCOPE_PATH_ARGS: tuple[str, ...] = (
 
 # Model-initiated network tools, governed by the net_mode policy
 # (localm.netpolicy): off = fail fast, ask = approval flow, allow = run.
-_NETWORK_TOOLS: frozenset[str] = frozenset({"fetch_url", "web_search"})
+# The browser tools listed here are the ones that make the browser reach the
+# network; the rest of the browser set reads state it already has. Listing them
+# also means net_mode=off refuses before a browser is launched.
+_NETWORK_TOOLS: frozenset[str] = frozenset({
+    "fetch_url", "web_search",
+    "browser_navigate", "browser_click", "browser_fill",
+})
 
 # Task-list tools (tools/tasks.py). They read and write THIS session's todo
 # state, so the dispatcher injects the Agent as a hidden `_session` arg.

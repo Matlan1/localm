@@ -228,3 +228,48 @@ class TestASpawnedChildDoesNotInheritTheBrowser:
         parent = _agent(tmp_path, browser_enabled=True)
         child = _agent(tmp_path, parent=parent)
         assert child.job_owner == parent.job_owner
+
+
+class TestTheNetworkPolicyPromptCoversTheBrowser:
+    """net_mode governs the browser tools that reach the network, the same way
+    it governs fetch_url. Without this, 'ask' prompted before a one-page fetch
+    and not before driving a whole browser."""
+
+    def test_the_reaching_tools_are_network_tools(self):
+        from localm.plugins.coder.agent.constants import _NETWORK_TOOLS
+        for name in ("browser_navigate", "browser_click", "browser_fill"):
+            assert name in _NETWORK_TOOLS, name
+
+    def test_the_reading_tools_are_not(self):
+        """They read state the session already has, so prompting for them would
+        be noise rather than a decision."""
+        from localm.plugins.coder.agent.constants import _NETWORK_TOOLS
+        for name in ("browser_read", "browser_console", "browser_network",
+                     "browser_screenshot", "browser_close"):
+            assert name not in _NETWORK_TOOLS, name
+
+    def test_net_mode_off_refuses_before_a_browser_is_launched(self, tmp_path,
+                                                              monkeypatch):
+        from localm.browser import session as bsession
+        monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "off")
+        a = _agent(tmp_path, browser_enabled=True)
+        before = set(bsession.active_ids())
+        from localm.plugins.coder.tools.registry import TOOL_REGISTRY  # noqa: F401
+        from localm.plugins.coder.parser import ToolCall
+        res = a._execute_tool(
+            ToolCall(name="browser_navigate", args={"url": "https://example.com/"},
+                     raw="", start=0, end=0), interactive=False)
+        assert res.ok is False
+        assert "net_mode=off" in res.output, res.output
+        assert set(bsession.active_ids()) == before, "a browser was launched anyway"
+
+
+class TestTheBrowserIsClosedWithTheSession:
+    def test_close_for_owner_is_wired_into_session_teardown(self):
+        """A browser outlives its session otherwise: a real Chromium plus its
+        driver, holding that session's cookies and storage."""
+        import inspect
+        from localm.plugins.coder import sessions
+        src = inspect.getsource(sessions.CoderSession.close)
+        assert "close_for_owner" in src, (
+            "nothing closes the browser when the coder session ends")
