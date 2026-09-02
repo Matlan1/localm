@@ -227,7 +227,7 @@ grammar = [
 cpu = []
 # Development + CI tooling (lint + tests). Install with:  pip install -e ".[dev]"
 dev = [
-    "ruff>=0.16.4",
+    "ruff>=0.16.5",
     "pytest>=8.0",
     # Coverage measurement (TEST-1). pytest-cov enforces the fail_under floor
     # from [tool.coverage.report] below.
