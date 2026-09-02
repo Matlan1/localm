@@ -126,6 +126,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   when it finishes. It performs exactly the same install as `setup.bat` /
   `setup.sh`, which are unchanged and remain available for anyone who prefers
   them.
+- **The preview canvas can now be turned off, or limited to you.** A reply
+  containing a self-contained HTML or SVG block gets a button that renders it
+  in a sandboxed frame. Two settings under Chat now govern it: one turns the
+  button off everywhere, and one offers it only to your own sessions rather
+  than to every API key. Both keep the previous behaviour by default.
 
 ### Changed
 - **The two installers explain themselves more consistently.** `setup.bat`
