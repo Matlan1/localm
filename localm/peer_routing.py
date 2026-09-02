@@ -181,7 +181,7 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
             continue
         if not is_routable_peer_endpoint(peer.get("host"), peer.get("scheme") or "http"):
             logger.warning(
-                "peer_routing: peer %s advertises '%s' at unroutable endpoint "
+                "peer_routing: peer %r advertises %r at unroutable endpoint "
                 "scheme=%r host=%r; not offering it, because only a loopback "
                 "address over http or https has had its occupant "
                 "identity-verified",
@@ -248,8 +248,8 @@ async def forward(route: PeerRoute, request, path: str):
     if not is_routable_peer_endpoint(route.host, route.scheme):
         clear_route(route.model)
         logger.warning(
-            "peer_routing: refusing to forward '%s' to unroutable endpoint "
-            "scheme=%r host=%r (peer %s); clearing the route without sending "
+            "peer_routing: refusing to forward %r to unroutable endpoint "
+            "scheme=%r host=%r (peer %r); clearing the route without sending "
             "the credential",
             route.model, route.scheme, route.host, route.instance_id)
         raise HTTPException(
