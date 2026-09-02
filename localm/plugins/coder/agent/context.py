@@ -15,6 +15,7 @@ from ..display import (
 )
 from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body
 from .constants import _COMPACT_AUTO_RATIO, _COMPACT_WARN_RATIO, _DEFAULT_CTX_TOKENS
+from localm.textguard import compose, slice_guarded
 
 _JSON_WS = " \t\r\n"
 
@@ -424,12 +425,12 @@ ws     ::= [ \t\n\r]*
                 compressed.append(block)
                 continue
             dropped = len(block) - self._COMPRESS_HEAD_CHARS - self._COMPRESS_TAIL_CHARS
-            compressed.append(
-                block[: self._COMPRESS_HEAD_CHARS]
-                + f"\n[... {dropped} chars of tool output elided to save context - "
-                "re-run the tool on a narrower target if you need the middle ...]\n"
-                + block[-self._COMPRESS_TAIL_CHARS:]
-            )
+            compressed.append(compose(
+                slice_guarded(block, 0, self._COMPRESS_HEAD_CHARS),
+                f"\n[... {dropped} chars of tool output elided to save context - "
+                "re-run the tool on a narrower target if you need the middle ...]\n",
+                slice_guarded(block, len(block) - self._COMPRESS_TAIL_CHARS, len(block)),
+            ))
         return compressed
 
     def _maybe_compact(self, interactive: bool) -> None:

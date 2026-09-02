@@ -412,3 +412,87 @@ def test_render_for_prompt_neutralises_stored_lessons():
     assert "<|im_start|>" not in out
     assert "&lt;|im_start|>" in out
     assert "</tool_result>" not in out
+
+
+# --------------------------------------------------------------------------- #
+#  Per-span trust reaches the backend                                         #
+# --------------------------------------------------------------------------- #
+#
+# neutralise() only defangs the model families it enumerates, so the backend
+# also needs to know WHICH BYTES came from outside in order to tokenise them
+# with special-token parsing off. build_result_block records that range, and it
+# has to survive every hop between here and the tokenizer.
+
+_EXOTIC = "<<ASSISTANT>>"          # outside neutralise()'s families, on purpose
+
+
+def test_untrusted_block_records_the_body_as_an_untrusted_range():
+    from localm.textguard import untrusted_spans_of
+    body = "page text " + _EXOTIC + " more"
+    block = build_result_block("fetch_url", ToolResult(True, body), untrusted=True)
+    spans = untrusted_spans_of(block)
+    assert len(spans) == 1
+    assert str(block)[spans[0][0]:spans[0][1]] == neutralise(body)
+
+
+def test_the_recorded_range_covers_the_body_and_not_the_trusted_framing():
+    from localm.textguard import untrusted_spans_of
+    block = build_result_block("fetch_url", ToolResult(True, "BODY"), untrusted=True)
+    start, end = untrusted_spans_of(block)[0]
+    assert str(block)[start:end] == "BODY"
+    assert "<tool_result" in str(block)[:start]
+    assert "</tool_result>" in str(block)[end:]
+
+
+def test_an_exotic_control_token_survives_neutralise_but_is_range_marked():
+    from localm.textguard import untrusted_spans_of
+    block = build_result_block("fetch_url", ToolResult(True, _EXOTIC), untrusted=True)
+    assert _EXOTIC in str(block)                       # the regex does not cover it
+    start, end = untrusted_spans_of(block)[0]
+    assert str(block)[start:end] == _EXOTIC            # but the backend is told
+
+
+def test_a_trusted_tool_block_records_no_untrusted_range():
+    from localm.textguard import untrusted_spans_of
+    block = build_result_block("read_file", ToolResult(True, "x " + _EXOTIC),
+                               untrusted=False)
+    assert untrusted_spans_of(block) == ()
+
+
+def test_the_block_is_still_an_ordinary_string_for_every_existing_consumer():
+    block = build_result_block("fetch_url", ToolResult(True, "b"), untrusted=True)
+    assert isinstance(block, str)
+    assert block.startswith("<tool_result")
+
+
+def test_joining_result_blocks_into_one_user_message_keeps_every_range():
+    """loop.py folds all blocks of a turn into one message before sending."""
+    from localm.textguard import compose_join, untrusted_spans_of
+    blocks = [
+        build_result_block("fetch_url", ToolResult(True, "AAA"), untrusted=True),
+        build_result_block("read_file", ToolResult(True, "trusted"), untrusted=False),
+        build_result_block("web_search", ToolResult(True, "BBB"), untrusted=True),
+    ]
+    combined = compose_join("\n\n", blocks)
+    spans = untrusted_spans_of(combined)
+    assert [str(combined)[a:b] for a, b in spans] == ["AAA", "BBB"]
+
+
+def test_compressing_an_oversized_block_keeps_the_range_over_what_survives():
+    """context.py truncates large blocks when the window fills up."""
+    from localm.plugins.coder.agent.context import _ContextMixin
+    from localm.textguard import untrusted_spans_of
+
+    body = "S" * 4000 + _EXOTIC + "E" * 4000
+    block = build_result_block("fetch_url", ToolResult(True, body), untrusted=True)
+
+    agent = _ContextMixin.__new__(_ContextMixin)
+    agent._fill_ratio = lambda: 0.99
+    out = _ContextMixin._compress_results(agent, [block])[0]
+
+    assert len(out) < len(block)
+    spans = untrusted_spans_of(out)
+    assert spans, "compression dropped the untrusted range"
+    covered = "".join(str(out)[a:b] for a, b in spans)
+    assert "S" * 100 in covered and "E" * 100 in covered
+    assert "elided to save context" not in covered

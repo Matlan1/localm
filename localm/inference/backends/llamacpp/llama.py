@@ -24,6 +24,7 @@ import uuid
 from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional, Tuple
 
 from localm.inference import pretokenizer_guard
+from localm.textguard import split_by_trust, untrusted_spans_of
 
 from . import _api as api
 from ._structs import (
@@ -318,15 +319,41 @@ class _Tokenizer:
                 "of one character class. Such input will be refused rather "
                 "than tokenised.", self._pre_type)
 
-    def encode(self, text: str, add_bos: bool = True) -> List[int]:
+    def encode(self, text: str, add_bos: bool = True, untrusted_ranges=()) -> List[int]:
+        """Tokenise *text*, parsing control tokens everywhere except untrusted ranges.
+
+        *untrusted_ranges* are ``(start, end)`` character offsets into *text*
+        holding content that came from outside. Those are tokenised with
+        ``parse_special=False``, so a control token spelled inside them stays
+        ordinary text and cannot forge a role boundary, whatever model family it
+        belongs to. Everything else, the chat template's own role markers
+        included, keeps ``parse_special=True``.
+
+        With no ranges this issues the single call it always did.
+        """
         pretokenizer_guard.check_text(self._pre_type, text)
+        if not untrusted_ranges:
+            return self._encode_segment(text, add_bos, True)
+
+        tokens: List[int] = []
+        want_bos = add_bos
+        for segment, is_untrusted in split_by_trust(text, untrusted_ranges):
+            if not segment:
+                continue
+            tokens.extend(self._encode_segment(segment, want_bos, not is_untrusted))
+            want_bos = False
+        if want_bos and add_bos:
+            return self._encode_segment(text, add_bos, True)
+        return tokens
+
+    def _encode_segment(self, text: str, add_special: bool, parse_special: bool) -> List[int]:
         raw = text.encode("utf-8", errors="replace")
         # First call: find required size (returns negative if buffer too small)
         n_max = len(raw) + 128
         buf = (llama_token * n_max)()
         n = api.llama_tokenize(
             self._vocab, raw, len(raw), buf, n_max,
-            add_special=add_bos, parse_special=True,
+            add_special=add_special, parse_special=parse_special,
         )
         if n < 0:
             # buffer too small - reallocate and retry
@@ -334,7 +361,7 @@ class _Tokenizer:
             buf = (llama_token * n_max)()
             n = api.llama_tokenize(
                 self._vocab, raw, len(raw), buf, n_max,
-                add_special=add_bos, parse_special=True,
+                add_special=add_special, parse_special=parse_special,
             )
         if n < 0:
             raise RuntimeError(f"Tokenisation failed (returned {n})")
@@ -447,10 +474,22 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Op
     reason to a channel visible without ``--debug`` once it is back in the
     parent process; see GgufBackend's ``_chatml_fallback`` latch in gguf.py.
     """
+    prompt, reason = _render_template(model_ptr, messages)
+    if reason:
+        _warn_chatml_fallback(reason)
+    return prompt, reason
+
+
+def _render_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Optional[str]]:
+    """Render *messages* exactly as :func:`_apply_model_template` does, without logging.
+
+    Returns ``(prompt, fallback_reason)``. Split out so the untrusted-span probe
+    can render a second, sentinel-carrying message list without emitting a
+    duplicate chat-template warning for the same request.
+    """
     tmpl_str = api.llama_model_chat_template(model_ptr)
     if not tmpl_str:
         reason = "model has no embedded chat template"
-        _warn_chatml_fallback(reason)
         return _format_chatml(messages), reason
 
     tmpl_bytes = tmpl_str.encode()
@@ -471,7 +510,6 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Op
         # Template not supported (< 0) or it rendered nothing (== 0): an empty
         # prompt would silently generate from thin air - fall back
         reason = "embedded template not recognized/rendered nothing"
-        _warn_chatml_fallback(reason)
         return _format_chatml(messages), reason
 
     if needed > buf_size:
@@ -481,10 +519,96 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Op
         if needed <= 0:
             # Same guard as above: a failed or empty render falls back
             reason = "embedded template not recognized/rendered nothing"
-            _warn_chatml_fallback(reason)
             return _format_chatml(messages), reason
 
     return buf.raw[:needed].decode("utf-8", errors="replace"), None
+
+
+# Private-use bracketing keeps a probe sentinel out of any real chat template's
+# own vocabulary; the uuid4 nonce keeps it unguessable by message content.
+_SENTINEL_OPEN = "\ue000"
+_SENTINEL_CLOSE = "\ue001"
+
+
+def _content_spans_in_prompt(
+    model_ptr: int,
+    messages: List[Dict],
+    prompt: str,
+    fallback_reason: Optional[str],
+) -> Optional[List[Tuple[int, int]]]:
+    """Character ranges in *prompt* holding each message's content, or ``None``.
+
+    Renders *messages* a second time with every content replaced by a unique
+    sentinel, then substitutes the real contents back into that skeleton and
+    requires the result to equal *prompt*. The ranges are only returned when
+    that equality holds, so a template that trims, escapes, reorders, drops or
+    duplicates content yields ``None`` rather than a wrong offset. Nothing is
+    searched for inside the rendered output.
+    """
+    contents = [_extract_text(m.get("content", "")) for m in messages]
+    nonce = uuid.uuid4().hex
+    sentinels = [
+        _SENTINEL_OPEN + str(i) + "-" + nonce + _SENTINEL_CLOSE
+        for i in range(len(messages))
+    ]
+    probe = [dict(m, content=s) for m, s in zip(messages, sentinels)]
+
+    skeleton, probe_reason = _render_template(model_ptr, probe)
+    if probe_reason != fallback_reason:
+        return None
+
+    rebuilt: List[str] = []
+    spans: List[Tuple[int, int]] = []
+    out_len = 0
+    pos = 0
+    for sentinel, content in zip(sentinels, contents):
+        found = skeleton.find(sentinel, pos)
+        if found < 0:
+            return None
+        wrapper = skeleton[pos:found]
+        rebuilt.append(wrapper)
+        out_len += len(wrapper)
+        spans.append((out_len, out_len + len(content)))
+        rebuilt.append(content)
+        out_len += len(content)
+        pos = found + len(sentinel)
+    rebuilt.append(skeleton[pos:])
+
+    if "".join(rebuilt) != prompt:
+        return None
+    return spans
+
+
+def _untrusted_prompt_ranges(
+    model_ptr: int,
+    messages: List[Dict],
+    prompt: str,
+    fallback_reason: Optional[str],
+) -> Tuple[Tuple[int, int], ...]:
+    """Untrusted character ranges of *prompt*, in prompt coordinates.
+
+    Empty when no message carries an annotation (the common case, which costs no
+    extra render) and also when the spans cannot be located exactly, in which
+    case the caller tokenises exactly as it did before this seam existed and a
+    warning records that the stronger defence did not apply.
+    """
+    per_message = [untrusted_spans_of(m.get("content")) for m in messages]
+    if not any(per_message):
+        return ()
+
+    spans = _content_spans_in_prompt(model_ptr, messages, prompt, fallback_reason)
+    if spans is None:
+        from localm.debuglog import logger
+        logger.warning(
+            "textguard: could not locate message content in the rendered prompt, "
+            "so untrusted spans are tokenised with special-token parsing ON; "
+            "only the text-level defang applies to this request")
+        return ()
+
+    ranges: List[Tuple[int, int]] = []
+    for (start, _end), local in zip(spans, per_message):
+        ranges.extend((start + a, start + b) for a, b in local)
+    return tuple(ranges)
 
 
 # UTF-8-safe token-bytes -> text stream: a multibyte character is often emitted
@@ -2446,7 +2570,10 @@ class LlamaCpp:
         # Otherwise keep add_bos=True so the tokenizer prepends BOS normally.
         bos_markers = ("<bos>", "<s>", "﻿")
         add_bos = not any(prompt.startswith(m) for m in bos_markers)
-        tokens = self._tokenizer.encode(prompt, add_bos=add_bos)
+        untrusted_ranges = _untrusted_prompt_ranges(
+            self._model_ptr, messages, prompt, fallback_reason)
+        tokens = self._tokenizer.encode(
+            prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges)
 
         from localm.inference.backends.base import messages_contain_image
         if getattr(self, "_mtmd", None) is not None and messages_contain_image(messages):
