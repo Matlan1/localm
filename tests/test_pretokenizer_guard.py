@@ -944,20 +944,24 @@ class _CountingCallScanner:
         return "<module>"
 
     def is_routed(self, node):
-        """True when the reference is handed to count_tokens_or_estimate, either
-        called directly or passed to run_in_executor alongside it."""
-        for anc in self._ancestors(node):
-            if not isinstance(anc, self._ast.Call):
-                continue
-            names = []
-            if isinstance(anc.func, self._ast.Name):
-                names.append(anc.func.id)
-            elif isinstance(anc.func, self._ast.Attribute):
-                names.append(anc.func.attr)
-            names += [a.id for a in anc.args if isinstance(a, self._ast.Name)]
-            if self.ROUTER in names:
-                return True
-        return False
+        """True when the reference is HANDED TO count_tokens_or_estimate.
+
+        Two shapes count, and only as a DIRECT argument: passed to the router
+        itself, or passed to run_in_executor alongside it. A node that is being
+        CALLED is never routed, however the router appears elsewhere in the
+        statement - a searched-anywhere version answered True for
+        ``log(count_tokens_or_estimate, engine.count_tokens(t))``, waving through
+        a direct invocation because the router happened to be named nearby.
+        """
+        parent = self.parent.get(node)
+        if isinstance(parent, self._ast.Call) and parent.func is node:
+            return False                                  # invoked, not handed over
+        if not isinstance(parent, self._ast.Call) or node not in parent.args:
+            return False                                  # not a direct argument
+        if isinstance(parent.func, self._ast.Name) and parent.func.id == self.ROUTER:
+            return True
+        return any(isinstance(a, self._ast.Name) and a.id == self.ROUTER
+                   for a in parent.args)
 
     def _handler_names(self, handler):
         t = handler.type
@@ -1195,6 +1199,28 @@ class TestTheClassifierCanRejectAndIsNotFooled:
                 n = await loop.run_in_executor(None, engine.count_tokens, text)
         """))
         assert not raw.is_routed(raw.calls()[0][2])
+
+    def test_the_router_named_nearby_does_not_route_a_direct_call(self):
+        # A searched-anywhere version answered True for both of these, waving an
+        # unguarded invocation through because the router appeared in the same
+        # statement for an unrelated reason.
+        import textwrap
+        for src in ("def f():\n    log(count_tokens_or_estimate, engine.count_tokens(t))\n",
+                    "def f():\n    outer(count_tokens_or_estimate, "
+                    "[inner(engine.count_tokens(t))])\n"):
+            scanner = _CountingCallScanner(textwrap.dedent(src))
+            node = scanner.calls()[0][2]
+            assert not scanner.is_routed(node), f"falsely routed: {src.strip()}"
+
+    def test_a_reference_nested_deeper_than_an_argument_is_not_routed(self):
+        # Only a DIRECT argument is handed over; anything deeper is being used,
+        # not passed.
+        import textwrap
+        scanner = _CountingCallScanner(textwrap.dedent("""
+            def f():
+                n = count_tokens_or_estimate([engine.count_tokens], t, "x")
+        """))
+        assert not scanner.is_routed(scanner.calls()[0][2])
 
     def test_a_name_that_merely_contains_the_words_is_not_a_call(self):
         import textwrap
