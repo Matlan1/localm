@@ -14,12 +14,11 @@ browser-specific narrowing that can refuse more but never permit more.
 ``check_url`` resolves DNS, so ``decide()`` blocks. Call it off the event loop
 that owns the browser session (see ``decide_async``).
 
-KNOWN LIMIT, and it is not closable at this seam: netpolicy's own HTTP client
-pins the resolved IP onto the socket (``pinned_request``), so a check-then-
-connect DNS rebind cannot retarget it. Chromium resolves and connects on its
-own, so a request allowed here is re-resolved by the browser before it
-connects. The window is narrow and the check is still worth making, but this
-path is NOT rebinding-proof the way the Python client is.
+LIMIT: a URL allowed here is re-resolved by Chromium before it connects, because
+the browser does its own DNS and its own networking. So this path does NOT pin
+the resolved address the way ``netpolicy.pinned_request`` does for localm's own
+HTTP client, and a host that answers differently between the check and the
+connection is not caught.
 """
 
 from __future__ import annotations
