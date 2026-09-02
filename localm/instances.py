@@ -22,6 +22,7 @@ attaches; it stays in the 0600 registry file and is NEVER served by
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import secrets
@@ -509,12 +510,24 @@ def attach_target(home: Path, root_dir: str,
     }
 
 
+def _threaded_map(fn: Callable[[object], object], items: list) -> list:
+    """Apply *fn* to each of *items* on a bounded thread pool, returning the
+    results in the same order as *items*."""
+    items = list(items)
+    if not items:
+        return []
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(items), 8)) as ex:
+        return list(ex.map(fn, items))
+
+
 def snapshot(home: Path, probe: Optional[Callable[[dict], bool]] = None,
              reap: bool = True, *, include_token: bool = False) -> list[dict]:
     """Registry entries for ``localm ps``: each gains an ``alive`` flag from an
     identity-verified /whoami probe, with the attach ``token`` stripped (a
     listing must never surface a credential). Process-gone entries are reaped
-    first unless *reap* is False. Sorted by start time (oldest first).
+    first unless *reap* is False. Probes run concurrently. Sorted by start
+    time (oldest first).
 
     ``include_token``: keep the attach token in each row instead of stripping
     it. Default False (every DISPLAY caller, e.g. ``localm ps``). Set True only
@@ -524,12 +537,17 @@ def snapshot(home: Path, probe: Optional[Callable[[dict], bool]] = None,
     probe = probe or default_probe
     if reap:
         reap_stale(home)
-    rows: list[dict] = []
-    for e in list_entries(home):
+    entries = list_entries(home)
+
+    def _probe(e: dict) -> bool:
         try:
-            alive = probe(e)
+            return probe(e)
         except Exception:
-            alive = False
+            return False
+
+    alive_flags = _threaded_map(_probe, entries)
+    rows: list[dict] = []
+    for e, alive in zip(entries, alive_flags):
         row = dict(e) if include_token else {k: v for k, v in e.items() if k != "token"}
         row["alive"] = alive
         rows.append(row)
@@ -547,12 +565,13 @@ def list_machine_peers(home: Path, *, timeout: float = 0.7) -> list[dict]:
     whatever its LOCALM_HOME, and returns the entries that are NOT in *home*'s
     own registry.
 
-    A peer is listed only on a verified ``GET /whoami`` handshake, so a stale
-    entry whose port got reused by an unrelated process is never listed;
-    ``root_dir``, ``mode`` and ``version`` come from that handshake rather than
-    from the coordination entry, which does not record them. A network-bound
-    peer omits ``root_dir``. ``started`` is None: the coordination entry records
-    a heartbeat time, not a start time.
+    A peer is listed only on a verified ``GET /whoami`` handshake, run
+    concurrently across candidates, so a stale entry whose port got reused by
+    an unrelated process is never listed; ``root_dir``, ``mode`` and
+    ``version`` come from that handshake rather than from the coordination
+    entry, which does not record them. A network-bound peer omits
+    ``root_dir``. ``started`` is None: the coordination entry records a
+    heartbeat time, not a start time.
 
     Returns no credential. The coordination entry's ``coordination_token`` is
     not an attach token and is dropped here, so a caller cannot use these rows
@@ -574,7 +593,7 @@ def list_machine_peers(home: Path, *, timeout: float = 0.7) -> list[dict]:
 
     own = {str(e.get("instance_id")) for e in list_entries(home)}
     self_pid = os.getpid()
-    rows: list[dict] = []
+    candidates: list[tuple[str, int, int, str, Optional[str]]] = []
     for entry in entries:
         iid = entry.get("instance_id")
         port = entry.get("port")
@@ -588,11 +607,19 @@ def list_machine_peers(home: Path, *, timeout: float = 0.7) -> list[dict]:
             continue
         scheme = entry.get("scheme") or "http"
         host = entry.get("host")
+        candidates.append((iid, pid, port, scheme, host))
+
+    def _probe(c: tuple) -> Optional[dict]:
+        iid, _pid, port, scheme, host = c
         try:
-            ident = fetch_whoami(scheme, int(port), iid, timeout, host)
+            return fetch_whoami(scheme, int(port), iid, timeout, host)
         except Exception as e:
             logger.debug("whoami probe failed for cross-install peer %s: %s", iid, e)
-            continue
+            return None
+
+    idents = _threaded_map(_probe, candidates)
+    rows: list[dict] = []
+    for (iid, pid, port, scheme, host), ident in zip(candidates, idents):
         if ident is None:
             continue
         rows.append({
