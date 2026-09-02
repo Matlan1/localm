@@ -10,9 +10,9 @@
  * There is no setter, so `window.X = ...` throws in strict mode; reassign the
  * binding through the module itself. */
 import * as m0 from "./client-log.js";
-import * as m1 from "./helpers.js";
 import * as mI18nEn from "./i18n-en.js";
 import * as mI18n from "./i18n.js";
+import * as m1 from "./helpers.js";
 import * as mIcons from "./icons.js";
 import * as mPk from "./picker.js";
 import * as m2 from "./theme.js";
