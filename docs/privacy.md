@@ -118,7 +118,11 @@ all - is one of the deliberate actions above, but it is worth its own
 section because it is the one path that pulls together diagnostics, recent
 logs and your config into text meant to leave your machine. The standalone
 reporter runs `scripts/report_issue.py`, or its no-Python PowerShell
-equivalent (`report_issue.ps1`) when even that cannot run.
+equivalent (`report_issue.ps1`) when even that cannot run. It needs a git
+clone of the repo, so it is not available after `pip install localm`; if
+localm will not start at all on a pip install, file an
+[Issue](https://github.com/Matlan1/localm/issues) directly instead, since
+`localm bug-report` itself needs a working localm to run.
 
 **You always see the full report before anything is sent, and sending needs
 your explicit OK.** The GUI shows the assembled text and requires you to

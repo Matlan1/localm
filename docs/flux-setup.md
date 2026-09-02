@@ -183,10 +183,13 @@ so which models you actually run never leaves your machine. This selected
 workflow takes precedence over everything below it, and governs `localm image`
 too, not just the GUI.
 
-The older method still works: drop the export at
+The older method still works for a from-source checkout: drop the export at
 `localm/image_gen/flux_workflow.json` (it is **gitignored**). localm migrates
 it into the same private, update-surviving location the first time it starts
 and selects it automatically, as long as nothing else is already selected.
+There is no equivalent path inside a `pip install localm` (no reachable
+`localm/image_gen/` folder to write into) - use the Workflow card or the
+`localm comfy workflow` commands above instead.
 
 ## Picking models per slot
 

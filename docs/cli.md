@@ -745,6 +745,9 @@ instead: double-click `report-issue.bat` (Windows) or run `bash report-issue.sh`
 (Linux/macOS) from the clone. It shows you exactly what will be sent, files an
 account-less GitHub issue via the same proxy (no GitHub login), and works with no
 Python or a broken install. The `setup.bat` / `setup.sh` failure paths and the
-launcher's "Report a problem" button both open it for you.
+launcher's "Report a problem" button both open it for you. This standalone
+reporter needs a git clone of the repo; if you installed via `pip install localm`
+and it will not start at all, there is no bundled recovery script - file an
+[Issue](https://github.com/Matlan1/localm/issues) directly instead.
 
 Updates are always user-initiated: localm never updates itself in the background.
