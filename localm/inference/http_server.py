@@ -2801,6 +2801,34 @@ def effective_fs_access(request: Request) -> str:
     return fs                               # bearer key or session fs-access snapshot
 
 
+def preview_allowed(request: Request) -> bool:
+    """Whether THIS caller is offered the sandboxed artifact preview canvas.
+
+    False when ``gui_preview_enabled`` is off. Otherwise True unless
+    ``gui_preview_owner_only`` is set and the caller is not the owner. Open mode
+    (no key configured, loopback owner) and an ADMIN key are the owner; every
+    other valid key, and an absent or invalid one, are not.
+
+    This decides what the GUI is OFFERED, not what a reply CONTAINS: the block
+    is already in the caller's own DOM either way.
+    """
+    from localm.auth import any_key_configured
+    from localm.config import load_config
+    cfg = load_config()
+    if not cfg.get("gui_preview_enabled", True):
+        return False
+    if not cfg.get("gui_preview_owner_only", False):
+        return True
+    if not any_key_configured():
+        return True                         # open/dev mode = loopback owner
+    token, source = _request_token(request)
+    prin = _principal_from_token(token, source)
+    if prin is None:
+        return False
+    held, _key_hash, _fs, _rag_roots = prin
+    return scopes.ADMIN in held
+
+
 def effective_rag_roots(request: Request) -> list:
     """The caller's effective per-key RAG-indexing folder allowlist: a list of
     folder-path strings, or ``[]`` meaning NO per-key restriction (the caller

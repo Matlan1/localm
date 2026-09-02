@@ -1132,6 +1132,20 @@ CORE_FIELDS: list = [
                  # ADMIN in held), so admin_only hides this from a SCOPED key, not
                  # from the ordinary single-user GUI.
                  group="Network", admin_only=True),
+    # ---- Preview (GUI renderer, core) ----
+    # owner="core": the artifact canvas is the GUI's own renderer and stays
+    # visible on an install with no plugin beyond chat.
+    SettingField("gui_preview_enabled", Widget.TOGGLE,
+                 "Preview generated pages in a sandboxed canvas",
+                 "Adds a canvas button to a self-contained HTML or SVG block "
+                 "in a reply, rendering it in a sandboxed frame with no "
+                 "network access and no access to this app. On by default.",
+                 group="Chat", admin_only=True),
+    SettingField("gui_preview_owner_only", Widget.TOGGLE,
+                 "Restrict the preview canvas to owner sessions",
+                 "Offers the canvas button only to the owner, not to other "
+                 "API keys. The reply text itself is unchanged either way.",
+                 group="Chat", admin_only=True),
     # ---- Voice (plugin) ----
     SettingField("voice_stt_model", Widget.SELECT, "Speech-to-text model",
                  "Whisper model size for the microphone button. Larger is more "

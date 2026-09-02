@@ -16,7 +16,8 @@ from fastapi import Depends, FastAPI, Request
 import localm.plugins.gui.web as _web
 from localm import scopes
 from localm.inference.http_server import (_require_auth, caller_scopes,
-                                          effective_fs_access, require_scope)
+                                          effective_fs_access, preview_allowed,
+                                          require_scope)
 from localm.executor import get_plugin_executor
 
 
@@ -150,7 +151,10 @@ def register(app: FastAPI, ctx) -> None:
                 # Host-filesystem reach for this caller ("none"|"shared"|"host"),
                 # so the GUI hides host-path config fields and the host file
                 # browser from a key that lacks it (server still enforces).
-                "fs_access": effective_fs_access(request)}
+                "fs_access": effective_fs_access(request),
+                # Whether to offer the sandboxed artifact preview canvas to this
+                # caller (gui_preview_enabled, then gui_preview_owner_only).
+                "preview": preview_allowed(request)}
 
     @app.get("/api/backend", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def gui_backend():
