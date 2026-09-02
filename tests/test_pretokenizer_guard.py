@@ -885,32 +885,342 @@ class TestTheEmbeddingsUsageCountIsSafeAndUnchanged:
         assert r.json()["usage"]["total_tokens"] == 100
 
 
-class TestEveryCountingCallIsClassified:
-    """ENUMERATES the counting calls instead of sampling them.
+class _CountingCallScanner:
+    """Finds counting calls and classifies each one's exception handling.
 
-    The class that used to sit here asserted completeness in its NAME while its
-    body checked a helper, one route, and another helper - so adding an
-    unguarded counting call failed nothing, and one was in fact missed: the
-    non-streaming chat usage count in http_server.py, which is the default shape
-    for most API clients.
-
-    Every counting call in the server files must be one of:
-
-    * routed through ``count_tokens_or_estimate`` - it REPORTS ON FINISHED WORK,
-      so a refusal degrades to an estimate rather than discarding a completed
-      generation; or
-    * inside a ``try`` whose own ``except`` names
-      :class:`PretokenizerUnsafeInputError` - it GATES the work, so a refusal
-      answers 400; or
-    * inside an ``if prompt_tokens is None:`` branch, which is dead for the
-      reason asserted by ``test_the_dead_branches_really_are_dead``.
-
-    A raw call that is none of those reaches the generic handler as an opaque
-    500.
+    Parses with ``ast`` rather than scanning indentation. Successive reviews
+    defeated the indentation version five ways - a window that ran to end of
+    file, a trailing comment after ``try:``, a comment at column 0 inside a try
+    body, a multi-line ``except`` tuple, and a multi-line ``def`` signature whose
+    closing paren sits at column 0. None of those are expressible against a
+    parse tree.
     """
 
-    # Every module that can hold a route-level counting call, discovered rather
-    # than listed, so a third route module cannot be added invisibly.
+    import ast as _ast
+
+    ATTRS = {"count_tokens", "count_messages_tokens"}
+    NAMED = "PretokenizerUnsafeInputError"
+    # Handlers that would catch the refusal. It is a ValueError (pinned by
+    # TestTheRefusalIsActionable), so a ValueError or broader clause swallows it.
+    CATCHES = {NAMED, "ValueError", "Exception", "BaseException"}
+    ROUTER = "count_tokens_or_estimate"
+    DEAD_TEST = "prompt_tokens is None"
+
+    def __init__(self, source: str):
+        self.src = source
+        self.tree = self._ast.parse(source)
+        self.parent = {}
+        for node in self._ast.walk(self.tree):
+            for child in self._ast.iter_child_nodes(node):
+                self.parent[child] = node
+
+    def _ancestors(self, node):
+        while node in self.parent:
+            node = self.parent[node]
+            yield node
+
+    def calls(self):
+        """(lineno, enclosing function, node) for each counting call."""
+        out = []
+        for node in self._ast.walk(self.tree):
+            hit = None
+            if isinstance(node, self._ast.Attribute) and node.attr in self.ATTRS:
+                hit = node
+            elif (isinstance(node, self._ast.Call)
+                  and isinstance(node.func, self._ast.Name)
+                  and node.func.id == "getattr"
+                  and len(node.args) >= 2
+                  and isinstance(node.args[1], self._ast.Constant)
+                  and node.args[1].value in self.ATTRS):
+                hit = node
+            if hit is not None:
+                out.append((hit.lineno, self._enclosing_def(hit), hit))
+        return sorted(out, key=lambda t: t[0])
+
+    def _enclosing_def(self, node):
+        for anc in self._ancestors(node):
+            if isinstance(anc, (self._ast.FunctionDef, self._ast.AsyncFunctionDef)):
+                return anc.name
+        return "<module>"
+
+    def is_routed(self, node):
+        """True when the reference is handed to count_tokens_or_estimate, either
+        called directly or passed to run_in_executor alongside it."""
+        for anc in self._ancestors(node):
+            if not isinstance(anc, self._ast.Call):
+                continue
+            names = []
+            if isinstance(anc.func, self._ast.Name):
+                names.append(anc.func.id)
+            elif isinstance(anc.func, self._ast.Attribute):
+                names.append(anc.func.attr)
+            names += [a.id for a in anc.args if isinstance(a, self._ast.Name)]
+            if self.ROUTER in names:
+                return True
+        return False
+
+    def _handler_names(self, handler):
+        t = handler.type
+        if t is None:
+            return {"BaseException"}                      # bare except
+        parts = t.elts if isinstance(t, self._ast.Tuple) else [t]
+        names = set()
+        for p in parts:
+            if isinstance(p, self._ast.Name):
+                names.add(p.id)
+            elif isinstance(p, self._ast.Attribute):
+                names.add(p.attr)
+        return names
+
+    def _in_body_of(self, node, try_node):
+        """True when *node* is in the try's BODY rather than in a handler."""
+        for stmt in try_node.body:
+            for inner in self._ast.walk(stmt):
+                if inner is node:
+                    return True
+        return False
+
+    def guard_verdict(self, node):
+        """``'named'``, ``'swallowed'`` or ``'unguarded'``.
+
+        Walks enclosing ``try`` statements innermost-first and returns the
+        verdict of the FIRST one that would catch the refusal, because Python
+        stops there. Within that try the handlers are read IN ORDER and the
+        first clause that would match decides, so a named handler listed after
+        a broad one is correctly reported as the dead code it is.
+        """
+        for anc in self._ancestors(node):
+            if isinstance(anc, (self._ast.FunctionDef, self._ast.AsyncFunctionDef)):
+                return "unguarded"                        # left the function
+            if not isinstance(anc, self._ast.Try):
+                continue
+            if not self._in_body_of(node, anc):
+                continue                                  # sits in a handler, not the body
+            for handler in anc.handlers:
+                names = self._handler_names(handler)
+                if not (names & self.CATCHES):
+                    continue                              # this clause cannot catch it
+                return "named" if self.NAMED in names else "swallowed"
+            # No clause on this try catches it: it propagates further out.
+        return "unguarded"
+
+    def in_dead_branch(self, node):
+        for anc in self._ancestors(node):
+            if isinstance(anc, self._ast.If):
+                if self.DEAD_TEST in self._ast.unparse(anc.test):
+                    return True
+        return False
+
+
+class TestTheClassifierCanRejectAndIsNotFooled:
+    """The classifier is itself a claim, so it gets the same treatment as the
+    code it guards.
+
+    Every case below is a shape a previous version got WRONG, most of them in
+    the dangerous direction - answering "guarded" for code that would let the
+    refusal through. A classifier that answers guarded for everything passes
+    every other assertion in this file.
+    """
+
+    def _verdict(self, body):
+        import textwrap
+        scanner = _CountingCallScanner(textwrap.dedent(body))
+        calls = scanner.calls()
+        assert len(calls) == 1, f"fixture should hold one call, got {len(calls)}"
+        return scanner.guard_verdict(calls[0][2])
+
+    def test_a_bare_call_is_unguarded(self):
+        assert self._verdict("""
+            def f():
+                n = engine.count_tokens(t)
+        """) == "unguarded"
+
+    def test_a_named_handler_guards(self):
+        assert self._verdict("""
+            def f():
+                try:
+                    n = engine.count_tokens(t)
+                except PretokenizerUnsafeInputError:
+                    raise
+        """) == "named"
+
+    def test_an_inner_broad_handler_swallows_it_before_an_outer_named_one(self):
+        # The shape of the original GgufBackend.count_messages_tokens bug: a
+        # broad except swallowed the refusal and estimated instead.
+        assert self._verdict("""
+            def f():
+                try:
+                    try:
+                        n = engine.count_tokens(t)
+                    except Exception:
+                        n = fallback()
+                except PretokenizerUnsafeInputError:
+                    raise
+        """) == "swallowed"
+
+    def test_an_inner_value_error_handler_swallows_it(self):
+        # PretokenizerUnsafeInputError IS a ValueError, so this catches it.
+        assert self._verdict("""
+            def f():
+                try:
+                    try:
+                        n = engine.count_tokens(t)
+                    except ValueError:
+                        n = 0
+                except PretokenizerUnsafeInputError:
+                    raise
+        """) == "swallowed"
+
+    def test_a_named_handler_after_a_broad_one_is_dead_code(self):
+        # Python takes the FIRST matching clause, so the named one never runs.
+        assert self._verdict("""
+            def f():
+                try:
+                    n = engine.count_tokens(t)
+                except Exception:
+                    n = 0
+                except PretokenizerUnsafeInputError:
+                    raise
+        """) == "swallowed"
+
+    def test_a_bare_except_swallows_it(self):
+        assert self._verdict("""
+            def f():
+                try:
+                    n = engine.count_tokens(t)
+                except:
+                    n = 0
+        """) == "swallowed"
+
+    def test_a_handler_that_cannot_catch_it_is_transparent(self):
+        # KeyError does not catch it, so it propagates to the named handler.
+        assert self._verdict("""
+            def f():
+                try:
+                    try:
+                        n = engine.count_tokens(t)
+                    except KeyError:
+                        n = 0
+                except PretokenizerUnsafeInputError:
+                    raise
+        """) == "named"
+
+    def test_a_multi_line_except_tuple_is_read(self):
+        assert self._verdict("""
+            def f():
+                try:
+                    n = engine.count_tokens(t)
+                except (KeyError,
+                        PretokenizerUnsafeInputError):
+                    raise
+        """) == "named"
+
+    def test_a_trailing_comment_after_try_does_not_defeat_it(self):
+        assert self._verdict("""
+            def f():
+                try:  # count the prompt
+                    n = engine.count_tokens(t)
+                except PretokenizerUnsafeInputError:
+                    raise
+        """) == "named"
+
+    def test_a_column_zero_comment_inside_the_body_does_not_defeat_it(self):
+        assert self._verdict("""
+            def f():
+                try:
+            # a comment at column 0
+                    n = engine.count_tokens(t)
+                except PretokenizerUnsafeInputError:
+                    raise
+        """) == "named"
+
+    def test_a_try_in_an_outer_function_does_not_guard_a_nested_def(self):
+        assert self._verdict("""
+            def outer():
+                try:
+                    def inner():
+                        n = engine.count_tokens(t)
+                except PretokenizerUnsafeInputError:
+                    raise
+        """) == "unguarded"
+
+    def test_a_handler_body_is_not_the_try_body(self):
+        assert self._verdict("""
+            def f():
+                try:
+                    something()
+                except PretokenizerUnsafeInputError:
+                    n = engine.count_tokens(t)
+        """) == "unguarded"
+
+    def test_a_multi_line_def_signature_does_not_end_the_walk(self):
+        # The indentation version reported "?" here, because the signature's
+        # closing paren sits at column 0.
+        import textwrap
+        scanner = _CountingCallScanner(textwrap.dedent("""
+            async def handler(
+                engine,
+                text,
+            ) -> str:
+                n = engine.count_tokens(text)
+        """))
+        _, func, node = scanner.calls()[0]
+        assert func == "handler"
+        assert scanner.guard_verdict(node) == "unguarded"
+
+    def test_a_reference_split_across_lines_is_seen(self):
+        import textwrap
+        scanner = _CountingCallScanner(textwrap.dedent("""
+            def f():
+                n = run_in_executor(None, engine
+                                    .count_tokens, text)
+        """))
+        assert len(scanner.calls()) == 1
+
+    def test_routing_is_recognised_in_both_shapes(self):
+        import textwrap
+        direct = _CountingCallScanner(textwrap.dedent("""
+            def f():
+                n = count_tokens_or_estimate(engine.count_tokens, t, "x")
+        """))
+        assert direct.is_routed(direct.calls()[0][2])
+        executor = _CountingCallScanner(textwrap.dedent("""
+            def f():
+                n = await loop.run_in_executor(
+                    None, count_tokens_or_estimate, engine.count_tokens, text, "x")
+        """))
+        assert executor.is_routed(executor.calls()[0][2])
+        raw = _CountingCallScanner(textwrap.dedent("""
+            def f():
+                n = await loop.run_in_executor(None, engine.count_tokens, text)
+        """))
+        assert not raw.is_routed(raw.calls()[0][2])
+
+    def test_a_name_that_merely_contains_the_words_is_not_a_call(self):
+        import textwrap
+        scanner = _CountingCallScanner(textwrap.dedent("""
+            def f():
+                self.count_tokens_total = 0
+                x = count_tokens(t)
+        """))
+        assert scanner.calls() == []
+
+
+class TestEveryCountingCallIsClassified:
+    """ENUMERATES the counting calls in the server files instead of sampling.
+
+    Each must be routed through ``count_tokens_or_estimate`` (it REPORTS ON
+    FINISHED WORK, so a refusal degrades to an estimate), guarded by a ``try``
+    whose first matching handler names the refusal (it GATES the work, so a
+    refusal answers 400), or inside an ``if prompt_tokens is None:`` branch that
+    ``test_the_dead_branches_really_are_dead`` pins as unreachable.
+
+    A call that is none of those reaches the generic handler as an opaque 500,
+    which is how the non-streaming chat usage count shipped broken.
+    """
+
+    EXPECTED_CALLS = 11
+
     @staticmethod
     def _server_files():
         from pathlib import Path
@@ -923,205 +1233,79 @@ class TestEveryCountingCallIsClassified:
             if p.name != "__init__.py")
         return files
 
-    # Matches the ATTRIBUTE on any receiver (`engine.`, `eng.`, `self._engine.`,
-    # or a continuation line carrying only `.count_tokens`). Almost every site
-    # here passes the method as a REFERENCE to run_in_executor rather than
-    # calling it syntactically, so requiring a paren matched nothing at all.
-    CALL_RE = r"\.count_tokens\b|\.count_messages_tokens\b"
-    # The indirect form, which the dotted pattern cannot see.
-    GETATTR_RE = r"getattr\s*\([^)]*['\"]count_(?:messages_)?tokens['\"]"
-    DEAD_BRANCH = "if prompt_tokens is None:"
-
-    def _lines(self, rel):
+    def _scan(self):
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1]
-        return (root / rel).read_text(encoding="utf-8").splitlines()
-
-    def _walk_out(self, lines, lineno):
-        """Yield (index, line) for each enclosing line, outermost-last.
-
-        Walks by INDENTATION from the call outwards, so it reports the lines
-        that actually contain the call rather than whatever happens to precede
-        it - which is what defeated the previous version of this check.
-        """
-        call = lines[lineno - 1]
-        indent = len(call) - len(call.lstrip())
-        for i in range(lineno - 2, -1, -1):
-            probe = lines[i]
-            if not probe.strip():
-                continue
-            probe_indent = len(probe) - len(probe.lstrip())
-            if probe_indent >= indent:
-                continue
-            yield i, probe
-            indent = probe_indent
-            if indent == 0:
-                return
-
-    def _enclosing_def(self, lines, lineno):
-        import re
-
-        for _, probe in self._walk_out(lines, lineno):
-            m = re.match(r"\s*(?:async\s+)?def\s+(\w+)", probe)
-            if m:
-                return m.group(1)
-        return "?"
-
-    def _try_names_the_error(self, lines, try_idx, indent):
-        """True when the ``try:`` at *try_idx* has an ``except`` naming the
-        refusal. Only that try's OWN handlers count, at its own indent."""
-        for j in range(try_idx + 1, len(lines)):
-            line = lines[j]
-            if not line.strip():
-                continue
-            line_indent = len(line) - len(line.lstrip())
-            if line_indent > indent:
-                continue                      # still inside the try body
-            if line_indent < indent:
-                return False                  # dedented out of the statement
-            stripped = line.strip()
-            if stripped.startswith("except"):
-                if "PretokenizerUnsafeInputError" in stripped:
-                    return True
-                continue
-            if stripped.startswith(("else:", "finally:")):
-                continue
-            return False                      # the try statement ended
-        return False
-
-    def _guarded(self, lines, lineno):
-        """True when an ENCLOSING try names the refusal in its own except."""
-        import re
-
-        for idx, probe in self._walk_out(lines, lineno):
-            stripped = probe.strip()
-            if stripped == "try:":
-                if self._try_names_the_error(
-                        lines, idx, len(probe) - len(probe.lstrip())):
-                    return True
-            if re.match(r"\s*(?:async\s+)?def\s+\w+", probe):
-                return False                  # left the function
-        return False
-
-    def _in_dead_branch(self, lines, lineno):
-        return any(self.DEAD_BRANCH in probe
-                   for _, probe in self._walk_out(lines, lineno))
-
-    def _calls(self):
-        import re
-
-        out = []
         for rel in self._server_files():
-            lines = self._lines(rel)
-            for i, line in enumerate(lines, 1):
-                if re.search(self.CALL_RE, line) or re.search(self.GETATTR_RE, line):
-                    out.append((rel, i, self._enclosing_def(lines, i), line))
-        return out
-
-    # The counting calls that exist today. An exact figure, not a floor: a floor
-    # lets calls VANISH silently, which is how a previous version of this test
-    # (">= 3" against 6) could not fail.
-    EXPECTED_CALLS = 11
+            yield rel, _CountingCallScanner((root / rel).read_text(encoding="utf-8"))
 
     def test_the_enumeration_finds_exactly_what_is_there(self):
-        calls = self._calls()
-        assert len(calls) == self.EXPECTED_CALLS, (
-            f"expected {self.EXPECTED_CALLS} counting calls, found {len(calls)}. "
-            "If this is a deliberate change, update EXPECTED_CALLS and classify "
-            "the new call:\n  " + "\n  ".join(
-                f"{r}:{n} in {f}(): {ln.strip()}" for r, n, f, ln in calls))
+        found = [(rel, ln, fn) for rel, sc in self._scan() for ln, fn, _ in sc.calls()]
+        assert len(found) == self.EXPECTED_CALLS, (
+            f"expected {self.EXPECTED_CALLS} counting calls, found {len(found)}. "
+            "This is a tripwire, not the gate: classify the new call against the "
+            "test below, then update the number.\n  "
+            + "\n  ".join(f"{r}:{n} in {f}()" for r, n, f in found))
 
-    def test_the_guard_check_can_answer_no(self):
-        """A classifier that answers GUARDED for everything would pass every
-        assertion below. Feed it a call with no try at all and require a NO."""
-        probe = [
-            "def handler():",
-            "    x = engine.count_tokens(text)",
-        ]
-        assert self._guarded(probe, 2) is False
-        guarded = [
-            "def handler():",
-            "    try:",
-            "        x = engine.count_tokens(text)",
-            "    except PretokenizerUnsafeInputError:",
-            "        raise",
-        ]
-        assert self._guarded(guarded, 3) is True
-        # An except in the same function but on a DIFFERENT try must not count.
-        elsewhere = [
-            "def handler():",
-            "    try:",
-            "        other()",
-            "    except PretokenizerUnsafeInputError:",
-            "        raise",
-            "    x = engine.count_tokens(text)",
-        ]
-        assert self._guarded(elsewhere, 6) is False
-
-    def test_the_pattern_sees_the_shapes_that_matter(self):
-        import re
-
-        for shape in ("n = engine.count_tokens(t)",
-                      "n = eng.count_tokens(t)",
-                      "n = backend.count_messages_tokens(m)",
-                      "n = self._engine.count_tokens(t)",
-                      "    .count_tokens(t)",
-                      "run_in_executor(None, engine.count_tokens, text)",
-                      'n = getattr(engine, "count_tokens")(t)'):
-            assert re.search(self.CALL_RE, shape) or re.search(self.GETATTR_RE, shape), \
-                f"the scan cannot see: {shape}"
-        # A name that merely CONTAINS the words must not match, or the count
-        # becomes noise rather than an enumeration.
-        assert not re.search(self.CALL_RE, "self.count_tokens_total = 0")
-        assert not re.search(self.CALL_RE, "def count_tokens(self, text):")
-
-    def test_every_counting_call_is_guarded_or_routed_or_dead(self):
+    def test_every_counting_call_is_routed_guarded_or_dead(self):
         unclassified = []
-        for rel, lineno, func, line in self._calls():
-            lines = self._lines(rel)
-            if "count_tokens_or_estimate" in line:
-                continue                                   # reports on finished work
-            if self._guarded(lines, lineno):
-                continue                                   # gates the work, answers 400
-            if self._in_dead_branch(lines, lineno):
-                continue                                   # unreachable, pinned below
-            unclassified.append(f"{rel}:{lineno} in {func}(): {line.strip()}")
+        for rel, sc in self._scan():
+            for lineno, func, node in sc.calls():
+                if sc.is_routed(node):
+                    continue
+                if sc.guard_verdict(node) == "named":
+                    continue
+                if sc.in_dead_branch(node):
+                    continue
+                unclassified.append(
+                    f"{rel}:{lineno} in {func}(): {sc.guard_verdict(node)}")
         assert not unclassified, (
             "these counting calls would reach the generic handler as a 500 on a "
             "pre-tokenizer refusal:\n  " + "\n  ".join(unclassified))
 
     def test_the_dead_branches_really_are_dead(self):
-        """Every call into the handlers that carry an
-        `if prompt_tokens is None:` fallback passes a prompt_tokens the route
-        has already guarded. Without this, the exemption above would be a
-        permanent hole rather than a statement about today's callers."""
-        import re
+        """The `if prompt_tokens is None:` fallbacks are unreachable only because
+        every caller passes a computed prompt_tokens the route already guarded.
+        Asserted rather than assumed, so a caller that stops passing it fails
+        here instead of quietly reviving an unguarded count."""
+        import ast
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1]
-        src = (root / "localm/inference/routes/chat.py").read_text(encoding="utf-8")
+        tree = ast.parse(
+            (root / "localm/inference/routes/chat.py").read_text(encoding="utf-8"))
+        handlers = {"_stream_sse", "_complete", "_stream_sse_completion"}
         found = 0
-        for name in ("_stream_sse", "_complete", "_stream_sse_completion"):
-            for m in re.finditer(rf"\b{name}\(", src):
-                # Read to the call's own matching close paren rather than a
-                # fixed window, so a neighbouring call's kwarg can never satisfy
-                # this by proximity.
-                depth, end = 0, None
-                for j in range(m.end() - 1, len(src)):
-                    if src[j] == "(":
-                        depth += 1
-                    elif src[j] == ")":
-                        depth -= 1
-                        if depth == 0:
-                            end = j
-                            break
-                assert end is not None, f"unbalanced call at {name}"
-                found += 1
-                assert "prompt_tokens=prompt_tokens" in src[m.start():end], (
-                    f"{name}() is called without passing prompt_tokens, which "
-                    f"revives an unguarded counting call in http_server.py")
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name not in handlers:
+                continue
+            found += 1
+            assert "prompt_tokens" in {k.arg for k in node.keywords}, (
+                f"{name}() at line {node.lineno} is called without passing "
+                f"prompt_tokens, which revives an unguarded counting call in "
+                f"http_server.py")
         assert found >= 3, f"expected the three handler call sites, found {found}"
+
+
+@pytest.fixture(autouse=True)
+def _gguf_backend_class_is_not_mutated():
+    """Runs after EVERY test in this file, not just at one collected moment.
+
+    A test that assigns or deletes an attribute on the real GgufBackend class
+    changes it for the rest of the process; deleting `loaded` in particular drops
+    resolution to BaseBackend's abstract stub, which returns None and silently
+    turns every later token count into the chars/4 heuristic. That escapes this
+    file, so it is checked per test rather than once.
+    """
+    yield
+    assert vars(_GgufBackend).get("loaded") is _ORIGINAL_GGUF_LOADED, \
+        "a test in this file mutated GgufBackend.loaded, which leaks into every " \
+        "test that runs after it in this process"
+
 
 class TestNonStreamingChatSurvivesARefusedUsageCount:
     """`stream: false` is the default shape for most API clients, and its usage
