@@ -229,8 +229,8 @@ cpu = []
 dev = [
     "ruff>=0.16.4",
     "pytest>=8.0",
-    # Coverage measurement (TEST-1). Visibility only for now: CI publishes a
-    # number, there is no --cov-fail-under gate. See [tool.coverage] below.
+    # Coverage measurement (TEST-1). pytest-cov enforces the fail_under floor
+    # from [tool.coverage.report] below.
     "pytest-cov>=5.0",
     # Parallel test execution (TEST-2): the suite is single-process by default
     # (~4200 tests, ~7-8 min sequential). Every test already gets its own
@@ -343,8 +343,9 @@ select = ["E4", "E7", "E9", "F"]
 # cleared and CI's ruff step is now blocking (.github/workflows/ci.yml).
 ignore = ["E741", "E701", "E702", "E402"]
 
-# Coverage measurement (TEST-1). CI prints a number and uploads coverage.xml/
-# coverage.json. Run locally with:
+# Coverage measurement (TEST-1). CI writes coverage.xml/coverage.json inside
+# the runner and prints a summary; neither file is uploaded or persisted past
+# the run. Run locally with:
 #   pytest -m "not integration" --cov=localm --cov-report=term-missing
 [tool.coverage.run]
 source = ["localm"]
