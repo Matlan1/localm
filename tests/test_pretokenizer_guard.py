@@ -32,6 +32,11 @@ from localm.inference.backends.llamacpp.llama import _Tokenizer
 
 _LLAMA_API = "localm.inference.backends.llamacpp.llama.api"
 
+# Captured at import, before any test can touch it, so a test that REPLACES or
+# DELETES it is caught by identity rather than by presence.
+from localm.inference.backends.gguf import GgufBackend as _GgufBackend  # noqa: E402
+_ORIGINAL_GGUF_LOADED = vars(_GgufBackend).get("loaded")
+
 # Every pre-type string the guard knows, and one it must never touch.
 _AFFECTED = sorted(guard.UNSAFE_PRE_TYPES)
 _UNAFFECTED = ["llama-bpe", "gpt-2", "qwen2", "deepseek-llm", "jais-2", ""]
@@ -581,8 +586,12 @@ class TestACountRefusalIsNotAWorkerFault:
         # ran after it in the same process.
         import localm.inference.backends.gguf as gguf
 
-        assert "loaded" in vars(gguf.GgufBackend), \
-            "GgufBackend.loaded must still be the class's own property"
+        # Identity, not presence: ASSIGNING `loaded` on the class replaces the
+        # real property process-wide, and DELETING it drops resolution to
+        # BaseBackend's abstract stub, which returns None. Presence alone catches
+        # only the second.
+        assert vars(gguf.GgufBackend).get("loaded") is _ORIGINAL_GGUF_LOADED, \
+            "GgufBackend.loaded is not the property the class was defined with"
 
 
 class TestTheEmbedderWorkerCarriesTheTypedRefusal:
@@ -796,15 +805,40 @@ class TestEveryCountingSiteIsAccountedFor:
             raise PretokenizerUnsafeInputError(_REFUSAL)
         assert count_tokens_or_estimate(_refuse, "x" * 400, "an embedding input") == 100
 
-    def test_a_gating_count_still_propagates(self):
-        # count_tokens_or_estimate must never be reached for a count that gates
-        # the work; those callers let it propagate so the route answers 400.
-        import inspect
+    def test_the_post_compaction_recount_refuses_rather_than_500(self, monkeypatch):
+        """The re-count after compaction reads a model-WRITTEN summary, which can
+        carry a run of its own. It gates the generation, so it must answer 400 -
+        and it sits in a different block from the first count, so wrapping that
+        one did not cover it."""
+        import localm.inference.compact as compact_mod
 
-        import localm.inference.routes.chat as chat_routes
-        src = inspect.getsource(chat_routes)
-        # Both pre-generation counts, and the post-compaction re-count, refuse.
-        assert src.count("raise HTTPException(400, str(e))") >= 3
+        engine = _engine()
+        # The first count clears the wrapped call and lands inside the compaction
+        # window; the RE-count, on the compacted messages, refuses.
+        counts = iter([3000])
+
+        def _count_messages(_messages):
+            try:
+                return next(counts)
+            except StopIteration:
+                raise PretokenizerUnsafeInputError(_REFUSAL)
+
+        engine.count_messages_tokens.side_effect = _count_messages
+        # capacity - prompt_tokens (4096 - 3000) < buffer (2048), so it compacts.
+        engine.context_capacity.return_value = 4096
+        monkeypatch.setattr(compact_mod, "compact_messages",
+                            lambda ms, gen: (list(ms), True))
+
+        thread = [{"role": "user", "content": "a"},
+                  {"role": "assistant", "content": "b"},
+                  {"role": "user", "content": "c"},
+                  {"role": "assistant", "content": "d"},
+                  {"role": "user", "content": "e"}]
+        r = _post(engine, {"model": "test-model", "messages": thread,
+                           "stream": False})
+        assert r.json()["detail"] != "Internal server error"
+        assert "unbroken run" in r.json()["detail"]
+        assert r.status_code == 400
 
     def test_only_this_refusal_is_estimated(self):
         from localm.inference.pretokenizer_guard import count_tokens_or_estimate
