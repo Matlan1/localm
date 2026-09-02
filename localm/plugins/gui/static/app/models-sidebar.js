@@ -905,14 +905,105 @@ export function renderModelSplitLine(split) {
   line.hidden = false;
 }
 
+// Ask a live sibling instance to be routed to instead of loading a local
+// copy: shows a password-input modal naming the peer and, on submit,
+// resolves the entered API key. Resolves null on Cancel/Escape/backdrop
+// dismiss. Modeled on promptText() in helpers.js, with a password-type
+// input for the credential and its own message/title instead of a bare
+// text prompt.
+function _offerPeerRoute(model, peer) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    let input;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
+    openModal(t("sidebar.peerRoute.title"), (body) => {
+      body.appendChild(el("p", "", t("sidebar.peerRoute.message", {
+        model, host: peer.host, port: peer.port,
+      })));
+      input = el("input");
+      input.type = "password";
+      input.placeholder = t("sidebar.peerRoute.keyPlaceholder");
+      body.appendChild(input);
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", "Cancel");
+      cancel.onclick = () => finish(null);
+      const ok = el("button", "btn-secondary", t("sidebar.peerRoute.routeButton"));
+      ok.onclick = () => finish(input.value.trim() || null);
+      row.appendChild(cancel);
+      row.appendChild(ok);
+      body.appendChild(row);
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") { e.preventDefault(); finish(input.value.trim() || null); }
+        else if (e.key === "Escape") { e.preventDefault(); finish(null); }
+      };
+    });
+    input.focus();
+    // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
+    // poll for it and treat as cancel - same pattern promptText() uses.
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(null);
+    }, 200);
+  });
+}
+
+// Check whether a live sibling instance already has *model* loaded
+// (GET /v1/models/{model}/peer-offer) and, if so, offer the user routing
+// there instead of a local load. Returns the server's route result
+// ({status: "peer_routed", model, peer}) when the user accepts, or null
+// when there is no offer, the offer check itself fails, or the user
+// declines - the caller then proceeds with its own normal local load.
+async function _maybeRoutePeer(model) {
+  let offer;
+  try {
+    const r = await fetch(`/v1/models/${encodeURIComponent(model)}/peer-offer`,
+                          { headers: authHeaders() });
+    if (!r.ok) return null;
+    offer = await r.json();
+  } catch (e) {
+    return null;
+  }
+  if (!offer || !offer.available || !offer.peer) return null;
+  const apiKey = await _offerPeerRoute(model, offer.peer);
+  if (!apiKey) return null;
+  const r2 = await fetch(`/v1/models/${encodeURIComponent(model)}/peer-route`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ instance_id: offer.peer.instance_id, api_key: apiKey }),
+  });
+  if (!r2.ok) {
+    const detail = (await r2.json().catch(() => ({}))).detail || r2.statusText;
+    toast(t("sidebar.peerRoute.routeFailed", { detail }), true);
+    return null;
+  }
+  const data = await r2.json();
+  setStatus("ok", t("sidebar.peerRoute.routedStatus", {
+    model, host: offer.peer.host, port: offer.peer.port,
+  }));
+  modelCache.active = model;
+  toast(t("sidebar.peerRoute.routedToast", { model }));
+  return data;
+}
+
 // Switch the active model. Returns the server status object
-// ({status: "loaded" | "already_active" | "superseded" | "cancelled", model, ...}).
+// ({status: "loaded" | "already_active" | "superseded" | "cancelled" |
+// "peer_routed", model, ...}).
 // "superseded" means another model was selected while this one was still loading;
 // "cancelled" means the load was aborted for some other reason. Either way the
 // server aborted this load, so we do NOT claim success or reset status here
 // (that would flash a model that never actually loaded). Callers should skip
-// their success toast for both.
+// their success toast for both. "peer_routed" means the user accepted an offer
+// to route to a live sibling instance instead of loading a local copy - see
+// _maybeRoutePeer, which always asks before ever touching /api/models/load.
 export async function switchModel(model) {
+  const routed = await _maybeRoutePeer(model);
+  if (routed) return routed;
   setStatus("busy", t("sidebar.status.loading", { model }));
   const r = await fetch("/api/models/load", {
     method: "POST",

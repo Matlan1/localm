@@ -140,6 +140,10 @@ def register(app: FastAPI, ctx) -> None:
         # inspected, which is not the same claim as false.
         if vision is not None:
             out["vision"] = vision
+        from localm import peer_routing
+        route = peer_routing.get_route(model_id)
+        if route is not None:
+            out["peer_route"] = route.safe_dict()
         return out
 
     @app.post("/v1/models/unload",
@@ -211,7 +215,12 @@ def register(app: FastAPI, ctx) -> None:
         name = model or _hs._resolve_unnamed_model_name()
         if not name:
             raise HTTPException(503, "No model specified or configured to load")
-            
+
+        from localm import peer_routing
+        route = peer_routing.get_route(name)
+        if route is not None:
+            return {"status": "peer_routed", "model": name, "peer": route.safe_dict()}
+
         already = False
         if name in _hs._engines and _hs._engines[name].loaded:
             already = True
