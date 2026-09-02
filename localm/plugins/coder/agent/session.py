@@ -375,8 +375,8 @@ class _SessionMixin:
     def _write_session_markdown(self) -> Path:
         """
         Write a human-readable Markdown transcript of the session to
-        ``.localcoder/sessions/<YYYY-MM-DD_HHMMSS>.md`` inside the project
-        working directory.
+        ``.localcoder/sessions/<YYYY-MM-DD_HHMMSS>_<checkpoint id>.md`` inside
+        the project working directory.
 
         Tool-result messages (which are large XML blobs) are skipped.
         Tool calls embedded in assistant messages are extracted and listed
@@ -389,7 +389,7 @@ class _SessionMixin:
 
         out_dir = self.cwd / ".localcoder" / "sessions"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{ts_label}.md"
+        out_path = out_dir / f"{ts_label}_{self._checkpoint_id}.md"
 
         tokens_line = (
             f"**Tokens (billed est.)**: ~{self._total_tokens:,}  "
