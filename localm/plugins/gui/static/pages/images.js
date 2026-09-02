@@ -8,6 +8,7 @@
 
 import { chat, renderAttachChips } from "../app/chat.js";
 import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
@@ -19,14 +20,13 @@ import { modelOverrides } from "./workflow.js";
 const imageGallery = createGallery({
   slug: "imagine",
   listKey: "images",
-  noun: "image",
-  plural: "images",
+  itemKey: "images.item",
   gridId: "img-history",
   bulkId: "img-bulk",
   moveDestKey: "localm.imgMoveDest",
   emptyIcon: "image",
-  emptyTitle: "No images yet",
-  emptyHint: "Generate one above; your results appear here.",
+  emptyTitleKey: "images.empty.title",
+  emptyHintKey: "images.empty.hint",
 
   buildPreview: imagePreview,
   caption: (item) => (item.meta?.prompt ? item.meta.prompt.slice(0, 60) : item.name),
@@ -58,16 +58,16 @@ const imageGallery = createGallery({
 
   // Still-image-only actions.
   extraActions: (item, ctx) => {
-    const useInput = el("button", "btn-secondary", "use as input");
-    useInput.title = "Use this image as the img2img input";
+    const useInput = el("button", "btn-secondary", t("images.useAsInput"));
+    useInput.title = t("images.useAsInputTitle");
     useInput.onclick = () => {
       $("img-input").value = item.path || item.name;
       ctx.closeModal();
-      toast("Set as img2img input - adjust denoise and generate");
+      toast(t("images.setAsInputToast"));
     };
 
-    const toChat = el("button", "btn-secondary", "send to chat");
-    toChat.title = "Attach this image to the chat composer";
+    const toChat = el("button", "btn-secondary", t("images.sendToChat"));
+    toChat.title = t("images.sendToChatTitle");
     toChat.onclick = async () => {
       try {
         const url = await fetchImageURL(
@@ -84,14 +84,14 @@ const imageGallery = createGallery({
         renderAttachChips();
         ctx.closeModal();
         showView("chat");
-        toast("Image attached - type your message");
+        toast(t("images.attachedToast"));
       } catch (e) {
-        toast("Attach failed: " + e.message, true);
+        toast(t("images.attachFailed", { message: e.message }), true);
       }
     };
 
-    const copyImg = el("button", "btn-secondary", "copy image");
-    copyImg.title = "Copy the image to the clipboard";
+    const copyImg = el("button", "btn-secondary", t("images.copyImage"));
+    copyImg.title = t("images.copyImageTitle");
     copyImg.onclick = async () => {
       try {
         const url = await fetchImageURL(
@@ -99,9 +99,9 @@ const imageGallery = createGallery({
         const blob = await (await fetch(url)).blob();
         URL.revokeObjectURL(url);
         await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-        toast("Image copied to clipboard");
+        toast(t("images.copiedToast"));
       } catch (e) {
-        toast("Copy failed: " + e.message, true);
+        toast(t("images.copyFailed", { message: e.message }), true);
       }
     };
 
@@ -132,7 +132,7 @@ export async function refreshLoraPicker() {
   sel.replaceChildren();
   const none = document.createElement("option");
   none.value = "";
-  none.textContent = data.reachable ? "None" : "None (ComfyUI not running)";
+  none.textContent = data.reachable ? t("images.loraNone") : t("images.loraNoneOffline");
   sel.appendChild(none);
   for (const name of (data.loras || [])) {
     const o = document.createElement("option");
@@ -150,14 +150,14 @@ export function showStop(btnId, jobId) {
   if (!btn) return;
   btn.style.display = "inline-block";
   btn.disabled = false;
-  btn.onclick = () => { btn.disabled = true; btn.textContent = "Stopping…"; cancelJob(jobId); };
+  btn.onclick = () => { btn.disabled = true; btn.textContent = t("images.stopping"); cancelJob(jobId); };
 }
 export function hideStop(btnId) {
   const btn = $(btnId);
   if (!btn) return;
   btn.style.display = "none";
   btn.disabled = false;
-  btn.textContent = "Stop";
+  btn.textContent = t("images.stop");
   btn.onclick = null;
 }
 
@@ -167,7 +167,7 @@ export function hideStop(btnId) {
 
 $("img-generate").onclick = async () => {
   const promptText = $("img-prompt").value.trim();
-  if (!promptText) { toast("Enter a prompt", true); return; }
+  if (!promptText) { toast(t("images.enterPrompt"), true); return; }
   const num = (id) => {
     const v = $(id).value.trim();
     return v === "" ? null : Number(v);
@@ -213,13 +213,13 @@ $("img-generate").onclick = async () => {
       img.src = await fetchImageURL(
         `/api/imagine/file/${encodeURIComponent(end.result)}`);
       $("img-result").appendChild(img);
-      toast("Image generated");
+      toast(t("images.generatedToast"));
       refreshImageHistory();
     } else {
-      toast("Generation " + jobStatusWord(end.status), end.status !== "cancelled");
+      toast(t("images.generationStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
     }
   } catch (e) {
-    toast("Generation failed: " + e.message, true);
+    toast(t("images.generationFailed", { message: e.message }), true);
   } finally {
     $("img-generate").disabled = false;
     hideStop("img-stop");

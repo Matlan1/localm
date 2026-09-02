@@ -82,12 +82,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   command line. The chat view and the app's shell - the sidebar, its navigation,
   the conversation list, the model box, the message composer and the chat
   parameters drawer - are translated, along with the Settings page's own
-  headings, search box, section navigation and Appearance card, and the
-  Plugins page. Everything not translated yet stays in English rather than
-  going blank, and switching language takes effect immediately without a
-  reload. The rest of the app (Models, Coder, Knowledge, Studio, and the
-  individual settings descriptions) is still English only; adding another
-  language now means adding one catalog file rather than changing the app.
+  headings, search box, section navigation and Appearance card, the
+  Plugins page, and the Images page. Everything not translated yet stays in
+  English rather than going blank, and switching language takes effect
+  immediately without a reload. The rest of the app (Models, Coder,
+  Knowledge, Music and Video in Studio, and the individual settings
+  descriptions) is still English only; adding another language now means
+  adding one catalog file rather than changing the app.
 - **Optional Hugging Face and CivitAI API tokens.** Set them in Settings
   under Library, or the `HF_TOKEN` / `CIVITAI_API_KEY` environment
   variables, to raise rate limits and reach gated or login-required models
