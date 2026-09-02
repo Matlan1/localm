@@ -91,8 +91,10 @@ class RoutingDecision:
 
     @property
     def routed(self) -> bool:
-        return (self.resolved is not None and self.current is not None
-                and self.resolved != self.current)
+        # Deliberately NOT gated on current being set. With no model resolved at
+        # all, resolved names one and routed must agree, or the audit surface
+        # reports a model that then does not answer.
+        return self.resolved is not None and self.resolved != self.current
 
     @property
     def has_gap(self) -> bool:

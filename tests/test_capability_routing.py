@@ -498,3 +498,20 @@ class TestCoderToolCapabilityNote:
 
     def test_silent_without_a_model_name(self, monkeypatch):
         assert self._note(monkeypatch, TOOLS_ONLY, "") == ""
+
+
+class TestNoCurrentModel:
+    def test_routed_agrees_with_resolved_when_nothing_is_loaded(self):
+        """With no model resolved at all, a decision that names one must also
+        report itself as a route. Disagreeing would put a model in the audit
+        header that never answers the request."""
+        d = cr.plan_route(None, cr.CapabilityNeeds(capabilities=("tool_use",)),
+                          pinned=False, reg=TOOLS_ONLY)
+        assert d.resolved == "tooly"
+        assert d.routed is True
+
+    def test_a_decision_that_changes_nothing_is_not_a_route(self):
+        d = cr.plan_route(None, cr.CapabilityNeeds(), pinned=False,
+                          reg=TOOLS_ONLY)
+        assert d.resolved is None
+        assert d.routed is False
