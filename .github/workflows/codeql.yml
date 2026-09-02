@@ -51,7 +51,7 @@ jobs:
         # public repo where workflows run against forks.
         language: [actions, javascript-typescript, python]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4

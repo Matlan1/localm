@@ -22,16 +22,17 @@ updates:
     schedule:
       interval: "weekly"
     ignore:
-      # Every action here is pinned to a floating major tag (checkout@v7,
-      # setup-python@v6, setup-uv@v7, setup-node@v6, codeql-action@v4), which for
-      # CodeQL is what upstream recommends: a pinned patch version silently loses
-      # functionality as server-side feature flags are retired, and this repo runs
-      # the advanced setup that guidance is aimed at. The v4 tag already tracks the
-      # latest v4.x, so a patch pin is pure churn (13 v4.x releases in 90 days) and
-      # goes stale on arrival - #966 proposed v4.37.4 while v4 already resolved to
-      # v4.37.6. Major bumps (v4 to v5) still open a PR, which is the signal worth
-      # having. Both minor and patch are listed so the rule holds however dependabot
-      # classifies a bare "4" to "4.37.x" transition.
+      # checkout, setup-python, setup-uv and setup-node are pinned to full-length
+      # commit SHAs (see the workflow files). github/codeql-action alone stays on
+      # its floating major tag (v4), which for CodeQL is what upstream recommends:
+      # a pinned patch version silently loses functionality as server-side feature
+      # flags are retired, and this repo runs the advanced setup that guidance is
+      # aimed at. The v4 tag already tracks the latest v4.x, so a patch pin is pure
+      # churn (13 v4.x releases in 90 days) and goes stale on arrival - #966 proposed
+      # v4.37.4 while v4 already resolved to v4.37.6. Major bumps (v4 to v5) still
+      # open a PR, which is the signal worth having. Both minor and patch are listed
+      # so the rule holds however dependabot classifies a bare "4" to "4.37.x"
+      # transition.
       - dependency-name: "github/codeql-action"
         update-types:
           - "version-update:semver-minor"
