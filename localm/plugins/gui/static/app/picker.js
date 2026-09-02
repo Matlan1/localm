@@ -626,10 +626,9 @@ export function pickPath(opts = {}) {
       cancelBtn.onclick = () => finish(null);
 
       // ---- language ----
-      // Re-paint the chrome this modal built once at open time. An edit in
-      // progress (New Folder / Rename / the editable path bar) is left alone
-      // so a language switch never discards text the user is mid-typing;
-      // it picks up the new language next time it is opened.
+      // Re-paints this modal's chrome for the current language. Skips New
+      // Folder, Rename and the editable path bar while any of them is mid
+      // edit; each picks up the language the next time it opens.
       function retranslate() {
         backBtn.title = t("picker.back");
         upBtn.title = t("picker.up");
