@@ -78,6 +78,10 @@ def _agent(cwd, **kw):
         PM.build.return_value.truncated = False
         kw.setdefault("mode", SessionMode.LOG)
         kw.setdefault("auto_approve", True)
+        # The browser tools are off by default, so without this the registry
+        # sweep below would skip them and their injection would go unverified.
+        # Their gating is pinned separately, in test_browser_tools_gate.py.
+        kw.setdefault("browser_enabled", True)
         return Agent(_Stub(), cwd=cwd, self_verify=False, **kw)
 
 

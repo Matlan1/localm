@@ -240,6 +240,15 @@ _SKILL_STATE_TOOLS: frozenset[str] = frozenset({"use_skill"})
 # project-index state rather than writing session state.
 _PROJECT_MAP_TOOLS: frozenset[str] = frozenset({"find_references"})
 
+# Browser tools (tools/browser.py). They act on the ONE browser session that
+# belongs to this coder session, and each re-checks the capability off the
+# Agent, so the dispatcher hands them the same hidden `_session` arg.
+_BROWSER_TOOLS: frozenset[str] = frozenset({
+    "browser_navigate", "browser_read", "browser_click", "browser_fill",
+    "browser_screenshot", "browser_console", "browser_network",
+    "browser_close",
+})
+
 # Fraction of estimated context window at which compaction is triggered
 _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
 

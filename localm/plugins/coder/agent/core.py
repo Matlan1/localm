@@ -86,6 +86,7 @@ class Agent(
         scope_inherited: bool = False,
         disabled_tools: Optional[frozenset] = None,
         restricted: bool = False,
+        browser_enabled: bool = False,
         role: Optional[str] = None,
         inherited_skill_tools: Optional[frozenset] = None,
         self_verify: bool = True,
@@ -146,6 +147,11 @@ class Agent(
         # network, env, or sub-agents) and given no external (MCP/plugin/skill)
         # tools. The effective disabled set is finalised after tool registration.
         self.restricted = restricted
+        # Browser automation is OFF unless the caller both holds the 'browser'
+        # capability and has the setting switched on. tools/browser.py re-reads
+        # this per call; _apply_browser_toolset removes the tools from the
+        # model's schema when it is False.
+        self.browser_enabled = bool(browser_enabled)
         # Tools removed from THIS session: hidden from the model and hard-refused
         # at dispatch so a minted scoped key cannot run them (RCE / data exfil).
         self.disabled_tools = expand_shell_disable(frozenset(disabled_tools or ()))
@@ -373,6 +379,10 @@ class Agent(
         self._init_mcp_tools(cwd)
         self._init_plugin_tools()
         self._init_skill_tools(cwd)
+        # Unconditional, unlike the narrowings below: browser automation is off
+        # by default, so this runs for every session and only leaves the tools
+        # in place when the capability was granted.
+        self._apply_browser_toolset()
         if self.restricted:
             self._apply_restricted_toolset()
         # AFTER restriction, and after every external tool has registered, so a
@@ -617,6 +627,20 @@ class Agent(
         print_warning(msg)
         self._emit("info", text=msg)
         self._audit.notice("scope_shell_unconfined", msg)
+
+    def _apply_browser_toolset(self) -> None:
+        """Disable every browser tool unless this session may browse.
+
+        Subtractive like the narrowings below it, so it composes with them in
+        any order. When the capability IS granted this removes nothing, and a
+        restricted or role-narrowed session still drops the tools through its
+        own allowlist."""
+        if self.browser_enabled:
+            return
+        from ..agent.constants import _BROWSER_TOOLS
+        TOOL_REGISTRY = _agent.TOOL_REGISTRY
+        self.disabled_tools = self.disabled_tools | (
+            frozenset(_BROWSER_TOOLS) & frozenset(TOOL_REGISTRY))
 
     def _apply_restricted_toolset(self) -> None:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY

@@ -1132,6 +1132,37 @@ CORE_FIELDS: list = [
                  # ADMIN in held), so admin_only hides this from a SCOPED key, not
                  # from the ordinary single-user GUI.
                  group="Network", admin_only=True),
+    # ---- Browser automation (plugin) ----
+    SettingField("browser_enabled", Widget.TOGGLE,
+                 "Let the model drive a web browser",
+                 "Off by default. A key must also hold the browser capability. "
+                 "The browser reaches only what the network policy already "
+                 "allows.",
+                 group="Network", owner="browser", admin_only=True),
+    SettingField("browser_engine", Widget.SELECT, "Browser to drive",
+                 "'bundled' runs the sandboxed browser localm downloads. "
+                 "'system' drives your own installed browser, including its "
+                 "logged-in sessions, which is why it is not the default.",
+                 group="Network", owner="browser", admin_only=True,
+                 options=["bundled", "system"]),
+    SettingField("browser_headless", Widget.TOGGLE, "Run the browser hidden",
+                 "On by default. Off opens a visible window; the live view "
+                 "works either way.",
+                 group="Network", owner="browser"),
+    SettingField("browser_custom_domain_rules", Widget.TOGGLE,
+                 "Use browser-specific domain rules",
+                 "Off by default, so the browser follows the same allowed and "
+                 "denied domains as everything else. On adds the two lists "
+                 "below, which can only narrow that further, never widen it.",
+                 group="Network", owner="browser", admin_only=True),
+    SettingField("browser_allow", Widget.LIST, "Browser allowed domains",
+                 "Only used when browser-specific rules are on. Empty = any "
+                 "the main policy already allows.",
+                 group="Network", owner="browser", admin_only=True),
+    SettingField("browser_deny", Widget.LIST, "Browser denied domains",
+                 "Only used when browser-specific rules are on. Refused on top "
+                 "of the main deny list.",
+                 group="Network", owner="browser", admin_only=True),
     # ---- Preview (GUI renderer, core) ----
     # owner="core": the artifact canvas is the GUI's own renderer and stays
     # visible on an install with no plugin beyond chat.
