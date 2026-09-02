@@ -27,6 +27,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   choice is never invisible. Starting a coder session on a model with no
   tool-calling support now points out which of your models are built for it -
   tool calls still work either way.
+- **Text-to-speech now speaks Spanish, French, Hindi, Italian and Brazilian
+  Portuguese.** The neural voice previously read every language with English
+  pronunciation, because the speech engine only ever loaded its English
+  pronunciation rules. Those five languages now use their own, so Spanish
+  "Jorge" is spoken as "Jorge" rather than "Corque" and Portuguese "Rio" as
+  "Rio" rather than "Kio". Thirteen new voices appear in the Settings picker,
+  which is now grouped by language, and nothing changes for English. Upstream
+  grades these voices lower than the English ones and does not grade the
+  Spanish and Portuguese ones at all, so the picker shows a grade only where
+  one exists. Japanese and Chinese are deliberately not included: the engine
+  cannot pronounce their scripts and produces placeholder text rather than
+  speech.
 - **Two localm instances on the same machine can now share one loaded model
   instead of each keeping its own copy in VRAM.** When you switch to a
   model, the Models page checks whether another running instance already
