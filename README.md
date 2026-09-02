@@ -163,6 +163,17 @@ Not every plugin needs an extra: the image/music/video plugins talk to an extern
 
 > **Avoid `uv tool install` for this project.** Tool installs are *global per package name*, so a second clone would silently replace the first one's `localm.exe`.
 
+### Verifying a downloaded release
+
+Every [GitHub Release](https://github.com/Matlan1/localm/releases) publishes `localm-<version>.zip` alongside a `localm-<version>.zip.sig` signature, as Assets on that release. This matters if you obtained a release zip some other way than the `git clone` install above (a browser download, a mirror, a forwarded copy):
+
+- **Quick, zero-dependency check:** compute the file's SHA256 (`sha256sum localm-<version>.zip` on Linux/macOS, or `certutil -hashfile localm-<version>.zip SHA256` on Windows) and compare it against a digest you trust - the maintainer may publish one in the release notes text, and any checksum file shipped alongside a later release can be compared with a plain text diff.
+- **Authoritative check:** `python scripts/verify_release.py localm-<version>.zip` verifies the zip against the same Ed25519 public key the auto-updater trusts (pinned in [`localm/updater.py`](localm/updater.py) as `_UPDATE_PUBKEYS` - you can cross-check that key against what GitHub's web UI shows independently of any zip you downloaded). It auto-finds the adjacent `.sig` file, or accepts an explicit `--sig`/`--sha256`; see `python scripts/verify_release.py --help` for the full usage.
+
+**This verifies the release *Asset*, not GitHub's own auto-generated "Source code (zip)" link on the same release page.** That auto-zipball is the raw tracked tree with no manifest filtering and no baked version file, so its bytes differ from the Asset and a release's signature will never match it.
+
+The recommended `git clone` install path above is unaffected by any of this: it never downloads a zip, so it keeps relying on git+HTTPS+GitHub's own trust model, the same as any other cloned project. One free check that needs no new tooling: if you cloned a specific tag, `git rev-parse HEAD` inside the clone should equal the commit SHA GitHub shows for that tag.
+
 ### No models yet?
 
 On a fresh install the launcher's **Import** row gets you a first model three ways: *from file...* / *from folder...* register a GGUF or a HuggingFace directory already on disk, and *from URL...* opens the Web GUI on its Models page and downloads the model there with a live progress bar. You can also launch the Web GUI with no models (`localm gui --no-model`); it opens straight to the Models page.

@@ -556,6 +556,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Neither needed a slow or memory-hungry pattern to trigger, so the existing
   time and size limits could not catch them. Upgrading the bundled regex
   engine closes both; the limits themselves are unchanged.
+- **A release you download instead of `git clone`-ing can now be verified
+  before you trust it.** The auto-updater already checked every in-place
+  update against a signature, but a first-time download of a release zip
+  (a browser download, a mirror, a forwarded copy) had nothing to check it
+  against. `scripts/verify_release.py` now verifies a downloaded
+  `localm-<version>.zip` against the same signature, and/or a plain SHA256
+  digest, with no new install required. The recommended `git clone` install
+  path is unchanged - it never downloads a zip, so it keeps relying on
+  git+HTTPS+GitHub the same way any other cloned project does.
 
 ## [0.1.5] - 2026-08-26
 
