@@ -5,7 +5,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { loadApp, runScript } from "./harness.mjs";
+
+const DE = JSON.parse(readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "..",
+    "localm", "plugins", "gui", "static", "i18n", "de.json"),
+  "utf-8"));
 
 const FS = {
   "/root": {
@@ -466,3 +474,60 @@ test("Escape cancels Rename without calling the server", async () => {
   assert.equal(called, false, "no request was sent");
   assert.ok(rowNamed(win, "apple.md"), "row reverted to its display name");
 });
+
+// --------------------------------------------------------------------------- //
+//  Language                                                                    //
+// --------------------------------------------------------------------------- //
+
+function fetchWithGerman(url, opts) {
+  if (String(url).includes("/i18n/de.json")) return Promise.resolve(json(DE));
+  return fetchImpl(url, opts);
+}
+
+test("the open picker's toolbar, rail and footer redraw in German when the language changes", async () => {
+  const { window: win } = loadApp({ fetchImpl: fetchWithGerman });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  assert.equal(okBtn(win).textContent, "Use this folder", "starts in English");
+  assert.equal(cancelBtn(win).textContent, "Cancel");
+
+  runScript(win, `window.__lang = applyLanguage("de");`);
+  await win.__lang;
+  await ticks(4);
+
+  assert.equal(okBtn(win).textContent, "Diesen Ordner verwenden",
+    "the footer confirm button redraws without closing the modal");
+  assert.equal(cancelBtn(win).textContent, "Abbrechen");
+  assert.ok(body(win).querySelector('button[title="Zurück"]'), "Back retranslated");
+  assert.ok(body(win).querySelector('button[title="Eine Ebene nach oben"]'), "Up one level retranslated");
+  assert.ok(body(win).querySelector('button[title="Neuer Ordner"]'), "New folder retranslated");
+  const railHead = body(win).querySelector(".picker-rail-head");
+  assert.equal(railHead && railHead.textContent, "Orte",
+    "the places rail heading is repainted (its own re-fetch runs after the sync part of the switch)");
+});
+
+test("closing the picker removes its language listener - a later language change never touches it again",
+  async () => {
+    const seenPlacesCalls = [];
+    const countingFetch = (url, opts) => {
+      if (String(url).includes("/api/fs/places")) seenPlacesCalls.push(url);
+      return fetchWithGerman(url, opts);
+    };
+    const { window: win } = loadApp({ fetchImpl: countingFetch });
+    start(win, `{ mode: "dir", startPath: "/root" }`);
+    await ticks();
+    const callsWhileOpen = seenPlacesCalls.length;
+    assert.ok(callsWhileOpen >= 1, "the places rail loads once while the picker is open");
+
+    cancelBtn(win).click();
+    await ticks();
+    assert.equal(win.__res, null, "the picker resolved and closed");
+
+    runScript(win, `window.__lang = applyLanguage("de");`);
+    await win.__lang;
+    await ticks(4);
+
+    assert.equal(seenPlacesCalls.length, callsWhileOpen,
+      "a language change after the picker closed must not re-run its retranslate - "
+      + "the listener was removed in cleanup, so nothing fires or touches stale DOM");
+  });

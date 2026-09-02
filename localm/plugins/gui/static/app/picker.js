@@ -11,6 +11,7 @@
 
 // --- ES module imports ---
 import { $, authHeaders, el, openModal, toast } from "./helpers.js";
+import { t, tn } from "./i18n.js";
 
 /** GET the listing for `path`. include_files adds files; meta adds the
  *  entries[] array of {name, is_dir, size, mtime}; includeHidden asks the
@@ -144,7 +145,7 @@ export function pickPath(opts = {}) {
       resolve(value);
     };
 
-    openModal(opts.title || "Choose", (body) => {
+    openModal(opts.title || t("picker.title"), (body) => {
       const modalEl = body.closest(".modal");
       if (modalEl) modalEl.classList.add("picker-modal");
 
@@ -164,13 +165,13 @@ export function pickPath(opts = {}) {
 
       const nav = el("div", "picker-nav");
       const backBtn = el("button", "picker-icon-btn");
-      backBtn.type = "button"; backBtn.title = "Back";
+      backBtn.type = "button"; backBtn.title = t("picker.back");
       backBtn.appendChild(iconSpan("picker-svg", "back"));
       const upBtn = el("button", "picker-icon-btn");
-      upBtn.type = "button"; upBtn.title = "Up one level";
+      upBtn.type = "button"; upBtn.title = t("picker.up");
       upBtn.appendChild(iconSpan("picker-svg", "up"));
       const newFolderBtn = el("button", "picker-icon-btn");
-      newFolderBtn.type = "button"; newFolderBtn.title = "New folder";
+      newFolderBtn.type = "button"; newFolderBtn.title = t("picker.newFolder");
       newFolderBtn.appendChild(iconSpan("picker-svg", "newfolder"));
       newFolderBtn.disabled = true;   // enabled once a real directory is loaded
       const pathWrap = el("div", "picker-path");
@@ -184,18 +185,18 @@ export function pickPath(opts = {}) {
       filterWrap.appendChild(iconSpan("picker-svg picker-filter-ic", "search"));
       const filterIn = document.createElement("input");
       filterIn.type = "text";
-      filterIn.placeholder = "Filter this folder";
-      filterIn.setAttribute("aria-label", "Filter this folder");
+      filterIn.placeholder = t("picker.filterPlaceholder");
+      filterIn.setAttribute("aria-label", t("picker.filterPlaceholder"));
       filterWrap.appendChild(filterIn);
 
       let showAllFiles = false;
       let typeSelect = null;
       if (exts) {
         typeSelect = el("select", "picker-type-select");
-        typeSelect.setAttribute("aria-label", "File type filter");
-        const optSupported = el("option", "", "Supported Files");
+        typeSelect.setAttribute("aria-label", t("picker.typeFilterAria"));
+        const optSupported = el("option", "", t("picker.supportedFiles"));
         optSupported.value = "supported";
-        const optAll = el("option", "", "All Files (*.*)");
+        const optAll = el("option", "", t("picker.allFiles"));
         optAll.value = "all";
         typeSelect.append(optSupported, optAll);
         typeSelect.onchange = () => {
@@ -208,13 +209,14 @@ export function pickPath(opts = {}) {
       const hiddenLabel = el("label", "picker-hidden-toggle");
       const hiddenCb = document.createElement("input");
       hiddenCb.type = "checkbox";
-      hiddenCb.setAttribute("aria-label", "Show hidden files and folders");
+      hiddenCb.setAttribute("aria-label", t("picker.showHiddenAria"));
       hiddenCb.onchange = () => {
         showHidden = hiddenCb.checked;
         renderList();
         updateCount();
       };
-      hiddenLabel.append(hiddenCb, document.createTextNode(" Hidden"));
+      const hiddenText = document.createTextNode(t("picker.hidden"));
+      hiddenLabel.append(hiddenCb, hiddenText);
 
       const countEl = el("span", "picker-count");
       if (typeSelect) {
@@ -229,10 +231,10 @@ export function pickPath(opts = {}) {
 
       const foot = el("div", "picker-foot");
       const hintEl = opts.hint ? el("div", "picker-hint", opts.hint) : null;
-      const cancelBtn = el("button", "btn-secondary", "Cancel");
+      const cancelBtn = el("button", "btn-secondary", t("picker.cancel"));
       cancelBtn.type = "button";
       const okLabel = opts.confirmLabel
-        || (multi ? "Add" : mode === "dir" ? "Use this folder" : "Choose");
+        || (multi ? t("picker.confirmAdd") : mode === "dir" ? t("picker.confirmDir") : t("picker.title"));
       const okBtn = el("button", "btn-primary", okLabel);
       okBtn.type = "button";
       if (mode === "file") okBtn.style.display = "none";   // file mode: click a file
@@ -253,9 +255,9 @@ export function pickPath(opts = {}) {
       function updateCount() {
         if (multi) {
           const n = selected.size;
-          countEl.textContent = n + " selected";
-          okBtn.textContent = (opts.confirmLabel || "Add") + " " + n +
-            " item" + (n === 1 ? "" : "s");
+          countEl.textContent = tn("picker.selectedCount", n);
+          okBtn.textContent = tn("picker.addItems", n,
+            { label: opts.confirmLabel || t("picker.confirmAdd") });
           okBtn.disabled = n === 0;
         } else if (mode === "dir") {
           okBtn.disabled = !current;
@@ -277,13 +279,13 @@ export function pickPath(opts = {}) {
           const isLast = i === items.length - 1;
           const c = el("span",
             "picker-crumb" + (isLast ? " picker-crumb-cur" : ""), it.label);
-          if (!isLast) { const t = it.path; c.onclick = () => navigate(t); }
+          if (!isLast) { const dest = it.path; c.onclick = () => navigate(dest); }
           crumbs.appendChild(c);
           if (!isLast) crumbs.appendChild(el("span", "picker-crumb-sep", "›"));
         });
         crumbs.onclick = (e) => { if (e.target === crumbs) editPath(); };
         const edit = el("button", "picker-path-edit");
-        edit.type = "button"; edit.title = "Type or paste a path";
+        edit.type = "button"; edit.title = t("picker.editPathTitle");
         edit.appendChild(iconSpan("picker-svg", "edit"));
         edit.onclick = editPath;
         pathWrap.append(crumbs, edit);
@@ -294,8 +296,8 @@ export function pickPath(opts = {}) {
         inp.type = "text";
         inp.className = "picker-path-input";
         inp.value = current;
-        inp.setAttribute("aria-label", "Path");
-        const go = el("button", "picker-path-go", "Go");
+        inp.setAttribute("aria-label", t("picker.pathAria"));
+        const go = el("button", "picker-path-go", t("picker.go"));
         go.type = "button";
         pathWrap.append(inp, go);
         inp.focus(); inp.select();
@@ -332,16 +334,14 @@ export function pickPath(opts = {}) {
           const onlyHidden = !showHidden && entries.length > 0
             && entries.every((e) => e.name.startsWith("."));
           listEl.appendChild(el("div", "picker-empty",
-            q ? "No matches" : onlyHidden
-              ? "This folder only has hidden items - turn on \"Hidden\" to show them"
+            q ? t("picker.noMatches") : onlyHidden
+              ? t("picker.onlyHidden")
               : (data && data.parent === null)
-                ? "No drives found" : "This folder is empty"));
+                ? t("picker.noDrives") : t("picker.emptyFolder")));
         }
         // The server caps very large listings; say so when the list is partial.
         if (data && data.truncated) {
-          listEl.appendChild(el("div", "picker-trunc",
-            "This folder is very large - showing a partial list. "
-            + "Filter or open a subfolder to narrow it."));
+          listEl.appendChild(el("div", "picker-trunc", t("picker.truncated")));
         }
       }
       function buildRow(entry) {
@@ -357,7 +357,7 @@ export function pickPath(opts = {}) {
             cb.type = "checkbox";
             cb.className = "picker-cb";
             cb.checked = selected.has(full);
-            cb.setAttribute("aria-label", "Select " + entry.name);
+            cb.setAttribute("aria-label", t("picker.selectAria", { name: entry.name }));
             cb.onclick = (e) => { e.stopPropagation(); toggleSelect(full, entry, cb.checked); };
             row.appendChild(cb);
           } else {
@@ -370,7 +370,7 @@ export function pickPath(opts = {}) {
           // Only entries inside a real directory are renamable, not the
           // synthetic drive-letter rows at the drive-list root (current === "").
           const renameBtn = el("button", "picker-row-rename");
-          renameBtn.type = "button"; renameBtn.title = "Rename";
+          renameBtn.type = "button"; renameBtn.title = t("picker.renameTitle");
           renameBtn.appendChild(iconSpan("picker-svg", "edit"));
           renameBtn.onclick = (e) => { e.stopPropagation(); startRename(row); };
           row.appendChild(renameBtn);
@@ -383,7 +383,7 @@ export function pickPath(opts = {}) {
           if (entry.size !== null && entry.size !== undefined) bits.push(fmtSize(entry.size));
           if (entry.mtime) bits.push(fmtDate(entry.mtime));
           meta.appendChild(document.createTextNode(bits.join("  ·  ")));
-          if (exts && !canSelect) meta.appendChild(el("span", "picker-tag", "unsupported"));
+          if (exts && !canSelect) meta.appendChild(el("span", "picker-tag", t("picker.unsupported")));
         }
         row.appendChild(meta);
         row.onclick = () => onRowActivate(row);
@@ -411,13 +411,13 @@ export function pickPath(opts = {}) {
         const inp = document.createElement("input");
         inp.type = "text";
         inp.className = "picker-inline-input";
-        inp.value = "New folder";
-        inp.setAttribute("aria-label", "New folder name");
+        inp.value = t("picker.newFolderDefault");
+        inp.setAttribute("aria-label", t("picker.newFolderNameAria"));
         const okIc = el("button", "picker-inline-btn");
-        okIc.type = "button"; okIc.title = "Create";
+        okIc.type = "button"; okIc.title = t("picker.create");
         okIc.appendChild(iconSpan("picker-svg", "check"));
         const cancelIc = el("button", "picker-inline-btn");
-        cancelIc.type = "button"; cancelIc.title = "Cancel";
+        cancelIc.type = "button"; cancelIc.title = t("picker.cancel");
         cancelIc.appendChild(iconSpan("picker-svg", "close"));
         row.append(inp, okIc, cancelIc);
         listEl.prepend(row);
@@ -433,7 +433,7 @@ export function pickPath(opts = {}) {
           mkdirFs(current, name).then((created) => {
             navigate(created.path);
           }).catch((e) => {
-            toast("Could not create folder: " + e.message, true);
+            toast(t("picker.createFolderFailed", { message: e.message }), true);
             done = false;
             renderList();
           });
@@ -460,7 +460,7 @@ export function pickPath(opts = {}) {
         inp.type = "text";
         inp.className = "picker-inline-input";
         inp.value = entry.name;
-        inp.setAttribute("aria-label", "Rename " + entry.name);
+        inp.setAttribute("aria-label", t("picker.renameAria", { name: entry.name }));
         nameSpan.replaceWith(inp);
         inp.focus();
         if (entry.is_dir) {
@@ -487,7 +487,7 @@ export function pickPath(opts = {}) {
             }
             navigate(current, { push: false });   // refresh the listing in place
           }).catch((e) => {
-            toast("Could not rename: " + e.message, true);
+            toast(t("picker.renameFailed", { message: e.message }), true);
             done = false;
             renderList();
           });
@@ -527,7 +527,8 @@ export function pickPath(opts = {}) {
         }).catch((e) => {
           if (seq !== reqSeq) return;
           setLoading(false);
-          toast("Cannot open " + (path || "location") + ": " + e.message, true);
+          toast(t("picker.openFailed",
+            { path: path || t("picker.location"), message: e.message }), true);
           if (!data) navigate("", { push: false });   // first load failed -> drives
         });
       }
@@ -560,8 +561,8 @@ export function pickPath(opts = {}) {
               rail.appendChild(b);
             }
           };
-          group("Places", pl.places);
-          group("Drives", pl.drives);
+          group(t("picker.places"), pl.places);
+          group(t("picker.drives"), pl.drives);
           highlightPlace();
         }).catch((e) => {
           // Hide the rail and log the reason.
@@ -624,6 +625,38 @@ export function pickPath(opts = {}) {
       };
       cancelBtn.onclick = () => finish(null);
 
+      // ---- language ----
+      // Re-paints this modal's chrome for the current language. Skips New
+      // Folder, Rename and the editable path bar while any of them is mid
+      // edit; each picks up the language the next time it opens.
+      function retranslate() {
+        backBtn.title = t("picker.back");
+        upBtn.title = t("picker.up");
+        newFolderBtn.title = t("picker.newFolder");
+        filterIn.placeholder = t("picker.filterPlaceholder");
+        filterIn.setAttribute("aria-label", t("picker.filterPlaceholder"));
+        if (typeSelect) {
+          typeSelect.setAttribute("aria-label", t("picker.typeFilterAria"));
+          const optS = typeSelect.querySelector('option[value="supported"]');
+          const optA = typeSelect.querySelector('option[value="all"]');
+          if (optS) optS.textContent = t("picker.supportedFiles");
+          if (optA) optA.textContent = t("picker.allFiles");
+        }
+        hiddenCb.setAttribute("aria-label", t("picker.showHiddenAria"));
+        hiddenText.nodeValue = t("picker.hidden");
+        cancelBtn.textContent = t("picker.cancel");
+        if (!multi) {
+          okBtn.textContent = opts.confirmLabel
+            || (mode === "dir" ? t("picker.confirmDir") : t("picker.title"));
+        }
+        updateCount();
+        if (!pathWrap.querySelector(".picker-path-input")) renderPath();
+        if (!listEl.querySelector(".picker-inline-input")) renderList();
+        loadPlaces();
+      }
+      const languageHandler = () => retranslate();
+      document.addEventListener("localm:language", languageHandler);
+
       // Dismissing via the shared modal chrome (x / backdrop) sets
       // display:none; poll for that and resolve null.
       const watch = setInterval(() => {
@@ -640,6 +673,7 @@ export function pickPath(opts = {}) {
       cleanup = () => {
         clearInterval(watch);
         document.removeEventListener("keydown", escHandler, true);
+        document.removeEventListener("localm:language", languageHandler);
         if (modalEl) modalEl.classList.remove("picker-modal");
       };
 
@@ -655,7 +689,7 @@ export function pickPath(opts = {}) {
 
 /** Break a resolved path into clickable breadcrumb segments {label, path}. */
 function pathSegments(current) {
-  if (!current) return [{ label: "This PC", path: "" }];
+  if (!current) return [{ label: t("picker.thisPc"), path: "" }];
   const win = /^([A-Za-z]:)[\\/]?/.exec(current);
   const out = [];
   let segs, acc;
@@ -677,10 +711,10 @@ function pathSegments(current) {
 
 /** Pick a single directory. Resolves the chosen path, or null if dismissed. */
 export function pickDirectory(title, startPath = "") {
-  return pickPath({ mode: "dir", title: title || "Pick a directory", startPath });
+  return pickPath({ mode: "dir", title: title || t("picker.pickDirTitle"), startPath });
 }
 
 /** Pick a single file. Resolves the chosen file path, or null if dismissed. */
 export function pickFile(title, startPath = "") {
-  return pickPath({ mode: "file", title: title || "Pick a file", startPath });
+  return pickPath({ mode: "file", title: title || t("picker.pickFileTitle"), startPath });
 }
