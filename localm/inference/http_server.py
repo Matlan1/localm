@@ -5179,15 +5179,11 @@ async def _count_streamed_tokens(engine, streamed: str) -> int:
     with no terminal chunk, no usage and no ``[DONE]``. A model can emit a run
     the pre-tokenizer aborts on just as a caller can send one.
     """
+    from localm.inference.pretokenizer_guard import count_tokens_or_estimate
     loop = asyncio.get_running_loop()
-    try:
-        return await loop.run_in_executor(None, engine.count_tokens, streamed)
-    except PretokenizerUnsafeInputError:
-        from localm.debuglog import logger as _dbg
-        _dbg.warning(
-            "usage: the generated text carries a run this model's pre-tokenizer "
-            "refuses, so completion_tokens is an estimate for this response")
-        return max(1, len(streamed) // 4)
+    return await loop.run_in_executor(
+        None, count_tokens_or_estimate, engine.count_tokens, streamed,
+        "the generated text")
 
 
 def inference_error_text(exc: BaseException) -> str:

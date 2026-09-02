@@ -30,6 +30,7 @@ from localm.inference.backends.base import (
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
+from localm.inference.pretokenizer_guard import count_tokens_or_estimate
 from localm.inference.protocol import (
     ChatRequest, CompletionRequest, EmbeddingRequest, make_chunk_id,
 )
@@ -211,8 +212,14 @@ def register(app: FastAPI, ctx) -> None:
                         None, compact_messages, messages, _gen_for_compact)
                     if changed:
                         messages = list(new_messages)
-                        prompt_tokens = await loop.run_in_executor(
-                            None, engine.count_messages_tokens, messages)
+                        try:
+                            prompt_tokens = await loop.run_in_executor(
+                                None, engine.count_messages_tokens, messages)
+                        except PretokenizerUnsafeInputError as e:
+                            # The compaction SUMMARY is model-generated text, so
+                            # it can carry a run of its own. This count gates the
+                            # generation, so it refuses rather than estimating.
+                            raise HTTPException(400, str(e))
 
             if (isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
@@ -376,8 +383,14 @@ def register(app: FastAPI, ctx) -> None:
 
         # Off the event loop: count_tokens is a native tokenizer call per input, and
         # ``input`` is bounded only by the 160 MB body cap.
+        # Reports on embeddings that were already computed, so a refusal here
+        # estimates rather than failing a request that succeeded. Note the count
+        # uses the CHAT engine's tokenizer, which may be a different model from
+        # the embedder that produced the vectors.
         total_tokens = await loop.run_in_executor(
-            None, lambda: sum(engine.count_tokens(t) for t in texts))
+            None, lambda: sum(
+                count_tokens_or_estimate(engine.count_tokens, t, "an embedding input")
+                for t in texts))
         return {
             "object": "list",
             "data": [
@@ -547,7 +560,9 @@ def register(app: FastAPI, ctx) -> None:
                 text = await pipeline.run_outlet(text, messages, ctx)
             _audit_exchange(_audit, _transcript, messages, text)
 
-            completion_tokens = await loop.run_in_executor(None, engine.count_tokens, text)
+            completion_tokens = await loop.run_in_executor(
+                None, count_tokens_or_estimate, engine.count_tokens, text,
+                "the generated text")
             ts  = int(time.time())
             cid = make_chunk_id()
             return {

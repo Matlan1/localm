@@ -126,27 +126,20 @@ def policy_for(pre_type: Optional[str]) -> Optional[Policy]:
     return UNSAFE_PRE_TYPES.get(pre_type)
 
 
-_EXCERPT_CHARS = 24
-
-
-def _excerpt(text: str, start: int) -> str:
-    """The first :data:`_EXCERPT_CHARS` characters of the offending run, so the
-    caller can find it in their own text.
-
-    An OFFSET is not reported: by the time this runs the text is usually a
-    templated prompt, so the position would not line up with anything the caller
-    sent.
-    """
-    piece = text[start:start + _EXCERPT_CHARS]
-    return piece + "..." if len(text) - start > _EXCERPT_CHARS else piece
-
-
 def check_text(pre_type: Optional[str], text: str) -> None:
     """Raise :class:`PretokenizerUnsafeInputError` if *text* must not be handed
     to the pre-tokenizer named by *pre_type*; return ``None`` otherwise.
 
     Returns without scanning for any *pre_type* outside :data:`UNSAFE_PRE_TYPES`,
     so the ordinary case costs one dict lookup.
+
+    INVARIANT: the message quotes NO part of *text*, and carries no offset into
+    it. Callers surface it as an HTTP detail, which ``_log_http_exception``
+    writes to the debug log gated on ``debug_enabled()`` rather than
+    ``debug_content_enabled()`` because a detail is server-authored operational
+    text. Echoing any of the caller's text here would put chat content in the
+    debug log, including under privacy mode. Pinned by
+    ``TestTheRefusalQuotesNoCallerText``.
     """
     policy = policy_for(pre_type)
     if policy is None:
@@ -167,10 +160,35 @@ def check_text(pre_type: Optional[str], text: str) -> None:
     raise PretokenizerUnsafeInputError(
         f"This model's pre-tokenizer ({policy.label}) crashes on an unbroken "
         f"run of more than {policy.max_run} {kind}; this input has a run of "
-        f"{run}, beginning {_excerpt(text, hit.start())!r}. Break the run with "
-        f"punctuation or a line break, or use a model with a different "
-        f"tokenizer."
+        f"{run}. Break the run with punctuation or a line break, or use a model "
+        f"with a different tokenizer."
     )
+
+
+def count_tokens_or_estimate(count_tokens, text: str, what: str) -> int:
+    """``count_tokens(text)``, falling back to the chars/4 estimate when the
+    tokenizer REFUSES *text*, and logging that it did.
+
+    For counts that REPORT ON WORK ALREADY DONE - a usage block for a reply that
+    was streamed, or for embeddings that were computed. Raising there fails an
+    operation that already succeeded, and on a streamed response it ends the
+    body with no terminal chunk and no ``[DONE]``. A model can emit a run the
+    pre-tokenizer refuses just as a caller can send one.
+
+    NOT for a count that GATES the work: a pre-generation count must refuse, so
+    those callers let the error propagate and map it to a 400 instead.
+
+    Every other exception propagates: only this refusal is answerable with an
+    estimate.
+    """
+    try:
+        return count_tokens(text)
+    except PretokenizerUnsafeInputError:
+        from localm.debuglog import logger
+        logger.warning(
+            "usage: %s carries a run this model's pre-tokenizer refuses, so the "
+            "reported token count is an estimate", what)
+        return max(1, len(text) // 4)
 
 
 def read_pre_type(model_ptr, api) -> Optional[str]:

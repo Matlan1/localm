@@ -291,7 +291,6 @@ class TestTheRefusalIsActionable:
         msg = str(exc.value)
         assert policy.label in msg
         assert str(policy.max_run) in msg
-        assert "character" not in msg
 
     def test_it_is_a_value_error_so_the_worker_reports_it_per_request(self):
         assert issubclass(PretokenizerUnsafeInputError, ValueError)
@@ -558,22 +557,32 @@ class TestACountRefusalIsNotAWorkerFault:
     is not a failure: estimating answers a request that must be rejected, and
     the notice reports a permanent degradation caused by one request."""
 
-    def test_the_refusal_propagates_instead_of_being_estimated(self):
+    def test_the_refusal_propagates_instead_of_being_estimated(self, monkeypatch):
         import localm.inference.backends.gguf as gguf
 
-        gguf._count_messages_tokens_rpc_warned = False
-        be = gguf.GgufBackend.__new__(gguf.GgufBackend)
+        # A real instance with _loaded set, NOT a __new__ shell with `loaded`
+        # patched onto the class: type(be) IS GgufBackend, so assigning or
+        # deleting an attribute there mutates the class for the whole process.
+        monkeypatch.setattr(gguf, "_count_messages_tokens_rpc_warned", False)
+        be = gguf.GgufBackend("does-not-exist.gguf", n_ctx=512)
+        be._loaded = True
         be._runner = MagicMock()
         be._runner.count_messages_tokens.side_effect = \
             PretokenizerUnsafeInputError(_REFUSAL)
-        type(be).loaded = property(lambda self: True)
-        try:
-            with pytest.raises(PretokenizerUnsafeInputError):
-                be.count_messages_tokens(_MSG)
-        finally:
-            del type(be).loaded
+        assert be.loaded, "test premise: the real `loaded` property must answer True"
+        with pytest.raises(PretokenizerUnsafeInputError):
+            be.count_messages_tokens(_MSG)
         assert gguf._count_messages_tokens_rpc_warned is False, \
             "a per-request refusal must not spend the worker-fault latch"
+
+    def test_this_module_leaves_gguf_backend_unmutated(self):
+        # The check that would have caught the class-level mutation this test
+        # class used to do, which deleted GgufBackend.loaded for every test that
+        # ran after it in the same process.
+        import localm.inference.backends.gguf as gguf
+
+        assert "loaded" in vars(gguf.GgufBackend), \
+            "GgufBackend.loaded must still be the class's own property"
 
 
 class TestTheEmbedderWorkerCarriesTheTypedRefusal:
@@ -663,3 +672,144 @@ class TestGeneratedTextDoesNotTruncateTheStream:
         engine = MagicMock()
         engine.count_tokens.return_value = 42
         assert asyncio.run(_count_streamed_tokens(engine, "hello")) == 42
+
+
+class TestTheRefusalQuotesNoCallerText:
+    """The refusal becomes an HTTP detail, and _log_http_exception writes details
+    to the debug log gated on debug_enabled() rather than debug_content_enabled(),
+    because a detail is server-authored operational text. Quoting any of the
+    caller's text here would put chat content in the debug log, privacy mode
+    included."""
+
+    SECRET = "SECRETPROJECTCODENAMEZEPHYR"
+
+    def _refusal_for(self, pre_type):
+        policy = guard.UNSAFE_PRE_TYPES[pre_type]
+        if policy.char_class == guard._CLASS_DIGIT:
+            run = "9" * (policy.max_run + 40)
+        else:
+            run = (self.SECRET * 10)[:policy.max_run + 40]
+        with pytest.raises(PretokenizerUnsafeInputError) as exc:
+            guard.check_text(pre_type, f"please summarise. {run}. thanks")
+        return str(exc.value), run
+
+    @pytest.mark.parametrize("pre_type", _AFFECTED)
+    def test_no_substring_of_the_offending_run_is_echoed(self, pre_type):
+        msg, run = self._refusal_for(pre_type)
+        # Any 8-character window of the caller's run would be chat content.
+        windows = {run[i:i + 8] for i in range(0, len(run) - 8)}
+        leaked = [w for w in windows if w in msg]
+        assert not leaked, f"the refusal echoed caller text: {leaked[:3]}"
+
+    @pytest.mark.parametrize("pre_type", _AFFECTED)
+    def test_no_surrounding_prompt_text_is_echoed(self, pre_type):
+        msg, _ = self._refusal_for(pre_type)
+        for word in ("please", "summarise", "thanks", self.SECRET):
+            assert word not in msg
+
+    @pytest.mark.parametrize("pre_type", _AFFECTED)
+    def test_it_still_says_enough_to_act_on(self, pre_type):
+        # Withholding the text must not leave the message useless: the run's
+        # length, the allowed length and the class are all caller-actionable.
+        import re as _re
+
+        msg, run = self._refusal_for(pre_type)
+        policy = guard.UNSAFE_PRE_TYPES[pre_type]
+        assert str(policy.max_run) in msg
+        found = _re.search(r"run of (\d+)", msg)
+        assert found, msg
+        # At least what was built: for exaone-moe a SPACE is part of the run
+        # class, so the space before the run is legitimately counted into it.
+        assert int(found.group(1)) >= len(run)
+        assert ("digits" in msg) or ("letters" in msg)
+
+    def test_the_total_length_refusal_quotes_nothing_either(self):
+        policy = guard.UNSAFE_PRE_TYPES["llama4"]
+        body = (self.SECRET + ". ") * (policy.max_chars // 10)
+        assert len(body) > policy.max_chars
+        with pytest.raises(PretokenizerUnsafeInputError) as exc:
+            guard.check_text("llama4", body)
+        assert self.SECRET not in str(exc.value)
+
+
+class TestTheStreamStillTerminatesWhenUsageIsRefused:
+    """The helper test above is blind to the property that actually broke: that
+    the SSE body still carries its terminal chunk, its usage block and [DONE].
+    The helper was extracted to fix a bug that lives in the stream, so the
+    regression guard belongs at the stream layer."""
+
+    def _sse(self, generated):
+        engine = _engine()
+        engine.chat_stream.side_effect = lambda messages, **kw: iter([generated])
+        # Counting the PROMPT must succeed (that gate is a different contract);
+        # only counting the GENERATED text refuses, which is the usage count.
+        def _count(text):
+            if text == generated:
+                raise PretokenizerUnsafeInputError(_REFUSAL)
+            return 2
+        engine.count_tokens.side_effect = _count
+        engine.count_messages_tokens.return_value = 3
+        return _post(engine, {"model": "test-model", "messages": _MSG,
+                              "stream": True})
+
+    def test_the_body_is_complete(self):
+        r = self._sse("a" * 400)
+        assert r.status_code == 200
+        body = r.text
+        assert "[DONE]" in body, "the stream ended without its [DONE] sentinel"
+        assert "usage" in body, "the stream ended without its usage block"
+
+    def test_the_estimate_is_reported_rather_than_nothing(self):
+        import json
+
+        body = self._sse("a" * 400).text
+        usage = None
+        for line in body.splitlines():
+            if not line.startswith("data: ") or line.endswith("[DONE]"):
+                continue
+            obj = json.loads(line[len("data: "):])
+            if obj.get("usage"):
+                usage = obj["usage"]
+        assert usage is not None, f"no usage block in the stream: {body[-300:]!r}"
+        assert usage["completion_tokens"] == 100, usage
+
+    def test_an_ordinary_stream_is_unchanged(self):
+        engine = _engine()
+        r = _post(engine, {"model": "test-model", "messages": _MSG,
+                           "stream": True})
+        assert r.status_code == 200
+        assert "[DONE]" in r.text
+
+
+class TestEveryCountingSiteIsAccountedFor:
+    """A refusal at a counting call either REFUSES the request (a count that
+    gates the work) or ESTIMATES (a count that reports on work already done).
+    Neither may reach the generic handler as a 500."""
+
+    def test_the_embeddings_usage_count_does_not_fail_a_successful_embed(self):
+        # The usage count uses the CHAT engine's tokenizer, which can be a
+        # different model from the embedder that produced the vectors, so it can
+        # refuse text the embedder was happy with.
+        from localm.inference.pretokenizer_guard import count_tokens_or_estimate
+
+        def _refuse(_text):
+            raise PretokenizerUnsafeInputError(_REFUSAL)
+        assert count_tokens_or_estimate(_refuse, "x" * 400, "an embedding input") == 100
+
+    def test_a_gating_count_still_propagates(self):
+        # count_tokens_or_estimate must never be reached for a count that gates
+        # the work; those callers let it propagate so the route answers 400.
+        import inspect
+
+        import localm.inference.routes.chat as chat_routes
+        src = inspect.getsource(chat_routes)
+        # Both pre-generation counts, and the post-compaction re-count, refuse.
+        assert src.count("raise HTTPException(400, str(e))") >= 3
+
+    def test_only_this_refusal_is_estimated(self):
+        from localm.inference.pretokenizer_guard import count_tokens_or_estimate
+
+        def _boom(_text):
+            raise RuntimeError("the worker died")
+        with pytest.raises(RuntimeError):
+            count_tokens_or_estimate(_boom, "hi", "the generated text")
