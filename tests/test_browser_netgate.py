@@ -157,3 +157,29 @@ class TestAsyncWrapper:
         denied, allowed = asyncio.run(run())
         assert denied is not None and "deny list" in denied
         assert allowed is None
+
+
+class TestTimeoutsNest:
+    """The marshalling timeout must OUTLAST every browser timeout it wraps.
+
+    Inverted, the caller abandons the call while the browser is still working,
+    so the page's own timeout never gets to produce a real error and the worker
+    keeps running past the report. Asserted as the RELATION, not as literals, so
+    retuning one end cannot silently break it.
+    """
+
+    def _default_ms(self, fn, name):
+        import inspect
+        return inspect.signature(fn).parameters[name].default
+
+    def test_every_page_timeout_fits_inside_the_call_timeout(self):
+        from localm.browser.session import BrowserSession, DEFAULT_CALL_TIMEOUT
+        inner = [
+            self._default_ms(BrowserSession.navigate, "timeout_ms"),
+            self._default_ms(BrowserSession.click, "timeout_ms"),
+            self._default_ms(BrowserSession.fill, "timeout_ms"),
+        ]
+        for ms in inner:
+            assert ms / 1000.0 < DEFAULT_CALL_TIMEOUT, (
+                "a browser timeout of %sms is not inside the %ss call timeout"
+                % (ms, DEFAULT_CALL_TIMEOUT))
