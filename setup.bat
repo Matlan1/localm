@@ -135,8 +135,7 @@ echo.
 echo  [!] uv still is not callable after the install attempt.
 echo      Open a NEW terminal (so the updated PATH applies) and run setup.bat again,
 echo      or install uv manually first, then re-run setup.bat:
-echo        powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
-echo        winget install astral-sh.uv
+call :uv_manual_hint
 call :offer_report "localm setup could not install uv" "setup.bat tried Astral's installer but uv was still not callable afterwards."
 echo.
 pause
@@ -145,8 +144,7 @@ exit /b 1
 :uv_manual
 echo.
 echo  Setup needs uv. Install it, then re-run setup.bat:
-echo    powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
-echo    winget install astral-sh.uv
+call :uv_manual_hint
 echo.
 pause
 exit /b 1
@@ -360,6 +358,7 @@ echo    [3] cuda       - NVIDIA, peak performance (fetches the CUDA runtime for 
 echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained%M4%
 echo    [5] cpu        - no GPU%M5%
 echo    [6] I will build / provide my own (skip the download)
+echo    (your pick is load-tested; a failure offers Vulkan, never a silent swap)
 set "BSEL="
 call :flush
 set /p "BSEL=  Pick 1-6 [1]: "
@@ -396,11 +395,11 @@ if not defined TORCHSPEC (
     rem  gfx103X (RX 6000): the bundled self-contained build carries torch + the HF
     rem  stack + the ROCm runtime; add audio (soundfile) for unified-audio models.
     echo  Installing PyTorch ^(AMD ROCm, gfx103X^) + transformers ...
-    uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch install failed. GGUF chat still works.
+    uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
 ) else (
     echo  Installing PyTorch + transformers ...
-    uv pip install -p .venv %TORCHSPEC% || echo  [!] torch install failed. GGUF chat still works.
-    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers install failed. GGUF chat still works.
+    uv pip install -p .venv %TORCHSPEC% || echo  [!] torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
 )
 
 rem ---- provision the native llama.cpp binaries ------------------------------
@@ -731,3 +730,12 @@ if not exist "home" mkdir "home"
 set "DATADIR=%CD%\home"
 set "DATACREATED=1"
 exit /b 0
+
+rem ===========================================================================
+rem  :uv_manual_hint - the manual uv-install command; used from two call sites
+rem  above (declined the auto-install, and the auto-install still failed).
+rem ===========================================================================
+:uv_manual_hint
+echo    powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
+echo    winget install astral-sh.uv
+goto :eof
