@@ -238,20 +238,53 @@ jobs:
         continue-on-error: true
         run: python scripts/write_coverage_summary.py
 
-      # GUI is vanilla JS (localm/plugins/gui/static); the jsdom harness under
-      # tests-js/ loads app.js and exercises it. node:test, no build step.
-      - name: Setup Node (GUI JS tests)
-        uses: actions/setup-node@v6
+  # Separate jobs rather than steps in `test`: a killed job skips every later
+  # step, which `if: always()` does not survive. Folding either back into
+  # `test` loses its result whenever the Python leg dies.
+
+  # GUI is vanilla JS (localm/plugins/gui/static); the jsdom harness under
+  # tests-js/ loads app.js and exercises it. node:test, no build step.
+  gui-tests:
+    name: GUI tests (jsdom, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Cheap and independent of the Python suite: runs on every PR, not only
+    # under the `full-ci` label that gates the two-platform test matrix.
+    if: github.event_name != 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
-
       - name: GUI tests (jsdom)
         run: |
           npm ci
           npm test
 
-      # ruff is configured (pyproject [tool.ruff]) and blocking: the unused-import
-      # backlog (F401/F841/E401/F541) was cleared, so a new lint regression fails CI.
+  # ruff is configured (pyproject [tool.ruff]) and blocking: a new lint
+  # regression fails CI. One host only; ruff's result does not vary by host.
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    # Cheap and independent of the Python suite: runs on every PR, not only
+    # under the `full-ci` label that gates the two-platform test matrix.
+    if: github.event_name != 'push'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Create the project venv
+        run: python -m venv .venv
+      - name: Put the venv on PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,rag]"
       - name: Lint (ruff)
         run: ruff check .
 

@@ -312,6 +312,27 @@ async def prompt_delete(name: str):
 
 
 # ------------------------------------------------------------------ #
+#  Shared capacity guard for the fixed-cost system nudges below       #
+# ------------------------------------------------------------------ #
+
+# The same "getting close to capacity" fraction routes/chat.py already uses
+# to trigger compaction.
+_NUDGE_CAPACITY_FRACTION = 0.10
+
+
+def _nudge_fits_capacity(instruction: str, ctx) -> bool:
+    """True when appending *instruction* is safe for the model's known
+    context capacity: ``ctx.state["capacity"]``, an int token ceiling, or
+    absent/None when unknown (always safe). Character count stands in for
+    token count, so a ceiling this clears is genuinely safe: it never
+    undercounts what the instruction will actually cost."""
+    capacity = ctx.state.get("capacity")
+    if not isinstance(capacity, int) or capacity <= 0:
+        return True
+    return len(instruction) <= capacity * _NUDGE_CAPACITY_FRACTION
+
+
+# ------------------------------------------------------------------ #
 #  Thinking-model <think> nudge for regular chat                      #
 # ------------------------------------------------------------------ #
 
@@ -327,13 +348,16 @@ def _thinking_inlet(messages, ctx):
 
     Injects only for thinking-family models, and never twice: skips when a system
     message already steers <think> (a coder session, whose system prompt already
-    carries the instruction, or a persona that already does it). Appends to the
-    first system message - chat templates commonly honour only the first -
-    otherwise inserts one. The kernel pipeline isolates any exception this
-    raises."""
+    carries the instruction, or a persona that already does it), and skips when
+    the model's known context capacity is too small to absorb the instruction
+    (see _nudge_fits_capacity). Appends to the first system message - chat
+    templates commonly honour only the first - otherwise inserts one. The
+    kernel pipeline isolates any exception this raises."""
     from localm.inference.model_family import is_thinking_model
 
     if not is_thinking_model(getattr(ctx, "model_id", "") or ""):
+        return None
+    if not _nudge_fits_capacity(_THINK_INSTRUCTION, ctx):
         return None
     for m in messages:
         if m.get("role") == "system" and isinstance(m.get("content"), str) \
@@ -363,9 +387,13 @@ def _role_word_inlet(messages, ctx):
     bare third-person role word ("Model", "the assistant") or an incorrect
     pronoun for itself.
 
-    Skips when a system message already mentions third-person self-reference.
-    Appends the instruction to the first system message, or inserts one when
-    none exists. Exceptions raised here are isolated by the chat pipeline."""
+    Skips when a system message already mentions third-person self-reference,
+    and when the model's known context capacity is too small to absorb the
+    instruction (see _nudge_fits_capacity). Appends the instruction to the
+    first system message, or inserts one when none exists. Exceptions raised
+    here are isolated by the chat pipeline."""
+    if not _nudge_fits_capacity(_ROLE_WORD_INSTRUCTION, ctx):
+        return None
     for m in messages:
         if m.get("role") == "system" and isinstance(m.get("content"), str) \
                 and "third person" in m["content"].lower():

@@ -176,6 +176,83 @@ def test_the_memoryerror_is_what_stops_it_not_luck():
 
 
 # ---------------------------------------------------------------------------
+#  Two heap-buffer-overflow bugs in the ENGINE ITSELF (regex issues #611 and
+#  #612), fixed in regex 2026.8.31. Neither is a slow or memory-hungry match,
+#  so the timeout/cap machinery above does not and cannot guard against them -
+#  the only guard is the engine version.
+# ---------------------------------------------------------------------------
+
+# Issue #611: a conditional group with no explicit `|no` branch reports
+# itself empty via a boolean-precedence bug in `is_empty()`, so its whole
+# subtree - including capture groups that already incremented the parser's
+# group count - is dropped without rolling that count back. The C compiler
+# then under-allocates relative to the inflated public group count, and
+# mark_named_groups() writes past the allocation. regex.compile() returns
+# normally either way; see the test below for what this specific pattern
+# does and does not reveal about that from pure Python.
+_GROUP_COUNT_OVERFLOW_PATTERN = ('((?!))(?(1)(?(?=' + '()' * 15 +
+    '(?<a>)(?<b>)()(?<c>)()()(?<d>)(?<e>)' + ')))')
+
+# Issue #612: BESTMATCH+POSIX fuzzy matching narrows the search slice for its
+# final retry while a cached required-string position still points past the
+# new slice end. The stale position feeds a reverse class test that reads
+# past the subject buffer, and the byte it reads decides whether a match is
+# returned.
+_GHOST_MATCH_PATTERN = (r'(?bps)(?:qq){e<=2}fd~fecddabab(?:ff{d<=1}|'
+    r'.{0,2100}+(?-i:(?<=[\x00-\x7d\x7f-\xff])))')
+_GHOST_MATCH_SUBJECT = "~" * 6 + "fd~fecddabab" * 2 + "~" * 2000
+
+_regex_too_old_for_heap_bounds_probe = pytest.mark.skipif(
+    _REGEX_VERSION < (2026, 8, 31),
+    reason=(
+        f"regex=={_regex_module.__version__} is older than 2026.8.31: regex "
+        "issues #611 (heap-buffer-overflow WRITE at compile time) and #612 "
+        "(heap-buffer-overflow READ at search time), both reachable through "
+        "a model-supplied pattern with no match needed to be interrupted, "
+        "were fixed in that release. Sync the venv before running this "
+        "test."
+    ),
+)
+
+
+def test_the_group_count_overflow_pattern_compiles_and_never_matches():
+    """Compiles _GROUP_COUNT_OVERFLOW_PATTERN through the real call site on
+    any regex version. Deliberately NOT version-gated and does NOT assert on
+    rx.groups or rx.groupindex: both are 24, with the same groupindex
+    mapping, on every regex version this project supports, vulnerable or
+    fixed - the regex 2026.8.31 fix corrects an internal C allocation to
+    match the public group count, which was never wrong itself, rather than
+    changing the count. So neither is a Python-visible discriminator for
+    this bug, and asserting on either here would not detect a regression.
+    What this test actually proves is narrower: the pattern does not raise
+    or crash through this project's own compile and search path. The fix
+    for regex issue #611 is verified independently, by diffing
+    regex/_regex_core.py's LookAroundConditional.is_empty() against the
+    upstream release that fixes it."""
+    rx = _compile_model_pattern(_GROUP_COUNT_OVERFLOW_PATTERN, _model_regex_flags())
+    result = _run_model_regex(rx.search, "anything")
+    assert result is None, "the outer negative-lookahead group can never match"
+
+
+@_regex_too_old_for_heap_bounds_probe
+def test_the_stale_required_string_cache_no_longer_produces_a_ghost_match():
+    """Below regex 2026.8.31, _GHOST_MATCH_PATTERN searched against
+    _GHOST_MATCH_SUBJECT through the real call site returns a Match spanning
+    (16, 2130): the OOB read hands a garbage byte to a reverse class test
+    that should have failed, so the fuzzy-match retry reports success on a
+    subject it should have rejected. Deterministic on both sides of the fix
+    (regex issue #612), so this is a real behavioral regression guard, not
+    merely a crash probe."""
+    rx = _compile_model_pattern(_GHOST_MATCH_PATTERN, _model_regex_flags())
+    result = _run_model_regex(rx.search, _GHOST_MATCH_SUBJECT)
+    assert result is None, (
+        "expected no match once the stale required-string cache is reset on "
+        f"a narrowed slice; got a spurious match at "
+        f"{result.span() if result else None} instead - the heap-read bug "
+        "(regex issue #612) may have reappeared")
+
+
+# ---------------------------------------------------------------------------
 #  The bound must not cost the feature
 # ---------------------------------------------------------------------------
 

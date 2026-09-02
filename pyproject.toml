@@ -55,8 +55,8 @@ dependencies = [
     # install has no transformers, so relying on the transitive path would leave
     # this guard absent precisely where nobody would think to look for it. See
     # localm/plugins/coder/tools/files.py _compile_model_pattern.
-    "regex>=2026.7.19",
-    "huggingface-hub>=1.28.0",
+    "regex>=2026.8.31",
+    "huggingface-hub>=1.29.0",
     "pydantic>=2.13.4",
     "fastapi>=0.141.1",
     # fastapi's own requirement is only starlette>=0.46.0, too weak to rely on:
