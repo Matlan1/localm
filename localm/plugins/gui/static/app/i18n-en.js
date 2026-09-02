@@ -753,6 +753,7 @@ export const I18N_EN = {
   "models.detail.title": "Model - {name}",
   "models.detail.type": "Type",
   "models.empty.hint": "Pull a model above, or search HuggingFace to add your first one.",
+  "models.empty.setupLink": "New here? Try Setup to get a model running.",
   "models.empty.text": "No models yet",
   "models.keyRequired": "This LocaLM server requires an API key.",
   "models.loadError": "Could not load models (HTTP {status})",

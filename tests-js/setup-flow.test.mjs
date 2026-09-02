@@ -183,6 +183,23 @@ test("Setup: Find a model navigates to Models and focuses the search box", async
   assert.equal(doc.activeElement, doc.getElementById("disc-query"));
 });
 
+test("Setup: the Models page empty state links into Setup on a deliberate click", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/models", { models: [] }],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("nav-models").click();
+  await window.refreshModelsPage();
+  const box = doc.getElementById("models-table");
+  assert.match(box.textContent, /No models yet/);
+  // Never opens on its own - only present, and only acts, on a click.
+  assert.equal(doc.getElementById("view-setup").classList.contains("active"), false);
+  const link = box.querySelector("a");
+  assert.ok(link, "the empty state must carry a link into Setup");
+  link.click();
+  assert.equal(doc.getElementById("view-setup").classList.contains("active"), true);
+});
+
 test("Setup: Go to chat navigates to the chat view", async () => {
   const { window } = loadAppWithPages({ fetchImpl: makeFetch([]) });
   const doc = showSetup(window);

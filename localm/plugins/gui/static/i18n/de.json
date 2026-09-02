@@ -589,6 +589,7 @@
   "models.detail.title": "Modell - {name}",
   "models.detail.type": "Typ",
   "models.empty.hint": "Laden Sie oben ein Modell herunter, oder durchsuchen Sie HuggingFace, um Ihr erstes hinzuzufügen.",
+  "models.empty.setupLink": "Neu hier? Nutzen Sie Setup, um ein Modell zum Laufen zu bringen.",
   "models.empty.text": "Noch keine Modelle",
   "models.keyRequired": "Dieser LocaLM-Server erfordert einen API-Schlüssel.",
   "models.loadError": "Modelle konnten nicht geladen werden (HTTP {status})",
