@@ -587,13 +587,13 @@ class GGUFEmbedder:
             # metadata read needs no context.
             self.declared_pooling = declared_pooling_type(self._model, api)
             self._pre_type = pretokenizer_guard.read_pre_type(self._model, api)
-            if pretokenizer_guard.policy_for(self._pre_type) is not None:
+            hazard = pretokenizer_guard.hazard_note(self._pre_type)
+            if hazard is not None:
                 logger.warning(
                     "embedder %s: declares tokenizer.ggml.pre=%r, whose "
-                    "pre-tokenizer regex aborts the process on long unbroken "
-                    "runs of one character class. Such text will be refused "
+                    "pre-tokenizer regex %s. Such text will be refused "
                     "rather than embedded.",
-                    Path(model_path).name, self._pre_type)
+                    Path(model_path).name, self._pre_type, hazard)
             self.pooling_type = _effective_pooling(pooling_type, self.declared_pooling)
             logger.debug("embedder %s: declared pooling %s, using %s",
                          Path(model_path).name, pooling_name(self.declared_pooling),

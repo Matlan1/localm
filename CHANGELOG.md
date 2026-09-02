@@ -470,11 +470,33 @@ permanent public record of what shipped and are never rewritten; the in-progress
   whole model process down with it: the reply was lost, the model was unloaded,
   and anything else in flight died with it. No unusual message was needed and
   the same input crashed it every time. Such text is now refused before it
-  reaches the tokenizer, with a message that quotes the run it objected to and
-  says how long a run that tokenizer allows, and the model stays loaded and
+  reaches the tokenizer, with a message saying how long the offending run was
+  and how long a run that tokenizer allows, and the model stays loaded and
   keeps serving everything else. Embedding and image prompts are covered too.
   Ordinary writing is unaffected, since punctuation and line breaks end a run,
   and models with unaffected tokenizers are not checked at all.
+- **A long run of blank lines crashed the server the same way, and the fix
+  above did not cover it.** The check looked for long runs of letters or
+  digits, and a line break is neither, so pasting a few thousand consecutive
+  blank lines still took the model process down. It affected eleven tokenizers:
+  the ten covered above, among them Llama 4, Tekken, GPT-4o-compatible,
+  Granite's multilingual embedding model and the Cohere and Aya families, and
+  also JAIS-2, which was not previously checked at all. Runs of line breaks are
+  now bounded too. Ordinary documents are unaffected, since the limit is far
+  above any normal run of blank lines, and the three tokenizers measured to
+  handle long runs of them safely are left unchecked.
+- **Two tokenizers could make the server crawl rather than crash.** With a
+  JAIS-2 model loaded, a message padded with a long stretch of spaces or tabs
+  took about a second just to be split into words. With a DeepSeek model, text
+  written as one unbroken block with no spaces or line breaks anywhere - which
+  is how Chinese, Japanese and Korean are normally written - got slower and
+  slower the longer the block ran, reaching over thirty seconds at the largest
+  message the server accepts. Neither of those was a crash, so neither was
+  caught by the crash check above. Both are now bounded, and the refusal says
+  the text is too slow to process rather than claiming it would crash. Ordinary
+  use is untouched: a CJK message of a few thousand characters, a long CJK
+  document with line breaks in it, and source code or English prose at the full
+  length limit all pass.
 - **A bug report now hides credentials that were logged as structured data, not
   just ones written as plain settings.** A report already blanked out things
   like `api_key=...` and `Authorization:` headers before you sent it, but a
