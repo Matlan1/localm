@@ -495,38 +495,38 @@
     <!-- ============ IMAGES ============ -->
     <section id="view-images" class="view">
       <div class="page">
-        <h2>Image generation</h2>
-        <div class="sub">Runs your local ComfyUI FLUX pipeline. The LLM unloads automatically
+        <h2 data-i18n="images.title">Image generation</h2>
+        <div class="sub" data-i18n="images.intro">Runs your local ComfyUI FLUX pipeline. The LLM unloads automatically
         to free VRAM for the image model, and reloads on the next chat request.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="image"></span>
-            <div class="card-head-text"><h3>Generate</h3></div></div>
-          <label>Prompt</label>
-          <textarea id="img-prompt" rows="3" placeholder="a watercolor fox in a snowy forest"></textarea>
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.generate">Generate</h3></div></div>
+          <label data-i18n="images.promptLabel">Prompt</label>
+          <textarea id="img-prompt" rows="3" placeholder="a watercolor fox in a snowy forest" data-i18n-placeholder="images.promptPlaceholder"></textarea>
           <div class="grid2">
-            <div><label>Negative prompt</label><input type="text" id="img-negative" placeholder="optional"></div>
-            <div><label>LoRA</label><select id="img-lora"><option value="">None</option></select></div>
+            <div><label data-i18n="images.negativePromptLabel">Negative prompt</label><input type="text" id="img-negative" placeholder="optional" data-i18n-placeholder="mediaGallery.optionalPlaceholder"></div>
+            <div><label data-i18n="images.loraLabel">LoRA</label><select id="img-lora"><option value="" data-i18n="images.loraNone">None</option></select></div>
           </div>
-          <label>Input image path (optional, img2img)</label>
-          <input type="text" id="img-input" placeholder="path to a base image" spellcheck="false">
+          <label data-i18n="images.inputImageLabel">Input image path (optional, img2img)</label>
+          <input type="text" id="img-input" placeholder="path to a base image" spellcheck="false" data-i18n-placeholder="images.inputImagePlaceholder">
           <!-- Every knob here is placeholder-defaulted: blank already means "use
                the tuned default". "reuse settings" on a history item writes into
                them, so it calls revealFilledAdvanced and this opens itself. -->
           <details class="adv-fold" id="img-advanced">
-            <summary>Advanced <span class="adv-fold-hint">seed, guidance, denoise, CFG, LoRA strength</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="images.advancedHint">seed, guidance, denoise, CFG, LoRA strength</span><span class="job-state adv-fold-count" hidden></span></summary>
             <div class="adv-fold-body grid2">
-              <div><label>Seed</label><input type="number" id="img-seed" placeholder="random"></div>
-              <div><label>Guidance</label><input type="number" id="img-guidance" step="0.1" placeholder="default (~3.5)"></div>
-              <div><label>Denoise (img2img)</label><input type="number" id="img-denoise" step="0.05" min="0" max="1" placeholder="default"></div>
-              <div><label>CFG</label><input type="number" id="img-cfg" step="0.5" placeholder="default 3.5, only with negative prompt"></div>
-              <div><label>LoRA strength (model)</label><input type="number" id="img-lora-strength-model" step="0.05" placeholder="default (1.0)"></div>
-              <div><label>LoRA strength (CLIP)</label><input type="number" id="img-lora-strength-clip" step="0.05" placeholder="default (0.5)"></div>
+              <div><label data-i18n="chat.seed">Seed</label><input type="number" id="img-seed" placeholder="random" data-i18n-placeholder="mediaGallery.randomPlaceholder"></div>
+              <div><label data-i18n="images.guidanceLabel">Guidance</label><input type="number" id="img-guidance" step="0.1" placeholder="default (~3.5)" data-i18n-placeholder="images.guidancePlaceholder"></div>
+              <div><label data-i18n="images.denoiseLabel">Denoise (img2img)</label><input type="number" id="img-denoise" step="0.05" min="0" max="1" placeholder="default" data-i18n-placeholder="mediaGallery.defaultPlaceholder"></div>
+              <div><label data-i18n="mediaGallery.cfgLabel">CFG</label><input type="number" id="img-cfg" step="0.5" placeholder="default 3.5, only with negative prompt" data-i18n-placeholder="images.cfgPlaceholder"></div>
+              <div><label data-i18n="images.loraStrengthModelLabel">LoRA strength (model)</label><input type="number" id="img-lora-strength-model" step="0.05" placeholder="default (1.0)" data-i18n-placeholder="images.loraStrengthModelPlaceholder"></div>
+              <div><label data-i18n="images.loraStrengthClipLabel">LoRA strength (CLIP)</label><input type="number" id="img-lora-strength-clip" step="0.05" placeholder="default (0.5)" data-i18n-placeholder="images.loraStrengthClipPlaceholder"></div>
             </div>
           </details>
           <div class="actions">
-            <button class="btn-primary" id="img-generate">Generate</button>
-            <button class="btn-secondary" id="img-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
-            <label class="inline-check" title="Applies to image generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
+            <button class="btn-primary" id="img-generate" data-i18n="mediaGallery.generate">Generate</button>
+            <button class="btn-secondary" id="img-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
+            <label class="inline-check" title="Applies to image generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="images.reloadCheckboxTitle">
               <input type="checkbox" id="img-reload-llm" checked> reload chat model after generation
             </label>
           </div>
@@ -535,16 +535,16 @@
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="image"></span>
-            <div class="card-head-text"><h3>History</h3></div></div>
-          <div class="sub">Tick thumbnails to select for bulk actions; click one for
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.history">History</h3></div></div>
+          <div class="sub" data-i18n="images.historyHint">Tick thumbnails to select for bulk actions; click one for
           details, metadata, and per-image actions.</div>
           <div id="img-bulk" class="media-bulk" style="display:none"></div>
           <div id="img-history" class="media-grid"></div>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
-            <div class="card-head-text"><h3>Workflow</h3></div></div>
-          <div class="sub">The ComfyUI workflow this page uses. Upload one (in
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
+          <div class="sub" data-i18n="workflow.intro">The ComfyUI workflow this page uses. Upload one (in
           ComfyUI: Save -> API format) and select it, or keep the built-in default.</div>
           <div id="img-workflows" data-media="image"></div>
         </div>

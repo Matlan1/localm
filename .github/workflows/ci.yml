@@ -247,10 +247,9 @@ jobs:
   gui-tests:
     name: GUI tests (jsdom, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    if: >-
-      github.event_name != 'push' &&
-      (github.event_name != 'pull_request' ||
-       contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    # Cheap and independent of the Python suite: runs on every PR, not only
+    # under the `full-ci` label that gates the two-platform test matrix.
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -270,10 +269,9 @@ jobs:
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name != 'push' &&
-      (github.event_name != 'pull_request' ||
-       contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    # Cheap and independent of the Python suite: runs on every PR, not only
+    # under the `full-ci` label that gates the two-platform test matrix.
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
