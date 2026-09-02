@@ -67,8 +67,9 @@ for you.
 
 Set `LOCALM_HOME` before you do anything else: `setup.sh` above always asks
 where data should live, but a plain `pip install` never does, and with
-nothing set it falls back to a directory inside your Python environment - the
-next `pip install --upgrade localm` can wipe it.
+nothing set it falls back to a directory inside your Python environment. An
+upgrade does not delete it, but your models then live inside site-packages, and
+removing or recreating that environment takes them with it.
 
 ```sh
 export LOCALM_HOME=~/localm-data
