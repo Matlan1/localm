@@ -5,10 +5,14 @@
   "description": "jsdom test harness for the localm GUI (localm/plugins/gui/static). Python is the product; this only tests the vanilla-JS frontend.",
   "scripts": {
     "test": "node --test --test-force-exit tests-js/*.test.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "lint": "eslint localm/plugins/gui/static tests-js"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.61.1",
+    "eslint": "^10.9.1",
+    "globals": "^17.12.0",
     "jsdom": "^25.0.1"
   }
 }

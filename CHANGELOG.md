@@ -110,6 +110,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The per-model icon override in Settings > Chat > Avatars now offers a
   dropdown of your installed models** instead of requiring you to type an
   exact model name.
+- **A guided Setup page walks you through installing the local model runtime
+  and adding your first model.** Open it from the new Setup entry in the
+  sidebar, or the link on an empty Models page; it never opens on its own.
+  It shows the detected and installed runtime and installs it in one click
+  if nothing is there yet, then tells you how many models you have with a
+  shortcut to add one. Nothing runs until you click it.
 
 ### Changed
 - **The two installers explain themselves more consistently.** `setup.bat`
@@ -397,6 +403,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   "Opening the GUI" or picking a model "on the Models page" - none of which
   `--api-mode` ever mounts. Those lines are now api-mode-aware and describe
   what is actually available instead.
+- **localm can now identify its own version in more situations**, instead of
+  falling back to "unknown." An install with no readable version file next to
+  it and no usable package metadata (uncommon, but possible on a damaged or
+  unusual install) previously could not tell what it was running - which also
+  meant the update checker could not confirm a downloaded build was genuinely
+  newer before installing it. Release builds now carry a fallback copy of
+  their own version number, so this case is now rare.
 - **A chat request could be rejected as too large for a very small context
   model even though your own message fit comfortably.** Every chat turn adds
   a short style nudge to the model's instructions; on a normal-sized context
@@ -406,6 +419,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   so a request that actually fits succeeds instead of being refused.
 
 ### Security
+- **A fetched web page or external tool result can no longer impersonate you or
+  the assistant, whatever model you run.** Text that localm brings in from
+  outside - a page the coder fetched, a web search result, output from an MCP
+  server - can contain the special markers a model uses to tell one speaker's
+  turn from another. Until now those markers were removed by matching against a
+  list of the model families localm knew about, so a family that was not on the
+  list could smuggle one through, and the model would read the injected text as
+  a genuine system or assistant turn and act on it. localm now tracks exactly
+  which part of a prompt came from outside and tells the model's tokenizer to
+  read that part as plain text, so those markers cannot take effect there no
+  matter which family they belong to, while the markers your model's own chat
+  format needs keep working normally. This covers both the GGUF and the
+  Transformers backends.
 - **Chatting with certain models no longer crashes the server outright.** For a
   handful of tokenizers - among them Llama 4, Mistral's Tekken, EXAONE MoE,
   GPT-4o-compatible and SuperBPE ones - a message containing a long unbroken run

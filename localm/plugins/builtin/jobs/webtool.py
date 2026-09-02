@@ -33,7 +33,7 @@ import json
 import re
 
 from localm.debuglog import logger
-from localm.textguard import neutralise
+from localm.textguard import compose, neutralise, untrusted_span
 
 # How many search/fetch rounds a single job run may take before it must answer.
 _MAX_ROUNDS = 4
@@ -78,8 +78,13 @@ _UNTRUSTED_WARNING = (
 )
 
 
-def _fence_untrusted(body: str) -> str:
-    return f"{_UNTRUSTED_WARNING}\n<untrusted_content>\n{body}\n</untrusted_content>"
+def _fence_untrusted(body: str):
+    """Fence *body* as untrusted, recording it as an untrusted range."""
+    return compose(
+        _UNTRUSTED_WARNING + "\n<untrusted_content>\n",
+        untrusted_span(body),
+        "\n</untrusted_content>",
+    )
 
 
 OFFLINE_SYSTEM = (
@@ -362,19 +367,23 @@ def run_web_call(call: dict) -> str:
                     r["title"] = neutralise(r["title"])
                 if isinstance(r.get("snippet"), str):
                     r["snippet"] = neutralise(r["snippet"])
-            return (f'[Results of web_search "{query}"]\n'
-                    + _fence_untrusted(netpolicy.format_results(results)))
+            return compose(
+                '[Results of web_search "', untrusted_span(query), '"]\n',
+                _fence_untrusted(netpolicy.format_results(results)))
         if name == "fetch_url":
             final_url, text = netpolicy.fetch_text(str(args.get("url", "")))
-            return (f"[Content of {final_url}]\n"
-                    + _fence_untrusted(neutralise(text[:6000])))
-        return f"[Unknown web tool: {name}] Answer without it."
+            return compose(
+                "[Content of ", untrusted_span(final_url), "]\n",
+                _fence_untrusted(text[:6000]))
+        return compose("[Unknown web tool: ", untrusted_span(name),
+                       "] Answer without it.")
     except netpolicy.NetworkPolicyError as e:
-        return (f"[Web request refused by policy: {e}] Answer without the web and say "
-                "web access was refused.")
+        return compose("[Web request refused by policy: ", untrusted_span(str(e)),
+                       "] Answer without the web and say web access was refused.")
     except Exception as e:
-        return (f"[Web request failed: {e}] Answer without the web, and say that web "
-                "access did not work.")
+        return compose("[Web request failed: ", untrusted_span(str(e)),
+                       "] Answer without the web, and say that web access did not "
+                       "work.")
 
 
 def _tool_call_grammar(engine):
@@ -479,7 +488,8 @@ def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> 
         # user message, so the user/assistant alternation the chat templates expect
         # is unchanged.
         messages.append({"role": "user",
-                         "content": run_web_call(call) + ignored_calls_note(calls)})
+                         "content": compose(run_web_call(call),
+                                            ignored_calls_note(calls))})
 
     # Round cap reached: force an answer from what was gathered, no more searching.
     messages.append({"role": "user", "content":

@@ -40,6 +40,15 @@ request extras:
 | `seed` | reproducible generation |
 | `grammar`, `grammar_lazy`, `grammar_triggers` | GBNF grammar constraining the output (local models); a lazy grammar stays unconstrained until a trigger pattern appears, and requires `grammar_triggers` |
 
+A message may also carry `untrusted_spans`: `[[start, end], ...]` character
+ranges of its own `content` that came from an untrusted source, such as a
+fetched page or a tool result. localm tokenises those ranges with
+special-token parsing off, so a chat-template control token spelled inside
+them stays ordinary text instead of forging a role boundary. The field is
+optional and additive: omit it and the request behaves exactly as before. A
+range can only disable special-token parsing over your own prompt, never
+enable it, and out-of-range values are clamped to the content length.
+
 The response's assistant message (and, for a stream, the delta) also carries
 `reasoning_content`: the model's `<think>` reasoning, split out of the
 visible `content` when the model emitted one. Present only when there was

@@ -20,6 +20,7 @@ const SHELL = [
   "/pages/dispatch.js", "/pages/models.js", "/pages/images.js",
   "/pages/plugins.js", "/pages/settings.js", "/pages/workflow.js",
   "/pages/music.js", "/pages/video.js", "/pages/knowledge.js",
+  "/pages/setup.js",
   // Interface translations. English is in /app/i18n-en.js, imported by the app.
   "/i18n/de.json",
   "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png",

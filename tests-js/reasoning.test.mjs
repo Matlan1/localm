@@ -23,7 +23,7 @@ async function run(deltas) {
 }
 
 test("H4: reasoning_content deltas render a think block and persist as <think>", async () => {
-  const { window, conv } = await run([
+  const { conv } = await run([
     { choices: [{ delta: { reasoning_content: "because X" } }] },
     { choices: [{ delta: { content: "The answer." } }] },
     { choices: [{ delta: {}, finish_reason: "stop" }], usage: { total_tokens: 5 } },

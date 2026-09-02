@@ -222,6 +222,100 @@ def _eos_token_ids(model, tokenizer) -> set:
     return {int(raw)}
 
 
+def _untrusted_prompt_ranges(tokenizer, template_messages, text):
+    """Untrusted character ranges of the rendered prompt *text*.
+
+    Empty when no message carries an annotation (the common case, which costs no
+    extra render) and also when the ranges cannot be located exactly, in which
+    case the caller tokenises exactly as it did before this seam existed and a
+    warning records that only the text-level defang applied.
+    """
+    from localm.textguard import (
+        content_spans_via_sentinels, map_untrusted_ranges, untrusted_spans_of,
+    )
+
+    per_message = [untrusted_spans_of(m.get("content")) for m in template_messages]
+    if not any(per_message):
+        return ()
+    contents = [m.get("content") for m in template_messages]
+    if not all(isinstance(c, str) for c in contents):
+        from localm.debuglog import logger
+        logger.warning(
+            "textguard: a message carries structured (non-text) content, so the "
+            "untrusted spans of this conversation cannot be located; they are "
+            "tokenised with special-token parsing ON and only the text-level "
+            "defang applies to this request")
+        return ()
+
+    def render(sentinels):
+        probe = [dict(m, content=s) for m, s in zip(template_messages, sentinels)]
+        return tokenizer.apply_chat_template(
+            probe, tokenize=False, add_generation_prompt=True)
+
+    spans = content_spans_via_sentinels([str(c) for c in contents], render, text)
+    if spans is None:
+        from localm.debuglog import logger
+        logger.warning(
+            "textguard: could not locate message content in the rendered prompt, "
+            "so untrusted spans are tokenised with special-token parsing ON; "
+            "only the text-level defang applies to this request")
+        return ()
+    return map_untrusted_ranges(spans, per_message)
+
+
+def _tokenize_prompt(tokenizer, template_messages, text, device):
+    """Tokenise *text*, splitting special tokens inside untrusted spans only.
+
+    ``split_special_tokens=True`` makes a control token spelled inside untrusted
+    content tokenise as ordinary text instead of the real special id. Trusted
+    segments, the chat template's own role markers included, keep the default so
+    the template still parses.
+
+    SCOPE: the knob covers added tokens registered with ``special=True``, which
+    is how chat templates register their role markers. An added token registered
+    with ``special=False`` still resolves to its own id inside an untrusted span;
+    only the text-level defang applies to that case. Pinned by
+    test_the_knob_covers_special_added_tokens_only.
+
+    ``add_special_tokens=False`` throughout: the template already emitted the
+    model's BOS, exactly as on the single-call path.
+    """
+    plain = lambda: tokenizer(                                    # noqa: E731
+        text, return_tensors="pt", add_special_tokens=False).to(device)
+
+    ranges = _untrusted_prompt_ranges(tokenizer, template_messages, text)
+    if not ranges:
+        return plain()
+
+    from localm.textguard import split_by_trust
+
+    try:
+        import torch
+        ids = []
+        for segment, is_untrusted in split_by_trust(text, ranges):
+            if not segment:
+                continue
+            ids.extend(tokenizer(
+                segment,
+                add_special_tokens=False,
+                split_special_tokens=bool(is_untrusted),
+            )["input_ids"])
+        if not ids:
+            return plain()
+        input_ids = torch.tensor([ids], dtype=torch.long)
+        return {
+            "input_ids": input_ids.to(device),
+            "attention_mask": torch.ones_like(input_ids).to(device),
+        }
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning(
+            "textguard: per-span tokenisation failed (%s), falling back to a "
+            "single call with special-token parsing ON; only the text-level "
+            "defang applies to this request", e)
+        return plain()
+
+
 def _resolve_max_new_tokens(max_tokens: int, context_capacity: Optional[int],
                              n_prompt: Optional[int]) -> int:
     """Translate ``max_tokens`` into the ``max_new_tokens`` transformers'
@@ -925,9 +1019,8 @@ class HFWorker:
             # tokenize=True) does internally; templates that emit no BOS
             # (ChatML/Qwen) are for models that take no standalone BOS, so
             # suppressing it here is correct for them too.
-            inputs = tokenizer(
-                text, return_tensors="pt", add_special_tokens=False
-            ).to(model.device)
+            inputs = _tokenize_prompt(
+                tokenizer, template_messages, text, model.device)
 
         # Check prompt token length against context capacity before generate
         input_ids = inputs.get("input_ids")

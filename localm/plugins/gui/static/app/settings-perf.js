@@ -1464,7 +1464,7 @@ export function rebuildViews() {
   // suite never caught this - only the real ESM browser did.) Mutating the array
   // contents is allowed on an imported binding and is seen by every importer.
   VIEWS.length = 0;
-  VIEWS.push("chat", ...tabs, "models", "plugins", "settings");
+  VIEWS.push("chat", ...tabs, ...CORE_VIEWS.filter((v) => v !== "chat"));
 }
 
 // After the rail is rebuilt, keep the shown view reachable: if its plugin was

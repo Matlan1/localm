@@ -5343,7 +5343,13 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
     result = []
     for msg in messages:
         if isinstance(msg.content, str):
-            result.append({"role": msg.role, "content": msg.content})
+            spans = getattr(msg, "untrusted_spans", None)
+            content = msg.content
+            if spans:
+                from localm.textguard import GuardedText
+                content = GuardedText(content, [tuple(s[:2]) for s in spans
+                                                if len(s) >= 2])
+            result.append({"role": msg.role, "content": content})
         else:
             parts = []
             for part in msg.content:

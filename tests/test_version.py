@@ -3,6 +3,9 @@
 the latest release tag. Editable installs do not refresh dist-info on a code swap,
 so the running version MUST come from the VERSION file at runtime, not metadata."""
 
+import sys
+import types
+
 from localm import _version
 
 
@@ -24,6 +27,64 @@ def test_repo_version_file_is_present_and_read():
     assert _version.version_file().is_file(), "repo must ship a VERSION file"
     assert _version.read_version() == _version.version_file().read_text(
         encoding="utf-8").strip()
+
+
+# --------------------- read_version() fallback order (3-way) --------------------
+#
+# VERSION file (live) > installed metadata > the release build's baked
+# localm/_build_version.py constant > "unknown". These control all three sources
+# independently so the ORDER, not just each source's own presence, is pinned.
+
+def _block_file_and_metadata(monkeypatch, tmp_path):
+    """Shared setup: the VERSION file is unreadable and importlib.metadata.version
+    raises, so read_version() can only resolve via the baked constant or
+    "unknown"."""
+    monkeypatch.setattr(_version, "version_file", lambda: tmp_path / "nope")
+
+    def _raise(name):
+        raise ModuleNotFoundError(f"No package metadata was found for {name}")
+    monkeypatch.setattr("importlib.metadata.version", _raise)
+
+
+def test_read_version_falls_back_to_baked_constant(monkeypatch, tmp_path):
+    """Third fallback: a release build's baked localm/_build_version.py constant,
+    reached only when neither the VERSION file nor installed metadata resolves."""
+    _block_file_and_metadata(monkeypatch, tmp_path)
+    fake = types.ModuleType("localm._build_version")
+    fake.VERSION = "7.7.7-baked"
+    monkeypatch.setitem(sys.modules, "localm._build_version", fake)
+    assert _version.read_version() == "7.7.7-baked"
+
+
+def test_read_version_prefers_metadata_over_baked_constant(monkeypatch, tmp_path):
+    """Installed metadata still wins over the baked constant when both are
+    available - the baked constant is the LAST fallback, not an alternate."""
+    monkeypatch.setattr(_version, "version_file", lambda: tmp_path / "nope")
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "5.5.5-metadata")
+    fake = types.ModuleType("localm._build_version")
+    fake.VERSION = "5.5.5-baked-should-not-be-read"
+    monkeypatch.setitem(sys.modules, "localm._build_version", fake)
+    assert _version.read_version() == "5.5.5-metadata"
+
+
+def test_read_version_unknown_when_all_three_sources_are_absent(monkeypatch, tmp_path):
+    """The pre-existing terminal case is unchanged: with no VERSION file, no
+    metadata, and no localm._build_version module at all (an ordinary source
+    checkout, never built into a signed release), read_version() still returns
+    "unknown" rather than raising - the baked-constant import must be guarded."""
+    _block_file_and_metadata(monkeypatch, tmp_path)
+    monkeypatch.delitem(sys.modules, "localm._build_version", raising=False)
+    assert _version.read_version() == "unknown"
+
+
+def test_read_version_baked_constant_empty_string_is_treated_as_absent(monkeypatch, tmp_path):
+    """A present-but-empty baked constant (a malformed or half-written generated
+    file) must not be reported as a real version."""
+    _block_file_and_metadata(monkeypatch, tmp_path)
+    fake = types.ModuleType("localm._build_version")
+    fake.VERSION = ""
+    monkeypatch.setitem(sys.modules, "localm._build_version", fake)
+    assert _version.read_version() == "unknown"
 
 
 def test_normalize_strips_leading_v():

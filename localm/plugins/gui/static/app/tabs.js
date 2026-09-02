@@ -8,7 +8,7 @@ import { $ } from "./helpers.js";
 
 // Kernel pages are always present; plugin views (coder, images, music, video,
 // knowledge) are added to VIEWS by renderNav() while their plugin is active.
-export const CORE_VIEWS = ["chat", "models", "plugins", "settings"];
+export const CORE_VIEWS = ["chat", "models", "plugins", "settings", "setup"];
 export let VIEWS = [...CORE_VIEWS];
 
 // Toggle the .active class on the view sections and nav buttons, without
