@@ -144,3 +144,51 @@ class TestPageContentIsUntrusted:
         for name in ("browser_navigate", "browser_read", "browser_click",
                      "browser_fill", "browser_console", "browser_network"):
             assert is_untrusted_tool(name, TOOL_REGISTRY[name]), name
+
+
+class TestTheRouteDecidesFromScopeAndSetting:
+    """Both must hold: the capability on the key, and the setting switched on."""
+
+    def _helper(self):
+        from localm.plugins.builtin.coder.plug import _browser_enabled_for
+        return _browser_enabled_for
+
+    def test_owner_still_needs_the_setting_on(self, monkeypatch):
+        fn = self._helper()
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"browser_enabled": False})
+        assert fn(True, set()) is False
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"browser_enabled": True})
+        assert fn(True, set()) is True
+
+    def test_a_key_without_the_capability_never_browses(self, monkeypatch):
+        from localm import scopes as S
+        fn = self._helper()
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"browser_enabled": True})
+        assert fn(False, {S.CODER}) is False
+        assert fn(False, {S.CODER_FULL}) is False, \
+            "shell access must not imply browser access"
+        assert fn(False, {S.BROWSER}) is True
+        assert fn(False, {S.ADMIN}) is True
+
+    def test_an_unreadable_config_refuses(self, monkeypatch):
+        fn = self._helper()
+
+        def boom():
+            raise RuntimeError("config gone")
+        monkeypatch.setattr("localm.config.load_config", boom)
+        assert fn(True, set()) is False
+
+
+class TestNoDeadSettings:
+    def test_every_browser_setting_is_actually_read(self):
+        """A setting nothing reads is a facade. Each of these has a consumer."""
+        import inspect
+        from localm.plugins.coder.tools import browser as bt
+        from localm.plugins.builtin.coder import plug
+        src = (inspect.getsource(bt) + inspect.getsource(plug._browser_enabled_for))
+        for key in ("browser_enabled", "browser_headless", "browser_engine",
+                    "browser_custom_domain_rules", "browser_allow", "browser_deny"):
+            assert key in src, key + " is declared in the schema but read nowhere"

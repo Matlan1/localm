@@ -157,3 +157,45 @@ def test_a_file_url_is_refused(browser, tmp_path):
     res = b.navigate(target.as_uri())
     assert res["ok"] is False
     assert "not allowed" in (res.get("refused") or ""), res
+
+
+def test_a_closed_session_leaves_no_profile_on_disk(browser, origin):
+    """No-traces: the browser writes its profile to the OS temp dir while it
+    runs, not into localm's data dir, and a clean stop() removes it.
+
+    A HARD KILL of the process is a different case and is not covered: nothing
+    runs to do the removal, so the temp profile survives until the OS clears it.
+    """
+    import glob
+    import os
+    import tempfile
+    import time
+
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    root = tempfile.gettempdir()
+
+    def snap():
+        found = set()
+        for pat in ("playwright*", "*chromium*", "scoped_dir*"):
+            found |= set(glob.glob(os.path.join(root, pat)))
+        return found
+
+    before = snap()
+    b = browser()
+    assert b.navigate("http://localhost:%d/index.html" % port)["ok"] is True
+    secret = "SECRET-NO-TRACES-7Q4M"
+    b._call(lambda: b._page.evaluate(
+        "(s) => { document.cookie = 'probe=' + s; localStorage.setItem('k', s); }",
+        secret))
+    written = b._call(lambda: b._page.evaluate(
+        "() => document.cookie + '|' + localStorage.getItem('k')"))
+    assert secret in written, "nothing was written, so the check below is vacuous"
+
+    created = snap() - before
+    assert created, "no profile directory was created, so nothing is being measured"
+
+    b.stop()
+    time.sleep(2.0)
+    leftover = created & snap()
+    assert not leftover, "a closed session left a profile behind: %r" % (sorted(leftover),)

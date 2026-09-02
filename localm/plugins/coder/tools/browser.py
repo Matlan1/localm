@@ -61,6 +61,7 @@ def _open_session(session, *, headless: bool = True):
         headless=headless and cfg["headless"],
         extra_deny=cfg["deny"],
         extra_allow=cfg["allow"],
+        engine=cfg["engine"],
     )
     live.start()
     bsession.register(live)
@@ -77,8 +78,10 @@ def _browser_config() -> dict:
     except Exception:
         cfg = {}
     custom = bool(cfg.get("browser_custom_domain_rules", False))
+    engine = str(cfg.get("browser_engine", "bundled") or "bundled")
     return {
         "headless": bool(cfg.get("browser_headless", True)),
+        "engine": engine if engine in ("bundled", "system") else "bundled",
         "deny": list(cfg.get("browser_deny") or []) if custom else [],
         "allow": list(cfg.get("browser_allow") or []) if custom else [],
     }

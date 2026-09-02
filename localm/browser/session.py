@@ -64,9 +64,10 @@ class BrowserSession:
     """One Chromium session, owned by its own thread and event loop."""
 
     def __init__(self, session_id: str, *, headless: bool = True,
-                 extra_deny=(), extra_allow=()):
+                 extra_deny=(), extra_allow=(), engine: str = "bundled"):
         self.session_id = session_id
         self.headless = headless
+        self.engine = engine or "bundled"
         self.extra_deny = tuple(extra_deny)
         self.extra_allow = tuple(extra_allow)
         self.state = SessionState()
@@ -116,7 +117,21 @@ class BrowserSession:
     async def _launch(self) -> None:
         async_playwright = _require_playwright()
         self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(headless=self.headless)
+        # "system" drives the browser already installed on this machine, which
+        # carries its real logged-in sessions; "bundled" launches the build
+        # localm downloaded, with a fresh profile.
+        launch = {"headless": self.headless}
+        if self.engine == "system":
+            launch["channel"] = "chrome"
+        try:
+            self._browser = await self._pw.chromium.launch(**launch)
+        except Exception as exc:
+            if self.engine == "system":
+                raise BrowserUnavailableError(
+                    "Could not start the system browser (Google Chrome). Install "
+                    "it, or set the browser engine back to 'bundled'. "
+                    + str(exc)) from exc
+            raise
         self._ctx = await self._browser.new_context()
         self._page = await self._ctx.new_page()
         self._page.on("console", self._on_console)
