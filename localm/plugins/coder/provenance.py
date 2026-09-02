@@ -26,6 +26,7 @@ from __future__ import annotations
 # module localm/textguard.py, so the agent-memory layer can reuse them without a
 # kernel->plugin import. Re-exported here for the coder's own call sites and
 # tests (from .provenance import neutralise).
+from localm.textguard import compose, untrusted_span
 from localm.textguard import neutralise  # noqa: F401  (re-export for back-compat)
 
 # Built-in tools whose output is external, attacker-influenceable content.
@@ -92,14 +93,12 @@ def build_result_block(tool_name: str, result, untrusted: bool) -> str:
         return result.to_xml(tool_name)
     status = "ok" if result.ok else "error"
     trunc = ' truncated="true"' if getattr(result, "truncated", False) else ""
-    body = neutralise(result.output or "")
     safe_name = _attr_safe(tool_name)
-    return (
+    return compose(
         f'<tool_result name="{safe_name}" status="{status}"{trunc} '
         f"{_PROVENANCE_ATTR}>\n"
         f"{_WARNING}\n"
-        f"{_OPEN_FENCE}\n"
-        f"{body}\n"
-        f"{_CLOSE_FENCE}\n"
-        f"</tool_result>"
+        f"{_OPEN_FENCE}\n",
+        untrusted_span(result.output or ""),
+        f"\n{_CLOSE_FENCE}\n</tool_result>",
     )

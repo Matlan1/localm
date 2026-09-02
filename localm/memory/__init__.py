@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from localm.textguard import neutralise
+from localm.textguard import compose, compose_join, neutralise, untrusted_span
 
 from .consolidate import extract, run_consolidation, summarize_session
 from .corrections import PendingCorrection
@@ -102,10 +102,10 @@ def render_memories(records: list, *, label: str = _INJECT_LABEL,
             text = r.get("text", "")
         # Word-boundary + ellipsis truncation (not a raw mid-word slice) BEFORE
         # neutralise, so a long fact renders whole up to the block budget ([52]).
-        text = neutralise(_truncate_line(text or "", line_chars))
-        if not text:
+        entry_text = neutralise(_truncate_line(text or "", line_chars))
+        if not entry_text:
             continue
-        entry = f"- {text}"
+        entry = compose("- ", untrusted_span(entry_text))
         if used + len(entry) + 1 > max_chars:
             break
         lines.append(entry)
@@ -113,4 +113,4 @@ def render_memories(records: list, *, label: str = _INJECT_LABEL,
     if len(lines) == 2:                      # nothing survived the caps
         return ""
     lines.append(_CLOSE_FENCE)
-    return "\n".join(lines)
+    return compose_join("\n", lines)

@@ -28,6 +28,7 @@ memory), never to trusted file reads that legitimately contain these strings.
 from __future__ import annotations
 
 import re
+from typing import List, Optional, Tuple
 
 # Frame markers localm owns. The body of untrusted content must not be able to
 # contain a literal one (or it could end / forge the frame). Match an opening or
@@ -121,3 +122,204 @@ def neutralise(text: str) -> str:
     text = _FRAME_RE.sub(r"&lt;\1", text)
     text = _SPECIAL_RE.sub(_defang_special, text)
     return text
+
+
+def _normalise_spans(spans, length: int) -> Tuple[Tuple[int, int], ...]:
+    """Clamp *spans* to ``[0, length]``, drop empties, sort and merge overlaps."""
+    cleaned = []
+    for item in spans or ():
+        start, end = int(item[0]), int(item[1])
+        start = max(0, min(start, length))
+        end = max(0, min(end, length))
+        if end > start:
+            cleaned.append((start, end))
+    cleaned.sort()
+    merged: List[Tuple[int, int]] = []
+    for start, end in cleaned:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+class GuardedText(str):
+    """A ``str`` that records which of its character ranges came from untrusted input.
+
+    It IS a ``str``: every existing consumer keeps working unchanged.
+    ``untrusted_spans`` holds non-overlapping ``(start, end)`` character offsets
+    into this string, ascending, marking text that a backend must tokenise with
+    special-token parsing OFF.
+
+    The annotation is dropped by anything that produces a plain ``str`` (an
+    f-string, ``+``, ``.strip()``, a JSON round trip). A consumer that finds no
+    annotation must read that as "no ranges are known", which degrades to the
+    text-level ``neutralise()`` defence, never as "this text is safe to parse".
+    Build annotated text with :func:`compose`, which is why an f-string is not
+    used at a converted call site.
+    """
+
+    __slots__ = ("untrusted_spans",)
+
+    def __new__(cls, text: str = "", untrusted_spans=()) -> "GuardedText":
+        obj = super().__new__(cls, text)
+        obj.untrusted_spans = _normalise_spans(untrusted_spans, len(obj))
+        return obj
+
+
+class _Untrusted:
+    """A ``compose()`` part whose text is untrusted. Built by :func:`untrusted_span`."""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def untrusted_span(text) -> _Untrusted:
+    """Mark *text* as untrusted for :func:`compose`, defanging it via ``neutralise()``.
+
+    ``neutralise()`` is applied here so that marking a span untrusted and
+    defanging it cannot drift apart. It is idempotent, so a call site that
+    already neutralised its text may pass the result in unchanged.
+    """
+    return _Untrusted(neutralise("" if text is None else str(text)))
+
+
+def compose(*parts) -> GuardedText:
+    """Concatenate *parts* into one :class:`GuardedText`, recording untrusted ranges.
+
+    A plain ``str`` part is trusted. A part from :func:`untrusted_span` is recorded as
+    an untrusted range. A :class:`GuardedText` part contributes its own ranges,
+    shifted into the result, so composed blocks nest.
+    """
+    chunks: List[str] = []
+    spans: List[Tuple[int, int]] = []
+    pos = 0
+    for part in parts:
+        if isinstance(part, _Untrusted):
+            piece = part.text
+            if piece:
+                spans.append((pos, pos + len(piece)))
+        elif isinstance(part, GuardedText):
+            piece = str(part)
+            spans.extend((pos + a, pos + b) for a, b in part.untrusted_spans)
+        elif part is None:
+            piece = ""
+        else:
+            piece = str(part)
+        chunks.append(piece)
+        pos += len(piece)
+    return GuardedText("".join(chunks), spans)
+
+
+def compose_join(separator: str, parts) -> GuardedText:
+    """``separator.join(parts)`` as a :func:`compose`, preserving untrusted ranges."""
+    interleaved: List = []
+    for i, part in enumerate(parts):
+        if i:
+            interleaved.append(separator)
+        interleaved.append(part)
+    return compose(*interleaved)
+
+
+def untrusted_spans_of(value) -> Tuple[Tuple[int, int], ...]:
+    """The untrusted ranges recorded on *value*, or ``()`` when it carries none."""
+    spans = getattr(value, "untrusted_spans", ())
+    if not isinstance(spans, tuple):
+        return ()
+    return spans
+
+
+# Private-use bracketing keeps a probe sentinel out of any real chat template's
+# own vocabulary; the uuid4 nonce keeps it unguessable by message content.
+_SENTINEL_OPEN = "\ue000"
+_SENTINEL_CLOSE = "\ue001"
+
+
+def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tuple[int, int]]]":
+    """Locate each of *contents* inside *rendered*, or return ``None``.
+
+    *render* takes a list of replacement contents and returns the template's
+    output for them. This calls it once with a unique sentinel per content,
+    substitutes the real contents back into that skeleton, and requires the
+    result to EQUAL *rendered*. Offsets are only returned when that holds, so a
+    template that trims, escapes, reorders, drops or duplicates content yields
+    ``None`` instead of a wrong offset, and nothing is ever searched for inside
+    the rendered output.
+    """
+    import uuid
+
+    nonce = uuid.uuid4().hex
+    sentinels = [
+        _SENTINEL_OPEN + str(i) + "-" + nonce + _SENTINEL_CLOSE
+        for i in range(len(contents))
+    ]
+    try:
+        skeleton = render(sentinels)
+    except Exception:
+        return None
+    if not isinstance(skeleton, str):
+        return None
+
+    rebuilt: List[str] = []
+    spans: List[Tuple[int, int]] = []
+    out_len = 0
+    pos = 0
+    for sentinel, content in zip(sentinels, contents):
+        found = skeleton.find(sentinel, pos)
+        if found < 0:
+            return None
+        wrapper = skeleton[pos:found]
+        rebuilt.append(wrapper)
+        out_len += len(wrapper)
+        spans.append((out_len, out_len + len(content)))
+        rebuilt.append(content)
+        out_len += len(content)
+        pos = found + len(sentinel)
+    rebuilt.append(skeleton[pos:])
+
+    if "".join(rebuilt) != rendered:
+        return None
+    return spans
+
+
+def map_untrusted_ranges(content_spans, per_content_spans) -> Tuple[Tuple[int, int], ...]:
+    """Shift each content's own untrusted ranges into rendered-text coordinates."""
+    ranges: List[Tuple[int, int]] = []
+    for (start, _end), local in zip(content_spans, per_content_spans):
+        ranges.extend((start + a, start + b) for a, b in local)
+    return tuple(ranges)
+
+
+def slice_guarded(value, start: int, end: int) -> GuardedText:
+    """``value[start:end]`` as a :class:`GuardedText`, with its ranges remapped.
+
+    Ranges that only partly overlap the slice are clipped to it, so a call site
+    that truncates annotated text keeps the annotation over whatever survives
+    instead of dropping it the way plain slicing does.
+    """
+    text = str(value)
+    length = len(text)
+    start = max(0, min(start, length))
+    end = max(start, min(end, length))
+    kept = [
+        (max(a, start) - start, min(b, end) - start)
+        for a, b in untrusted_spans_of(value)
+        if min(b, end) > max(a, start)
+    ]
+    return GuardedText(text[start:end], kept)
+
+
+def split_by_trust(text: str, spans) -> List[Tuple[str, bool]]:
+    """Split *text* into ``(segment, is_untrusted)`` pairs that concatenate back to it."""
+    out: List[Tuple[str, bool]] = []
+    pos = 0
+    for start, end in _normalise_spans(spans, len(text)):
+        if start > pos:
+            out.append((text[pos:start], False))
+        out.append((text[start:end], True))
+        pos = end
+    if pos < len(text) or not out:
+        out.append((text[pos:], False))
+    return out

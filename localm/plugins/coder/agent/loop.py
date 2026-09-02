@@ -22,6 +22,7 @@ from .constants import (
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
     _SKILL_STATE_TOOLS, _WORKSPACE_HINT,
 )
+from localm.textguard import compose_join
 
 _RE_WORKSPACE = None      # compiled on first use
 
@@ -432,7 +433,7 @@ class _LoopMixin:
                 # Feed all results back as a user message, compressing large
                 # outputs when the context is filling up
                 result_blocks = self._compress_results(result_blocks)
-                combined = "\n\n".join(result_blocks)
+                combined = compose_join("\n\n", result_blocks)
                 self._add_user(combined)
 
                 breaker_msg = self._check_post_batch_breakers()
