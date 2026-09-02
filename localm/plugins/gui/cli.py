@@ -68,6 +68,51 @@ def _console_url_line(api_mode: bool, base_url: str, open_url: str) -> tuple:
     return "Open the GUI", open_url
 
 
+def _phone_lan_hint(api_mode: bool) -> str:
+    """Console line recommending a network bind so a phone can reach a
+    loopback-bound server."""
+    alt = "" if api_mode else " or Settings > Server > Bind address (set an API key first)"
+    return ("  [dim]use from your phone: bind to your network with "
+            "[/dim][cyan]localm gui -H 0.0.0.0[/cyan]"
+            f"[dim]{alt}; see docs/phone.md[/dim]")
+
+
+def _no_model_flag_hint(api_mode: bool) -> str:
+    """Console line for an explicit --no-model startup."""
+    if api_mode:
+        return "[dim]Starting with no model loaded.[/dim]"
+    return ("[dim]Opening with no model loaded - "
+            "pick one on the Models page.[/dim]")
+
+
+def _empty_registry_hint(api_mode: bool, pull_spec) -> str:
+    """Console line for an empty model registry at startup."""
+    if api_mode:
+        return ("[yellow]No models registered yet.[/yellow]"
+                + (" Download starting…" if pull_spec else ""))
+    return ("[yellow]No models registered yet.[/yellow] "
+            "Opening the GUI - add one on the Models page"
+            + (" (download starting)…" if pull_spec else "."))
+
+
+def _no_loadable_model_hint(api_mode: bool) -> str:
+    """Console line when the registry has entries but none is a loadable chat model."""
+    base = ("[yellow]No loadable chat models in the registry "
+            "(files missing, not a model, or type 'unknown').[/yellow]")
+    if api_mode:
+        return base
+    return base + (" Opening the GUI - fix, add, or set "
+                    "a model's type on the Models page.")
+
+
+def _engine_load_failed_hint(api_mode: bool) -> str:
+    """Console line shown after a named model's engine construction raised."""
+    if api_mode:
+        return "[yellow]Continuing without a model loaded.[/yellow]"
+    return ("[yellow]Opening the GUI model-less - pick a model on "
+            "the Models page.[/yellow]")
+
+
 def _should_auto_open_browser(no_browser: bool) -> bool:
     """Whether THIS process's own startup should auto-open a browser tab.
 
@@ -546,16 +591,13 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         # user picks or switches on the Models page.
         model_less = True
         model = ""
-        console.print("[dim]Opening with no model loaded - "
-                      "pick one on the Models page.[/dim]")
+        console.print(_no_model_flag_hint(api_mode))
     elif not model:
         if not registry:
             # Fresh install: open the GUI anyway so the user can add a model
             # from the Models page (or via --pull). No engine until then.
             model_less = True
-            console.print("[yellow]No models registered yet.[/yellow] "
-                          "Opening the GUI - add one on the Models page"
-                          + (" (download starting)…" if pull_spec else "."))
+            console.print(_empty_registry_hint(api_mode, pull_spec))
         else:
             # Pick the first entry that still resolves to a real model file or
             # directory, skipping rows whose file is missing or is not a model,
@@ -565,10 +607,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                           if get_model_info(n) and is_auto_chat_eligible(registry[n])), None)
             if model is None:
                 model_less = True
-                console.print(
-                    "[yellow]No loadable chat models in the registry "
-                    "(files missing, not a model, or type 'unknown').[/yellow] "
-                    "Opening the GUI - fix, add, or set a model's type on the Models page.")
+                console.print(_no_loadable_model_hint(api_mode))
 
     # Effective bind host: an explicit -H wins for this process (and survives
     # an in-place restart, which re-execs the same argv); otherwise the
@@ -783,8 +822,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             # A single bad registry entry must not stop the server from starting;
             # degrade to the model-less path and let the user pick on the Models page.
             console.print(f"[yellow]Could not load model '{model}': {e}[/yellow]")
-            console.print("[yellow]Opening the GUI model-less - pick a model on "
-                          "the Models page.[/yellow]")
+            console.print(_engine_load_failed_hint(api_mode))
             model_less = True
     app = hs.create_app(engine)
 
@@ -873,10 +911,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # reachable on this machine; bound to the network, print the address a phone
     # on the same Wi-Fi can open. See docs/phone.md (Tailscale for off-LAN use).
     if is_loopback_host(host):
-        console.print(
-            "  [dim]use from your phone: bind to your network with "
-            "[/dim][cyan]localm gui -H 0.0.0.0[/cyan][dim] or Settings > Server "
-            "> Bind address (set an API key first); see docs/phone.md[/dim]")
+        console.print(_phone_lan_hint(api_mode))
         if show_qr:
             console.print(
                 "  [yellow][PoC][/yellow] [dim]--qr needs a network bind to be "
