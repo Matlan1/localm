@@ -1792,6 +1792,31 @@ if ($("rebuild-launcher")) $("rebuild-launcher").onclick = rebuildLauncher;
 // changes with no round trip, and tells "switch" apart from "install".
 let runtimeCheckState = null;
 
+/** The raw GET /api/runtime/check call: no DOM, throws on a non-OK response.
+ *  The one place that talks to the endpoint - shared by the Settings runtime
+ *  card below and the Setup flow (pages/setup.js), so neither forks it. */
+export async function fetchRuntimeCheck() {
+  const r = await fetch("/api/runtime/check", { headers: authHeaders() });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  return d;
+}
+
+/** The raw POST /api/runtime/update call: no DOM, returns the new job's id.
+ *  Shared the same way as fetchRuntimeCheck above. */
+export async function postRuntimeUpdate(backend, tag, rollback) {
+  const body = {};
+  if (backend) body.backend = backend;
+  if (rollback) body.rollback = true;
+  else if (tag) body.tag = tag;
+  const r = await fetch("/api/runtime/update", {
+    method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  return d.job_id;
+}
+
 /** What pressing the button will do, given the current selection and the last
  *  check. Pure, so the wording is testable without a DOM.
  *
@@ -1828,9 +1853,7 @@ export async function runtimeUpdateCheck() {
   const out = $("runtime-update-status");
   if (out) { out.hidden = false; out.textContent = "Checking..."; }
   try {
-    const r = await fetch("/api/runtime/check", { headers: authHeaders() });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.detail || r.statusText);
+    const d = await fetchRuntimeCheck();
     runtimeCheckState = d;
     if (out) {
       if (!d.installed) {
@@ -1879,18 +1902,9 @@ export async function runtimeProvision(backend, tag, rollback) {
     out.textContent = rollback ? "Rolling back the runtime..." : "Provisioning the runtime...";
   }
   if (log) { log.style.display = ""; log.textContent = ""; }
-  const body = {};
-  if (backend) body.backend = backend;
-  if (rollback) body.rollback = true;
-  else if (tag) body.tag = tag;
   let jobId;
   try {
-    const r = await fetch("/api/runtime/update", {
-      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.detail || r.statusText);
-    jobId = d.job_id;
+    jobId = await postRuntimeUpdate(backend, tag, rollback);
   } catch (e) {
     if (out) out.textContent = (rollback ? "Roll back failed: " : "Update failed: ") + e.message;
     if (btn) btn.disabled = false;
