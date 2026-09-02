@@ -600,14 +600,20 @@ class TestForwardRefusesANonLoopbackRoute:
         async def scenario():
             return await peer_routing.forward(route, req, "/v1/chat/completions")
 
-        with pytest.raises(HTTPException) as exc_info:
+        raised = None
+        try:
             asyncio.run(scenario())
+        except HTTPException as e:
+            raised = e
 
-        # The credential first, the status code second: a request that was
-        # never made is the property, and the status code is a proxy for it.
+        # The exception is captured rather than asserted with pytest.raises so
+        # that these run FIRST: a request that was never made is the property,
+        # and the status code is only a proxy for it. Under pytest.raises the
+        # runner reports "DID NOT RAISE" and never reaches these lines, which
+        # reads as an assertion to relax rather than as a credential leaving.
         assert calls == [], "the bearer credential left this process"
         assert peer_routing.get_route("lan-model") is None
-        assert exc_info.value.status_code == 502
+        assert raised is not None and raised.status_code == 502
 
     def test_a_loopback_route_still_forwards(self, monkeypatch):
         """The control: same shape, loopback host, request goes out."""
