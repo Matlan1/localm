@@ -260,8 +260,16 @@ def _load_lib() -> ctypes.CDLL:
 # with no marker/bitmaps, so nothing else runs during them (see _probe_n_tokens's
 # own docstring); llama.py's caller wraps this whole constructor call so neither
 # line reaches the console.
-_PROBE_CONTROL = b"a" * 256
-_PROBE_EMBEDDED_NUL = b"\x00" + b"a" * 255
+# The filler carries punctuation every few bytes, so its longest unbroken run of
+# one character class is 2. A 256-byte run of plain letters is above the length
+# at which several pre-tokenizer regexes abort the process (see
+# pretokenizer_guard), and this probe runs before any caller text exists, so the
+# guard cannot cover it. Only three things about these two values are
+# load-bearing: equal byte length, a control that tokenizes to more than 0
+# tokens, and a leading NUL on the discriminator.
+_PROBE_FILLER = b"ab. " * 64
+_PROBE_CONTROL = _PROBE_FILLER
+_PROBE_EMBEDDED_NUL = b"\x00" + _PROBE_FILLER[:255]
 
 
 def _probe_n_tokens(m: ctypes.CDLL, ctx: int, cls: type, raw: bytes) -> Optional[int]:

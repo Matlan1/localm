@@ -36,6 +36,8 @@ import queue as _queue
 import time
 from typing import List
 
+from localm.inference.backends.base import PretokenizerUnsafeInputError
+
 # Fault-injection hook, honoured by the child ONLY when this environment
 # variable is set; never set in production. Values: "abort" (a genuine
 # uncatchable native abort), "exit" (a hard process exit, no Python traceback),
@@ -228,6 +230,12 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
                 embed_stderr_ctx.__enter__()
             try:
                 resp_q.put(("ok", embedder.embed(payload)))
+            except PretokenizerUnsafeInputError as e:
+                # Text this model's pre-tokenizer aborts the process on, refused
+                # in Python before any native call. Tagged so the parent re-raises
+                # it typed: untagged it becomes a RuntimeError, which the parent
+                # reads as a worker fault and reports as a temporary 503.
+                resp_q.put(("error", str(e), "PretokenizerUnsafeInputError"))
             except Exception as e:
                 resp_q.put(("error", str(e)))
             # Same as above: a native abort during llama_decode propagates
@@ -413,6 +421,11 @@ class EmbedderRunner:
         if kind == "ok":
             return result[1]
         if kind == "error":
+            tag = result[2] if len(result) > 2 else None
+            if tag == "PretokenizerUnsafeInputError":
+                # A per-request refusal by a healthy worker, not a fault: it must
+                # not shut the worker down and must not read as a RuntimeError.
+                raise PretokenizerUnsafeInputError(result[1])
             if shutdown_on_error:
                 self.shutdown(grace=0)
             raise RuntimeError(result[1])

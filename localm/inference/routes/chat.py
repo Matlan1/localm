@@ -25,7 +25,8 @@ from fastapi.responses import StreamingResponse
 import localm.inference.http_server as _hs
 from localm.inference.backends.base import (
     EmbedBatchTooLargeError, GrammarUnsupportedError, InvalidGrammarError,
-    TriggerValidatorUnavailableError, messages_contain_image,
+    PretokenizerUnsafeInputError, TriggerValidatorUnavailableError,
+    messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
@@ -189,8 +190,14 @@ def register(app: FastAPI, ctx) -> None:
             # inlet-transformed messages, compact when approaching the ceiling, and
             # reject an oversized request with HTTP 413.
             loop = asyncio.get_running_loop()
-            prompt_tokens = await loop.run_in_executor(
-                None, engine.count_messages_tokens, messages)
+            try:
+                prompt_tokens = await loop.run_in_executor(
+                    None, engine.count_messages_tokens, messages)
+            except PretokenizerUnsafeInputError as e:
+                # Counting tokenizes, so this is where the refusal surfaces on an
+                # ordinary chat: before the generation call whose own handler
+                # would otherwise be the one to report it.
+                raise HTTPException(400, str(e))
 
             capacity = engine.context_capacity()
             if (isinstance(capacity, int) and capacity > 0
@@ -284,6 +291,11 @@ def register(app: FastAPI, ctx) -> None:
                     "expected 'float' or 'base64'.")
             try:
                 vecs_emb = await loop.run_in_executor(None, lambda: embed_texts(texts_emb))
+            except PretokenizerUnsafeInputError as e:
+                # A permanent property of this text against this model, not a
+                # transient worker condition, so 400 rather than the 503 below:
+                # retrying the same request cannot succeed.
+                raise HTTPException(400, str(e))
             except RuntimeError as e:
                 # The isolated embedder worker can hard-crash mid-embed on a native
                 # GPU-backend fault, which IsolatedEmbedder.embed re-raises. Reported
@@ -480,8 +492,11 @@ def register(app: FastAPI, ctx) -> None:
             # Count tokens on the (possibly inlet-transformed) messages, matching the
             # chat path. Off the event loop: count_tokens is a native tokenizer call.
             loop = asyncio.get_running_loop()
-            prompt_tokens = await loop.run_in_executor(
-                None, engine.count_tokens, _messages_prompt_text(messages))
+            try:
+                prompt_tokens = await loop.run_in_executor(
+                    None, engine.count_tokens, _messages_prompt_text(messages))
+            except PretokenizerUnsafeInputError as e:
+                raise HTTPException(400, str(e))
 
             capacity = engine.context_capacity()
             if (isinstance(capacity, int) and capacity > 0

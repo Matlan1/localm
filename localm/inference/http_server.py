@@ -4816,7 +4816,7 @@ async def _stream_sse(
     _audit_exchange(audit, transcript, messages, reply)
 
     # Count tokens on the streamed text - what the client actually received
-    completion_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_tokens, streamed)
+    completion_tokens = await _count_streamed_tokens(engine, streamed)
 
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
@@ -4958,7 +4958,7 @@ async def _stream_sse_completion(
         reply = await pipeline.run_outlet(streamed, messages, ctx)
     _audit_exchange(audit, transcript, messages, reply)
 
-    completion_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_tokens, streamed)
+    completion_tokens = await _count_streamed_tokens(engine, streamed)
     # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
     # not "stop", so a client keying off finish_reason detects the failure even
     # though the error text was already streamed as a visible chunk.
@@ -5169,6 +5169,25 @@ def backend_error_status(exc: BaseException) -> Optional[int]:
         if isinstance(exc, exc_type):
             return status
     return None
+
+
+async def _count_streamed_tokens(engine, streamed: str) -> int:
+    """Token count of text already delivered to the client, for the usage block.
+
+    Falls back to the chars/4 estimate when the tokenizer REFUSES the text: the
+    content has been streamed already, so raising here would end the response
+    with no terminal chunk, no usage and no ``[DONE]``. A model can emit a run
+    the pre-tokenizer aborts on just as a caller can send one.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, engine.count_tokens, streamed)
+    except PretokenizerUnsafeInputError:
+        from localm.debuglog import logger as _dbg
+        _dbg.warning(
+            "usage: the generated text carries a run this model's pre-tokenizer "
+            "refuses, so completion_tokens is an estimate for this response")
+        return max(1, len(streamed) // 4)
 
 
 def inference_error_text(exc: BaseException) -> str:

@@ -291,6 +291,7 @@ class TestTheRefusalIsActionable:
         msg = str(exc.value)
         assert policy.label in msg
         assert str(policy.max_run) in msg
+        assert "character" not in msg
 
     def test_it_is_a_value_error_so_the_worker_reports_it_per_request(self):
         assert issubclass(PretokenizerUnsafeInputError, ValueError)
@@ -476,3 +477,189 @@ class TestScannerCacheKeysAreDistinct:
             scanner = guard._SCANNERS[(p.char_class, p.max_run)]
             assert scanner.pattern.startswith(p.char_class)
             assert str(p.max_run + 1) in scanner.pattern
+
+
+# --------------------------------------------------------------------------- #
+#  The refusal has to REACH the caller, not merely fire                        #
+# --------------------------------------------------------------------------- #
+
+_REFUSAL = "This model's pre-tokenizer (llama4) crashes on an unbroken run"
+_MSG = [{"role": "user", "content": "hi"}]
+
+
+def _engine(*, count_exc=None):
+    """An engine whose token COUNTING can refuse.
+
+    That is what an ordinary chat request hits first: both chat routes count
+    prompt tokens before they generate, and counting tokenizes. A fixture that
+    injects only at the generation call cannot reach this path at all.
+    """
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    engine.supports_images = False
+    engine.can_be_multimodal = False
+    engine.supports_grammar = True
+    engine.last_finish_reason = "stop"
+    engine.context_capacity.return_value = None
+    type(engine).loaded = property(lambda self: True)
+    if count_exc is not None:
+        engine.count_messages_tokens.side_effect = count_exc
+        engine.count_tokens.side_effect = count_exc
+    else:
+        engine.count_messages_tokens.return_value = 3
+        engine.count_tokens.return_value = 2
+    engine.chat_stream.side_effect = lambda messages, **kw: iter(["ok"])
+    return engine
+
+
+def _post(engine, payload, path="/v1/chat/completions"):
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+    # raise_server_exceptions=False so an unhandled error is OBSERVED as the 500
+    # a real client would get, instead of being re-raised into the test.
+    with TestClient(create_app(engine), raise_server_exceptions=False) as client:
+        return client.post(path, json=payload)
+
+
+class TestARefusalDuringTokenCountingReachesTheCaller:
+    """Unhandled, the refusal falls through to the generic handler and the
+    caller gets an opaque 500 rather than the reason."""
+
+    def test_chat_non_streaming_reports_the_reason_with_400(self):
+        r = _post(_engine(count_exc=PretokenizerUnsafeInputError(_REFUSAL)),
+                  {"model": "test-model", "messages": _MSG, "stream": False})
+        assert "unbroken run" in r.json()["detail"]
+        assert r.json()["detail"] != "Internal server error"
+        assert r.status_code == 400
+
+    def test_chat_streaming_reports_the_reason_with_400(self):
+        r = _post(_engine(count_exc=PretokenizerUnsafeInputError(_REFUSAL)),
+                  {"model": "test-model", "messages": _MSG, "stream": True})
+        assert "unbroken run" in r.json()["detail"]
+        assert r.status_code == 400
+
+    def test_completions_reports_the_reason_with_400(self):
+        r = _post(_engine(count_exc=PretokenizerUnsafeInputError(_REFUSAL)),
+                  {"model": "test-model", "prompt": "hi", "stream": False},
+                  path="/v1/completions")
+        assert "unbroken run" in r.json()["detail"]
+        assert r.status_code == 400
+
+    def test_an_ordinary_request_is_untouched(self):
+        r = _post(_engine(), {"model": "test-model", "messages": _MSG,
+                              "stream": False})
+        assert r.status_code == 200
+
+
+class TestACountRefusalIsNotAWorkerFault:
+    """GgufBackend.count_messages_tokens estimates and latches a
+    once-per-process degradation notice when the counting RPC FAILS. A refusal
+    is not a failure: estimating answers a request that must be rejected, and
+    the notice reports a permanent degradation caused by one request."""
+
+    def test_the_refusal_propagates_instead_of_being_estimated(self):
+        import localm.inference.backends.gguf as gguf
+
+        gguf._count_messages_tokens_rpc_warned = False
+        be = gguf.GgufBackend.__new__(gguf.GgufBackend)
+        be._runner = MagicMock()
+        be._runner.count_messages_tokens.side_effect = \
+            PretokenizerUnsafeInputError(_REFUSAL)
+        type(be).loaded = property(lambda self: True)
+        try:
+            with pytest.raises(PretokenizerUnsafeInputError):
+                be.count_messages_tokens(_MSG)
+        finally:
+            del type(be).loaded
+        assert gguf._count_messages_tokens_rpc_warned is False, \
+            "a per-request refusal must not spend the worker-fault latch"
+
+
+class TestTheEmbedderWorkerCarriesTheTypedRefusal:
+    """GGUFEmbedder runs only inside the embedder child, so an untagged refusal
+    becomes RuntimeError in the parent - which the embeddings route reports as a
+    temporary 503 and which RAG reads as the embedder being broken."""
+
+    def _runner_with(self, result):
+        import multiprocessing as mp
+
+        from localm.inference._embedder_runner import EmbedderRunner
+
+        class _AliveProc:
+            def is_alive(self):
+                return True
+
+        r = EmbedderRunner.__new__(EmbedderRunner)
+        q = mp.get_context("spawn").Queue()
+        q.put(result)
+        r._resp_q = q
+        r._proc = _AliveProc()
+        r.shutdown = MagicMock()
+        return r
+
+    def test_the_worker_tags_the_refusal(self):
+        import inspect
+
+        import localm.inference._embedder_runner as runner
+        assert '"error", str(e), "PretokenizerUnsafeInputError"' in \
+            inspect.getsource(runner)
+
+    def test_the_parent_re_raises_it_typed_and_keeps_the_worker(self):
+        r = self._runner_with(("error", _REFUSAL, "PretokenizerUnsafeInputError"))
+        with pytest.raises(PretokenizerUnsafeInputError):
+            r._wait(5.0, "embed", shutdown_on_error=True)
+        r.shutdown.assert_not_called()
+
+    def test_an_untagged_error_still_reads_as_a_fault(self):
+        r = self._runner_with(("error", "the worker died"))
+        with pytest.raises(RuntimeError) as exc:
+            r._wait(5.0, "embed", shutdown_on_error=True)
+        assert not isinstance(exc.value, PretokenizerUnsafeInputError)
+        r.shutdown.assert_called_once()
+
+
+class TestTheMtmdAbiProbeIsNotItselfFatal:
+    """mtmd's layout probe sends a fixed string through mtmd_tokenize at vision
+    load, before any caller text exists for the guard to check. A long
+    single-class run there aborts the process on exactly the models this guard
+    is about, and the probe's own except-Exception cannot catch a native abort."""
+
+    @pytest.mark.parametrize("pre_type", _AFFECTED)
+    def test_the_probe_strings_pass_the_guard(self, pre_type):
+        from localm.inference.backends.llamacpp import mtmd
+
+        for raw in (mtmd._PROBE_CONTROL, mtmd._PROBE_EMBEDDED_NUL):
+            guard.check_text(pre_type, raw.decode("utf-8", "replace"))
+
+    def test_the_probe_keeps_the_properties_it_measures(self):
+        from localm.inference.backends.llamacpp import mtmd
+
+        assert len(mtmd._PROBE_CONTROL) == len(mtmd._PROBE_EMBEDDED_NUL) == 256
+        assert mtmd._PROBE_EMBEDDED_NUL[:1] == b"\x00"
+        assert b"\x00" not in mtmd._PROBE_CONTROL
+        assert mtmd._PROBE_CONTROL.strip()
+
+
+class TestGeneratedTextDoesNotTruncateTheStream:
+    """Usage is counted on text ALREADY delivered. A model can emit a run the
+    pre-tokenizer refuses just as a caller can send one, and raising there ends
+    the response with no terminal chunk, no usage and no [DONE]."""
+
+    def test_a_refused_count_falls_back_instead_of_raising(self):
+        import asyncio
+
+        from localm.inference.http_server import _count_streamed_tokens
+
+        engine = MagicMock()
+        engine.count_tokens.side_effect = PretokenizerUnsafeInputError(_REFUSAL)
+        assert asyncio.run(_count_streamed_tokens(engine, "x" * 400)) == 100
+
+    def test_an_ordinary_count_is_unchanged(self):
+        import asyncio
+
+        from localm.inference.http_server import _count_streamed_tokens
+
+        engine = MagicMock()
+        engine.count_tokens.return_value = 42
+        assert asyncio.run(_count_streamed_tokens(engine, "hello")) == 42

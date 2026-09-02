@@ -126,6 +126,21 @@ def policy_for(pre_type: Optional[str]) -> Optional[Policy]:
     return UNSAFE_PRE_TYPES.get(pre_type)
 
 
+_EXCERPT_CHARS = 24
+
+
+def _excerpt(text: str, start: int) -> str:
+    """The first :data:`_EXCERPT_CHARS` characters of the offending run, so the
+    caller can find it in their own text.
+
+    An OFFSET is not reported: by the time this runs the text is usually a
+    templated prompt, so the position would not line up with anything the caller
+    sent.
+    """
+    piece = text[start:start + _EXCERPT_CHARS]
+    return piece + "..." if len(text) - start > _EXCERPT_CHARS else piece
+
+
 def check_text(pre_type: Optional[str], text: str) -> None:
     """Raise :class:`PretokenizerUnsafeInputError` if *text* must not be handed
     to the pre-tokenizer named by *pre_type*; return ``None`` otherwise.
@@ -152,7 +167,7 @@ def check_text(pre_type: Optional[str], text: str) -> None:
     raise PretokenizerUnsafeInputError(
         f"This model's pre-tokenizer ({policy.label}) crashes on an unbroken "
         f"run of more than {policy.max_run} {kind}; this input has a run of "
-        f"{run} starting at character {hit.start()}. Break the run with "
+        f"{run}, beginning {_excerpt(text, hit.start())!r}. Break the run with "
         f"punctuation or a line break, or use a model with a different "
         f"tokenizer."
     )
