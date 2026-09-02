@@ -22,6 +22,13 @@ from localm import debuglog
 
 def setup_function():
     debuglog.install_ring_buffer()
+    # install_ring_buffer() is idempotent and never clears, and the ring is
+    # bounded (maxlen=_RING_CAPACITY). A full-suite run saturates it, so the
+    # "before = len(recent_activity())" slicing below indexes past the end and
+    # yields an EMPTY tail: new lines evict old ones and the length never grows.
+    # Start every test from an empty ring so the slice means what it says.
+    if debuglog._ring_handler is not None:
+        debuglog._ring_handler._buf.clear()
 
 
 def test_console_stream_is_captured_before_fd_redirect(monkeypatch):
