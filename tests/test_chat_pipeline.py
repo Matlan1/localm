@@ -113,6 +113,59 @@ def test_thinking_inlet_noop_for_non_thinking_model():
     assert msgs == before
 
 
+# --------------------------------------------------------------------------- #
+#  role-word self-reference nudge (REC-D1-ROLEWORD) in regular chat           #
+# --------------------------------------------------------------------------- #
+
+def test_role_word_inlet_inserts_system_when_absent():
+    from localm.plugins.builtin.chat.plug import _role_word_inlet, _ROLE_WORD_INSTRUCTION
+    msgs = [{"role": "user", "content": "hi"}]
+    out = _role_word_inlet(msgs, _think_ctx("llama3.1-8b"))
+    assert out is msgs and msgs[0]["role"] == "system"
+    assert _ROLE_WORD_INSTRUCTION in msgs[0]["content"]
+    assert msgs[1] == {"role": "user", "content": "hi"}
+
+
+def test_role_word_inlet_appends_to_existing_system():
+    from localm.plugins.builtin.chat.plug import _role_word_inlet, _ROLE_WORD_INSTRUCTION
+    msgs = [{"role": "system", "content": "You are a poet."},
+            {"role": "user", "content": "hi"}]
+    out = _role_word_inlet(msgs, _think_ctx("gemma3"))
+    assert out is msgs and len(msgs) == 2          # no new message inserted
+    assert msgs[0]["content"].startswith("You are a poet.")
+    assert _ROLE_WORD_INSTRUCTION in msgs[0]["content"]
+
+
+def test_role_word_inlet_skips_when_already_instructed():
+    from localm.plugins.builtin.chat.plug import _role_word_inlet
+    msgs = [{"role": "system", "content": "Never refer to yourself in the third person."},
+            {"role": "user", "content": "hi"}]
+    before = [dict(m) for m in msgs]
+    assert _role_word_inlet(msgs, _think_ctx("llama3.1-8b")) is None
+    assert msgs == before                          # untouched
+
+
+def test_role_word_inlet_applies_regardless_of_model_family():
+    from localm.plugins.builtin.chat.plug import _role_word_inlet, _ROLE_WORD_INSTRUCTION
+    for model_id in ("deepseek-r1-7b", "llama3.1-8b", "mistral-7b", ""):
+        msgs = [{"role": "user", "content": "hi"}]
+        out = _role_word_inlet(msgs, _think_ctx(model_id))
+        assert out is msgs
+        assert _ROLE_WORD_INSTRUCTION in msgs[0]["content"], model_id
+
+
+def test_thinking_and_role_word_inlets_compose_on_one_system_message():
+    from localm.plugins.builtin.chat.plug import (
+        _thinking_inlet, _role_word_inlet, _THINK_INSTRUCTION, _ROLE_WORD_INSTRUCTION,
+    )
+    msgs = [{"role": "user", "content": "hi"}]
+    msgs = _thinking_inlet(msgs, _think_ctx("deepseek-r1-7b")) or msgs
+    msgs = _role_word_inlet(msgs, _think_ctx("deepseek-r1-7b")) or msgs
+    assert len([m for m in msgs if m["role"] == "system"]) == 1
+    assert _THINK_INSTRUCTION in msgs[0]["content"]
+    assert _ROLE_WORD_INSTRUCTION in msgs[0]["content"]
+
+
 def test_failure_isolation_keeps_going_and_preserves_value():
     p = ChatPipeline()
     p.add_hook("inlet", lambda m, c: m + ["one"], priority=0, plugin="ok1")

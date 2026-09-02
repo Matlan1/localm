@@ -347,9 +347,41 @@ def _thinking_inlet(messages, ctx):
     return messages
 
 
+# ------------------------------------------------------------------ #
+#  Role-word self-reference nudge for regular chat                    #
+# ------------------------------------------------------------------ #
+
+_ROLE_WORD_INSTRUCTION = (
+    "Speak only in the first person, as \"I\". Never refer to yourself in the "
+    "third person using a role word such as \"the model\" or \"the assistant\", "
+    "and never use an incorrect pronoun for yourself."
+)
+
+
+def _role_word_inlet(messages, ctx):
+    """Steer the model to speak of itself in the first person rather than a
+    bare third-person role word ("Model", "the assistant") or an incorrect
+    pronoun for itself.
+
+    Skips when a system message already mentions third-person self-reference.
+    Appends the instruction to the first system message, or inserts one when
+    none exists. Exceptions raised here are isolated by the chat pipeline."""
+    for m in messages:
+        if m.get("role") == "system" and isinstance(m.get("content"), str) \
+                and "third person" in m["content"].lower():
+            return None                          # already instructed; don't double up
+    for m in messages:
+        if m.get("role") == "system" and isinstance(m.get("content"), str):
+            m["content"] = m["content"].rstrip() + "\n\n" + _ROLE_WORD_INSTRUCTION
+            return messages
+    messages.insert(0, {"role": "system", "content": _ROLE_WORD_INSTRUCTION})
+    return messages
+
+
 def register(host) -> None:
     host.mount_router(_router)
     host.register_chat_hook("inlet", _thinking_inlet)
+    host.register_chat_hook("inlet", _role_word_inlet)
 
 
 def unregister() -> None:
