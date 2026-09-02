@@ -1,0 +1,112 @@
+# Publish the sdist and wheel to PyPI when a GitHub release is published.
+#
+# Authentication is PyPI Trusted Publishing (OIDC), not an API token: the
+# publish job exchanges a short-lived GitHub identity token for an upload
+# token. No secret is stored in this repository.
+#
+# The PyPI side of that trust is configured once, at
+# https://pypi.org/manage/project/localm/settings/publishing/, and must match
+# THIS file exactly: owner Matlan1, repository localm, workflow
+# publish-pypi.yml, environment pypi. Renaming this file breaks publishing
+# until the publisher is updated to match.
+#
+# Build and publish are separate jobs on purpose: only `publish` is granted
+# id-token: write, so the job that runs packaging code never holds a
+# credential.
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag to build and publish (e.g. v0.1.6)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ inputs.ref || github.event.release.tag_name }}
+          # The version guard below reads VERSION from the checked-out tree.
+          fetch-depth: 1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # A tag and the VERSION file disagreeing means the tag points at a tree
+      # that was never prepared for it. Publishing is irreversible on PyPI: a
+      # version number cannot be reused even after deletion, so this refuses
+      # before the artifact is built rather than after it is uploaded.
+      - name: Refuse a tag that disagrees with VERSION
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.ref || github.event.release.tag_name }}"
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          echo "tag=${tag}  VERSION=${file_version}"
+          if [ "${tag}" != "v${file_version}" ]; then
+            echo "::error::tag ${tag} does not match VERSION ${file_version} (expected v${file_version})"
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build
+          python -m build
+
+      # twine check validates that the long description renders on PyPI.
+      # PyPI rejects an unrenderable description at upload time, which would
+      # otherwise burn the version number.
+      - name: Check the artifacts
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+
+      - name: Confirm the artifacts carry the tagged version
+        run: |
+          set -euo pipefail
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          ls -la dist/
+          test -f "dist/localm-${file_version}.tar.gz"
+          test -f "dist/localm-${file_version}-py3-none-any.whl"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Named in the PyPI publisher config, and the place to attach a required
+    # reviewer if publishing should need approval.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/localm/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          # A re-run over an already-published version is a no-op instead of a
+          # failure; PyPI never allows overwriting one.
+          skip-existing: true
+          print-hash: true
