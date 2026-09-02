@@ -1340,9 +1340,18 @@ export let pluginState = [];
 // Each plugin's manifest icon name -> a shared SVG icon name (see app/icons.js).
 // Kernel nav buttons carry their own data-icon in index.html; "studio" is the
 // media parent. An unknown manifest icon falls back to the generic "plugins" glyph.
-export const NAV_ICON = { chat: "chat", code: "coder", image: "image", music: "music", video: "video", book: "book", clock: "clock" };
-// Canonical rail order of first-party plugin tabs (stable so the rail does not
-// reshuffle as plugins toggle); "studio" is the media slot (image/music/video).
+export const NAV_ICON = { chat: "chat", code: "coder", image: "image", music: "music", video: "video", book: "book", clock: "clock", web: "web" };
+// Nav categories. A plugin joins one with [surface] group = "<key>"; the rail
+// collapses a category under one parent once 2+ of its tabs are enabled, and
+// shows a flat tab while exactly one is. `order` fixes the child order so the
+// rail does not reshuffle as plugins toggle; a member with an unlisted tab is
+// appended rather than dropped.
+export const NAV_GROUPS = {
+  studio: { label: "Studio", icon: "studio", order: ["images", "music", "video"],
+            key: "localm.studioOpen" },
+  coder:  { label: "Coder",  icon: "coder",  order: ["coder", "browser"],
+            key: "localm.coderOpen" },
+};
 export const NAV_TAB_ORDER = ["coder", "studio", "knowledge"];
 
 export function _navButton(id, iconName, label, onClick, cls) {
@@ -1386,8 +1395,7 @@ export function renderNav() {
   // plugin claiming a kernel view) as a dynamic tab.
   const active = pluginState.filter(
     (p) => p.active && p.tab && !CORE_VIEWS.includes(p.tab));
-  const studio = active.filter((p) => p.group === "studio");
-  const flat = active.filter((p) => p.group !== "studio");
+  const flat = active.filter((p) => !NAV_GROUPS[p.group]);
   const byTab = {};
   for (const p of flat) byTab[p.tab] = p;
 
@@ -1396,7 +1404,10 @@ export function renderNav() {
 
   const done = new Set();
   for (const key of NAV_TAB_ORDER) {
-    if (key === "studio") { renderStudioGroup(slot, studio); continue; }
+    if (NAV_GROUPS[key]) {
+      renderNavGroup(slot, key, active.filter((p) => p.group === key));
+      continue;
+    }
     if (byTab[key]) { renderFlat(byTab[key]); done.add(key); }
   }
   // any other active plugin tab not in the canonical order, in catalog order.
@@ -1408,40 +1419,41 @@ export function renderNav() {
   reconcileActiveView();
 }
 
-/** Studio hybrid grouping: nothing for 0 media plugins, a single flat tab for
- *  exactly 1, and one stable-position "Studio" parent expanding to the active
- *  children for 2+. */
-export function renderStudioGroup(slot, studio) {
-  if (studio.length === 0) return;
-  if (studio.length === 1) {
-    const p = studio[0];
+/** Hybrid grouping for one nav category: nothing for 0 enabled members, a single
+ *  flat tab for exactly 1, and one stable-position parent expanding to the
+ *  active children for 2+. */
+export function renderNavGroup(slot, groupKey, members) {
+  const group = NAV_GROUPS[groupKey];
+  if (!group || members.length === 0) return;
+  if (members.length === 1) {
+    const p = members[0];
     slot.appendChild(_navButton(
       "nav-" + p.tab, NAV_ICON[p.icon] || "plugins", p.label || p.name, () => showView(p.tab)));
     return;
   }
-  const order = ["images", "music", "video"];
-  const known = order.map((t) => studio.find((p) => p.tab === t)).filter(Boolean);
-  // include any studio plugin with a non-canonical tab so a third-party media
-  // plugin is not counted toward the group yet silently never rendered (LGAP-1)
-  const extra = studio.filter((p) => !order.includes(p.tab));
+  const order = group.order;
+  const known = order.map((t) => members.find((p) => p.tab === t)).filter(Boolean);
+  // include any member with a non-canonical tab so a third-party plugin is not
+  // counted toward the group yet silently never rendered (LGAP-1)
+  const extra = members.filter((p) => !order.includes(p.tab));
   const kids = [...known, ...extra];
   const activeView = (document.querySelector(".view.active") || { id: "view-chat" })
     .id.replace("view-", "");
   const hasActiveKid = kids.some((p) => p.tab === activeView);
   const open = hasActiveKid ||
-    (chat.privacy ? true : localStorage.getItem("localm.studioOpen") !== "0");
+    (chat.privacy ? true : localStorage.getItem(group.key) !== "0");
 
   const wrap = el("div", "nav-group");
   const parent = el("button", "nav-group-parent" + (open ? " open" : ""));
-  parent.appendChild(iconEl("studio", "nav-ic"));
-  parent.appendChild(document.createTextNode("Studio"));
+  parent.appendChild(iconEl(group.icon, "nav-ic"));
+  parent.appendChild(document.createTextNode(group.label));
   const children = el("div", "nav-children");
   children.style.display = open ? "block" : "none";
   parent.onclick = () => {
     const nowOpen = children.style.display === "none";
     children.style.display = nowOpen ? "block" : "none";
     parent.classList.toggle("open", nowOpen);
-    lsSetScoped("localm.studioOpen", nowOpen ? "1" : "0");
+    lsSetScoped(group.key, nowOpen ? "1" : "0");
   };
   for (const p of kids) {
     children.appendChild(_navButton(

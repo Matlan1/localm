@@ -30,6 +30,9 @@ from localm.model_manager import PROGRESS_SENTINEL
 # Bound on the replay backlog and on each subscriber's queue.
 _HISTORY_MAX = 10_000
 
+#: Event type carrying one live-view frame. Only the most recent is kept.
+FRAME_EVENT = "frame"
+
 # Every status a job can hold. "interrupted" means the server stopped while the
 # operation was in flight, so its outcome is unknown; "failed" means the work
 # itself failed; "cancelled" means someone stopped it.
@@ -86,6 +89,9 @@ class Job:
     # The most recent {"type": "progress", ...} event. Written under _sub_lock in
     # push(), alongside the history append it is derived from.
     _last_progress: Optional[dict] = None
+    # The most recent live-view frame. Frames do NOT enter _history: they are
+    # large and frequent, and a new subscriber wants the current one.
+    _last_frame: Optional[dict] = None
     # Set by mark_outcome(). None (never marked) and "failed" both fall through to
     # start_fn's except-branch behavior; only "done" overrides it. Read and written
     # from the single worker thread running this job's callback, so it needs no
@@ -182,9 +188,16 @@ class Job:
 
     def push(self, event: dict) -> None:
         with self._sub_lock:
-            self._history.append(event)
-            if event.get("type") == "progress":
-                self._last_progress = event
+            if event.get("type") == FRAME_EVENT:
+                # A live-view frame REPLACES the last one instead of joining the
+                # history: frames are large and arrive many times a second, and a
+                # new subscriber wants the current picture, not a replay of every
+                # picture since the job started.
+                self._last_frame = event
+            else:
+                self._history.append(event)
+                if event.get("type") == "progress":
+                    self._last_progress = event
             subs = list(self._subscribers)
         for q, loop in subs:
             loop.call_soon_threadsafe(_safe_put, q, event)
@@ -236,6 +249,8 @@ class Job:
         q: asyncio.Queue = asyncio.Queue(maxsize=_HISTORY_MAX)
         with self._sub_lock:
             backlog = list(self._history)
+            if self._last_frame is not None:
+                backlog.append(self._last_frame)
             self._subscribers.append((q, loop))
         for event in backlog:
             q.put_nowait(event)

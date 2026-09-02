@@ -68,7 +68,12 @@ class BrowserSession:
     """One Chromium session, owned by its own thread and event loop."""
 
     def __init__(self, session_id: str, *, headless: bool = True,
-                 extra_deny=(), extra_allow=(), engine: str = "bundled"):
+                 extra_deny=(), extra_allow=(), engine: str = "bundled",
+                 on_frame: Optional[Callable[[str], None]] = None):
+        #: Called with each base64 JPEG frame when a live view is wanted. None
+        #: starts no screencast at all.
+        self._on_frame = on_frame
+        self._cdp = None
         self.session_id = session_id
         self.headless = headless
         self.engine = engine or "bundled"
@@ -153,6 +158,50 @@ class BrowserSession:
         # a routed WebSocket does not reach the server unless connect_to_server()
         # is called, so an unhandled one fails closed.
         await self._ctx.route_web_socket("**/*", self._on_ws_route)
+        if self._on_frame is not None:
+            await self._start_screencast()
+
+    async def _start_screencast(self) -> None:
+        """Stream the page as JPEG frames to the on_frame callback.
+
+        Best-effort: a browser build without the screencast command still drives
+        normally, it just has no live view, and the reason is logged rather than
+        raised into the session's startup."""
+        try:
+            self._cdp = await self._ctx.new_cdp_session(self._page)
+            await self._cdp.send("Page.enable")
+            self._cdp.on("Page.screencastFrame", self._on_screencast_frame)
+            await self._cdp.send("Page.startScreencast", {
+                "format": "jpeg", "quality": 55,
+                "maxWidth": 1280, "maxHeight": 800,
+            })
+        except Exception as exc:                     # noqa: BLE001
+            self._cdp = None
+            logger.warning("browser %s has no live view: %s", self.session_id, exc)
+
+    def _on_screencast_frame(self, params: dict) -> None:
+        """Hand one frame on, then acknowledge it.
+
+        Chromium stops sending frames until the previous one is acknowledged, so
+        a missed ack silently freezes the live view rather than dropping a frame.
+        """
+        try:
+            data = params.get("data")
+            if data and self._on_frame is not None:
+                self._on_frame(data)
+        except Exception as exc:                     # noqa: BLE001
+            logger.debug("browser %s frame callback failed: %s",
+                         self.session_id, exc)
+        sid = params.get("sessionId")
+        if self._cdp is not None and sid is not None:
+            asyncio.ensure_future(self._ack_frame(sid))
+
+    async def _ack_frame(self, session_id) -> None:
+        try:
+            await self._cdp.send("Page.screencastFrameAck",
+                                 {"sessionId": session_id})
+        except Exception:
+            pass
 
     def stop(self, timeout: float = 30.0) -> None:
         """Close the browser and stop the loop. Safe to call more than once."""

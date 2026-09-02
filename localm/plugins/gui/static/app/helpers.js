@@ -60,6 +60,7 @@ export const INSTANCE_SCOPED_KEYS = [
   "localm.webAccess",
   "localm.speakAloud",
   "localm.studioOpen",
+  "localm.coderOpen",
   "localm.backendHintDismissed",
 ];
 

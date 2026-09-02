@@ -171,6 +171,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   browser capability, which is separate from the coding agent's shell access,
   so you can grant one without the other.
 
+- **You can watch the browser work.** The Browser tab shows the page live as
+  the agent drives it, and lists any address the network policy refused,
+  along with the reason. Coder and Browser now share one collapsible group in
+  the sidebar, the way the media tabs already do.
+
 ### Changed
 - **The two installers explain themselves more consistently.** `setup.bat`
   now tells you a backend pick is load-tested and falls back to Vulkan
