@@ -384,9 +384,10 @@ def register(app: FastAPI, ctx) -> None:
         # Off the event loop: count_tokens is a native tokenizer call per input, and
         # ``input`` is bounded only by the 160 MB body cap.
         # Reports on embeddings that were already computed, so a refusal here
-        # estimates rather than failing a request that succeeded. Note the count
-        # uses the CHAT engine's tokenizer, which may be a different model from
-        # the embedder that produced the vectors.
+        # estimates rather than failing a request that succeeded. Defensive
+        # rather than reachable today: the only backend whose count_tokens can
+        # refuse is GgufBackend, whose embed() raises NotImplementedError and is
+        # refused above before this line runs.
         total_tokens = await loop.run_in_executor(
             None, lambda: sum(
                 count_tokens_or_estimate(engine.count_tokens, t, "an embedding input")

@@ -790,20 +790,11 @@ class TestTheStreamStillTerminatesWhenUsageIsRefused:
         assert "[DONE]" in r.text
 
 
-class TestEveryCountingSiteIsAccountedFor:
-    """A refusal at a counting call either REFUSES the request (a count that
-    gates the work) or ESTIMATES (a count that reports on work already done).
-    Neither may reach the generic handler as a 500."""
-
-    def test_the_embeddings_usage_count_does_not_fail_a_successful_embed(self):
-        # The usage count uses the CHAT engine's tokenizer, which can be a
-        # different model from the embedder that produced the vectors, so it can
-        # refuse text the embedder was happy with.
-        from localm.inference.pretokenizer_guard import count_tokens_or_estimate
-
-        def _refuse(_text):
-            raise PretokenizerUnsafeInputError(_REFUSAL)
-        assert count_tokens_or_estimate(_refuse, "x" * 400, "an embedding input") == 100
+class TestTheGatesRefuseAndTheReportsEstimate:
+    """The partition itself: a count that GATES the work refuses, a count that
+    REPORTS ON FINISHED WORK estimates. Completeness over the call sites is a
+    different claim and is checked by enumeration in
+    TestEveryCountingCallIsClassified, not here."""
 
     def test_the_post_compaction_recount_refuses_rather_than_500(self, monkeypatch):
         """The re-count after compaction reads a model-WRITTEN summary, which can
@@ -885,3 +876,202 @@ class TestTheEmbeddingsUsageCountIsSafeAndUnchanged:
         # The vectors are still returned; only the count degraded.
         assert r.json()["data"][0]["embedding"] == [0.1, 0.2, 0.3]
         assert r.json()["usage"]["total_tokens"] == 100
+
+
+class TestEveryCountingCallIsClassified:
+    """ENUMERATES the counting calls instead of sampling them.
+
+    The class that used to sit here asserted completeness in its NAME while its
+    body checked a helper, one route, and another helper - so adding an
+    unguarded counting call failed nothing, and one was in fact missed: the
+    non-streaming chat usage count in http_server.py, which is the default shape
+    for most API clients.
+
+    Every `engine.count_tokens` / `engine.count_messages_tokens` call in the two
+    server files must be one of:
+
+    * routed through ``count_tokens_or_estimate`` - it REPORTS ON FINISHED WORK,
+      so a refusal degrades to an estimate rather than discarding a completed
+      generation; or
+    * inside a ``PretokenizerUnsafeInputError`` handler - it GATES the work, so a
+      refusal answers 400.
+
+    A raw call that is neither reaches the generic handler as an opaque 500.
+    """
+
+    SERVER_FILES = ("localm/inference/http_server.py",
+                    "localm/inference/routes/chat.py")
+
+    # Counting calls inside an `if prompt_tokens is None:` fallback are dead
+    # today, because every caller passes a computed prompt_tokens that the route
+    # has already guarded. That precondition is asserted below rather than
+    # trusted, so a future caller that stops passing it fails this test instead
+    # of silently reviving an unguarded count.
+    DEAD_BRANCH = "if prompt_tokens is None:"
+
+    def _calls(self):
+        """(file, lineno, enclosing def, source line) for every raw counting call."""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        out = []
+        for rel in self.SERVER_FILES:
+            lines = (root / rel).read_text(encoding="utf-8").splitlines()
+            enclosing = "?"
+            for i, line in enumerate(lines, 1):
+                d = re.match(r"\s*(?:async\s+)?def\s+(\w+)", line)
+                if d:
+                    enclosing = d.group(1)
+                if re.search(r"engine\.count_tokens|engine\.count_messages_tokens", line):
+                    out.append((rel, i, enclosing, line))
+        return out
+
+    def _guarded_region(self, rel, lineno):
+        """True when this line sits under a PretokenizerUnsafeInputError handler
+        within the same function."""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        lines = (root / rel).read_text(encoding="utf-8").splitlines()
+        # Walk back to the enclosing def; a handler for this error anywhere in
+        # that function's body before or after means the call is inside a try
+        # whose except names it.
+        start = 0
+        for i in range(lineno - 1, -1, -1):
+            if re.match(r"\s*(?:async\s+)?def\s+\w+", lines[i]):
+                start = i
+                break
+        end = len(lines)
+        for i in range(lineno, len(lines)):
+            if re.match(r"(?:async\s+)?def\s+\w+|class\s+\w+", lines[i]):
+                end = i
+                break
+        body = "\n".join(lines[start:end])
+        return "except PretokenizerUnsafeInputError" in body
+
+    def test_the_enumeration_finds_something(self):
+        # A scan that matched nothing would pass every assertion below.
+        calls = self._calls()
+        assert len(calls) >= 8, f"the scan found only {len(calls)} counting calls"
+
+    def _in_dead_branch(self, rel, lineno):
+        """True when the call sits inside an `if prompt_tokens is None:` block."""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        lines = (root / rel).read_text(encoding="utf-8").splitlines()
+        call = lines[lineno - 1]
+        indent = len(call) - len(call.lstrip())
+        for i in range(lineno - 2, -1, -1):
+            probe = lines[i]
+            if not probe.strip():
+                continue
+            probe_indent = len(probe) - len(probe.lstrip())
+            if probe_indent >= indent:
+                continue
+            # First line at a shallower indent decides: either it opens the dead
+            # branch, or the call is outside it.
+            if self.DEAD_BRANCH in probe:
+                return True
+            indent = probe_indent
+        return False
+
+    def test_every_counting_call_is_guarded_or_routed_or_dead(self):
+        unclassified = []
+        for rel, lineno, func, line in self._calls():
+            if "count_tokens_or_estimate" in line:
+                continue                                   # reports on finished work
+            if self._guarded_region(rel, lineno):
+                continue                                   # gates the work, answers 400
+            if self._in_dead_branch(rel, lineno):
+                continue                                   # unreachable, pinned below
+            unclassified.append(f"{rel}:{lineno} in {func}(): {line.strip()}")
+        assert not unclassified, (
+            "these counting calls would reach the generic handler as a 500 on a "
+            "pre-tokenizer refusal:\n  " + "\n  ".join(unclassified))
+
+    def test_the_dead_branches_really_are_dead(self):
+        """Every call into the handlers that carry an
+        `if prompt_tokens is None:` fallback passes a prompt_tokens the route
+        has already guarded. Without this, the exemption above would be a
+        permanent hole rather than a statement about today's callers."""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        src = (root / "localm/inference/routes/chat.py").read_text(encoding="utf-8")
+        handlers = ("_stream_sse", "_complete", "_stream_sse_completion")
+        found = 0
+        for name in handlers:
+            for m in re.finditer(rf"\b{name}\(", src):
+                # The call's argument list runs to the matching close paren; a
+                # conservative window of the next 600 characters covers every
+                # multi-line call site in this file.
+                window = src[m.start():m.start() + 600]
+                found += 1
+                assert "prompt_tokens=prompt_tokens" in window, (
+                    f"{name}() is called without passing prompt_tokens, which "
+                    f"revives an unguarded counting call in http_server.py")
+        assert found >= 3, f"expected the three handler call sites, found {found}"
+
+
+@pytest.fixture(autouse=True)
+def _gguf_backend_class_is_not_mutated():
+    """Runs after EVERY test in this file, not just at one collected moment.
+
+    A test that assigns or deletes an attribute on the real GgufBackend class
+    changes it for the rest of the process; deleting `loaded` in particular drops
+    resolution to BaseBackend's abstract stub, which returns None and silently
+    turns every later token count into the chars/4 heuristic. That escapes this
+    file, so it is checked per test rather than once.
+    """
+    yield
+    assert vars(_GgufBackend).get("loaded") is _ORIGINAL_GGUF_LOADED, \
+        "a test in this file mutated GgufBackend.loaded, which leaks into every " \
+        "test that runs after it in this process"
+
+
+class TestNonStreamingChatSurvivesARefusedUsageCount:
+    """`stream: false` is the default shape for most API clients, and its usage
+    count sits in http_server.py rather than routes/chat.py - which is why the
+    first sweep, scoped to the routes file, missed it. A refusal there discarded
+    a generation that had fully succeeded."""
+
+    GENERATED = "a" * 400
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+
+        from localm.inference.http_server import create_app
+        engine = _engine()
+        engine.chat_stream.side_effect = lambda m, **kw: iter([self.GENERATED])
+
+        # Only counting the GENERATED text refuses; counting the PROMPT must
+        # succeed, or this would test the gating path instead of the usage path.
+        def _count(text):
+            if text == self.GENERATED:
+                raise PretokenizerUnsafeInputError(_REFUSAL)
+            return 2
+        engine.count_tokens.side_effect = _count
+        engine.count_messages_tokens.return_value = 3
+        return TestClient(create_app(engine), raise_server_exceptions=False)
+
+    def _post(self):
+        with self._client() as c:
+            return c.post("/v1/chat/completions",
+                          json={"model": "test-model", "messages": _MSG,
+                                "stream": False})
+
+    def test_the_generation_is_returned_rather_than_discarded(self):
+        r = self._post()
+        assert r.json() != {"detail": "Internal server error"}
+        assert r.status_code == 200, r.json()
+        # The answer is the property; the token count is a report about it.
+        content = r.json()["choices"][0]["message"]["content"]
+        assert content, "a successful generation was thrown away over its usage count"
+
+    def test_the_count_degrades_to_an_estimate(self):
+        usage = self._post().json()["usage"]
+        assert usage["completion_tokens"] == len(self.GENERATED) // 4

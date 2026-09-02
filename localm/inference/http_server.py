@@ -5305,8 +5305,7 @@ async def _complete(
     from localm.textnorm import split_think
     answer, reasoning = split_think(text)
 
-    completion_tokens = await asyncio.get_running_loop().run_in_executor(
-        None, engine.count_tokens, text)
+    completion_tokens = await _count_streamed_tokens(engine, text)
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
