@@ -123,14 +123,21 @@ latter would flag these two as violations:
                                  have received the user's key over a
                                  connection whose occupant was never checked,
                                  in cleartext whenever scheme was "http".
-                                 peer_routing.is_routable_peer_host now
-                                 requires the dialled address to be a loopback
-                                 literal, enforced both in find_offer (such a
-                                 peer is never offered) and at the top of
-                                 forward() itself (before the body is read or
-                                 the header is built), so the verified
-                                 endpoint and the credential's destination are
-                                 the same one.
+                                 peer_routing.is_routable_peer_endpoint now
+                                 requires BOTH: the dialled address must be a
+                                 loopback literal, and the scheme must be http
+                                 or https. Pinning only the host is not
+                                 enough, because _peer_url interpolates the
+                                 scheme into "{scheme}://{host}:{port}{path}"
+                                 and a scheme containing "://" moves the URL
+                                 authority off the host entirely, so the two
+                                 fields of the same untrusted record have to
+                                 be pinned together. It is enforced in
+                                 find_offer, so such a peer is never offered,
+                                 and again at the top of forward() before the
+                                 body is read or the header is built, so the
+                                 verified endpoint and the credential's
+                                 destination are the same one.
 
 If you land a new site here, EITHER route it through
 ``auth.resolve_bearer_headers`` (the common case) OR add it to the allowlist

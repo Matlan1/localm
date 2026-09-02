@@ -91,29 +91,33 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "instance_id and api_key are required")
         self_id = (_hs._gpu_coord or {}).get("instance_id") if _hs._gpu_coord else None
 
-        def _verify_and_store():
+        # Verification only. run_in_threadpool_bounded ABANDONS the awaiting
+        # caller at its deadline while the worker thread runs to completion, so
+        # a set_route() in here would install the route after the client had
+        # already been told 504.
+        # See test_a_timed_out_accept_never_installs_a_route.
+        def _verify():
             registry = load_registry()
             canonical, aliases = peer_routing.registry_name_and_aliases(registry, name)
             peer = peer_routing.find_offer(canonical, aliases, exclude_self_id=self_id)
             if peer is None or peer.get("instance_id") != instance_id:
                 return None
-            route = peer_routing.PeerRoute(
+            return peer_routing.PeerRoute(
                 model=name, instance_id=peer.get("instance_id"),
                 host=peer.get("host"), port=int(peer.get("port")),
                 scheme=peer.get("scheme") or "http", api_key=api_key)
-            peer_routing.set_route(route)
-            return route
 
         try:
             route = await run_in_threadpool_bounded(
-                _verify_and_store, timeout=_PEER_LOOKUP_TIMEOUT_S)
+                _verify, timeout=_PEER_LOOKUP_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Verifying peer '{instance_id}' timed out: {e}")
         if route is None:
             raise HTTPException(
                 409, f"Peer instance '{instance_id}' is no longer live, no "
                 f"longer has '{name}' loaded, or is not reachable at a "
-                "loopback address; re-check available peers.")
+                "loopback address over http or https; re-check available peers.")
+        peer_routing.set_route(route)
         return {"status": "routed", "model": name, "peer": route.safe_dict()}
 
     @app.delete("/v1/models/{model_id}/peer-route",

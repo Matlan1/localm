@@ -64,7 +64,8 @@ _ROUTES: dict = {}
 
 # Guards every read and write of _ROUTES. Held only across dict operations,
 # never across a network call or a registry read.
-# See test_routes_lock_is_never_held_across_a_network_call.
+# See test_find_offer_does_not_hold_the_routes_lock and
+# test_forward_does_not_hold_the_routes_lock_across_the_request.
 _ROUTES_LOCK = threading.RLock()
 
 
@@ -108,23 +109,43 @@ def dial_host(host: Optional[str]) -> str:
     return self_connect_host(host)
 
 
+# The only schemes a peer entry may name. gpu_registry.list_gpu_peers applies
+# no whitelist of its own, and _peer_url interpolates the value straight into
+# "{scheme}://{host}:{port}{path}", where any string containing "://" moves the
+# authority off *host* entirely.
+# See test_a_peer_whose_scheme_smuggles_an_authority_is_never_offered.
+_ROUTABLE_SCHEMES = ("http", "https")
+
+
 def is_routable_peer_host(host: Optional[str]) -> bool:
-    """Whether a peer registering *host* may be sent this instance's forwarded
-    request and its bearer credential.
+    """Whether *host* names an address this instance has identity-verified.
 
     True only when :func:`dial_host` yields a loopback IP literal. A name that
-    does not parse as an IP address is False.
+    does not parse as an IP address, and any value that is not a string, is
+    False rather than raising.
 
     ``gpu_registry.list_gpu_peers`` runs its ``/whoami`` identity handshake
-    against loopback (it passes no ``bind_host``), so loopback is the only
-    address whose occupant this instance has actually verified. A registry
-    entry naming any other host would be dialled without ever having been
-    identity-checked. See
+    with no ``bind_host``, so the address it verifies is exactly
+    ``127.0.0.1``. This predicate accepts the whole loopback class, which is
+    marginally wider: a peer bound only on ``::1`` has nothing answering on
+    ``127.0.0.1`` and so fails that handshake and is never offered, so the
+    extra width is unreachable without a forged registry entry. See
     test_a_peer_advertising_a_non_loopback_host_is_never_offered."""
     try:
         return ipaddress.ip_address(dial_host(host)).is_loopback
-    except ValueError:
+    except (ValueError, AttributeError, TypeError):
         return False
+
+
+def is_routable_peer_endpoint(host: Optional[str], scheme: Optional[str]) -> bool:
+    """Whether a peer registering *host* and *scheme* may be sent this
+    instance's forwarded request and its bearer credential.
+
+    Requires BOTH a verified-loopback *host* (:func:`is_routable_peer_host`)
+    and a *scheme* in :data:`_ROUTABLE_SCHEMES`. Both fields come from the same
+    untrusted registry entry, so pinning only the host leaves the credential's
+    destination open through the other one."""
+    return scheme in _ROUTABLE_SCHEMES and is_routable_peer_host(host)
 
 
 def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] = None) -> Optional[dict]:
@@ -136,8 +157,9 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
     identical, only that the peer's own chosen name for what it has loaded
     equals one this instance also uses for the same registry entry.
 
-    A peer whose registered ``host`` fails :func:`is_routable_peer_host` is
-    skipped and logged at WARNING, however well it matches.
+    A peer whose registered ``host``/``scheme`` fails
+    :func:`is_routable_peer_endpoint` is skipped and logged at WARNING,
+    however well it matches.
 
     Best-effort: any failure reading the registry is logged and yields None,
     never raised, matching every other public function in gpu_registry."""
@@ -157,12 +179,13 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
             continue
         if model not in names and model.casefold() not in folded:
             continue
-        if not is_routable_peer_host(peer.get("host")):
+        if not is_routable_peer_endpoint(peer.get("host"), peer.get("scheme") or "http"):
             logger.warning(
-                "peer_routing: peer %s advertises '%s' at non-loopback host "
-                "%r; not offering it, because only a loopback address has had "
-                "its occupant identity-verified",
-                peer.get("instance_id"), model, peer.get("host"))
+                "peer_routing: peer %s advertises '%s' at unroutable endpoint "
+                "scheme=%r host=%r; not offering it, because only a loopback "
+                "address over http or https has had its occupant "
+                "identity-verified",
+                peer.get("instance_id"), model, peer.get("scheme"), peer.get("host"))
             continue
         return peer
     return None
@@ -213,8 +236,8 @@ async def forward(route: PeerRoute, request, path: str):
     DOES return (2xx or not) is passed through unchanged - that is a real
     answer from a live peer, not "peer unavailable".
 
-    A *route* whose host fails :func:`is_routable_peer_host` is refused before
-    the request body or the ``Authorization`` header is built: the route is
+    A *route* whose endpoint fails :func:`is_routable_peer_endpoint` is refused
+    before the request body or the ``Authorization`` header is built: the route is
     CLEARED, a WARNING is logged, and ``HTTPException(502, ...)`` is raised.
     ``find_offer`` already refuses to offer such a peer, so this is the second
     of two checks and holds however the ``PeerRoute`` was constructed. See
@@ -222,16 +245,18 @@ async def forward(route: PeerRoute, request, path: str):
     from fastapi import HTTPException
     from fastapi.responses import StreamingResponse
 
-    if not is_routable_peer_host(route.host):
+    if not is_routable_peer_endpoint(route.host, route.scheme):
         clear_route(route.model)
         logger.warning(
-            "peer_routing: refusing to forward '%s' to non-loopback host %r "
-            "(peer %s); clearing the route without sending the credential",
-            route.model, route.host, route.instance_id)
+            "peer_routing: refusing to forward '%s' to unroutable endpoint "
+            "scheme=%r host=%r (peer %s); clearing the route without sending "
+            "the credential",
+            route.model, route.scheme, route.host, route.instance_id)
         raise HTTPException(
-            502, f"Route for '{route.model}' names a non-loopback peer host "
-            f"{route.host!r}, which this instance cannot identity-verify; the "
-            "route has been cleared. Retry to load a local copy.")
+            502, f"Route for '{route.model}' names peer endpoint "
+            f"{route.scheme!r}://{route.host!r}, which this instance cannot "
+            "identity-verify; the route has been cleared. Retry to load a "
+            "local copy.")
 
     body = await request.body()
     fwd_headers = {"Authorization": f"Bearer {route.api_key}"}

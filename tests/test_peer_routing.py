@@ -729,11 +729,12 @@ class TestRoutesLock:
             t.join(timeout=5)
         assert errors == [], f"concurrent access to _ROUTES raised: {errors}"
 
-    def test_routes_lock_is_never_held_across_a_network_call(
+    def test_find_offer_does_not_hold_the_routes_lock(
             self, _isolated_state, monkeypatch):
-        """The invariant _ROUTES_LOCK's own comment states. Holding it across
-        the peer lookup would block get_route on the event loop for the whole
-        lookup, reintroducing the stall the offload removed."""
+        """Half of the invariant _ROUTES_LOCK's comment states. This pins the
+        peer-lookup path only, and it is insensitive to whether the four
+        accessors lock at all: it fails when find_offer ACQUIRES the lock, not
+        when someone removes a `with` from set_route."""
         import threading
 
         acquired = []
@@ -756,3 +757,186 @@ class TestRoutesLock:
         peer_routing.find_offer("some-model", frozenset())
         assert acquired == [True], (
             "_ROUTES_LOCK was held across the peer lookup's network call")
+
+    def test_forward_does_not_hold_the_routes_lock_across_the_request(self, monkeypatch):
+        """The other half. forward() is the path that genuinely takes the lock
+        (clear_route) near a network call, so this is the one find_offer's
+        sibling test cannot cover: the lock must be free while the forwarded
+        request is in flight."""
+        import threading
+
+        acquired = []
+
+        def probing_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+            def probe():
+                got = peer_routing._ROUTES_LOCK.acquire(blocking=False)
+                acquired.append(got)
+                if got:
+                    peer_routing._ROUTES_LOCK.release()
+
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join(timeout=5)
+            return _FakePeerResponse()
+
+        monkeypatch.setattr("requests.post", probing_post)
+        route = peer_routing.PeerRoute(
+            model="lock-fwd", instance_id="peer-lockfwd", host="127.0.0.1",
+            port=9607, scheme="http", api_key="k")
+        req = _FakeRequest(b"{}")
+
+        assert asyncio.run(
+            peer_routing.forward(route, req, "/v1/chat/completions")).status_code == 200
+        assert acquired == [True], (
+            "_ROUTES_LOCK was held while the forwarded request was in flight")
+
+
+# ------------------------------------------------------------------ #
+#  scheme is the other half of the same untrusted record             #
+# ------------------------------------------------------------------ #
+
+class TestPeerSchemeIsPinnedToo:
+    """_peer_url interpolates scheme into "{scheme}://{host}:{port}{path}", so
+    a scheme containing "://" moves the URL authority off host entirely and
+    the loopback host check never sees it."""
+
+    @pytest.mark.parametrize("scheme", [
+        "http://attacker.example/collect?x",
+        "https://attacker.example/#",
+        "HTTP", "ftp", "file", "", None, "http ",
+    ])
+    def test_only_http_and_https_are_routable(self, scheme):
+        assert peer_routing.is_routable_peer_endpoint("127.0.0.1", scheme) is False
+
+    @pytest.mark.parametrize("scheme", ["http", "https"])
+    def test_http_and_https_on_loopback_are_routable(self, scheme):
+        assert peer_routing.is_routable_peer_endpoint("127.0.0.1", scheme) is True
+
+    def test_a_smuggled_scheme_really_moves_the_url_authority(self):
+        """The reason this is pinned at all, asserted against the real URL
+        builder rather than argued: with a loopback host and a crafted scheme,
+        the authority is the attacker's."""
+        from urllib3.util import parse_url
+        route = peer_routing.PeerRoute(
+            model="m", instance_id="i", host="127.0.0.1", port=8642,
+            scheme="http://attacker.example/collect?x", api_key="k")
+        assert parse_url(peer_routing._peer_url(route, "/v1/chat/completions")).host \
+            == "attacker.example"
+
+    def test_a_peer_whose_scheme_smuggles_an_authority_is_never_offered(
+            self, _isolated_state, monkeypatch):
+        gpu_registry.write_entry(
+            _isolated_state, instance_id="peer-smuggle", pid=os.getpid() + 1,
+            port=9601, host="127.0.0.1",
+            scheme="http://attacker.example/collect?x", model="shared-model",
+            vram_estimate_bytes=None, gpu_index=0, coordination_token="t")
+        _make_live(monkeypatch)
+        assert peer_routing.find_offer("shared-model", frozenset()) is None
+
+    def test_forward_refuses_a_smuggled_scheme_without_sending_the_key(self, monkeypatch):
+        calls = []
+
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+            calls.append((url, headers))
+            return _FakePeerResponse()
+
+        monkeypatch.setattr("requests.post", fake_post)
+        route = peer_routing.PeerRoute(
+            model="smuggled", instance_id="peer-smuggle2", host="127.0.0.1",
+            port=9602, scheme="http://attacker.example/collect?x",
+            api_key="the-users-real-key")
+        peer_routing.set_route(route)
+        req = _FakeRequest(b"{}")
+
+        from fastapi import HTTPException
+
+        raised = None
+        try:
+            asyncio.run(peer_routing.forward(route, req, "/v1/chat/completions"))
+        except HTTPException as e:
+            raised = e
+
+        assert calls == [], "the bearer credential left this process"
+        assert peer_routing.get_route("smuggled") is None
+        assert raised is not None and raised.status_code == 502
+
+
+# ------------------------------------------------------------------ #
+#  find_offer's never-raises contract                                #
+# ------------------------------------------------------------------ #
+
+class TestMalformedEntryDoesNotRaise:
+    """find_offer documents that any failure reading the registry yields None
+    and is never raised. The host predicate runs outside the try that wraps
+    list_gpu_peers, so a non-string host must be rejected rather than raise."""
+
+    @pytest.mark.parametrize("host", [127, True, ["127.0.0.1"], {"a": 1}, 1.5])
+    def test_a_non_string_host_is_rejected_not_raised(self, host):
+        """None is deliberately absent: an unset host is the wildcard-bind
+        case, which self_connect_host maps to 127.0.0.1, and
+        test_a_loopback_or_wildcard_bind_is_routable pins it as True."""
+        assert peer_routing.is_routable_peer_host(host) is False
+
+    def test_find_offer_yields_none_on_a_malformed_host(self, monkeypatch):
+        monkeypatch.setattr(
+            gpu_registry, "list_gpu_peers",
+            lambda **k: [{"instance_id": "bad", "model": "shared-model",
+                          "host": 127, "port": 9603, "scheme": "http"}])
+        assert peer_routing.find_offer("shared-model", frozenset()) is None
+
+    def test_the_offer_endpoint_reports_unavailable_rather_than_500(
+            self, _isolated_state, monkeypatch):
+        monkeypatch.setattr(
+            gpu_registry, "list_gpu_peers",
+            lambda **k: [{"instance_id": "bad", "model": "shared-model",
+                          "host": 127, "port": 9604, "scheme": "http"}])
+        client = TestClient(create_app(None))
+        r = client.get("/v1/models/shared-model/peer-offer")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"available": False, "peer": None}
+
+
+# ------------------------------------------------------------------ #
+#  A request the client was told failed must change nothing          #
+# ------------------------------------------------------------------ #
+
+class TestTimedOutAcceptInstallsNothing:
+    def test_a_timed_out_accept_never_installs_a_route(
+            self, _isolated_state, monkeypatch):
+        """run_in_threadpool_bounded abandons the AWAITING CALLER at its
+        deadline and lets the worker thread run to completion, so any mutation
+        inside the offloaded closure lands after the client was told 504. The
+        user sees the failure toast while their next chat request would be
+        forwarded with the key they typed."""
+        import time
+
+        from localm.inference.routes import peer_routing as routes_peer_routing
+
+        _write_peer(_isolated_state, "peer-slow", 9605, model="shared-model")
+        _make_live(monkeypatch)
+
+        real = peer_routing.find_offer
+
+        def slow(*a, **k):
+            time.sleep(1.2)
+            return real(*a, **k)
+
+        monkeypatch.setattr(peer_routing, "find_offer", slow)
+        monkeypatch.setattr(routes_peer_routing, "_PEER_LOOKUP_TIMEOUT_S", 0.2)
+
+        client = TestClient(create_app(None))
+        r = client.post(
+            "/v1/models/shared-model/peer-route",
+            headers={"Authorization": f"Bearer {client.app.state.shell_token}"},
+            json={"instance_id": "peer-slow", "api_key": "the-users-real-key"})
+
+        assert r.status_code == 504, r.text
+        assert peer_routing.get_route("shared-model") is None
+
+        # The abandoned worker is still running here; the assertion that
+        # matters is the one AFTER it has had time to finish.
+        time.sleep(2.0)
+        late = peer_routing.get_route("shared-model")
+        assert late is None, (
+            "a request the client was told had FAILED installed a route "
+            f"carrying the user's key: {late}")
