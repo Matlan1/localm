@@ -30,8 +30,25 @@ const LOCALE_DICT = Object.freeze({
 
 const DATA_DIR = "/usr/share/espeak-ng-data";
 
+/** A word each locale's dictionary must be able to pronounce. */
+const PROBE_WORD = Object.freeze({
+  es: "hola",
+  fr: "bonjour",
+  hi: "नमस्ते",
+  it: "ciao",
+  "pt-br": "ola",
+});
+
 /** eSpeak-NG language-switch markers, e.g. the "(en)" around a loanword. */
 const LANG_SWITCH = /\([a-z]{2,3}(?:-[a-z]{2,8})*\)/g;
+
+/**
+ * A run of the punctuation Kokoro's alphabet contains, plus the whitespace
+ * after it. eSpeak-NG drops punctuation from its IPA, so it is carried across
+ * from the source text instead; these are the characters the model has tokens
+ * for, and they are what gives it pause and question intonation.
+ */
+const PUNCTUATION_RUN = /[;:,.!?\u2014\u2026"\u201C\u201D]+\s*/g;
 
 /**
  * The locale for a Kokoro voice id, or null when the voice is English and the
@@ -71,6 +88,28 @@ export function normalizePhonemes(ipa) {
     .trim();
 }
 
+/** One chunk of text as IPA, with eSpeak-NG's clause breaks flattened. */
+function speakSegment(worker, text) {
+  const raw = worker.synthesize_ipa(text).ipa ?? "";
+  return raw.split("\n").filter((line) => line.length > 0).join(" ");
+}
+
+/**
+ * Split into alternating spoken and punctuation runs, so the punctuation can be
+ * carried across verbatim while only the rest is sent to the engine.
+ */
+function splitOnPunctuation(text) {
+  const parts = [];
+  let last = 0;
+  for (const m of text.matchAll(PUNCTUATION_RUN)) {
+    if (m.index > last) parts.push({ punctuation: false, text: text.slice(last, m.index) });
+    parts.push({ punctuation: true, text: m[0] });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push({ punctuation: false, text: text.slice(last) });
+  return parts;
+}
+
 /** Per-locale dictionary loads, settled or in flight, keyed by locale. */
 const dictLoads = new Map();
 
@@ -90,13 +129,27 @@ async function ensureDictionary(mod, locale, baseURL) {
   load = (async () => {
     const fs = mod.espeakFS;
     const target = `${DATA_DIR}/${dict}`;
-    if (fs.analyzePath(target).exists) return;
-    const url = new URL(`vendor/espeak-ng-data/${dict}`, baseURL);
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`${dict}: HTTP ${res.status}`);
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    if (bytes.length === 0) throw new Error(`${dict}: empty response`);
-    fs.writeFile(target, bytes);
+    if (!fs.analyzePath(target).exists) {
+      const url = new URL(`vendor/espeak-ng-data/${dict}`, baseURL);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`${dict}: HTTP ${res.status}`);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (bytes.length === 0) throw new Error(`${dict}: empty response`);
+      fs.writeFile(target, bytes);
+    }
+    // Prove the engine can read it, ONCE, on a word it must be able to say.
+    // eSpeak-NG answers a dictionary it cannot read the same way it answers a
+    // chunk with nothing to pronounce: empty output and a success code. Asking
+    // here, where the answer is known, is what lets phonemize() treat an empty
+    // result as "nothing to say" instead of a fault. See
+    // test_unpronounceable_chunk_is_not_a_dictionary_fault.
+    const worker = await mod.espeakWorker;
+    if (worker.set_voice(locale) !== 0) return;
+    if (speakSegment(worker, PROBE_WORD[locale]) === "") {
+      throw new Error(
+        `${dict} is present but eSpeak-NG cannot read it: "${PROBE_WORD[locale]}" ` +
+        `produced no phonemes.`);
+    }
   })();
 
   dictLoads.set(locale, load);
@@ -112,17 +165,15 @@ async function ensureDictionary(mod, locale, baseURL) {
 /**
  * Phonemize one chunk of text for a non-English locale.
  *
- * Throws on both of eSpeak-NG's silent failures.
+ * Returns "" when the text holds nothing to pronounce, which is ordinary: a
+ * markdown rule or a table row of dashes arrives here as its own chunk.
  *
- * `set_voice` answers 0 on success and non-zero on rejection, and a rejected
- * call leaves the PREVIOUS language selected rather than reporting an error, so
- * an unusable locale reads as fluent output in the wrong language. Not every
- * language name it lists is a settable identifier: "fr-fr" appears in the voice
- * metadata and is rejected, while "fr" is accepted. See test_rejects_unsettable_locale.
- *
- * A dictionary it cannot read is likewise not an error: it writes a message to
- * the console and returns an empty string with a success code, which reaches
- * the model as an empty token sequence and plays as silence.
+ * Throws when the locale is unusable. `set_voice` answers 0 on success and
+ * non-zero on rejection, and a rejected call leaves the PREVIOUS language
+ * selected rather than reporting an error, so an unusable locale reads as
+ * fluent output in the wrong language. Not every language name it lists is a
+ * settable identifier: "fr-fr" appears in the voice metadata and is rejected,
+ * while "fr" is accepted. See test_rejects_unsettable_locale.
  */
 export async function phonemize(mod, text, locale, baseURL) {
   await ensureDictionary(mod, locale, baseURL);
@@ -133,15 +184,11 @@ export async function phonemize(mod, text, locale, baseURL) {
       `eSpeak-NG rejected locale "${locale}" (status ${status}); refusing to ` +
       `phonemize, which would silently use the previously selected language.`);
   }
-  const raw = worker.synthesize_ipa(text).ipa ?? "";
-  const joined = raw.split("\n").filter((line) => line.length > 0).join(" ");
-  const phonemes = normalizePhonemes(joined);
-  if (phonemes.length === 0) {
-    throw new Error(
-      `eSpeak-NG produced no phonemes for locale "${locale}"; the ` +
-      `${LOCALE_DICT[locale]} dictionary is missing or unreadable.`);
+  let out = "";
+  for (const part of splitOnPunctuation(text)) {
+    out += part.punctuation ? part.text : speakSegment(worker, part.text);
   }
-  return phonemes;
+  return normalizePhonemes(out);
 }
 
 /**
@@ -154,6 +201,7 @@ export async function* streamNonEnglish(mod, tts, source, { voice, speed, baseUR
   const sentences = typeof source === "string" ? [source] : source;
   for await (const sentence of sentences) {
     const phonemes = await phonemize(mod, sentence, locale, baseURL);
+    if (phonemes === "") continue;
     const { input_ids } = tts.tokenizer(phonemes, { truncation: true });
     const audio = await tts.generate_from_ids(input_ids, { voice, speed });
     yield { text: sentence, phonemes, audio };

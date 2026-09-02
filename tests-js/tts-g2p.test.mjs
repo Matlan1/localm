@@ -295,3 +295,97 @@ test("test_falls_back_to_af_heart: an unknown configured voice falls back by nam
     delete global.window; delete global.document; delete global.Audio;
   }
 });
+
+// ---- "nothing to say" is not a broken dictionary ----------------------- //
+
+// eSpeak-NG answers a dictionary it cannot read exactly as it answers a chunk
+// with nothing pronounceable: empty output, success code. Conflating them made
+// an ordinary markdown rule abort the rest of a spoken reply and blame a
+// dictionary that was fine. The dictionary is proved once, on load, instead.
+test("test_unpronounceable_chunk_is_not_a_dictionary_fault", async () => {
+  // Not "***": eSpeak-NG reads asterisks aloud ("asterisco"), as it does for
+  // English, and the app strips them before TTS anyway.
+  for (const chunk of ["---", "|---|---|", "   ", "|  |  |", "___"]) {
+    const phonemes = await g2p.phonemize(kokoro, chunk, "es", BASE);
+    assert.equal(phonemes, "", `${JSON.stringify(chunk)} must yield no phonemes`);
+  }
+  // and the language still works immediately afterwards
+  assert.match(await g2p.phonemize(kokoro, "Hola mundo", "es", BASE), /ˈola/);
+});
+
+// A markdown table is ordinary model output, and TextSplitterStream emits its
+// separator row as its own chunk.
+test("a table separator row does not stop the rest of the reply", async () => {
+  const splitter = new kokoro.TextSplitterStream();
+  splitter.push("Aqui esta la tabla:\n\n| Clave | Valor |\n|---|---|\n| uno | 1 |\n\nEso es todo.");
+  splitter.close();
+  const spoken = [];
+  for await (const sentence of splitter) {
+    const phonemes = await g2p.phonemize(kokoro, sentence, "es", BASE);
+    if (phonemes !== "") spoken.push(phonemes);
+  }
+  assert.equal(spoken.length, 4, `expected 4 spoken chunks, got ${spoken.length}`);
+  assert.match(spoken.at(-1), /ˈeso/, "the final sentence must still be reached");
+});
+
+test("an unreadable dictionary is still refused, on load", async () => {
+  const stub = {
+    espeakFS: { analyzePath: () => ({ exists: true }), writeFile: () => {} },
+    espeakWorker: Promise.resolve({
+      set_voice: () => 0,
+      synthesize_ipa: () => ({ code: 0, ipa: "\n" }),   // what an unreadable dict gives
+    }),
+  };
+  g2p._resetDictionaryCache();
+  try {
+    await assert.rejects(
+      () => g2p.phonemize(stub, "Hola", "es", BASE),
+      /es_dict is present but eSpeak-NG cannot read it/);
+  } finally {
+    g2p._resetDictionaryCache();
+  }
+});
+
+// ---- punctuation reaches the model ------------------------------------- //
+
+// eSpeak-NG strips punctuation from its IPA. Kokoro has tokens for it and the
+// bundle's English path preserves it, so it is carried across from the source
+// text; without this the new languages get no pause or question intonation.
+test("test_preserves_punctuation: pause and intonation marks survive", async () => {
+  const cases = {
+    es: ["Hola, mundo. Como estas?", /^ˈola, .*\. .*\?$/],
+    it: ["Aspetta; fermati! Davvero?", /^aspˈɛtːa; .*! .*\?$/],
+    fr: ["Bonjour, ca va? Oui!", /^bɔ̃ʒˈuʁ, .*\? .*!$/],
+    "pt-br": ["Ola, tudo bem? Sim.", /^ˈɔlæ, .*\? .*\.$/],
+    hi: ["नमस्ते, आप कैसे हैं?", /,.*\?$/],
+  };
+  for (const [locale, [text, shape]] of Object.entries(cases)) {
+    const phonemes = await g2p.phonemize(kokoro, text, locale, BASE);
+    assert.match(phonemes, shape, `${locale}: ${phonemes}`);
+  }
+});
+
+test("every punctuation mark carried across is in Kokoro's alphabet", async () => {
+  const phonemes = await g2p.phonemize(
+    kokoro, "Uno, dos; tres: cuatro. Cinco! Seis?", "es", BASE);
+  const unsupported = [...new Set(phonemes)]
+    .filter((c) => c !== " " && !KOKORO_ALPHABET.has(c));
+  assert.deepEqual(unsupported, [], phonemes);
+});
+
+// ---- the stream skips silent chunks rather than synthesising them ------- //
+
+test("streamNonEnglish makes no model call for an unpronounceable chunk", async () => {
+  let generated = 0;
+  const tts = {
+    tokenizer: (p) => ({ input_ids: { dims: [1, p.length + 2], data: [] } }),
+    generate_from_ids: async () => { generated++; return { audio: new Float32Array(8), sampling_rate: 24000 }; },
+  };
+  const chunks = [];
+  for await (const c of g2p.streamNonEnglish(
+    kokoro, tts, ["Hola mundo.", "---", "Adios."], { voice: "ef_dora", speed: 1, baseURL: BASE })) {
+    chunks.push(c.text);
+  }
+  assert.deepEqual(chunks, ["Hola mundo.", "Adios."]);
+  assert.equal(generated, 2, "the separator must not reach the model");
+});
