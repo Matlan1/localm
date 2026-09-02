@@ -127,8 +127,25 @@ def memory_hostile_repo(tmp_path):
     return tmp_path
 
 
+@pytest.fixture
+def widened_model_regex_timeout(monkeypatch):
+    """Raise the per-match timeout `_run_model_regex` reads, for this test only.
+
+    `_MEMORY_KILLER`'s own memory-exhaustion time sits close enough to the
+    production `_MODEL_REGEX_TIMEOUT` that which one fires first is not
+    deterministic on a loaded host. Widening the timeout only for the call
+    under test leaves the pattern, the input, and the production budget
+    everywhere else unchanged, and lets MemoryError be what actually stops
+    the match rather than a race against the timeout.
+    """
+    import localm.plugins.coder.tools.files as files_mod
+    monkeypatch.setattr(files_mod, "_MODEL_REGEX_TIMEOUT",
+                        files_mod._MODEL_REGEX_TIMEOUT * 10)
+
+
 @_regex_too_old_for_memory_probe
-def test_grep_aborts_a_memory_exhausting_pattern_and_names_the_pattern(memory_hostile_repo):
+def test_grep_aborts_a_memory_exhausting_pattern_and_names_the_pattern(
+        memory_hostile_repo, widened_model_regex_timeout):
     """Before the fix this fell through to the generic per-file handler and was
     reported as 'N file(s) could not be read and were not searched' - wrong and
     unactionable, since nothing is wrong with the file. It must also NOT reuse
@@ -146,7 +163,8 @@ def test_grep_aborts_a_memory_exhausting_pattern_and_names_the_pattern(memory_ho
 
 
 @_regex_too_old_for_memory_probe
-def test_search_replace_aborts_before_writing_anything_on_memory_exhaustion(memory_hostile_repo):
+def test_search_replace_aborts_before_writing_anything_on_memory_exhaustion(
+        memory_hostile_repo, widened_model_regex_timeout):
     """Before the fix this escaped tool_search_replace's try block entirely (no
     handler matched MemoryError) and reached execution.py's generic
     `except Exception as e: ToolResult.error(f"Tool error: {e}")` - and
@@ -165,7 +183,7 @@ def test_search_replace_aborts_before_writing_anything_on_memory_exhaustion(memo
 
 
 @_regex_too_old_for_memory_probe
-def test_the_memoryerror_is_what_stops_it_not_luck():
+def test_the_memoryerror_is_what_stops_it_not_luck(widened_model_regex_timeout):
     """Asserts the MECHANISM, mirroring test_the_timeout_is_what_stops_it_not_luck:
     a broad `except Exception` would also make this pass without actually
     distinguishing memory exhaustion from a timeout, which is exactly the bug
