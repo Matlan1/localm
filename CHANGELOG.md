@@ -457,6 +457,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   arbitrary, unvetted GGUF to be downloaded and loaded. Pulling a model
   over MCP is now held to the same standard: a known repo, or one whose
   source matches a model you already have registered.
+- **A HuggingFace or CivitAI token could be sent to a different host than the
+  one you configured it for, if that host's API ever issued a redirect.**
+  Both integrations attach the token as an Authorization header and follow
+  redirects themselves (so each hop can be checked against your network
+  policy), but the token was re-attached on every hop regardless of where it
+  pointed. It is now dropped the moment a redirect crosses to a different
+  host, matching what a browser or a standard HTTP client already does by
+  default.
 
 ## [0.1.5] - 2026-08-26
 
