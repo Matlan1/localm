@@ -1152,8 +1152,9 @@ CORE_FIELDS: list = [
     SettingField("browser_custom_domain_rules", Widget.TOGGLE,
                  "Use browser-specific domain rules",
                  "Off by default, so the browser follows the same allowed and "
-                 "denied domains as everything else. On adds the two lists "
-                 "below, which can only narrow that further, never widen it.",
+                 "denied domains as everything else. On adds the browser allowed "
+                 "and denied domain lists, which can only narrow that further, "
+                 "never widen it.",
                  group="Network", owner="browser", admin_only=True),
     SettingField("browser_allow", Widget.LIST, "Browser allowed domains",
                  "Only used when browser-specific rules are on. Empty = any "

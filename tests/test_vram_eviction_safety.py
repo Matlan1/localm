@@ -30,6 +30,34 @@ from localm.inference import http_server as hs
 from tests.conftest import probe_double
 
 
+@pytest.fixture(autouse=True)
+def _release_test_clients(monkeypatch):
+    """Close every TestClient this module opens, and reset the engine table.
+
+    The file builds 34 apps and 33 clients and closed none of them. Each client
+    drives the ASGI app through its own thread portal, so the threads and
+    sockets accumulated for the whole module. hs._engines is module-global and
+    was only cleared at seven scattered call sites, so it carried entries
+    between tests too."""
+    opened = []
+    real = TestClient
+
+    class _Tracked(real):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            opened.append(self)
+
+    import sys
+    monkeypatch.setattr(sys.modules[__name__], "TestClient", _Tracked)
+    yield
+    for c in opened:
+        try:
+            c.close()
+        except Exception:
+            pass
+    hs._engines.clear()
+
+
 class FakeEngine:
     def __init__(self, display_name, *, fails_to_fit=False):
         self.display_name = display_name

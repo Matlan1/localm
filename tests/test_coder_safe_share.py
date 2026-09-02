@@ -211,7 +211,7 @@ def test_owner_key_keeps_the_full_coder(tmp_path, monkeypatch):
         assert r.status_code == 200
         assert r.json()["cwd"] == str(work.resolve())    # honored, not forced
         sess = app.state.coder_sessions.get(r.json()["id"])
-        assert not sess.agent.disabled_tools             # full power, run_shell intact
+        assert "run_shell" not in sess.agent.disabled_tools   # full power
         assert sess.restricted is False
 
 
@@ -432,7 +432,7 @@ def test_coder_full_key_gets_the_unrestricted_coder(tmp_path, monkeypatch):
         assert r.status_code == 200
         assert r.json()["cwd"] == str(work.resolve())     # honored, not forced to root
         sess = app.state.coder_sessions.get(r.json()["id"])
-        assert not sess.agent.disabled_tools              # run_shell intact
+        assert "run_shell" not in sess.agent.disabled_tools   # run_shell intact
         assert sess.restricted is False
 
 

@@ -329,7 +329,14 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         # Optional HF/CivitAI credentials (ADR-0015).
         | MODEL_SOURCE_CREDENTIAL_KEYS
         # The GUI-settable server bind + TLS trio.
-        | NETWORK_BIND_OWNER_KEYS)
+        | NETWORK_BIND_OWNER_KEYS
+        # The browser keys decide whether the coding agent may drive a real
+        # browser, which engine it drives, and which domains it may reach.
+        | {"browser_enabled", "browser_engine", "browser_custom_domain_rules",
+           "browser_allow", "browser_deny"}
+        # gui_preview_* decide whether a reply's own HTML is rendered at all
+        # and who it is rendered for.
+        | {"gui_preview_enabled", "gui_preview_owner_only"})
 
 
 def test_outbound_endpoint_keys_are_owner_only():
