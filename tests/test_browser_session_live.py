@@ -298,3 +298,21 @@ def test_an_allowed_redirect_still_follows(browser, origin):
     assert res["ok"] is True, res
     assert "/index.html" in _Recorder.seen, _Recorder.seen
     assert "page" in b.read_text()
+
+
+def test_a_gate_that_raises_refuses_the_request(browser, origin, monkeypatch):
+    """A handler that raises would otherwise leave the request hanging until the
+    caller's own timeout, which reads as a slow site rather than a broken gate."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+
+    async def boom(*a, **kw):
+        raise RuntimeError("gate exploded")
+    monkeypatch.setattr(bsession.netgate, "decide_async", boom)
+
+    res = b.navigate("http://localhost:%d/index.html" % port)
+    assert res["ok"] is False, res
+    assert _Recorder.seen == [], "the request went out while the gate was broken"
+    assert any("gate failed" in x["reason"] for x in b.blocked_requests()), \
+        b.blocked_requests()

@@ -201,6 +201,23 @@ class BrowserSession:
         logger.info("browser %s blocked %s: %s", self.session_id, url, reason)
 
     async def _on_route(self, route, request) -> None:
+        """Decide one request. An unexpected failure aborts it.
+
+        A handler that raises leaves the request hanging until the caller's own
+        timeout, which reads as a slow site rather than as a broken gate."""
+        try:
+            await self._route(route, request)
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("browser %s gate failed for %s, refusing it: %s",
+                           self.session_id, getattr(request, "url", "?"), exc)
+            self._refuse(getattr(request, "url", "") or "",
+                         "the network gate failed on this request")
+            try:
+                await route.abort()
+            except Exception:
+                pass
+
+    async def _route(self, route, request) -> None:
         url = request.url
         reason = await netgate.decide_async(
             url, extra_deny=self.extra_deny, extra_allow=self.extra_allow)
