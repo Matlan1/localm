@@ -10,6 +10,7 @@ import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { modelCache, refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
 import { refreshPerfEstimate } from "../app/settings-perf.js";
+import { showView } from "../app/tabs.js";
 
 /* ================================================================ */
 /*  Models page                                                      */
@@ -143,6 +144,19 @@ function _groupingActive() {
 // Also stands in for the empty state when every model is one of the hidden ones.
 export function otherHiddenNote(n) {
   return el("div", "sub models-other-note", tn("models.otherHiddenNote", n));
+}
+
+/** A plain, deliberate-click link into the Setup view from the "No models
+ *  yet" empty state. Setup never opens on its own (see pages/setup.js) -
+ *  this is the ONLY door into it from here, and only a click opens it. */
+function setupLink() {
+  const p = el("div", "sub");
+  const a = document.createElement("a");
+  a.href = "#";
+  a.textContent = t("models.empty.setupLink");
+  a.onclick = (e) => { e.preventDefault(); showView("setup"); };
+  p.appendChild(a);
+  return p;
 }
 
 // Show each display toggle only in the views it applies to.
@@ -285,9 +299,12 @@ export async function refreshModelsPage() {
   if (!models.length) {
     // The hidden-rows note when the registry is not empty and All is merely
     // hiding all of it; the empty state otherwise.
-    box.replaceChildren(hiddenOther
-      ? otherHiddenNote(hiddenOther)
-      : emptyState("models", t("models.empty.text"), t("models.empty.hint")));
+    if (hiddenOther) {
+      box.replaceChildren(otherHiddenNote(hiddenOther));
+    } else {
+      box.replaceChildren(emptyState("models", t("models.empty.text"), t("models.empty.hint")));
+      box.appendChild(setupLink());
+    }
     return;
   }
 
@@ -1792,6 +1809,31 @@ if ($("rebuild-launcher")) $("rebuild-launcher").onclick = rebuildLauncher;
 // changes with no round trip, and tells "switch" apart from "install".
 let runtimeCheckState = null;
 
+/** The raw GET /api/runtime/check call: no DOM, throws on a non-OK response.
+ *  The one place that talks to the endpoint - shared by the Settings runtime
+ *  card below and the Setup flow (pages/setup.js), so neither forks it. */
+export async function fetchRuntimeCheck() {
+  const r = await fetch("/api/runtime/check", { headers: authHeaders() });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  return d;
+}
+
+/** The raw POST /api/runtime/update call: no DOM, returns the new job's id.
+ *  Shared the same way as fetchRuntimeCheck above. */
+export async function postRuntimeUpdate(backend, tag, rollback) {
+  const body = {};
+  if (backend) body.backend = backend;
+  if (rollback) body.rollback = true;
+  else if (tag) body.tag = tag;
+  const r = await fetch("/api/runtime/update", {
+    method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  return d.job_id;
+}
+
 /** What pressing the button will do, given the current selection and the last
  *  check. Pure, so the wording is testable without a DOM.
  *
@@ -1828,9 +1870,7 @@ export async function runtimeUpdateCheck() {
   const out = $("runtime-update-status");
   if (out) { out.hidden = false; out.textContent = "Checking..."; }
   try {
-    const r = await fetch("/api/runtime/check", { headers: authHeaders() });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.detail || r.statusText);
+    const d = await fetchRuntimeCheck();
     runtimeCheckState = d;
     if (out) {
       if (!d.installed) {
@@ -1879,18 +1919,9 @@ export async function runtimeProvision(backend, tag, rollback) {
     out.textContent = rollback ? "Rolling back the runtime..." : "Provisioning the runtime...";
   }
   if (log) { log.style.display = ""; log.textContent = ""; }
-  const body = {};
-  if (backend) body.backend = backend;
-  if (rollback) body.rollback = true;
-  else if (tag) body.tag = tag;
   let jobId;
   try {
-    const r = await fetch("/api/runtime/update", {
-      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.detail || r.statusText);
-    jobId = d.job_id;
+    jobId = await postRuntimeUpdate(backend, tag, rollback);
   } catch (e) {
     if (out) out.textContent = (rollback ? "Roll back failed: " : "Update failed: ") + e.message;
     if (btn) btn.disabled = false;

@@ -110,6 +110,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The per-model icon override in Settings > Chat > Avatars now offers a
   dropdown of your installed models** instead of requiring you to type an
   exact model name.
+- **A guided Setup page walks you through installing the local model runtime
+  and adding your first model.** Open it from the new Setup entry in the
+  sidebar, or the link on an empty Models page; it never opens on its own.
+  It shows the detected and installed runtime and installs it in one click
+  if nothing is there yet, then tells you how many models you have with a
+  shortcut to add one. Nothing runs until you click it.
 
 ### Changed
 - **The two installers explain themselves more consistently.** `setup.bat`
