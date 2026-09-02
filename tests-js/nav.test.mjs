@@ -52,6 +52,29 @@ test("jobs plugin gets its clock SVG icon, not the generic fallback", () => {
   assert.ok(!node.textContent.includes("•"), "no bullet fallback text");
 });
 
+test("rebuildViews (unstubbed) puts every CORE_VIEWS entry into VIEWS", () => {
+  // Every other test in this file stubs rebuildViews out entirely, which is
+  // exactly how a hardcoded second copy of the core view list (instead of
+  // deriving it from CORE_VIEWS) went untested: VIEWS.push("chat", "models",
+  // "plugins", "settings") silently dropped any view CORE_VIEWS gained later.
+  const { window } = loadApp();
+  runScript(window, `
+    reconcileActiveView = function () {};
+    pluginState = ${JSON.stringify([
+      { name: "coder", active: true, tab: "coder", group: "", icon: "code", label: "Coder" },
+    ])};
+    renderNav();
+    window.__views = [...VIEWS];
+    window.__coreViews = [...CORE_VIEWS];
+  `);
+  const views = window.__views;
+  for (const v of window.__coreViews) {
+    assert.ok(views.includes(v), `VIEWS is missing core view "${v}": ${views}`);
+  }
+  assert.ok(views.includes("coder"), "an active plugin's own tab must also survive");
+  assert.equal(views[0], "chat", "chat stays the static first anchor");
+});
+
 test("renderNav still renders ordinary flat + studio tabs", () => {
   const win = renderWith([
     { name: "coder", active: true, tab: "coder", group: "", icon: "code", label: "Coder" },
