@@ -97,3 +97,19 @@ def test_suggest_plugins_off_falls_back_to_unknown(cfg_env, monkeypatch):
 def test_genuinely_unknown_command_is_unknown(cfg_env, monkeypatch):
     out = _run_command(monkeypatch, "/wat")
     assert "Unknown" in out
+
+def test_every_bundled_plugin_is_in_the_catalog():
+    # `localm plugin setup` and `localm plugin install-deps` build their
+    # selection from CATALOG alone, while `plugin status` and the GUI union the
+    # bundled store with it. A plugin present in the store but absent here is
+    # therefore advertised as available and refused by the installer's own
+    # command. The browser plugin shipped in exactly that state.
+    from localm.plugins.engine import PluginManager
+
+    store = PluginManager(None).store_catalog()
+    names = {s["name"] if isinstance(s, dict) else s for s in store}
+    missing = sorted(names - set(catalog.names()))
+    assert not missing, (
+        f"bundled store plugins missing from CATALOG: {missing}. "
+        "Add a CatalogEntry, or `localm plugin setup` can never offer them."
+    )

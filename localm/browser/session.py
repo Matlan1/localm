@@ -147,7 +147,14 @@ class BrowserSession:
                     "Could not start the system browser (Google Chrome). Install "
                     "it, or set the browser engine back to 'bundled'. "
                     + str(exc)) from exc
-            raise
+            # The bundled engine needs a Chromium build the pip extra does NOT
+            # bring: playwright downloads it separately, one build per version.
+            # A missing build arrives here as a raw playwright error, so name
+            # the command that fixes it instead of passing the raw text on.
+            raise BrowserUnavailableError(
+                "Could not start the bundled browser. Its Chromium build is "
+                "downloaded separately from the Python package; get it with:  "
+                "python -m playwright install chromium. " + str(exc)) from exc
         self._ctx = await self._browser.new_context()
         self._page = await self._ctx.new_page()
         self._page.on("console", self._on_console)
@@ -241,6 +248,33 @@ class BrowserSession:
             raise BrowserUnavailableError("this browser session is closed")
         fut = asyncio.run_coroutine_threadsafe(make_coro(), self._loop)
         return fut.result(timeout)
+
+    def enable_live_view(self, on_frame) -> bool:
+        """Start streaming this ALREADY-RUNNING session to *on_frame*.
+
+        start() only starts the screencast when the session was built with an
+        on_frame, so a session created without one (the coder builds its browser
+        that way) produces no frames at all and cannot be watched. This attaches
+        a viewer to it afterwards.
+
+        Returns False when there is nothing to attach to, or when this build has
+        no screencast; it never raises into a caller that is only watching."""
+        if self._closed or self._loop is None:
+            return False
+        self._on_frame = on_frame
+        if self._cdp is not None:
+            return True                      # already streaming
+        try:
+            self._call(self._start_screencast)
+        except Exception as exc:             # noqa: BLE001
+            logger.warning("browser %s could not start a live view: %s",
+                           self.session_id, exc)
+            return False
+        return self._cdp is not None
+
+    def disable_live_view(self) -> None:
+        """Stop handing frames to a viewer. The session keeps running."""
+        self._on_frame = None
 
     # -- request gating ----------------------------------------------------- #
 

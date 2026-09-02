@@ -126,6 +126,90 @@ async def open_browser(req: OpenRequest, request: Request):
     return {"job_id": job.id, "session_id": sid}
 
 
+def _viewable_agent_browsers(request: Request) -> list:
+    """Live agent-driven browsers this caller is allowed to watch.
+
+    The coder builds its browser with no on_frame, so it emits no frames, and it
+    registers under "coder-<job_owner>" - a namespace this tab's own
+    "gui-<principal>" can never match. Without this the Browser tab could only
+    ever show a browser it opened itself.
+
+    Scoping is DELEGATED to SessionManager.list rather than re-implemented: the
+    owner sees every coder session, a scoped key sees only the sessions its own
+    principal created. A handed-out key must never be able to watch the owner's
+    browser."""
+    mgr = getattr(request.app.state, "coder_sessions", None)
+    if mgr is None:
+        return []
+    try:
+        from localm.plugins.builtin.coder.plug import _principal_from_request
+        is_owner, principal = _principal_from_request(request)
+    except Exception:                      # noqa: BLE001
+        return []                          # no identity: show nothing
+    found = []
+    for info in mgr.list(principal=principal, is_owner=is_owner):
+        sess = mgr.get(info.get("id"))
+        if sess is None:
+            continue
+        owner = str(getattr(getattr(sess, "agent", None), "job_owner", "") or "")
+        if not owner:
+            continue
+        live = bsession.get("coder-" + owner)
+        if live is not None:
+            found.append({"session_id": info.get("id"), "browser": live})
+    return found
+
+
+@_router.get("/api/browser/agent")
+async def agent_browser_status(request: Request):
+    """Whether an agent-driven browser is running that this caller may watch."""
+    _require_enabled()
+    found = _viewable_agent_browsers(request)
+    return {"available": bool(found),
+            "session_id": found[0]["session_id"] if found else None}
+
+
+@_router.post("/api/browser/agent")
+async def watch_agent_browser(request: Request):
+    """Stream the browser the coding agent is driving, to this caller.
+
+    The agent's session emits no frames until a viewer asks for them, so this
+    turns its screencast on for as long as the view is open and off again after,
+    leaving the agent's own browsing untouched either way."""
+    _require_enabled()
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        raise HTTPException(503, "The live browser view needs this server's "
+                                 "background job registry, which is "
+                                 "unavailable.")
+    found = _viewable_agent_browsers(request)
+    if not found:
+        raise HTTPException(404, "No agent is driving a browser right now.")
+    entry = found[0]
+    live = entry["browser"]
+
+    def _run(job) -> bool:
+        ok = live.enable_live_view(
+            lambda data: job.push({"type": FRAME_EVENT, "data": data}))
+        if not ok:
+            job.push({"type": "line",
+                      "text": "this browser build has no live view"})
+            return False
+        job.push({"type": "line", "line": "watching the agent browser"})
+        try:
+            while (not job.cancel_requested
+                   and bsession.get(live.session_id) is live):
+                time.sleep(_TICK)
+        finally:
+            # The agent keeps browsing; only the viewer goes away.
+            live.disable_live_view()
+        return True
+
+    job = jobs.start_fn("browser", _run, owner=principal_id(request),
+                        label="Agent browser view")
+    return {"job_id": job.id, "session_id": entry["session_id"]}
+
+
 @_router.post("/api/browser/navigate")
 async def navigate(req: NavigateRequest, request: Request):
     _require_enabled()

@@ -241,3 +241,52 @@ test("owner key: a refused rotation surfaces the server's reason", async () => {
   assert.equal(win.document.getElementById("owner-key-secret").style.display, "none",
     "and nothing is presented as a new key");
 });
+
+
+// --------------------------------------------------------------------------- //
+//  Leaving protected mode. /api/auth/key/clear existed with no control calling  //
+//  it, so a server put into protected mode here could not be taken back out.    //
+// --------------------------------------------------------------------------- //
+
+test("owner key: the card offers a way OUT of protected mode", async () => {
+  const win = await ownerPanel({});
+  await win.refreshOwnerKeyPanel();
+  const btn = win.document.getElementById("owner-key-clear");
+  assert.ok(btn, "no control removes the owner key, so protected mode is one-way");
+});
+
+test("owner key: removing it POSTs the clear route and reports it", async () => {
+  const seen = [];
+  const win = await ownerPanel({
+    "POST /api/auth/key/clear": (path, opts) => {
+      seen.push({ path, method: (opts.method || "GET").toUpperCase() });
+      return { status: 200, body: { cleared: true } };
+    },
+  });
+  await win.refreshOwnerKeyPanel();
+  autoConfirm(win);
+  const t = toasts(win);
+  runScript(win, "window.location.reload = () => {};");
+  win.document.getElementById("owner-key-clear").onclick();
+  await tick();
+
+  assert.deepEqual(seen, [{ path: "/api/auth/key/clear", method: "POST" }],
+    "removing the owner key did not reach the clear route");
+  assert.ok(t.all().some((x) => /removed/i.test(x.msg) && !x.isErr),
+    `no confirmation that the key was removed: ${JSON.stringify(t.all())}`);
+});
+
+test("owner key: a refused removal is reported, not silently swallowed", async () => {
+  const win = await ownerPanel({
+    "POST /api/auth/key/clear": () => ({ status: 403, body: { detail: "nope" } }),
+  });
+  await win.refreshOwnerKeyPanel();
+  autoConfirm(win);
+  const t = toasts(win);
+  runScript(win, "window.location.reload = () => {};");
+  win.document.getElementById("owner-key-clear").onclick();
+  await tick();
+
+  assert.ok(t.all().some((x) => x.isErr),
+    "a refused removal reported no error at all");
+});

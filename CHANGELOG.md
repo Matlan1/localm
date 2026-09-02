@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The Browser tab can now show the browser the coding agent is driving.**
+  It used to open a browser of its own instead, so the agent's own page was
+  never visible. A Watch the agent button appears whenever the agent has one
+  open. A shared key can only watch sessions it started itself, never yours.
+- **Settings can remove the owner key again.** Setting one from Settings >
+  Security used to be a one-way door: nothing in the interface could take the
+  server back out of protected mode. Removing it asks first, and says plainly
+  that the server returns to open mode.
 - **localm can now pick a capable model for a request instead of just using
   whichever one happens to be loaded.** Each model is checked for what it can
   actually do - reading images, emitting structured tool calls, how long a
@@ -191,6 +199,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   explicitly either way.
 
 ### Fixed
+- **`localm plugin setup` could never offer the browser plugin.** It ships with
+  localm and the Plugins page listed it as available, but the command the
+  installers themselves run could not see it, and asking for it by name failed.
+- **A browser that failed to start said only "Browser closed."** The reason was
+  thrown away, so a missing browser download looked like a normal shutdown. It
+  now reports what went wrong, and a bundled browser that has not been
+  downloaded yet names the command that fetches it.
+- **`localm update` no longer tries to replace a pip install.** There it would
+  have written a release tree over the directory it shares with every other
+  installed package. It now points at pip instead.
+- **The coder in a terminal ignored the browser setting.** Turning the browser
+  on only affected the coder in the web interface; `localm coder` never got
+  the browser tools at all.
+- **The default system prompt was applied by the web interface only.** A chat
+  started with `localm run` or `localm chat` began with no system prompt,
+  whatever the setting said. `--system` still overrides it for one chat.
 - **The "Other instances" list (Models page) could take several seconds to
   refresh when more than one localm server was running.** Each running
   instance was checked one at a time, so the wait added up with every extra

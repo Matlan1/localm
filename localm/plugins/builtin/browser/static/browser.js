@@ -56,7 +56,10 @@ export function register(ctx) {
   const go = el("button", "primary", "Open");
   const stop = el("button", "", "Stop");
   stop.disabled = true;
-  bar.append(url, go, stop);
+  const watch = el("button", "", "Watch the agent");
+  watch.hidden = true;
+  watch.title = "Show the browser the coding agent is driving";
+  bar.append(url, go, stop, watch);
 
   const shot = el("img", "browser-frame");
   shot.alt = "Live view of the automated browser";
@@ -103,6 +106,7 @@ export function register(ctx) {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
+    let lastLine = "";
     for (;;) {
       let chunk;
       try {
@@ -124,8 +128,19 @@ export function register(ctx) {
           continue;
         }
         if (ev.type === "frame") showFrame(ev.data);
-        else if (ev.type === "line" && ev.line) status.textContent = ev.line;
-        else if (ev.type === "end") { setRunning(false); status.textContent = "Browser closed."; }
+        else if (ev.type === "line" && (ev.line || ev.text)) {
+          lastLine = ev.line || ev.text;
+          status.textContent = lastLine;
+        } else if (ev.type === "end") {
+          setRunning(false);
+          const failed = ev.status && ev.status !== "done" && ev.status !== "cancelled";
+          if (failed) {
+            status.textContent = lastLine || ("Browser stopped: " + ev.status);
+            toast(status.textContent, true);
+          } else {
+            status.textContent = "Browser closed.";
+          }
+        }
       }
     }
   }
@@ -180,13 +195,53 @@ export function register(ctx) {
     if (jobId) setTimeout(poll, 2000);
   }
 
+  async function refreshAgentOffer() {
+    // The agent's browser is a different session from this tab's own, so it is
+    // only watchable while the agent actually has one open.
+    try {
+      const r = await fetch(API + "/agent", { headers: authHeaders() });
+      if (!r.ok) { watch.hidden = true; return; }
+      const st = await r.json();
+      watch.hidden = !st.available;
+    } catch (e) {
+      watch.hidden = true;
+    }
+  }
+
+  async function watchAgent() {
+    setRunning(true);
+    status.textContent = "Attaching to the agent browser...";
+    try {
+      const r = await fetch(API + "/agent", {
+        method: "POST", headers: authHeaders(),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setRunning(false);
+        status.textContent = data.detail || "No agent browser to watch.";
+        toast(status.textContent, true);
+        return;
+      }
+      jobId = data.job_id;
+      stream(jobId);
+      poll();
+    } catch (e) {
+      setRunning(false);
+      status.textContent = "Could not attach to the agent browser.";
+    }
+  }
+
   go.onclick = open;
   stop.onclick = close;
+  watch.onclick = watchAgent;
   url.onkeydown = (e) => { if (e.key === "Enter" && !go.disabled) open(); };
 
   const prev = window.onViewShown;
   window.onViewShown = (name) => {
     if (prev) prev(name);
-    if (name === "browser" && jobId) poll();
+    if (name === "browser") {
+      refreshAgentOffer();
+      if (jobId) poll();
+    }
   };
 }

@@ -313,6 +313,12 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         )
 
     cfg = load_config()
+    # settings_schema calls chat_system_prompt 'the system prompt every new chat
+    # starts with', with a chat's own System field overriding it. --system is that
+    # override here, so a run without one inherits the setting. Without this the
+    # setting reached the web GUI only and did nothing on the command line.
+    if system is None:
+        system = (cfg.get("chat_system_prompt") or "").strip() or None
     gen_opts = {
         "max_tokens":     max_tokens  if max_tokens  is not None else cfg["max_tokens"],
         "temperature":    temperature if temperature is not None else cfg["temperature"],
