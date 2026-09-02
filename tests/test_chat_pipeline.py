@@ -66,6 +66,24 @@ def _think_ctx(model_id):
     return ChatHookContext(model_id=model_id, stream=False, request_id="r")
 
 
+def _cap_ctx(model_id, capacity):
+    ctx = _think_ctx(model_id)
+    ctx.state["capacity"] = capacity
+    return ctx
+
+
+# --------------------------------------------------------------------------- #
+#  shared capacity guard for the fixed-cost nudges below                      #
+# --------------------------------------------------------------------------- #
+
+def test_nudge_fits_capacity_helper():
+    from localm.plugins.builtin.chat.plug import _nudge_fits_capacity
+    assert _nudge_fits_capacity("x" * 50, _cap_ctx("m", None)) is True
+    assert _nudge_fits_capacity("x" * 50, _cap_ctx("m", 100)) is False   # 50 > 10% of 100
+    assert _nudge_fits_capacity("x" * 5, _cap_ctx("m", 100)) is True     # 5 <= 10% of 100
+    assert _nudge_fits_capacity("x" * 50, _cap_ctx("m", 0)) is True      # non-positive: always fits
+
+
 def test_is_thinking_model_detection():
     from localm.inference.model_family import is_thinking_model
     for name in ("deepseek-r1-7b", "qwq-32b", "qwen3-8b", "magistral-small",
@@ -113,6 +131,22 @@ def test_thinking_inlet_noop_for_non_thinking_model():
     assert msgs == before
 
 
+def test_thinking_inlet_skips_when_capacity_too_small():
+    from localm.plugins.builtin.chat.plug import _thinking_inlet
+    msgs = [{"role": "user", "content": "hi"}]
+    before = [dict(m) for m in msgs]
+    assert _thinking_inlet(msgs, _cap_ctx("deepseek-r1-7b", 100)) is None
+    assert msgs == before
+
+
+def test_thinking_inlet_applies_when_capacity_comfortable():
+    from localm.plugins.builtin.chat.plug import _thinking_inlet, _THINK_INSTRUCTION
+    msgs = [{"role": "user", "content": "hi"}]
+    out = _thinking_inlet(msgs, _cap_ctx("deepseek-r1-7b", 8192))
+    assert out is msgs
+    assert _THINK_INSTRUCTION in msgs[0]["content"]
+
+
 # --------------------------------------------------------------------------- #
 #  role-word self-reference nudge (REC-D1-ROLEWORD) in regular chat           #
 # --------------------------------------------------------------------------- #
@@ -152,6 +186,22 @@ def test_role_word_inlet_applies_regardless_of_model_family():
         out = _role_word_inlet(msgs, _think_ctx(model_id))
         assert out is msgs
         assert _ROLE_WORD_INSTRUCTION in msgs[0]["content"], model_id
+
+
+def test_role_word_inlet_skips_when_capacity_too_small():
+    from localm.plugins.builtin.chat.plug import _role_word_inlet
+    msgs = [{"role": "user", "content": "hi"}]
+    before = [dict(m) for m in msgs]
+    assert _role_word_inlet(msgs, _cap_ctx("llama3.1-8b", 100)) is None
+    assert msgs == before
+
+
+def test_role_word_inlet_applies_when_capacity_comfortable():
+    from localm.plugins.builtin.chat.plug import _role_word_inlet, _ROLE_WORD_INSTRUCTION
+    msgs = [{"role": "user", "content": "hi"}]
+    out = _role_word_inlet(msgs, _cap_ctx("llama3.1-8b", 8192))
+    assert out is msgs
+    assert _ROLE_WORD_INSTRUCTION in msgs[0]["content"]
 
 
 def test_thinking_and_role_word_inlets_compose_on_one_system_message():
