@@ -69,6 +69,10 @@ function installStubs(win, { fetchImpl } = {}) {
   // a streamed fetch body.
   if (!win.TextDecoder) win.TextDecoder = TextDecoder;   // node global
   if (!win.TextEncoder) win.TextEncoder = TextEncoder;   // node global
+  // jsdom's URL has no File-API static methods; blob-preview code (image
+  // proxying, export links) calls these.
+  if (!win.URL.createObjectURL) win.URL.createObjectURL = () => "blob:stub";
+  if (!win.URL.revokeObjectURL) win.URL.revokeObjectURL = () => {};
   win.fetch = fetchImpl
     || (async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" }));
   // speechSynthesis: speak() calls are recorded in win.__spoken.
