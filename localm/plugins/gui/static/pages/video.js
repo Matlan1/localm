@@ -17,14 +17,13 @@ import { modelOverrides } from "./workflow.js";
 const videoGallery = createGallery({
   slug: "video",
   listKey: "videos",
-  noun: "clip",
-  plural: "clips",
+  itemKey: "video.item",
   gridId: "video-history",
   bulkId: "video-bulk",
   moveDestKey: "localm.videoMoveDest",
   emptyIcon: "video",
-  emptyTitle: "No clips yet",
-  emptyHint: "Generate one above; your clips appear here.",
+  emptyTitleKey: "video.empty.title",
+  emptyHintKey: "video.empty.hint",
 
   beforeRefresh: () => refreshReloadToggle("video", "video-reload-llm"),
 

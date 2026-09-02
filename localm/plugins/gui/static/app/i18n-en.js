@@ -1149,6 +1149,18 @@ export const I18N_EN = {
   "images.useAsInput": "use as input",
   "images.useAsInputTitle": "Use this image as the img2img input",
 
+  // ---- Music page (item/empty-state keys only; the rest of music.js migrates in Batch 2) ----
+  "music.empty.hint": "Generate one above; your tracks appear here.",
+  "music.empty.title": "No tracks yet",
+  "music.item.one": "track",
+  "music.item.other": "tracks",
+
+  // ---- Video page (item/empty-state keys only; the rest of video.js migrates in Batch 2) ----
+  "video.empty.hint": "Generate one above; your clips appear here.",
+  "video.empty.title": "No clips yet",
+  "video.item.one": "clip",
+  "video.item.other": "clips",
+
   // ---- Setup page (guided runtime + first model, manual entry only) ----
   "setup.done.goToChat": "Go to chat",
   "setup.done.intro": "Head into chat whenever you are ready.",
