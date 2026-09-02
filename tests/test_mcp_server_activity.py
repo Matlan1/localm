@@ -81,7 +81,7 @@ def test_no_server_running_is_not_reported_as_idle(tools, monkeypatch):
     because a server could be started a second later and it was never asked."""
     _patch_instances(monkeypatch, [])
     out = _call(tools)
-    assert "no localm server is running" in out.lower()
+    assert "no localm server of this install is running" in out.lower()
     assert not _claims_idle(out)
 
 
