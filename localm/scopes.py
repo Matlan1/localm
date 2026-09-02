@@ -35,6 +35,7 @@ RAG   = "rag"
 WEB   = "web"
 VOICE = "voice"
 MCP   = "mcp"
+BROWSER = "browser"
 
 KERNEL_SCOPES: dict[str, str] = {
     MODELS_READ:   "List and inspect installed models",
@@ -58,6 +59,7 @@ BUILTIN_PLUGIN_SCOPES: dict[str, str] = {
     WEB:   "Web search and fetch",
     VOICE: "Speech-to-text",
     MCP:   "MCP server interface",
+    BROWSER: "Automated web browser (navigate, read, click, fill)",
 }
 
 # Capability variants that are not a plugin name of their own.
