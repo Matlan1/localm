@@ -55,6 +55,16 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest, request: Request):
+        # A model name already routed to a peer instance is forwarded there
+        # raw, bypassing local engine resolution entirely.
+        from localm import peer_routing
+        _routed_name = (req.model or "").strip()
+        if not _routed_name or _routed_name == "localm":
+            _routed_name = _hs._resolve_unnamed_model_name() or ""
+        _route = peer_routing.get_route(_routed_name) if _routed_name else None
+        if _route is not None:
+            return await peer_routing.forward(_route, request, "/v1/chat/completions")
+
         # An empty model means "no preference" and resolves the same way the None
         # default does. Still a 400 when there is nothing to resolve to.
         if not req.model and not (_hs._active_model_name or _hs._default_model_name):
@@ -408,6 +418,15 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/completions", dependencies=[Depends(_require_auth)])
     async def completions(req: CompletionRequest, request: Request):
+        # Same peer-routing short-circuit as /v1/chat/completions above.
+        from localm import peer_routing
+        _routed_name = (req.model or "").strip()
+        if not _routed_name or _routed_name == "localm":
+            _routed_name = _hs._resolve_unnamed_model_name() or ""
+        _route = peer_routing.get_route(_routed_name) if _routed_name else None
+        if _route is not None:
+            return await peer_routing.forward(_route, request, "/v1/completions")
+
         # Same resolution as /v1/chat/completions: an empty model is "no preference",
         # refused only when there is nothing to fall back to.
         if not req.model and not (_hs._active_model_name or _hs._default_model_name):

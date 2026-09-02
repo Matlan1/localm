@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Two localm instances on the same machine can now share one loaded model
+  instead of each keeping its own copy in VRAM.** When you switch to a
+  model, the Models page checks whether another running instance already
+  has it loaded; if so, it offers to route your requests there instead of
+  loading a second copy. Accepting asks for that instance's API key and
+  routes chat requests to it directly. Declining, or when no such instance
+  exists, loads locally exactly as before. If the other instance later
+  becomes unavailable, the next request tells you plainly and you can load
+  a local copy or route again.
 - **`localm bench-mtp MODEL` answers whether Multi-Token Prediction is worth
   turning on for a model.** The MTP setting helps some models and slows others
   down, and which is which depends on the model, the quantisation, how much of

@@ -4407,6 +4407,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     _routes_keys.register(app, ctx)
     from localm.inference.routes import gpu as _routes_gpu
     _routes_gpu.register(app, ctx)
+    from localm.inference.routes import peer_routing as _routes_peer_routing
+    _routes_peer_routing.register(app, ctx)
     from localm.inference.routes import admin as _routes_admin
     _routes_admin.register(app, ctx)
     from localm.inference.routes import chat as _routes_chat
