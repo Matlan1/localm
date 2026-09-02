@@ -486,6 +486,32 @@ test("the models page redraws its table headers and row badges when the language
       "the vision capability pill must be rebuilt in German too");
   });
 
+test("the models page redraws the discovery search placeholder when the language changes",
+  async () => {
+    const fetchImpl = async (url) => {
+      const u = String(url);
+      if (u.includes("/i18n/de.json")) return { ok: true, status: 200, json: async () => DE };
+      if (u.includes("/i18n/")) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    };
+    const { window } = loadAppWithPages({ fetchImpl });
+
+    // DISC_SOURCE_PLACEHOLDER is a module-level Finding-B constant: it holds
+    // catalog key names, not resolved text, resolved via t() inside
+    // applyDiscSource() at each call - covering that fix, not only an
+    // ordinary per-render t() call.
+    const placeholder = () => window.document.getElementById("disc-query").placeholder;
+    assert.equal(placeholder(), "search HuggingFace - empty shows the most downloaded",
+      "starts in English");
+
+    runScript(window, 'window.__p = applyLanguage("de");');
+    await window.__p;
+
+    assert.equal(placeholder(),
+      "HuggingFace durchsuchen - leer zeigt die meistheruntergeladenen",
+      "the discovery search placeholder must be rebuilt in German");
+  });
+
 test("the coder state pill, usage line and remote badge redraw when the language changes",
   async () => {
     const { window } = await loadIn(null);

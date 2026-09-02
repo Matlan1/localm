@@ -362,49 +362,49 @@
         <h2 data-i18n="models.title">Models</h2>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="search"></span>
-            <div class="card-head-text"><h3>Find models</h3></div></div>
+            <div class="card-head-text"><h3 data-i18n="models.disc.title">Find models</h3></div></div>
           <div id="disc-search-box">
             <div class="row">
-              <select id="disc-source" title="Which model source to search">
-                <option value="hf">HuggingFace</option>
-                <option value="civitai">CivitAI</option>
+              <select id="disc-source" data-i18n-title="models.disc.sourceTitle" title="Which model source to search">
+                <option value="hf" data-i18n="models.disc.source.hf">HuggingFace</option>
+                <option value="civitai" data-i18n="models.disc.source.civitai">CivitAI</option>
               </select>
               <input type="text" id="disc-query" placeholder="search HuggingFace - empty shows the most downloaded" spellcheck="false">
-              <button class="btn-primary" id="disc-search">Search</button>
+              <button class="btn-primary" id="disc-search" data-i18n="models.disc.searchButton">Search</button>
             </div>
             <div class="disc-filter-bar disc-hf-only" id="disc-hf-filters">
               <div class="disc-filters" id="disc-type-filter">
-                <span class="sub disc-filter-label">Types</span>
-                <label class="disc-chip" data-type="llm"><input type="checkbox" class="disc-type" value="llm" checked><span>LLMs</span></label>
-                <label class="disc-chip" data-type="embedding"><input type="checkbox" class="disc-type" value="embedding" checked><span>Embedding</span></label>
-                <label class="disc-chip" data-type="diffusion-unet"><input type="checkbox" class="disc-type" value="diffusion-unet" checked><span>Diffusion</span></label>
-                <label class="disc-chip" data-type="text-encoder"><input type="checkbox" class="disc-type" value="text-encoder" checked><span>Encoders</span></label>
-                <label class="disc-chip" data-type="vae"><input type="checkbox" class="disc-type" value="vae" checked><span>VAEs</span></label>
-                <label class="disc-chip" data-type="lora"><input type="checkbox" class="disc-type" value="lora" checked><span>LoRAs</span></label>
-                <label class="disc-chip" data-type="unknown"><input type="checkbox" class="disc-type" value="unknown" checked><span>Other</span></label>
+                <span class="sub disc-filter-label" data-i18n="models.disc.filterLabel.types">Types</span>
+                <label class="disc-chip" data-type="llm"><input type="checkbox" class="disc-type" value="llm" checked><span data-i18n="models.disc.type.llm">LLMs</span></label>
+                <label class="disc-chip" data-type="embedding"><input type="checkbox" class="disc-type" value="embedding" checked><span data-i18n="models.disc.type.embedding">Embedding</span></label>
+                <label class="disc-chip" data-type="diffusion-unet"><input type="checkbox" class="disc-type" value="diffusion-unet" checked><span data-i18n="models.disc.type.diffusionUnet">Diffusion</span></label>
+                <label class="disc-chip" data-type="text-encoder"><input type="checkbox" class="disc-type" value="text-encoder" checked><span data-i18n="models.disc.type.textEncoder">Encoders</span></label>
+                <label class="disc-chip" data-type="vae"><input type="checkbox" class="disc-type" value="vae" checked><span data-i18n="models.disc.type.vae">VAEs</span></label>
+                <label class="disc-chip" data-type="lora"><input type="checkbox" class="disc-type" value="lora" checked><span data-i18n="models.disc.type.lora">LoRAs</span></label>
+                <label class="disc-chip" data-type="unknown"><input type="checkbox" class="disc-type" value="unknown" checked><span data-i18n="models.disc.type.unknown">Other</span></label>
               </div>
               <div class="disc-filters" id="disc-formats">
-                <span class="sub disc-filter-label">Format</span>
-                <label class="disc-chip disc-chip-fmt" data-fmt="gguf"><input type="checkbox" id="disc-fmt-gguf" checked><span>GGUF</span></label>
-                <label class="disc-chip disc-chip-fmt" data-fmt="hf"><input type="checkbox" id="disc-fmt-hf" checked><span>Safetensors</span></label>
+                <span class="sub disc-filter-label" data-i18n="models.disc.filterLabel.format">Format</span>
+                <label class="disc-chip disc-chip-fmt" data-fmt="gguf"><input type="checkbox" id="disc-fmt-gguf" checked><span data-i18n="models.disc.format.gguf">GGUF</span></label>
+                <label class="disc-chip disc-chip-fmt" data-fmt="hf"><input type="checkbox" id="disc-fmt-hf" checked><span data-i18n="models.disc.format.hf">Safetensors</span></label>
               </div>
             </div>
             <div class="disc-filter-bar disc-civitai-only" id="disc-civitai-filters" style="display:none">
               <div class="disc-filters" id="disc-civitai-type-filter">
-                <span class="sub disc-filter-label">Types</span>
-                <label class="disc-chip" data-type="Checkpoint"><input type="checkbox" class="disc-civitai-type" value="Checkpoint" checked><span>Checkpoints</span></label>
-                <label class="disc-chip" data-type="LORA"><input type="checkbox" class="disc-civitai-type" value="LORA" checked><span>LoRA</span></label>
-                <label class="disc-chip" data-type="LoCon"><input type="checkbox" class="disc-civitai-type" value="LoCon" checked><span>LoCon</span></label>
-                <label class="disc-chip" data-type="DoRA"><input type="checkbox" class="disc-civitai-type" value="DoRA" checked><span>DoRA</span></label>
-                <label class="disc-chip" data-type="TextualInversion"><input type="checkbox" class="disc-civitai-type" value="TextualInversion" checked><span>Embeddings</span></label>
-                <label class="disc-chip" data-type="VAE"><input type="checkbox" class="disc-civitai-type" value="VAE" checked><span>VAEs</span></label>
-                <label class="disc-chip" data-type="Controlnet"><input type="checkbox" class="disc-civitai-type" value="Controlnet" checked><span>ControlNets</span></label>
-                <label class="disc-chip" data-type="Upscaler"><input type="checkbox" class="disc-civitai-type" value="Upscaler" checked><span>Upscalers</span></label>
+                <span class="sub disc-filter-label" data-i18n="models.disc.filterLabel.types">Types</span>
+                <label class="disc-chip" data-type="Checkpoint"><input type="checkbox" class="disc-civitai-type" value="Checkpoint" checked><span data-i18n="models.disc.civitaiType.checkpoint">Checkpoints</span></label>
+                <label class="disc-chip" data-type="LORA"><input type="checkbox" class="disc-civitai-type" value="LORA" checked><span data-i18n="models.disc.civitaiType.lora">LoRA</span></label>
+                <label class="disc-chip" data-type="LoCon"><input type="checkbox" class="disc-civitai-type" value="LoCon" checked><span data-i18n="models.disc.civitaiType.locon">LoCon</span></label>
+                <label class="disc-chip" data-type="DoRA"><input type="checkbox" class="disc-civitai-type" value="DoRA" checked><span data-i18n="models.disc.civitaiType.dora">DoRA</span></label>
+                <label class="disc-chip" data-type="TextualInversion"><input type="checkbox" class="disc-civitai-type" value="TextualInversion" checked><span data-i18n="models.disc.civitaiType.textualInversion">Embeddings</span></label>
+                <label class="disc-chip" data-type="VAE"><input type="checkbox" class="disc-civitai-type" value="VAE" checked><span data-i18n="models.disc.civitaiType.vae">VAEs</span></label>
+                <label class="disc-chip" data-type="Controlnet"><input type="checkbox" class="disc-civitai-type" value="Controlnet" checked><span data-i18n="models.disc.civitaiType.controlnet">ControlNets</span></label>
+                <label class="disc-chip" data-type="Upscaler"><input type="checkbox" class="disc-civitai-type" value="Upscaler" checked><span data-i18n="models.disc.civitaiType.upscaler">Upscalers</span></label>
               </div>
               <div class="disc-filters" id="disc-civitai-toggles">
-                <span class="sub disc-filter-label">Show</span>
-                <label class="disc-chip" title="Off by default. A model flagged as depicting a minor is excluded either way."><input type="checkbox" id="disc-civitai-nsfw"><span>NSFW</span></label>
-                <label class="disc-chip" title="PickleTensor/unknown-format files can execute code on load. Off by default; each result shows its own CivitAI safety-scan status, which is evidence, not a guarantee."><input type="checkbox" id="disc-civitai-legacy"><span>Legacy formats</span></label>
+                <span class="sub disc-filter-label" data-i18n="models.disc.filterLabel.show">Show</span>
+                <label class="disc-chip" data-i18n-title="models.disc.nsfwTitle" title="Off by default. A model flagged as depicting a minor is excluded either way."><input type="checkbox" id="disc-civitai-nsfw"><span data-i18n="models.disc.nsfw">NSFW</span></label>
+                <label class="disc-chip" data-i18n-title="models.disc.legacyFormatsTitle" title="PickleTensor/unknown-format files can execute code on load. Off by default; each result shows its own CivitAI safety-scan status, which is evidence, not a guarantee."><input type="checkbox" id="disc-civitai-legacy"><span data-i18n="models.disc.legacyFormats">Legacy formats</span></label>
               </div>
             </div>
             <div class="sub disc-hf-hint" id="disc-hf-hint" style="display:none"></div>
@@ -414,25 +414,25 @@
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="download"></span>
-            <div class="card-head-text"><h3>Add a model</h3></div></div>
-          <div class="sub">From HuggingFace (owner/repo[:file.gguf]) or an https URL, or add one already on disk - paste a folder/file path, or use Browse to pick a folder.</div>
+            <div class="card-head-text"><h3 data-i18n="models.pull.title">Add a model</h3></div></div>
+          <div class="sub" data-i18n="models.pull.intro">From HuggingFace (owner/repo[:file.gguf]) or an https URL, or add one already on disk - paste a folder/file path, or use Browse to pick a folder.</div>
           <div class="row">
-            <select id="pull-shortcut" style="max-width:200px" title="Curated small models that work even with network access set to Off - picks a known-good quant and fills in the fields below">
-              <option value="">Curated shortcuts…</option>
+            <select id="pull-shortcut" style="max-width:200px" data-i18n-title="models.pull.shortcutTitle" title="Curated small models that work even with network access set to Off - picks a known-good quant and fills in the fields below">
+              <option value="" data-i18n="models.pull.shortcutPlaceholder">Curated shortcuts…</option>
             </select>
-            <input type="text" id="pull-spec" placeholder="owner/repo:file.gguf  ·  https://…  ·  a local folder or .gguf path" spellcheck="false">
-            <input type="text" id="pull-name" placeholder="name (optional)" spellcheck="false" style="max-width:180px">
+            <input type="text" id="pull-spec" data-i18n-placeholder="models.pull.specPlaceholder" placeholder="owner/repo:file.gguf  ·  https://…  ·  a local folder or .gguf path" spellcheck="false">
+            <input type="text" id="pull-name" data-i18n-placeholder="models.pull.namePlaceholder" placeholder="name (optional)" spellcheck="false" style="max-width:180px">
             <select id="pull-mmproj" style="display:none; max-width:200px">
-              <option value="">No vision projector</option>
+              <option value="" data-i18n="models.pull.noVisionProjector">No vision projector</option>
             </select>
-            <input type="text" id="pull-sha256" placeholder="sha256 (optional)" spellcheck="false" maxlength="64" style="max-width:180px" title="Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.">
-            <select id="pull-store" style="max-width:180px" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.">
-              <option value="">Register in place</option>
-              <option value="copy">Copy into library</option>
-              <option value="move">Move into library</option>
+            <input type="text" id="pull-sha256" data-i18n-placeholder="models.pull.sha256Placeholder" placeholder="sha256 (optional)" spellcheck="false" maxlength="64" style="max-width:180px" data-i18n-title="models.pull.sha256Title" title="Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.">
+            <select id="pull-store" style="max-width:180px" data-i18n-title="models.pull.storeTitle" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.">
+              <option value="" data-i18n="models.pull.store.registerInPlace">Register in place</option>
+              <option value="copy" data-i18n="models.pull.store.copy">Copy into library</option>
+              <option value="move" data-i18n="models.pull.store.move">Move into library</option>
             </select>
-            <button class="btn-secondary" id="pull-browse" title="Pick a folder on this machine that holds the model(s)">Browse…</button>
-            <button class="btn-primary" id="pull-start">Add</button>
+            <button class="btn-secondary" id="pull-browse" data-i18n="models.pull.browseButton" data-i18n-title="models.pull.browseTitle" title="Pick a folder on this machine that holds the model(s)">Browse…</button>
+            <button class="btn-primary" id="pull-start" data-i18n="models.pull.addButton">Add</button>
           </div>
           <div id="pull-progress" class="dl-progress" style="display:none">
             <div class="dl-file" id="pull-file" hidden></div>
@@ -441,13 +441,13 @@
           </div>
           <pre id="pull-log" class="job-log" style="display:none"></pre>
           <div class="row" style="margin-top:8px">
-            <button class="btn-secondary" id="models-import-comfy-btn">Import from ComfyUI…</button>
-            <span class="sub">Already have models in a ComfyUI install? Preview and import them in bulk.</span>
+            <button class="btn-secondary" id="models-import-comfy-btn" data-i18n="models.importComfy.button">Import from ComfyUI…</button>
+            <span class="sub" data-i18n="models.importComfy.hint">Already have models in a ComfyUI install? Preview and import them in bulk.</span>
           </div>
           <div class="row" id="models-scan-row" style="margin-top:8px">
             <span class="ic cat-ic cat-violet" data-icon="refresh"></span>
-            <button class="btn-secondary" id="models-scan-btn">Re-scan ComfyUI folder</button>
-            <span class="sub">Picks up new models from the ComfyUI folder already set in Settings - one click, no folder picker.</span>
+            <button class="btn-secondary" id="models-scan-btn" data-i18n="models.scan.button">Re-scan ComfyUI folder</button>
+            <span class="sub" data-i18n="models.scan.hint">Picks up new models from the ComfyUI folder already set in Settings - one click, no folder picker.</span>
           </div>
           <div id="scan-progress" class="dl-progress" style="display:none">
             <div class="dl-bar"><div class="dl-fill" id="scan-bar"></div></div>

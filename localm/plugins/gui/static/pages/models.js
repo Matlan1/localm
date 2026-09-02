@@ -671,8 +671,9 @@ export function fmtParamCount(n) {
   return String(n) + " params";
 }
 
-export const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
-                   "too-big": "needs partial CPU offload" };
+// Values are catalog key names; t() resolves them at each render site below.
+export const FIT_TEXT = { "fits": "models.fit.fits", "tight": "models.fit.tight",
+                   "too-big": "models.fit.tooBig" };
 
 // moe: "confirmed" (the model's own architecture header says MoE) or "likely"
 // (a name-pattern guess, e.g. "8x7B"/"A3B" in the repo id - see discover.py's
@@ -705,7 +706,8 @@ function visionBadge(v) {
 // Catalog key name; t() resolves it at each render site below.
 const MOE_TITLE = { likely: "models.moe.likelyTitle" };
 
-export const FMT_LABEL = { gguf: "GGUF", hf: "HF" };
+// Values are catalog key names; t() resolves them at each render site below.
+export const FMT_LABEL = { gguf: "models.fmt.gguf", hf: "models.fmt.hf" };
 
 /** Fetch the GPU list AND the configured split once per search/files-load, for
  *  the split-fit hint and the VRAM-basis caption below. Empty on any failure
@@ -736,16 +738,13 @@ export function vramBasisCaption(totalBytes, gpuInfo) {
   // Dedup and keep only indices that map to a detected device - the same
   // resolve_gpu_split validation vram_capacity() applies.
   const split = [...new Set(rawSplit.filter((i) => gpus.some((g) => g.index === i)))];
-  const tail = " (weights + ~1.5 GB overhead).";
-  let basis;
   if (split.length >= 2) {
-    basis = `your ${gib} GB VRAM combined across ${split.length} GPUs`;
-  } else if (gpus.length > 1) {
-    basis = `your main GPU's ${gib} GB (set a split in Settings to use all ${gpus.length})`;
-  } else {
-    basis = `your ${gib} GB VRAM`;
+    return t("models.vramBasis.combined", { gib, count: split.length });
   }
-  return `Badges compare each file against ${basis}${tail}`;
+  if (gpus.length > 1) {
+    return t("models.vramBasis.mainGpu", { gib, count: gpus.length });
+  }
+  return t("models.vramBasis.single", { gib });
 }
 
 /** Non-blocking "might not fit on one GPU, but may fit split across them" hint,
@@ -764,8 +763,7 @@ export function splitFitHint(sizeBytes, gpus) {
   const largest = Math.max(...frees);
   const total = frees.reduce((a, b) => a + b, 0);
   if (need <= largest || need > total) return "";
-  return `may not fit on one GPU, but may fit split across your ${gpus.length} GPUs - `
-       + "see Settings > Split across GPUs";
+  return t("models.splitHint", { count: gpus.length });
 }
 
 export function discFormats() {
@@ -832,8 +830,7 @@ function showHfHint() {
   if (!hint) return;
   // Non-blocking: HF (transformers) models still download, they just cannot run
   // until torch + transformers are installed.
-  hint.textContent = "No transformers runtime detected. HF models will download, "
-    + "but need the [gpu] extra (torch + transformers) installed to run.";
+  hint.textContent = t("models.disc.noTransformersHint");
   hint.style.display = "block";
 }
 function hideHfHint() {
@@ -859,7 +856,7 @@ function prefillHfPull(repo, detectedType) {
   }
   nameInput.focus();
   nameInput.select();
-  toast("Review the alias, then click Add to download the full HF model");
+  toast(t("models.disc.hfPullHint"));
 }
 
 // One search-result repo: name + type badge + per-format badge(s) + the right
@@ -892,21 +889,23 @@ function discRepoRow(m, gpus) {
     head.appendChild(el("span", "param-count", fmtParamCount(m.param_count)));
   }
   const fmts = Array.isArray(m.formats) ? m.formats : ["gguf"];
-  for (const f of fmts) head.appendChild(el("span", "fmt-badge fmt-" + f, FMT_LABEL[f] || f));
+  for (const f of fmts) {
+    head.appendChild(el("span", "fmt-badge fmt-" + f, FMT_LABEL[f] ? t(FMT_LABEL[f]) : f));
+  }
   // HF repos pull whole, so show total size + a VRAM fit badge inline (from the
   // server's safetensors param estimate), or "size unknown" when there is no
   // estimate. GGUF results are sized per-quant in the files expander instead.
   if (fmts.includes("hf")) {
     if (m.size_bytes) {
       head.appendChild(el("span", "disc-hf-size", fmtSize(m.size_bytes)));
-      if (m.fit) head.appendChild(el("span", "fit " + m.fit, FIT_TEXT[m.fit]));
+      if (m.fit) head.appendChild(el("span", "fit " + m.fit, t(FIT_TEXT[m.fit])));
       // "fits"/"tight" already account for a configured split (the server sums
       // capacity across it - see discover.vram_capacity), so no split hint.
       const hint = (m.fit === "fits" || m.fit === "tight")
         ? "" : splitFitHint(m.size_bytes, gpus);
       if (hint) head.appendChild(el("span", "sub split-hint", hint));
     } else {
-      head.appendChild(el("span", "disc-hf-size sub", "size unknown"));
+      head.appendChild(el("span", "disc-hf-size sub", t("models.sizeUnknown")));
     }
   }
   // Downloads + likes as inline SVGs.
@@ -918,12 +917,12 @@ function discRepoRow(m, gpus) {
   head.appendChild(meta);
   const filesBox = el("div", "files");
   if (fmts.includes("gguf")) {
-    const btn = el("button", "btn-secondary", "files");
+    const btn = el("button", "btn-secondary", t("models.disc.filesButton"));
     btn.onclick = () => discoverFiles(m.id, filesBox, btn, gpus, m.detected_type);
     head.appendChild(btn);
   }
   if (fmts.includes("hf")) {
-    const btn = el("button", "btn-secondary", "add full repo");
+    const btn = el("button", "btn-secondary", t("models.disc.addFullRepoButton"));
     btn.onclick = () => prefillHfPull(m.id, m.detected_type);
     head.appendChild(btn);
   }
@@ -938,9 +937,9 @@ function discRepoRow(m, gpus) {
 // discRepoRow's HF `license` shape. true/false/absent (three-state, since the
 // API may omit a flag) each get their own word - never collapsed to "yes/no".
 function civitaiFlag(value) {
-  if (value === true) return "yes";
-  if (value === false) return "no";
-  return "unknown";
+  if (value === true) return t("models.civitai.flag.yes");
+  if (value === false) return t("models.civitai.flag.no");
+  return t("models.civitai.flag.unknown");
 }
 
 // allowCommercialUse is an array of the specific permitted uses (e.g.
@@ -949,10 +948,10 @@ function civitaiFlag(value) {
 // EMPTY array is a real "no commercial use", not "unknown" (only an absent
 // field is unknown).
 function civitaiCommercialUse(value) {
-  if (Array.isArray(value)) return value.length ? value.join(", ") : "no";
-  if (value === true) return "yes";
-  if (value === false) return "no";
-  return "unknown";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : t("models.civitai.flag.no");
+  if (value === true) return t("models.civitai.flag.yes");
+  if (value === false) return t("models.civitai.flag.no");
+  return t("models.civitai.flag.unknown");
 }
 
 // One CivitAI search result: name + type badge + license-flag summary + NSFW
@@ -964,20 +963,23 @@ function discCivitaiRow(m) {
   const row = el("div", "disc-repo");
   const head = el("div", "head");
   head.appendChild(iconEl("models", "ic ic-model"));
-  head.appendChild(el("span", "name", m.name || "(unnamed)"));
+  head.appendChild(el("span", "name", m.name || t("models.civitai.unnamed")));
   if (m.type) head.appendChild(el("span", "arch-badge", m.type));
   if (m.nsfw === true) {
     const badge = el("span", "type-badge type-unknown",
-      typeof m.nsfwLevel === "number" ? `NSFW (level ${m.nsfwLevel})` : "NSFW");
-    badge.title = "CivitAI-flagged NSFW content. Only shown because the NSFW toggle is on.";
+      typeof m.nsfwLevel === "number"
+        ? t("models.civitai.nsfw", { level: m.nsfwLevel }) : t("models.disc.nsfw"));
+    badge.title = t("models.civitai.nsfwTitle");
     head.appendChild(badge);
   }
   const flags = el("span", "sub civitai-license",
-    `commercial use: ${civitaiCommercialUse(m.allowCommercialUse)} · `
-    + `derivatives: ${civitaiFlag(m.allowDerivatives)} · `
-    + `credit required: ${civitaiFlag(m.allowNoCredit === undefined ? undefined : !m.allowNoCredit)} · `
-    + `different license: ${civitaiFlag(m.allowDifferentLicense)}`);
-  flags.title = "CivitAI's own permission flags, not an SPDX license - shown as CivitAI reports them.";
+    t("models.civitai.flagsLine", {
+      commercial: civitaiCommercialUse(m.allowCommercialUse),
+      derivatives: civitaiFlag(m.allowDerivatives),
+      credit: civitaiFlag(m.allowNoCredit === undefined ? undefined : !m.allowNoCredit),
+      license: civitaiFlag(m.allowDifferentLicense),
+    }));
+  flags.title = t("models.civitai.flagsTitle");
   const meta = el("span", "meta disc-stats");
   meta.appendChild(iconEl("download", "meta-ic"));
   meta.appendChild(el("span", "", fmtCount((m.stats || {}).downloadCount)));
@@ -986,7 +988,7 @@ function discCivitaiRow(m) {
   const latestVersion = versions[0] && versions[0].id;
   const filesBox = el("div", "files");
   if (latestVersion != null) {
-    const btn = el("button", "btn-secondary", "files");
+    const btn = el("button", "btn-secondary", t("models.disc.filesButton"));
     btn.onclick = () => discoverCivitaiFiles(latestVersion, filesBox, btn);
     head.appendChild(btn);
   }
@@ -1004,8 +1006,8 @@ function civitaiScanBadge(status) {
   const s = (status || "").trim();
   const clean = /^success$/i.test(s);
   const badge = el("span", "moe-badge " + (clean ? "moe-confirmed" : "moe-likely"),
-    "scan: " + (s || "unknown"));
-  badge.title = "CivitAI's own upload-time safety scan - evidence, not a guarantee.";
+    t("models.civitai.scanBadge", { status: s || t("models.civitai.flag.unknown") }));
+  badge.title = t("models.civitai.scanBadgeTitle");
   return badge;
 }
 
@@ -1015,7 +1017,7 @@ export async function discoverCivitaiFiles(versionId, filesBox, btn) {
     return;
   }
   if (btn) btn.disabled = true;
-  filesBox.replaceChildren(el("div", "sub", "loading file list…"));
+  filesBox.replaceChildren(el("div", "sub", t("models.disc.loadingFiles")));
   try {
     const legacy = discCivitaiLegacyFormats();
     const r = await fetch("/api/discover/files?repo=" + encodeURIComponent(versionId)
@@ -1026,9 +1028,7 @@ export async function discoverCivitaiFiles(versionId, filesBox, btn) {
     filesBox.replaceChildren();
     const files = Array.isArray(data.files) ? data.files : [];
     if (!files.length) {
-      filesBox.appendChild(el("div", "sub",
-        "(no downloadable files - try Show legacy formats if you expect a "
-        + "riskier format)"));
+      filesBox.appendChild(el("div", "sub", t("models.civitai.noFiles")));
     }
     for (const f of files) {
       const row = el("div", "disc-file");
@@ -1038,7 +1038,7 @@ export async function discoverCivitaiFiles(versionId, filesBox, btn) {
       row.appendChild(el("span", "mono", (sizeKb / (1024 * 1024)).toFixed(2) + " GB"));
       row.appendChild(civitaiScanBadge(f.virusScanResult));
       row.appendChild(el("span", "fname", f.name || String(f.id)));
-      const pull = el("button", "btn-secondary", "pull");
+      const pull = el("button", "btn-secondary", t("models.disc.pullButton"));
       pull.onclick = () => {
         $("pull-spec").value = `civitai:${versionId}:${f.id}`;
         $("pull-name").value = (f.name || `civitai-${versionId}`).replace(/\.[^.]+$/, "");
@@ -1048,13 +1048,13 @@ export async function discoverCivitaiFiles(versionId, filesBox, btn) {
         }
         nameInput.focus();
         nameInput.select();
-        toast("Review the alias, then click Add to download from CivitAI");
+        toast(t("models.civitai.pullHint"));
       };
       row.appendChild(pull);
       filesBox.appendChild(row);
     }
   } catch (e) {
-    filesBox.replaceChildren(el("div", "sub", "Failed: " + e.message));
+    filesBox.replaceChildren(el("div", "sub", t("models.disc.filesFailed", { message: e.message })));
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -1066,18 +1066,16 @@ export async function discoverSearch() {
   const formats = discFormats();
   const types = discTypes();
   if (!formats.length) {
-    box.replaceChildren(el("div", "sub",
-      "Select at least one format (GGUF or Safetensors) to search."));
+    box.replaceChildren(el("div", "sub", t("models.disc.selectFormat")));
     hideHfHint();
     return;
   }
   if (!types.length) {
-    box.replaceChildren(el("div", "sub",
-      "Select at least one model type to search for."));
+    box.replaceChildren(el("div", "sub", t("models.disc.selectType")));
     hideHfHint();
     return;
   }
-  box.replaceChildren(el("div", "sub", "searching HuggingFace…"));
+  box.replaceChildren(el("div", "sub", t("models.disc.searchingHf")));
   $("disc-search").disabled = true;
   try {
     const q = $("disc-query").value.trim();
@@ -1091,25 +1089,24 @@ export async function discoverSearch() {
     const gpuInfo = await _gpuInfo();
     $("disc-vram").textContent = data.vram.total
       ? vramBasisCaption(data.vram.total, gpuInfo)
-      : "No GPU VRAM detected - sizes shown without fit badges.";
+      : t("models.disc.noGpuVram");
     // Show the HF-runtime hint only when HF is actually being searched and the
     // runtime is missing (backend flag comes from the server probe).
     if (formats.includes("hf") && data.hf_backend_available === false) showHfHint();
     else hideHfHint();
     box.replaceChildren();
     if (!data.results.length) {
-      box.appendChild(el("div", "sub", "(no matching repos found)"));
+      box.appendChild(el("div", "sub", t("models.disc.noResultsHf")));
       return;
     }
     // A persistent legend for the dashed "MoE?" pill, shown once and only when
     // a result on screen carries that inferred-not-confirmed signal.
     if (data.results.some((m) => m.moe === "likely")) {
-      box.appendChild(el("div", "sub moe-legend",
-        "MoE? = inferred from the model's name, not confirmed by its own header"));
+      box.appendChild(el("div", "sub moe-legend", t("models.disc.moeLegend")));
     }
     for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus));
   } catch (e) {
-    box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
+    box.replaceChildren(el("div", "sub", t("models.disc.searchFailed", { message: e.message })));
   } finally {
     $("disc-search").disabled = false;
   }
@@ -1119,12 +1116,11 @@ async function _discoverSearchCivitai() {
   const box = $("disc-results");
   const types = discCivitaiTypes();
   if (!types.length) {
-    box.replaceChildren(el("div", "sub",
-      "Select at least one model type to search for."));
+    box.replaceChildren(el("div", "sub", t("models.disc.selectType")));
     return;
   }
   hideHfHint();
-  box.replaceChildren(el("div", "sub", "searching CivitAI…"));
+  box.replaceChildren(el("div", "sub", t("models.disc.searchingCivitai")));
   $("disc-search").disabled = true;
   try {
     const q = $("disc-query").value.trim();
@@ -1140,12 +1136,12 @@ async function _discoverSearchCivitai() {
     box.replaceChildren();
     const results = Array.isArray(data.results) ? data.results : [];
     if (!results.length) {
-      box.appendChild(el("div", "sub", "(no matching CivitAI models found)"));
+      box.appendChild(el("div", "sub", t("models.disc.noResultsCivitai")));
       return;
     }
     for (const m of results) box.appendChild(discCivitaiRow(m));
   } catch (e) {
-    box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
+    box.replaceChildren(el("div", "sub", t("models.disc.searchFailed", { message: e.message })));
   } finally {
     $("disc-search").disabled = false;
   }
@@ -1157,7 +1153,7 @@ export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
     return;
   }
   btn.disabled = true;
-  filesBox.replaceChildren(el("div", "sub", "loading file list…"));
+  filesBox.replaceChildren(el("div", "sub", t("models.disc.loadingFiles")));
   if (!Array.isArray(gpus)) gpus = await _splitGpus();   // not supplied by the caller
   try {
     const r = await fetch("/api/discover/files?repo=" + encodeURIComponent(repo),
@@ -1178,13 +1174,13 @@ export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
       const desc = `${(f.size_bytes / GIB).toFixed(1)} GB` +
         (f.n_parts > 1 ? ` (${f.n_parts} parts)` : "");
       row.appendChild(el("span", "mono", desc));
-      if (f.fit) row.appendChild(el("span", "fit " + f.fit, FIT_TEXT[f.fit]));
+      if (f.fit) row.appendChild(el("span", "fit " + f.fit, t(FIT_TEXT[f.fit])));
       // "fits"/"tight" already account for a configured split, so no split hint.
       const splitHint = (f.fit === "fits" || f.fit === "tight")
         ? "" : splitFitHint(f.size_bytes, gpus);
       if (splitHint) row.appendChild(el("span", "sub split-hint", splitHint));
       row.appendChild(el("span", "fname", f.file));
-      const pull = el("button", "btn-secondary", "pull");
+      const pull = el("button", "btn-secondary", t("models.disc.pullButton"));
       pull.onclick = () => {
         // Prefill the pull form; the user confirms (and can set an alias)
         // before anything downloads. The suggested alias mirrors the server's
@@ -1204,7 +1200,7 @@ export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
         // Populate the mmproj dropdown
         const mmprojSelect = $("pull-mmproj");
         mmprojSelect.replaceChildren();
-        const noOption = el("option", "", "No vision projector");
+        const noOption = el("option", "", t("models.pull.noVisionProjector"));
         noOption.value = "";
         mmprojSelect.appendChild(noOption);
         
@@ -1246,13 +1242,13 @@ export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
         }
         nameInput.focus();
         nameInput.select();
-        toast("Review the alias, then click Pull to start the download");
+        toast(t("models.disc.pullFileHint"));
       };
       row.appendChild(pull);
       filesBox.appendChild(row);
     }
   } catch (e) {
-    filesBox.replaceChildren(el("div", "sub", "Failed: " + e.message));
+    filesBox.replaceChildren(el("div", "sub", t("models.disc.filesFailed", { message: e.message })));
   } finally {
     btn.disabled = false;
   }
@@ -1263,9 +1259,10 @@ $("disc-query").addEventListener("keydown", (e) => {
   if (e.key === "Enter") discoverSearch();
 });
 
+// Values are catalog key names; t() resolves them at each call below.
 const DISC_SOURCE_PLACEHOLDER = {
-  hf: "search HuggingFace - empty shows the most downloaded",
-  civitai: "search CivitAI - empty shows the most downloaded",
+  hf: "models.disc.placeholder.hf",
+  civitai: "models.disc.placeholder.civitai",
 };
 
 function applyDiscSource() {
@@ -1274,7 +1271,7 @@ function applyDiscSource() {
   if (hfBar) hfBar.style.display = source === "hf" ? "" : "none";
   if (civitaiBar) civitaiBar.style.display = source === "civitai" ? "" : "none";
   const q = $("disc-query");
-  if (q) q.placeholder = DISC_SOURCE_PLACEHOLDER[source];
+  if (q) q.placeholder = t(DISC_SOURCE_PLACEHOLDER[source]);
   hideHfHint();
   const box = $("disc-results");
   if (box) box.replaceChildren();
@@ -1348,7 +1345,7 @@ async function _loadPullShortcuts() {
     const data = await r.json();
     const shortcuts = Array.isArray(data.shortcuts) ? data.shortcuts : [];
     for (const s of shortcuts) {
-      const opt = el("option", null, `${s.alias} (${s.size || "size unknown"})`);
+      const opt = el("option", null, `${s.alias} (${s.size || t("models.sizeUnknown")})`);
       opt.value = s.spec;
       opt.dataset.alias = s.alias;
       sel.appendChild(opt);
@@ -1374,7 +1371,7 @@ document.addEventListener("click", async (e) => {
   if (e.target && e.target.id === "pull-browse") {
     const spec = $("pull-spec");
     if (!spec) return;
-    const dir = await pickDirectory("Pick a folder that holds the model(s)",
+    const dir = await pickDirectory(t("models.pull.browseDialogTitle"),
                                     spec.value.trim());
     if (dir) spec.value = dir;
   }
@@ -2191,10 +2188,9 @@ if ($("upload-send")) {
 
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();
-  if (!spec) { toast("Enter a model spec", true); return; }
+  if (!spec) { toast(t("models.pull.enterSpec"), true); return; }
   if (spec.startsWith("-")) {
-    toast("A model spec can't start with '-'. Use owner/repo, " +
-          "owner/repo:file.gguf, or an https URL.", true);
+    toast(t("models.pull.specNoDash"), true);
     return;
   }
   const name = $("pull-name").value.trim();
@@ -2218,7 +2214,7 @@ $("pull-start").onclick = async () => {
   bar.classList.remove("failed");
   bar.classList.add("indeterminate");
   bar.style.width = "35%";
-  pct.textContent = "starting…";
+  pct.textContent = t("models.pull.starting");
   if ($("pull-file")) { $("pull-file").hidden = true; $("pull-file").textContent = ""; }
   const samples = [];   // rolling {t, downloaded} window for speed/ETA
   try {
@@ -2248,8 +2244,8 @@ $("pull-start").onclick = async () => {
         if (ev.count > 1) {
           fileLine.hidden = false;
           fileLine.textContent = ev.name
-            ? `file ${ev.index} of ${ev.count}: ${ev.name}`
-            : `file ${ev.index} of ${ev.count}`;
+            ? t("models.pull.fileOf", { index: ev.index, count: ev.count, name: ev.name })
+            : t("models.pull.fileOfBare", { index: ev.index, count: ev.count });
         } else {
           fileLine.hidden = true;
         }
@@ -2270,14 +2266,14 @@ $("pull-start").onclick = async () => {
         // Unknown total - busy bar with a running byte count
         bar.classList.add("indeterminate");
         bar.style.width = "100%";
-        pct.textContent = "downloading…  " + fmtBytes(ev.downloaded);
+        pct.textContent = t("models.pull.downloading", { bytes: fmtBytes(ev.downloaded) });
       }
     });
     if (end.status === "done") {
       bar.classList.remove("indeterminate");
       bar.style.width = "100%";
-      pct.textContent = "done";
-      toast("Pull finished");
+      pct.textContent = t("models.pull.done");
+      toast(t("models.pull.finishedToast"));
       $("pull-spec").value = "";
       $("pull-name").value = "";
       if (sha256Input) sha256Input.value = "";
@@ -2288,17 +2284,16 @@ $("pull-start").onclick = async () => {
       // streamJob gave up reconnecting, or the job was already gone. Not a job
       // failure: a dropped SSE connection does not stop the pull, so the bar is
       // left as-is rather than painted red or completed.
-      pct.textContent = "connection lost - it may still be running";
-      toast("Lost connection to the pull - it may still be running in the "
-            + "background. Check the Models list in a moment.", true);
+      pct.textContent = t("models.pull.disconnectedStatus");
+      toast(t("models.pull.disconnectedToast"), true);
     } else {
       // Surface the failure: red bar, exit code, and the inputs kept for a
       // retry.
       bar.classList.remove("indeterminate");
       bar.classList.add("failed");
       const code = end.returncode != null ? `, exit ${end.returncode}` : "";
-      pct.textContent = `failed${code} - see log`;
-      toast(`Pull failed (${end.status}${code}) - see log`, true);
+      pct.textContent = t("models.pull.failedStatus", { code });
+      toast(t("models.pull.failedToast", { status: end.status, code }), true);
       // The job's own log is the CLI's console output verbatim (it streams a
       // spawned `localm pull`), so a net_mode=off refusal in there names a
       // terminal command a browser cannot run. Never rewritten in place
@@ -2310,9 +2305,7 @@ $("pull-start").onclick = async () => {
         if (cr.ok) {
           const c = await cr.json();
           if (c.net_mode === "off" && !c.net_allow_model_downloads) {
-            log.textContent += "(if this failed because network access is " +
-              "off: turn it on, or allow downloads only, in Settings → " +
-              "Network)\n";
+            log.textContent += t("models.pull.netOffHint") + "\n";
             log.scrollTop = log.scrollHeight;
           }
         }
@@ -2321,8 +2314,8 @@ $("pull-start").onclick = async () => {
   } catch (e) {
     bar.classList.remove("indeterminate");
     bar.classList.add("failed");
-    pct.textContent = "failed - see log";
-    toast("Pull failed: " + e.message, true);
+    pct.textContent = t("models.pull.failedStatusShort");
+    toast(t("models.pull.failedException", { message: e.message }), true);
   } finally {
     $("pull-start").disabled = false;
   }
@@ -2406,23 +2399,23 @@ export function scanResultMessage(data) {
   const method = String(data.method || "");
   if (method.startsWith("none")) {
     if (method.includes("comfy_workdir not configured")) {
-      return "No ComfyUI workdir configured - set it in Settings.";
+      return t("models.scan.noWorkdir");
     }
     const under = "models folder not found under ";
     const i = method.indexOf(under);
     if (i !== -1) {
       const path = method.slice(i + under.length).replace(/\)\s*$/, "");
-      return `ComfyUI models folder not found at ${path}.`;
+      return t("models.scan.folderNotFoundAt", { path });
     }
     // Any other "none (...)" reason.
-    return "Scan found no ComfyUI models. Check the ComfyUI setup in Settings.";
+    return t("models.scan.noneOtherReason");
   }
   if (added === 0 && skipped === 0) {
     // A real scan (folder-walk / hybrid) that turned up nothing: the folders
     // exist but held no models.
-    return "Scan complete. No new ComfyUI models found.";
+    return t("models.scan.emptyButRan");
   }
-  return `Scan complete. Added ${added} models, skipped ${skipped} existing.`;
+  return t("models.scan.result", { added, skipped });
 }
 
 // Bind Scan button click handler
@@ -2442,7 +2435,7 @@ if (scanBtn) {
       bar.classList.add("indeterminate");
       bar.style.width = "35%";
     }
-    if (pct) pct.textContent = "Scanning ComfyUI model folders…";
+    if (pct) pct.textContent = t("models.scan.scanning");
     let lastLine = null;
     let finalResult = null;
     try {
@@ -2453,8 +2446,8 @@ if (scanBtn) {
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         if (bar) { bar.classList.remove("indeterminate"); bar.classList.add("failed"); }
-        if (pct) pct.textContent = "failed - see toast";
-        toast(data.detail || "Scan failed", true);
+        if (pct) pct.textContent = t("models.scan.failedStatus");
+        toast(data.detail || t("models.scan.failedFallback"), true);
         return;
       }
       const end = await streamJob(data.job_id, (line) => { lastLine = line; }, (ev) => {
@@ -2465,30 +2458,29 @@ if (scanBtn) {
         if (ev.total && bar && pct) {
           bar.classList.remove("indeterminate");
           bar.style.width = (ev.done / ev.total * 100) + "%";
-          pct.textContent = `Registering model ${ev.done} of ${ev.total}`
-            + (ev.name ? `: ${ev.name}` : "");
+          pct.textContent = t("models.scan.registering",
+            { done: ev.done, total: ev.total, name: ev.name ? `: ${ev.name}` : "" });
         }
       });
       if (end.status === "done") {
         if (bar) { bar.classList.remove("indeterminate"); bar.style.width = "100%"; }
-        if (pct) pct.textContent = "done";
-        toast(finalResult ? scanResultMessage(finalResult) : "Scan complete.");
+        if (pct) pct.textContent = t("models.pull.done");
+        toast(finalResult ? scanResultMessage(finalResult) : t("models.scan.completeFallback"));
         refreshModelsPage();
       } else if (end.status === "disconnected") {
         // A lost SSE connection is not a job failure, so the bar is left as-is
         // rather than painted red.
-        if (pct) pct.textContent = "connection lost - it may still be running";
-        toast("Lost connection to the scan - it may still be running in the "
-              + "background. Check the Models list in a moment.", true);
+        if (pct) pct.textContent = t("models.scan.disconnectedStatus");
+        toast(t("models.scan.disconnectedToast"), true);
       } else {
         if (bar) { bar.classList.remove("indeterminate"); bar.classList.add("failed"); }
-        if (pct) pct.textContent = "failed - see toast";
-        toast(lastLine || "Scan failed", true);
+        if (pct) pct.textContent = t("models.scan.failedStatus");
+        toast(lastLine || t("models.scan.failedFallback"), true);
       }
     } catch (e) {
       if (bar) { bar.classList.remove("indeterminate"); bar.classList.add("failed"); }
-      if (pct) pct.textContent = "failed - see toast";
-      toast("Scan failed: " + e.message, true);
+      if (pct) pct.textContent = t("models.scan.failedStatus");
+      toast(t("models.scan.failedException", { message: e.message }), true);
     } finally {
       scanBtn.disabled = false;
     }
@@ -2502,12 +2494,13 @@ if (scanBtn) {
 // Friendly labels for the dry-run preview breakdown; mirrors
 // localm.model_manager.registry.MODEL_TYPES (keep in sync), minus "llm"/"mmproj"
 // which a ComfyUI scan never produces.
+// Values are catalog key names; t() resolves them at the render site below.
 export const IMPORT_TYPE_LABELS = {
-  "diffusion-unet": "Diffusion / checkpoints",
-  "text-encoder": "Text encoders",
-  vae: "VAEs",
-  lora: "LoRAs",
-  unknown: "Other",
+  "diffusion-unet": "models.importComfy.type.diffusionUnet",
+  "text-encoder": "models.importComfy.type.textEncoder",
+  vae: "models.importComfy.type.vae",
+  lora: "models.importComfy.type.lora",
+  unknown: "models.importComfy.type.unknown",
 };
 
 // localm's own managed ComfyUI install path, or null if there isn't one (not
@@ -2537,22 +2530,22 @@ export function importComfyPreviewMessage(data) {
 }
 
 export function openImportComfyModal(initialPath = "") {
-  openModal("Import from ComfyUI", (body) => {
+  openModal(t("models.importComfy.modalTitle"), (body) => {
     const wrap = el("div", "import-comfy");
 
     const pathRow = el("div", "row");
     const pathInput = document.createElement("input");
     pathInput.type = "text";
-    pathInput.placeholder = "ComfyUI install folder";
+    pathInput.placeholder = t("models.importComfy.pathPlaceholder");
     pathInput.value = initialPath;
-    const browseBtn = el("button", "btn-secondary", "Browse…");
+    const browseBtn = el("button", "btn-secondary", t("models.importComfy.browseButton"));
     browseBtn.type = "button";
     // pickDirectory() opens its OWN modal, and this app has a single shared
     // #modal/#modal-body (openModal() replaces its content, it does not stack),
     // so the picker destroys this modal's DOM, pathInput included. Re-open this
     // modal fresh with the picked path rather than writing into a detached node.
     browseBtn.onclick = async () => {
-      const dir = await pickDirectory("Pick a ComfyUI folder", pathInput.value.trim());
+      const dir = await pickDirectory(t("models.importComfy.pickerTitle"), pathInput.value.trim());
       if (dir) openImportComfyModal(dir);
     };
     pathRow.append(pathInput, browseBtn);
@@ -2562,7 +2555,7 @@ export function openImportComfyModal(initialPath = "") {
     // status check resolves, and stays hidden if there is none.
     const managedRow = el("div", "row");
     managedRow.style.display = "none";
-    const managedBtn = el("button", "btn-secondary", "Use localm's own ComfyUI");
+    const managedBtn = el("button", "btn-secondary", t("models.importComfy.useManagedButton"));
     managedBtn.type = "button";
     managedRow.appendChild(managedBtn);
     wrap.appendChild(managedRow);
@@ -2582,9 +2575,9 @@ export function openImportComfyModal(initialPath = "") {
     wrap.appendChild(progressBox);
 
     const actions = el("div", "actions");
-    const previewBtn = el("button", "btn-secondary", "Preview");
+    const previewBtn = el("button", "btn-secondary", t("models.importComfy.previewButton"));
     previewBtn.type = "button";
-    const importBtn = el("button", "btn-primary", "Import");
+    const importBtn = el("button", "btn-primary", t("models.importComfy.importButton"));
     importBtn.type = "button";
     importBtn.disabled = true;
     actions.append(previewBtn, importBtn);
@@ -2597,11 +2590,11 @@ export function openImportComfyModal(initialPath = "") {
 
     previewBtn.onclick = async () => {
       const workdir = pathInput.value.trim();
-      if (!workdir) { toast("Choose a ComfyUI folder first", true); return; }
+      if (!workdir) { toast(t("models.importComfy.chooseFolderFirst"), true); return; }
       previewedWorkdir = null;
       importBtn.disabled = true;
       previewBtn.disabled = true;
-      previewBox.replaceChildren(el("span", "", "Scanning…"));
+      previewBox.replaceChildren(el("span", "", t("models.importComfy.scanning")));
       try {
         const r = await fetch("/api/models/scan", {
           method: "POST", headers: authHeaders(),
@@ -2609,7 +2602,7 @@ export function openImportComfyModal(initialPath = "") {
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) {
-          previewBox.replaceChildren(el("span", "", data.detail || "Preview failed"));
+          previewBox.replaceChildren(el("span", "", data.detail || t("models.importComfy.previewFailedFallback")));
           return;
         }
         const errMsg = importComfyPreviewMessage(data);
@@ -2622,24 +2615,25 @@ export function openImportComfyModal(initialPath = "") {
         const total = data.total_new || 0;
         if (!total) {
           previewBox.appendChild(el("span", "", data.already_registered
-            ? `All ${data.already_registered} found model(s) are already registered.`
-            : "No models found in that folder."));
+            ? t("models.importComfy.allAlreadyRegistered", { count: data.already_registered })
+            : t("models.importComfy.noneFound")));
           return;
         }
-        previewBox.appendChild(el("div", "", `Found ${total} new model(s):`));
+        previewBox.appendChild(el("div", "", t("models.importComfy.foundNew", { count: total })));
         const list = el("ul", "import-comfy-counts");
         for (const [type, n] of Object.entries(counts)) {
-          list.appendChild(el("li", "", `${IMPORT_TYPE_LABELS[type] || type}: ${n}`));
+          const label = IMPORT_TYPE_LABELS[type] ? t(IMPORT_TYPE_LABELS[type]) : type;
+          list.appendChild(el("li", "", `${label}: ${n}`));
         }
         previewBox.appendChild(list);
         if (data.already_registered) {
           previewBox.appendChild(el("div", "sub",
-            `${data.already_registered} already registered (skipped).`));
+            t("models.importComfy.alreadyRegisteredSkipped", { count: data.already_registered })));
         }
         previewedWorkdir = workdir;
         importBtn.disabled = false;
       } catch (e) {
-        previewBox.replaceChildren(el("span", "", "Preview failed: " + e.message));
+        previewBox.replaceChildren(el("span", "", t("models.importComfy.previewException", { message: e.message })));
       } finally {
         previewBtn.disabled = false;
       }
@@ -2649,7 +2643,7 @@ export function openImportComfyModal(initialPath = "") {
       if (!previewedWorkdir) return;
       importBtn.disabled = true;
       progressBox.style.display = "block";
-      progressBox.textContent = "Starting import…";
+      progressBox.textContent = t("models.importComfy.starting");
       let lastLine = null;
       let finalResult = null;
       try {
@@ -2659,7 +2653,7 @@ export function openImportComfyModal(initialPath = "") {
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) {
-          toast(data.detail || "Import failed", true);
+          toast(data.detail || t("models.importComfy.importFailedFallback"), true);
           importBtn.disabled = false;
           progressBox.style.display = "none";
           return;
@@ -2672,27 +2666,26 @@ export function openImportComfyModal(initialPath = "") {
             return;
           }
           if (ev.total) {
-            progressBox.textContent = `Registering model ${ev.done} of ${ev.total}`
-              + (ev.name ? `: ${ev.name}` : "");
+            progressBox.textContent = t("models.scan.registering",
+              { done: ev.done, total: ev.total, name: ev.name ? `: ${ev.name}` : "" });
           }
         });
         if (end.status === "done") {
-          toast(finalResult ? scanResultMessage(finalResult) : "Import finished");
+          toast(finalResult ? scanResultMessage(finalResult) : t("models.importComfy.finished"));
           $("modal").style.display = "none";
           refreshModelsPage();
         } else if (end.status === "disconnected") {
           // A lost stream is not necessarily a lost job.
-          progressBox.textContent = "Connection lost - it may still be running";
-          toast("Lost connection to the import - it may still be running in "
-                + "the background. Check the Models list in a moment.", true);
+          progressBox.textContent = t("models.importComfy.disconnectedProgress");
+          toast(t("models.importComfy.disconnectedToast"), true);
           importBtn.disabled = false;
         } else {
           progressBox.style.display = "none";
-          toast(lastLine || "Import failed", true);
+          toast(lastLine || t("models.importComfy.importFailedFallback"), true);
           importBtn.disabled = false;
         }
       } catch (e) {
-        toast("Import failed: " + e.message, true);
+        toast(t("models.importComfy.importException", { message: e.message }), true);
         importBtn.disabled = false;
         progressBox.style.display = "none";
       }
@@ -2749,7 +2742,9 @@ if (unloadAllBtn) {
 
 // The table is painted from a fetched /api/models response, not marked up in
 // index.html, so it is redrawn when the interface language changes.
+// applyDiscSource() re-derives the search placeholder.
 document.addEventListener("localm:language", () => {
   refreshModelsPage();
+  applyDiscSource();
 });
 
