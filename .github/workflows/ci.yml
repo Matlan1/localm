@@ -6,10 +6,14 @@ on:
   #   pull_request   the lint + hygiene + tests matrix runs ONLY when the PR
   #                  carries the `full-ci` label. Every other PR skips it.
   #                  `labeled` is in the types list so adding the label to an
-  #                  OPEN PR starts the run without needing a new push.
+  #                  OPEN PR starts the run without needing a new push. The
+  #                  mutation-test job runs the same way, gated on the
+  #                  `mutation-test` label instead - see that job below.
   #   push           paths-scoped to the two native-binding files below, and it
   #                  runs abi-check ONLY. It never starts the test matrix.
-  #   workflow_dispatch / schedule   run the matrix unconditionally.
+  #   workflow_dispatch / schedule   run the matrix unconditionally. The
+  #                  mutation-test job runs on workflow_dispatch too, but never
+  #                  on push or schedule - see that job below.
   #
   # THE LABEL GATE IS THE WHOLE MECHANISM. Do not remove the `full-ci`
   # condition on the test job and do not widen the push paths filter; either
@@ -398,3 +402,63 @@ jobs:
       - name: Compare bundled ComfyUI pin against upstream latest release
         continue-on-error: true
         run: python scripts/check_comfyui_pin.py
+
+  # Mutation testing (mutmut) for six of the eight trust-boundary modules
+  # scripts/check_coverage_floors.py tracks - see pyproject.toml
+  # [tool.mutmut] for which two are excluded and why. ubuntu-latest only,
+  # and there is no matrix dimension on this job at all, so it structurally
+  # cannot run on windows-latest: mutmut has no native Windows support and
+  # refuses to run there ("please use the WSL"). Opt-in via the
+  # `mutation-test` PR label (same mechanism as `full-ci` above) or a manual
+  # dispatch; never runs on push or schedule. Read-only: it never fails the
+  # build on survivors.
+  mutation-test:
+    name: mutation testing (mutmut, ubuntu-latest only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'mutation-test'))
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Create the project venv
+        run: python -m venv .venv
+      - name: Put the venv on PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install mutmut==3.7.0
+
+      # A per-mutant re-test can cost anywhere from a fraction of a second to
+      # several minutes, depending on how many tests map to the mutated
+      # function - this bound lets the export/publish/check steps below
+      # still run and report whatever real, partial results exist so far.
+      - name: Mutation test the trust-boundary modules
+        timeout-minutes: 45
+        continue-on-error: true
+        run: mutmut run
+
+      - name: Export mutation stats
+        if: always()
+        continue-on-error: true
+        run: mutmut export-cicd-stats
+
+      - name: Publish mutation summary
+        if: always()
+        continue-on-error: true
+        run: python scripts/write_mutation_summary.py
+
+      # Fails if mutants were generated but none reached a real outcome
+      # (`mutmut run` exits 0 even then). Never gates on the mutation score.
+      - name: Verify the run actually completed
+        if: always()
+        run: python scripts/write_mutation_summary.py --check
