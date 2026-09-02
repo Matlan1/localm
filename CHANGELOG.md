@@ -419,6 +419,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   so a request that actually fits succeeds instead of being refused.
 
 ### Security
+- **A fetched web page or external tool result can no longer impersonate you or
+  the assistant, whatever model you run.** Text that localm brings in from
+  outside - a page the coder fetched, a web search result, output from an MCP
+  server - can contain the special markers a model uses to tell one speaker's
+  turn from another. Until now those markers were removed by matching against a
+  list of the model families localm knew about, so a family that was not on the
+  list could smuggle one through, and the model would read the injected text as
+  a genuine system or assistant turn and act on it. localm now tracks exactly
+  which part of a prompt came from outside and tells the model's tokenizer to
+  read that part as plain text, so those markers cannot take effect there no
+  matter which family they belong to, while the markers your model's own chat
+  format needs keep working normally. This covers both the GGUF and the
+  Transformers backends.
 - **Chatting with certain models no longer crashes the server outright.** For a
   handful of tokenizers - among them Llama 4, Mistral's Tekken, EXAONE MoE,
   GPT-4o-compatible and SuperBPE ones - a message containing a long unbroken run
