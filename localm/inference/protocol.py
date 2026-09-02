@@ -53,6 +53,16 @@ class Message(BaseModel):
     # assistant responses when the model emitted a <think> block; ignored on
     # input. Clients that do not know the field ignore it.
     reasoning_content: Optional[str] = None
+    # Character ranges of ``content`` that came from an untrusted source, as
+    # ``[[start, end], ...]``. The backend tokenises those ranges with
+    # special-token parsing off. Optional and additive: a client that omits it
+    # gets exactly the previous behaviour.
+    #
+    # A range can only DISABLE special-token parsing over part of the sender's
+    # own prompt, never enable it, so a wrong or hostile value degrades that
+    # request's own output and cannot weaken anyone else's. Values are clamped
+    # to the content length when applied.
+    untrusted_spans: Optional[List[List[int]]] = None
 
     def text_only(self) -> str:
         """Flatten content to plain text (discards media)."""

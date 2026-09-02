@@ -368,20 +368,22 @@ def run_web_call(call: dict) -> str:
                 if isinstance(r.get("snippet"), str):
                     r["snippet"] = neutralise(r["snippet"])
             return compose(
-                f'[Results of web_search "{query}"]\n',
+                '[Results of web_search "', untrusted_span(query), '"]\n',
                 _fence_untrusted(netpolicy.format_results(results)))
         if name == "fetch_url":
             final_url, text = netpolicy.fetch_text(str(args.get("url", "")))
             return compose(
-                f"[Content of {final_url}]\n",
+                "[Content of ", untrusted_span(final_url), "]\n",
                 _fence_untrusted(text[:6000]))
-        return f"[Unknown web tool: {name}] Answer without it."
+        return compose("[Unknown web tool: ", untrusted_span(name),
+                       "] Answer without it.")
     except netpolicy.NetworkPolicyError as e:
-        return (f"[Web request refused by policy: {e}] Answer without the web and say "
-                "web access was refused.")
+        return compose("[Web request refused by policy: ", untrusted_span(str(e)),
+                       "] Answer without the web and say web access was refused.")
     except Exception as e:
-        return (f"[Web request failed: {e}] Answer without the web, and say that web "
-                "access did not work.")
+        return compose("[Web request failed: ", untrusted_span(str(e)),
+                       "] Answer without the web, and say that web access did not "
+                       "work.")
 
 
 def _tool_call_grammar(engine):

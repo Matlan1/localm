@@ -379,12 +379,35 @@ class HTTPBackend(BaseLLMBackend):
             return f"{self._base_url}/messages"
         return f"{self._base_url}/chat/completions"
 
+    def _with_untrusted_spans(self, messages: list[dict]) -> list[dict]:
+        """Carry each message's untrusted character ranges over the wire.
+
+        JSON has nowhere to keep the annotation a ``GuardedText`` content
+        carries, so the ranges travel as a sibling ``untrusted_spans`` field
+        that localm's own chat route reads back. Only sent to a localm server:
+        a third-party endpoint has no use for the field and may reject an
+        unknown one. A message with no ranges is passed through untouched, so
+        an ordinary request is byte-identical to before.
+        """
+        if not self._is_local_server:
+            return messages
+        from localm.textguard import untrusted_spans_of
+        out = []
+        for msg in messages:
+            spans = untrusted_spans_of(msg.get("content"))
+            if spans:
+                msg = dict(msg)
+                msg["content"] = str(msg["content"])
+                msg["untrusted_spans"] = [[a, b] for a, b in spans]
+            out.append(msg)
+        return out
+
     def _body(self, messages: list[dict], stream: bool, **kwargs) -> dict:
         if self.anthropic:
             return self._anthropic_body(messages, stream, **kwargs)
         body = {
             "model":    self._model,
-            "messages": messages,
+            "messages": self._with_untrusted_spans(messages),
             "stream":   stream,
             **self._extra,
             **kwargs,

@@ -239,6 +239,12 @@ def _untrusted_prompt_ranges(tokenizer, template_messages, text):
         return ()
     contents = [m.get("content") for m in template_messages]
     if not all(isinstance(c, str) for c in contents):
+        from localm.debuglog import logger
+        logger.warning(
+            "textguard: a message carries structured (non-text) content, so the "
+            "untrusted spans of this conversation cannot be located; they are "
+            "tokenised with special-token parsing ON and only the text-level "
+            "defang applies to this request")
         return ()
 
     def render(sentinels):
@@ -261,9 +267,15 @@ def _tokenize_prompt(tokenizer, template_messages, text, device):
     """Tokenise *text*, splitting special tokens inside untrusted spans only.
 
     ``split_special_tokens=True`` makes a control token spelled inside untrusted
-    content tokenise as ordinary text instead of the real special id, whatever
-    model family it belongs to. Trusted segments, the chat template's own role
-    markers included, keep the default so the template still parses.
+    content tokenise as ordinary text instead of the real special id. Trusted
+    segments, the chat template's own role markers included, keep the default so
+    the template still parses.
+
+    SCOPE: the knob covers added tokens registered with ``special=True``, which
+    is how chat templates register their role markers. An added token registered
+    with ``special=False`` still resolves to its own id inside an untrusted span;
+    only the text-level defang applies to that case. Pinned by
+    test_the_knob_covers_special_added_tokens_only.
 
     ``add_special_tokens=False`` throughout: the template already emitted the
     model's BOS, exactly as on the single-call path.

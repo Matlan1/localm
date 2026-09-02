@@ -303,12 +303,36 @@ def test_encode_without_ranges_matches_the_single_call_shape():
 
 
 def test_encode_retries_on_a_short_buffer_per_segment():
-    """The resize-and-retry guard survives the split into segments."""
-    native = FakeNative()
-    with native.patches()[2]:
-        ids = _tokenizer().encode("x" * 400, add_bos=False,
+    """The resize-and-retry guard survives the split into segments.
+
+    Every segment must retry on its OWN short buffer, so the fake refuses
+    the first sizing call for each one and the test asserts both that the
+    retry happened and that no tokens were lost to it."""
+    seen = []
+    refused = set()
+
+    def short_first(vocab, raw, n_raw, buf, n_max,
+                    add_special=True, parse_special=True):
+        text = raw.decode("utf-8")
+        seen.append((text, n_max))
+        need = len(text)
+        if text not in refused:
+            refused.add(text)
+            return -need           # "buffer too small", forcing the retry
+        for k in range(need):
+            buf[k] = 10 + k % 700
+        return need
+
+    with patch(_LLAMA_API + ".llama_tokenize", side_effect=short_first):
+        ids = _tokenizer().encode("x" * 100 + "y" * 200 + "z" * 100,
+                                  add_bos=False,
                                   untrusted_ranges=((100, 300),))
+
     assert len(ids) == 400
+    assert len(seen) == 6, "each of the 3 segments should size then retry"
+    assert [t for t, _n in seen] == ["x" * 100, "x" * 100,
+                                     "y" * 200, "y" * 200,
+                                     "z" * 100, "z" * 100]
 
 
 def test_encode_raises_when_a_segment_cannot_be_tokenised():
@@ -412,3 +436,45 @@ def test_an_injected_marker_sharing_the_template_s_own_id_is_removed_by_count():
     assert ranges
     assert ids_before.count(start_id) == ids_clean.count(start_id) + 1
     assert ids_after.count(start_id) == ids_clean.count(start_id)
+
+
+# --------------------------------------------------------------------------- #
+#  Composition with the pre-tokenizer crash guard                             #
+# --------------------------------------------------------------------------- #
+
+def test_the_pretokenizer_guard_still_refuses_when_ranges_are_supplied():
+    """Segmenting must not become a way around the crash guard.
+
+    The guard runs once over the WHOLE text before any native call, so an input
+    it refuses is refused whether or not untrusted ranges were supplied.
+    """
+    from localm.inference.pretokenizer_guard import PretokenizerUnsafeInputError
+
+    tok = _tokenizer()
+    tok._pre_type = "gpt-4o"
+    hostile = "A" * 500                       # one unbroken letter run, over the cap
+    native = FakeNative()
+
+    with native.patches()[2]:
+        with pytest.raises(PretokenizerUnsafeInputError):
+            tok.encode(hostile, add_bos=False, untrusted_ranges=((0, 500),))
+        with pytest.raises(PretokenizerUnsafeInputError):
+            tok.encode(hostile, add_bos=False)
+
+    assert native.calls == [], "the guard must refuse before any native call"
+
+
+def test_every_segment_is_within_the_bounds_the_guard_checked():
+    """A segment is a substring, so a whole-text pass implies a per-segment pass."""
+    from localm.inference.pretokenizer_guard import check_text
+
+    tok = _tokenizer()
+    tok._pre_type = "gpt-4o"
+    safe = ("word " * 200).strip()            # no run over the cap
+    native = FakeNative()
+    with native.patches()[2]:
+        tok.encode(safe, add_bos=False, untrusted_ranges=((10, 40), (100, 150)))
+
+    assert native.calls, "the safe input should have been tokenised"
+    for segment, _parse_special in native.calls:
+        check_text("gpt-4o", segment)         # raises if a segment exceeds a bound

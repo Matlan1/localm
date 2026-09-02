@@ -328,9 +328,12 @@ class _Tokenizer:
         *untrusted_ranges* are ``(start, end)`` character offsets into *text*
         holding content that came from outside. Those are tokenised with
         ``parse_special=False``, so a control token spelled inside them stays
-        ordinary text and cannot forge a role boundary, whatever model family it
-        belongs to. Everything else, the chat template's own role markers
-        included, keeps ``parse_special=True``.
+        ordinary text and cannot forge a role boundary. Everything else, the
+        chat template's own role markers included, keeps ``parse_special=True``.
+
+        SCOPE: this covers the tokens the native tokenizer treats as special,
+        which is how a chat template's role markers are registered. Whether it
+        also covers every non-control added token has not been established here.
 
         With no ranges this issues the single call it always did.
         """
@@ -2542,13 +2545,25 @@ class LlamaCpp:
         # Otherwise keep add_bos=True so the tokenizer prepends BOS normally.
         bos_markers = ("<bos>", "<s>", "﻿")
         add_bos = not any(prompt.startswith(m) for m in bos_markers)
-        untrusted_ranges = _untrusted_prompt_ranges(
-            self._model_ptr, messages, prompt, fallback_reason)
+        from localm.inference.backends.base import messages_contain_image
+        going_to_vision = (getattr(self, "_mtmd", None) is not None
+                           and messages_contain_image(messages))
+        if going_to_vision:
+            untrusted_ranges = ()
+            if any(untrusted_spans_of(m.get("content")) for m in messages):
+                from localm.debuglog import logger
+                logger.warning(
+                    "textguard: this request takes the vision path, which "
+                    "tokenises the whole prompt through mtmd in one call, so "
+                    "untrusted spans keep special-token parsing ON; only the "
+                    "text-level defang applies to this request")
+        else:
+            untrusted_ranges = _untrusted_prompt_ranges(
+                self._model_ptr, messages, prompt, fallback_reason)
         tokens = self._tokenizer.encode(
             prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges)
 
-        from localm.inference.backends.base import messages_contain_image
-        if getattr(self, "_mtmd", None) is not None and messages_contain_image(messages):
+        if going_to_vision:
             # Image present + an mmproj is loaded: evaluate the image+text via mtmd
             # instead of the text-only prefill. The text path below is untouched.
             gen = self._generate_image(

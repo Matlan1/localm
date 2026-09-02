@@ -170,3 +170,37 @@ def test_a_tokenizer_that_rejects_the_knob_falls_back_to_one_call(tokenizer):
     expected = tokenizer(text, return_tensors="pt", add_special_tokens=False)
     assert [int(i) for i in inputs["input_ids"][0]] == \
            [int(i) for i in expected["input_ids"][0]]
+
+
+def test_the_knob_covers_special_added_tokens_only():
+    """Pins the mechanism's SCOPE so it cannot silently be believed wider.
+
+    split_special_tokens suppresses added tokens registered with special=True,
+    which is how a chat template registers its role markers. An added token
+    registered with special=False still resolves to its own id, and only the
+    text-level defang applies to that case.
+    """
+    pytest.importorskip("transformers", exc_type=ImportError)
+    pytest.importorskip("tokenizers")
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import AddedToken, PreTrainedTokenizerFast
+
+    core = Tokenizer(models.WordLevel(vocab={"<unk>": 0, "x": 1, "y": 2},
+                                      unk_token="<unk>"))
+    core.pre_tokenizer = pre_tokenizers.Whitespace()
+    tok = PreTrainedTokenizerFast(tokenizer_object=core, unk_token="<unk>")
+    tok.add_tokens([AddedToken("<|ROLEMARK|>", special=True)], special_tokens=True)
+    tok.add_tokens([AddedToken("<|PLAINADD|>", special=False)], special_tokens=False)
+
+    def ids(literal, split):
+        return tok("x " + literal + " y", add_special_tokens=False,
+                   split_special_tokens=split)["input_ids"]
+
+    role_id = tok.convert_tokens_to_ids("<|ROLEMARK|>")
+    plain_id = tok.convert_tokens_to_ids("<|PLAINADD|>")
+
+    assert role_id in ids("<|ROLEMARK|>", False)
+    assert role_id not in ids("<|ROLEMARK|>", True)      # covered
+
+    assert plain_id in ids("<|PLAINADD|>", False)
+    assert plain_id in ids("<|PLAINADD|>", True)          # NOT covered, by design
