@@ -17,14 +17,13 @@ import { modelOverrides } from "./workflow.js";
 const musicGallery = createGallery({
   slug: "music",
   listKey: "tracks",
-  noun: "track",
-  plural: "tracks",
+  itemKey: "music.item",
   gridId: "music-history",
   bulkId: "music-bulk",
   moveDestKey: "localm.musicMoveDest",
   emptyIcon: "music",
-  emptyTitle: "No tracks yet",
-  emptyHint: "Generate one above; your tracks appear here.",
+  emptyTitleKey: "music.empty.title",
+  emptyHintKey: "music.empty.hint",
   cardClass: "thumb-track",
 
   beforeRefresh: () => refreshReloadToggle("music", "music-reload-llm"),

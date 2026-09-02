@@ -801,6 +801,10 @@
   "models.view.groupByTypeTitle": "Teilt die Liste in einen Abschnitt pro Modelltyp auf, statt einer flachen Liste.",
   "models.view.showOther": "andere Typen hier anzeigen",
   "models.view.showOtherTitle": "Vision-Projektoren und alles, was localm nicht einordnen konnte, befinden sich im Tab Andere. Aktivieren Sie dies, um sie auch hier aufzulisten.",
+  "music.empty.hint": "Erstellen Sie oben einen; Ihre Titel erscheinen hier.",
+  "music.empty.title": "Noch keine Titel",
+  "music.item.one": "Titel",
+  "music.item.other": "Titel",
   "nav.chat": "Chat",
   "nav.models": "Modelle",
   "nav.plugins": "Plugins",
@@ -1011,5 +1015,9 @@
   "slash.webSearchFailed": "Websuche fehlgeschlagen: {message}",
   "topbar.newChat": "Neuer Chat",
   "topbar.openMenu": "Menü öffnen",
+  "video.empty.hint": "Erstellen Sie oben einen; Ihre Clips erscheinen hier.",
+  "video.empty.title": "Noch keine Clips",
+  "video.item.one": "Clip",
+  "video.item.other": "Clips",
   "workflow.intro": "Der ComfyUI-Workflow, den diese Seite verwendet. Laden Sie einen hoch (in ComfyUI: Speichern -> API-Format) und wählen Sie ihn aus, oder behalten Sie die eingebaute Standardeinstellung."
 }
