@@ -402,14 +402,10 @@ exclude_also = [
 # actually checked is a question this number cannot answer.
 fail_under = 78
 
-# Mutation testing (mutmut) for six of the eight trust-boundary modules, run
-# only by the opt-in `mutation-test` job in .github/workflows/ci.yml.
-# localm/tls.py and localm/portmux.py are not in only_mutate: every test that
-# performs real (non-mocked) TLS certificate generation raises "Algorithm
-# must be a registered hash algorithm" under mutmut's instrumented import
-# path, in both files' own dedicated tests, regardless of whether tls.py
-# itself is in only_mutate - a mutmut/cryptography interaction, not a localm
-# defect. only_mutate takes a glob per file/tree; pytest_add_cli_args_test_selection
+# Mutation testing (mutmut) for all eight trust-boundary modules, run only by
+# the opt-in `mutation-test` job in .github/workflows/ci.yml, through
+# scripts/mutmut_run.py rather than the bare `mutmut` CLI - see that script.
+# only_mutate takes a glob per file/tree; pytest_add_cli_args_test_selection
 # must list every test file that exercises one of the included modules,
 # dedicated or incidental, since mutate_only_covered_lines derives coverage
 # from that same pytest scope.
@@ -422,6 +418,8 @@ only_mutate = [
     "localm/netpolicy.py",
     "localm/auth.py",
     "localm/config.py",
+    "localm/tls.py",
+    "localm/portmux.py",
 ]
 mutate_only_covered_lines = true
 also_copy = ["scripts"]
@@ -448,9 +446,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_netpolicy_ssrf_phase3.py",
     "tests/test_auth.py",
     "tests/test_auth_kdf.py",
-    # test_auth_network_1_loopback_gate.py performs real TLS cert
-    # generation - see the module comment above. auth.py's other five
-    # dedicated test files are unaffected.
+    "tests/test_auth_network_1_loopback_gate.py",
     "tests/test_auth_network_4_session_revalidation.py",
     "tests/test_auth_reg579_empty_key_file.py",
     "tests/test_auth_secret_write_perms.py",
@@ -463,4 +459,8 @@ pytest_add_cli_args_test_selection = [
     "tests/test_config_reg586_reg566_regressions.py",
     "tests/test_config_schema_endpoint.py",
     "tests/test_config_validation.py",
+    "tests/test_tls.py",
+    "tests/test_tls_cli.py",
+    "tests/test_portmux.py",
+    "tests/test_portmux_lifecycle.py",
 ]
