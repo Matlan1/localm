@@ -28,7 +28,7 @@ memory), never to trusted file reads that legitimately contain these strings.
 from __future__ import annotations
 
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 # Frame markers localm owns. The body of untrusted content must not be able to
 # contain a literal one (or it could end / forge the frame). Match an opening or
@@ -229,6 +229,67 @@ def untrusted_spans_of(value) -> Tuple[Tuple[int, int], ...]:
     if not isinstance(spans, tuple):
         return ()
     return spans
+
+
+# Private-use bracketing keeps a probe sentinel out of any real chat template's
+# own vocabulary; the uuid4 nonce keeps it unguessable by message content.
+_SENTINEL_OPEN = "\ue000"
+_SENTINEL_CLOSE = "\ue001"
+
+
+def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tuple[int, int]]]":
+    """Locate each of *contents* inside *rendered*, or return ``None``.
+
+    *render* takes a list of replacement contents and returns the template's
+    output for them. This calls it once with a unique sentinel per content,
+    substitutes the real contents back into that skeleton, and requires the
+    result to EQUAL *rendered*. Offsets are only returned when that holds, so a
+    template that trims, escapes, reorders, drops or duplicates content yields
+    ``None`` instead of a wrong offset, and nothing is ever searched for inside
+    the rendered output.
+    """
+    import uuid
+
+    nonce = uuid.uuid4().hex
+    sentinels = [
+        _SENTINEL_OPEN + str(i) + "-" + nonce + _SENTINEL_CLOSE
+        for i in range(len(contents))
+    ]
+    try:
+        skeleton = render(sentinels)
+    except Exception:
+        return None
+    if not isinstance(skeleton, str):
+        return None
+
+    rebuilt: List[str] = []
+    spans: List[Tuple[int, int]] = []
+    out_len = 0
+    pos = 0
+    for sentinel, content in zip(sentinels, contents):
+        found = skeleton.find(sentinel, pos)
+        if found < 0:
+            return None
+        wrapper = skeleton[pos:found]
+        rebuilt.append(wrapper)
+        out_len += len(wrapper)
+        spans.append((out_len, out_len + len(content)))
+        rebuilt.append(content)
+        out_len += len(content)
+        pos = found + len(sentinel)
+    rebuilt.append(skeleton[pos:])
+
+    if "".join(rebuilt) != rendered:
+        return None
+    return spans
+
+
+def map_untrusted_ranges(content_spans, per_content_spans) -> Tuple[Tuple[int, int], ...]:
+    """Shift each content's own untrusted ranges into rendered-text coordinates."""
+    ranges: List[Tuple[int, int]] = []
+    for (start, _end), local in zip(content_spans, per_content_spans):
+        ranges.extend((start + a, start + b) for a, b in local)
+    return tuple(ranges)
 
 
 def slice_guarded(value, start: int, end: int) -> GuardedText:

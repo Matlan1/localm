@@ -24,7 +24,10 @@ import uuid
 from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional, Tuple
 
 from localm.inference import pretokenizer_guard
-from localm.textguard import split_by_trust, untrusted_spans_of
+from localm.textguard import (
+    content_spans_via_sentinels, map_untrusted_ranges, split_by_trust,
+    untrusted_spans_of,
+)
 
 from . import _api as api
 from ._structs import (
@@ -524,12 +527,6 @@ def _render_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Optiona
     return buf.raw[:needed].decode("utf-8", errors="replace"), None
 
 
-# Private-use bracketing keeps a probe sentinel out of any real chat template's
-# own vocabulary; the uuid4 nonce keeps it unguessable by message content.
-_SENTINEL_OPEN = "\ue000"
-_SENTINEL_CLOSE = "\ue001"
-
-
 def _content_spans_in_prompt(
     model_ptr: int,
     messages: List[Dict],
@@ -546,37 +543,15 @@ def _content_spans_in_prompt(
     searched for inside the rendered output.
     """
     contents = [_extract_text(m.get("content", "")) for m in messages]
-    nonce = uuid.uuid4().hex
-    sentinels = [
-        _SENTINEL_OPEN + str(i) + "-" + nonce + _SENTINEL_CLOSE
-        for i in range(len(messages))
-    ]
-    probe = [dict(m, content=s) for m, s in zip(messages, sentinels)]
 
-    skeleton, probe_reason = _render_template(model_ptr, probe)
-    if probe_reason != fallback_reason:
-        return None
-
-    rebuilt: List[str] = []
-    spans: List[Tuple[int, int]] = []
-    out_len = 0
-    pos = 0
-    for sentinel, content in zip(sentinels, contents):
-        found = skeleton.find(sentinel, pos)
-        if found < 0:
+    def render(sentinels):
+        probe = [dict(m, content=s) for m, s in zip(messages, sentinels)]
+        skeleton, probe_reason = _render_template(model_ptr, probe)
+        if probe_reason != fallback_reason:
             return None
-        wrapper = skeleton[pos:found]
-        rebuilt.append(wrapper)
-        out_len += len(wrapper)
-        spans.append((out_len, out_len + len(content)))
-        rebuilt.append(content)
-        out_len += len(content)
-        pos = found + len(sentinel)
-    rebuilt.append(skeleton[pos:])
+        return skeleton
 
-    if "".join(rebuilt) != prompt:
-        return None
-    return spans
+    return content_spans_via_sentinels(contents, render, prompt)
 
 
 def _untrusted_prompt_ranges(
@@ -605,10 +580,7 @@ def _untrusted_prompt_ranges(
             "only the text-level defang applies to this request")
         return ()
 
-    ranges: List[Tuple[int, int]] = []
-    for (start, _end), local in zip(spans, per_message):
-        ranges.extend((start + a, start + b) for a, b in local)
-    return tuple(ranges)
+    return map_untrusted_ranges(spans, per_message)
 
 
 # UTF-8-safe token-bytes -> text stream: a multibyte character is often emitted
