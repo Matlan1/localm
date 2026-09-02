@@ -192,3 +192,39 @@ class TestNoDeadSettings:
         for key in ("browser_enabled", "browser_headless", "browser_engine",
                     "browser_custom_domain_rules", "browser_allow", "browser_deny"):
             assert key in src, key + " is declared in the schema but read nowhere"
+
+
+class TestASpawnedChildDoesNotInheritTheBrowser:
+    """A child shares the parent's job_owner, which is what the browser registry
+    is keyed on, so it could otherwise reach the parent's live browser. It
+    cannot: the capability is not inherited, and the child re-applies its own
+    gate on top of the disabled_tools it inherits.
+
+    This pins the SAFE direction (a child gets less). Granting a child the
+    browser is a deliberate decision, not something to fall into by adding one
+    key to inherited_child_kwargs.
+    """
+
+    def test_the_capability_is_not_in_the_inherited_child_kwargs(self):
+        import inspect
+        from localm.plugins.coder.tools import agents
+        src = inspect.getsource(agents.inherited_child_kwargs)
+        assert "browser_enabled" not in src, (
+            "a child would inherit the browser; if that is wanted it needs its "
+            "own decision and this test updated deliberately")
+
+    def test_a_child_of_a_browsing_parent_still_cannot_browse(self, tmp_path):
+        parent = _agent(tmp_path, browser_enabled=True)
+        for name in _BROWSER_TOOLS:
+            assert name not in parent.disabled_tools, name
+        child = _agent(tmp_path, parent=parent,
+                       disabled_tools=parent.disabled_tools)
+        assert child.browser_enabled is False
+        for name in _BROWSER_TOOLS:
+            assert name in child.disabled_tools, name
+
+    def test_the_child_shares_the_parent_owner_key(self, tmp_path):
+        """The premise of this class: without the gate they WOULD collide."""
+        parent = _agent(tmp_path, browser_enabled=True)
+        child = _agent(tmp_path, parent=parent)
+        assert child.job_owner == parent.job_owner
