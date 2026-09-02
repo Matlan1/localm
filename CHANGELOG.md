@@ -101,6 +101,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   dropdown of your installed models** instead of requiring you to type an
   exact model name.
 
+### Changed
+- **The two installers explain themselves more consistently.** `setup.bat`
+  now tells you a backend pick is load-tested and falls back to Vulkan
+  rather than swapping silently (matching `setup.sh`), and points a failed
+  PyTorch/transformers install at `docs/gpu-setup.md` instead of leaving you
+  with no next step. `setup.sh`'s closing summary now also confirms when an
+  application-menu entry was created.
+
 ### Fixed
 - **The "Other instances" list (Models page) could take several seconds to
   refresh when more than one localm server was running.** Each running
