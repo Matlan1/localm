@@ -6,43 +6,45 @@
 import { addMessageRow, chat, currentConv, newConversation, renderChat, renderConvList, saveConversations } from "./chat.js";
 import { exportCoderSession, openFilesModal } from "./coder.js";
 import { $, authHeaders, autoGrow, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
+import { t } from "./i18n.js";
 import { applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
 
 /* ================================================================ */
 /*  Slash commands                                                   */
 /* ================================================================ */
 
+// hint/args hold catalog keys, not literal text; callers resolve them with t().
 export const CHAT_COMMANDS = [
-  { cmd: "generate-image", hint: "generate an image with FLUX", args: "<prompt>" },
-  { cmd: "generate-music", hint: "generate a music track (ACE-Step, 120s instrumental)", args: "<style tags>" },
-  { cmd: "generate-video", hint: "generate a short video clip (Wan, ~5s - slow)", args: "<prompt>" },
-  { cmd: "web", hint: "search the web, then answer with sources", args: "<query>" },
-  { cmd: "clear", hint: "clear this conversation" },
-  { cmd: "compact", hint: "summarise older messages to free context" },
-  { cmd: "export", hint: "download this conversation as markdown" },
-  { cmd: "rename", hint: "rename this conversation", args: "<title>" },
-  { cmd: "persona", hint: "apply a saved persona (system prompt + params)", args: "<name>" },
-  { cmd: "remember", hint: "add a fact to the model's long-term memory", args: "<fact>" },
-  { cmd: "memory", hint: "view or edit the memory file" },
-  { cmd: "pin", hint: "pin/unpin this conversation" },
-  { cmd: "folder", hint: "move this conversation to a folder (empty = remove)", args: "<name>" },
-  { cmd: "system", hint: "edit the system prompt" },
-  { cmd: "new", hint: "start a new conversation" },
+  { cmd: "generate-image", hint: "slash.chatCmd.generateImage.hint", args: "slash.chatCmd.generateImage.args" },
+  { cmd: "generate-music", hint: "slash.chatCmd.generateMusic.hint", args: "slash.chatCmd.generateMusic.args" },
+  { cmd: "generate-video", hint: "slash.chatCmd.generateVideo.hint", args: "slash.chatCmd.generateVideo.args" },
+  { cmd: "web", hint: "slash.chatCmd.web.hint", args: "slash.chatCmd.web.args" },
+  { cmd: "clear", hint: "slash.chatCmd.clear.hint" },
+  { cmd: "compact", hint: "slash.chatCmd.compact.hint" },
+  { cmd: "export", hint: "slash.chatCmd.export.hint" },
+  { cmd: "rename", hint: "slash.chatCmd.rename.hint", args: "slash.chatCmd.rename.args" },
+  { cmd: "persona", hint: "slash.chatCmd.persona.hint", args: "slash.chatCmd.persona.args" },
+  { cmd: "remember", hint: "slash.chatCmd.remember.hint", args: "slash.chatCmd.remember.args" },
+  { cmd: "memory", hint: "slash.chatCmd.memory.hint" },
+  { cmd: "pin", hint: "slash.chatCmd.pin.hint" },
+  { cmd: "folder", hint: "slash.chatCmd.folder.hint", args: "slash.chatCmd.folder.args" },
+  { cmd: "system", hint: "slash.chatCmd.system.hint" },
+  { cmd: "new", hint: "slash.chatCmd.new.hint" },
 ];
 
 export const CODER_COMMANDS = [
-  { cmd: "undo", hint: "revert the last file write" },
-  { cmd: "files", hint: "files changed this session, with diffs" },
-  { cmd: "compact", hint: "summarise older turns" },
-  { cmd: "export", hint: "download this session's feed as markdown" },
-  { cmd: "log", hint: "open the audit log" },
-  { cmd: "stop", hint: "interrupt the current task" },
-  { cmd: "end", hint: "end this session" },
-  { cmd: "help", hint: "list available commands" },
+  { cmd: "undo", hint: "slash.coderCmd.undo.hint" },
+  { cmd: "files", hint: "slash.coderCmd.files.hint" },
+  { cmd: "compact", hint: "slash.coderCmd.compact.hint" },
+  { cmd: "export", hint: "slash.coderCmd.export.hint" },
+  { cmd: "log", hint: "slash.coderCmd.log.hint" },
+  { cmd: "stop", hint: "slash.coderCmd.stop.hint" },
+  { cmd: "end", hint: "slash.coderCmd.end.hint" },
+  { cmd: "help", hint: "slash.coderCmd.help.hint" },
 ];
 
 export async function runImagineInChat(promptText) {
-  if (!promptText) { toast("Usage: /generate-image <prompt>", true); return; }
+  if (!promptText) { toast(t("slash.usage.image"), true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
   conv.messages.push({ role: "user", content: "/generate-image " + promptText });
@@ -50,7 +52,7 @@ export async function runImagineInChat(promptText) {
   renderChat();
   const box = $("chat-messages");
   const { body } = addMessageRow(box, "assistant", "");
-  body.textContent = "Generating image…";
+  body.textContent = t("slash.generatingImage");
   box.scrollTop = box.scrollHeight;
   try {
     const r = await fetch("/api/imagine", {
@@ -67,7 +69,7 @@ export async function runImagineInChat(promptText) {
       conv.messages.push({
         role: "assistant",
         content: [
-          { type: "text", text: "Here is the generated image:" },
+          { type: "text", text: t("slash.resultImageLabel") },
           { type: "image_url",
             image_url: { url: "/api/imagine/file/" + encodeURIComponent(end.result) } },
         ],
@@ -75,11 +77,10 @@ export async function runImagineInChat(promptText) {
       saveConversations(conv);
       renderChat();
     } else {
-      body.textContent = "Image generation " + jobStatusWord(end.status) +
-        " - see the Images page for details.";
+      body.textContent = t("slash.imageStatus", { status: jobStatusWord(end.status) });
     }
   } catch (e) {
-    body.textContent = "Image generation failed: " + e.message;
+    body.textContent = t("slash.imageFailed", { message: e.message });
     toast(e.message, true);
   }
 }
@@ -87,8 +88,8 @@ export async function runImagineInChat(promptText) {
 /** /web <query> - search, inject the results into the conversation, and let the
  *  model answer from them. */
 export async function runWebInChat(query) {
-  if (!query) { toast("Usage: /web <query>", true); return; }
-  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  if (!query) { toast(t("slash.usage.web"), true); return; }
+  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
   conv.messages.push({ role: "user", content: "/web " + query });
@@ -101,9 +102,11 @@ export async function runWebInChat(query) {
   let note;
   try {
     note = await requestWebTool({ name: "web_search", args: { query } });
+    // Model-directed text, appended to the message the model reads next; left untranslated.
     note += `\n\nUsing these results, answer: ${query}\nName the sources you used.`;
   } catch (e) {
-    toast("Web search failed: " + e.message, true);
+    toast(t("slash.webSearchFailed", { message: e.message }), true);
+    // Model-directed text (see above), left untranslated.
     note = `[Web search failed: ${e.message}] Tell the user, and answer ` +
            "from your own knowledge if you can.";
   }
@@ -115,7 +118,7 @@ export async function runWebInChat(query) {
 
 /** /music <tags> - generate a default-length instrumental inline. */
 export async function runMusicInChat(tags) {
-  if (!tags) { toast("Usage: /generate-music <style tags>", true); return; }
+  if (!tags) { toast(t("slash.usage.music"), true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
   conv.messages.push({ role: "user", content: "/generate-music " + tags });
@@ -123,7 +126,7 @@ export async function runMusicInChat(tags) {
   renderChat();
   const box = $("chat-messages");
   const { body } = addMessageRow(box, "assistant", "");
-  body.textContent = "Generating track… (long tracks take a while)";
+  body.textContent = t("slash.generatingTrack");
   box.scrollTop = box.scrollHeight;
   try {
     const r = await fetch("/api/music", {
@@ -139,24 +142,23 @@ export async function runMusicInChat(tags) {
     if (end.status === "done" && end.result) {
       conv.messages.push({
         role: "assistant",
-        content: "Here is the generated track:",
+        content: t("slash.resultTrackLabel"),
         audio: "/api/music/file/" + encodeURIComponent(end.result),
       });
       saveConversations(conv);
       renderChat();
     } else {
-      body.textContent = "Music generation " + jobStatusWord(end.status) +
-        " - see the Music page for details.";
+      body.textContent = t("slash.musicStatus", { status: jobStatusWord(end.status) });
     }
   } catch (e) {
-    body.textContent = "Music generation failed: " + e.message;
+    body.textContent = t("slash.musicFailed", { message: e.message });
     toast(e.message, true);
   }
 }
 
 /** /video <prompt> - generate a default-length (~5s) clip inline. */
 export async function runVideoInChat(promptText) {
-  if (!promptText) { toast("Usage: /generate-video <prompt>", true); return; }
+  if (!promptText) { toast(t("slash.usage.video"), true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
   conv.messages.push({ role: "user", content: "/generate-video " + promptText });
@@ -164,7 +166,7 @@ export async function runVideoInChat(promptText) {
   renderChat();
   const box = $("chat-messages");
   const { body } = addMessageRow(box, "assistant", "");
-  body.textContent = "Generating clip… (video is slow - expect several minutes)";
+  body.textContent = t("slash.generatingClip");
   box.scrollTop = box.scrollHeight;
   try {
     const r = await fetch("/api/video", {
@@ -180,17 +182,16 @@ export async function runVideoInChat(promptText) {
     if (end.status === "done" && end.result) {
       conv.messages.push({
         role: "assistant",
-        content: "Here is the generated clip:",
+        content: t("slash.resultClipLabel"),
         video: "/api/video/file/" + encodeURIComponent(end.result),
       });
       saveConversations(conv);
       renderChat();
     } else {
-      body.textContent = "Video generation " + jobStatusWord(end.status) +
-        " - see the Video page for details.";
+      body.textContent = t("slash.videoStatus", { status: jobStatusWord(end.status) });
     }
   } catch (e) {
-    body.textContent = "Video generation failed: " + e.message;
+    body.textContent = t("slash.videoFailed", { message: e.message });
     toast(e.message, true);
   }
 }
@@ -216,7 +217,7 @@ export function execChatCommand(cmd, arg) {
     case "rename": {
       const conv = currentConv();
       if (conv && arg) { conv.title = arg; saveConversations(conv); renderConvList(); }
-      else toast("Usage: /rename <title>", true);
+      else toast(t("slash.usage.rename"), true);
       return true;
     }
     case "remember": rememberFact(arg); return true;
@@ -224,8 +225,8 @@ export function execChatCommand(cmd, arg) {
     case "persona": {
       if (!arg) {
         const names = personaCache.map((p) => p.name);
-        toast(names.length ? "Personas: " + names.join(", ")
-                           : "No personas saved yet - use the drawer's save…",
+        toast(names.length ? t("slash.personaList", { names: names.join(", ") })
+                           : t("slash.noPersonas"),
               !names.length);
         return true;
       }
@@ -242,7 +243,7 @@ export function execChatCommand(cmd, arg) {
       if (!conv.pinned) delete conv.pinned;
       saveConversations(conv);
       renderConvList();
-      toast(conv.pinned ? "Pinned" : "Unpinned");
+      toast(conv.pinned ? t("slash.pinned") : t("slash.unpinned"));
       return true;
     }
     case "folder": {
@@ -252,7 +253,7 @@ export function execChatCommand(cmd, arg) {
       else delete conv.folder;
       saveConversations(conv);
       renderConvList();
-      toast(arg ? `Moved to folder '${arg}'` : "Removed from its folder");
+      toast(arg ? t("slash.movedToFolder", { name: arg }) : t("slash.removedFromFolder"));
       return true;
     }
     case "system":
@@ -274,15 +275,14 @@ export function execCoderCommand(cmd) {
     case "stop": $("coder-stop").onclick(); return true;
     case "end": $("coder-end").onclick(); return true;
     case "help":
-      openModal("Coder commands", (body) => {
+      openModal(t("slash.coderCommandsTitle"), (body) => {
         for (const c of CODER_COMMANDS) {
           const row = el("div", "log-entry");
           row.appendChild(el("span", "t", "/" + c.cmd));
-          row.appendChild(document.createTextNode(c.hint));
+          row.appendChild(document.createTextNode(t(c.hint)));
           body.appendChild(row);
         }
-        body.appendChild(el("div", "sub",
-          "Anything not starting with / is sent to the agent as a task."));
+        body.appendChild(el("div", "sub", t("slash.coderCommandsHint")));
       });
       return true;
   }
@@ -313,8 +313,8 @@ export function attachSlashMenu(textarea, commands, execute) {
     menu.replaceChildren();
     visible.forEach((c, i) => {
       const row = el("div", "slash-item" + (i === selected ? " selected" : ""));
-      row.appendChild(el("span", "cmd", "/" + c.cmd + (c.args ? " " + c.args : "")));
-      row.appendChild(el("span", "hint", c.hint));
+      row.appendChild(el("span", "cmd", "/" + c.cmd + (c.args ? " " + t(c.args) : "")));
+      row.appendChild(el("span", "hint", t(c.hint)));
       row.onmousedown = (e) => { e.preventDefault(); pick(c); };
       menu.appendChild(row);
     });
@@ -360,7 +360,7 @@ export function handleSlashSubmit(text, execute) {
   const hint = pluginSuggestion(cmd);   // known plugin, just not active yet
   if (hint) { toast(hint, true); return true; }
   if (!execute(cmd, arg)) {
-    toast(`Unknown command: /${cmd}`, true);
+    toast(t("slash.unknownCommand", { cmd }), true);
   }
   return true;   // never send slash input to the model
 }

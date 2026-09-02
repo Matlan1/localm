@@ -1403,9 +1403,10 @@
 
 <!-- Command palette (Ctrl/Cmd+K): fuzzy-jump to any view or action. -->
 <div id="cmdk" class="modal-backdrop cmdk-backdrop" style="display:none">
-  <div class="cmdk-panel" role="dialog" aria-label="Command palette">
+  <div class="cmdk-panel" role="dialog" aria-label="Command palette" data-i18n-aria-label="cmdk.aria">
     <input id="cmdk-input" type="text" autocomplete="off" spellcheck="false"
-           placeholder="Type a command…  (↑↓ to move · Enter to run · Esc to close)">
+           placeholder="Type a command…  (↑↓ to move · Enter to run · Esc to close)"
+           data-i18n-placeholder="cmdk.placeholder">
     <div id="cmdk-list" class="cmdk-list"></div>
   </div>
 </div>
