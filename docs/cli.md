@@ -84,6 +84,15 @@ localm benchmark mymodel --gpu-layers 99          # GPU layers
 
 Runs a fixed prompt padded to each requested size, streams tokens, and reports time to first token, tokens per second, and total time.
 
+```bash
+localm bench-mtp mymodel
+localm bench-mtp mymodel --gen-tokens 256   # tokens per round (default 160)
+localm bench-mtp mymodel --rounds 3         # measurements to average (default 2)
+localm bench-mtp mymodel --ctx 8192 --gpu-layers 99
+```
+
+Loads the model twice per round, once with Multi-Token Prediction off and once on, and reports which was faster. Nothing is written to your config; the setting is left as it was.
+
 ---
 
 ## Model management

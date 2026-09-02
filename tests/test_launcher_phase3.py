@@ -285,16 +285,19 @@ def test_set_busy_disables_launch_and_generate(launcher_mod):
     fake.import_btns = [_Btn(), _Btn()]
     fake.launch_btn = _Btn()
     fake.gen_btn = _Btn()
+    fake.refresh_btn = _Btn()
 
     launcher_mod.Launcher._set_busy(fake, True)
     assert all(b.state == "disabled" for b in fake.import_btns)
     assert fake.launch_btn.state == "disabled"
     assert fake.gen_btn.state == "disabled"
+    assert fake.refresh_btn.state == "disabled"
 
     launcher_mod.Launcher._set_busy(fake, False)
     assert all(b.state == "normal" for b in fake.import_btns)
     assert fake.launch_btn.state == "normal"
     assert fake.gen_btn.state == "normal"
+    assert fake.refresh_btn.state == "normal"
 
 
 # --------------------------------------------------------------------------- #

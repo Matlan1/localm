@@ -234,10 +234,10 @@ CORE_FIELDS: list = [
                  "still loads instead of being refused. An explicit value is kept.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("mtp_enabled", Widget.TOGGLE, "Multi-Token Prediction (MTP)",
-                 "Speculative drafting on models with MTP/next-n heads. Off by "
-                 "default: it speeds some models up and slows others down, "
-                 "depending on the model and this machine. Run "
-                 "`localm bench-mtp <model>` to measure which yours is.",
+                 "Speculative drafting on MTP/next-n-head models. Off by "
+                 "default: speeds some models up, slows others, depending on "
+                 "model and machine. Run `localm bench-mtp <model>` to check "
+                 "yours.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
