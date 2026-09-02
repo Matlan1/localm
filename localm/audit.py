@@ -20,8 +20,8 @@ log
 full
     Everything in ``log`` mode, plus a human-readable Markdown transcript:
     - coder:  ``.localcoder/sessions/<ts>.md`` in the project (agent.close())
-    - chat:   ``<data dir>/sessions/<ts>_chat.md``
-    - server: ``<data dir>/sessions/<ts>_server.md`` (per-exchange append)
+    - chat:   ``<data dir>/sessions/<ts>_<pid>_<session_id>_chat.md``
+    - server: ``<data dir>/sessions/<ts>_<pid>_<session_id>_server.md`` (per-exchange append)
 
 Mode resolution (``effective_mode(surface)``)
 ---------------------------------------------
@@ -339,9 +339,12 @@ class MarkdownTranscript:
     appending one exchange at a time (the server has no clean session end).
     """
 
-    def __init__(self, label: str = "chat") -> None:
+    def __init__(self, label: str = "chat", session_id: str = "") -> None:
         ts = time.strftime("%Y-%m-%d_%H%M%S")
-        self._path = _sessions_dir() / f"{ts}_{os.getpid()}_{label}.md"
+        pid = os.getpid()
+        # Falls back to a freshly minted id when the caller passes none.
+        self._session_id = session_id or uuid.uuid4().hex[:8]
+        self._path = _sessions_dir() / f"{ts}_{pid}_{self._session_id}_{label}.md"
         self._wrote_header = False
         self._label = label
 

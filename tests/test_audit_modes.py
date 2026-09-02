@@ -181,6 +181,38 @@ class TestSessionIdentity:
 
 
 # ------------------------------------------------------------------ #
+#  Transcript identity: two transcripts opened in the same second by  #
+#  the same process must never collide (REG: sibling of              #
+#  TestSessionIdentity above, same shape as the coder markdown        #
+#  transcript's own filename-collision fix)                           #
+# ------------------------------------------------------------------ #
+
+class TestTranscriptIdentity:
+    def test_two_transcripts_same_second_same_pid_do_not_collide(self, tmp_path):
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("time.strftime", return_value="2026-01-01_000000"):
+            t1 = MarkdownTranscript(label="server")
+            t2 = MarkdownTranscript(label="server")
+        assert t1.path != t2.path
+
+    def test_colliding_transcripts_do_not_interleave_exchanges(self, tmp_path):
+        """The append-only append mode means a collision does not overwrite -
+        it interleaves two unrelated conversations into what reads as one
+        transcript. Confirm each instance's exchange lands only in its own
+        file."""
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("time.strftime", return_value="2026-01-01_000000"):
+            t1 = MarkdownTranscript(label="server")
+            t2 = MarkdownTranscript(label="server")
+        t1.exchange("first question", "first answer")
+        t2.exchange("second question", "second answer")
+        text1 = t1.path.read_text(encoding="utf-8")
+        text2 = t2.path.read_text(encoding="utf-8") if t2.path != t1.path else text1
+        assert "first question" in text1 and "second question" not in text1
+        assert "second question" in text2 and "first question" not in text2
+
+
+# ------------------------------------------------------------------ #
 #  Back-compat shim                                                   #
 # ------------------------------------------------------------------ #
 

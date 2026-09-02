@@ -436,6 +436,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   second session closing within the same second silently overwrote the
   first one's file, replacing its entire recorded conversation with the
   second session's own. Each session's transcript now gets its own file.
+- **Restarting the server in `full` mode could interleave two sessions'
+  conversations into one saved transcript.** The chat and server transcript
+  files were named only by the second they were created and the process id,
+  both unchanged across an in-place restart, so a restart happening within
+  the same second as the previous start reused the exact same file and the
+  new conversation was appended into what read as the old one's transcript.
+  Each transcript now gets its own file.
 - **An MCP client asked to pull a model could point localm at any
   HuggingFace repo, with nothing vetting the source.** Setting up an
   embedding model over MCP was already limited to a short known-good list
