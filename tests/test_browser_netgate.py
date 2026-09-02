@@ -183,3 +183,40 @@ class TestTimeoutsNest:
             assert ms / 1000.0 < DEFAULT_CALL_TIMEOUT, (
                 "a browser timeout of %sms is not inside the %ss call timeout"
                 % (ms, DEFAULT_CALL_TIMEOUT))
+
+
+class TestWebSocketsUseTheSameHostPolicy:
+    """A WebSocket reaches a host exactly like a request does, so it is decided
+    by the same policy rather than refused for its scheme. netpolicy only
+    understands http(s), so ws(s) is mapped onto it."""
+
+    def test_an_allowed_host_passes(self, cfg_home):
+        _set(net_mode="allow")
+        assert netgate.decide("ws://example.com/socket") is None
+        assert netgate.decide("wss://example.com/socket") is None
+
+    def test_a_denied_host_is_refused(self, cfg_home):
+        _set(net_mode="allow", net_deny=["example.com"])
+        for url in ("ws://example.com/s", "wss://example.com/s"):
+            reason = netgate.decide(url)
+            assert reason and "deny list" in reason, url
+
+    def test_net_mode_off_refuses_a_websocket(self, cfg_home):
+        _set(net_mode="off")
+        reason = netgate.decide("ws://example.com/s")
+        assert reason and "net_mode=off" in reason
+
+    def test_a_private_address_websocket_is_refused(self, cfg_home):
+        _set(net_mode="allow", net_allow_private=False)
+        reason = netgate.decide("ws://127.0.0.1:9/s")
+        assert reason and "non-public" in reason
+
+    def test_the_allow_list_applies_to_websockets(self, cfg_home):
+        _set(net_mode="allow", net_allow=["good.example"])
+        assert netgate.decide("ws://good.example/s") is None
+        assert netgate.decide("ws://evil.example/s") is not None
+
+    def test_the_mapping_preserves_host_and_port(self, cfg_home):
+        assert netgate._policy_url("ws://h:81/p?q=1", "ws") == "http://h:81/p?q=1"
+        assert netgate._policy_url("wss://h/p", "wss") == "https://h/p"
+        assert netgate._policy_url("http://h/p", "http") == "http://h/p"

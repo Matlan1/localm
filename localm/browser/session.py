@@ -138,6 +138,10 @@ class BrowserSession:
         # Routed on the CONTEXT rather than the page, so a popup or a second
         # page the site opens is gated too.
         await self._ctx.route("**/*", self._on_route)
+        # WebSockets are NOT covered by route(): they need their own handler, and
+        # a routed WebSocket does not reach the server unless connect_to_server()
+        # is called, so an unhandled one fails closed.
+        await self._ctx.route_web_socket("**/*", self._on_ws_route)
 
     def stop(self, timeout: float = 30.0) -> None:
         """Close the browser and stop the loop. Safe to call more than once."""
@@ -193,6 +197,21 @@ class BrowserSession:
             self.state.blocked.append(Blocked(url=url, reason=reason))
         logger.info("browser %s blocked %s: %s", self.session_id, url, reason)
         await route.abort()
+
+    async def _on_ws_route(self, ws) -> None:
+        url = getattr(ws, "url", "") or ""
+        reason = await netgate.decide_async(
+            url, extra_deny=self.extra_deny, extra_allow=self.extra_allow)
+        if reason is None:
+            if len(self.state.requests) < _LOG_CAP:
+                self.state.requests.append(url)
+            ws.connect_to_server()
+            return
+        if len(self.state.blocked) < _LOG_CAP:
+            self.state.blocked.append(Blocked(url=url, reason=reason))
+        logger.info("browser %s blocked websocket %s: %s",
+                    self.session_id, url, reason)
+        await ws.close()
 
     def _on_console(self, msg) -> None:
         if len(self.state.console) < _LOG_CAP:

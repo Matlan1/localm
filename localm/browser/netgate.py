@@ -36,10 +36,21 @@ INERT_SCHEMES = frozenset({"about", "data", "blob", "javascript"})
 #: Schemes decided by netpolicy.
 NETWORK_SCHEMES = frozenset({"http", "https"})
 
+#: WebSocket schemes, mapped to the http(s) equivalent netpolicy understands.
+#: A WebSocket reaches a host exactly like a request does, so it is decided by
+#: the same host policy rather than being refused for its scheme alone.
+WEBSOCKET_SCHEMES = {"ws": "http", "wss": "https"}
+
 
 def _scheme_of(url: str) -> str:
     head, sep, _ = url.partition(":")
     return head.lower() if sep else ""
+
+
+def _policy_url(url: str, scheme: str) -> str:
+    """The URL to hand netpolicy: a ws(s) URL rewritten to its http(s) form."""
+    mapped = WEBSOCKET_SCHEMES.get(scheme)
+    return mapped + url[len(scheme):] if mapped else url
 
 
 def decide(url: str, *, extra_deny: Iterable[str] = (),
@@ -57,9 +68,10 @@ def decide(url: str, *, extra_deny: Iterable[str] = (),
     scheme = _scheme_of(url)
     if scheme in INERT_SCHEMES:
         return None
-    if scheme not in NETWORK_SCHEMES:
+    if scheme not in NETWORK_SCHEMES and scheme not in WEBSOCKET_SCHEMES:
         return (f"scheme '{scheme or '(none)'}' is not allowed in the "
                 "automated browser")
+    url = _policy_url(url, scheme)
 
     try:
         netpolicy.check_url(url)

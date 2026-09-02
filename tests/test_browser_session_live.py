@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import http.server
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,11 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
         if self.path.endswith(".png"):
             body = b"\x89PNG\r\n\x1a\n"
             ctype = "image/png"
+        elif self.path.startswith("/ws-page"):
+            body = (b"<html><body>ws<script>try{new WebSocket("
+                    b"'ws://127.0.0.1:%d/ws');}catch(e){}</script></body></html>"
+                    % self.server.server_address[1])
+            ctype = "text/html"
         else:
             body = (b"<html><body><h1>page</h1>"
                     b"<img src='http://127.0.0.1:%d/sub.png'>"
@@ -199,3 +205,34 @@ def test_a_closed_session_leaves_no_profile_on_disk(browser, origin):
     time.sleep(2.0)
     leftover = created & snap()
     assert not leftover, "a closed session left a profile behind: %r" % (sorted(leftover),)
+
+
+def _ws_seen():
+    return [p for p in _Recorder.seen if p.startswith("/ws")
+            and not p.startswith("/ws-page")]
+
+
+def test_a_websocket_to_a_denied_host_never_connects(browser, origin):
+    """WebSockets are NOT covered by the ordinary request route and need their
+    own handler. Without one they reach any host the page names, whatever the
+    policy says."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True, net_deny=["127.0.0.1"])
+    b = browser()
+    assert b.navigate("http://localhost:%d/ws-page.html" % port)["ok"] is True
+    time.sleep(1.5)
+    assert _ws_seen() == [], (
+        "a websocket reached a denied host: %r" % (_Recorder.seen,))
+    assert any("/ws" in x["url"] for x in b.blocked_requests()), b.blocked_requests()
+
+
+def test_a_websocket_to_an_allowed_host_still_connects(browser, origin):
+    """The control for the test above: without it, 'no websocket arrived' is
+    equally consistent with having broken every websocket."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+    assert b.navigate("http://localhost:%d/ws-page.html" % port)["ok"] is True
+    time.sleep(1.5)
+    assert _ws_seen(), (
+        "an allowed websocket never reached the origin: %r" % (_Recorder.seen,))
