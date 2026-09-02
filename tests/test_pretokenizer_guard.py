@@ -374,3 +374,59 @@ class TestScanCost:
         for _ in range(10):
             guard.check_text("llama4", text)
         assert time.perf_counter() - start < 2.0
+
+
+class TestVisionPathIsGuardedToo:
+    """mtmd_tokenize runs the same pre-tokenizer over the text parts of a
+    vision prompt, and llama4 is both an affected pre-tokenizer and a
+    multimodal model, so the image path needs the same check."""
+
+    def _vision_llama(self, pre_type, prompt):
+        import threading
+
+        from localm.inference.backends.llamacpp.llama import LlamaCpp
+
+        obj = LlamaCpp.__new__(LlamaCpp)
+        obj._inference_lock = threading.RLock()
+        obj._model_ptr = object()
+        obj._mtmd = MagicMock()
+        obj._mtmd.marker = "<__image__>"
+        obj._tokenizer = _tokenizer(pre_type)
+        obj._messages_with_markers = MagicMock(return_value=([{"role": "user",
+                                                              "content": prompt}], [object()]))
+        obj.mtp_active_this_call = None
+        obj.chat_template_fallback_reason = None
+        # Enough of the object for the vision path to run PAST the guard site and
+        # reach mtmd, so assert_not_called below is load-bearing rather than
+        # satisfied by the stub falling over first.
+        obj._verbose = False
+        obj._gen_lock = threading.RLock()
+        obj._stop = threading.Event()
+        obj._ctx_ptr = object()
+        obj._reset_kv_for_image = MagicMock()
+        obj._mtmd.eval_into.return_value = 0
+        return obj
+
+    def _drive(self, obj, prompt):
+        with patch("localm.inference.backends.llamacpp.llama._apply_model_template",
+                   return_value=(prompt, None)):
+            return list(obj._generate_image(
+                [{"role": "user", "content": prompt}],
+                max_new_tokens=1, temperature=0.0, top_k=1, top_p=1.0,
+                repeat_penalty=1.0))
+
+    def test_a_long_run_is_refused_before_mtmd_is_touched(self):
+        prompt = _letters(400)
+        obj = self._vision_llama("llama4", prompt)
+        with pytest.raises(PretokenizerUnsafeInputError):
+            self._drive(obj, prompt)
+        obj._mtmd.eval_into.assert_not_called()
+
+    def test_an_unaffected_vision_model_is_not_blocked_by_the_guard(self):
+        # The guard must not be what stops an ordinary vision request; this one
+        # gets past it and fails later, on the native work these stubs lack.
+        prompt = _letters(400)
+        obj = self._vision_llama("qwen2", prompt)
+        with pytest.raises(Exception) as exc:
+            self._drive(obj, prompt)
+        assert not isinstance(exc.value, PretokenizerUnsafeInputError)

@@ -1889,6 +1889,10 @@ class LlamaCpp:
                     self.chat_template_fallback_reason = fallback_reason
                 bos_markers = ("<bos>", "<s>", "﻿")
                 add_special = not any(prompt.startswith(m) for m in bos_markers)
+                # mtmd_tokenize runs the same pre-tokenizer over the text parts
+                # of this prompt, so the vision path needs the same check the
+                # text path gets in _Tokenizer.encode.
+                pretokenizer_guard.check_text(self._tokenizer._pre_type, prompt)
 
                 # Stays on _quiet_stderr rather than _generate()'s
                 # dedup_native_stderr: below, _ctx() is entered once for the mtmd
