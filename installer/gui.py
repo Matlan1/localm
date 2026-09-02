@@ -222,8 +222,14 @@ def build_steps(plan: Plan) -> List[Step]:
             raise StepFailed(f"{target} is not an absolute path")
         # Directory first, marker second: a marker must never point at
         # something that could not be created.
-        target.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(target), encoding="utf-8")
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise StepFailed(f"could not use {target}: {e}")
+        try:
+            marker.write_text(str(target), encoding="utf-8")
+        except OSError as e:
+            raise StepFailed(f"could not record the data directory: {e}")
         emit(f"Data directory: {target}")
     steps.append(Step("Recording where data lives", data_dir))
 
