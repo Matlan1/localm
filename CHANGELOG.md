@@ -109,6 +109,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   PyTorch/transformers install at `docs/gpu-setup.md` instead of leaving you
   with no next step. `setup.sh`'s closing summary now also confirms when an
   application-menu entry was created.
+- **`setup.bat` now asks whether to use GPU acceleration when one is
+  detected, matching `setup.sh`.** Declining makes CPU the pre-selected
+  default in the backend menu that follows, so accepting that menu with
+  Enter can no longer silently download and load-test a GPU runtime you
+  did not want; every backend, including CPU, stays available to pick
+  explicitly either way.
 
 ### Fixed
 - **The "Other instances" list (Models page) could take several seconds to
