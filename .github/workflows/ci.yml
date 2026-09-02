@@ -462,3 +462,22 @@ jobs:
       - name: Verify the run actually completed
         if: always()
         run: python scripts/write_mutation_summary.py --check
+
+  # Maintenance signal for a third bundled-and-pinned dependency, same shape as
+  # comfyui-pin-check above: one GitHub API call, no clone, no prebuilt
+  # download. Runs on every trigger of this workflow, including the weekly
+  # schedule above, and can never fail the build - the script always exits 0
+  # and the step itself is continue-on-error. See scripts/check_llama_rocm_pin.py.
+  llama-rocm-pin-check:
+    name: llama.cpp ROCm pin currency (warn-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Compare bundled lemonade-sdk ROCm build pin against upstream latest release
+        continue-on-error: true
+        run: python scripts/check_llama_rocm_pin.py
