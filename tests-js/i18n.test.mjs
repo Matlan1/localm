@@ -388,6 +388,56 @@ test("the settings nav redraws its labels when the language changes", async () =
     `the nav must redraw in German, got ${labels()}`);
 });
 
+/** A single protected, active builtin plugin - enough to exercise a status
+ *  pill and a table header without pulling in a full plugin-refresh fixture. */
+function pluginsPayload() {
+  return {
+    plugins: [
+      { name: "chat", label: "Chat", builtin: true, installed: true,
+        enabled: true, active: true, protected: true, description: "core",
+        requires: [], missing_requires: [] },
+    ],
+  };
+}
+
+test("the plugins page redraws its status pills and table headers when the language changes",
+  async () => {
+    const fetchImpl = async (url) => {
+      const u = String(url);
+      if (u.includes("/i18n/de.json")) return { ok: true, status: 200, json: async () => DE };
+      if (u.includes("/i18n/")) return { ok: false, status: 404, json: async () => ({}) };
+      if (u.includes("/api/models")) return { ok: false, status: 401, json: async () => ({}) };
+      if (u === "/api/plugins") {
+        return { ok: true, status: 200, json: async () => pluginsPayload(), text: async () => "" };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    };
+    const { window } = loadAppWithPages({ fetchImpl });
+
+    async function settled() {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        const s = window.document.querySelector(".catalog-status");
+        if (s && !/Loading/.test(s.textContent)) return;
+      }
+    }
+    const pill = () => window.document.querySelector("#catalog-table .job-state");
+    const descHeader = () => window.document.querySelectorAll("#catalog-table th")[2];
+
+    runScript(window, "_catalogStaggerMs = 0; renderCatalogPlugins();");
+    await settled();
+    assert.equal(pill() && pill().textContent, "protected", "starts in English");
+    assert.equal(descHeader() && descHeader().textContent, "Description");
+
+    runScript(window, 'window.__p = applyLanguage("de");');
+    await window.__p;
+    await settled();
+    assert.equal(pill() && pill().textContent, "geschützt",
+      "the status pill must be rebuilt in German");
+    assert.equal(descHeader() && descHeader().textContent, "Beschreibung",
+      "the table header must be rebuilt in German");
+  });
+
 /* ================================================================ */
 /*  Drift gates                                                      */
 /* ================================================================ */
@@ -409,7 +459,7 @@ test("every data-i18n key in index.html resolves in the English catalog", async 
 
 // The migrated modules. A file added here must have its t() keys in the catalog.
 const T_CALL_FILES = ["app/chat.js", "app/models-sidebar.js", "app/logo.js",
-                      "app/settings-perf.js", "pages/settings.js"];
+                      "app/settings-perf.js", "pages/settings.js", "pages/plugins.js"];
 
 /** Key-shaped string literals inside a balanced t(...) / tn(...) call. */
 function tCallKeys(src) {

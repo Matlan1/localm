@@ -4,6 +4,7 @@
 
 // --- ES module imports ---
 import { $, authHeaders, confirmDanger, el, readSSE, toast } from "../app/helpers.js";
+import { t, tn } from "../app/i18n.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
 
@@ -39,10 +40,10 @@ export function _catalogRow(p) {
   nameLine.appendChild(iconEl("plugins", "ic ic-plugin"));
   nameLine.appendChild(el("span", "name", p.label || p.name));
   tr.appendChild(nameTd);
-  const status = p.protected ? "protected"
-    : p.active ? "active"
-    : p.installed ? "installed (off)"
-    : "available";
+  const status = p.protected ? t("plugins.pill.protected")
+    : p.active ? t("plugins.pill.active")
+    : p.installed ? t("plugins.pill.installedOff")
+    : t("plugins.pill.available");
   // State renders as a .job-state pill: protected -> on, active -> st-ok,
   // installed-but-off -> st-pending, available -> the base pill.
   const statusCls = p.protected ? "on" : p.active ? "st-ok" : p.installed ? "st-pending" : "";
@@ -54,32 +55,33 @@ export function _catalogRow(p) {
   const missing = Array.isArray(p.missing_requires) ? p.missing_requires : [];
   if (missing.length) {
     descTd.appendChild(el("div", "sub plugin-missing-req",
-      `requires ${(p.requires || []).join(", ")} (missing: ${missing.join(", ")})`));
+      t("plugins.missingRequires",
+        { requires: (p.requires || []).join(", "), missing: missing.join(", ") })));
   }
   // Warn when an installed plugin is missing its pip extras (Python packages).
   const missingDeps = Array.isArray(p.missing_deps) ? p.missing_deps : [];
   if (p.installed && missingDeps.length) {
     descTd.appendChild(el("div", "sub plugin-missing-dep",
-      `needs Python packages: ${missingDeps.join(", ")}`));
+      t("plugins.missingDeps", { missing: missingDeps.join(", ") })));
   }
   tr.appendChild(descTd);
   const actions = el("td", "actions-cell");
   if (!p.protected) {
     if (!p.installed) {
-      actions.appendChild(_catalogBtn("install", p.name, "primary", "Install"));
+      actions.appendChild(_catalogBtn("install", p.name, "primary", t("plugins.install")));
     } else {
       actions.appendChild(p.enabled
-        ? _catalogBtn("disable", p.name, "", "Disable")
-        : _catalogBtn("enable", p.name, "primary", "Enable"));
+        ? _catalogBtn("disable", p.name, "", t("plugins.disable"))
+        : _catalogBtn("enable", p.name, "primary", t("plugins.enable")));
       // Re-copy this builtin from the bundled store. Only builtins refresh
       // from the store; a third-party install is never a target.
-      if (p.builtin) actions.appendChild(_catalogBtn("refresh", p.name, "", "Refresh"));
-      actions.appendChild(_catalogBtn("uninstall", p.name, "danger", "Uninstall"));
+      if (p.builtin) actions.appendChild(_catalogBtn("refresh", p.name, "", t("plugins.refresh")));
+      actions.appendChild(_catalogBtn("uninstall", p.name, "danger", t("plugins.uninstall")));
     }
   }
   // One-click install of any missing requirements.
   if (missing.length) {
-    const req = el("button", "btn-primary", "Install requirements");
+    const req = el("button", "btn-primary", t("plugins.installRequirements"));
     req.style.marginLeft = "6px";
     req.dataset.reqfor = p.name;
     req.onclick = () => installRequirements(p.name, missing);
@@ -88,7 +90,7 @@ export function _catalogRow(p) {
   // One-click install of missing pip extras (host-side; a remote client is told
   // to install on the host).
   if (p.installed && missingDeps.length) {
-    const dep = el("button", "btn-primary", "Install dependencies");
+    const dep = el("button", "btn-primary", t("plugins.installDependencies"));
     dep.style.marginLeft = "6px";
     dep.dataset.depsfor = p.name;
     dep.onclick = () => installPluginDeps(p.name);
@@ -109,7 +111,7 @@ export async function renderCatalogPlugins() {
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
-    box.appendChild(emptyState("warning", "Could not load plugins", e.message));
+    box.appendChild(emptyState("warning", t("plugins.loadFailed"), e.message));
     return;
   }
   if (myToken !== _catalogRenderToken) return;   // superseded while fetching
@@ -123,7 +125,8 @@ export async function renderCatalogPlugins() {
   const table = el("table", "data-table");
   const thead = el("thead");
   const hr = el("tr");
-  for (const h of ["Name", "Status", "Description", ""]) hr.appendChild(el("th", "", h));
+  for (const h of [t("plugins.col.name"), t("plugins.col.status"), t("plugins.col.description"), ""])
+    hr.appendChild(el("th", "", h));
   thead.appendChild(hr);
   table.appendChild(thead);
   const tbody = el("tbody");
@@ -135,7 +138,7 @@ export async function renderCatalogPlugins() {
   for (let i = 0; i < plugins.length; i++) {
     if (myToken !== _catalogRenderToken) return;
     tbody.appendChild(_catalogRow(plugins[i]));
-    status.textContent = `Loading plugins… (${i + 1}/${plugins.length})`;
+    status.textContent = t("plugins.loadingProgress", { current: i + 1, total: plugins.length });
     await new Promise((r) => setTimeout(r, _catalogStaggerMs));
   }
   if (myToken !== _catalogRenderToken) return;
@@ -143,7 +146,8 @@ export async function renderCatalogPlugins() {
   const active = plugins.filter((p) => p.active).length;
   const failed = plugins.filter((p) => p.error).length;
   status.textContent =
-    `${active}/${plugins.length} plugins active` + (failed ? ` · ${failed} failed` : "");
+    t("plugins.summary.active", { active, total: plugins.length })
+    + (failed ? " · " + tn("plugins.summary.failed", failed) : "");
 
   if (data.errors) {
     // First-party errors only; the External plugins card renders the rest.
@@ -265,9 +269,9 @@ export function pluginCatalogAction(action, name) {
                             { method: "POST", headers: authHeaders() });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        const msg = d.detail || (r.status === 404 ? "no such plugin"
-                   : r.status === 409 ? "not allowed in the current state"
-                   : "failed");
+        const msg = d.detail || (r.status === 404 ? t("plugins.error.noSuchPlugin")
+                   : r.status === 409 ? t("plugins.error.notAllowed")
+                   : t("plugins.error.failed"));
         toast(`${action} ${name}: ${msg}`, true);
         return;
       }
@@ -286,8 +290,8 @@ export function pluginCatalogAction(action, name) {
     if (action === "install" || action === "enable") _maybeAutoInstallDeps(name);
   };
   if (action === "uninstall") {
-    confirmDanger(`Uninstall '${name}'?`,
-      "Its plugin files are removed (your data is kept).", "Uninstall", run);
+    confirmDanger(t("plugins.uninstallConfirm.title", { name }),
+      t("plugins.uninstallConfirm.body"), t("plugins.uninstall"), run);
   } else {
     run();
   }
@@ -314,13 +318,14 @@ export async function refreshPluginsPage() {
         .filter(([name]) => !builtins.has(name)),
     };
     if (!data.plugins.length) {
-      box.appendChild(emptyState("plugins", "No external plugins installed",
-        "Install one from the catalog above to add capabilities."));
+      box.appendChild(emptyState("plugins", t("plugins.external.empty.text"),
+        t("plugins.external.empty.hint")));
     } else {
       const table = el("table", "data-table");
       const thead = el("thead");
       const hr = el("tr");
-      for (const h of ["Name", "Version", "Description", "Tools", ""])
+      for (const h of [t("plugins.col.name"), t("plugins.col.version"),
+                       t("plugins.col.description"), t("plugins.col.tools"), ""])
         hr.appendChild(el("th", "", h));
       thead.appendChild(hr);
       table.appendChild(thead);
@@ -338,17 +343,17 @@ export async function refreshPluginsPage() {
         tr.appendChild(el("td", "mono",
           (p.tool_exports || []).length ? p.tool_exports.join(", ") : ""));
         const actions = el("td", "actions-cell");
-        const rm = el("button", "danger", "remove");
+        const rm = el("button", "danger", t("plugins.removeButton"));
         rm.onclick = () => {
-          confirmDanger(`Remove plugin '${p.name}'?`,
-            "Its folder in the data directory's plugins/ is deleted.",
-            "Remove", async () => {
+          confirmDanger(t("plugins.removeConfirm.title", { name: p.name }),
+            t("plugins.removeConfirm.body"),
+            t("plugins.remove"), async () => {
               const rr = await fetch(
                 `/api/plugins/${encodeURIComponent(p.name)}/uninstall`,
                 { method: "POST", headers: authHeaders() });
               const dd = await rr.json().catch(() => ({}));
-              if (rr.ok) { toast(`Removed '${p.name}'`); refreshPluginsPage(); }
-              else toast(dd.detail || "Remove failed", true);
+              if (rr.ok) { toast(t("plugins.removed", { name: p.name })); refreshPluginsPage(); }
+              else toast(dd.detail || t("plugins.removeFailed"), true);
             });
         };
         actions.appendChild(rm);
@@ -362,24 +367,32 @@ export async function refreshPluginsPage() {
       box.appendChild(pluginErrorLine(name, err));
     }
   } catch (e) {
-    box.appendChild(emptyState("warning", "Could not load plugins", e.message));
+    box.appendChild(emptyState("warning", t("plugins.loadFailed"), e.message));
   }
 }
 
 $("plugin-install").onclick = async () => {
   const source = $("plugin-source").value.trim();
-  if (!source) { toast("Enter the plugin folder path", true); return; }
+  if (!source) { toast(t("plugins.enterSourcePath"), true); return; }
   const r = await fetch("/api/plugins/install-external", {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify({ source }),
   });
   const data = await r.json().catch(() => ({}));
   if (r.ok) {
-    toast(`Installed '${data.name}' ${data.version} - restart localm gui to load its command`);
+    toast(t("plugins.installedRestartHint", { name: data.name, version: data.version }));
     $("plugin-source").value = "";
     refreshPluginsPage();
   } else {
-    toast(data.detail || "Install failed", true);
+    toast(data.detail || t("plugins.installFailed"), true);
   }
 };
+
+// The catalog and external tables are painted from fetched data, not marked
+// up in index.html, so both are re-fetched and redrawn when the interface
+// language changes.
+document.addEventListener("localm:language", () => {
+  renderCatalogPlugins();
+  refreshPluginsPage();
+});
 
