@@ -217,14 +217,16 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     Ranking among qualified candidates: already resident first, then the largest
     confirmed context window, then name, so the result is deterministic and a
     test can assert on it."""
+    # Before the registry read, not after: a request that states no needs is the
+    # common case and must not pay for a read it cannot use.
+    if needs.is_empty():
+        return RoutingDecision(current=current, resolved=current, pinned=pinned,
+                               needs=needs)
+
     reg = caps._registry._mm.load_registry() if reg is None else reg
     if not isinstance(reg, dict):
         reg = {}
     dir_cache: dict = {}
-
-    if needs.is_empty():
-        return RoutingDecision(current=current, resolved=current, pinned=pinned,
-                               needs=needs)
 
     gaps = _current_gaps(current, needs, reg, dir_cache)
     if not gaps:

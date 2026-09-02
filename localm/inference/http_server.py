@@ -1123,7 +1123,10 @@ def plan_capability_route(model_name: str | None, messages: list,
     )
     pinned = _model_is_pinned(model_name)
     current = (model_name or "").strip() if pinned else _resolve_unnamed_model_name()
-    resident = [n for n, e in _engines.items() if getattr(e, "loaded", False)]
+    # list() first: this runs in an executor thread while the event loop can
+    # be adding or evicting engines, and iterating the live dict would raise.
+    resident = [n for n, e in list(_engines.items())
+                if getattr(e, "loaded", False)]
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident)
 
 
