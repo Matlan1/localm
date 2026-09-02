@@ -478,3 +478,41 @@ def test_every_segment_is_within_the_bounds_the_guard_checked():
     assert native.calls, "the safe input should have been tokenised"
     for segment, _parse_special in native.calls:
         check_text("gpt-4o", segment)         # raises if a segment exceeds a bound
+
+
+# --------------------------------------------------------------------------- #
+#  The wiring itself                                                          #
+# --------------------------------------------------------------------------- #
+
+def test_create_chat_completion_hands_the_ranges_to_the_tokenizer():
+    """Guards the one line that joins the seam to the tokenizer.
+
+    Every other test here exercises _untrusted_prompt_ranges and encode()
+    SEPARATELY. Dropping the untrusted_ranges argument at the call site that
+    joins them would silently disable the whole llama.cpp half of this defence
+    with all of them still green, so this asserts the argument arrives.
+    """
+    from tests._bare_llama import make_bare_llama
+
+    guarded = compose("<f>\n", untrusted_span(ATTACK), "\n</f>")
+    messages = [{"role": "user", "content": guarded}]
+
+    tok = MagicMock()
+    tok.encode.return_value = [1, 2, 3]
+    llm = make_bare_llama(_tokenizer=tok, _model_ptr=object())
+
+    native = FakeNative()
+    with native.patches()[0], native.patches()[1], native.patches()[2]:
+        prompt, reason = _apply_model_template(llm._model_ptr, messages)
+        expected = _untrusted_prompt_ranges(
+            llm._model_ptr, messages, prompt, reason)
+        try:
+            gen = llm.create_chat_completion(messages, max_tokens=1)
+            if gen is not None:
+                list(gen)
+        except Exception:
+            pass          # the bare instance cannot generate; only the call matters
+
+    assert expected, "the fixture must produce ranges or this proves nothing"
+    assert tok.encode.called, "the chat path never tokenised"
+    assert tok.encode.call_args.kwargs.get("untrusted_ranges") == expected
