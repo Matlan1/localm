@@ -847,3 +847,41 @@ class TestEveryCountingSiteIsAccountedFor:
             raise RuntimeError("the worker died")
         with pytest.raises(RuntimeError):
             count_tokens_or_estimate(_boom, "hi", "the generated text")
+
+
+class TestTheEmbeddingsUsageCountIsSafeAndUnchanged:
+    """The /v1/embeddings usage total is counted with the CHAT engine's
+    tokenizer, which can be a different model from the embedder that produced
+    the vectors - so it can refuse text the embedder was happy with, AFTER the
+    vectors exist. It must not fail a request that succeeded, and it must be
+    byte-for-byte unchanged when nothing refuses."""
+
+    def _client(self, count_side_effect):
+        from fastapi.testclient import TestClient
+
+        from localm.inference.http_server import create_app
+        engine = _engine()
+        engine.embed.return_value = [[0.1, 0.2, 0.3]]
+        engine.count_tokens.side_effect = count_side_effect
+        return TestClient(create_app(engine), raise_server_exceptions=False)
+
+    def test_the_total_is_the_real_sum_when_nothing_refuses(self):
+        # len() as the token count, so the expected total is checkable.
+        with self._client(lambda t: len(t)) as c:
+            r = c.post("/v1/embeddings",
+                       json={"model": "test-model", "input": ["hello", "worldly"]})
+        assert r.status_code == 200
+        assert r.json()["usage"]["total_tokens"] == len("hello") + len("worldly")
+
+    def test_a_refused_count_does_not_fail_the_completed_embedding(self):
+        def _refuse(_t):
+            raise PretokenizerUnsafeInputError(_REFUSAL)
+
+        with self._client(_refuse) as c:
+            r = c.post("/v1/embeddings",
+                       json={"model": "test-model", "input": ["x" * 400]})
+        assert r.json() != {"detail": "Internal server error"}
+        assert r.status_code == 200, r.json()
+        # The vectors are still returned; only the count degraded.
+        assert r.json()["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+        assert r.json()["usage"]["total_tokens"] == 100
