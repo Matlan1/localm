@@ -22,7 +22,6 @@ from localm.inference.backends.base import (
 )
 from localm.inference.engine import Engine
 from localm.inference.http_server import create_app
-from localm.plugins.builtin.chat.plug import _ROLE_WORD_INSTRUCTION
 from tests._bare_llama import make_bare_llama
 
 
@@ -82,17 +81,16 @@ class _EngineWithBackend(Engine):
         self.unloading = False
 
 
-# The built-in chat plugin's inlet (localm/plugins/builtin/chat/plug.py,
-# always registered) leaves a system message alone when it already contains
-# "third person" - its own documented skip condition, also pinned by
-# test_chat_pipeline.py::test_role_word_inlet_skips_when_already_instructed.
-# Carrying this in every /v1/chat/completions request below keeps the
-# message list exactly as constructed, so the token counts stay exact.
-_SKIP_ROLE_NUDGE_SYSTEM = {"role": "system", "content": "Never refer to yourself in the third person."}
-
-
 class TestPreDispatchContextCapacityGuard:
-    """Pre-dispatch check in routes/chat.py must reject oversized prompts with 413."""
+    """Pre-dispatch check in routes/chat.py must reject oversized prompts with 413.
+
+    A capacity this low (100) is well under the built-in chat plugin's
+    per-nudge threshold (localm/plugins/builtin/chat/plug.py,
+    _nudge_fits_capacity: instruction length <= capacity * 0.10), so its
+    role-word and thinking nudges always skip here and never add to the
+    prompt these tests construct. See test_chat_pipeline.py for that
+    threshold's own coverage.
+    """
 
     def test_chat_completions_non_streaming_rejects_oversized_prompt(self):
         backend = _MockBackend(capacity=100)
@@ -100,18 +98,18 @@ class TestPreDispatchContextCapacityGuard:
         app = create_app(engine)
         client = TestClient(app)
 
+        # 150 characters = 150 tokens > 100 capacity
         oversized_content = "x" * 150
-        expected_tokens = len(_SKIP_ROLE_NUDGE_SYSTEM["content"]) + len(oversized_content)
         resp = client.post(
             "/v1/chat/completions",
             json={
                 "model": "test-cap-model",
-                "messages": [_SKIP_ROLE_NUDGE_SYSTEM, {"role": "user", "content": oversized_content}],
+                "messages": [{"role": "user", "content": oversized_content}],
                 "stream": False,
             },
         )
         assert resp.status_code == 413
-        assert f"{expected_tokens} tokens" in resp.json()["detail"]
+        assert "150 tokens" in resp.json()["detail"]
         assert "100 tokens" in resp.json()["detail"]
         assert "localm config n_ctx_max" in resp.json()["detail"]
         assert backend.loaded is True
@@ -124,18 +122,17 @@ class TestPreDispatchContextCapacityGuard:
         client = TestClient(app)
 
         oversized_content = "x" * 150
-        expected_tokens = len(_SKIP_ROLE_NUDGE_SYSTEM["content"]) + len(oversized_content)
         resp = client.post(
             "/v1/chat/completions",
             json={
                 "model": "test-cap-model",
-                "messages": [_SKIP_ROLE_NUDGE_SYSTEM, {"role": "user", "content": oversized_content}],
+                "messages": [{"role": "user", "content": oversized_content}],
                 "stream": True,
             },
         )
         # Rejected up front with 413, not 200 SSE stream
         assert resp.status_code == 413
-        assert f"{expected_tokens} tokens" in resp.json()["detail"]
+        assert "150 tokens" in resp.json()["detail"]
         assert "100 tokens" in resp.json()["detail"]
         assert backend.loaded is True
 
@@ -145,11 +142,7 @@ class TestPreDispatchContextCapacityGuard:
         app = create_app(engine)
         client = TestClient(app)
 
-        # /v1/completions has no system-message field, so the always-on
-        # role-word inlet always inserts _ROLE_WORD_INSTRUCTION ahead of the
-        # prompt; _messages_prompt_text joins the two with a single space.
         oversized_prompt = "x" * 150
-        expected_tokens = len(_ROLE_WORD_INSTRUCTION) + 1 + len(oversized_prompt)
         resp = client.post(
             "/v1/completions",
             json={
@@ -159,7 +152,7 @@ class TestPreDispatchContextCapacityGuard:
             },
         )
         assert resp.status_code == 413
-        assert f"{expected_tokens} tokens" in resp.json()["detail"]
+        assert "150 tokens" in resp.json()["detail"]
         assert "100 tokens" in resp.json()["detail"]
         assert backend.loaded is True
 
@@ -170,7 +163,6 @@ class TestPreDispatchContextCapacityGuard:
         client = TestClient(app)
 
         oversized_prompt = "x" * 150
-        expected_tokens = len(_ROLE_WORD_INSTRUCTION) + 1 + len(oversized_prompt)
         resp = client.post(
             "/v1/completions",
             json={
@@ -180,7 +172,7 @@ class TestPreDispatchContextCapacityGuard:
             },
         )
         assert resp.status_code == 413
-        assert f"{expected_tokens} tokens" in resp.json()["detail"]
+        assert "150 tokens" in resp.json()["detail"]
         assert "100 tokens" in resp.json()["detail"]
         assert backend.loaded is True
 
@@ -190,13 +182,13 @@ class TestPreDispatchContextCapacityGuard:
         app = create_app(engine)
         client = TestClient(app)
 
-        # opt-out system message + 50 char content stays under 100 capacity
+        # 50 tokens <= 100 capacity
         normal_content = "x" * 50
         resp = client.post(
             "/v1/chat/completions",
             json={
                 "model": "test-cap-model",
-                "messages": [_SKIP_ROLE_NUDGE_SYSTEM, {"role": "user", "content": normal_content}],
+                "messages": [{"role": "user", "content": normal_content}],
                 "stream": False,
             },
         )
