@@ -77,6 +77,12 @@ async def video(req: VideoRequest, request: Request):
         raise HTTPException(400, "Duration must be between 1 and 20 seconds")
     if req.fps <= 0 or req.fps > 60:
         raise HTTPException(400, "FPS must be between 1 and 60")
+    if req.width is not None and not (16 <= req.width <= 4096):
+        raise HTTPException(400, "Width must be between 16 and 4096")
+    if req.height is not None and not (16 <= req.height <= 4096):
+        raise HTTPException(400, "Height must be between 16 and 4096")
+    if req.steps is not None and not (1 <= req.steps <= 200):
+        raise HTTPException(400, "Steps must be between 1 and 200")
     input_image = None
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)

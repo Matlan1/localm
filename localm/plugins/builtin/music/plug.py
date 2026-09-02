@@ -76,6 +76,8 @@ async def music(req: MusicRequest, request: Request):
         raise HTTPException(400, "Empty style tags")
     if req.duration_seconds <= 0 or req.duration_seconds > 3600:
         raise HTTPException(400, "Duration must be between 1 and 3600 seconds")
+    if req.steps is not None and not (1 <= req.steps <= 200):
+        raise HTTPException(400, "Steps must be between 1 and 200")
 
     # The job registry is kernel-level, so the real precondition is knowing this
     # server's own address for the VRAM handover, not the GUI being attached.
