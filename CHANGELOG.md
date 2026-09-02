@@ -367,6 +367,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   intended, then reported "ComfyUI is running." either way - indistinguishable
   from an actual restart. It now says plainly that nothing was restarted and
   that ComfyUI is left running, so you know to restart it yourself.
+- **`localm gui --api-mode` printed startup hints that pointed at pages it
+  never serves.** The phone/LAN-access line offered a Settings page
+  alternative, and four separate no-model-loaded messages talked about
+  "Opening the GUI" or picking a model "on the Models page" - none of which
+  `--api-mode` ever mounts. Those lines are now api-mode-aware and describe
+  what is actually available instead.
 
 ### Security
 - **A bug report now hides credentials that were logged as structured data, not
