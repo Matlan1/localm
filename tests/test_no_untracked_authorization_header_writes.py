@@ -79,6 +79,22 @@ latter would flag these two as violations:
                                  get_api_key() would not even be the right
                                  credential for a different instance's home.
 
+  localm/discover.py, _hf_auth_headers()
+                                 builds the optional HuggingFace bearer token
+                                 for discover._get(), which routes through
+                                 netpolicy.safe_fetch_bytes - redirect-
+                                 revalidated AND host-pinned: any hop whose
+                                 host differs from the original request
+                                 strips extra_headers entirely, so the token
+                                 can never reach a different host across a
+                                 redirect.
+
+  localm/model_manager/sources.py, _civitai_get()
+                                 the CivitAI equivalent of the above: builds
+                                 the optional CivitAI API-key bearer header,
+                                 sent through the same host-pinned
+                                 safe_fetch_bytes.
+
 If you land a new site here, EITHER route it through
 ``auth.resolve_bearer_headers`` (the common case) OR add it to the allowlist
 below with a review comment matching the rigor above - never widen the scan
@@ -103,6 +119,8 @@ _REVIEWED_SITES = {
     ("localm/inference/http_engine.py", "remote_model_status", "f'Bearer {token}'"),
     ("localm/plugins/coder/backends/http.py", "HTTPBackend._headers", "f'Bearer {self._api_key}'"),
     ("localm/plugins/gui/cli.py", "_mount_remote_gui", "f'Bearer {token}'"),
+    ("localm/discover.py", "_hf_auth_headers", "f'Bearer {token}'"),
+    ("localm/model_manager/sources.py", "_civitai_get", "f'Bearer {api_key}'"),
 }
 
 
