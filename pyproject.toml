@@ -70,7 +70,7 @@ dependencies = [
     # Built-in TLS (NET-1): localm mints a local CA + leaf cert so a network
     # bind serves HTTPS out of the box. Core, not an extra - encryption on an
     # exposed bind must never be opt-in. See localm/tls.py and docs/tls.md.
-    "cryptography>=50.0.0",
+    "cryptography>=50.0.1",
     # QR codes: the companion pairing flow renders a key QR server-side and the
     # GUI/CLI print LAN-URL QRs. Core so phone pairing works out of the box.
     "qrcode>=8.2",
