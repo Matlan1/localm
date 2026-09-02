@@ -5,6 +5,7 @@ exercised here (it has its own detached-helper tests)."""
 
 import base64
 import json
+import pathlib
 import subprocess
 import sys
 
@@ -942,3 +943,41 @@ def test_spawn_health_watchdog_missing_script_returns_false(tmp_path, monkeypatc
                                        expect_version="1", popen=_capturing_popen(calls))
     assert ok is False
     assert calls == []
+
+def test_is_site_packages_install_recognises_a_pip_install():
+    import sysconfig
+
+    purelib = sysconfig.get_paths()["purelib"]
+    assert updater.is_site_packages_install(purelib) is True
+    # A self-contained release tree or source checkout is NOT one.
+    assert updater.is_site_packages_install(pathlib.Path(__file__).parent) is False
+
+
+def test_apply_refuses_to_swap_a_release_tree_into_site_packages(monkeypatch, tmp_path):
+    # apply() swaps a whole release tree into repo_root(). On a pip install that
+    # root is site-packages, shared with every other installed package, so the
+    # swap would overwrite unrelated packages and leave pip unaware of what is
+    # on disk. It must refuse BEFORE downloading anything.
+    import sysconfig
+    from localm.bugreport import LocalmError
+
+    purelib = sysconfig.get_paths()["purelib"]
+    monkeypatch.setattr(updater, "repo_root", lambda: pathlib.Path(purelib))
+
+    downloads = []
+    monkeypatch.setattr(updater, "download",
+                        lambda *a, **k: downloads.append(a))
+
+    # Catch EVERYTHING: without the guard apply() runs on and dies inside the
+    # stubbed download with an unrelated error, which would escape a narrow
+    # except and stop the data assertion below from ever speaking.
+    exc = None
+    try:
+        updater.apply("asset-1", signature="sig")
+    except Exception as e:
+        exc = e
+    # DATA first: nothing was fetched, so nothing could be swapped.
+    assert downloads == [], f"apply() downloaded despite a pip install: {downloads}"
+    assert exc is not None, "apply() did not refuse a site-packages install"
+    assert isinstance(exc, LocalmError), f"refused with the wrong error: {exc!r}"
+    assert "pip" in str(exc).lower()

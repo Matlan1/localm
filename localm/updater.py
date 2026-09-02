@@ -156,6 +156,33 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def is_site_packages_install(root=None) -> bool:
+    """True when localm was pip-installed into a site-packages tree.
+
+    :func:`apply` swaps a whole release tree into :func:`repo_root`. For a pip
+    install that root IS site-packages, shared with every other installed
+    package, so the swap would write a release tree over unrelated packages and
+    leave pip with no record of what is on disk. Such an install is updated
+    with pip, not by localm.
+    """
+    import sysconfig
+    target = Path(root or repo_root()).resolve()
+    try:
+        paths = sysconfig.get_paths()
+    except Exception:
+        return False
+    for key in ("purelib", "platlib"):
+        raw = paths.get(key)
+        if not raw:
+            continue
+        try:
+            if target == Path(raw).resolve():
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _prerelease_channel_enabled() -> bool:
     """Whether this install opted into the prerelease update channel
     (settings_schema.py's ``update_allow_prerelease``, admin_only, default
@@ -535,6 +562,12 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     from localm import _apply_update as au
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
+    if installed is None and is_site_packages_install(target):
+        raise LocalmError(
+            "this localm was installed with pip, so applying a release tree "
+            "would overwrite unrelated packages in site-packages and leave "
+            "pip unaware of what is installed",
+            reason="run 'pip install --upgrade localm' instead")
     updir = _updates_dir()
     backup_dir = _backup_dir(create=True)   # the STABLE location rollback_last() reads
 

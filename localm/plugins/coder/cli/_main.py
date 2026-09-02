@@ -55,6 +55,24 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+def _browser_enabled() -> bool:
+    """Whether this terminal session may drive the browser.
+
+    The GUI gates the browser tools on TWO things: the caller holds the browser
+    capability, and browser_enabled is on. A terminal session is the owner and
+    holds every capability, so only the setting is left to check. Without this
+    the Agent default (off) applied to every terminal session and the setting
+    had no effect there at all.
+
+    An unreadable config answers False, matching the GUI.
+    """
+    try:
+        from localm.config import load_config
+        return bool(load_config().get("browser_enabled", False))
+    except Exception:
+        return False
+
+
 def _complete_model(ctx, param, incomplete):
     """Shell completion callback: suggest registered localm model names."""
     try:
@@ -371,6 +389,7 @@ def main(
         scope=scope,
         custom_instructions=system_instructions,
         verify_cmd=session_verify,
+        browser_enabled=_browser_enabled(),
         **gen_kw,
     )
 

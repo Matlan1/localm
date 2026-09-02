@@ -962,6 +962,34 @@ export async function refreshOwnerKeyPanel() {
   // not obvious from a button labelled "Generate".
   const WARN = "Every other device holding the current key loses access until you give "
     + "it the new one. This browser stays signed in.";
+  // Guarded, unlike its siblings: a missing control here would otherwise throw
+  // partway through this refresh and take the whole Owner key panel with it.
+  const clearBtn = $("owner-key-clear");
+  if (clearBtn) clearBtn.onclick = () => {
+    // /api/auth/key/clear has existed all along with no control calling it, so a
+    // server put into protected mode from here could never be taken back out of it
+    // from here. This is a real downgrade, so it goes through confirmDanger like
+    // the other destructive key actions rather than a bare click.
+    confirmDanger("Remove the owner key?",
+      "This server returns to open mode: anyone who can reach it gets full "
+      + "access, with no key needed.", "Remove", async () => {
+        let r;
+        try {
+          r = await fetch("/api/auth/key/clear",
+                          { method: "POST", headers: authHeaders() });
+        } catch (e) { toast("Could not remove the owner key", true); return; }
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          toast(e.detail || "Could not remove the owner key", true);
+          return;
+        }
+        toast("Owner key removed - this server is open again");
+        // That call invalidates this session cookie, so re-read the page state
+        // rather than leaving a view authed by a session that no longer exists.
+        window.location.reload();
+      });
+  };
+
   $("owner-key-roll").onclick = () => {
     confirmDanger("Generate a new owner key?", WARN, "Generate",
                   () => rotate({}, "Generate"));

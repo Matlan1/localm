@@ -61,7 +61,11 @@ test("the view offers a url field and open/stop controls", async () => {
   const view = win.document.getElementById("view-browser");
   assert.ok(view.querySelector("input.browser-url"));
   const buttons = [...view.querySelectorAll("button")].map((b) => b.textContent);
-  assert.deepEqual(buttons, ["Open", "Stop"]);
+  assert.deepEqual(buttons, ["Open", "Stop", "Watch the agent"]);
+  const watch = [...view.querySelectorAll("button")]
+    .find((b) => b.textContent === "Watch the agent");
+  assert.equal(watch.hidden, true,
+    "the agent offer stays hidden until the server says one is running");
   assert.ok(view.querySelector("img.browser-frame"), "the live view surface");
 });
 
@@ -124,4 +128,72 @@ test("the image starts with no source at all", async () => {
   assert.equal(img.getAttribute("src"), null,
     "an unpainted live view must not request anything");
   assert.ok(img.alt, "the surface carries alt text");
+});
+
+
+// --------------------------------------------------------------------------- //
+//  Watching the browser the coding agent drives.                              //
+// --------------------------------------------------------------------------- //
+
+test("the agent offer appears only when the server says one is running", async () => {
+  const { win } = makeEnv();
+  let available = false;
+  win.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.endsWith("/agent") && (opts.method || "GET").toUpperCase() === "GET") {
+      return { ok: true, status: 200, json: async () => ({
+        available, session_id: available ? "s1" : null }) };
+    }
+    return { ok: true, status: 200, body: null, json: async () => ({}) };
+  };
+  global.fetch = win.fetch;
+  const mod = await load();
+  mod.register({ toast() {}, authHeaders: () => ({}) });
+  const view = win.document.getElementById("view-browser");
+  const watch = [...view.querySelectorAll("button")]
+    .find((b) => b.textContent === "Watch the agent");
+
+  // No agent browser: the tab must not offer something that is not there.
+  await win.onViewShown("browser");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(watch.hidden, true,
+    "offered to watch an agent browser that is not running");
+
+  // One appears: the offer shows up on the next time the tab is shown.
+  available = true;
+  await win.onViewShown("browser");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(watch.hidden, false,
+    "an agent browser is running and the tab did not offer to show it");
+});
+
+test("watching the agent posts to the agent route, not the tab own session", async () => {
+  const { win, calls } = makeEnv();
+  win.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    calls.push({ url: u, method: (opts.method || "GET").toUpperCase() });
+    if (u.endsWith("/agent") && (opts.method || "GET").toUpperCase() === "GET") {
+      return { ok: true, status: 200, json: async () => ({ available: true, session_id: "s1" }) };
+    }
+    if (u.endsWith("/agent")) {
+      return { ok: true, status: 200, json: async () => ({ job_id: "j1", session_id: "s1" }) };
+    }
+    return { ok: true, status: 200, body: null, json: async () => ({}) };
+  };
+  global.fetch = win.fetch;
+  const mod = await load();
+  mod.register({ toast() {}, authHeaders: () => ({}) });
+  const view = win.document.getElementById("view-browser");
+  const watch = [...view.querySelectorAll("button")]
+    .find((b) => b.textContent === "Watch the agent");
+
+  watch.onclick();
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+
+  const posts = calls.filter((c) => c.method === "POST");
+  assert.ok(posts.length > 0, "watching the agent sent no request at all");
+  assert.ok(posts.every((c) => !c.url.endsWith("/session")),
+    "watching the agent opened a NEW browser instead of attaching to the agent one");
+  assert.ok(posts.some((c) => c.url.endsWith("/agent")),
+    "the agent route was never called");
 });

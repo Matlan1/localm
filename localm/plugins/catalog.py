@@ -51,6 +51,8 @@ CATALOG: tuple = (
                  preinstalled=True, protected=True),
     CatalogEntry("coder", "Offline AI coding agent",
                  commands=("coder",), extra="coder"),
+    CatalogEntry("browser", "An automated web browser the model can drive",
+                 extra="browser"),
     CatalogEntry("image", "Image generation (ComfyUI by default)",
                  commands=("generate-image",)),
     CatalogEntry("music", "Music generation (ComfyUI ACE-Step by default)",

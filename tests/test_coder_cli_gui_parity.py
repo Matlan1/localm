@@ -550,3 +550,36 @@ def test_the_web_oracle_is_the_same_one_until_uses():
     assert g._goal_feedback is v.verify_feedback
     assert "Do not modify the check itself" in v.verify_feedback("pytest", 1,
                                                                 "boom")
+
+# --------------------------------------------------------------------------- #
+#  The reverse direction: a GUI capability the CLI could not reach at all.     #
+# --------------------------------------------------------------------------- #
+
+def test_terminal_coder_honours_the_browser_setting(monkeypatch):
+    """browser_enabled had no effect on a terminal session.
+
+    Agent(browser_enabled=...) defaults to False and the CLI never passed it, so
+    `localm coder` could never use the browser tools the GUI coder gets, however
+    the setting was set.
+    """
+    from localm.plugins.coder.cli import _main
+
+    monkeypatch.setattr("localm.config.load_config", lambda: {"browser_enabled": True})
+    assert _main._browser_enabled() is True
+    monkeypatch.setattr("localm.config.load_config", lambda: {"browser_enabled": False})
+    assert _main._browser_enabled() is False
+    # An unreadable config answers False, matching the GUI gate.
+    def _boom():
+        raise OSError("no config")
+    monkeypatch.setattr("localm.config.load_config", _boom)
+    assert _main._browser_enabled() is False
+
+
+def test_terminal_coder_actually_passes_browser_enabled_to_the_agent():
+    """The helper above is only worth anything if the Agent is built with it."""
+    from localm.plugins.coder.cli import _main
+
+    # click wraps the command, so the function is on .callback.    src = inspect.getsource(_main.main.callback)
+    assert "browser_enabled=_browser_enabled()" in src, (
+        "the terminal coder builds its Agent without browser_enabled, "
+        "so the setting cannot reach it")
