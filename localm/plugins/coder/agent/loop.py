@@ -22,7 +22,7 @@ from .constants import (
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
     _SKILL_STATE_TOOLS, _WORKSPACE_HINT,
 )
-from localm.textguard import compose_join
+from localm.textguard import compose, compose_join
 
 _RE_WORKSPACE = None      # compiled on first use
 
@@ -140,7 +140,7 @@ class _LoopMixin:
             self._record_episodes_used([], reason="no relevant past lesson")
             return task
         self._record_episodes_used(episodes)
-        return block + "\n\n## Task\n" + task
+        return compose(block, "\n\n## Task\n", task)
 
     def _record_episodes_used(self, episodes: list, reason: str = "") -> None:
         """Stash + surface the recalled lessons for this run.

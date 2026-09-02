@@ -25,13 +25,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from .provenance import neutralise
+from localm.textguard import compose, untrusted_span
 
 # Cap on the diff handed to the reviewer.
 _MAX_DIFF_CHARS = 12_000
 
-# neutralise() defangs frame/control-token forgery in the diff; the instructions
-# tell the reviewer to treat the task and diff as data, not orders.
+# untrusted_span() defangs frame/control-token forgery in the task and diff and
+# records them as untrusted ranges; the instructions tell the reviewer to treat
+# them as data, not orders.
 _REVIEW_INSTRUCTIONS = (
     "You are a STRICT senior code reviewer. Below is a unified diff of the changes "
     "a coding agent just made for a task. Review ONLY for BLOCKING problems: "
@@ -68,14 +69,17 @@ def _truncate_diff(diff: str, max_chars: int = _MAX_DIFF_CHARS) -> str:
             + diff[-half:])
 
 
-def build_review_prompt(diff: str, task: str = "") -> str:
-    """The reviewer prompt for *diff* (neutralised) and the optional *task*."""
-    task_s = neutralise((task or "").strip()[:1000]) or "(not provided)"
-    diff_s = neutralise(_truncate_diff((diff or "").strip())) or "(empty diff)"
-    return (
-        _REVIEW_INSTRUCTIONS
-        + "TASK:\n" + task_s
-        + "\n\nDIFF:\n" + diff_s
+def build_review_prompt(diff: str, task: str = ""):
+    """The reviewer prompt for *diff* and the optional *task*, both defanged.
+
+    Returns a ``GuardedText`` recording the task and diff as untrusted ranges.
+    """
+    task_raw = (task or "").strip()[:1000]
+    diff_raw = _truncate_diff((diff or "").strip())
+    return compose(
+        _REVIEW_INSTRUCTIONS,
+        "TASK:\n", untrusted_span(task_raw) if task_raw else "(not provided)",
+        "\n\nDIFF:\n", untrusted_span(diff_raw) if diff_raw else "(empty diff)",
     )
 
 

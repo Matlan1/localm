@@ -53,7 +53,7 @@ from typing import Callable, Optional
 from localm.jsonl import dumps_line, dumps_lines, split_jsonl
 from localm.storekit import NamespaceLockRegistry
 
-from .provenance import neutralise
+from localm.textguard import compose, compose_join, untrusted_span
 
 # Cap on the per-project log. At the cap the LEAST VALUABLE episode is dropped,
 # not the oldest (see _episode_value), and it is archived first (see _archive).
@@ -702,31 +702,34 @@ class EpisodeStore:
         self.archive_path.unlink(missing_ok=True)
 
 
-def render_for_prompt(episodes: list) -> str:
+def render_for_prompt(episodes: list):
     """Format retrieved episodes as a context block to prepend to a task. Empty
-    string when there is nothing relevant to add."""
+    string when there is nothing relevant to add.
+
+    Returns a ``GuardedText`` recording each stored field as an untrusted range.
+    """
     if not episodes:
         return ""
-    lines = [
+    lines: list = [
         "## Past lessons (episodic memory)",
         "Relevant lessons from earlier sessions on this project. Apply them and "
         "do not repeat past mistakes.",
     ]
     for e in episodes:
-        bits: list[str] = []
+        bits: list = []
         # Recall is injected as trusted, unfenced context, so stored text is
-        # neutralised here too.
+        # defanged and range-marked here too.
         if e.lesson:
-            bits.append("lesson: " + neutralise(e.lesson))
+            bits.append(compose("lesson: ", untrusted_span(e.lesson)))
         elif e.summary:
-            bits.append(neutralise(e.summary))
+            bits.append(compose(untrusted_span(e.summary)))
         if e.what_worked:
-            bits.append("worked: " + neutralise(e.what_worked))
+            bits.append(compose("worked: ", untrusted_span(e.what_worked)))
         if e.what_failed:
-            bits.append("avoid: " + neutralise(e.what_failed))
+            bits.append(compose("avoid: ", untrusted_span(e.what_failed)))
         if bits:
-            lines.append("- " + "; ".join(bits))
-    return "\n".join(lines)
+            lines.append(compose("- ", compose_join("; ", bits)))
+    return compose_join("\n", lines)
 
 
 _CONSOLIDATE_HEADER = (
@@ -770,17 +773,17 @@ def _relate_groups(eps: list, ratio: float = _RELATE_RATIO) -> list:
     return groups
 
 
-def _build_consolidate_prompt(members: list) -> str:
-    lines = [_CONSOLIDATE_HEADER]
+def _build_consolidate_prompt(members: list):
+    lines: list = [_CONSOLIDATE_HEADER]
     for n, e in enumerate(members, 1):
         lines.append("LESSON %d (outcome: %s)" % (n, e.outcome))
-        lines.append("  task: " + neutralise((e.task or "")[:300]))
+        lines.append(compose("  task: ", untrusted_span((e.task or "")[:300])))
         for label, val in (("summary", e.summary), ("what_worked", e.what_worked),
                            ("what_failed", e.what_failed), ("lesson", e.lesson)):
             if val:
-                lines.append("  %s: %s" % (label, neutralise(val[:500])))
+                lines.append(compose("  %s: " % label, untrusted_span(val[:500])))
         lines.append("")
-    return "\n".join(lines)
+    return compose_join("\n", lines)
 
 
 def consolidate(store: "EpisodeStore", *, complete: Callable[[str], str],
@@ -898,27 +901,30 @@ _REFLECT_HEADER = (
 
 def _build_reflect_prompt(task: str, outcome: str, files: list, diff: str,
                           max_diff_chars: int, errors: str = "",
-                          max_error_chars: int = 2000) -> str:
-    # neutralise() defangs frame markers and chat-template control tokens.
-    task_s = neutralise((task or "").strip()[:1000])
+                          max_error_chars: int = 2000):
+    # untrusted_span() defangs frame markers and chat-template control tokens via
+    # neutralise() and records the range for the backend.
+    task_raw = (task or "").strip()[:1000]
     files_s = ", ".join(files) if files else "(none)"
-    diff_s = neutralise((diff or "").strip()[:max_diff_chars]) or "(no diff captured)"
-    prompt = (
-        _REFLECT_HEADER
-        + "TASK:\n" + task_s
-        + "\n\nOUTCOME: " + outcome
-        + "\nCHANGED FILES: " + files_s
-        + "\n\nWORK LOG (unified diff of the changes):\n" + diff_s
-    )
-    # The tool and command failures the session hit, capped and neutralised like
-    # the diff. Fills what_failed.
-    err_s = neutralise((errors or "").strip()[:max_error_chars])
-    if err_s:
-        prompt += (
+    diff_raw = (diff or "").strip()[:max_diff_chars]
+    parts: list = [
+        _REFLECT_HEADER,
+        "TASK:\n", untrusted_span(task_raw),
+        "\n\nOUTCOME: ", outcome,
+        "\nCHANGED FILES: ", files_s,
+        "\n\nWORK LOG (unified diff of the changes):\n",
+        untrusted_span(diff_raw) if diff_raw else "(no diff captured)",
+    ]
+    # The tool and command failures the session hit, capped and defanged like the
+    # diff. Fills what_failed.
+    err_raw = (errors or "").strip()[:max_error_chars]
+    if err_raw:
+        parts.append(
             "\n\nTOOL FAILURES AND ERRORS (commands and tools that failed during "
-            "the session - use these to fill what_failed):\n" + err_s
+            "the session - use these to fill what_failed):\n"
         )
-    return prompt
+        parts.append(untrusted_span(err_raw))
+    return compose(*parts)
 
 
 def _summarise_errors(errors: str, limit: int = 400) -> str:
