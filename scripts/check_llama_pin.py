@@ -91,7 +91,8 @@ def upstream_tags() -> "tuple[list, str]":
         return [], "the releases API returned something that is not a list"
     tags = []
     for rel in releases:
-        if not isinstance(rel, dict) or rel.get("draft") or rel.get("prerelease"):
+        # Not excluded on prerelease. See test_currency_treats_a_prerelease_flagged_release_as_a_real_candidate.
+        if not isinstance(rel, dict) or rel.get("draft"):
             continue
         tag = rel.get("tag_name")
         # Skip releases whose assets have not finished uploading.
