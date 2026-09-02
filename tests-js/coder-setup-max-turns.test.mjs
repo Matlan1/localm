@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadAppWithPages, runScript } from "./harness.mjs";
+import { loadAppWithPages } from "./harness.mjs";
 
 function makeFetch(calls) {
   return async (url, opts = {}) => {
