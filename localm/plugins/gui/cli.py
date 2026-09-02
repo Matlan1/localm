@@ -163,6 +163,40 @@ def _tray_callbacks(app, hs):
     return on_restart, on_stop
 
 
+# Upper bound on how long _console_close_cleanup blocks its caller, in
+# seconds. Windows allows roughly SPI_GETHUNGAPPTIMEOUT (5s by default) after
+# CTRL_CLOSE_EVENT/LOGOFF/SHUTDOWN before killing the process.
+_CONSOLE_CLOSE_CLEANUP_BUDGET_S = 3.0
+
+
+def _console_close_cleanup() -> None:
+    """Kill any running coder background OS subprocess (see
+    localm.plugins.coder.background.JobRegistry.shutdown_all).
+
+    Runs the kill on a separate daemon thread and returns after at most
+    _CONSOLE_CLOSE_CLEANUP_BUDGET_S seconds regardless of that thread's
+    state. Model workers (GGUF/embedder/STT/HF) are not touched here; see
+    localm._mp_spawn.install_parent_death_watchdog.
+
+    Passed to winconsole.register_console_handler, whose contract requires
+    the callable to be quick and never raise.
+    """
+    done = threading.Event()
+
+    def _work() -> None:
+        try:
+            from localm.plugins.coder.background import get_registry
+            get_registry().shutdown_all()
+        except Exception:
+            pass
+        finally:
+            done.set()
+
+    threading.Thread(target=_work, daemon=True,
+                     name="localm-console-close-cleanup").start()
+    done.wait(_CONSOLE_CLOSE_CLEANUP_BUDGET_S)
+
+
 def _gui_bind_warning(host: str):
     """Warning text when the GUI binds past loopback without auth, or None when
     the bind is safe. Builds on the server's check, then escalates for the GUI:
@@ -421,8 +455,12 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     # A click into this console window must not freeze the server
     # (Windows QuickEdit suspends output, and output blocks inference).
-    from localm.winconsole import disable_quickedit, set_console_title
+    from localm.winconsole import (disable_quickedit, register_console_handler,
+                                    set_console_title)
     disable_quickedit()
+    # A closed console window kills this process without running Python
+    # finally/atexit; run best-effort cleanup inside the handler instead.
+    register_console_handler(_console_close_cleanup)
     # Brand the window right away so it never reads as a python.exe path; a richer
     # title (with the port) is set once the port is chosen below.
     set_console_title("LocaLM")
