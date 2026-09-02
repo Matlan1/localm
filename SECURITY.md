@@ -373,6 +373,13 @@ with **no signature check and no network request** - it is not a download, so
 the signing model above does not apply to it. It restores files only, not a
 deps-class update's package installs.
 
+**A first-time (non-updater) install can be verified too.** `scripts/verify_release.py`
+checks a downloaded release Asset (`localm-<version>.zip` plus its `.zip.sig`) against
+the same pinned Ed25519 key described above, and/or a plain SHA256 digest - useful if
+you obtained the zip some other way than the recommended `git clone` install. The
+`git clone` path itself is unchanged by this: it never downloads a zip, so it continues
+to rely on git+HTTPS+GitHub's own trust model, not this signing mechanism.
+
 ## Supported versions
 
 localm is pre-1.0; security fixes land on the latest `master`.
