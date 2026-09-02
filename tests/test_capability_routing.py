@@ -461,3 +461,41 @@ class TestVisionMismatchReconciliation:
                         json={"messages": _IMAGE_MSG, "stream": False})
         assert r.status_code == 400
         assert _answering_model(engines) == []
+
+
+# --------------------------------------------------------------------------- #
+#  The coder's suggestion (a note, never a switch)                             #
+# --------------------------------------------------------------------------- #
+
+class TestCoderToolCapabilityNote:
+    """The coder pins the active model and a per-session switch changes the one
+    shared engine for every other caller, so its capability integration is a
+    SUGGESTION. These pin the conditions under which it stays silent."""
+
+    def _note(self, monkeypatch, registry, model):
+        from localm.plugins.builtin.coder import plug
+        monkeypatch.setattr("localm.model_manager.load_registry", lambda: registry)
+        return plug._tool_capability_note(model)
+
+    def test_suggests_a_capable_model_when_the_active_one_confirmedly_lacks_it(
+            self, monkeypatch):
+        note = self._note(monkeypatch, TOOLS_ONLY, "plain")
+        assert "tooly" in note
+        assert "Tool calls still work" in note      # a fitness note, not a block
+
+    def test_silent_when_the_active_model_is_capable(self, monkeypatch):
+        assert self._note(monkeypatch, TOOLS_ONLY, "tooly") == ""
+
+    def test_silent_when_the_active_model_is_UNKNOWN(self, monkeypatch):
+        """The tri-state case. An unmeasured model is not a model known to lack
+        tool support, and advising a switch away from one on no evidence is
+        exactly the wrong advice."""
+        reg = _reg(unmeasured={}, tooly={"tool_use": True})
+        assert self._note(monkeypatch, reg, "unmeasured") == ""
+
+    def test_silent_when_nothing_better_is_installed(self, monkeypatch):
+        reg = _reg(plain={"tool_use": False})
+        assert self._note(monkeypatch, reg, "plain") == ""
+
+    def test_silent_without_a_model_name(self, monkeypatch):
+        assert self._note(monkeypatch, TOOLS_ONLY, "") == ""
