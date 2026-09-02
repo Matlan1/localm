@@ -15,6 +15,7 @@
  */
 
 import { NetGateError, classifyLoadError, loadToast, planModelFetch, pickDevice, pickDtype, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
+import { isNonEnglishVoice, streamNonEnglish } from "./g2p.js";
 
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
 
@@ -87,21 +88,37 @@ export async function register(ctx) {
     const vr = await fetch(VENDOR_VOICES);
     if (vr.ok) {
       const map = await vr.json();
-      voiceList = Object.entries(map).map(([id, v]) => ({
-        id,
-        label: `${v.name} (${v.language}, ${v.gender}${v.grade ? ", " + v.grade : ""})`,
-      }));
+      // Grouped by language so the picker lists each language together, with
+      // English first: it holds the default voice and most of the catalogue.
+      // The grade is upstream's own and is omitted for the voices upstream
+      // does not grade, rather than shown as an invented value.
+      voiceList = Object.entries(map)
+        .sort(([, a], [, b]) => {
+          const rank = (v) => (v.language.startsWith("en") ? 0 : 1);
+          return rank(a) - rank(b) ||
+            a.language.localeCompare(b.language) ||
+            a.name.localeCompare(b.name);
+        })
+        .map(([id, v]) => ({
+          id,
+          language: v.language,
+          label: `${v.name} (${v.language}, ${v.gender}${v.grade ? ", " + v.grade : ""})`,
+        }));
     }
   } catch { /* picker simply shows the default */ }
 
+  // "af_heart" by name, not by list position: it is the shipped default and the
+  // list above is ordered for the picker. See test_falls_back_to_af_heart.
   let currentVoice =
     (voiceList.find((v) => v.id === cfg.voice) && cfg.voice) ||
+    (voiceList.find((v) => v.id === "af_heart") && "af_heart") ||
     (voiceList[0] && voiceList[0].id) ||
     cfg.voice || "af_heart";
 
   // ---- lazy model load (with WebGPU -> WASM fallback) -------------------- //
   let kokoro = null;
   let Splitter = null;       // vendored TextSplitterStream; see speak()
+  let kokoroMod = null;      // the vendored bundle namespace; see speak()
   let loadPromise = null;
   let announced = false;
   let activeDevice = null;   // the backend that actually built the model (see build())
@@ -159,6 +176,7 @@ export async function register(ctx) {
 
     const mod = await import(libraryURL);
     Splitter = mod.TextSplitterStream || null;
+    kokoroMod = mod;
     const onnx = mod.env && mod.env.backends && mod.env.backends.onnx;
     // The onnxruntime runtime is VENDORED (see vendor/NOTICE.md), and this
     // fallback is where the default has to live rather than only in
@@ -375,7 +393,14 @@ export async function register(ctx) {
           "[tts] the vendored bundle exports no TextSplitterStream, so the last " +
           "sentence of each reply cannot be flushed and will not be spoken.");
       }
-      for await (const chunk of k.stream(source, { voice: currentVoice, speed })) {
+      // The bundle's own stream() phonemizes as English and then applies
+      // English-only phoneme fixups, so a non-English voice goes through
+      // g2p.js, which drives the same engine with that voice's language.
+      const stream = isNonEnglishVoice(currentVoice)
+        ? streamNonEnglish(kokoroMod, k, source,
+            { voice: currentVoice, speed, baseURL: import.meta.url })
+        : k.stream(source, { voice: currentVoice, speed });
+      for await (const chunk of stream) {
         if (myToken !== token) return;
         // Repair the WebGPU leading transient BEFORE encoding: toBlob() writes a
         // float32 wav, so an out-of-range sample is carried through verbatim and
