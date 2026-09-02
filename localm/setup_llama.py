@@ -1642,6 +1642,16 @@ def _install_runtime_wheel(pkg_dir: Path) -> bool:
     pulls the build backend (setuptools/wheel) into the tool's cache, and either tool
     would otherwise put it in a per-user location OUTSIDE the data dir. See
     ``config.contained_pip_env``."""
+    # Already importable means the package ships in this install (a wheel built
+    # with runtime/localm_llama_runtime in it), so its lib/ is provisioned in
+    # place and there is nothing to install. Running the editable install here
+    # would target site-packages itself, and `-m pip` is absent from a
+    # uv-created venv. See test_runtime_wheel_install_skipped_when_importable.
+    try:
+        import localm_llama_runtime  # noqa: F401
+        return True
+    except Exception:
+        pass
     env = config.contained_pip_env()
     last_err = ""
     for cmd in (["uv", "pip", "install", "-e", str(pkg_dir)],

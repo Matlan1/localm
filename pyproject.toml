@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "localm"
 version = "0.1.5"
 description = "Local AI platform - offline LLM inference, model management, and extensible agent plugins"
-readme = "README.md"
+readme = "docs/pypi-readme.md"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "Matlan1" }]
 keywords = ["llm", "gguf", "llama", "local", "offline", "inference", "agent", "mcp"]
@@ -477,3 +477,10 @@ pytest_add_cli_args_test_selection = [
     "tests/test_portmux.py",
     "tests/test_portmux_lifecycle.py",
 ]
+
+[tool.hatch.build.targets.wheel]
+# localm_llama_runtime ships as an importable package with an EMPTY lib/, so a
+# pip install can provision binaries into it. Its LIB_DIR resolves next to its
+# own __init__.py, which setup-llama writes into directly. Without it in the
+# wheel there is no runtime package for a pip install to provision at all.
+packages = ["localm", "runtime/localm_llama_runtime"]
