@@ -338,6 +338,18 @@ echo  Detected graphics vendor: %VENDOR%
 echo  Recommended inference backend: %REC%
 if /i "%VENDOR%"=="nvidia" echo  NVIDIA note: [1] cuda = peak performance, fetches a self-contained runtime (no Toolkit) and falls back to Vulkan if your driver is too old; pick [2] vulkan for the no-download universal build.
 
+rem  Plain-language opt-out before the numbered menu below: on blank Enter that
+rem  menu defaults to REC, so a GPU box would otherwise fetch and load-test a
+rem  sizeable GPU runtime by default even for someone who wants CPU only.
+rem  Downgrades the DEFAULT the menu offers; [5] cpu is still there regardless.
+if /i not "%REC%"=="cpu" (
+    set "GPUUSE="
+    call :flush
+    set /p "GPUUSE=  GPU acceleration looks available (%VENDOR%). Use it? [Y/n] (n = CPU only): "
+    if not defined GPUUSE set "GPUUSE=Y"
+    if /i "!GPUUSE:~0,1!"=="N" set "REC=cpu"
+)
+
 rem ---- choose the llama.cpp backend (recommended pre-selected) ---------------
 echo.
 rem  [1] is a shortcut for whichever backend the policy recommended, so it is
