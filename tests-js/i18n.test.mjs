@@ -438,6 +438,54 @@ test("the plugins page redraws its status pills and table headers when the langu
       "the table header must be rebuilt in German");
   });
 
+test("the models page redraws its table headers and row badges when the language changes",
+  async () => {
+    const fetchImpl = async (url) => {
+      const u = String(url);
+      if (u.includes("/i18n/de.json")) return { ok: true, status: 200, json: async () => DE };
+      if (u.includes("/i18n/")) return { ok: false, status: 404, json: async () => ({}) };
+      if (u === "/api/models" || u.startsWith("/api/models?")) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            models: [{ name: "demo-model", active: true, loaded: true,
+              model_type: "llm", size_bytes: 100, vision: true }],
+            active: "demo-model",
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    };
+    const { window } = loadAppWithPages({ fetchImpl });
+
+    await window.refreshModelsPage();
+    await settle(20);
+
+    // A module-level MODEL_COLUMNS.label (the header) and a module-level
+    // CAP_LABEL.vision (the pill, via visionBadge()) - both hold catalog key
+    // names rather than resolved text, so this also covers the Finding-B
+    // freeze-avoidance fix, not only the ordinary per-render t() calls.
+    const roleHeader = () => window.document.querySelectorAll("#models-table th")[1];
+    const activeTag = () => window.document.querySelector("#models-table .active-tag");
+    const visionPill = () => window.document.querySelector("#models-table .cap-badge.cap-vision");
+
+    assert.equal(roleHeader() && roleHeader().textContent, "Role", "starts in English");
+    assert.equal(activeTag() && activeTag().textContent, "active");
+    assert.equal(visionPill() && visionPill().textContent, "vision");
+
+    runScript(window, 'window.__p = applyLanguage("de");');
+    await window.__p;
+    assert.ok(await waitFor(() => roleHeader() && roleHeader().textContent === "Rolle"),
+      "the table must be redrawn after the language change");
+
+    assert.equal(roleHeader() && roleHeader().textContent, "Rolle",
+      "the table header must be rebuilt in German");
+    assert.equal(activeTag() && activeTag().textContent, "aktiv",
+      "the active tag must be rebuilt in German");
+    assert.equal(visionPill() && visionPill().textContent, "Vision",
+      "the vision capability pill must be rebuilt in German too");
+  });
+
 /* ================================================================ */
 /*  Drift gates                                                      */
 /* ================================================================ */
@@ -460,7 +508,8 @@ test("every data-i18n key in index.html resolves in the English catalog", async 
 // The migrated modules. A file added here must have its t() keys in the catalog.
 const T_CALL_FILES = ["app/chat.js", "app/models-sidebar.js", "app/logo.js",
                       "app/settings-perf.js", "pages/settings.js", "pages/plugins.js",
-                      "app/slash.js", "app/cmdk.js", "app/picker.js"];
+                      "app/slash.js", "app/cmdk.js", "app/picker.js",
+                      "pages/models.js"];
 
 /** Key-shaped string literals inside a balanced t(...) / tn(...) call. */
 function tCallKeys(src) {

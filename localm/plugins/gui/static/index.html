@@ -358,7 +358,7 @@
     <!-- ============ MODELS ============ -->
     <section id="view-models" class="view">
       <div class="page">
-        <h2>Models</h2>
+        <h2 data-i18n="models.title">Models</h2>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="search"></span>
             <div class="card-head-text"><h3>Find models</h3></div></div>
@@ -455,33 +455,37 @@
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="models"></span>
-            <div class="card-head-text"><h3>Registered models</h3></div></div>
+            <div class="card-head-text"><h3 data-i18n="models.table.title">Registered models</h3></div></div>
           <div class="tab-nav" id="models-tab-nav">
-            <button class="tab-btn active" data-type="all">All</button>
-            <button class="tab-btn" data-type="llm">LLMs</button>
-            <button class="tab-btn" data-type="embedding">Embedding</button>
-            <button class="tab-btn" data-type="diffusion-unet">Diffusion</button>
-            <button class="tab-btn" data-type="text-encoder">Encoders</button>
-            <button class="tab-btn" data-type="vae">VAEs</button>
-            <button class="tab-btn" data-type="lora">LoRAs</button>
+            <button class="tab-btn active" data-type="all" data-i18n="models.tab.all">All</button>
+            <button class="tab-btn" data-type="llm" data-i18n="models.tab.llm">LLMs</button>
+            <button class="tab-btn" data-type="embedding" data-i18n="models.tab.embedding">Embedding</button>
+            <button class="tab-btn" data-type="diffusion-unet" data-i18n="models.tab.diffusionUnet">Diffusion</button>
+            <button class="tab-btn" data-type="text-encoder" data-i18n="models.tab.textEncoder">Encoders</button>
+            <button class="tab-btn" data-type="vae" data-i18n="models.tab.vae">VAEs</button>
+            <button class="tab-btn" data-type="lora" data-i18n="models.tab.lora">LoRAs</button>
             <!-- Not a MODEL_TYPES value: this tab collects every model whose type has
                  no tab of its own (a vision projector, an unclassified file, and
                  whatever the registry gains next), so such a model has a home of its
                  own instead of being reachable from All alone. -->
-            <button class="tab-btn" data-type="other">Other</button>
+            <button class="tab-btn" data-type="other" data-i18n="models.tab.other">Other</button>
           </div>
           <div class="scan-row">
             <div class="models-view-opts">
               <label class="inline-check" id="models-show-other-wrap"
+                     data-i18n="models.view.showOther" data-i18n-title="models.view.showOtherTitle"
                      title="Vision projectors and anything localm could not classify live on the Other tab. Tick this to list them here too.">
                 <input type="checkbox" id="models-show-other"> show other types here
               </label>
               <label class="inline-check" id="models-group-wrap"
+                     data-i18n="models.view.groupByType" data-i18n-title="models.view.groupByTypeTitle"
                      title="Break the list into one section per model type instead of one flat list.">
                 <input type="checkbox" id="models-group-by-type"> group by type
               </label>
             </div>
-            <button class="btn-secondary" id="models-unload-all-btn" title="Release every currently-loaded model from GPU/CPU memory">Unload all</button>
+            <button class="btn-secondary" id="models-unload-all-btn"
+                    data-i18n="models.unloadAll.button" data-i18n-title="models.unloadAll.title"
+                    title="Release every currently-loaded model from GPU/CPU memory">Unload all</button>
           </div>
           <div id="models-table"></div>
         </div>

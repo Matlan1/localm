@@ -770,7 +770,7 @@ export async function refreshModels() {
       // auto-seeded). Show the in-page key gate, not window.prompt() - mobile/PWA
       // browsers suppress prompt(), leaving a phone/LAN client on a blank page
       // (NET-1). The gate stores the key and reloads on submit.
-      showKeyGate("This LocaLM server requires an API key.");
+      showKeyGate(t("models.keyRequired"));
       return;
     }
     if (r.status === 403) {
@@ -1015,7 +1015,7 @@ if (sidebarUnloadBtn) {
       // would leave refreshModels()'s own status write gated off below.
       if (data.status === "in_use") {
         setStatus("ok", model);
-        toast(`'${model}' is still generating - try again once it finishes`, true);
+        toast(t("models.unload.inUse", { name: model }), true);
         refreshModels();
         return;
       }
