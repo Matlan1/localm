@@ -24,6 +24,12 @@ page/snippet is parsed as a REAL role delimiter and can forge a turn.
 ``neutralise()`` defangs that here, at the boundary, so every consumer gets
 defanged content. ``jobs/webtool.py`` calls ``localm.netpolicy`` directly rather
 than these HTTP endpoints, so it neutralises its own copy at that boundary.
+
+Both responses also carry ``untrusted_fields``, naming the fields whose value is
+wholly remote-controlled. A caller that splices one of them into a prompt uses
+that to set ``Message.untrusted_spans`` over the range it landed on, so the
+backend tokenises it with special-token parsing off. Defanging is unconditional
+and does not depend on a caller reading this field.
 """
 
 from __future__ import annotations
@@ -41,19 +47,35 @@ from localm.textguard import neutralise
 _router = APIRouter()
 
 
+# Response fields whose value is wholly remote-controlled text. A caller that
+# splices one into a prompt must mark the range it lands on as untrusted (see
+# Message.untrusted_spans). Named per response shape rather than as character
+# ranges because every character of these fields is untrusted, so a caller only
+# needs the offset it spliced them at.
+_UNTRUSTED_SEARCH_FIELDS = ["title", "snippet"]
+_UNTRUSTED_FETCH_FIELDS = ["text"]
+
+
 def _neutralise_results(results: list) -> list:
     """Defang chat control / frame tokens in each search result's title/snippet
-    before it leaves this boundary. A search result is UNTRUSTED content: a page
-    author can embed a control token (``<|im_start|>system ...``) or a frame
-    marker in the title/snippet, which both backends' tokenizers parse as a real
-    role delimiter once spliced into the prompt. ``url`` is a locator, not prose,
-    and is left untouched."""
+    before it leaves this boundary, and declare those fields untrusted.
+
+    A search result is UNTRUSTED content: a page author can embed a control token
+    (``<|im_start|>system ...``) or a frame marker in the title/snippet, which
+    both backends' tokenizers parse as a real role delimiter once spliced into
+    the prompt. ``url`` is a locator, not prose, and is left untouched.
+
+    Each result gains ``untrusted_fields``, naming the fields a caller must mark
+    as an untrusted range when it splices them into a prompt.
+    """
     for r in results:
         if isinstance(r, dict):
             if isinstance(r.get("title"), str):
                 r["title"] = neutralise(r["title"])
             if isinstance(r.get("snippet"), str):
                 r["snippet"] = neutralise(r["snippet"])
+            r["untrusted_fields"] = [f for f in _UNTRUSTED_SEARCH_FIELDS
+                                     if isinstance(r.get(f), str)]
     return results
 
 
@@ -105,7 +127,8 @@ async def web_fetch_endpoint(req: WebFetchRequest):
     loop = asyncio.get_running_loop()
     final_url, text, truncated = await loop.run_in_executor(
         get_plugin_executor(), _fetch_and_defang)
-    return {"url": final_url, "text": text, "truncated": truncated}
+    return {"url": final_url, "text": text, "truncated": truncated,
+            "untrusted_fields": list(_UNTRUSTED_FETCH_FIELDS)}
 
 
 def register(host) -> None:

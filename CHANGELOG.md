@@ -486,6 +486,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   matter which family they belong to, while the markers your model's own chat
   format needs keep working normally. This covers both the GGUF and the
   Transformers backends.
+- **That same protection now covers what localm's own helpers feed back to the
+  model, not just what it fetches from the web.** A sub-agent you delegate to
+  reports back in its own words, a past lesson is recalled from memory, a diff
+  goes to the reviewer model, and a long session gets summarised - and each of
+  those can quote text that came from outside in the first place. Those paths
+  were still relying on matching the marker against a list of known model
+  families, so one belonging to a family that was not on the list could survive
+  and be read as a genuine speaker change. They now carry the same
+  came-from-outside marking as a fetched page, so the tokenizer reads that text
+  as plain text whatever family the marker belongs to. The web search and page
+  fetch endpoints also now say which parts of their answer came from outside, so
+  anything built on them can pass that along.
 - **Chatting with certain models no longer crashes the server outright.** For a
   handful of tokenizers - among them Llama 4, Mistral's Tekken, EXAONE MoE,
   GPT-4o-compatible and SuperBPE ones - a message containing a long unbroken run

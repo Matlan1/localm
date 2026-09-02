@@ -324,7 +324,7 @@ def tool_spawn_agent(
     # the parent. This is the structural-forgery half of provenance hardening; we
     # do not wrap it in the untrusted fence, so the parent can still act on a
     # legitimate delegated result (the child runs its own fence internally).
-    from ..provenance import neutralise
+    from localm.textguard import compose, untrusted_span
     # ASK THE CHILD whether it succeeded. run_task RETURNS its failure message
     # rather than raising, so arriving here is not success: a child that hit
     # max_turns or tripped its circuit breaker was reported to the model as
@@ -337,7 +337,7 @@ def tool_spawn_agent(
     verdict = ("finished in" if child_ok else
                "DID NOT COMPLETE its task, stopping after")
     return ToolResult.success(
-        neutralise(result_text),
+        compose(untrusted_span(result_text)),
         summary=f"sub-agent '{name}' {verdict} {turns_used} turn(s)",
     )
 
@@ -620,7 +620,9 @@ def tool_check_agent_job(cwd: Path, job_id: str) -> ToolResult:
     child_ok = result.get("ok", True)
     verdict = ("finished in" if child_ok else
                "DID NOT COMPLETE its task, stopping after")
+    from localm.textguard import compose, untrusted_span
     return ToolResult.success(
-        f"sub-agent '{st['label']}' ({job_id}) {verdict} "
-        f"{result.get('turns', 0)} turn(s):\n\n{body}{warn}",
+        compose("sub-agent '", untrusted_span(st["label"]),
+                f"' ({job_id}) {verdict} {result.get('turns', 0)} turn(s):\n\n",
+                body, warn),
         summary=f"{job_id}: {state}" if child_ok else f"{job_id}: {state} (failed)")

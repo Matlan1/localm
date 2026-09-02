@@ -638,20 +638,21 @@ class _ExecutionMixin:
             self._record_error(call.name, result.output)
             streak = self._consecutive_errors.get(call.name, 0) + 1
             self._consecutive_errors[call.name] = streak
+            from localm.textguard import compose
             if streak == 2:
-                result = ToolResult.error(
-                    result.output
-                    + "\n\n[Hint: this tool has failed twice in a row. "
+                result = ToolResult.error(compose(
+                    result.output,
+                    "\n\n[Hint: this tool has failed twice in a row. "
                     "Try a different approach - check paths, arguments, or preconditions.]"
-                )
+                ))
             elif streak >= 3:
-                result = ToolResult.error(
-                    result.output
-                    + f"\n\n[Warning: {call.name} has failed {streak} times consecutively. "
+                result = ToolResult.error(compose(
+                    result.output,
+                    f"\n\n[Warning: {call.name} has failed {streak} times consecutively. "
                     "Step back and reconsider your strategy. "
                     "Consider reading the relevant files first, "
                     "or breaking the task into smaller steps.]"
-                )
+                ))
             if streak >= 4:
                 self._abort_streak_tool = call.name
             # Global no-progress breaker: count failures across ANY tool so a model

@@ -342,3 +342,49 @@ def test_successful_approval_emits_no_failure_warning(tmp_path):
         assert _final_answer(agent.run_task("change code")) == "All done!"
     assert not [c for c in warn.call_args_list if "self-review" in str(c)]
     assert not agent._audit.notice.call_args_list
+
+
+# --------------------------------------------------------------------------- #
+#  Per-span untrusted ranges (AUD-PROVDEFANG stage 2)                          #
+# --------------------------------------------------------------------------- #
+
+_EXOTIC = "<<ASSISTANT>>"          # outside neutralise()'s families, on purpose
+
+
+def test_the_exotic_marker_is_still_not_covered_by_neutralise():
+    """If this fails the PoC below stopped being a bypass and must be replaced."""
+    from localm.textguard import neutralise
+    assert neutralise(_EXOTIC) == _EXOTIC
+
+
+def test_review_prompt_records_the_task_and_diff_as_untrusted_ranges():
+    from localm.textguard import untrusted_spans_of
+    p = build_review_prompt("DIFF " + _EXOTIC, task="TASK " + _EXOTIC)
+    covered = "".join(str(p)[a:b] for a, b in untrusted_spans_of(p))
+    assert covered.count(_EXOTIC) == 2
+    # The reviewer instructions are localm's own text and must not be marked.
+    assert "STRICT senior code reviewer" not in covered
+
+
+def test_review_prompt_keeps_its_placeholders_when_task_and_diff_are_empty():
+    """untrusted_span() returns a truthy object, so the fallback must be picked
+    from the RAW string or these placeholders would be unreachable."""
+    from localm.textguard import untrusted_spans_of
+    p = build_review_prompt("", task="")
+    assert "(not provided)" in str(p)
+    assert "(empty diff)" in str(p)
+    assert untrusted_spans_of(p) == ()
+
+
+def test_the_reviewer_sends_the_ranges_on_the_message_it_hands_the_backend():
+    """The range has to survive onto the dict Reviewer.review() actually sends."""
+    from localm.textguard import untrusted_spans_of
+    backend = MagicMock()
+    backend.chat.return_value = '{"approved": true, "blocking": [], "notes": ""}'
+    Reviewer(backend).review("DIFF " + _EXOTIC, task="t")
+
+    sent = backend.chat.call_args[0][0]
+    spans = untrusted_spans_of(sent[0]["content"])
+    assert spans, "the reviewer sent a message with no untrusted range"
+    covered = "".join(str(sent[0]["content"])[a:b] for a, b in spans)
+    assert _EXOTIC in covered
