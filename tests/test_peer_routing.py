@@ -36,11 +36,11 @@ def _isolated_state(tmp_path, monkeypatch):
     peer_routing._ROUTES.clear()
 
 
-def _write_peer(d, iid, port, model=None, pid=None):
+def _write_peer(d, iid, port, model=None, pid=None, host="127.0.0.1"):
     if pid is None:
         pid = os.getpid() + 1
     return gpu_registry.write_entry(
-        d, instance_id=iid, pid=pid, port=port, host="127.0.0.1",
+        d, instance_id=iid, pid=pid, port=port, host=host,
         scheme="http", model=model, vram_estimate_bytes=None, gpu_index=0,
         coordination_token=f"tok-{iid}")
 
@@ -494,3 +494,259 @@ class TestChatCompletionsForwarding:
             "messages": [{"role": "user", "content": "hi"}],
         })
         assert r2.status_code != 502
+
+
+# ------------------------------------------------------------------ #
+#  The peer host a forwarded credential may reach                    #
+# ------------------------------------------------------------------ #
+
+class TestRoutablePeerHost:
+    """gpu_registry.list_gpu_peers verifies a peer's identity by calling
+    /whoami with no bind_host, i.e. against loopback. _peer_url dials
+    self_connect_host(entry["host"]) instead, which returns any other literal
+    as itself. is_routable_peer_host is what keeps those two the same
+    endpoint."""
+
+    @pytest.mark.parametrize("host", [
+        "127.0.0.1", "127.0.0.5", "::1", "localhost", "0.0.0.0", "::", "", None,
+    ])
+    def test_a_loopback_or_wildcard_bind_is_routable(self, host):
+        assert peer_routing.is_routable_peer_host(host) is True
+
+    @pytest.mark.parametrize("host", [
+        "192.168.1.5", "10.0.0.7", "8.8.8.8", "attacker.example",
+        "peer.local", "2001:db8::1", "169.254.169.254",
+    ])
+    def test_anything_else_is_not_routable(self, host):
+        assert peer_routing.is_routable_peer_host(host) is False
+
+    def test_dial_host_matches_what_peer_url_actually_builds(self):
+        """The predicate is only meaningful if it judges the same string
+        _peer_url dials. A divergence there is the whole defect class."""
+        from localm.bindhost import url_host
+        for host in ("0.0.0.0", "::", "localhost", "127.0.0.1", "192.168.1.5"):
+            route = peer_routing.PeerRoute(
+                model="m", instance_id="i", host=host, port=9000,
+                scheme="http", api_key="k")
+            url = peer_routing._peer_url(route, "/v1/chat/completions")
+            assert url_host(peer_routing.dial_host(host)) + ":9000" in url
+
+
+class TestNonLoopbackPeerIsNeverOffered:
+    def test_a_peer_advertising_a_non_loopback_host_is_never_offered(
+            self, _isolated_state, monkeypatch):
+        """A matching, live, whoami-passing peer is still refused when the
+        address this instance would DIAL was never the address it verified."""
+        _write_peer(_isolated_state, "peer-lan", 9401,
+                    model="shared-model", host="192.168.1.5")
+        _make_live(monkeypatch)
+        assert peer_routing.find_offer("shared-model", frozenset()) is None
+
+    def test_the_same_peer_on_loopback_is_offered(self, _isolated_state, monkeypatch):
+        """The control for the test above: everything else identical, so the
+        host is provably the discriminator rather than some unrelated reason
+        the lookup returned nothing."""
+        _write_peer(_isolated_state, "peer-lo", 9402,
+                    model="shared-model", host="127.0.0.1")
+        _make_live(monkeypatch)
+        peer = peer_routing.find_offer("shared-model", frozenset())
+        assert peer is not None and peer["instance_id"] == "peer-lo"
+
+    def test_the_endpoint_reports_unavailable_for_a_non_loopback_peer(
+            self, _isolated_state, monkeypatch):
+        _write_peer(_isolated_state, "peer-lan2", 9403,
+                    model="shared-model", host="10.0.0.7")
+        _make_live(monkeypatch)
+        client = TestClient(create_app(None))
+        r = client.get("/v1/models/shared-model/peer-offer")
+        assert r.status_code == 200
+        assert r.json() == {"available": False, "peer": None}
+
+    def test_accepting_a_non_loopback_peer_is_refused_and_stores_no_route(
+            self, _isolated_state, monkeypatch):
+        _write_peer(_isolated_state, "peer-lan3", 9404,
+                    model="shared-model", host="203.0.113.9")
+        _make_live(monkeypatch)
+        client = TestClient(create_app(None))
+        r = client.post(
+            "/v1/models/shared-model/peer-route",
+            headers={"Authorization": f"Bearer {client.app.state.shell_token}"},
+            json={"instance_id": "peer-lan3", "api_key": "the-users-real-key"})
+        assert peer_routing.get_route("shared-model") is None
+        assert r.status_code == 409
+
+
+class TestForwardRefusesANonLoopbackRoute:
+    def test_forward_refuses_a_non_loopback_route_without_sending_the_key(
+            self, monkeypatch):
+        """The second of the two checks: it must hold however the PeerRoute
+        was constructed, so it is asserted here against a route built directly
+        rather than through find_offer."""
+        calls = []
+
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+            calls.append((url, headers))
+            return _FakePeerResponse()
+
+        monkeypatch.setattr("requests.post", fake_post)
+        route = peer_routing.PeerRoute(
+            model="lan-model", instance_id="peer-lan4", host="192.168.1.5",
+            port=9405, scheme="http", api_key="the-users-real-key")
+        peer_routing.set_route(route)
+        req = _FakeRequest(b"{}")
+
+        from fastapi import HTTPException
+
+        async def scenario():
+            return await peer_routing.forward(route, req, "/v1/chat/completions")
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(scenario())
+
+        # The credential first, the status code second: a request that was
+        # never made is the property, and the status code is a proxy for it.
+        assert calls == [], "the bearer credential left this process"
+        assert peer_routing.get_route("lan-model") is None
+        assert exc_info.value.status_code == 502
+
+    def test_a_loopback_route_still_forwards(self, monkeypatch):
+        """The control: same shape, loopback host, request goes out."""
+        calls = []
+
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+            calls.append((url, headers))
+            return _FakePeerResponse()
+
+        monkeypatch.setattr("requests.post", fake_post)
+        route = peer_routing.PeerRoute(
+            model="lo-model", instance_id="peer-lo2", host="127.0.0.1",
+            port=9406, scheme="http", api_key="the-users-real-key")
+        req = _FakeRequest(b"{}")
+
+        async def scenario():
+            return await peer_routing.forward(route, req, "/v1/chat/completions")
+
+        assert asyncio.run(scenario()).status_code == 200
+        assert len(calls) == 1
+        assert calls[0][1]["Authorization"] == "Bearer the-users-real-key"
+
+
+# ------------------------------------------------------------------ #
+#  The peer lookup runs off the event loop                           #
+# ------------------------------------------------------------------ #
+
+class TestPeerLookupIsOffloaded:
+    """A sync handler with no await points is implicitly atomic on the event
+    loop; these routes reach requests.get through find_offer, so the lookup
+    must not run there."""
+
+    def _record_thread(self, monkeypatch, seen):
+        real = peer_routing.find_offer
+
+        def probe(*a, **k):
+            try:
+                asyncio.get_running_loop()
+                seen.append("event-loop")
+            except RuntimeError:
+                seen.append("worker-thread")
+            return real(*a, **k)
+
+        monkeypatch.setattr(peer_routing, "find_offer", probe)
+
+    def test_peer_offer_looks_the_peer_up_off_the_event_loop(
+            self, _isolated_state, monkeypatch):
+        seen = []
+        self._record_thread(monkeypatch, seen)
+        _write_peer(_isolated_state, "peer-off2", 9501, model="shared-model")
+        _make_live(monkeypatch)
+        client = TestClient(create_app(None))
+        assert client.get("/v1/models/shared-model/peer-offer").status_code == 200
+        assert seen == ["worker-thread"], (
+            "find_offer ran on the event loop, so its requests.get stalls "
+            "every other request on this server")
+
+    def test_accept_verifies_the_peer_off_the_event_loop(
+            self, _isolated_state, monkeypatch):
+        seen = []
+        self._record_thread(monkeypatch, seen)
+        _write_peer(_isolated_state, "peer-acc2", 9502, model="shared-model")
+        _make_live(monkeypatch)
+        client = TestClient(create_app(None))
+        r = client.post(
+            "/v1/models/shared-model/peer-route",
+            headers={"Authorization": f"Bearer {client.app.state.shell_token}"},
+            json={"instance_id": "peer-acc2", "api_key": "k"})
+        assert r.status_code == 200, r.text
+        assert seen == ["worker-thread"]
+
+
+# ------------------------------------------------------------------ #
+#  _ROUTES is shared with worker threads now                         #
+# ------------------------------------------------------------------ #
+
+class TestRoutesLock:
+    def _route(self, model):
+        return peer_routing.PeerRoute(
+            model=model, instance_id="i", host="127.0.0.1", port=1,
+            scheme="http", api_key="k")
+
+    def test_listing_survives_concurrent_mutation(self):
+        """list_routes() iterates _ROUTES while the offloaded accept handler
+        writes to it from a worker thread. Unlocked, that raises
+        "dictionary changed size during iteration"."""
+        import threading
+
+        for i in range(200):
+            peer_routing.set_route(self._route(f"seed-{i}"))
+        stop = threading.Event()
+        errors = []
+
+        def churn():
+            i = 0
+            while not stop.is_set():
+                peer_routing.set_route(self._route(f"churn-{i}"))
+                peer_routing.clear_route(f"churn-{i}")
+                i += 1
+
+        t = threading.Thread(target=churn, daemon=True)
+        t.start()
+        try:
+            for _ in range(3000):
+                try:
+                    peer_routing.list_routes()
+                    peer_routing.get_route("seed-0")
+                except RuntimeError as e:
+                    errors.append(repr(e))
+                    break
+        finally:
+            stop.set()
+            t.join(timeout=5)
+        assert errors == [], f"concurrent access to _ROUTES raised: {errors}"
+
+    def test_routes_lock_is_never_held_across_a_network_call(
+            self, _isolated_state, monkeypatch):
+        """The invariant _ROUTES_LOCK's own comment states. Holding it across
+        the peer lookup would block get_route on the event loop for the whole
+        lookup, reintroducing the stall the offload removed."""
+        import threading
+
+        acquired = []
+
+        def peers_probe(*a, **k):
+            def probe():
+                got = peer_routing._ROUTES_LOCK.acquire(blocking=False)
+                acquired.append(got)
+                if got:
+                    peer_routing._ROUTES_LOCK.release()
+
+            # A separate thread, because _ROUTES_LOCK is an RLock and would
+            # re-enter for the calling one.
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join(timeout=5)
+            return []
+
+        monkeypatch.setattr(gpu_registry, "list_gpu_peers", peers_probe)
+        peer_routing.find_offer("some-model", frozenset())
+        assert acquired == [True], (
+            "_ROUTES_LOCK was held across the peer lookup's network call")

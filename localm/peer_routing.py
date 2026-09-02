@@ -24,6 +24,8 @@ configured on THIS instance do not run for a forwarded request."""
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -60,15 +62,22 @@ class PeerRoute:
 # model name -> PeerRoute. Process-local, in-memory, never persisted.
 _ROUTES: dict = {}
 
+# Guards every read and write of _ROUTES. Held only across dict operations,
+# never across a network call or a registry read.
+# See test_routes_lock_is_never_held_across_a_network_call.
+_ROUTES_LOCK = threading.RLock()
+
 
 def get_route(model_name: Optional[str]) -> Optional[PeerRoute]:
     if not model_name:
         return None
-    return _ROUTES.get(model_name)
+    with _ROUTES_LOCK:
+        return _ROUTES.get(model_name)
 
 
 def set_route(route: PeerRoute) -> None:
-    _ROUTES[route.model] = route
+    with _ROUTES_LOCK:
+        _ROUTES[route.model] = route
 
 
 def clear_route(model_name: Optional[str]) -> Optional[PeerRoute]:
@@ -76,18 +85,47 @@ def clear_route(model_name: Optional[str]) -> Optional[PeerRoute]:
     none."""
     if not model_name:
         return None
-    return _ROUTES.pop(model_name, None)
+    with _ROUTES_LOCK:
+        return _ROUTES.pop(model_name, None)
 
 
 def list_routes() -> dict:
     """Every active route, keyed by model name, as :meth:`PeerRoute.safe_dict`
     values - never includes an ``api_key``."""
-    return {name: route.safe_dict() for name, route in _ROUTES.items()}
+    with _ROUTES_LOCK:
+        return {name: route.safe_dict() for name, route in _ROUTES.items()}
 
 
 # ------------------------------------------------------------------ #
 #  Discovery / matching                                              #
 # ------------------------------------------------------------------ #
+
+def dial_host(host: Optional[str]) -> str:
+    """The address this machine dials to reach a peer that registered *host*,
+    via ``bindhost.self_connect_host`` (wildcards and ``localhost`` become a
+    loopback literal, any other literal is returned as itself)."""
+    from localm.bindhost import self_connect_host
+    return self_connect_host(host)
+
+
+def is_routable_peer_host(host: Optional[str]) -> bool:
+    """Whether a peer registering *host* may be sent this instance's forwarded
+    request and its bearer credential.
+
+    True only when :func:`dial_host` yields a loopback IP literal. A name that
+    does not parse as an IP address is False.
+
+    ``gpu_registry.list_gpu_peers`` runs its ``/whoami`` identity handshake
+    against loopback (it passes no ``bind_host``), so loopback is the only
+    address whose occupant this instance has actually verified. A registry
+    entry naming any other host would be dialled without ever having been
+    identity-checked. See
+    test_a_peer_advertising_a_non_loopback_host_is_never_offered."""
+    try:
+        return ipaddress.ip_address(dial_host(host)).is_loopback
+    except ValueError:
+        return False
+
 
 def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] = None) -> Optional[dict]:
     """A live, identity-verified peer (via ``gpu_registry.list_gpu_peers``)
@@ -97,6 +135,9 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
     Matches by NAME only: it does not verify the underlying model files are
     identical, only that the peer's own chosen name for what it has loaded
     equals one this instance also uses for the same registry entry.
+
+    A peer whose registered ``host`` fails :func:`is_routable_peer_host` is
+    skipped and logged at WARNING, however well it matches.
 
     Best-effort: any failure reading the registry is logged and yields None,
     never raised, matching every other public function in gpu_registry."""
@@ -114,8 +155,16 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
         model = peer.get("model")
         if not model:
             continue
-        if model in names or model.casefold() in folded:
-            return peer
+        if model not in names and model.casefold() not in folded:
+            continue
+        if not is_routable_peer_host(peer.get("host")):
+            logger.warning(
+                "peer_routing: peer %s advertises '%s' at non-loopback host "
+                "%r; not offering it, because only a loopback address has had "
+                "its occupant identity-verified",
+                peer.get("instance_id"), model, peer.get("host"))
+            continue
+        return peer
     return None
 
 
@@ -162,9 +211,27 @@ async def forward(route: PeerRoute, request, path: str):
     retried locally; the next request for this model name proceeds as an
     ordinary local load because the route is gone. Any HTTP response the peer
     DOES return (2xx or not) is passed through unchanged - that is a real
-    answer from a live peer, not "peer unavailable"."""
+    answer from a live peer, not "peer unavailable".
+
+    A *route* whose host fails :func:`is_routable_peer_host` is refused before
+    the request body or the ``Authorization`` header is built: the route is
+    CLEARED, a WARNING is logged, and ``HTTPException(502, ...)`` is raised.
+    ``find_offer`` already refuses to offer such a peer, so this is the second
+    of two checks and holds however the ``PeerRoute`` was constructed. See
+    test_forward_refuses_a_non_loopback_route_without_sending_the_key."""
     from fastapi import HTTPException
     from fastapi.responses import StreamingResponse
+
+    if not is_routable_peer_host(route.host):
+        clear_route(route.model)
+        logger.warning(
+            "peer_routing: refusing to forward '%s' to non-loopback host %r "
+            "(peer %s); clearing the route without sending the credential",
+            route.model, route.host, route.instance_id)
+        raise HTTPException(
+            502, f"Route for '{route.model}' names a non-loopback peer host "
+            f"{route.host!r}, which this instance cannot identity-verify; the "
+            "route has been cleared. Retry to load a local copy.")
 
     body = await request.body()
     fwd_headers = {"Authorization": f"Bearer {route.api_key}"}

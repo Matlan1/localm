@@ -12,6 +12,13 @@ from pydantic import BaseModel
 
 import localm.inference.http_server as _hs
 from localm import scopes
+from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threadpool_bounded
+
+# Budget for run_in_threadpool_bounded() below. A peer lookup reads the
+# machine-wide registry directory and then runs one /whoami probe per
+# live-pid entry at gpu_registry.list_gpu_peers' own 0.7s timeout, so this
+# sits well above the worst case for a realistic number of local instances.
+_PEER_LOOKUP_TIMEOUT_S = 20.0
 
 
 class PeerRouteAccept(BaseModel):
@@ -45,10 +52,18 @@ def register(app: FastAPI, ctx) -> None:
         name = _resolve_requested_name(model_id)
         if not name:
             return {"available": False, "peer": None}
-        registry = load_registry()
-        canonical, aliases = peer_routing.registry_name_and_aliases(registry, name)
         self_id = (_hs._gpu_coord or {}).get("instance_id") if _hs._gpu_coord else None
-        peer = peer_routing.find_offer(canonical, aliases, exclude_self_id=self_id)
+
+        def _lookup():
+            registry = load_registry()
+            canonical, aliases = peer_routing.registry_name_and_aliases(registry, name)
+            return peer_routing.find_offer(canonical, aliases, exclude_self_id=self_id)
+
+        try:
+            peer = await run_in_threadpool_bounded(
+                _lookup, timeout=_PEER_LOOKUP_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Looking for a peer with '{name}' loaded timed out: {e}")
         if peer is None:
             return {"available": False, "peer": None}
         return {"available": True, "peer": {
@@ -74,19 +89,31 @@ def register(app: FastAPI, ctx) -> None:
         api_key = body.api_key.strip()
         if not instance_id or not api_key:
             raise HTTPException(400, "instance_id and api_key are required")
-        registry = load_registry()
-        canonical, aliases = peer_routing.registry_name_and_aliases(registry, name)
         self_id = (_hs._gpu_coord or {}).get("instance_id") if _hs._gpu_coord else None
-        peer = peer_routing.find_offer(canonical, aliases, exclude_self_id=self_id)
-        if peer is None or peer.get("instance_id") != instance_id:
+
+        def _verify_and_store():
+            registry = load_registry()
+            canonical, aliases = peer_routing.registry_name_and_aliases(registry, name)
+            peer = peer_routing.find_offer(canonical, aliases, exclude_self_id=self_id)
+            if peer is None or peer.get("instance_id") != instance_id:
+                return None
+            route = peer_routing.PeerRoute(
+                model=name, instance_id=peer.get("instance_id"),
+                host=peer.get("host"), port=int(peer.get("port")),
+                scheme=peer.get("scheme") or "http", api_key=api_key)
+            peer_routing.set_route(route)
+            return route
+
+        try:
+            route = await run_in_threadpool_bounded(
+                _verify_and_store, timeout=_PEER_LOOKUP_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Verifying peer '{instance_id}' timed out: {e}")
+        if route is None:
             raise HTTPException(
-                409, f"Peer instance '{instance_id}' is no longer live or no "
-                f"longer has '{name}' loaded; re-check available peers.")
-        route = peer_routing.PeerRoute(
-            model=name, instance_id=peer.get("instance_id"),
-            host=peer.get("host"), port=int(peer.get("port")),
-            scheme=peer.get("scheme") or "http", api_key=api_key)
-        peer_routing.set_route(route)
+                409, f"Peer instance '{instance_id}' is no longer live, no "
+                f"longer has '{name}' loaded, or is not reachable at a "
+                "loopback address; re-check available peers.")
         return {"status": "routed", "model": name, "peer": route.safe_dict()}
 
     @app.delete("/v1/models/{model_id}/peer-route",

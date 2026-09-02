@@ -95,6 +95,43 @@ latter would flag these two as violations:
                                  sent through the same host-pinned
                                  safe_fetch_bytes.
 
+  localm/peer_routing.py, forward()
+                                 forwards a chat/completion request to a
+                                 SIBLING instance on this machine, using THAT
+                                 peer's own real API key, which the user typed
+                                 into POST /v1/models/{id}/peer-route (scope
+                                 MODELS_WRITE) when they accepted the offer.
+                                 The same classification as gui/cli.py's
+                                 _mount_remote_gui above: this process's own
+                                 get_api_key() is not the right credential for
+                                 a different instance's home, so
+                                 resolve_bearer_headers does not apply. The
+                                 key is held in process memory only, never
+                                 persisted, and PeerRoute.safe_dict() excludes
+                                 it from every response.
+
+                                 The reason this entry could not simply be
+                                 added when the site landed: the destination
+                                 was not the endpoint that had been identity-
+                                 verified. gpu_registry.list_gpu_peers runs
+                                 its /whoami handshake with no bind_host, so
+                                 it verifies 127.0.0.1:port, while
+                                 peer_routing._peer_url dials
+                                 self_connect_host(entry["host"]), which
+                                 returns a non-loopback literal as itself. A
+                                 registry entry naming any other host would
+                                 have received the user's key over a
+                                 connection whose occupant was never checked,
+                                 in cleartext whenever scheme was "http".
+                                 peer_routing.is_routable_peer_host now
+                                 requires the dialled address to be a loopback
+                                 literal, enforced both in find_offer (such a
+                                 peer is never offered) and at the top of
+                                 forward() itself (before the body is read or
+                                 the header is built), so the verified
+                                 endpoint and the credential's destination are
+                                 the same one.
+
 If you land a new site here, EITHER route it through
 ``auth.resolve_bearer_headers`` (the common case) OR add it to the allowlist
 below with a review comment matching the rigor above - never widen the scan
@@ -121,6 +158,7 @@ _REVIEWED_SITES = {
     ("localm/plugins/gui/cli.py", "_mount_remote_gui", "f'Bearer {token}'"),
     ("localm/discover.py", "_hf_auth_headers", "f'Bearer {token}'"),
     ("localm/model_manager/sources.py", "_civitai_get", "f'Bearer {api_key}'"),
+    ("localm/peer_routing.py", "forward", "f'Bearer {route.api_key}'"),
 }
 
 
