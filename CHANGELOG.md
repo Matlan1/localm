@@ -382,10 +382,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   made the part of llama.cpp that splits text into words abort. That took the
   whole model process down with it: the reply was lost, the model was unloaded,
   and anything else in flight died with it. No unusual message was needed and
-  the same input crashed it every time. Such text is now refused with a clear
-  message naming what was too long and where, and the model stays loaded and
-  serving. Ordinary writing is unaffected, since punctuation and line breaks
-  end a run, and models with unaffected tokenizers are not checked at all.
+  the same input crashed it every time. Such text is now refused before it
+  reaches the tokenizer, with a message that quotes the run it objected to and
+  says how long a run that tokenizer allows, and the model stays loaded and
+  keeps serving everything else. Embedding and image prompts are covered too.
+  Ordinary writing is unaffected, since punctuation and line breaks end a run,
+  and models with unaffected tokenizers are not checked at all.
 - **A bug report now hides credentials that were logged as structured data, not
   just ones written as plain settings.** A report already blanked out things
   like `api_key=...` and `Authorization:` headers before you sent it, but a
