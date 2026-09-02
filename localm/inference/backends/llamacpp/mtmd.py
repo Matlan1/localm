@@ -255,13 +255,22 @@ def _load_lib() -> ctypes.CDLL:
 #
 # llama.cpp's own tokenizer trace echoes whatever it is handed via an
 # "add_text: <text>" line on stderr, so a reader of a captured/debug load log who
-# sees "add_text: aaaa..." followed by an empty "add_text: " is looking at these
+# sees "add_text: ab. ab. ..." followed by an empty "add_text: " is looking at these
 # two probe calls, in order - not a leaked user prompt. Both are text-only calls
 # with no marker/bitmaps, so nothing else runs during them (see _probe_n_tokens's
 # own docstring); llama.py's caller wraps this whole constructor call so neither
 # line reaches the console.
-_PROBE_CONTROL = b"a" * 256
-_PROBE_EMBEDDED_NUL = b"\x00" + b"a" * 255
+# The filler carries punctuation every few bytes, so its longest unbroken run of
+# one character class is 3. A 256-byte run of plain letters is above the length
+# at which several pre-tokenizer regexes abort the process (see
+# pretokenizer_guard), and this probe runs before any caller text exists, so the
+# guard cannot cover it. The 256-byte TOTAL above is unchanged and stays
+# load-bearing for the reason given there; what the bytes CONTAIN is free, as
+# long as the control is non-empty text and the discriminator keeps its leading
+# NUL. See test_the_probe_keeps_the_properties_it_measures.
+_PROBE_FILLER = b"ab. " * 64
+_PROBE_CONTROL = _PROBE_FILLER
+_PROBE_EMBEDDED_NUL = b"\x00" + _PROBE_FILLER[:255]
 
 
 def _probe_n_tokens(m: ctypes.CDLL, ctx: int, cls: type, raw: bytes) -> Optional[int]:

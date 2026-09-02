@@ -23,6 +23,8 @@ import time
 import uuid
 from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional, Tuple
 
+from localm.inference import pretokenizer_guard
+
 from . import _api as api
 from ._structs import (
     llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
@@ -305,8 +307,19 @@ class _Tokenizer:
     def __init__(self, model_ptr: int, ctx_ptr: int) -> None:
         self._vocab = api.llama_model_get_vocab(model_ptr)
         self._ctx   = ctx_ptr
+        # Read once per load, not per encode: the value cannot change while the
+        # model is loaded, and encode() runs on every request.
+        self._pre_type = pretokenizer_guard.read_pre_type(model_ptr, api)
+        if pretokenizer_guard.policy_for(self._pre_type) is not None:
+            from localm.debuglog import logger
+            logger.warning(
+                "tokenizer: this model declares tokenizer.ggml.pre=%r, whose "
+                "pre-tokenizer regex aborts the process on long unbroken runs "
+                "of one character class. Such input will be refused rather "
+                "than tokenised.", self._pre_type)
 
     def encode(self, text: str, add_bos: bool = True) -> List[int]:
+        pretokenizer_guard.check_text(self._pre_type, text)
         raw = text.encode("utf-8", errors="replace")
         # First call: find required size (returns negative if buffer too small)
         n_max = len(raw) + 128
@@ -1876,6 +1889,10 @@ class LlamaCpp:
                     self.chat_template_fallback_reason = fallback_reason
                 bos_markers = ("<bos>", "<s>", "﻿")
                 add_special = not any(prompt.startswith(m) for m in bos_markers)
+                # mtmd_tokenize runs the same pre-tokenizer over the text parts
+                # of this prompt, so the vision path needs the same check the
+                # text path gets in _Tokenizer.encode.
+                pretokenizer_guard.check_text(self._tokenizer._pre_type, prompt)
 
                 # Stays on _quiet_stderr rather than _generate()'s
                 # dedup_native_stderr: below, _ctx() is entered once for the mtmd

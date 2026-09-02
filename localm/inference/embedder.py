@@ -48,6 +48,7 @@ from typing import Callable, List, Optional
 
 from localm import pathscrub
 from localm.debuglog import dedup_native_stderr, logger
+from localm.inference import pretokenizer_guard
 from localm.inference.backends.llamacpp._sizing import VramSizingMixin
 
 # Known small embedding models, keyed by friendly name -> (hf_repo, filename).
@@ -540,6 +541,7 @@ class GGUFEmbedder:
         self._ctx = None
         self._vocab = None
         self._mem = None
+        self._pre_type = None
         self.dim = 0
         # What the GGUF declares versus what is actually pooled with. Reported
         # up to IsolatedEmbedder through the runner's load meta.
@@ -584,6 +586,14 @@ class GGUFEmbedder:
             # Read what the model declares BEFORE creating the context; a
             # metadata read needs no context.
             self.declared_pooling = declared_pooling_type(self._model, api)
+            self._pre_type = pretokenizer_guard.read_pre_type(self._model, api)
+            if pretokenizer_guard.policy_for(self._pre_type) is not None:
+                logger.warning(
+                    "embedder %s: declares tokenizer.ggml.pre=%r, whose "
+                    "pre-tokenizer regex aborts the process on long unbroken "
+                    "runs of one character class. Such text will be refused "
+                    "rather than embedded.",
+                    Path(model_path).name, self._pre_type)
             self.pooling_type = _effective_pooling(pooling_type, self.declared_pooling)
             logger.debug("embedder %s: declared pooling %s, using %s",
                          Path(model_path).name, pooling_name(self.declared_pooling),
@@ -623,6 +633,7 @@ class GGUFEmbedder:
         so an empty list is an unambiguous "could not tokenize this at all"
         signal to callers, never a legitimate zero-token text."""
         api = self._api
+        pretokenizer_guard.check_text(self._pre_type, text or " ")
         raw = (text or " ").encode("utf-8")
         buf = (self._llama_token * self._effective_seq_ctx)()
         n = api.llama_tokenize(self._vocab, raw, len(raw), buf,

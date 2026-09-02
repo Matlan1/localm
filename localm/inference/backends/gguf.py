@@ -26,7 +26,7 @@ from typing import Iterator, List, Optional
 
 from localm.console import console
 
-from .base import BaseBackend, ModelLoadCancelled
+from .base import BaseBackend, ModelLoadCancelled, PretokenizerUnsafeInputError
 from .llamacpp._runner import RunnerBusy
 from .llamacpp._sizing import VramSizingMixin
 
@@ -560,6 +560,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("gguf count_messages_tokens: worker busy with a live "
                            "stream; using the heuristic estimate")
+            except PretokenizerUnsafeInputError:
+                # The worker REFUSED this text; it did not fail. Falling back to
+                # an estimate would answer a request that must be rejected, and
+                # the once-per-process notice below would report a permanent
+                # degradation caused by one request.
+                raise
             except Exception as e:
                 # An unexpected RPC failure (worker crash, timeout, encode error).
                 # The super() return below dispatches back onto this class's

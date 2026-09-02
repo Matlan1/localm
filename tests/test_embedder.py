@@ -1346,6 +1346,10 @@ def _stub_embedder(n_ctx=8, n_seq_max=emb._EMBED_BATCH_TARGET,
     # Also set by __init__: the per-sequence token budget, which equals n_ctx
     # unless the runtime sliced the KV cache.
     e._effective_seq_ctx = n_ctx if effective_seq_ctx is None else effective_seq_ctx
+    # Also set by __init__: the model's declared tokenizer.ggml.pre. None means
+    # "not one of the pre-tokenizers that abort on long runs", so _tokenize
+    # scans nothing and these stubs keep their previous behaviour.
+    e._pre_type = None
     return e
 
 

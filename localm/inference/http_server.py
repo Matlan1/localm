@@ -44,6 +44,7 @@ from localm.inference.backends.base import (
     ImageDecodeUnavailable,
     InvalidGrammarError,
     ModelLoadCancelled,
+    PretokenizerUnsafeInputError,
     TriggerValidatorUnavailableError,
     UnsupportedInputError,
     VisionInputError,
@@ -4815,7 +4816,7 @@ async def _stream_sse(
     _audit_exchange(audit, transcript, messages, reply)
 
     # Count tokens on the streamed text - what the client actually received
-    completion_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_tokens, streamed)
+    completion_tokens = await _count_streamed_tokens(engine, streamed)
 
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
@@ -4957,7 +4958,7 @@ async def _stream_sse_completion(
         reply = await pipeline.run_outlet(streamed, messages, ctx)
     _audit_exchange(audit, transcript, messages, reply)
 
-    completion_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_tokens, streamed)
+    completion_tokens = await _count_streamed_tokens(engine, streamed)
     # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
     # not "stop", so a client keying off finish_reason detects the failure even
     # though the error text was already streamed as a visible chunk.
@@ -5143,6 +5144,7 @@ _BACKEND_ERROR_STATUS: tuple = (
     (InvalidGrammarError, 400),
     (EmbedBatchTooLargeError, 413),
     (ContextCapacityExceededError, 413),
+    (PretokenizerUnsafeInputError, 400),
 )
 
 # The same classes as a plain tuple, for use as an `except` clause. Derived from
@@ -5167,6 +5169,21 @@ def backend_error_status(exc: BaseException) -> Optional[int]:
         if isinstance(exc, exc_type):
             return status
     return None
+
+
+async def _count_streamed_tokens(engine, streamed: str) -> int:
+    """Token count of text already delivered to the client, for the usage block.
+
+    Falls back to the chars/4 estimate when the tokenizer REFUSES the text: the
+    content has been streamed already, so raising here would end the response
+    with no terminal chunk, no usage and no ``[DONE]``. A model can emit a run
+    the pre-tokenizer aborts on just as a caller can send one.
+    """
+    from localm.inference.pretokenizer_guard import count_tokens_or_estimate
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, count_tokens_or_estimate, engine.count_tokens, streamed,
+        "the generated text")
 
 
 def inference_error_text(exc: BaseException) -> str:
@@ -5288,8 +5305,7 @@ async def _complete(
     from localm.textnorm import split_think
     answer, reasoning = split_think(text)
 
-    completion_tokens = await asyncio.get_running_loop().run_in_executor(
-        None, engine.count_tokens, text)
+    completion_tokens = await _count_streamed_tokens(engine, text)
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

@@ -101,7 +101,7 @@ from typing import Optional
 from localm.inference.backends.base import (
     ContextCapacityExceededError,
     GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled,
-    UnsupportedInputError)
+    PretokenizerUnsafeInputError, UnsupportedInputError)
 
 
 class RunnerBusy(Exception):
@@ -335,6 +335,13 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 # any native inference begins - the loaded model is unharmed and
                 # the worker can keep serving requests without reloading.
                 resp_q.put(("error", str(e), "ContextCapacityExceededError"))
+            except PretokenizerUnsafeInputError as e:
+                # Text this model's pre-tokenizer regex aborts the process on.
+                # Detected in pure Python before llama_tokenize is called, so
+                # nothing native ran and this worker keeps serving. Without this
+                # arm it would fall through to the uncaught path below and kill
+                # the process over a request the caller can resend differently.
+                resp_q.put(("error", str(e), "PretokenizerUnsafeInputError"))
             except GrammarUnsupportedError as e:
                 # _build_sampler REFUSES a lazy grammar it cannot apply rather
                 # than building a chain with no grammar stage and generating
@@ -371,6 +378,8 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
         if name == "count_tokens":
             try:
                 resp_q.put(("ok", worker.count_tokens(payload)))
+            except PretokenizerUnsafeInputError as e:
+                resp_q.put(("error", str(e), "PretokenizerUnsafeInputError"))
             except Exception as e:
                 resp_q.put(("error", str(e)))
             continue
@@ -378,6 +387,8 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
         if name == "count_messages_tokens":
             try:
                 resp_q.put(("ok", worker.count_messages_tokens(payload)))
+            except PretokenizerUnsafeInputError as e:
+                resp_q.put(("error", str(e), "PretokenizerUnsafeInputError"))
             except Exception as e:
                 resp_q.put(("error", str(e)))
             continue
@@ -902,6 +913,11 @@ class ModelRunner:
                             # NOT a RuntimeError, so GgufBackend does not unload
                             # the model. ContextCapacityExceededError is a ValueError.
                             raise ContextCapacityExceededError(msg)
+                        if tag == "PretokenizerUnsafeInputError":
+                            # Refused before any native call. NOT a RuntimeError,
+                            # so GgufBackend does not unload the model.
+                            # PretokenizerUnsafeInputError is a ValueError.
+                            raise PretokenizerUnsafeInputError(msg)
                         raise RuntimeError(msg)
                     else:
                         raise RuntimeError(f"Unexpected response during generation: {result!r}")
@@ -1000,6 +1016,8 @@ class ModelRunner:
                     raise GrammarUnsupportedError(msg)
                 if tag == "ContextCapacityExceededError":
                     raise ContextCapacityExceededError(msg)
+                if tag == "PretokenizerUnsafeInputError":
+                    raise PretokenizerUnsafeInputError(msg)
                 raise RuntimeError(msg)
             raise RuntimeError(f"Unexpected response for '{name}': {result!r}")
         finally:

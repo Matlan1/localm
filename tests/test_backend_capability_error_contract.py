@@ -32,6 +32,7 @@ from localm.inference.backends.base import (
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
     InvalidGrammarError,
+    PretokenizerUnsafeInputError,
     TriggerValidatorUnavailableError,
     UnsupportedInputError,
     VisionInputError,
@@ -273,6 +274,7 @@ class TestBackendErrorStatusTable:
         (TriggerValidatorUnavailableError("probe pool busy"), 503),
         (EmbedBatchTooLargeError("too many"), 413),
         (ContextCapacityExceededError("too long"), 413),
+        (PretokenizerUnsafeInputError("run too long"), 400),
     ])
     def test_each_family_maps_to_its_status(self, exc, status):
         assert backend_error_status(exc) == status
@@ -323,6 +325,9 @@ class TestNonStreamingReportsTheReason:
          "cannot accept image input"),
         (InvalidGrammarError("grammar failed to parse at 'root'"), 400,
          "failed to parse"),
+        (PretokenizerUnsafeInputError(
+            "This model's pre-tokenizer (llama4) crashes on an unbroken run of "
+            "more than 64 letters"), 400, "unbroken run"),
     ])
     def test_each_family_returns_its_status_and_its_reason(self, exc, status, needle):
         r = _post(_mock_engine(stream_exc=exc),
