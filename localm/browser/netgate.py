@@ -63,18 +63,17 @@ def decide(url: str, *, extra_deny: Iterable[str] = (),
 
     try:
         netpolicy.check_url(url)
+        host = netpolicy.check_url_shape(url)
+        for pattern in netpolicy._domain_list(list(extra_deny)):
+            if netpolicy._host_matches(host, pattern):
+                return f"'{host}' is on the browser deny list"
+        allow = netpolicy._domain_list(list(extra_allow))
+        if allow and not any(netpolicy._host_matches(host, p) for p in allow):
+            return f"'{host}' is not on the browser allow list"
     except netpolicy.NetworkPolicyError as exc:
         return str(exc)
     except Exception as exc:                       # noqa: BLE001
         return f"network policy could not be evaluated: {exc}"
-
-    host = netpolicy.check_url_shape(url)
-    for pattern in netpolicy._domain_list(list(extra_deny)):
-        if netpolicy._host_matches(host, pattern):
-            return f"'{host}' is on the browser deny list"
-    allow = netpolicy._domain_list(list(extra_allow))
-    if allow and not any(netpolicy._host_matches(host, p) for p in allow):
-        return f"'{host}' is not on the browser allow list"
     return None
 
 

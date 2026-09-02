@@ -146,6 +146,19 @@ desktop = [
     "pywebview[qt]>=6.2.1; sys_platform == 'linux'",
 ]
 
+# Automated web browser the model can drive: navigate, read, click, fill,
+# screenshot. This installs the DRIVER only. The browser build it drives is a
+# separate download, and playwright pins one exact build revision per version,
+# so this extra alone does not make the browser runnable:
+#   python -m playwright install chromium
+# must run too, and must run again after any change to the pin below. Keep the
+# upper bound: widening it silently leaves the installed browser build behind
+# the driver, which then refuses to launch.
+# Install with:  pip install "localm[browser]"
+browser = [
+    "playwright>=1.61,<1.62",
+]
+
 # AMD RDNA2 (RX 6xxx) GPU stack - ROCm 7.13.0, Python 3.12, Windows
 # Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
 gpu = [
