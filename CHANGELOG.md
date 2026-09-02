@@ -151,9 +151,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   install the browser extra, download the browser it drives, and switch it on
   in Settings, the agent can open a page, read it, click, fill in forms, take
   screenshots, and read the page's console and network activity. It reaches
-  only what your network policy already allows: every request the page makes,
-  including images and scripts the page pulls in on its own, is checked, and
-  anything refused is reported with the reason. An API key needs the new
+  only what your network policy already allows: every request the page makes is
+  checked, including images and scripts the page pulls in on its own and every
+  hop of a redirect, and anything refused is reported with the reason.
+  WebSocket connections are refused rather than relayed, and say so. An API key
+  needs the new
   browser capability, which is separate from the coding agent's shell access,
   so you can grant one without the other.
 

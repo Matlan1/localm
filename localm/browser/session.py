@@ -20,6 +20,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+from urllib.parse import urljoin
 
 from localm.browser import netgate
 
@@ -30,6 +31,9 @@ DEFAULT_CALL_TIMEOUT = 45.0
 
 #: Console lines, allowed URLs and blocked-request records kept per session.
 _LOG_CAP = 500
+
+#: Redirect hops followed for one request before it is refused.
+_MAX_REDIRECTS = 10
 
 
 class BrowserUnavailableError(RuntimeError):
@@ -184,33 +188,82 @@ class BrowserSession:
 
     # -- request gating ----------------------------------------------------- #
 
+    def _refuse(self, url: str, reason: str) -> None:
+        if len(self.state.blocked) < _LOG_CAP:
+            self.state.blocked.append(Blocked(url=url, reason=reason))
+        logger.info("browser %s blocked %s: %s", self.session_id, url, reason)
+
     async def _on_route(self, route, request) -> None:
         url = request.url
         reason = await netgate.decide_async(
             url, extra_deny=self.extra_deny, extra_allow=self.extra_allow)
-        if reason is None:
-            if len(self.state.requests) < _LOG_CAP:
-                self.state.requests.append(url)
+        if reason is not None:
+            self._refuse(url, reason)
+            await route.abort()
+            return
+        if len(self.state.requests) < _LOG_CAP:
+            self.state.requests.append(url)
+        # A WebSocket handshake is not fetchable, and _on_ws_route owns it. Hand
+        # it straight on rather than aborting it on a failed fetch.
+        if netgate._scheme_of(url) in netgate.WEBSOCKET_SCHEMES:
             await route.continue_()
             return
-        if len(self.state.blocked) < _LOG_CAP:
-            self.state.blocked.append(Blocked(url=url, reason=reason))
-        logger.info("browser %s blocked %s: %s", self.session_id, url, reason)
+        # The redirect chain is walked HERE, one hop at a time, and every hop is
+        # decided. max_redirects=0 stops fetch() following them internally, and
+        # the final response is fulfilled so the browser never follows one
+        # itself: a browser-followed redirect is auto-continued without creating
+        # a route, so its target would never be decided.
+        current = url
+        for _ in range(_MAX_REDIRECTS):
+            try:
+                response = await route.fetch(url=current, max_redirects=0)
+            except Exception as exc:                 # noqa: BLE001
+                logger.debug("browser %s fetch failed for %s: %s",
+                             self.session_id, current, exc)
+                await route.abort()
+                return
+            if not (300 <= response.status < 400):
+                await route.fulfill(response=response)
+                return
+            target = self._redirect_target(current, response)
+            if target is None:
+                await route.fulfill(response=response)
+                return
+            hop = await netgate.decide_async(
+                target, extra_deny=self.extra_deny, extra_allow=self.extra_allow)
+            if hop is not None:
+                self._refuse(target, hop)
+                await route.abort()
+                return
+            if len(self.state.requests) < _LOG_CAP:
+                self.state.requests.append(target)
+            current = target
+        self._refuse(current, "too many redirects")
         await route.abort()
 
+    @staticmethod
+    def _redirect_target(url: str, response) -> Optional[str]:
+        """The absolute URL a 3xx points at, or None when it names none."""
+        headers = response.headers or {}
+        location = headers.get("location") or headers.get("Location")
+        return urljoin(url, location) if location else None
+
     async def _on_ws_route(self, ws) -> None:
+        """Refuse every WebSocket, with the policy's reason where it has one.
+
+        A routed WebSocket only reaches its server if this handler connects it,
+        and connecting does not work while requests are being fulfilled for
+        redirect gating: the handshake never leaves the browser. Rather than
+        leave a socket that looks connected and silently dies, it is closed here
+        and the reason is recorded, so the caller is told instead of guessing.
+        """
         url = getattr(ws, "url", "") or ""
         reason = await netgate.decide_async(
             url, extra_deny=self.extra_deny, extra_allow=self.extra_allow)
         if reason is None:
-            if len(self.state.requests) < _LOG_CAP:
-                self.state.requests.append(url)
-            ws.connect_to_server()
-            return
-        if len(self.state.blocked) < _LOG_CAP:
-            self.state.blocked.append(Blocked(url=url, reason=reason))
-        logger.info("browser %s blocked websocket %s: %s",
-                    self.session_id, url, reason)
+            reason = ("WebSocket connections are not available in the automated "
+                      "browser")
+        self._refuse(url, reason)
         await ws.close()
 
     def _on_console(self, msg) -> None:
@@ -229,17 +282,32 @@ class BrowserSession:
         if pre is not None:
             return {"ok": False, "url": url, "refused": pre}
 
+        mark = len(self.state.blocked)
+
         async def go():
             resp = await self._page.goto(url, timeout=timeout_ms)
             return {"ok": True, "url": self._page.url,
                     "status": resp.status if resp else None,
                     "title": await self._page.title()}
         try:
-            return self._call(go)
+            res = self._call(go)
         except Exception as exc:                     # noqa: BLE001
-            blocked = [b.reason for b in self.state.blocked if b.url == url]
-            return {"ok": False, "url": url, "error": str(exc),
-                    "refused": blocked[0] if blocked else None}
+            res = {"ok": False, "url": url, "error": str(exc)}
+        # An error page is not a load. Chromium reports the failed navigation as
+        # a completed one sitting on its own error URL.
+        if res.get("ok") and str(res.get("url", "")).startswith("chrome-error://"):
+            res = {"ok": False, "url": url, "error": "the page did not load"}
+        # A refusal recorded DURING this call is the real reason a failed
+        # navigation failed, and it names the destination, which after a
+        # redirect is not the URL that was asked for. A refusal on a
+        # SUBRESOURCE does not fail the navigation: the page itself loaded.
+        if not res.get("ok"):
+            refused = self.state.blocked[mark:]
+            if refused:
+                res["refused"] = refused[0].reason
+                res["refused_url"] = refused[0].url
+        res.setdefault("refused", None)
+        return res
 
     def read_text(self, *, max_chars: int = 20000) -> str:
         async def read():

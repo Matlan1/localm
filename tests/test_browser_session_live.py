@@ -57,6 +57,21 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):                                # noqa: N802
         type(self).seen.append(self.path)
+        port = self.server.server_address[1]
+        # Redirect fixtures. Without a 3xx in the fixture's value space, no test
+        # here can express a redirect bypass at all.
+        hops = {
+            "/redir-denied": "http://127.0.0.1:%d/TARGET" % port,
+            "/chain-1":      "http://localhost:%d/chain-2" % port,
+            "/chain-2":      "http://127.0.0.1:%d/TARGET" % port,
+            "/redir-ok":     "http://localhost:%d/index.html" % port,
+        }
+        if self.path in hops:
+            self.send_response(302)
+            self.send_header("Location", hops[self.path])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path.endswith(".png"):
             body = b"\x89PNG\r\n\x1a\n"
             ctype = "image/png"
@@ -212,27 +227,74 @@ def _ws_seen():
             and not p.startswith("/ws-page")]
 
 
-def test_a_websocket_to_a_denied_host_never_connects(browser, origin):
-    """WebSockets are NOT covered by the ordinary request route and need their
-    own handler. Without one they reach any host the page names, whatever the
-    policy says."""
+def test_no_websocket_reaches_its_host(browser, origin):
+    """WebSockets are refused, and the refusal is reported rather than left as a
+    socket that looks open and dies. The denied-host reason is the policy's own;
+    an otherwise-allowed host is refused for the stated availability reason."""
     port = origin.server_address[1]
     _set(net_mode="allow", net_allow_private=True, net_deny=["127.0.0.1"])
     b = browser()
     assert b.navigate("http://localhost:%d/ws-page.html" % port)["ok"] is True
     time.sleep(1.5)
     assert _ws_seen() == [], (
-        "a websocket reached a denied host: %r" % (_Recorder.seen,))
-    assert any("/ws" in x["url"] for x in b.blocked_requests()), b.blocked_requests()
+        "a websocket reached its host: %r" % (_Recorder.seen,))
+    blocked = [x for x in b.blocked_requests() if x["url"].startswith("ws")]
+    assert blocked, b.blocked_requests()
+    assert "deny list" in blocked[0]["reason"], blocked
 
 
-def test_a_websocket_to_an_allowed_host_still_connects(browser, origin):
-    """The control for the test above: without it, 'no websocket arrived' is
-    equally consistent with having broken every websocket."""
+def test_an_allowed_websocket_is_refused_for_the_stated_reason(browser, origin):
+    """The control for the shape above: with nothing denied, the refusal must
+    still happen and must NOT claim a policy reason it does not have."""
     port = origin.server_address[1]
     _set(net_mode="allow", net_allow_private=True)
     b = browser()
     assert b.navigate("http://localhost:%d/ws-page.html" % port)["ok"] is True
     time.sleep(1.5)
-    assert _ws_seen(), (
-        "an allowed websocket never reached the origin: %r" % (_Recorder.seen,))
+    assert _ws_seen() == [], _Recorder.seen
+    blocked = [x for x in b.blocked_requests() if x["url"].startswith("ws")]
+    assert blocked, "the refusal was not recorded, so nothing tells the caller"
+    assert "not available" in blocked[0]["reason"], blocked
+
+
+# --------------------------------------------------------------------------- #
+#  Redirects. A browser follows these itself, and a followed redirect is not
+#  routed, so its target would never be decided. Every hop is gated instead.
+# --------------------------------------------------------------------------- #
+
+def test_a_redirect_to_a_denied_host_never_reaches_it(browser, origin):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True, net_deny=["127.0.0.1"])
+    b = browser()
+    res = b.navigate("http://localhost:%d/redir-denied" % port)
+    assert res["ok"] is False, res
+    assert "deny list" in (res.get("refused") or ""), res
+    assert res.get("refused_url", "").endswith("/TARGET"), res
+    assert "/TARGET" not in _Recorder.seen, (
+        "the denied redirect target was fetched: %r" % (_Recorder.seen,))
+
+
+def test_a_two_hop_redirect_chain_is_gated_at_every_hop(browser, origin):
+    """One hop of checking is not enough: an allowed host can redirect to
+    another allowed host that redirects to a denied one."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True, net_deny=["127.0.0.1"])
+    b = browser()
+    res = b.navigate("http://localhost:%d/chain-1" % port)
+    assert res["ok"] is False, res
+    assert "deny list" in (res.get("refused") or ""), res
+    assert "/chain-2" in _Recorder.seen, "the allowed middle hop should be followed"
+    assert "/TARGET" not in _Recorder.seen, (
+        "the denied end of the chain was fetched: %r" % (_Recorder.seen,))
+
+
+def test_an_allowed_redirect_still_follows(browser, origin):
+    """The control. Without it, 'the target was never fetched' is equally
+    consistent with having broken redirects altogether."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+    res = b.navigate("http://localhost:%d/redir-ok" % port)
+    assert res["ok"] is True, res
+    assert "/index.html" in _Recorder.seen, _Recorder.seen
+    assert "page" in b.read_text()

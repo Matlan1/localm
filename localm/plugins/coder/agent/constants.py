@@ -89,7 +89,7 @@ _SCOPED_TOOLS: frozenset[str] = frozenset({
     "list_dir", "tree",
     # The rest of the file-reading/writing tools.
     "grep", "search_files", "search_replace", "read_env",
-    "edit_notebook_cell", "generate_image",
+    "edit_notebook_cell", "generate_image", "browser_screenshot",
 })
 
 # Tools NOT confined by the scope glob: git_diff / git_log take a git
@@ -207,6 +207,7 @@ _SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
     "search_files":   ("path", "pattern"),
     "search_replace": ("glob",),
     "generate_image": ("output_path", "input_image"),
+    "browser_screenshot": ("output_path",),
 }
 
 # MCP (mcp_<server>_<tool>) and plugin (plugin_<plugin>_<export>) tools register
