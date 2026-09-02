@@ -349,3 +349,115 @@ class TestPinnedDiscriminator(unittest.TestCase):
     def test_absent_empty_and_the_sentinel_are_not_pinned(self):
         for name in (None, "", "   ", "localm"):
             self.assertFalse(hs._model_is_pinned(name), repr(name))
+
+
+# --------------------------------------------------------------------------- #
+#  Reconciliation with the shipped vision-mismatch 400                         #
+# --------------------------------------------------------------------------- #
+
+_IMAGE_MSG = [{
+    "role": "user",
+    "content": [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url",
+         "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+    ],
+}]
+
+
+@pytest.fixture
+def vision_server(tmp_path, monkeypatch):
+    """A text-only model loaded, and a genuinely vision-capable one registered.
+
+    The vision capability is REAL, not patched: a regular model file plus a
+    recorded projector that exists on disk is exactly what
+    model_vision_capability reads, so the routing decision here runs the shipped
+    probe rather than a stand-in for it."""
+    # SEPARATE directories on purpose: find_sibling_mmproj auto-detects a
+    # projector sitting NEXT TO a model file, so a shared folder would make the
+    # text-only model vision-capable too and leave nothing to route away from.
+    (tmp_path / "plain").mkdir()
+    (tmp_path / "seer").mkdir()
+    plain_path = tmp_path / "plain" / "plain.gguf"
+    plain_path.write_bytes(b"GGUF")
+    seer_path = tmp_path / "seer" / "seer.gguf"
+    seer_path.write_bytes(b"GGUF")
+    proj_path = tmp_path / "seer" / "seer-mmproj.gguf"
+    proj_path.write_bytes(b"GGUF")
+
+    registry = {
+        "plain": {"path": str(plain_path), "source": "local",
+                  "model_type": "llm"},
+        "seer": {"path": str(seer_path), "source": "local", "model_type": "llm",
+                 "mmproj": str(proj_path)},
+    }
+    engines: dict[str, FakeEngine] = {}
+
+    def factory(name):
+        e = engines.setdefault(name, FakeEngine(name))
+        e.supports_images = (name == "seer")
+        return e
+
+    monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+    monkeypatch.setattr("localm.model_manager.load_registry", lambda: registry)
+    monkeypatch.setattr("localm.model_manager.get_model_info",
+                        lambda name: (str(tmp_path / name / f"{name}.gguf"), "hint"))
+    monkeypatch.setattr("localm.model_manager.get_model_mmproj",
+                        lambda name, **kw: str(proj_path) if name == "seer" else None)
+    monkeypatch.setattr(hs, "_engine_factory", factory)
+
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._inference_sems.clear()
+    hs._last_activity_per_model.clear()
+    hs._active_model_name = None
+    hs._default_model_name = None
+    hs._engine = None
+    hs._inference_sem = None
+
+    startup = factory("plain")
+    startup.load()
+    with TestClient(hs.create_app(startup)) as client:
+        yield client, engines, registry
+
+
+class TestVisionMismatchReconciliation:
+    def test_the_shipped_probe_really_sees_the_fixture(self, vision_server):
+        """Guards the fixture itself: if this stopped being True the routing
+        tests below would pass for the wrong reason (nothing to route to)."""
+        _, _, registry = vision_server
+        from localm.model_manager import registry as R
+        assert R.model_vision_capability("seer", reg=registry) is True
+        assert R.model_vision_capability("plain", reg=registry) is False
+
+    def test_unpinned_image_request_now_ROUTES_instead_of_400(self, vision_server):
+        """The behaviour change the ADR asked for. This request used to be a 400
+        naming the text-only model; it is now answered by a model that can
+        actually see the picture."""
+        client, engines, _ = vision_server
+        r = client.post("/v1/chat/completions",
+                        json={"messages": _IMAGE_MSG, "stream": False})
+        assert r.status_code == 200
+        assert _answering_model(engines) == ["seer"]
+
+    def test_pinned_image_request_still_gets_the_shipped_400(self, vision_server):
+        """Unchanged for an explicit pin: dropping the picture silently is worse
+        than refusing, and swapping the model the user is looking at is out."""
+        client, engines, _ = vision_server
+        r = client.post("/v1/chat/completions",
+                        json={"model": "plain", "messages": _IMAGE_MSG,
+                              "stream": False})
+        assert r.status_code == 400
+        assert "cannot accept image" in r.json()["detail"]
+        assert _answering_model(engines) == []
+
+    def test_unpinned_image_request_with_no_capable_model_still_400s(
+            self, vision_server, monkeypatch):
+        """The honest fallback: with nowhere to route, the shipped refusal
+        stands rather than the picture being dropped."""
+        client, engines, registry = vision_server
+        registry.pop("seer")
+        r = client.post("/v1/chat/completions",
+                        json={"messages": _IMAGE_MSG, "stream": False})
+        assert r.status_code == 400
+        assert _answering_model(engines) == []
