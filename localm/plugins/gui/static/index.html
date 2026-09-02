@@ -670,39 +670,42 @@
     <!-- ============ KNOWLEDGE ============ -->
     <section id="view-knowledge" class="view">
       <div class="page">
-        <h2>Knowledge</h2>
-        <div class="sub">Index folders or files into collections, then pick a collection in
+        <h2 data-i18n="knowledge.title">Knowledge</h2>
+        <div class="sub" data-i18n-rich="knowledge.intro">Index folders or files into collections, then pick a collection in
         the chat parameters drawer - replies get grounded in the most relevant excerpts,
         with citations. Retrieval is BM25 (always works offline); when an embedding model is
         set up, semantic (vector) search is blended in. Collections live in the
         localm data directory under <code>rag/</code>.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
-            <div class="card-head-text"><h3>Embedding model</h3></div></div>
-          <div class="sub">Semantic search uses a small embedding model, loaded separately from
+            <div class="card-head-text"><h3 data-i18n="knowledge.embedCard.title">Embedding model</h3></div></div>
+          <div class="sub" data-i18n="knowledge.embedCard.intro">Semantic search uses a small embedding model, loaded separately from
           your chat model. Choose the built-in one (downloaded once, on this machine) or any
           model from your list. BM25 lexical search always works without one.</div>
-          <div id="kb-embed-status" class="sub">Checking…</div>
+          <div id="kb-embed-status" class="sub" data-i18n="knowledge.embed.status.checking">Checking…</div>
           <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
             <select id="kb-embed-model" style="max-width:340px"></select>
-            <button class="btn-primary" id="kb-embed-apply">Set up / apply</button>
+            <button class="btn-primary" id="kb-embed-apply" data-i18n="knowledge.embed.setupApply">Set up / apply</button>
             <button class="btn-secondary" id="kb-embed-download" style="display:none"
-              title="One-time download of the configured model, blocked so far by the network policy. Changes no settings.">Download model now</button>
+              title="One-time download of the configured model, blocked so far by the network policy. Changes no settings."
+              data-i18n-title="knowledge.embed.downloadHint" data-i18n="knowledge.embed.downloadModelNow">Download model now</button>
           </div>
           <pre id="kb-embed-log" class="job-log" style="display:none"></pre>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
-            <div class="card-head-text"><h3>New collection</h3></div></div>
+            <div class="card-head-text"><h3 data-i18n="knowledge.newCollectionCard.title">New collection</h3></div></div>
           <div class="row">
-            <input type="text" id="kb-name" placeholder="name (spaces &amp; emoji ok)" spellcheck="false" style="max-width:260px">
-            <button class="btn-primary" id="kb-create">Create</button>
+            <input type="text" id="kb-name" placeholder="name (spaces &amp; emoji ok)" spellcheck="false" style="max-width:260px"
+                   data-i18n-placeholder="knowledge.name.placeholder">
+            <button class="btn-primary" id="kb-create" data-i18n="knowledge.createButton">Create</button>
           </div>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
-            <div class="card-head-text"><h3>Collections</h3></div></div>
-          <div class="check-row"><label title="Compute embeddings for semantic (vector) search in addition to BM25, when you add documents. Uses the embedding model set up above; BM25 lexical retrieval always works without one. Uncheck to index BM25-only (faster, no embedding model needed)."><input type="checkbox" id="kb-embed" checked> Compute embeddings when indexing (semantic search)</label></div>
+            <div class="card-head-text"><h3 data-i18n="knowledge.collectionsCard.title">Collections</h3></div></div>
+          <div class="check-row"><label title="Compute embeddings for semantic (vector) search in addition to BM25, when you add documents. Uses the embedding model set up above; BM25 lexical retrieval always works without one. Uncheck to index BM25-only (faster, no embedding model needed)."
+              data-i18n-title="knowledge.embedCheckbox.title" data-i18n="knowledge.embedCheckbox.label"><input type="checkbox" id="kb-embed" checked> Compute embeddings when indexing (semantic search)</label></div>
           <div id="kb-table"></div>
           <pre id="kb-log" class="job-log" style="display:none"></pre>
         </div>
@@ -992,7 +995,7 @@
                      actions, and this card's own copy says it cannot be undone.
                      Paired with btn-secondary, the shape used at every other
                      destructive site (knowledge.js, video.js, helpers.js). -->
-                <button class="btn-secondary btn-danger" id="gui-clear-convs">Delete all conversations</button>
+                <button class="btn-secondary btn-danger" id="gui-clear-convs" data-i18n="knowledge.clearConvs.button">Delete all conversations</button>
               </div>
             </section>
 
