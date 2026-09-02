@@ -314,13 +314,13 @@ class _Tokenizer:
         # Read once per load, not per encode: the value cannot change while the
         # model is loaded, and encode() runs on every request.
         self._pre_type = pretokenizer_guard.read_pre_type(model_ptr, api)
-        if pretokenizer_guard.policy_for(self._pre_type) is not None:
+        hazard = pretokenizer_guard.hazard_note(self._pre_type)
+        if hazard is not None:
             from localm.debuglog import logger
             logger.warning(
                 "tokenizer: this model declares tokenizer.ggml.pre=%r, whose "
-                "pre-tokenizer regex aborts the process on long unbroken runs "
-                "of one character class. Such input will be refused rather "
-                "than tokenised.", self._pre_type)
+                "pre-tokenizer regex %s. Such input will be refused rather "
+                "than tokenised.", self._pre_type, hazard)
 
     def encode(self, text: str, add_bos: bool = True, untrusted_ranges=()) -> List[int]:
         """Tokenise *text*, parsing control tokens everywhere except untrusted ranges.
