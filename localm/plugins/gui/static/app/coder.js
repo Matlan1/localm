@@ -1283,7 +1283,7 @@ export function showAuditModal(title, data) {
     body.appendChild(el("div", "sub", data.path));
     const filter = document.createElement("input");
     filter.type = "text";
-    filter.placeholder = "filter entries… (tool name, text, type)";
+    filter.placeholder = t("coder.log.filterPlaceholder");
     filter.className = "log-filter";
     filter.spellcheck = false;
     body.appendChild(filter);
@@ -1305,8 +1305,8 @@ export function showAuditModal(title, data) {
       }
     });
     if (!data.entries.length) {
-      body.appendChild(emptyState("clock", "No entries yet",
-        "Tool calls and events for this session appear here as they happen."));
+      body.appendChild(emptyState("clock", t("coder.log.emptyTitle"),
+        t("coder.log.emptyHint")));
     }
   });
 }
@@ -1322,18 +1322,18 @@ export async function openFilesModal() {
     data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
   } catch (e) {
-    toast("Could not load changed files: " + e.message, true);
+    toast(t("coder.files.loadFailed") + e.message, true);
     return;
   }
-  openModal("Files changed - " + sessionLabel(s.info), (body) => {
+  openModal(t("coder.files.modalTitle", { label: sessionLabel(s.info) }), (body) => {
     if (!data.files.length) {
-      body.appendChild(emptyState("file", "No files changed",
-        "Edits the agent makes this session appear here."));
+      body.appendChild(emptyState("file", t("coder.files.emptyTitle"),
+        t("coder.files.emptyHint")));
       return;
     }
     const diffBox = el("div", "files-diff");
     const showDiff = async (path) => {
-      diffBox.replaceChildren(el("div", "sub", "loading diff…"));
+      diffBox.replaceChildren(el("div", "sub", t("coder.files.loadingDiff")));
       try {
         const r = await fetch(
           `/api/coder/sessions/${s.info.id}/files/diff?path=` +
@@ -1341,28 +1341,29 @@ export async function openFilesModal() {
         const d = await r.json();
         if (!r.ok) throw new Error(d.detail || r.statusText);
         diffBox.replaceChildren(
-          d.diff ? renderDiff(d.diff) : el("div", "sub", "(no difference)"));
+          d.diff ? renderDiff(d.diff) : el("div", "sub", t("coder.files.noDifference")));
       } catch (e) {
-        diffBox.replaceChildren(el("div", "sub", "diff failed: " + e.message));
+        diffBox.replaceChildren(el("div", "sub", t("coder.files.diffFailed") + e.message));
       }
     };
     for (const f of data.files) {
       const row = el("div", "log-entry clickable");
-      row.appendChild(el("span", "t", f.created ? "new" : "edit"));
+      row.appendChild(el("span", "t", t(f.created ? "coder.files.tagNew" : "coder.files.tagEdit")));
       row.appendChild(document.createTextNode(
-        `${f.path} - ${f.writes} write(s)` + (f.exists ? "" : " (deleted since)")));
+        `${f.path}` + tn("coder.files.writeCount", f.writes)
+        + (f.exists ? "" : t("coder.files.deletedSince"))));
       row.onclick = () => showDiff(f.path);
       // Download the file itself (pull coder output onto this device / phone).
       // Only for files that still exist on disk.
       if (f.exists) {
-        const dl = el("button", "btn-secondary file-dl", "download");
-        dl.title = "Download this file to your device";
+        const dl = el("button", "btn-secondary file-dl", t("coder.files.downloadBtn"));
+        dl.title = t("coder.files.downloadTitle");
         dl.onclick = (ev) => { ev.stopPropagation(); downloadCoderFile(s, f.path); };
         row.appendChild(dl);
       }
       body.appendChild(row);
     }
-    const all = el("button", "btn-secondary", "full session diff");
+    const all = el("button", "btn-secondary", t("coder.files.fullDiff"));
     all.onclick = () => showDiff("");
     body.appendChild(all);
     body.appendChild(diffBox);
@@ -1390,7 +1391,7 @@ export async function downloadCoderFile(s, path) {
     a.remove();
     URL.revokeObjectURL(a.href);
   } catch (e) {
-    toast("Download failed: " + e.message, true);
+    toast(t("coder.files.downloadFailed") + e.message, true);
   }
 }
 
@@ -1399,24 +1400,24 @@ export async function downloadCoderFile(s, path) {
 export function exportCoderSession() {
   const s = activeSession();
   const log = s?.eventLog || [];
-  if (!log.length) { toast("Nothing to export yet", true); return; }
-  const lines = [`# Coder session - ${sessionLabel(s.info)}`, ""];
+  if (!log.length) { toast(t("coder.export.nothingYet"), true); return; }
+  const lines = [t("coder.export.mdHeader", { label: sessionLabel(s.info) }), ""];
   for (const ev of log) {
     if (ev.type === "user") {
-      lines.push(`**You${ev.queued ? " (queued)" : ""}**: ${ev.text}`, "");
+      lines.push(`**${t("coder.export.you")}${ev.queued ? t("coder.export.queuedSuffix") : ""}**: ${ev.text}`, "");
     } else if (ev.type === "tool_call") {
       lines.push(`- \`${ev.tool}\` ` +
         JSON.stringify(slimArgs(ev.args)).slice(0, 200));
     } else if (ev.type === "tool_result") {
-      lines.push(`  - ${ev.ok ? "ok" : "FAILED"}` +
+      lines.push(`  - ${ev.ok ? t("coder.export.ok") : t("coder.export.failed")}` +
         (ev.summary ? `: ${ev.summary}` : ""));
     } else if (ev.type === "info") {
       lines.push(`> ${ev.text}`, "");
     } else if (ev.type === "estimate") {
-      lines.push("", `**Estimate (not run)** for: ${ev.task || ""}`, "",
+      lines.push("", `${t("coder.export.estimateLabel")}${ev.task || ""}`, "",
         ev.text || "", "");
     } else if (ev.type === "final") {
-      lines.push("", `**Agent**: ${ev.text}`, "");
+      lines.push("", `${t("coder.export.agentLabel")}${ev.text}`, "");
     }
   }
   const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
@@ -1434,7 +1435,7 @@ export function exportCoderSession() {
  *  an empty object that looks like a task which produced nothing. */
 export async function exportCoderResultJson() {
   const s = activeSession();
-  if (!s) { toast("No active session", true); return; }
+  if (!s) { toast(t("coder.session.none"), true); return; }
   try {
     const r = await fetch(`/api/coder/sessions/${s.info.id}/result`,
                           { headers: authHeaders() });
@@ -1448,7 +1449,7 @@ export async function exportCoderResultJson() {
     a.click();
     URL.revokeObjectURL(a.href);
   } catch (e) {
-    toast("No result to export: " + e.message, true);
+    toast(t("coder.export.resultFailed") + e.message, true);
   }
 }
 
@@ -1458,7 +1459,7 @@ export async function exportCoderResultJson() {
  *  consume it, so this can be pressed as often as you like. */
 export async function downloadCoderPatch() {
   const s = activeSession();
-  if (!s) { toast("No active session", true); return; }
+  if (!s) { toast(t("coder.session.none"), true); return; }
   try {
     const r = await fetch(`/api/coder/sessions/${s.info.id}/patch/download`,
                           { headers: authHeaders() });
@@ -1475,7 +1476,7 @@ export async function downloadCoderPatch() {
     a.remove();
     URL.revokeObjectURL(a.href);
   } catch (e) {
-    toast("Patch download failed: " + e.message, true);
+    toast(t("coder.export.patchFailed") + e.message, true);
   }
 }
 
@@ -1506,7 +1507,7 @@ async function episodeOp(method, path, cwd) {
  *  here stays actionable from a terminal. */
 export async function openEpisodesModal(view = "live") {
   const cwd = ($("setup-cwd")?.value || "").trim();
-  if (!cwd) { toast("Enter a project directory first", true); return; }
+  if (!cwd) { toast(t("coder.episodes.enterDirectoryFirst"), true); return; }
   const url = view === "archive"
     ? "/api/coder/episodes/archive?cwd=" : "/api/coder/episodes?cwd=";
   try {
@@ -1514,11 +1515,11 @@ export async function openEpisodesModal(view = "live") {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     const rows = (view === "archive" ? data.archived : data.episodes) || [];
-    openModal(view === "archive" ? "Dropped lessons" : "Stored lessons", (body) => {
+    openModal(t(view === "archive" ? "coder.episodes.droppedTitle" : "coder.episodes.storedTitle"), (body) => {
       const tabs = el("div", "actions");
-      const liveBtn = el("button", "btn-secondary", "stored");
+      const liveBtn = el("button", "btn-secondary", t("coder.episodes.storedTab"));
       liveBtn.onclick = () => openEpisodesModal("live");
-      const arcBtn = el("button", "btn-secondary", "dropped");
+      const arcBtn = el("button", "btn-secondary", t("coder.episodes.droppedTab"));
       arcBtn.onclick = () => openEpisodesModal("archive");
       (view === "archive" ? arcBtn : liveBtn).classList.add("active");
       tabs.appendChild(liveBtn);
@@ -1526,28 +1527,24 @@ export async function openEpisodesModal(view = "live") {
       body.appendChild(tabs);
 
       if (!rows.length) {
-        body.appendChild(emptyState(view === "archive"
-          ? "Nothing has been dropped for this project. Lessons land here when "
-            + "they are merged, evicted at the cap, or forgotten - so they can be "
-            + "brought back."
-          : "No lessons stored for this project yet. The coder writes one when a "
-            + "session that changed files finishes, outside privacy mode."));
+        body.appendChild(view === "archive"
+          ? emptyState("book", t("coder.episodes.emptyDroppedTitle"), t("coder.episodes.emptyDroppedHint"))
+          : emptyState("book", t("coder.episodes.emptyStoredTitle"), t("coder.episodes.emptyStoredHint")));
       } else {
         body.appendChild(el("p", "sub",
-          `${rows.length} lesson(s) for ${data.cwd}. The id is what `
-          + "localcoder --forget-episode / --restore-episode take."));
+          tn("coder.episodes.countForProject", rows.length, { cwd: data.cwd })));
         for (const ep of rows) {
           const card = el("div", "card");
           card.appendChild(el("div", "row",
-            `${ep.lesson || ep.summary || ep.task || "(no lesson text)"}`));
+            `${ep.lesson || ep.summary || ep.task || t("coder.episodes.noLessonText")}`));
           const meta = view === "archive"
-            ? `${ep.id} · dropped: ${ep.reason || "?"}`
-            : `${ep.id} · ${ep.outcome} · ${ep.turns} turn(s)`
-              + (ep.merged ? ` · merged ${ep.merged}` : "");
+            ? `${ep.id} ${t("coder.episodes.droppedReason", { reason: ep.reason || "?" })}`
+            : `${ep.id} · ${ep.outcome} · ${tn("coder.episodes.turnsCount", ep.turns)}`
+              + (ep.merged ? t("coder.episodes.mergedInto", { merged: ep.merged }) : "");
           card.appendChild(el("div", "sub", meta));
           const act = el("div", "actions");
           if (view === "archive") {
-            const b = el("button", "btn-secondary", "restore");
+            const b = el("button", "btn-secondary", t("coder.episodes.restoreBtn"));
             b.onclick = async () => {
               try {
                 const out = await episodeOp(
@@ -1555,22 +1552,22 @@ export async function openEpisodesModal(view = "live") {
                 // The caveats are surfaced, not swallowed: both describe a
                 // restore that SUCCEEDED and is still not what you pictured.
                 for (const n of out.notes || []) toast(n, true);
-                if (!(out.notes || []).length) toast("Lesson restored");
+                if (!(out.notes || []).length) toast(t("coder.episodes.restored"));
                 openEpisodesModal("archive");
-              } catch (e) { toast("Restore failed: " + e.message, true); }
+              } catch (e) { toast(t("coder.episodes.restoreFailed") + e.message, true); }
             };
             act.appendChild(b);
           } else {
-            const b = el("button", "btn-secondary", "forget");
-            b.title = "Drops it from recall. Archived, so it can be restored.";
+            const b = el("button", "btn-secondary", t("coder.episodes.forgetBtn"));
+            b.title = t("coder.episodes.forgetTitle");
             b.onclick = async () => {
               try {
                 const out = await episodeOp(
                   "POST", `/api/coder/episodes/${encodeURIComponent(ep.id)}/forget`, cwd);
                 if (out.warning) toast(out.warning, true);
-                else toast("Forgotten - restore it from the dropped tab");
+                else toast(t("coder.episodes.forgotten"));
                 openEpisodesModal("live");
-              } catch (e) { toast("Forget failed: " + e.message, true); }
+              } catch (e) { toast(t("coder.episodes.forgetFailed") + e.message, true); }
             };
             act.appendChild(b);
           }
@@ -1580,53 +1577,48 @@ export async function openEpisodesModal(view = "live") {
       }
 
       const foot = el("div", "actions");
-      const cons = el("button", "btn-secondary", "consolidate");
-      cons.title = "Ask the model to merge related lessons into one. Opt-in and "
-        + "manual; every original is archived, so a bad merge is reversible.";
+      const cons = el("button", "btn-secondary", t("coder.episodes.consolidateBtn"));
+      cons.title = t("coder.episodes.consolidateTitle");
       cons.onclick = async () => {
         cons.disabled = true;
         try {
           const rep = await episodeOp("POST", "/api/coder/episodes/consolidate", cwd);
-          if (!rep.groups) toast("Nothing to consolidate: no related lessons found");
+          if (!rep.groups) toast(t("coder.episodes.nothingToConsolidate"));
           else {
-            toast(`Consolidated ${rep.groups} group(s): ${rep.replaced} merged `
-              + `into ${rep.merged}, ${rep.archived} archived`);
+            toast(t("coder.episodes.consolidated",
+              { groups: rep.groups, replaced: rep.replaced, merged: rep.merged, archived: rep.archived }));
             // A group the model returned nothing usable for is COUNTED, not
             // hidden - it was left untouched rather than dropped.
             if (rep.skipped) {
-              toast(`${rep.skipped} group(s) left untouched (no usable merge)`, true);
+              toast(t("coder.episodes.skipped", { skipped: rep.skipped }), true);
             }
           }
           if (rep.warning) toast(rep.warning, true);
           openEpisodesModal("live");
         } catch (e) {
-          toast("Consolidate failed: " + e.message, true);
+          toast(t("coder.episodes.consolidateFailed") + e.message, true);
         } finally { cons.disabled = false; }
       };
       foot.appendChild(cons);
 
-      const wipe = el("button", "btn-secondary btn-danger", "erase all");
-      wipe.title = "Erases every lesson for this project, dropped ones included. "
-        + "Not reversible.";
+      const wipe = el("button", "btn-secondary btn-danger", t("coder.episodes.eraseAllBtn"));
+      wipe.title = t("coder.episodes.eraseAllTitle");
       wipe.onclick = () => confirmDanger(
-        "Erase all lessons?",
-        "This erases every lesson this project remembers, including the dropped "
-        + "ones you could otherwise restore. The archive goes too, so nothing is "
-        + "recoverable afterwards. This cannot be undone.",
-        "Erase everything",
+        t("coder.episodes.eraseConfirmTitle"),
+        t("coder.episodes.eraseConfirmBody"),
+        t("coder.episodes.eraseConfirmBtn"),
         async () => {
           try {
             const out = await episodeOp("DELETE", "/api/coder/episodes", cwd);
-            toast(`Erased ${out.erased} lesson(s) and ${out.erased_archived} `
-              + "dropped one(s)");
+            toast(t("coder.episodes.erased", { erased: out.erased, erasedArchived: out.erased_archived }));
             openEpisodesModal("live");
-          } catch (e) { toast("Erase failed: " + e.message, true); }
+          } catch (e) { toast(t("coder.episodes.eraseFailed") + e.message, true); }
         });
       foot.appendChild(wipe);
       body.appendChild(foot);
     });
   } catch (e) {
-    toast("Could not read lessons: " + e.message, true);
+    toast(t("coder.episodes.readFailed") + e.message, true);
   }
 }
 
@@ -1635,9 +1627,9 @@ export async function openEpisodesModal(view = "live") {
  *  every open tab sees it; this only has to fire the request. */
 export async function estimateCoderTask() {
   const s = activeSession();
-  if (!s) { toast("No active session", true); return; }
+  if (!s) { toast(t("coder.session.none"), true); return; }
   const text = $("coder-input").value.trim();
-  if (!text) { toast("Describe a task to estimate", true); return; }
+  if (!text) { toast(t("coder.estimate.needText"), true); return; }
   const btn = $("coder-estimate");
   btn.disabled = true;
   try {
@@ -1651,7 +1643,7 @@ export async function estimateCoderTask() {
     // The task stays in the composer: an estimate is a pre-flight, and the
     // usual next action is to send the very same text for real.
   } catch (e) {
-    toast("Estimate failed: " + e.message, true);
+    toast(t("coder.estimate.failed") + e.message, true);
   } finally {
     btn.disabled = false;
   }
@@ -1661,14 +1653,12 @@ $("coder-files").onclick = openFilesModal;
 $("coder-patch").onclick = downloadCoderPatch;
 $("coder-estimate").onclick = estimateCoderTask;
 $("setup-episodes").onclick = openEpisodesModal;
-$("coder-export").onclick = () => openModal("Export session", (body) => {
-  body.appendChild(el("p", "sub",
-    "Markdown is the readable transcript; JSON is the last finished task's "
-    + "result, the same payload localcoder --output-format json prints."));
+$("coder-export").onclick = () => openModal(t("coder.export.modalTitle"), (body) => {
+  body.appendChild(el("p", "sub", t("coder.export.modalHint")));
   const row = el("div", "actions");
-  const md = el("button", "btn-secondary", "markdown transcript");
+  const md = el("button", "btn-secondary", t("coder.export.markdownBtn"));
   md.onclick = () => { $("modal").style.display = "none"; exportCoderSession(); };
-  const js = el("button", "btn-secondary", "result JSON");
+  const js = el("button", "btn-secondary", t("coder.export.jsonBtn"));
   js.onclick = () => { $("modal").style.display = "none"; exportCoderResultJson(); };
   row.appendChild(md);
   row.appendChild(js);
@@ -1681,8 +1671,8 @@ $("coder-log").onclick = async () => {
   const r = await fetch(`/api/coder/sessions/${s.info.id}/log`, {
     headers: authHeaders() });
   const data = await r.json();
-  if (!r.ok) { toast(data.detail || "No log available", true); return; }
-  showAuditModal("Audit log - " + sessionLabel(s.info), data);
+  if (!r.ok) { toast(data.detail || t("coder.log.noLogAvailable"), true); return; }
+  showAuditModal(t("coder.log.modalTitle", { label: sessionLabel(s.info) }), data);
 };
 
 /** Past coder sessions: audit logs left behind by log/full-mode sessions,
@@ -1693,22 +1683,18 @@ export async function openSessionHistory() {
     const r = await fetch("/api/coder/history", { headers: authHeaders() });
     if (r.ok) data = await r.json();
   } catch (e) { /* handled below */ }
-  if (!data) { toast("Could not load session history", true); return; }
-  openModal("Past coder sessions", (body) => {
+  if (!data) { toast(t("coder.history.loadFailed"), true); return; }
+  openModal(t("coder.history.modalTitle"), (body) => {
     if (data.authorized === false) {
-      body.appendChild(el("div", "sub",
-        "Past coder sessions are private to the server owner. Sign in with the " +
-        "owner API key on this device to view them."));
+      body.appendChild(el("div", "sub", t("coder.history.ownerOnly")));
       return;
     }
     if (!data.enabled) {
-      body.appendChild(el("div", "sub",
-        "New sessions are not being recorded (privacy mode). Anything below " +
-        "is from earlier log/full-mode sessions."));
+      body.appendChild(el("div", "sub", t("coder.history.privacyNote")));
     }
     if (!data.logs.length) {
-      body.appendChild(emptyState("book", "No session logs yet",
-        "Start a session with persistence set to log or full to keep an audit trail here."));
+      body.appendChild(emptyState("book", t("coder.history.emptyTitle"),
+        t("coder.history.emptyHint")));
       return;
     }
     for (const item of data.logs) {
@@ -1716,7 +1702,7 @@ export async function openSessionHistory() {
       const when = new Date(item.mtime * 1000).toLocaleString();
       const kb = (item.size_bytes / 1024).toFixed(1);
       row.appendChild(el("span", "t", when));
-      row.appendChild(document.createTextNode(`${item.name} (${kb} KB)`));
+      row.appendChild(document.createTextNode(t("coder.history.sizeKb", { name: item.name, kb })));
       row.onclick = async () => {
         try {
           const r = await fetch(
@@ -1724,9 +1710,9 @@ export async function openSessionHistory() {
             { headers: authHeaders() });
           const entries = await r.json();
           if (!r.ok) throw new Error(entries.detail || r.statusText);
-          showAuditModal("Session - " + item.name, entries);
+          showAuditModal(t("coder.history.sessionModalTitle", { name: item.name }), entries);
         } catch (e) {
-          toast("Could not open log: " + e.message, true);
+          toast(t("coder.history.openFailed") + e.message, true);
         }
       };
       body.appendChild(row);
@@ -1750,7 +1736,7 @@ $("setup-history").onclick = openSessionHistory;
  *  changing one control cannot silently restate (and clobber) the others. */
 export async function postSessionSettings(body) {
   const s = activeSession();
-  if (!s) throw new Error("No active session");
+  if (!s) throw new Error(t("coder.session.none"));
   const r = await fetch(`/api/coder/sessions/${s.info.id}/settings`, {
     method: "POST", headers: authHeaders(), body: JSON.stringify(body),
   });
@@ -1765,13 +1751,11 @@ export async function postSessionSettings(body) {
  *  check must not look like a check was set. */
 export function openSessionControls() {
   const s = activeSession();
-  if (!s) { toast("Start a session first", true); return; }
-  openModal("Session controls - " + sessionLabel(s.info), (body) => {
+  if (!s) { toast(t("coder.session.startFirst"), true); return; }
+  openModal(t("coder.controls.modalTitle", { label: sessionLabel(s.info) }), (body) => {
     const info = s.info || {};
 
-    body.appendChild(el("p", "sub",
-      "Changes apply to this running session immediately - including while a "
-      + "task is in flight, which is the point of the auto-approve switch."));
+    body.appendChild(el("p", "sub", t("coder.controls.intro")));
 
     /* --- auto-approve (the REPL's /approve) --- */
     const appRow = el("div", "card");
@@ -1781,27 +1765,25 @@ export function openSessionControls() {
     appBox.id = "ctl-auto-approve";
     appBox.checked = !!info.auto_approve;
     appLbl.appendChild(appBox);
-    appLbl.appendChild(document.createTextNode(" Auto-approve destructive tools"));
+    appLbl.appendChild(document.createTextNode(" " + t("coder.controls.autoApproveLabel")));
     appRow.appendChild(appLbl);
-    appRow.appendChild(el("div", "sub",
-      "Unticking this takes effect on the very next tool call, so it stops a "
-      + "run already under way. You then get an approval card per action."));
+    appRow.appendChild(el("div", "sub", t("coder.controls.autoApproveHint")));
     appBox.onchange = async () => {
       appBox.disabled = true;
       try {
         const d = await postSessionSettings({ auto_approve: appBox.checked });
         appBox.checked = !!d.auto_approve;
-        toast(d.auto_approve ? "Auto-approve on" : "Auto-approve revoked");
+        toast(t(d.auto_approve ? "coder.controls.autoApproveOn" : "coder.controls.autoApproveRevoked"));
       } catch (e) {
         appBox.checked = !appBox.checked;
-        toast("Could not change auto-approve: " + e.message, true);
+        toast(t("coder.controls.autoApproveFailed") + e.message, true);
       } finally { appBox.disabled = false; }
     };
     body.appendChild(appRow);
 
     /* --- scope (the REPL's /scope) --- */
     const scopeCard = el("div", "card");
-    scopeCard.appendChild(el("label", "", "Scope (glob - file tools are confined to matching paths)"));
+    scopeCard.appendChild(el("label", "", t("coder.controls.scopeLabel")));
     const scopeRow = el("div", "row");
     const scopeIn = document.createElement("input");
     scopeIn.type = "text";
@@ -1809,7 +1791,7 @@ export function openSessionControls() {
     scopeIn.placeholder = "src/**/*.py";
     scopeIn.spellcheck = false;
     scopeIn.value = info.scope || "";
-    const scopeBtn = el("button", "btn-secondary", "apply");
+    const scopeBtn = el("button", "btn-secondary", t("coder.controls.applyBtn"));
     scopeBtn.onclick = async () => {
       scopeBtn.disabled = true;
       try {
@@ -1817,55 +1799,51 @@ export function openSessionControls() {
         // field (leave alone) from an explicit null (clear).
         const v = scopeIn.value.trim();
         const d = await postSessionSettings({ scope: v || null });
-        toast(d.scope ? `Scope set to '${d.scope}'` : "Scope cleared");
-      } catch (e) { toast("Could not set scope: " + e.message, true); }
+        toast(d.scope ? t("coder.controls.scopeSet", { scope: d.scope }) : t("coder.controls.scopeCleared"));
+      } catch (e) { toast(t("coder.controls.scopeSetFailed") + e.message, true); }
       finally { scopeBtn.disabled = false; }
     };
     scopeRow.appendChild(scopeIn);
     scopeRow.appendChild(scopeBtn);
     scopeCard.appendChild(scopeRow);
-    scopeCard.appendChild(el("div", "sub",
-      "Empty clears it. A scope confines the FILE tools; run_shell executes a "
-      + "process, which no path check can confine."));
+    scopeCard.appendChild(el("div", "sub", t("coder.controls.scopeHint")));
     body.appendChild(scopeCard);
 
     /* --- verification (the REPL's /verify) --- */
     const vCard = el("div", "card");
-    vCard.appendChild(el("label", "", "Verification command (exit 0 before a turn may finish)"));
+    vCard.appendChild(el("label", "", t("coder.controls.verifyLabel")));
     if (info.restricted) {
-      vCard.appendChild(el("div", "modal-warn",
-        "A shared-key session runs no commands, so it has no verification "
-        + "check to set."));
+      vCard.appendChild(el("div", "modal-warn", t("coder.controls.verifyRestrictedWarn")));
     }
     const vRow = el("div", "row");
     const vIn = document.createElement("input");
     vIn.type = "text";
     vIn.id = "ctl-verify";
-    vIn.placeholder = "(off)";
+    vIn.placeholder = t("coder.controls.verifyOffPlaceholder");
     vIn.spellcheck = false;
     vIn.value = info.verify || "";
-    const vSet = el("button", "btn-secondary", "set");
+    const vSet = el("button", "btn-secondary", t("coder.controls.setBtn"));
     vSet.onclick = async () => {
       vSet.disabled = true;
       try {
         const v = vIn.value.trim();
         const d = await postSessionSettings({ verify: v || null });
         vIn.value = d.verify || "";
-        toast(d.verify ? `Verification: ${d.verify}` : "Verification off");
-      } catch (e) { toast("Could not set verification: " + e.message, true); }
+        toast(d.verify ? t("coder.controls.verificationIs", { verify: d.verify }) : t("coder.controls.verificationOff"));
+      } catch (e) { toast(t("coder.controls.verifySetFailed") + e.message, true); }
       finally { vSet.disabled = false; }
     };
-    const vAuto = el("button", "btn-secondary", "re-detect");
-    vAuto.title = "Look again for this project's own check";
+    const vAuto = el("button", "btn-secondary", t("coder.controls.redetectBtn"));
+    vAuto.title = t("coder.controls.redetectTitle");
     vAuto.onclick = async () => {
       vAuto.disabled = true;
       try {
         const d = await postSessionSettings({ auto_verify: true });
         vIn.value = d.verify || "";
         // A re-detect that found nothing is SAID, not left looking like a set.
-        toast(d.verify ? `Verification: ${d.verify}`
-                       : "No obvious check found in this project - verification is off", !d.verify);
-      } catch (e) { toast("Could not re-detect: " + e.message, true); }
+        toast(d.verify ? t("coder.controls.verificationIs", { verify: d.verify })
+                       : t("coder.controls.noCheckFound"), !d.verify);
+      } catch (e) { toast(t("coder.controls.redetectFailed") + e.message, true); }
       finally { vAuto.disabled = false; }
     };
     vRow.appendChild(vIn);
@@ -1876,19 +1854,19 @@ export function openSessionControls() {
 
     /* --- working directory (the REPL's /cd) --- */
     const cdCard = el("div", "card");
-    cdCard.appendChild(el("label", "", "Working directory"));
+    cdCard.appendChild(el("label", "", t("coder.controls.cwdLabel")));
     const cdRow = el("div", "row");
     const cdIn = document.createElement("input");
     cdIn.type = "text";
     cdIn.id = "ctl-cwd";
     cdIn.spellcheck = false;
     cdIn.value = info.cwd || "";
-    const cdBrowse = el("button", "btn-secondary", "browse…");
+    const cdBrowse = el("button", "btn-secondary", t("coder.setup.browseBtn"));
     cdBrowse.onclick = async () => {
-      const picked = await pickDirectory("Move this session to", cdIn.value);
+      const picked = await pickDirectory(t("coder.controls.pickDirectoryTitle"), cdIn.value);
       if (picked) cdIn.value = picked;
     };
-    const cdBtn = el("button", "btn-secondary", "move");
+    const cdBtn = el("button", "btn-secondary", t("coder.controls.moveBtn"));
     cdBtn.onclick = async () => {
       cdBtn.disabled = true;
       try {
@@ -1900,18 +1878,15 @@ export function openSessionControls() {
         if (!r.ok) throw new Error(d.detail || r.statusText);
         s.info = d;
         $("coder-cwd").textContent = d.cwd;
-        toast("Working directory: " + d.cwd);
-      } catch (e) { toast("Could not change directory: " + e.message, true); }
+        toast(t("coder.controls.cwdSetToast") + d.cwd);
+      } catch (e) { toast(t("coder.controls.cwdSetFailed") + e.message, true); }
       finally { cdBtn.disabled = false; }
     };
     cdRow.appendChild(cdIn);
     cdRow.appendChild(cdBrowse);
     cdRow.appendChild(cdBtn);
     cdCard.appendChild(cdRow);
-    cdCard.appendChild(el("div", "sub",
-      "The conversation moves with the session, and so does its saved "
-      + "checkpoint - it is not left behind under the old project. Not "
-      + "available mid-task."));
+    cdCard.appendChild(el("div", "sub", t("coder.controls.cwdHint")));
     // Said up front rather than discovered by collecting a 403: a shared-key
     // session is confined to the project root by design, and that is worth
     // explaining once instead of looking like a failure each time.
@@ -1919,9 +1894,7 @@ export function openSessionControls() {
       cdIn.disabled = true;
       cdBrowse.disabled = true;
       cdBtn.disabled = true;
-      cdCard.appendChild(el("div", "modal-warn",
-        "This session was started with a shared key, so it is confined to the "
-        + "project root and cannot change directory."));
+      cdCard.appendChild(el("div", "modal-warn", t("coder.controls.cwdRestrictedWarn")));
     }
     body.appendChild(cdCard);
   });
@@ -1938,40 +1911,39 @@ export function openSessionControls() {
  *  chip stopped opening anything. Two different memories, two different names. */
 export async function openCoderMemoryModal() {
   const s = activeSession();
-  if (!s) { toast("Start a session first", true); return; }
+  if (!s) { toast(t("coder.session.startFirst"), true); return; }
   let data;
   try {
     const r = await fetch(`/api/coder/sessions/${s.info.id}/memory`,
                           { headers: authHeaders() });
     data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-  } catch (e) { toast("Could not read project memory: " + e.message, true); return; }
+  } catch (e) { toast(t("coder.memory.readFailed") + e.message, true); return; }
 
-  openModal("Project memory - " + sessionLabel(s.info), (body) => {
+  openModal(t("coder.memory.modalTitle", { label: sessionLabel(s.info) }), (body) => {
     if (data.warning) body.appendChild(el("div", "modal-warn", data.warning));
     if (!data.exists) {
-      body.appendChild(emptyState("book", "No project memory yet",
-        "Add a note below and it is written to LOCALCODER.md in this project, "
-        + "then injected into the agent's prompt from the next turn on."));
+      body.appendChild(emptyState("book", t("coder.memory.emptyTitle"),
+        t("coder.memory.emptyHint")));
     } else {
       body.appendChild(el("p", "sub", data.path));
       const pre = el("pre", "job-log");
       // textContent, never innerHTML: this is user/project file content.
-      pre.textContent = data.text || "(empty)";
+      pre.textContent = data.text || t("coder.memory.emptyFileContent");
       body.appendChild(pre);
     }
 
     const addCard = el("div", "card");
-    addCard.appendChild(el("label", "", "Remember something about this project"));
+    addCard.appendChild(el("label", "", t("coder.memory.addLabel")));
     const addRow = el("div", "row");
     const addIn = document.createElement("input");
     addIn.type = "text";
     addIn.id = "mem-add";
-    addIn.placeholder = "e.g. the test suite is run with npm test, not node --test";
-    const addBtn = el("button", "btn-secondary", "remember");
+    addIn.placeholder = t("coder.memory.addPlaceholder");
+    const addBtn = el("button", "btn-secondary", t("coder.memory.addBtn"));
     addBtn.onclick = async () => {
       const text = addIn.value.trim();
-      if (!text) { toast("Type what to remember", true); return; }
+      if (!text) { toast(t("coder.memory.needText"), true); return; }
       addBtn.disabled = true;
       try {
         const r = await fetch(`/api/coder/sessions/${s.info.id}/memory`, {
@@ -1979,9 +1951,9 @@ export async function openCoderMemoryModal() {
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
-        toast("Remembered - the agent has it from the next turn");
+        toast(t("coder.memory.remembered"));
         openCoderMemoryModal();
-      } catch (e) { toast("Could not remember: " + e.message, true); }
+      } catch (e) { toast(t("coder.memory.addFailed") + e.message, true); }
       finally { addBtn.disabled = false; }
     };
     addRow.appendChild(addIn);
@@ -1990,16 +1962,16 @@ export async function openCoderMemoryModal() {
     body.appendChild(addCard);
 
     const dropCard = el("div", "card");
-    dropCard.appendChild(el("label", "", "Forget entries containing"));
+    dropCard.appendChild(el("label", "", t("coder.memory.forgetLabel")));
     const dropRow = el("div", "row");
     const dropIn = document.createElement("input");
     dropIn.type = "text";
     dropIn.id = "mem-forget";
-    dropIn.placeholder = "substring, case-insensitive";
-    const dropBtn = el("button", "btn-secondary", "forget");
+    dropIn.placeholder = t("coder.memory.forgetPlaceholder");
+    const dropBtn = el("button", "btn-secondary", t("coder.memory.forgetBtn"));
     dropBtn.onclick = async () => {
       const pattern = dropIn.value.trim();
-      if (!pattern) { toast("Type what to forget", true); return; }
+      if (!pattern) { toast(t("coder.memory.forgetNeedText"), true); return; }
       dropBtn.disabled = true;
       try {
         const r = await fetch(`/api/coder/sessions/${s.info.id}/memory/forget`, {
@@ -2010,11 +1982,11 @@ export async function openCoderMemoryModal() {
         if (!r.ok) throw new Error(d.detail || r.statusText);
         // "no memory file" and "nothing matched" are different situations and
         // are reported as such, not both as a bare "removed 0".
-        if (!d.had_file) toast("There is no memory file for this project", true);
-        else if (!d.removed) toast(`No entries matching '${pattern}'`, true);
-        else toast(`Removed ${d.removed} entr${d.removed === 1 ? "y" : "ies"}`);
+        if (!d.had_file) toast(t("coder.memory.noFile"), true);
+        else if (!d.removed) toast(t("coder.memory.noMatch", { pattern }), true);
+        else toast(tn("coder.memory.removed", d.removed));
         openCoderMemoryModal();
-      } catch (e) { toast("Could not forget: " + e.message, true); }
+      } catch (e) { toast(t("coder.memory.forgetFailed") + e.message, true); }
       finally { dropBtn.disabled = false; }
     };
     dropRow.appendChild(dropIn);
@@ -2029,16 +2001,16 @@ export async function openCoderMemoryModal() {
  *  them nowhere. */
 export async function openBackgroundModal() {
   const s = activeSession();
-  if (!s) { toast("Start a session first", true); return; }
+  if (!s) { toast(t("coder.session.startFirst"), true); return; }
   let data;
   try {
     const r = await fetch(`/api/coder/sessions/${s.info.id}/background`,
                           { headers: authHeaders() });
     data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-  } catch (e) { toast("Could not read background jobs: " + e.message, true); return; }
+  } catch (e) { toast(t("coder.bg.readFailed") + e.message, true); return; }
 
-  openModal("Background jobs - " + sessionLabel(s.info), (body) => {
+  openModal(t("coder.bg.modalTitle", { label: sessionLabel(s.info) }), (body) => {
     const jobs = data.jobs || [];
     const running = jobs.filter((j) => j.state === "running");
     const done = jobs.filter((j) => j.state !== "running");
@@ -2047,12 +2019,8 @@ export async function openBackgroundModal() {
       // "none yet" and "this session can never have any" are different answers
       // and the server tells us which, so we do not collapse them.
       body.appendChild(data.supported
-        ? emptyState("clock", "No background work yet",
-            "The agent starts these with run_shell_background or "
-            + "spawn_agent_background; they show up here while they run.")
-        : emptyState("clock", "Not available in this session",
-            "A shared-key session runs nothing in the background - it has no "
-            + "shell or sub-agent tools at all."));
+        ? emptyState("clock", t("coder.bg.emptyTitle"), t("coder.bg.emptyHint"))
+        : emptyState("clock", t("coder.bg.unsupportedTitle"), t("coder.bg.unsupportedHint")));
     }
 
     const section = (title, rows, cls) => {
@@ -2065,10 +2033,10 @@ export async function openBackgroundModal() {
         if (j.state !== "running") bits.push(j.state);
         const res = j.result || {};
         if (j.kind === "shell" && res.exit_code !== undefined && res.exit_code !== null)
-          bits.push(`exit ${res.exit_code}`);
+          bits.push(t("coder.bg.exitCode", { code: res.exit_code }));
         if (j.kind === "agent" && res.turns !== undefined)
-          bits.push(`${res.turns} turn(s)`);
-        if (res.branch) bits.push(`branch ${res.branch}`);
+          bits.push(tn("coder.bg.turnsCount", res.turns));
+        if (res.branch) bits.push(t("coder.bg.branch", { branch: res.branch }));
         if (j.error) bits.push(j.error);
         card.appendChild(el("div", cls, bits.join(" · ")));
         // Non-fatal problems the job recorded are shown, not dropped.
@@ -2076,29 +2044,25 @@ export async function openBackgroundModal() {
         body.appendChild(card);
       }
     };
-    section("Running", running, "sub");
-    section("Finished", done, "sub");
+    section(t("coder.bg.runningHeading"), running, "sub");
+    section(t("coder.bg.finishedHeading"), done, "sub");
 
     // What the bounded table discarded. A lost sub-agent result is a real,
     // unrecoverable loss; an aged-out shell job is housekeeping and is still
     // pollable by id, so the two are not rendered with the same alarm.
     const dropped = data.dropped || {};
     if (dropped.agent) {
-      body.appendChild(el("div", "modal-warn",
-        `${dropped.agent} background sub-agent result(s) were discarded before `
-        + "they could be collected, and are lost."));
+      body.appendChild(el("div", "modal-warn", tn("coder.bg.droppedAgent", dropped.agent)));
     }
     const other = Object.entries(dropped)
       .filter(([k]) => k !== "agent")
       .reduce((n, [, v]) => n + v, 0);
     if (other) {
-      body.appendChild(el("div", "sub",
-        `${other} older finished job(s) have aged out of this list (it is `
-        + "capped per kind)."));
+      body.appendChild(el("div", "sub", tn("coder.bg.droppedOther", other)));
     }
 
     const foot = el("div", "actions");
-    const refresh = el("button", "btn-secondary", "refresh");
+    const refresh = el("button", "btn-secondary", t("coder.bg.refreshBtn"));
     refresh.onclick = () => openBackgroundModal();
     foot.appendChild(refresh);
     body.appendChild(foot);
