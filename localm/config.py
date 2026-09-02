@@ -712,6 +712,14 @@ DEFAULT_CONFIG: dict = {
     # Render a self-contained HTML/SVG reply block in the sandboxed artifact
     # canvas. Off hides the canvas button everywhere; owner_only hides it from
     # every caller that is not the owner.
+    # Browser automation. Off by default even for a key holding the browser
+    # capability: the scope grants eligibility, this switch grants use.
+    "browser_enabled": False,
+    "browser_headless": True,
+    "browser_engine": "bundled",
+    "browser_custom_domain_rules": False,
+    "browser_allow": [],
+    "browser_deny": [],
     "gui_preview_enabled": True,
     "gui_preview_owner_only": False,
     "coder_rail_side": "right",

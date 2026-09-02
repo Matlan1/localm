@@ -89,7 +89,7 @@ _SCOPED_TOOLS: frozenset[str] = frozenset({
     "list_dir", "tree",
     # The rest of the file-reading/writing tools.
     "grep", "search_files", "search_replace", "read_env",
-    "edit_notebook_cell", "generate_image",
+    "edit_notebook_cell", "generate_image", "browser_screenshot",
 })
 
 # Tools NOT confined by the scope glob: git_diff / git_log take a git
@@ -207,6 +207,7 @@ _SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
     "search_files":   ("path", "pattern"),
     "search_replace": ("glob",),
     "generate_image": ("output_path", "input_image"),
+    "browser_screenshot": ("output_path",),
 }
 
 # MCP (mcp_<server>_<tool>) and plugin (plugin_<plugin>_<export>) tools register
@@ -223,7 +224,13 @@ _MCP_SCOPE_PATH_ARGS: tuple[str, ...] = (
 
 # Model-initiated network tools, governed by the net_mode policy
 # (localm.netpolicy): off = fail fast, ask = approval flow, allow = run.
-_NETWORK_TOOLS: frozenset[str] = frozenset({"fetch_url", "web_search"})
+# The browser tools listed here are the ones that make the browser reach the
+# network; the rest of the browser set reads state it already has. Listing them
+# also means net_mode=off refuses before a browser is launched.
+_NETWORK_TOOLS: frozenset[str] = frozenset({
+    "fetch_url", "web_search",
+    "browser_navigate", "browser_click", "browser_fill",
+})
 
 # Task-list tools (tools/tasks.py). They read and write THIS session's todo
 # state, so the dispatcher injects the Agent as a hidden `_session` arg.
@@ -239,6 +246,15 @@ _SKILL_STATE_TOOLS: frozenset[str] = frozenset({"use_skill"})
 # set again: injected identically to _TODO_TOOLS/_SKILL_STATE_TOOLS, but reads
 # project-index state rather than writing session state.
 _PROJECT_MAP_TOOLS: frozenset[str] = frozenset({"find_references"})
+
+# Browser tools (tools/browser.py). They act on the ONE browser session that
+# belongs to this coder session, and each re-checks the capability off the
+# Agent, so the dispatcher hands them the same hidden `_session` arg.
+_BROWSER_TOOLS: frozenset[str] = frozenset({
+    "browser_navigate", "browser_read", "browser_click", "browser_fill",
+    "browser_screenshot", "browser_console", "browser_network",
+    "browser_close",
+})
 
 # Fraction of estimated context window at which compaction is triggered
 _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode

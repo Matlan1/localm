@@ -607,6 +607,7 @@ export const KEY_SCOPES = [
   ["video", "Video generation"],
   ["voice", "Voice"],
   ["web", "Web access"],
+  ["browser", "Automated web browser (navigate, read, click, fill)"],
   ["mcp", "MCP"],
   ["config:read", "Read settings"],
   ["config:write", "Change settings (owner-only, dangerous)"],

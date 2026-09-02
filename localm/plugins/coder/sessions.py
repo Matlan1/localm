@@ -154,6 +154,7 @@ class CoderSession:
         patch_mode: bool = False,
         disabled_tools: Optional[frozenset] = None,
         restricted: bool = False,
+        browser_enabled: bool = False,
         custom_instructions: Optional[str] = None,
         # A shell string OR an argv list, the same union the agent's verify_cmd
         # holds: auto-detection assigns a list to this very field below.
@@ -264,6 +265,7 @@ class CoderSession:
             patch_mode=patch_mode,
             disabled_tools=disabled_tools,
             restricted=restricted,
+            browser_enabled=browser_enabled,
             # None -> Agent reads .localcoder/system.md; a GUI-supplied string
             # (setup form) overrides it, mirroring the CLI --system flag.
             custom_instructions=custom_instructions,
@@ -912,6 +914,14 @@ class CoderSession:
         self._push({"type": "closed"})
         try:
             self.agent.close()
+        except Exception:
+            pass
+        # A browser this session opened outlives it otherwise: it is a real
+        # Chromium plus its driver, holding the session's cookies and storage,
+        # and nothing else ever closes it.
+        try:
+            from .tools.browser import close_for_owner
+            close_for_owner(getattr(self.agent, "job_owner", ""))
         except Exception:
             pass
 

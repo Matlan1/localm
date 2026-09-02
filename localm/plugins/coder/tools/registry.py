@@ -48,6 +48,16 @@ from .agents import (
 )
 from .parallel import tool_dispatch_parallel
 from .media import tool_generate_image
+from .browser import (
+    tool_browser_click,
+    tool_browser_close,
+    tool_browser_console,
+    tool_browser_fill,
+    tool_browser_navigate,
+    tool_browser_network,
+    tool_browser_read,
+    tool_browser_screenshot,
+)
 from .rag import tool_rag_list_collections, tool_rag_search
 from .references import tool_find_references
 from .tasks import tool_read_todos, tool_set_todos
@@ -448,6 +458,83 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "lora_strength_model":{"type": "float",  "description": "LoRA strength on the UNet (default: 1.0). Main lever for unlock/style LoRAs.", "required": False},
             "lora_strength_clip": {"type": "float",  "description": "LoRA strength on the text encoder (default: 0.5).", "required": False},
         },
+    ),
+    # Off unless the session holds the browser capability AND the setting is on
+    # (see Agent._apply_browser_toolset); each wrapper re-checks. Not in
+    # SAFE_RESTRICTED_TOOLS: a restricted session never browses.
+    "browser_navigate": ToolDef(
+        name="browser_navigate",
+        fn=tool_browser_navigate,
+        description=(
+            "Open a URL in the automated browser, starting it if it is not "
+            "already running. Every request the page makes is checked against "
+            "the network policy, so a refused destination is reported rather "
+            "than fetched."
+        ),
+        params={
+            "url": {"type": "string", "description": "The http(s) URL to open.", "required": True},
+        },
+        untrusted_output=True,
+    ),
+    "browser_read": ToolDef(
+        name="browser_read",
+        fn=tool_browser_read,
+        description="Read the visible text of the page currently open in the browser.",
+        params={
+            "max_chars": {"type": "int", "description": "Cap on returned characters (default 8000).", "required": False},
+        },
+        untrusted_output=True,
+    ),
+    "browser_click": ToolDef(
+        name="browser_click",
+        fn=tool_browser_click,
+        description="Click the first element matching a CSS selector on the open page.",
+        params={
+            "selector": {"type": "string", "description": "A CSS selector, e.g. 'button.submit'.", "required": True},
+        },
+        untrusted_output=True,
+    ),
+    "browser_fill": ToolDef(
+        name="browser_fill",
+        fn=tool_browser_fill,
+        description="Type a value into the form field matching a CSS selector.",
+        params={
+            "selector": {"type": "string", "description": "A CSS selector for the field.", "required": True},
+            "value":    {"type": "string", "description": "The text to type.", "required": True},
+        },
+        untrusted_output=True,
+    ),
+    "browser_screenshot": ToolDef(
+        name="browser_screenshot",
+        fn=tool_browser_screenshot,
+        description="Save a PNG screenshot of the open page into the project.",
+        params={
+            "output_path": {"type": "string", "description": "Where to save it (default screenshot.png).", "required": False},
+            "full_page":   {"type": "bool",   "description": "Capture the whole scrollable page.", "required": False},
+        },
+    ),
+    "browser_console": ToolDef(
+        name="browser_console",
+        fn=tool_browser_console,
+        description="Read the console messages the open page has logged.",
+        params={},
+        untrusted_output=True,
+    ),
+    "browser_network": ToolDef(
+        name="browser_network",
+        fn=tool_browser_network,
+        description=(
+            "List the requests the page made and the ones the network policy "
+            "refused, with the reason for each refusal."
+        ),
+        params={},
+        untrusted_output=True,
+    ),
+    "browser_close": ToolDef(
+        name="browser_close",
+        fn=tool_browser_close,
+        description="Close the automated browser and discard its session state.",
+        params={},
     ),
     "rag_list_collections": ToolDef(
         name="rag_list_collections",

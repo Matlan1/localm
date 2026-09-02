@@ -221,6 +221,23 @@ def _sessions(request: Request):
     return mgr
 
 
+def _browser_enabled_for(is_owner: bool, held: set) -> bool:
+    """Whether a session opened by this caller may drive the browser.
+
+    Both must hold: the caller has the browser capability (the owner has every
+    capability), and browser_enabled is switched on. A config that cannot be
+    read answers False.
+    """
+    from localm import scopes as _S
+    if not (is_owner or _S.BROWSER in held or _S.ADMIN in held):
+        return False
+    try:
+        from localm.config import load_config
+        return bool(load_config().get("browser_enabled", False))
+    except Exception:
+        return False
+
+
 def _principal_from_request(request: Request) -> tuple[bool, str | None]:
     """Identify the caller for session isolation: returns ``(is_owner, principal)``.
 
@@ -524,6 +541,10 @@ async def create_session(req: CreateSessionRequest, request: Request):
     from localm.inference.http_server import caller_scopes as _caller_scopes
     held = _caller_scopes(request) or set()
     restricted = not (is_owner or _S.CODER_FULL in held)
+    # Browser automation needs BOTH: the capability on the key, and the setting
+    # switched on. Held independently of coder's shell tier, so a browser key
+    # need not also be a coder:full key.
+    browser_enabled = _browser_enabled_for(is_owner, held)
 
     if restricted:
         # Force the session into the instance's project root, ignoring req.cwd, so
@@ -689,6 +710,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         interactive_confirm=req.interactive_confirm,
         patch_mode=req.patch_mode,
         restricted=restricted,
+        browser_enabled=browser_enabled,
         custom_instructions=req.custom_instructions,
         verify=req.verify,
         auto_verify=req.auto_verify,
