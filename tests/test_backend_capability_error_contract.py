@@ -325,6 +325,9 @@ class TestNonStreamingReportsTheReason:
          "cannot accept image input"),
         (InvalidGrammarError("grammar failed to parse at 'root'"), 400,
          "failed to parse"),
+        (PretokenizerUnsafeInputError(
+            "This model's pre-tokenizer (llama4) crashes on an unbroken run of "
+            "more than 64 letters"), 400, "unbroken run"),
     ])
     def test_each_family_returns_its_status_and_its_reason(self, exc, status, needle):
         r = _post(_mock_engine(stream_exc=exc),
