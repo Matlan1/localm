@@ -2,8 +2,10 @@
 // jsdom harness for the localm GUI. Loads the real index.html so every element
 // the app's $() expects exists, stubs the browser and vendor globals the app
 // touches at top level, and injects the app scripts as classic scripts, which
-// jsdom executes in the window context. Parsing has already completed, so
-// DOMContentLoaded does not fire again and the network-driven init never runs.
+// jsdom executes in the window context. init.js's own boot sequence has no
+// DOMContentLoaded/readyState gate, so it runs unconditionally on injection;
+// the root after-hook below drains its dangling async chains before closing
+// each window.
 //
 // jsdom builds a DOM but never lays out or paints, so nothing here observes
 // rendered geometry or composed on-screen text.
@@ -35,7 +37,13 @@ const readClassic = (p) => moduleToClassic(read(p));
 // node's event loop alive after the tests finish, so every window is tracked and
 // closed in a root after-hook.
 const _openWindows = new Set();
-after(() => {
+after(async () => {
+  // Drains dangling boot-chain promises (init.js's unawaited async IIFE and
+  // its downstream fetch chains) against a still-valid document before
+  // win.close() nulls it out from under them.
+  if (_openWindows.size > 0) {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 50));
+  }
   for (const win of _openWindows) {
     try { win.close(); } catch (e) { /* already torn down */ }
   }
