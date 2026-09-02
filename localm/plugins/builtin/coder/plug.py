@@ -302,6 +302,39 @@ def _url_leaves_machine(url: str) -> bool:
         return True
 
 
+def _tool_capability_note(model_name: str) -> str:
+    """A suggestion when the model this coder session will use is not confirmed
+    to emit structured tool calls and an installed one is, else "".
+
+    Blocking (registry read plus a probe per candidate); callers run it off the
+    event loop.
+
+    Says nothing when the model is confirmed tool-capable, when nothing better is
+    installed, or when the answer is UNKNOWN. That last case is the point: an
+    unmeasured model is not a model known to lack tool support, and advising a
+    switch away from one on no evidence is exactly the wrong advice. The coder's
+    tool calls are PROMPTED rather than template-driven, so a model without a
+    tool-calling template still works - this reports a fitness difference, never
+    a blocker."""
+    from localm.model_manager import capabilities as _caps
+    try:
+        if not model_name:
+            return ""
+        reg = _caps._registry._mm.load_registry()
+        if _caps.model_tool_use_capability(model_name, reg=reg) is not False:
+            return ""
+        better = [n for n in _caps.models_with_capability(_caps.TOOL_USE, reg=reg)
+                  if n != model_name]
+        if not better:
+            return ""
+        return (f"{model_name} has no tool-call formatting in its chat template. "
+                f"Tool calls still work (the coder prompts for them), but these "
+                f"installed models are built for it: {', '.join(better[:5])}. "
+                f"Pass one as 'model' to use it.")
+    except (OSError, ValueError):
+        return ""
+
+
 def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
                      model_name: str, restricted: bool, session_mode: str):
     """Build this session's LLM backend and describe it honestly.
@@ -615,6 +648,19 @@ async def create_session(req: CreateSessionRequest, request: Request):
             "OpenAI tools API. The session uses localm's own tool-call "
             "convention (grammar-constrained where the loaded model supports "
             "it).")
+
+    # A SUGGESTION, never a switch. The coder pins the active model, and a
+    # per-session model switch changes the one shared engine for every other
+    # caller (see the req.model branch above), so this reports the better
+    # candidate and leaves the choice with the user. Local backend only: the
+    # capability registry describes THIS install's models and says nothing about
+    # a remote endpoint's.
+    if backend_info.get("backend") == "local" and not req.model:
+        _cap_note = await loop.run_in_executor(
+            get_plugin_executor(),
+            lambda: _tool_capability_note(backend_info.get("model") or ""))
+        if _cap_note:
+            notes.append(_cap_note)
 
     gen_kwargs = {}
     if req.temperature is not None:
