@@ -163,13 +163,39 @@ test("test_preserves_r_and_x: the English-only fixups are not applied", async ()
 // A rejected set_voice leaves the PREVIOUS language selected and reports
 // nothing, so an unusable locale reads as fluent output in the wrong language.
 // "fr-fr" is listed in the engine's own voice metadata and is still rejected.
-test("test_rejects_unsettable_locale: a rejected locale throws", async () => {
+// The engine is driven through a stub here on purpose: every locale g2p.js
+// actually ships is settable, so nothing real can reach this guard. Without the
+// stub the call is refused one step earlier, by the dictionary table, and the
+// guard itself is never executed.
+test("test_rejects_unsettable_locale: a non-zero set_voice status throws", async () => {
+  const stub = {
+    espeakFS: { analyzePath: () => ({ exists: true }), writeFile: () => {} },
+    espeakWorker: Promise.resolve({
+      set_voice: () => 2,
+      synthesize_ipa: () => ({ ipa: "output in the previously selected language" }),
+    }),
+  };
+  g2p._resetDictionaryCache();
+  try {
+    await assert.rejects(
+      () => g2p.phonemize(stub, "Bonjour", "fr", BASE),
+      /rejected locale "fr" \(status 2\)/);
+  } finally {
+    g2p._resetDictionaryCache();
+  }
+});
+
+// Why the table maps prefix "f" to "fr" and not "fr-fr": the engine lists
+// "fr-fr" among its voices' languages and still refuses to select it.
+test("the locale table avoids the identifiers the engine refuses", async () => {
   const worker = await kokoro.espeakWorker;
-  assert.notEqual(worker.set_voice("fr-fr"), 0,
-    "precondition: the engine must reject fr-fr");
-  await assert.rejects(
-    () => g2p.phonemize(kokoro, "Bonjour", "fr-fr", BASE),
-    /No dictionary is vendored/);
+  assert.notEqual(worker.set_voice("fr-fr"), 0, "the engine must reject fr-fr");
+  for (const id of ["es", "fr", "hi", "it", "pt-br"]) {
+    assert.equal(worker.set_voice(id), 0, `the engine must accept ${id}`);
+  }
+});
+
+test("a locale with no vendored dictionary throws", async () => {
   await assert.rejects(
     () => g2p.phonemize(kokoro, "hello", "en-gb", BASE),
     /No dictionary is vendored/);
