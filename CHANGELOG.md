@@ -12,6 +12,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **localm can now pick a capable model for a request instead of just using
+  whichever one happens to be loaded.** Each model is checked for what it can
+  actually do - reading images, emitting structured tool calls, how long a
+  conversation it was trained to hold - and a request that needs something the
+  loaded model does not provide is answered by an installed model that does.
+  Sending a picture to a text-only model no longer just fails: if you have a
+  model that can see, it answers. **A model you picked yourself is never
+  swapped out from under you.** When the model you chose lacks something the
+  request needs, localm tells you what is missing and which of your models has
+  it, and leaves the choice to you. Where a model has not been inspected yet,
+  localm says so rather than claiming it cannot do the job, and a response
+  carries a short note saying which model answered and why, so an automatic
+  choice is never invisible. Starting a coder session on a model with no
+  tool-calling support now points out which of your models are built for it -
+  tool calls still work either way.
 - **Two localm instances on the same machine can now share one loaded model
   instead of each keeping its own copy in VRAM.** When you switch to a
   model, the Models page checks whether another running instance already

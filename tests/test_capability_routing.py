@@ -21,7 +21,6 @@ from fastapi.testclient import TestClient
 
 import localm.inference.http_server as hs
 from localm.inference import capability_routing as cr
-from localm.model_manager import capabilities as caps
 
 
 def _reg(**entries):
