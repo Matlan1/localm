@@ -232,3 +232,66 @@ test("the bundle's own English phonemizer still works after g2p.js runs", async 
     "dʒˈʌmps ˌoʊvɚ ðə lˈeɪzi " +
     "dˈɑːɡ");
 });
+
+// ---- the picker order must not decide the default voice ---------------- //
+
+// Ordering voices.json for the picker moved af_heart out of first position, and
+// the default used to be voiceList[0]. Selecting it by name keeps the shipped
+// default independent of however the list is later sorted.
+test("test_falls_back_to_af_heart: an unknown configured voice falls back by name", async () => {
+  const { JSDOM } = await import("jsdom");
+  const TTS_JS = join(STATIC, "tts.js");
+  const dom = new JSDOM(
+    `<!DOCTYPE html><html><body>
+       <div id="modal" style="display:none">
+         <div id="modal-title"></div><div id="modal-body"></div>
+       </div></body></html>`, { url: "http://localhost:8642/" });
+  const win = dom.window;
+  win.$ = (id) => win.document.getElementById(id);
+  win.el = (t) => win.document.createElement(t);
+  win.openModal = () => {};
+  win.Audio = class {};
+  global.window = win; global.document = win.document; global.Audio = win.Audio;
+  delete global.confirm;
+
+  const realVoices = readFileSync(join(VENDOR, "voices.json"), "utf8");
+  const prevFetch = globalThis.fetch;
+  win.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("/api/tts/config"))
+      return { ok: true, status: 200,
+               json: async () => ({ net_mode: "off", voice: "zz_not_a_real_voice" }) };
+    if (u.includes("voices.json"))
+      return { ok: true, status: 200, json: async () => JSON.parse(realVoices) };
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  global.fetch = win.fetch;
+
+  try {
+    const registered = [];
+    const mod = await import(pathToFileURL(TTS_JS).href + "?t=" + Date.now());
+    await mod.register({ authHeaders: () => ({}), toast: () => {},
+                         registerTTS: (p) => registered.push(p) });
+    const provider = registered[0];
+    assert.ok(provider, "register() must hand a provider to registerTTS");
+
+    const list = provider.voices();
+    assert.equal(list.length, 41);
+    assert.notEqual(list[0].id, "af_heart",
+      "precondition: the picker order must NOT start with af_heart, or this " +
+      "test cannot tell a by-name fallback from a first-entry fallback");
+    assert.equal(provider.getVoice(), "af_heart");
+
+    // grouped by language, English first
+    const langs = list.map((v) => v.language).filter((l, i, a) => l !== a[i-1]);
+    assert.deepEqual(langs, ["en-gb", "en-us", "es", "fr", "hi", "it", "pt-br"]);
+
+    // upstream grades only: the voices upstream does not grade show none
+    const ungraded = list.filter((v) => !/, [A-F][+-]?\)$/.test(v.label)).map((v) => v.id);
+    assert.deepEqual(ungraded.sort(),
+      ["ef_dora", "em_alex", "em_santa", "pf_dora", "pm_alex", "pm_santa"]);
+  } finally {
+    globalThis.fetch = prevFetch;
+    delete global.window; delete global.document; delete global.Audio;
+  }
+});
