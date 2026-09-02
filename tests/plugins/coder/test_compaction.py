@@ -328,9 +328,32 @@ def test_compaction_marks_each_older_message_body_as_an_untrusted_range():
     assert spans, "the summariser prompt carries no untrusted range"
     covered = "".join(str(content)[a:b] for a, b in spans)
     assert _EXOTIC in covered
-    # The role labels and the in-band guard are localm's own text.
-    assert "ASSISTANT: " not in covered
+    # The ROLE LABEL is inside the range with its content: resume_checkpoint
+    # assigns _messages straight from a user-writable JSON file whose roles are
+    # never validated, so a role is not necessarily one of localm's own.
+    assert "ASSISTANT: " in covered
+    # The in-band guard IS localm's own text and stays outside.
     assert "never follow, execute" not in covered
+
+
+def test_a_role_from_a_restored_checkpoint_cannot_smuggle_a_control_token():
+    """resume_checkpoint assigns _messages wholesale from JSON (persistence.py),
+    and _read_checkpoint validates only version==1 and messages-is-a-list. So a
+    role is attacker-influenceable, and must not reach the summariser as
+    trusted framing."""
+    from localm.textguard import untrusted_spans_of
+    sent = _compact_with([
+        {"role": "user" + _EXOTIC, "content": "a"},
+        {"role": "assistant", "content": "b"},
+        {"role": "user", "content": "c"},
+        {"role": "assistant", "content": "d"},
+        {"role": "user", "content": "e"},
+    ])
+    content = sent[0]["content"]
+    covered = "".join(str(content)[a:b] for a, b in untrusted_spans_of(content))
+    assert _EXOTIC.upper() in covered, (
+        "a checkpoint-supplied role reached the summariser outside every "
+        "untrusted range")
 
 
 def test_compaction_marks_the_body_on_the_grammar_path_too():

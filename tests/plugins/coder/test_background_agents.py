@@ -885,7 +885,11 @@ def test_polling_a_finished_child_keeps_the_range_on_the_tool_result():
     assert spans, "check_agent_job dropped the child's range"
     covered = "".join(str(res.output)[a:b] for a, b in spans)
     assert _EXOTIC in covered
-    assert "sub-agent 'worker'" not in covered      # localm's own framing
+    # The label is a model-chosen, unvalidated tool argument (registry.py has no
+    # pattern on it and AgentJob stores it raw), so it is marked untrusted too.
+    # Only localm's own framing around it stays trusted.
+    assert "worker" in covered
+    assert "sub-agent '" not in covered
 
 
 def test_the_trusted_tool_frame_carries_a_polled_child_range_to_the_model():
@@ -912,7 +916,7 @@ def test_the_automatic_fold_in_keeps_the_range_on_the_parent_message():
 
     class _Reg:
         def drain_finished(self, kind=None):
-            return [{"id": "job_1", "label": "worker", "result": payload,
+            return [{"id": "job_1", "label": "worker" + _EXOTIC, "result": payload,
                      "state": "done"}]
         def take_dropped_undrained(self, kind):
             return 0
@@ -928,12 +932,53 @@ def test_the_automatic_fold_in_keeps_the_range_on_the_parent_message():
     covered = "".join(str(notes[0])[a:b] for a, b in untrusted_spans_of(notes[0]))
     assert _EXOTIC in covered, "the drain note dropped the child's range"
     assert "Background sub-agent" not in covered     # localm's own framing
+    # The model-chosen label is marked too, not left in the trusted framing.
+    assert covered.count(_EXOTIC) == 2, (
+        "the drain note left the model-chosen label outside every range")
 
-    # And the loop's own fold-in hop, which wraps that note for the model.
-    from localm.textguard import compose
-    folded = compose("[background sub-agent result]\n", notes[0])
-    covered = "".join(str(folded)[a:b] for a, b in untrusted_spans_of(folded))
+
+def test_the_loop_fold_in_puts_the_range_on_the_message_it_actually_sends():
+    """loop.py's own hop, driven through a REAL agent turn.
+
+    The sibling test above asserts on what _drain_background_agents RETURNS.
+    That leaves loop.py's own `self._add_user(compose(...))` covered by nothing:
+    reverting it to an f-string leaves the whole file green, because no test in
+    the tree reaches _loop(). This drives the real turn and reads _messages.
+    """
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch as _patch
+    from localm.textguard import compose, untrusted_span, untrusted_spans_of
+    import tempfile
+
+    note = compose("Background sub-agent 'w' finished.\n\n",
+                   untrusted_span("CHILD " + _EXOTIC))
+
+    with tempfile.TemporaryDirectory() as td:
+        from localm.plugins.coder.agent import Agent
+        backend = MagicMock()
+        backend.model_id = "test-model"
+        backend.native_tools = False
+        with _patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+             _patch("localm.plugins.coder.agent.make_audit_log"), \
+             _patch("localm.plugins.coder.agent.load_memory", return_value=""):
+            MockPM.build.return_value.file_count.return_value = 0
+            agent = Agent(backend=backend, cwd=Path(td))
+
+        drained = [[note], []]
+        with _patch.object(agent, "_call_llm", return_value="Done."), \
+             _patch.object(agent, "_drain_background_agents",
+                           side_effect=lambda: drained.pop(0) if drained else []):
+            agent.run_task("do the thing")
+
+    folded = [m for m in agent._messages
+              if m["role"] == "user"
+              and str(m["content"]).startswith("[background sub-agent result]")]
+    assert folded, "the loop never folded the background note into a message"
+    spans = untrusted_spans_of(folded[0]["content"])
+    assert spans, "the loop's fold-in hop dropped the range"
+    covered = "".join(str(folded[0]["content"])[a:b] for a, b in spans)
     assert _EXOTIC in covered
+    assert "[background sub-agent result]" not in covered
 
 
 def test_the_synchronous_spawn_also_range_marks_the_child_reply(repo):

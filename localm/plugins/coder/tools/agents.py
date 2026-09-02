@@ -620,8 +620,9 @@ def tool_check_agent_job(cwd: Path, job_id: str) -> ToolResult:
     child_ok = result.get("ok", True)
     verdict = ("finished in" if child_ok else
                "DID NOT COMPLETE its task, stopping after")
-    from localm.textguard import compose
+    from localm.textguard import compose, untrusted_span
     return ToolResult.success(
-        compose(f"sub-agent '{st['label']}' ({job_id}) {verdict} "
-                f"{result.get('turns', 0)} turn(s):\n\n", body, warn),
+        compose("sub-agent '", untrusted_span(st["label"]),
+                f"' ({job_id}) {verdict} {result.get('turns', 0)} turn(s):\n\n",
+                body, warn),
         summary=f"{job_id}: {state}" if child_ok else f"{job_id}: {state} (failed)")

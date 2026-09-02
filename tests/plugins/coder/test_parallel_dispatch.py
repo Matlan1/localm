@@ -859,3 +859,88 @@ def test_stripping_a_child_detail_keeps_the_range_over_what_survives():
     assert str(out) == "BODY " + _EXOTIC
     covered = "".join(str(out)[a:b] for a, b in untrusted_spans_of(out))
     assert covered == "BODY " + _EXOTIC
+
+
+def test_a_real_dispatch_puts_the_range_on_the_tool_result_it_returns(repo):
+    """The layer the two tests above cannot reach.
+
+    They exercise _render_report and _stripped directly, which leaves the FINAL
+    composition in tool_dispatch_parallel's return - where the report is joined
+    to the degraded/residency prefixes - covered by nothing. A plain
+    concatenation there drops every range while both of those stay green.
+    """
+    from localm.textguard import untrusted_spans_of
+
+    FakeAgent.behaviour = {
+        "child1": lambda a: "CHILD ONE " + _EXOTIC,
+        "child2": lambda a: "child two done",
+    }
+    parent = DummyParent(repo)
+    res = par.tool_dispatch_parallel(repo, tasks=["a", "b"], _parent_agent=parent)
+    assert res.ok, res.output
+
+    spans = untrusted_spans_of(res.output)
+    assert spans, "the dispatch result reached the model with no untrusted range"
+    covered = "".join(str(res.output)[a:b] for a, b in spans)
+    assert _EXOTIC in covered
+    # localm's own report scaffolding stays outside the ranges.
+    assert "NOTHING HAS BEEN MERGED" not in covered
+    assert "git" not in covered
+
+
+def test_a_repeated_tool_failure_hint_does_not_strip_the_range():
+    """A failing tool's output gets a hint appended before it is framed.
+
+    dispatch_parallel is the one converted tool whose ok can be False while its
+    output still carries ranges, so a plain concatenation of that hint drops the
+    marking on exactly the retry path a struggling model spends most turns in.
+    """
+    from localm.plugins.coder.agent.execution import _ExecutionMixin
+    from localm.plugins.coder.parser import ToolCall
+    from localm.plugins.coder.tools.base import ToolResult
+    from localm.textguard import compose, untrusted_span, untrusted_spans_of
+
+    agent = _ExecutionMixin.__new__(_ExecutionMixin)
+    agent._consecutive_errors = {}
+    agent._global_error_streak = 0
+    agent._abort_streak_tool = None
+    agent._abort_no_progress = False
+    agent._record_error = lambda *a, **k: None
+
+    call = ToolCall(name="dispatch_parallel", args={}, raw="", start=0, end=0)
+    covered_per_streak = []
+    for _ in range(3):
+        failing = ToolResult(False, compose("report ", untrusted_span(_EXOTIC)))
+        out = _ExecutionMixin._track_tool_failure(agent, call, failing)
+        covered_per_streak.append(
+            "".join(str(out.output)[a:b] for a, b in untrusted_spans_of(out.output)))
+
+    assert all(_EXOTIC in c for c in covered_per_streak), (
+        "the failure hint dropped the untrusted range: %r" % (covered_per_streak,))
+
+
+def test_a_child_diff_is_NOT_range_marked_today(repo):
+    """PINS CURRENT BEHAVIOUR, and it is a gap rather than a guarantee.
+
+    A child's committed diff is the largest external body in the report and is
+    neither neutralised nor range-marked, on master and here alike. This unit
+    deliberately did not change that (background.py records the decision that a
+    diff is carried verbatim), so this test exists to make the gap VISIBLE and
+    to fail loudly if someone changes it without meaning to.
+    """
+    from pathlib import Path as _P
+    from localm.plugins.coder.tools.parallel import _ChildOutcome, _render_report
+    from localm.textguard import untrusted_spans_of
+
+    o = _ChildOutcome.__new__(_ChildOutcome)
+    o.name = "w1"; o.status = "ok"; o.branch = "b"; o.worktree = ""
+    o.model = ""; o.turns = 1; o.detail = ""; o.cleanup_warning = ""
+    o.late_note = ""
+    o.diff = "+++ b/x.py\n+MARKER " + _EXOTIC + "\n"
+
+    report = _render_report([o], _P("."))
+    covered = "".join(str(report)[a:b] for a, b in untrusted_spans_of(report))
+    assert _EXOTIC in str(report)
+    assert _EXOTIC not in covered, (
+        "a child diff is now range-marked - that is an IMPROVEMENT, but it "
+        "changes a documented decision, so update this test deliberately")
