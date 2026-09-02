@@ -415,7 +415,7 @@ jobs:
   mutation-test:
     name: mutation testing (mutmut, ubuntu-latest only)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
@@ -443,7 +443,7 @@ jobs:
       # function - this bound lets the export/publish/check steps below
       # still run and report whatever real, partial results exist so far.
       - name: Mutation test the trust-boundary modules
-        timeout-minutes: 45
+        timeout-minutes: 170
         continue-on-error: true
         run: mutmut run
 
