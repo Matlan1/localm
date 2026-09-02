@@ -108,8 +108,11 @@ UNSAFE_PRE_TYPES: Dict[str, Policy] = {
 }
 
 # One compiled scanner per distinct (class, limit) pair, built once at import.
-_SCANNERS: Dict[str, "regex.Pattern[str]"] = {
-    f"{p.char_class}{p.max_run}": regex.compile(p.char_class + "{" + str(p.max_run + 1) + ",}")
+# Keyed by the pair itself rather than by the two values concatenated, so no two
+# policies can ever share a key.
+_SCANNERS: Dict[tuple, "regex.Pattern[str]"] = {
+    (p.char_class, p.max_run):
+        regex.compile(p.char_class + "{" + str(p.max_run + 1) + ",}")
     for p in UNSAFE_PRE_TYPES.values()
 }
 
@@ -139,7 +142,7 @@ def check_text(pre_type: Optional[str], text: str) -> None:
             f"more than {policy.max_chars} characters at once; this input is "
             f"{len(text)}. Send less text per request."
         )
-    hit = _SCANNERS[f"{policy.char_class}{policy.max_run}"].search(text)
+    hit = _SCANNERS[(policy.char_class, policy.max_run)].search(text)
     if hit is None:
         return
     run = hit.end() - hit.start()
@@ -160,11 +163,21 @@ def read_pre_type(model_ptr, api) -> Optional[str]:
     none or the runtime has no metadata API.
 
     Never raises: a model whose pre-tokenizer cannot be read is treated as
-    unaffected, which is what every model was before this guard existed.
+    unaffected, which is what every model was before this guard existed. A read
+    that FAILS leaves the guard off for that model, so it is logged at WARNING
+    rather than passed over silently; a runtime with no metadata API at all is
+    the ordinary older-build case and is logged at DEBUG.
     """
+    from localm.debuglog import logger
     try:
         if not api.has_model_meta_api():
+            logger.debug("pretokenizer guard: runtime exposes no model metadata "
+                         "API, so tokenizer.ggml.pre cannot be read")
             return None
         return api.llama_model_meta_val_str(model_ptr, PRE_TYPE_KEY)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "pretokenizer guard: could not read tokenizer.ggml.pre (%s: %s); "
+            "this model's input will NOT be checked against the pre-tokenizers "
+            "known to abort the process", type(exc).__name__, exc)
         return None

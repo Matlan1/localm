@@ -430,3 +430,49 @@ class TestVisionPathIsGuardedToo:
         with pytest.raises(Exception) as exc:
             self._drive(obj, prompt)
         assert not isinstance(exc.value, PretokenizerUnsafeInputError)
+
+
+class TestAFailedPreTypeReadIsVisible:
+    """A read that fails leaves the guard OFF for that model, so it must not be
+    passed over in silence."""
+
+    def test_a_raising_read_warns(self, caplog):
+        import logging
+
+        mock_api = MagicMock()
+        mock_api.has_model_meta_api.side_effect = OSError("no runtime")
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            assert guard.read_pre_type(object(), mock_api) is None
+        assert any("tokenizer.ggml.pre" in r.getMessage() for r in caplog.records), \
+            "a failed pre-type read must be reported, not swallowed"
+
+    def test_an_absent_metadata_api_does_not_warn(self):
+        # An older runtime without the metadata API is the ordinary case, not a
+        # failure, so it must not produce a warning on every load.
+        import logging
+
+        mock_api = MagicMock()
+        mock_api.has_model_meta_api.return_value = False
+        logger = logging.getLogger("localm")
+        seen = []
+        handler = logging.Handler()
+        handler.emit = lambda r: seen.append(r)
+        handler.setLevel(logging.WARNING)
+        logger.addHandler(handler)
+        try:
+            assert guard.read_pre_type(object(), mock_api) is None
+        finally:
+            logger.removeHandler(handler)
+        assert not [r for r in seen if r.levelno >= logging.WARNING]
+
+
+class TestScannerCacheKeysAreDistinct:
+    def test_every_policy_resolves_to_its_own_scanner(self):
+        # A shared key would silently apply one policy's scanner to another's
+        # text, which reads as the guard working.
+        pairs = {(p.char_class, p.max_run) for p in guard.UNSAFE_PRE_TYPES.values()}
+        assert len(guard._SCANNERS) == len(pairs)
+        for p in guard.UNSAFE_PRE_TYPES.values():
+            scanner = guard._SCANNERS[(p.char_class, p.max_run)]
+            assert scanner.pattern.startswith(p.char_class)
+            assert str(p.max_run + 1) in scanner.pattern
