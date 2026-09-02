@@ -33,7 +33,7 @@ classifiers = [
 # installer ever provisions a newer Python.
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "click>=8.4.1",
+    "click>=8.5.0",
     "rich>=15.0.0",
     "requests>=2.31",
     # setup-llama verifies its GitHub downloads against certifi's CA bundle, not
