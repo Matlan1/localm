@@ -11,6 +11,9 @@ build/
 venv/
 .uv/
 
+# Generated during a release build; never hand-written
+localm/_build_version.py
+
 # Editor / assistant configs (launch.json names which local model to run)
 .vscode/
 .idea/
