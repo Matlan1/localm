@@ -150,6 +150,11 @@ def test_setup_llama_runtime_wheel_hands_the_contained_env_to_the_child(monkeypa
         return _R()
 
     monkeypatch.setattr(setup_llama.subprocess, "run", fake_run)
+    # _install_runtime_wheel returns early when localm_llama_runtime is already
+    # importable, which it is in a dev checkout, so without this the install
+    # path below never runs and this test asserts nothing. None in sys.modules
+    # is the standard way to force ImportError for an importable package.
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", None)
     ok = setup_llama._install_runtime_wheel(Path("some/pkg/dir"))
     assert ok is True
     env = captured["env"]
@@ -203,3 +208,30 @@ def test_real_pip_child_resolves_its_cache_inside_the_data_dir(pip_venv, tmp_pat
     assert home in reported.parents, out.stdout
     if Path.home() not in home.parents:
         assert Path.home() not in reported.parents, out.stdout  # not the user profile
+
+def test_runtime_wheel_install_skipped_when_importable(monkeypatch):
+    """A wheel that already ships localm_llama_runtime has nothing to install.
+
+    The editable install would target site-packages itself, and `-m pip` is
+    absent from a uv-created venv, so reaching the installer here is the bug.
+    setup_llama.py names this test; it did not exist until now."""
+    from localm import setup_llama
+
+    calls = []
+    monkeypatch.setattr(setup_llama.subprocess, "run",
+                        lambda *a, **kw: calls.append(a) or _R2())
+
+    import types
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime",
+                        types.ModuleType("localm_llama_runtime"))
+
+    ok = setup_llama._install_runtime_wheel(Path("some/pkg/dir"))
+    # DATA first: nothing was launched at all.
+    assert calls == [], f"an installer ran for an already-shipped runtime: {calls}"
+    assert ok is True, "an already-shipped runtime must report success"
+
+
+class _R2:
+    returncode = 0
+    stdout = ""
+    stderr = ""
