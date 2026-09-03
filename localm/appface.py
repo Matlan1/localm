@@ -62,18 +62,18 @@ def _native_window_allowed_by_preference() -> bool:
     """Has the user explicitly turned the app window off (config key
     desktop_window_mode == "browser")? A config dict missing the key falls
     back to config.py's OWN default for it rather than a second copy of that
-    value here, so the two can never disagree. Returns False on a read
-    failure: the app window is opt-in precisely because it can still crash the
-    process on startup, so an unreadable config must not be what turns it on.
-    Never raises."""
+    value here, so the two can never disagree. Defaults to True (allowed) on
+    any read failure, so a config problem never silently disables a feature
+    the user did not ask to disable - the same posture run_native_window's own
+    desktop_window_quit_on_close read uses. Never raises."""
     try:
         from localm.config import DEFAULT_CONFIG, load_config
-        fallback = DEFAULT_CONFIG.get("desktop_window_mode", "browser")
+        fallback = DEFAULT_CONFIG.get("desktop_window_mode", "auto")
         return load_config().get("desktop_window_mode", fallback) != "browser"
     except Exception:
         logger.debug("appface: reading desktop_window_mode failed, "
-                     "defaulting to browser", exc_info=True)
-        return False
+                     "defaulting to allowed", exc_info=True)
+        return True
 
 
 def native_window_available() -> bool:

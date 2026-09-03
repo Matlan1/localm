@@ -193,12 +193,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Enter can no longer silently download and load-test a GPU runtime you
   did not want; every backend, including CPU, stays available to pick
   explicitly either way.
-- **The standalone app window is now opt-in.** With the optional desktop extra
-  installed, localm used to open in its own window automatically. That window
-  can still crash on startup on some machines, so localm now opens in your
-  browser unless you ask for the window in Settings > Desktop (or by setting
-  `desktop_window_mode` to `auto`). Nothing changes if you never installed the
-  extra.
 
 ### Fixed
 - **`localm image`, `localm music` and `localm video` ignored the ComfyUI

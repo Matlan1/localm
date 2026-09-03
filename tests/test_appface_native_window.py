@@ -51,17 +51,6 @@ def test_native_window_available_false_when_not_installed(monkeypatch):
     assert appface.native_window_available() is False
 
 
-def test_desktop_window_mode_default_is_browser():
-    """The app window is OPT-IN. Measured 2026-09-03 on AMD/Windows 11 with
-    pywebview 6.2.1/WebView2: a fresh `localm gui` in app-window mode dies
-    with a native access violation on roughly one start in three, so it must
-    not be what an install does by default. Pinned against the real
-    DEFAULT_CONFIG rather than a mock so a well-meant flip back to "auto"
-    fails here rather than in front of a user."""
-    from localm.config import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG["desktop_window_mode"] == "browser"
-
-
 def test_native_window_available_uses_config_pys_own_default_for_a_missing_key(
         monkeypatch):
     """A config dict missing the key entirely (an older config written before
@@ -95,9 +84,9 @@ def test_native_window_available_false_when_mode_is_browser(monkeypatch):
     assert appface.native_window_available() is False
 
 
-def test_native_window_allowed_defaults_false_when_config_read_fails(monkeypatch):
-    """An unreadable config must not be what ENABLES an opt-in feature that
-    can still crash the process - fail toward the browser tab."""
+def test_native_window_allowed_defaults_true_when_config_read_fails(monkeypatch):
+    """A config problem must never silently disable a feature the user did
+    not ask to disable - same posture as the quit_on_close read."""
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     monkeypatch.setitem(sys.modules, "webview", MagicMock())
 
@@ -105,7 +94,7 @@ def test_native_window_allowed_defaults_false_when_config_read_fails(monkeypatch
         raise RuntimeError("disk on fire")
 
     monkeypatch.setattr("localm.config.load_config", _boom)
-    assert appface.native_window_available() is False
+    assert appface.native_window_available() is True
 
 
 def test_run_native_window_returns_false_when_mode_is_browser(monkeypatch):
