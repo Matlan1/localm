@@ -219,6 +219,11 @@ class TestRunCrashRelaunches:
 
     def test_crash_triggers_a_real_relaunch_then_returns(self, tmp_path):
         wd = _load_wd()
+        # This simulates a SERVER THAT HAD BEEN UP and then crashed, which is
+        # the case a relaunch is for. The sleeper only lives 0.1s, so the
+        # startup-death guard has to be opted out of explicitly or it would
+        # (correctly) refuse to relaunch - see TestDiedOnStartup.
+        wd._MIN_UPTIME_TO_RELAUNCH_S = 0.0
         holder = [None]
         server, thread, port = _whoami_server(holder)
         try:
@@ -254,6 +259,7 @@ class TestRunStormCap:
         wd = _load_wd()
         wd._STORM_LIMIT = 2
         wd._STORM_WINDOW_S = 300.0
+        wd._MIN_UPTIME_TO_RELAUNCH_S = 0.0   # see the relaunch test above
         holder = [None]
         server, thread, port = _whoami_server(holder)
         try:
@@ -283,6 +289,7 @@ class TestRunStormCap:
         wd = _load_wd()
         wd._STORM_LIMIT = 100
         wd._STORM_WINDOW_S = 300.0
+        wd._MIN_UPTIME_TO_RELAUNCH_S = 0.0   # see the relaunch test above
         holder = [None]
         server, thread, port = _whoami_server(holder)
         try:
@@ -373,3 +380,78 @@ class TestPollForNewInstance:
         finally:
             server.shutdown()
             thread.join(timeout=5)
+
+
+class TestDiedOnStartup:
+    """A process that dies before it ever finished starting up must be
+    reported ONCE, not relaunched.
+
+    Relaunching it runs the same startup and it dies the same way, so the
+    storm cap alone still permits _STORM_LIMIT of those back to back - which
+    the user sees as a console crashing and reloading several times before
+    anything stops it. Reported from the field on 2026-09-03: "debug console
+    keeps crashing and reloading". The trigger there was a half-applied
+    `git pull` under a running install, but the guard is about the SHAPE of
+    the death, not any one cause: whatever leaves a process unable to finish
+    starting, retrying it cannot help.
+    """
+
+    def test_a_startup_death_is_not_relaunched(self, tmp_path):
+        wd = _load_wd()
+        wd._MIN_UPTIME_TO_RELAUNCH_S = 30.0
+        holder = [None]
+        server, thread, port = _whoami_server(holder)
+        try:
+            proc = _spawn_sleeper(0.1)          # dies at once: never started up
+            _write_marker(tmp_path, "startup-dead", proc.pid)
+            sentinel = tmp_path / "relaunched.txt"
+            relaunch_argv = [sys.executable, "-c",
+                             f"open(r'{sentinel}', 'w').write('x')"]
+
+            code = wd.run(pid=proc.pid, host="127.0.0.1", port=port,
+                          scheme="http", instance_id="startup-dead",
+                          crash_dir=tmp_path, relaunch_argv=relaunch_argv,
+                          restart_history=[], poll_interval=0.02, grace_s=0.2,
+                          request_timeout=0.5, log_path=None)
+
+            assert code == wd.EXIT_DIED_ON_STARTUP
+            time.sleep(0.4)
+            assert not sentinel.exists(), (
+                "a process that never finished starting up was relaunched - "
+                "that is the flapping console this guard exists to stop")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_the_crash_marker_is_left_for_the_next_start_to_report(self, tmp_path):
+        """Not relaunching must not mean swallowing it: the evidence stays on
+        disk so the next manual start still tells the user what happened."""
+        wd = _load_wd()
+        wd._MIN_UPTIME_TO_RELAUNCH_S = 30.0
+        holder = [None]
+        server, thread, port = _whoami_server(holder)
+        try:
+            proc = _spawn_sleeper(0.1)
+            marker = _write_marker(tmp_path, "startup-dead", proc.pid)
+
+            wd.run(pid=proc.pid, host="127.0.0.1", port=port, scheme="http",
+                   instance_id="startup-dead", crash_dir=tmp_path,
+                   relaunch_argv=[sys.executable, "-c", "pass"],
+                   restart_history=[], poll_interval=0.02, grace_s=0.2,
+                   request_timeout=0.5, log_path=None)
+
+            assert marker.exists(), "the crash evidence was discarded"
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_a_long_lived_process_that_crashes_is_still_relaunched(self):
+        """Fires-control for the guard: it must not disable crash recovery
+        for the case recovery is FOR - a server that ran fine, then died."""
+        wd = _load_wd()
+        assert wd._MIN_UPTIME_TO_RELAUNCH_S > 0
+        # The decision is a pure comparison against how long it was watched;
+        # a long-lived process is above the threshold and still relaunches
+        # (exercised end to end by test_crash_triggers_a_real_relaunch_then_returns,
+        # which opts the guard out to stand in for that uptime).
+        assert 3600.0 >= wd._MIN_UPTIME_TO_RELAUNCH_S

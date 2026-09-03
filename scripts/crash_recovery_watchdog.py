@@ -64,12 +64,19 @@ from typing import Optional
 EXIT_OK = 0
 EXIT_STORM_CAPPED = 1
 EXIT_RELAUNCH_FAILED = 2
+EXIT_DIED_ON_STARTUP = 3
 
 DEFAULT_POLL_INTERVAL_S = 3.0
 DEFAULT_GRACE_S = 25.0
 DEFAULT_REQUEST_TIMEOUT_S = 3.0
 _STORM_LIMIT = 4
 _STORM_WINDOW_S = 300.0
+# A watched process that dies THIS soon after its watchdog began watching
+# never finished starting up, so relaunching it runs the same startup again
+# and it dies again. The storm cap alone still permits _STORM_LIMIT of those
+# in a row, which is a console visibly crashing and reloading several times
+# before anything stops it. Below this, one death is reported instead.
+_MIN_UPTIME_TO_RELAUNCH_S = 20.0
 _HISTORY_ENV = "LOCALM_CRASH_WATCHDOG_HISTORY"
 
 
@@ -279,8 +286,10 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
         f"watching pid {pid} (instance {instance_id!r}) on "
         f"{scheme}://{host}:{port}")
 
+    watch_started = time.monotonic()
     while pid_alive(pid):
         time.sleep(poll_interval)
+    watched_for = time.monotonic() - watch_started
 
     _log(log_path, f"pid {pid} is gone - waiting up to {grace_s}s for a "
                    "replacement to come up on its own")
@@ -301,6 +310,16 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
             f"no replacement appeared and {marker.name} is gone - this was "
             "a clean, intentional shutdown. Nothing to recover.")
         return EXIT_OK
+
+    if watched_for < _MIN_UPTIME_TO_RELAUNCH_S:
+        _log(log_path,
+            f"{marker.name} is still present, but the process died "
+            f"{watched_for:.1f}s after this watchdog started watching - it "
+            f"never finished starting up, so a relaunch would run the same "
+            f"startup and die the same way. NOT relaunching; the crash "
+            f"marker and any trace file are left in place for the next "
+            f"manual start to report.")
+        return EXIT_DIED_ON_STARTUP
 
     now = time.time()
     if storm_active(restart_history, now):
