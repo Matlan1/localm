@@ -304,8 +304,17 @@ def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:
     raises."""
     if not isinstance(pid, int) or pid <= 0 or not pid_alive(pid):
         return True
+    # Imported before the try below, not inside it: psutil is an optional extra,
+    # and an ImportError inside that block leaves the name unbound while the
+    # `except psutil.NoSuchProcess` clause still has to evaluate it, raising
+    # UnboundLocalError out of a function documented to never raise. See
+    # test_kill_pid_without_psutil_does_not_raise.
     try:
         import psutil
+    except Exception as e:
+        logger.debug("kill_pid(%s): psutil unavailable (%s)", pid, e)
+        return not pid_alive(pid)
+    try:
         proc = psutil.Process(pid)
         proc.terminate()
         try:
