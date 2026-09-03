@@ -297,6 +297,13 @@ def rag_route_app(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALM_HOME", str(localm))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    # The routes compute dim_mismatch against whatever embedder is RESIDENT in
+    # this process. These tests state that none is, which is true when the file
+    # runs alone and FALSE under a loaded run, where another test leaves a real
+    # embedder loaded and the comparison resolves to True instead of None. Pin
+    # it so the premise is true by construction, not by what ran before.
+    import localm.inference.embedder as _emb
+    monkeypatch.setattr(_emb, "loaded_dim", lambda: None)
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", localm)
     monkeypatch.setattr(cfg, "MODELS_DIR", localm / "models")
