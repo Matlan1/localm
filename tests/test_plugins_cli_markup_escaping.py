@@ -103,6 +103,17 @@ def runner():
 #  Third-party install: scope, version - genuinely unvalidated manifest text  #
 # --------------------------------------------------------------------------- #
 
+@pytest.fixture(autouse=True)
+def _wide_console(monkeypatch):
+    """Widen the console for every test in this module.
+
+    rich.console.Console.size returns 80x25 outright on a dumb terminal,
+    before it ever consults COLUMNS - patching is_dumb_terminal is what makes
+    the COLUMNS override below actually take effect."""
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
+
+
 class TestInstallFromDirectoryMarkupEscaping:
     def test_scope_bracket_drop_survives_verbatim(self, runner, cli_env, tmp_path):
         ext = tmp_path / "thirdparty"

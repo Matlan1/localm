@@ -238,6 +238,33 @@ def test_pid_alive_self_and_invalid():
     assert instances.pid_alive(0) is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="a zombie is a POSIX process state; the Windows arm uses "
+           "psutil.pid_exists, which is enumeration-based and unaffected")
+def test_pid_alive_is_false_for_an_unreaped_child():
+    """A child that has EXITED but not been waited on is a zombie, and
+    os.kill(pid, 0) SUCCEEDS for it - so a signal-0-only probe reports a dead
+    process as alive.
+
+    That is not pid_alive's documented "cannot tell, stay conservative" case:
+    the OS can tell, and the answer is dead. It matters because every
+    staleness rule in this project is keyed on pid liveness rather than
+    elapsed time - the pull .part lock, the updater lock, setup_llama's
+    provision lock, the managed-comfy update lock - so a holder that died
+    without being reaped would hold its lock permanently, which is exactly
+    what test_a_dead_holders_lock_is_reclaimed promises cannot happen.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        # Block until exited but leave it UNREAPED (WNOWAIT), so the zombie
+        # state is deterministic rather than a timing guess.
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        assert instances.pid_alive(proc.pid) is False
+    finally:
+        proc.wait(timeout=10)
+
+
 # ------------------------------------------------------------------ #
 #  kill_pid (the `localm stop` direct-kill fallback)                 #
 # ------------------------------------------------------------------ #

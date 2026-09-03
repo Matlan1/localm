@@ -25,6 +25,7 @@ directly against ``run_or_die`` with a synthetic click command.
 from __future__ import annotations
 
 import click
+import pytest
 from click.testing import CliRunner
 
 from localm.cli.errors import run_or_die
@@ -61,6 +62,17 @@ def _synthetic_group():
         run_or_die(boom)
 
     return g
+
+
+@pytest.fixture(autouse=True)
+def _wide_console(monkeypatch):
+    """Widen the console for every test in this module.
+
+    rich.console.Console.size returns 80x25 outright on a dumb terminal,
+    before it ever consults COLUMNS - patching is_dumb_terminal is what makes
+    the COLUMNS override below actually take effect."""
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
 
 
 class TestRunOrDieKeyErrorMissingMsgEscaping:

@@ -245,6 +245,17 @@ def _wire_http(monkeypatch, head_total: int, response):
 # / [bold]{filename}[/bold]" message
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _wide_console(monkeypatch):
+    """Widen the console for every test in this module.
+
+    rich.console.Console.size returns 80x25 outright on a dumb terminal,
+    before it ever consults COLUMNS - patching is_dumb_terminal is what makes
+    the COLUMNS override below actually take effect."""
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
+
+
 class TestPullGgufFileTagInjection:
     def test_repo_id_tag_injection_blocked(
             self, rich_capture, fake_registry, monkeypatch):
