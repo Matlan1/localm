@@ -511,3 +511,27 @@ pytest_add_cli_args_test_selection = [
 # own __init__.py, which setup-llama writes into directly. Without it in the
 # wheel there is no runtime package for a pip install to provision at all.
 packages = ["localm", "runtime/localm_llama_runtime"]
+
+[tool.hatch.build.targets.sdist]
+# These paths are excluded by NAME, not by .gitignore. hatchling drops every
+# .gitignore pattern when the build root itself matches one of them, so a build
+# run from a directory under .claude/ or home/ packages the local-only files
+# below. Naming them here makes the sdist contents the same from any root.
+exclude = [
+  "/.claude",
+  "/dev-notes",
+  "/qa",
+  "/issues",
+  "/home",
+  "/AGENTS.md",
+  "/CLAUDE.md",
+  "/RELEASE.md",
+  "/TODO.md",
+  "/CHANGELOG-FULL.md",
+  "/release-manifest.toml",
+  "/scripts/codeql",
+  "/scripts/build_release.py",
+  "/scripts/make_release.py",
+  "/scripts/sign_release.py",
+  "/scripts/check_manifest.py",
+]
