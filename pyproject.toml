@@ -254,6 +254,14 @@ dev = [
     # everywhere (e.g. under a debugger, or -k a single test) without surprise
     # worker overhead.
     "pytest-xdist>=3.6",
+    # Splits the ubuntu-latest CI leg into two shorter shards (NEW-CI-UBUNTU-
+    # RUNNER-DIES-AT-81 - see ci.yml's Tests steps): a single ~13-15 minute
+    # pytest-xdist invocation pegging both of that runner's physical cores
+    # continuously gets killed by a GitHub-side "runner has received a
+    # shutdown signal" partway through, consistently, with no local resource
+    # (RAM, disk, process/fd count) ever showing exhaustion. --splits/--group
+    # balance by collected item count (no committed durations file yet).
+    "pytest-split>=0.9",
     # Feature parsers whose extraction code has tests that otherwise SILENTLY SKIP
     # when the optional extra is absent (the default install is .[coder,voice,
     # monitor], no rag). pypdf gates tests/test_rag.py's real PDF round-trip; keep

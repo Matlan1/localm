@@ -220,7 +220,47 @@ jobs:
       # tests/conftest.py and the few tests that bind a real socket use an
       # OS-assigned ephemeral port, so this is safe. See AGENTS.md "Test-run
       # cadence".
-      - name: Tests
+      #
+      # ubuntu-latest ONLY runs this as two sequential shards
+      # (NEW-CI-UBUNTU-RUNNER-DIES-AT-81): a single ~13-15 minute pytest-xdist
+      # invocation here gets killed mid-run by a GitHub-side "the runner has
+      # received a shutdown signal", every time, with no local resource (RAM,
+      # disk, process count, open file descriptors) ever showing exhaustion -
+      # confirmed both in the real job logs and in a from-scratch WSL
+      # reproduction with 15 GB RAM and 950 GB free disk. This matches a
+      # documented, unresolved GitHub Actions pattern on long-running
+      # CPU-bound jobs (e.g. actions/runner#3724 and neighbouring issues),
+      # not a defect in this suite - so the fix here is to keep any single
+      # stretch of sustained CPU use short, not to chase a leak that was never
+      # measured. windows-latest has never shown this failure and keeps the
+      # original single invocation below. --splits/--group (pytest-split)
+      # partition strictly by collected item count with no overlap and no
+      # gap (verified: 7260 + 7260 = 14520, zero shared test ids) - there is
+      # no committed durations file yet, so the split is by count, not by
+      # measured time; rebalance with one if the two shards end up lopsided.
+      # Each shard turns off pytest-cov's own fail_under check
+      # (--cov-fail-under=0) and appends into one shared .coverage file
+      # (--cov-append on the second shard only); the 78% ratchet is enforced
+      # ONCE at the end, by the plain `coverage report` below, against the
+      # COMBINED data - never against either shard's own partial view, which
+      # would read low for reasons that have nothing to do with a regression.
+      - name: Tests (ubuntu-latest, shard 1/2)
+        if: matrix.os == 'ubuntu-latest'
+        run: pytest -m "not integration" -n auto --splits 2 --group 1 --cov=localm --cov-fail-under=0
+
+      - name: Tests (ubuntu-latest, shard 2/2)
+        if: matrix.os == 'ubuntu-latest'
+        run: pytest -m "not integration" -n auto --splits 2 --group 2 --cov=localm --cov-append --cov-fail-under=0
+
+      - name: Coverage report (ubuntu-latest, combined across both shards)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          coverage report -m
+          coverage xml
+          coverage json
+
+      - name: Tests (windows-latest)
+        if: matrix.os == 'windows-latest'
         run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
 
       # Per-module coverage floors for the trust boundary (pathsafe, auth,
