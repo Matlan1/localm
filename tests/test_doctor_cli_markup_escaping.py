@@ -82,10 +82,13 @@ def _stub_unrelated_probes(monkeypatch):
     monkeypatch.setattr(doctor_mod, "_check_hf_backend_usable", lambda *a, **k: None)
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
-    # rich soft-wraps at the console width (default 80 under the non-tty
-    # CliRunner capture), which would split a long bracketed line mid-string
-    # and defeat a plain substring assertion - widen it, as the sibling tests do.
+    # Pin the width of the console the CLI prints through. Console.size returns
+    # _width/_height before it consults TERM or COLUMNS, and returns 80x25
+    # outright on a dumb terminal, where COLUMNS alone does not survive.
     monkeypatch.setenv("COLUMNS", "400")
+    from localm.cli import _core
+    monkeypatch.setattr(_core.console, "_width", 400)
+    monkeypatch.setattr(_core.console, "_height", 25)
 
 
 # --------------------------------------------------------------------------- #

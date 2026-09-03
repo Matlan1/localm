@@ -40,14 +40,18 @@ BRACKET_STYLE_NAME = "notes[bold red].md"
 
 @pytest.fixture(autouse=True)
 def _wide_console(monkeypatch):
-    """Widen the console for every test in this module.
+    """Pin the width of the console the chat CLI prints through.
 
-    rich.console.Console reads COLUMNS lazily on every render, so this applies
-    even though chat.py's `console` is a module-level singleton built once at
-    import. Without it the non-tty width default of 80 hard-wraps mid-word
-    inside a long pytest basetemp path, splitting a path across two lines and
-    breaking an exact-substring assertion."""
+    Sets ``_width``/``_height`` on ``localm.cli._core.console``, which
+    ``Console.size`` returns before it consults TERM or COLUMNS; setting
+    COLUMNS alone does not survive a dumb terminal, where ``size`` returns
+    80x25 outright. COLUMNS is still set, for any Console built during a test.
+    At width 80 a long basetemp path wraps mid-word and the exact-substring
+    assertions below fail on the newline rather than on markup."""
     monkeypatch.setenv("COLUMNS", "300")
+    from localm.cli import _core
+    monkeypatch.setattr(_core.console, "_width", 300)
+    monkeypatch.setattr(_core.console, "_height", 25)
 
 
 @pytest.fixture
