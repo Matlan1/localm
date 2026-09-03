@@ -75,6 +75,39 @@ _WRONG_TEMP_ROOT_ADVICE = (
     "  answer it resolves - then delete that one directory, by name.")
 
 
+def make_console_wide_and_plain(monkeypatch, width: str = "300") -> None:
+    """Make every Rich console in this test render wide and uncolored,
+    matching CI's real terminal (a non-tty that still reports
+    ``is_terminal`` True, so Console.size short-circuits to 80x25 before it
+    ever reads COLUMNS, and Console.__init__ separately caches a color
+    system at construction that later env changes cannot revisit).
+
+    Two independent things, both needed:
+
+    - ``is_dumb_terminal`` is read live on every ``.size`` access, so a
+      class-level patch fixes every Console - the shared CLI singleton and
+      any instance a command constructs fresh per call.
+    - ``_color_system`` is computed ONCE in ``__init__`` and cached on the
+      instance forever. A class-level patch to ``_detect_color_system``
+      only helps instances built AFTER the patch (a command's own
+      per-call ``Console()``); the shared singletons imported once per
+      xdist worker were already constructed, possibly under a DIFFERENT
+      test's environment in the same worker process, so their cached value
+      is forced directly.
+
+    See test_wide_dumb_console_helper_actually_works for the two-arm proof.
+    """
+    import rich.console
+    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
+    monkeypatch.setattr(rich.console.Console, "_detect_color_system",
+                        lambda self: None)
+    from localm.cli import _core as _core_mod
+    monkeypatch.setattr(_core_mod.console, "_color_system", None)
+    from localm.model_manager import _shared as _shared_mod
+    monkeypatch.setattr(_shared_mod.console, "_color_system", None)
+    monkeypatch.setenv("COLUMNS", width)
+
+
 def _same_dir(a, b) -> bool:
     """True when two paths name the same directory.
 

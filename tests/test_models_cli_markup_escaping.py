@@ -136,9 +136,8 @@ class TestInfoMarkupEscaping:
         # without it CliRunner's non-tty default (80) hard-wraps mid-word
         # inside a long path - see test_rag_cli_markup_escaping.py's identical
         # fixture note.
-        import rich.console
-        monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
-        monkeypatch.setenv("COLUMNS", "300")
+        from tests.conftest import make_console_wide_and_plain
+        make_console_wide_and_plain(monkeypatch, width="300")
         import localm.cli.models as modelscli
         bracket_home = tmp_path / BRACKET_DROP
         bracket_home.mkdir()
@@ -212,9 +211,8 @@ class TestUnloadCmdMarkupEscaping:
     def test_unreachable_server_shows_bracketed_exception_verbatim(
             self, cli_runner, monkeypatch):
         import requests
-        import rich.console
-        monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
-        monkeypatch.setenv("COLUMNS", "300")
+        from tests.conftest import make_console_wide_and_plain
+        make_console_wide_and_plain(monkeypatch, width="300")
         monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:19999")
         msg = f"Connection refused talking to {BRACKET_STYLE}"
 
@@ -307,9 +305,8 @@ class TestGpusCmdMarkupEscaping:
 
 class TestPsCmdMarkupEscaping:
     def test_instance_row_bracketed_fields_survive_verbatim(self, cli_runner, monkeypatch):
-        import rich.console
-        monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
-        monkeypatch.setenv("COLUMNS", "300")
+        from tests.conftest import make_console_wide_and_plain
+        make_console_wide_and_plain(monkeypatch, width="300")
         from localm import instances
         root = f"/proj/{BRACKET_DROP}"
         monkeypatch.setattr(instances, "snapshot", lambda *a, **k: [

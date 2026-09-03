@@ -48,9 +48,8 @@ def _wide_console(monkeypatch):
     80x25 outright. COLUMNS is still set, for any Console built during a test.
     At width 80 a long basetemp path wraps mid-word and the exact-substring
     assertions below fail on the newline rather than on markup."""
-    import rich.console
-    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
-    monkeypatch.setenv("COLUMNS", "300")
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
     from localm.cli import _core
     monkeypatch.setattr(_core.console, "_width", 300)
     monkeypatch.setattr(_core.console, "_height", 25)

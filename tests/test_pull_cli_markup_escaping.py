@@ -252,9 +252,8 @@ def _wide_console(monkeypatch):
     rich.console.Console.size returns 80x25 outright on a dumb terminal,
     before it ever consults COLUMNS - patching is_dumb_terminal is what makes
     the COLUMNS override below actually take effect."""
-    import rich.console
-    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
-    monkeypatch.setenv("COLUMNS", "300")
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
 
 
 class TestPullGgufFileTagInjection:

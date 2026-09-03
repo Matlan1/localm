@@ -36,9 +36,8 @@ def env(tmp_path, monkeypatch):
     # rich.console.Console() reads COLUMNS at construction time; without it, a
     # non-tty width default (80) hard-wraps mid-word inside the long pytest
     # basetemp paths these tests assert on.
-    import rich.console
-    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
-    monkeypatch.setenv("COLUMNS", "300")
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
     monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
