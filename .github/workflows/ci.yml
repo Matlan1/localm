@@ -252,20 +252,36 @@ jobs:
       # against the COMBINED data - never against any one shard's partial
       # view, which would read low for reasons that have nothing to do with
       # a regression.
+      # Each shard step is continue-on-error: a real test failure in an
+      # earlier shard must not hide whichever shards run after it (including
+      # whether THEY hit the runner-shutdown this split exists to avoid) -
+      # same reasoning as fail-fast: false on the matrix above, and why
+      # "Publish coverage summary" below is already if: always(). `outcome`
+      # (unlike `conclusion`) still reports the real per-shard result even
+      # under continue-on-error, which the explicit failure check after the
+      # coverage report reads to fail the JOB if any shard genuinely failed.
       - name: Tests (ubuntu-latest, shard 1/4)
+        id: shard1
         if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
         run: pytest -m "not integration" -n auto --splits 4 --group 1 --cov=localm --cov-fail-under=0
 
       - name: Tests (ubuntu-latest, shard 2/4)
+        id: shard2
         if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
         run: pytest -m "not integration" -n auto --splits 4 --group 2 --cov=localm --cov-append --cov-fail-under=0
 
       - name: Tests (ubuntu-latest, shard 3/4)
+        id: shard3
         if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
         run: pytest -m "not integration" -n auto --splits 4 --group 3 --cov=localm --cov-append --cov-fail-under=0
 
       - name: Tests (ubuntu-latest, shard 4/4)
+        id: shard4
         if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
         run: pytest -m "not integration" -n auto --splits 4 --group 4 --cov=localm --cov-append --cov-fail-under=0
 
       - name: Coverage report (ubuntu-latest, combined across all shards)
@@ -274,6 +290,16 @@ jobs:
           coverage report -m
           coverage xml
           coverage json
+
+      - name: Fail the job if any ubuntu-latest shard actually failed
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          rc=0
+          if [ "${{ steps.shard1.outcome }}" != "success" ]; then echo "shard 1/4 failed"; rc=1; fi
+          if [ "${{ steps.shard2.outcome }}" != "success" ]; then echo "shard 2/4 failed"; rc=1; fi
+          if [ "${{ steps.shard3.outcome }}" != "success" ]; then echo "shard 3/4 failed"; rc=1; fi
+          if [ "${{ steps.shard4.outcome }}" != "success" ]; then echo "shard 4/4 failed"; rc=1; fi
+          exit "$rc"
 
       - name: Tests (windows-latest)
         if: matrix.os == 'windows-latest'
