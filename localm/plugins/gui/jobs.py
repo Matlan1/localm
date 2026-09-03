@@ -786,7 +786,16 @@ def _terminate_process_tree(proc, *, grace: float = _CHILD_GRACE_S) -> None:
     kids = []
     try:
         import psutil
-        kids = psutil.Process(pid).children(recursive=True)
+        target = psutil.Process(pid)
+        # Walk the tree only for a process THIS one spawned.
+        # See test_tree_walk_refuses_a_pid_we_did_not_spawn.
+        owner = target.ppid()
+        if owner == os.getpid():
+            kids = target.children(recursive=True)
+        elif logger is not None:
+            logger.debug("job pid %s is not a child of this process (its parent "
+                         "is %s); not walking its tree, signalling the recorded "
+                         "handle only", pid, owner)
     except ImportError:
         if logger is not None:
             logger.debug("psutil is not installed, so only the direct child of "

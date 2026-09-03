@@ -1682,6 +1682,13 @@ def _kill_process_tree(proc) -> None:
         pgid = _os.getpgid(pid)
     except Exception:
         pgid = None
+    # Signal a GROUP only when it is a real group created for this child. killpg
+    # is kill(-pgid), so pgid 1 is the kill(2) BROADCAST to every process this
+    # user may signal, and pgid 0 means our own group; either takes localm, and
+    # on CI the whole runner, down with it. Falling back to None sends to the
+    # recorded handle alone. See test_kill_process_tree_never_broadcasts.
+    if pgid is not None and (pgid <= 1 or pgid == _os.getpgrp()):
+        pgid = None
     try:
         if pgid is not None:
             _os.killpg(pgid, _signal.SIGTERM)
