@@ -119,6 +119,10 @@ class MCPServer:
             except Exception:
                 try:
                     self._proc.kill()
+                    # A killed child stays in the process table until it is
+                    # waited on, and a zombie answers os.kill(pid, 0), so every
+                    # pid-liveness check in the codebase reads it as running.
+                    self._proc.wait(timeout=5)
                 except Exception:
                     pass
         self._proc = None

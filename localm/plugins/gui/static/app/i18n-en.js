@@ -17,7 +17,6 @@ export const I18N_EN = {
   "nav.models": "Models",
   "nav.plugins": "Plugins",
   "nav.settings": "Settings",
-  "nav.setup": "Setup",
 
   // ---- Sidebar ----
   "sidebar.activityDetails": "Click for details",
@@ -998,7 +997,6 @@ export const I18N_EN = {
   "models.disc.type.unknown": "Other",
   "models.disc.type.vae": "VAEs",
   "models.empty.hint": "Pull a model above, or search HuggingFace to add your first one.",
-  "models.empty.setupLink": "New here? Try Setup to get a model running.",
   "models.empty.text": "No models yet",
   "models.fit.fits": "fits your VRAM",
   "models.fit.tight": "tight fit",
@@ -1331,26 +1329,4 @@ export const I18N_EN = {
   "video.item.other": "clips",
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
-  "setup.done.goToChat": "Go to chat",
-  "setup.done.intro": "Head into chat whenever you are ready.",
-  "setup.done.title": "You are set",
-  "setup.intro": "Install the local model runtime and add your first model. Nothing here runs until you click it.",
-  "setup.models.checkFailed": "Could not check: {message}",
-  "setup.models.count.one": "{count} model ready to use.",
-  "setup.models.count.other": "{count} models ready to use.",
-  "setup.models.goToModels": "Find a model",
-  "setup.models.none": "No models yet.",
-  "setup.models.title": "Add a model",
-  "setup.runtime.checkFailed": "Could not check: {message}",
-  "setup.runtime.checking": "Checking...",
-  "setup.runtime.done": "Runtime ready.",
-  "setup.runtime.failed": "Could not finish: {message}",
-  "setup.runtime.install": "Install now",
-  "setup.runtime.installed": "Installed: {backend}",
-  "setup.runtime.notFinished": "Did not finish. See the log below.",
-  "setup.runtime.notInstalled": "Not installed yet.",
-  "setup.runtime.recommended": "Detected for this machine: {backend}",
-  "setup.runtime.title": "Inference runtime",
-  "setup.runtime.working": "Installing...",
-  "setup.title": "Setup",
 };

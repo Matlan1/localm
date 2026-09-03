@@ -462,7 +462,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 
 /* ---------------- main ---------------- */
 
-#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+/* padding-left, not margin: #main is a flex child with min-width 0, so a margin
+   would come out of its own track and can round to a horizontal scrollbar on a
+   narrow window. */
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; padding-left: 2px; }
 
 .view { display: none; flex: 1; flex-direction: column; min-height: 0; }
 .view.active { display: flex; }
@@ -947,6 +950,7 @@ pre:hover .canvas-btn { opacity: 1; }
 #coder-bar {
   display: none;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 10px 24px;
   border-bottom: 1px solid var(--border);
@@ -1213,6 +1217,10 @@ pre:hover .canvas-btn { opacity: 1; }
 .card textarea { resize: vertical; }
 .card .row { display: flex; gap: 10px; align-items: center; }
 .card .row input { flex: 1; }
+/* A select in a card row sizes to its content instead of the 100% width above,
+   so the flex:1 inputs beside it keep the remaining space.
+   See tests-e2e/card-row-select-width.spec.mjs. */
+.card .row select { flex: 0 0 auto; width: auto; }
 .card .actions { margin-top: 14px; display: flex; gap: 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
 
@@ -2752,9 +2760,6 @@ div:has(> .data-table) { overflow-x: auto; }
 
   /* Let row inputs + their buttons wrap instead of overflowing the card. */
   .card .row { flex-wrap: wrap; }
-
-  /* Toolbars wrap rather than overflow. */
-  #coder-bar { flex-wrap: wrap; }
 
   /* R17: no room for the open-sessions rail on a phone - fall back to the
      #session-select dropdown in the coder bar, and stack the coder column. */

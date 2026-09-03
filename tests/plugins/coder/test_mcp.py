@@ -8,8 +8,10 @@ is exercised, not mocks.
 """
 
 import json
+import subprocess
 import sys
 import textwrap
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -283,3 +285,30 @@ class TestRegistration:
         assert len(warnings) == 1
         assert "command not found" in warnings[0]
 
+
+
+class TestStopReapsTheChild:
+    """A killed child that is never waited on stays in the process table as a
+    zombie, and a zombie still answers ``os.kill(pid, 0)``, so every
+    pid-liveness check in the codebase reads it as running. stop() must reap.
+
+    Asserts the calls rather than the process table. Two world-level probes were
+    tried first and BOTH passed with the reap removed, so neither pinned
+    anything: a /proc state check races kill(), which is asynchronous, and
+    returncode is set by whichever thread polls first. What is deterministic is
+    that stop() must wait() again after kill()."""
+
+    def test_stop_waits_after_killing_a_child_that_ignored_terminate(self):
+        s = MCPServer("stubborn", sys.executable, [])
+        proc = MagicMock()
+        proc.poll.return_value = None                  # still running
+        # terminate()'s wait times out; the kill path's wait then succeeds.
+        proc.wait.side_effect = [subprocess.TimeoutExpired("stubborn", 5), 0]
+        s._proc = proc
+
+        s.stop()
+
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2, (
+            "stop() killed the child but never waited on it, leaving a zombie "
+            "that every os.kill(pid, 0) liveness check reads as alive")

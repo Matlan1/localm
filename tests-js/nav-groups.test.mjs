@@ -38,10 +38,14 @@ test("two members collapse under the category's own parent", () => {
   const slot = win.document.getElementById("nav-plugin-slot");
   const parent = slot.querySelector(".nav-group-parent");
   assert.ok(parent, "a parent is rendered for 2+ members");
-  assert.match(parent.textContent, /Coder/,
+  assert.match(parent.textContent, /Agent/,
     "the parent takes the category's own label, not Studio's");
   assert.ok(slot.querySelector('[id="nav-coder"]'), "child: the agent");
   assert.ok(slot.querySelector('[id="nav-browser"]'), "child: the browser");
+  // A parent named after one of its own children reads as "Coder > Coder".
+  const kidLabels = [...slot.querySelectorAll(".nav-child")].map((n) => n.textContent.trim());
+  assert.ok(!kidLabels.includes(parent.textContent.trim()),
+    `the parent must not repeat a child's name: ${parent.textContent} in ${kidLabels}`);
 });
 
 test("the studio category still behaves exactly as before", () => {
@@ -60,7 +64,7 @@ test("two categories render side by side without borrowing each other's members"
   const parents = [...slot.querySelectorAll(".nav-group-parent")]
     .map((n) => n.textContent);
   assert.equal(parents.length, 2, parents);
-  assert.ok(parents.some((t) => /Coder/.test(t)), parents);
+  assert.ok(parents.some((t) => /Agent/.test(t)), parents);
   assert.ok(parents.some((t) => /Studio/.test(t)), parents);
   // Each parent holds exactly its own two children.
   for (const wrap of slot.querySelectorAll(".nav-group")) {
