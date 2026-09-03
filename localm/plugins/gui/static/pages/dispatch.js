@@ -13,7 +13,6 @@ import { refreshKnowledgePage } from "./knowledge.js";
 import { refreshInstancesCard, refreshModelsPage, refreshUploadsList, runtimeUpdateCheck } from "./models.js";
 import { refreshPluginsPage, renderCatalogPlugins } from "./plugins.js";
 import { refreshDiagnosticsCard, refreshSettingsPage } from "./settings.js";
-import { refreshSetupPage } from "./setup.js";
 import { refreshMusicHistory } from "./music.js";
 import { refreshVideoHistory } from "./video.js";
 import { refreshWorkflowPanel } from "./workflow.js";
@@ -53,7 +52,6 @@ window.onViewShown = (name) => {
   // Only reached by a deliberate click on the Setup nav button (or the
   // generic "restore the view you were last on" boot path every core view
   // gets) - never auto-triggered by an unprovisioned runtime or zero models.
-  if (name === "setup") refreshSetupPage();
 };
 
 /** Pre-select the configured coder session mode in the setup form. */

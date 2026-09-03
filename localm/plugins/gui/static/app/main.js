@@ -34,9 +34,8 @@ import * as m17 from "../pages/workflow.js";
 import * as m18 from "../pages/music.js";
 import * as m19 from "../pages/video.js";
 import * as m20 from "../pages/knowledge.js";
-import * as m21 from "../pages/setup.js";
 
-for (const mod of [m0, m1, mI18nEn, mI18n, mIcons, mPk, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16, m17, m18, m19, m20, m21]) {
+for (const mod of [m0, m1, mI18nEn, mI18n, mIcons, mPk, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16, m17, m18, m19, m20]) {
   for (const name of Object.keys(mod)) {
     try {
       Object.defineProperty(window, name, { get: () => mod[name], configurable: true, enumerable: true });

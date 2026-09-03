@@ -88,7 +88,6 @@
       <button id="nav-models" data-i18n="nav.models"><span class="nav-ic" data-icon="models"></span>Models</button>
       <button id="nav-plugins" data-i18n="nav.plugins"><span class="nav-ic" data-icon="plugins"></span>Plugins</button>
       <button id="nav-settings" data-i18n="nav.settings"><span class="nav-ic" data-icon="settings"></span>Settings</button>
-      <button id="nav-setup" data-i18n="nav.setup"><span class="nav-ic" data-icon="check"></span>Setup</button>
     </nav>
 
     <div id="conversations">
@@ -1281,41 +1280,6 @@
          the Settings "Inference runtime" card above) and the existing
          model discover/pull flow on the Models page, rather than
          duplicating either. -->
-    <section id="view-setup" class="view">
-      <div class="page">
-        <h2 data-i18n="setup.title">Setup</h2>
-        <div class="sub" data-i18n="setup.intro">Install the local model runtime and add your first model. Nothing here runs until you click it.</div>
-
-        <div class="card">
-          <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="check"></span>
-            <div class="card-head-text"><h3 data-i18n="setup.runtime.title">Inference runtime</h3></div></div>
-          <div class="sub" id="onb-runtime-status" data-i18n="setup.runtime.checking">Checking...</div>
-          <div class="sub" id="onb-runtime-warning" hidden></div>
-          <div class="actions">
-            <button class="btn-primary" id="onb-runtime-install" hidden data-i18n="setup.runtime.install">Install now</button>
-          </div>
-          <pre id="onb-runtime-log" class="comfy-managed-log" style="display:none"></pre>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="download"></span>
-            <div class="card-head-text"><h3 data-i18n="setup.models.title">Add a model</h3></div></div>
-          <div class="sub" id="onb-models-status" data-i18n="setup.models.none">No models yet.</div>
-          <div class="actions">
-            <button class="btn-secondary" id="onb-models-go" data-i18n="setup.models.goToModels">Find a model</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="chat"></span>
-            <div class="card-head-text"><h3 data-i18n="setup.done.title">You are set</h3></div></div>
-          <div class="sub" data-i18n="setup.done.intro">Head into chat whenever you are ready.</div>
-          <div class="actions">
-            <button class="btn-primary" id="onb-go-chat" data-i18n="setup.done.goToChat">Go to chat</button>
-          </div>
-        </div>
-      </div>
-    </section>
 
   </main>
 </div>

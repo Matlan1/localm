@@ -146,19 +146,6 @@ export function otherHiddenNote(n) {
   return el("div", "sub models-other-note", tn("models.otherHiddenNote", n));
 }
 
-/** A plain, deliberate-click link into the Setup view from the "No models
- *  yet" empty state. Setup never opens on its own (see pages/setup.js) -
- *  this is the ONLY door into it from here, and only a click opens it. */
-function setupLink() {
-  const p = el("div", "sub");
-  const a = document.createElement("a");
-  a.href = "#";
-  a.textContent = t("models.empty.setupLink");
-  a.onclick = (e) => { e.preventDefault(); showView("setup"); };
-  p.appendChild(a);
-  return p;
-}
-
 // Show each display toggle only in the views it applies to.
 function _syncViewOptControls() {
   const showOther = $("models-show-other-wrap");
@@ -303,7 +290,6 @@ export async function refreshModelsPage() {
       box.replaceChildren(otherHiddenNote(hiddenOther));
     } else {
       box.replaceChildren(emptyState("models", t("models.empty.text"), t("models.empty.hint")));
-      box.appendChild(setupLink());
     }
     return;
   }
@@ -1807,8 +1793,8 @@ if ($("rebuild-launcher")) $("rebuild-launcher").onclick = rebuildLauncher;
 let runtimeCheckState = null;
 
 /** The raw GET /api/runtime/check call: no DOM, throws on a non-OK response.
- *  The one place that talks to the endpoint - shared by the Settings runtime
- *  card below and the Setup flow (pages/setup.js), so neither forks it. */
+ *  The one place that talks to the endpoint, used by the Settings runtime
+ *  card below. */
 export async function fetchRuntimeCheck() {
   const r = await fetch("/api/runtime/check", { headers: authHeaders() });
   const d = await r.json().catch(() => ({}));
