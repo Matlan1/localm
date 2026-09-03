@@ -347,7 +347,34 @@ target-version = "py310"
 # Adopting any of the newly-default families is a deliberate style decision with
 # a real backlog behind it (UP045 x1021, BLE001 x822, I001 x478), so it belongs
 # in its own change, not in a linter upgrade.
-select = ["E4", "E7", "E9", "F"]
+#
+# This is that separate change, for one family and only its backlog-free part.
+# The S (flake8-bandit) rules below are a RATCHET, not a cleanup: every one of
+# them reports zero findings across the whole tree today, so adopting them
+# changes no existing line and creates no backlog. The subset is chosen to match
+# what localm actually does: it loads third-party plugin manifests and ComfyUI
+# custom nodes (deserialization and code execution), it requires outbound HTTPS
+# to go through a verified context (transport security), and it spawns the
+# llama.cpp and ComfyUI processes (shell and command injection).
+#
+# The wider S family is deliberately NOT adopted. S110 and S112 (try-except-pass
+# and try-except-continue) describe a pattern this codebase uses hundreds of
+# times on purpose, and it is governed by review rather than by lint. S104 flags
+# binding 0.0.0.0, which is a supported deployment here. S310, S311, S324, S603,
+# S606, S607 and S608 are excluded on the same grounds: each has a legitimate
+# established use in this tree.
+select = [
+    "E4", "E7", "E9", "F",
+    # code execution and deserialization
+    "S102", "S103", "S301", "S302", "S306", "S307", "S308", "S506",
+    # transport security
+    "S113", "S312", "S317", "S318", "S319", "S321", "S323",
+    "S501", "S502", "S503", "S505", "S507", "S508", "S509",
+    # shell and command injection
+    "S601", "S602", "S604", "S605", "S609", "S610", "S611",
+    # misc hardening
+    "S612", "S701", "S702",
+]
 
 # The codebase deliberately uses a compact style: one-line guards (if x: return),
 # short local names, and a few intentional late module-level imports. Ignore those
