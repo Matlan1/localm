@@ -947,6 +947,7 @@ pre:hover .canvas-btn { opacity: 1; }
 #coder-bar {
   display: none;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 10px 24px;
   border-bottom: 1px solid var(--border);
@@ -2756,9 +2757,6 @@ div:has(> .data-table) { overflow-x: auto; }
 
   /* Let row inputs + their buttons wrap instead of overflowing the card. */
   .card .row { flex-wrap: wrap; }
-
-  /* Toolbars wrap rather than overflow. */
-  #coder-bar { flex-wrap: wrap; }
 
   /* R17: no room for the open-sessions rail on a phone - fall back to the
      #session-select dropdown in the coder bar, and stack the coder column. */
