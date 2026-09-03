@@ -11,6 +11,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-03
+
 ### Added
 - **The Browser tab can now show the browser the coding agent is driving.**
   It used to open a browser of its own instead, so the agent's own page was
@@ -6083,7 +6085,8 @@ First tagged release. A self-contained, offline local-LLM platform.
 - The NVIDIA GPU path is validated by design and CI-adjacent testing; the primary
   development hardware is AMD.
 
-[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/Matlan1/localm/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Matlan1/localm/releases/tag/v0.2.0
 [0.1.5]: https://github.com/Matlan1/localm/releases/tag/v0.1.5
 [0.1.4]: https://github.com/Matlan1/localm/releases/tag/v0.1.4
 [0.1.3]: https://github.com/Matlan1/localm/releases/tag/v0.1.3
