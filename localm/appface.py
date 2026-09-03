@@ -100,6 +100,36 @@ def native_window_available() -> bool:
 _native_window = None
 _native_window_may_really_close = threading.Event()
 
+_COINIT_APARTMENTTHREADED = 0x2
+
+
+def _com_init():
+    """Establish an STA COM apartment on the calling thread. Returns the
+    ole32 handle to pass to _com_uninit, or None if unavailable or the call
+    failed. Best-effort: guarded so a failure here never blocks the caller."""
+    import ctypes
+    try:
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        hr = ole32.CoInitializeEx(None, _COINIT_APARTMENTTHREADED)
+        if hr < 0:
+            logger.debug("appface: CoInitializeEx returned 0x%08X; "
+                         "continuing without it", hr & 0xFFFFFFFF)
+            return None
+        return ole32
+    except Exception:
+        logger.debug("appface: CoInitializeEx failed", exc_info=True)
+        return None
+
+
+def _com_uninit(ole32) -> None:
+    if ole32 is None:
+        return
+    try:
+        ole32.CoUninitialize()
+    except Exception:
+        pass
+
 
 def run_native_window(url: str, name: str = "LocaLM", *,
                       hide_on_close: bool = True,
@@ -208,6 +238,16 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     threading.Thread(target=_watch_loaded, name="localm-webview-confirm",
                      daemon=True).start()
     _native_window = window
+    # The WinForms backend's own window creation (lazy, inside webview.start()
+    # below) can trigger outgoing COM calls (UI Automation/accessibility
+    # notifications), and a thread with no COM apartment established raises
+    # RPC_E_CANTCALLOUT_ININPUTSYNCCALL when that happens - the same fault
+    # _WinTray._run establishes an STA apartment against. This function is
+    # called on the process's actual main thread (see the docstring above),
+    # which on Windows has no COM apartment of its own by default. A no-op on
+    # non-Windows platforms (ctypes.windll does not exist there; _com_init
+    # catches the AttributeError and returns None).
+    ole32 = _com_init()
     try:
         # private_mode=False keeps the login cookie across restarts, like the
         # browser tab this replaces. Blocks until the window is destroyed.
@@ -223,6 +263,7 @@ def run_native_window(url: str, name: str = "LocaLM", *,
         return False
     finally:
         _native_window = None
+        _com_uninit(ole32)
     return loaded["v"]
 
 
@@ -622,8 +663,6 @@ class _WinTray(AppFace):
     _ID_STOP = 1005
     _ID_SHOW = 1006
 
-    _COINIT_APARTMENTTHREADED = 0x2
-
     def __init__(self, *, name, url, logfile, on_restart, on_stop, get_log_lines=None,
                  on_show=None):
         self.name = name
@@ -710,36 +749,6 @@ class _WinTray(AppFace):
             self._ID_SHOW: self._show,
         }.get(cmd_id, lambda: None)()
 
-    # ---- COM apartment (see _run's call site for why) ----
-    def _com_init(self):
-        """Establish an STA COM apartment on this thread. Returns the ole32
-        handle to pass to _com_uninit, or None if unavailable or the call
-        failed. Best-effort: guarded so a failure here never blocks the tray
-        from starting, matching every other call in this class."""
-        import ctypes
-        try:
-            ole32 = ctypes.windll.ole32
-            ole32.CoInitializeEx.restype = ctypes.c_long
-            hr = ole32.CoInitializeEx(None, self._COINIT_APARTMENTTHREADED)
-            if hr < 0:
-                logger.debug("appface: CoInitializeEx returned 0x%08X on "
-                             "the tray thread; continuing without it",
-                             hr & 0xFFFFFFFF)
-                return None
-            return ole32
-        except Exception:
-            logger.debug("appface: CoInitializeEx failed on the tray thread",
-                         exc_info=True)
-            return None
-
-    def _com_uninit(self, ole32) -> None:
-        if ole32 is None:
-            return
-        try:
-            ole32.CoUninitialize()
-        except Exception:
-            pass
-
     # ---- the Win32 plumbing (its own thread owns the window + message loop) ----
     def _run(self):
         import ctypes
@@ -752,11 +761,12 @@ class _WinTray(AppFace):
         # and a thread with no COM apartment established raises
         # RPC_E_CANTCALLOUT_ININPUTSYNCCALL when that happens. STA (not MTA)
         # because this thread runs a real GetMessage/DispatchMessage loop.
-        ole32 = self._com_init()
+        # Shared with run_native_window's identical need - see _com_init.
+        ole32 = _com_init()
         try:
             self._run_message_loop(user32, shell32, kernel32)
         finally:
-            self._com_uninit(ole32)
+            _com_uninit(ole32)
 
     def _run_message_loop(self, user32, shell32, kernel32):
         from ctypes import wintypes

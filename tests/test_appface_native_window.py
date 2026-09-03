@@ -281,6 +281,50 @@ def test_run_native_window_returns_false_and_never_raises_when_start_fails(monke
     assert appface.run_native_window("http://127.0.0.1:8642/") is False
 
 
+def test_run_native_window_establishes_and_releases_a_com_apartment_around_start(
+        monkeypatch):
+    """The WinForms backend's own window creation (lazy, inside webview.start())
+    can trigger outgoing COM calls, and a thread with no COM apartment
+    established raises RPC_E_CANTCALLOUT_ININPUTSYNCCALL when that happens - a
+    real crash reproduced on 2026-09-03 (Windows fatal exception 0x8001010d in
+    webview/platforms/winforms.py's create_window, called from webview.start()
+    on run_native_window's own thread). Shares appface._com_init/_com_uninit
+    with _WinTray's identical, already-fixed need - see
+    test_appface_tray_com.py."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, _ = _fake_webview(loaded=True, start_sleep=0)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    calls = []
+    sentinel_ole32 = object()
+    monkeypatch.setattr(appface, "_com_init",
+                        lambda: (calls.append("init"), sentinel_ole32)[1])
+    monkeypatch.setattr(appface, "_com_uninit",
+                        lambda h: calls.append(("uninit", h)))
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is True
+
+    assert calls == ["init", ("uninit", sentinel_ole32)]
+
+
+def test_run_native_window_releases_the_com_apartment_even_when_start_raises(
+        monkeypatch):
+    """Same regression shape as _WinTray._run's fires-control: the apartment
+    acquired before webview.start() must be released via the finally, not
+    only on the clean-exit path."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, _ = _fake_webview(loaded=False)
+    fake.start.side_effect = RuntimeError("boom")
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    sentinel_ole32 = object()
+    monkeypatch.setattr(appface, "_com_init", lambda: sentinel_ole32)
+    uninit_calls = []
+    monkeypatch.setattr(appface, "_com_uninit", lambda h: uninit_calls.append(h))
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is False
+
+    assert uninit_calls == [sentinel_ole32]
+
+
 def test_show_native_window_returns_false_when_no_window_active():
     assert appface._native_window is None, "no run_native_window call should be active here"
     assert appface.show_native_window() is False

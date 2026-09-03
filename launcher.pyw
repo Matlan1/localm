@@ -112,11 +112,19 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
     setup.sh ``.desktop`` entry a dead button (BUG-15). On POSIX we instead use
     ``start_new_session=True`` so the child survives the launcher closing,
     without touching the Windows-only flag.
+
+    On Windows the child runs through ``cmd.exe /c`` with a trailing
+    ``if errorlevel 1 pause`` rather than directly: a console window closes
+    the instant its owning process exits, so a crash (including a native
+    fault, which still sets a nonzero exit code) previously closed the window
+    before its last lines - including the error itself - could be read. A
+    clean exit (errorlevel 0) still closes normally.
     """
     kwargs: dict = {"cwd": cwd}
     if env is not None:
         kwargs["env"] = env
     if sys.platform == "win32":
+        cmd = ["cmd.exe", "/c", subprocess.list2cmdline(cmd) + " & if errorlevel 1 pause"]
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
     else:
         kwargs["start_new_session"] = True
