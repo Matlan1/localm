@@ -199,11 +199,23 @@ jobs:
       # tests/conftest.py and the few tests that bind a real socket use an
       # OS-assigned ephemeral port, so this is safe. See AGENTS.md "Test-run
       # cadence".
-      # ubuntu-latest runs 2 workers, not `auto`. On that runner (4 vCPU, 16 GB)
-      # `auto` starts 4, and the runner receives a shutdown signal partway
-      # through the suite, so the job reports `cancelled` with no failure names.
+      # TEMPORARY DIAGNOSTIC, not for merge: the ubuntu runner stops at 81% of
+      # the suite. Run the tests sitting at that mark on their own, with disk
+      # and memory reported around them, and skip the full run on that leg so
+      # this step is reached at all.
+      - name: Diagnostic - pull tests alone (ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          df -h /
+          free -m
+          pytest -m "not integration" -p no:randomly -q tests/test_pull_civitai.py tests/test_pull_cli_markup_escaping.py tests/test_pull_comfy_dest_dir.py tests/test_pull_duplicate_job_409.py tests/test_pull_fresh_zero_is_not_a_percentage.py tests/test_pull_local_path.py tests/test_pull_local_path_no_leak.py tests/test_pull_mmproj_autofetch.py tests/test_pull_part_lock.py tests/test_pull_progress_honesty.py
+          echo "=== after ==="
+          df -h /
+          free -m
+
       - name: Tests
-        run: pytest -m "not integration" -n ${{ matrix.os == 'ubuntu-latest' && '2' || 'auto' }} --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
+        if: matrix.os != 'ubuntu-latest'
+        run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
 
       # Per-module coverage floors for the trust boundary (pathsafe, auth,
       # netpolicy, scopes, tls, bindhost, config, portmux): a missed branch in
