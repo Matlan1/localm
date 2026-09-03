@@ -44,7 +44,8 @@ def _wide_terminal(monkeypatch):
     a non-tty width default (80) hard-wraps mid-word inside the long pytest
     basetemp paths some tests here assert on verbatim - same fix
     test_rag_cli_markup_escaping.py's own `env` fixture applies."""
-    monkeypatch.setenv("COLUMNS", "300")
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
 
 
 # --------------------------------------------------------------------------- #

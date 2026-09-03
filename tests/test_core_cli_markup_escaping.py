@@ -43,11 +43,17 @@ BRACKET_STYLE_TEXT = "notes[bold red].md"
 
 @pytest.fixture(autouse=True)
 def wide_console(monkeypatch):
-    """rich.console.Console().size reads COLUMNS from os.environ live rather
-    than caching it at construction, so this also widens _core.py's
-    module-level `console` singleton, built at import time. Without it an
-    80-column default can hard-wrap one of these longer messages mid-word."""
-    monkeypatch.setenv("COLUMNS", "300")
+    """Pin the width of _core.py's module-level ``console`` singleton.
+
+    ``Console.size`` returns ``_width``/``_height`` before it consults TERM or
+    COLUMNS, and returns 80x25 outright on a dumb terminal, where setting
+    COLUMNS alone does not survive. At width 80 a long message hard-wraps
+    mid-word and the substring assertions below fail on the newline."""
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
+    from localm.cli import _core
+    monkeypatch.setattr(_core.console, "_width", 300)
+    monkeypatch.setattr(_core.console, "_height", 25)
 
 
 # --------------------------------------------------------------------------
