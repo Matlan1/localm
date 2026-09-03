@@ -211,6 +211,44 @@ class TestListMachinePeers:
         assert peer["mode"] == "full"
         assert peer["version"] == "9.9.9"
 
+    def test_a_forged_host_is_never_dialed_verification_always_probes_loopback(
+            self, tmp_path, gpu_dir, foreign_pid, monkeypatch):
+        """A coordination entry's ``host`` is attacker-controlled (any
+        same-user process can write into the machine-wide registry), so the
+        identity handshake must never be sent to it - mirrors
+        gpu_registry.list_gpu_peers, which already probes loopback
+        unconditionally. Spies on the real requests.get (rather than
+        replacing it) so a genuine loopback peer is still exercised for real
+        in the same test."""
+        import requests as requests_module
+        home = tmp_path / "homeA"
+        home.mkdir()
+        real_get = requests_module.get
+        calls = []
+
+        def spy_get(url, *a, **kw):
+            calls.append(url)
+            return real_get(url, *a, **kw)
+
+        monkeypatch.setattr(requests_module, "get", spy_get)
+
+        with whoami_server({"app": "localm", "instance_id": "cccc00000000000f",
+                            "root_dir": "/proj/other", "mode": "full",
+                            "version": "9.9.9"}) as port:
+            write_gpu_entry(gpu_dir, instance_id="cccc00000000000f", port=port,
+                            pid=foreign_pid, host="attacker.example")
+
+            peers = instances.list_machine_peers(home)
+
+        assert not any("attacker.example" in u for u in calls), (
+            f"a forged registry entry made this server dial an attacker-named "
+            f"host: {calls}")
+        # The forged host is ignored, not merely refused: the genuine
+        # loopback listener the attacker's port number happens to name is
+        # still found and verified, exactly as a truthful entry would be.
+        assert len(peers) == 1
+        assert peers[0]["instance_id"] == "cccc00000000000f"
+
     def test_excludes_an_instance_this_home_already_lists(self, tmp_path, gpu_dir,
                                                           foreign_pid):
         home = tmp_path / "homeA"

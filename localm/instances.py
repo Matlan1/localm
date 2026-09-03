@@ -619,9 +619,12 @@ def list_machine_peers(home: Path, *, timeout: float = 0.7) -> list[dict]:
         candidates.append((iid, pid, port, scheme, host))
 
     def _probe(c: tuple) -> Optional[dict]:
-        iid, _pid, port, scheme, host = c
+        iid, _pid, port, scheme, _host = c
         try:
-            return fetch_whoami(scheme, int(port), iid, timeout, host)
+            # No bind_host: always probes loopback, never the entry's own
+            # value. See
+            # test_a_forged_host_is_never_dialed_verification_always_probes_loopback.
+            return fetch_whoami(scheme, int(port), iid, timeout)
         except Exception as e:
             logger.debug("whoami probe failed for cross-install peer %s: %s", iid, e)
             return None

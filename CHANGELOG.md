@@ -18,6 +18,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   credential that authorizes the request. The request is now sent only to an
   address and connection type this instance has confirmed is the same
   machine.
+- Fixed a flaw in cross-install instance discovery: confirming that a listed
+  instance was genuinely running could send a network request to an address
+  that instance's own unverified registration claimed, rather than to this
+  machine. Discovery now always confirms an instance on this machine,
+  regardless of what address a registration entry names.
 
 ## [0.2.0] - 2026-09-03
 
