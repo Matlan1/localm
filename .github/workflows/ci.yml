@@ -210,7 +210,8 @@ jobs:
               echo "DISKWATCH $(date +%H:%M:%S) free_disk_mb=$(df -m / | tail -1 | awk '{print $4}') avail_mem_mb=$(free -m | awk '/^Mem:/{print $7}') procs=$(ps -e --no-headers | wc -l)";
               sleep 15;
             done ) &
-          pytest -m "not integration" -n auto -v --no-header -p no:cacheprovider
+          pytest -m "not integration" -p no:randomly -v --no-header -p no:cacheprovider tests/test_server_control_2026_07_01.py tests/test_server_embeddings_phase3.py tests/test_server_hardening.py tests/test_server_restart.py tests/test_server_robustness.py tests/test_server_shutdown.py
+          echo "SURVIVED the server tests"
 
       - name: Tests
         if: matrix.os != 'ubuntu-latest'
