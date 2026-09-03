@@ -11,29 +11,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-### Security
-- Fixed a flaw in the multi-instance GPU coordination handshake: a request
-  asking another local instance to free VRAM could be sent to an address that
-  was never verified as belonging to that instance, carrying the one-time
-  credential that authorizes the request. The request is now sent only to an
-  address and connection type this instance has confirmed is the same
-  machine.
-- Fixed a flaw in cross-install instance discovery: confirming that a listed
-  instance was genuinely running could send a network request to an address
-  that instance's own unverified registration claimed, rather than to this
-  machine. Discovery now always confirms an instance on this machine,
-  regardless of what address a registration entry names.
-
-### Fixed
-- **Models page: the HuggingFace search box was squeezed to a sliver.** The
-  source dropdown next to it claimed the whole row, leaving the search field a
-  few pixels wide and effectively unusable. It now takes the space the dropdown
-  is not using, and the same fix widens the owner/repo field under "Add a model".
-- **Coder: the Stop and End buttons could not be reached on a narrower window.**
-  The session toolbar ran off the edge of its column, so on a 1280px-wide window
-  everything from "memory" rightwards, including Stop, sat under the sessions
-  list with no way to scroll to it. The toolbar now wraps onto a second row.
-
 ## [0.2.0] - 2026-09-03
 
 ### Added
@@ -523,6 +500,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   otherwise-small request past the model's context limit by itself. The
   nudge is now skipped when the model's context is too small to absorb it,
   so a request that actually fits succeeds instead of being refused.
+- **Models page: the HuggingFace search box was squeezed to a sliver.** The
+  source dropdown next to it claimed the whole row, leaving the search field a
+  few pixels wide and effectively unusable. It now takes the space the dropdown
+  is not using, and the same fix widens the owner/repo field under "Add a model".
+- **Coder: the Stop and End buttons could not be reached on a narrower window.**
+  The session toolbar ran off the edge of its column, so on a 1280px-wide window
+  everything from "memory" rightwards, including Stop, sat under the sessions
+  list with no way to scroll to it. The toolbar now wraps onto a second row.
 
 ### Security
 - **A fetched web page or external tool result can no longer impersonate you or
@@ -695,6 +680,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   digest, with no new install required. The recommended `git clone` install
   path is unchanged - it never downloads a zip, so it keeps relying on
   git+HTTPS+GitHub the same way any other cloned project does.
+- Fixed a flaw in the multi-instance GPU coordination handshake: a request
+  asking another local instance to free VRAM could be sent to an address that
+  was never verified as belonging to that instance, carrying the one-time
+  credential that authorizes the request. The request is now sent only to an
+  address and connection type this instance has confirmed is the same
+  machine.
+- Fixed a flaw in cross-install instance discovery: confirming that a listed
+  instance was genuinely running could send a network request to an address
+  that instance's own unverified registration claimed, rather than to this
+  machine. Discovery now always confirms an instance on this machine,
+  regardless of what address a registration entry names.
 
 ## [0.1.5] - 2026-08-26
 
