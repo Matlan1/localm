@@ -70,6 +70,106 @@ class TestClassifyPriorDeath:
         assert "crashed" in summary.lower()
         assert "OS kill" in reason and "force-closed" in reason
 
+
+# The exact trace a HEALTHY standalone app-window start writes, reduced to its
+# fault header. Measured 2026-09-03: a run that wrote this went on to load its
+# window, serve for over an hour and exit cleanly - faulthandler's Windows
+# handler logs an exception and returns EXCEPTION_CONTINUE_SEARCH, so the
+# trace records that an exception happened, never that it ended the run.
+_SURVIVED_COM_TRACE = (
+    "Windows fatal exception: code 0x8001010d\n"
+    "\n"
+    "Current thread 0x000063b4 (most recent call first):\n"
+    '  File "webview\\platforms\\winforms.py", line 808 in create\n'
+)
+
+
+class TestSurvivableFaultsAreNotCrashes:
+    """A faulthandler trace holding only first-chance exceptions the process
+    HANDLED must not be reported to the user as a crash.
+
+    This shipped as a real false report: a run that was working fine produced
+    "localm server crashed - native fault captured: Windows fatal exception:
+    code 0x8001010d" plus a filed bug report, because any non-empty trace was
+    taken as proof of a native crash. 0x8001010d is
+    RPC_E_CANTCALLOUT_ININPUTSYNCCALL - an HRESULT raised and handled inside
+    WebView2/.NET while the app window is created.
+    """
+
+    def test_a_survived_com_exception_is_not_reported_as_a_native_crash(self):
+        summary, reason = bugreport._classify_prior_death(
+            native_trace=_SURVIVED_COM_TRACE,
+            hang_trace="",
+            raw_tail_truncated=False,
+            raw_tail_last_line="",
+        )
+        assert "native fault captured" not in summary
+        assert "0x8001010d" not in summary
+        # Falls through to the honest unknown rather than inventing a cause.
+        assert "OS kill" in reason and "force-closed" in reason
+
+    def test_a_survived_com_exception_does_not_mask_the_real_evidence(self):
+        """The benign trace must not outrank the mid-operation cutoff that
+        actually explains the death - the ordering bug the false positive hid."""
+        summary, reason = bugreport._classify_prior_death(
+            native_trace=_SURVIVED_COM_TRACE,
+            hang_trace="",
+            raw_tail_truncated=True,
+            raw_tail_last_line="llama_context: constructing llama_context",
+        )
+        assert "model load/construction" in summary
+        assert "llama_context: constructing llama_context" in reason
+
+    def test_a_real_access_violation_is_still_reported(self):
+        """Fires-control for the fix: the genuine fatal fault must survive it."""
+        summary, _ = bugreport._classify_prior_death(
+            native_trace="Windows fatal exception: access violation\n\n"
+                         "Current thread 0x1 (most recent call first):\n"
+                         '  File "llama.py", line 942 in _generate',
+            hang_trace="", raw_tail_truncated=False, raw_tail_last_line="",
+        )
+        assert "native fault captured" in summary
+        assert "access violation" in summary
+
+    def test_a_fatal_fault_after_benign_noise_is_the_one_named(self):
+        """A real crash preceded by survivable noise must be titled by the
+        REAL fault, not by whichever line happened to come first."""
+        summary, _ = bugreport._classify_prior_death(
+            native_trace=_SURVIVED_COM_TRACE +
+                         "\nWindows fatal exception: access violation\n",
+            hang_trace="", raw_tail_truncated=False, raw_tail_last_line="",
+        )
+        assert "access violation" in summary
+        assert "0x8001010d" not in summary
+
+    def test_ntstatus_range_numeric_codes_are_still_fatal(self):
+        """Only the software-exception ranges are excused. A bare NTSTATUS
+        code faulthandler had no name for is a genuine fault."""
+        summary, _ = bugreport._classify_prior_death(
+            native_trace="Windows fatal exception: code 0xc0000005\n",
+            hang_trace="", raw_tail_truncated=False, raw_tail_last_line="",
+        )
+        assert "native fault captured" in summary
+
+    def test_posix_fatal_python_error_is_fatal(self):
+        summary, _ = bugreport._classify_prior_death(
+            native_trace="Fatal Python error: Segmentation fault\n\n"
+                         "Current thread 0x1 (most recent call first):\n",
+            hang_trace="", raw_tail_truncated=False, raw_tail_last_line="",
+        )
+        assert "native fault captured" in summary
+        assert "Segmentation fault" in summary
+
+    def test_clr_and_cpp_throw_codes_are_survivable(self):
+        """The CLR's own exception code and the C++ throw code are raised by
+        software and normally handled, exactly like the COM HRESULT range."""
+        for code in ("0xe0434352", "0xe06d7363"):
+            summary, _ = bugreport._classify_prior_death(
+                native_trace=f"Windows fatal exception: code {code}\n",
+                hang_trace="", raw_tail_truncated=False, raw_tail_last_line="",
+            )
+            assert "native fault captured" not in summary, code
+
     def test_priority_order_native_trace_beats_truncation_beats_hang(self):
         """With all three signals present at once, a captured trace wins over a
         mid-operation truncation, which wins over a hang stack."""

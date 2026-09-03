@@ -1852,6 +1852,58 @@ _NATIVE_OP_LINE_RE = re.compile(
 # needs only the last line rather than a digest.
 _TRUNCATION_CHECK_READ_BYTES = 4000
 
+# faulthandler's own fault headers: "Windows fatal exception: <description>"
+# on Windows, "Fatal Python error: <signal>" everywhere else.
+_WIN_FAULT_LINE_RE = re.compile(r"^Windows fatal exception:\s*(.+?)\s*$")
+_POSIX_FAULT_LINE_RE = re.compile(r"^Fatal Python error:\s*(.+?)\s*$")
+# A numeric Windows exception code, for the codes faulthandler has no name for.
+_WIN_FAULT_CODE_RE = re.compile(r"^code 0x([0-9a-f]{8})$", re.I)
+
+
+def _is_fatal_fault_description(desc: str) -> bool:
+    """Whether a faulthandler fault description names a fault that actually
+    kills the process.
+
+    faulthandler's Windows handler LOGS an exception and then returns
+    EXCEPTION_CONTINUE_SEARCH, so a trace is written for first-chance
+    exceptions the process goes on to handle and survive. Measured
+    2026-09-03: a healthy standalone app-window start writes
+    "Windows fatal exception: code 0x8001010d"
+    (RPC_E_CANTCALLOUT_ININPUTSYNCCALL, raised and handled inside
+    WebView2/.NET while the window is created) and then runs normally to a
+    clean exit. Treating any trace as proof of a crash therefore reports a
+    crash that never happened.
+
+    A description faulthandler NAMED (access violation, stack overflow, ...)
+    is a genuine hardware/OS fault. A bare numeric code is fatal only in the
+    NTSTATUS error range (0xC.......); the 0x8....... HRESULT range, the CLR's
+    own exception code and the C++ throw code are all raised by software and
+    routinely handled.
+    """
+    m = _WIN_FAULT_CODE_RE.match(desc.strip())
+    if m is None:
+        return True   # a named fault: access violation, stack overflow, ...
+    return m.group(1).lower().startswith("c")
+
+
+def _fatal_fault_line(native_trace: str) -> str:
+    """The first line of *native_trace* naming a fault that actually killed the
+    process, or "" when the trace holds none (see
+    _is_fatal_fault_description). Never raises."""
+    try:
+        for line in (native_trace or "").splitlines():
+            line = line.strip()
+            m = _WIN_FAULT_LINE_RE.match(line)
+            if m is not None:
+                if _is_fatal_fault_description(m.group(1)):
+                    return line
+                continue
+            if _POSIX_FAULT_LINE_RE.match(line):
+                return line
+    except Exception:
+        pass
+    return ""
+
 
 def _raw_tail_truncation_signal(home=None, pid=None) -> "tuple[bool, str]":
     """(truncated, last_line): whether the crashed run's OWN raw log file (see
@@ -1890,12 +1942,17 @@ def _classify_prior_death(*, native_trace: str, hang_trace: str,
     Ordered by how direct the evidence is: a captured native trace beats an
     inferred mid-operation cutoff beats a captured hang, and only when NONE of
     those fired does it fall back to naming the remaining ambiguity (an OS kill
-    / force-closed window legitimately leaves no trace at all)."""
-    if native_trace.strip():
-        first_line = next(
-            (ln.strip() for ln in native_trace.strip().splitlines() if ln.strip()), "")
+    / force-closed window legitimately leaves no trace at all).
+
+    Only a trace naming a FATAL fault counts as the first kind of evidence: a
+    trace holding nothing but survivable first-chance exceptions is not a
+    crash report, it is noise the run wrote and lived through (see
+    _fatal_fault_line). Such a trace is still attached to the report - it is
+    context, just not the cause."""
+    fatal_fault = _fatal_fault_line(native_trace)
+    if fatal_fault:
         return (
-            f"localm server crashed - native fault captured: {first_line}",
+            f"localm server crashed - native fault captured: {fatal_fault}",
             "a native crash was caught by the fault handler; see the captured "
             "trace below for the exact fault and thread/frame."
         )
