@@ -48,9 +48,15 @@ jobs:
       # version number cannot be reused even after deletion, so this refuses
       # before the artifact is built rather than after it is uploaded.
       - name: Refuse a tag that disagrees with VERSION
+        # The tag reaches the script through the environment rather than being
+        # interpolated into it. A ${{ }} expression is substituted into the
+        # script TEXT before any shell runs, so a tag containing shell
+        # metacharacters would execute here; $TAG is read as data and cannot.
+        env:
+          TAG: ${{ inputs.ref || github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.ref || github.event.release.tag_name }}"
+          tag="${TAG}"
           file_version="$(tr -d '[:space:]' < VERSION)"
           echo "tag=${tag}  VERSION=${file_version}"
           if [ "${tag}" != "v${file_version}" ]; then
