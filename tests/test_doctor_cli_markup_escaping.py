@@ -80,6 +80,8 @@ def _stub_unrelated_probes(monkeypatch):
     monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
     monkeypatch.setitem(sys.modules, "torch", _fake_torch_no_gpu())
     monkeypatch.setattr(doctor_mod, "_check_hf_backend_usable", lambda *a, **k: None)
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
     # rich soft-wraps at the console width (default 80 under the non-tty
     # CliRunner capture), which would split a long bracketed line mid-string
     # and defeat a plain substring assertion - widen it, as the sibling tests do.
