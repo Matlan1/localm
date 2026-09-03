@@ -38,7 +38,9 @@ class TestWidthHalf:
         _dumb_env(monkeypatch)
         make_console_wide_and_plain(monkeypatch, width="300")
         c = rich.console.Console(file=io.StringIO())
-        assert c.size.width == 299   # legacy_windows subtracts 1 on some platforms; not here
+        # legacy_windows subtracts 1 from the reported width on Windows
+        # without a modern terminal - platform-dependent, not a fixed number.
+        assert c.size.width == 300 - c.legacy_windows
 
     def test_a_preexisting_console_is_also_widened(self, monkeypatch):
         """The shared CLI singletons are constructed before any fixture
@@ -47,7 +49,26 @@ class TestWidthHalf:
         preexisting = rich.console.Console(file=io.StringIO())
         assert preexisting.size.width == 80
         make_console_wide_and_plain(monkeypatch, width="300")
-        assert preexisting.size.width == 299
+        assert preexisting.size.width == 300 - preexisting.legacy_windows
+
+
+    def test_a_poisoned_shared_singletons_width_is_also_reset(self, monkeypatch):
+        """Console.width has a real setter (console.width = N). If some
+        UNRELATED test elsewhere in the suite leaves the shared CLI
+        singleton's _width non-None, Console.size's FIRST check short-
+        circuits before is_dumb_terminal/COLUMNS ever run - this is the
+        exact failure mode that made keys.py's Table tests still fail after
+        the is_dumb_terminal fix alone: the shared console renders correctly
+        in isolation but not when some other test in the same xdist worker
+        set an explicit width on it first. The helper can only defend the
+        specific singleton objects it holds a reference to - not an
+        arbitrary Console() built elsewhere, which is why this targets the
+        real localm.cli._core.console rather than a fresh instance."""
+        _dumb_env(monkeypatch)
+        from localm.cli import _core
+        _core.console.width = 80   # simulates an unrelated test poisoning it
+        make_console_wide_and_plain(monkeypatch, width="300")
+        assert _core.console.size.width == 300 - _core.console.legacy_windows
 
 
 class TestColorHalf:

@@ -102,9 +102,18 @@ def make_console_wide_and_plain(monkeypatch, width: str = "300") -> None:
     monkeypatch.setattr(rich.console.Console, "_detect_color_system",
                         lambda self: None)
     from localm.cli import _core as _core_mod
-    monkeypatch.setattr(_core_mod.console, "_color_system", None)
     from localm.model_manager import _shared as _shared_mod
-    monkeypatch.setattr(_shared_mod.console, "_color_system", None)
+    for singleton in (_core_mod.console, _shared_mod.console):
+        # Console.width has a real setter (console.width = N), so a
+        # completely unrelated test elsewhere in the suite can leave a
+        # SHARED singleton's _width permanently non-None - and size's
+        # FIRST check ("if self._width is not None") then wins over
+        # is_dumb_terminal/COLUMNS for the rest of this xdist worker's
+        # life. Force both back to None so the live is_dumb_terminal +
+        # COLUMNS path actually governs again.
+        monkeypatch.setattr(singleton, "_width", None)
+        monkeypatch.setattr(singleton, "_height", None)
+        monkeypatch.setattr(singleton, "_color_system", None)
     monkeypatch.setenv("COLUMNS", width)
 
 
