@@ -45,4 +45,5 @@ exit /b %errorlevel%
 
 :forward
 "%PY%" -m localm %*
+if errorlevel 1 pause
 exit /b %errorlevel%
