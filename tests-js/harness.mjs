@@ -141,7 +141,7 @@ export function runScript(win, code) {
 // toast, ...) resolve by bare name.
 const PAGE_SCRIPTS = [
   "dispatch", "models", "images", "plugins", "settings",
-  "workflow", "music", "video", "knowledge", "setup",
+  "workflow", "music", "video", "knowledge",
 ];
 
 /**
