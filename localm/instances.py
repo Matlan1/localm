@@ -266,10 +266,36 @@ def list_entries(home: Path) -> list[dict]:
 #  Liveness + reaping                                                #
 # ------------------------------------------------------------------ #
 
+def _is_zombie(pid: int) -> bool:
+    """True if *pid* has exited but has not been reaped by its parent.
+
+    ``os.kill(pid, 0)`` SUCCEEDS for such a process - a zombie keeps its
+    process-table entry until its parent waits on it - so a signal-0 probe
+    alone calls a dead process alive. That is not the conservative
+    "cannot tell" case pid_alive documents below: the OS can tell, and the
+    answer is dead. Every staleness rule in this project is keyed on
+    liveness rather than elapsed time (the pull .part lock, the updater
+    lock, setup_llama's provision lock, the managed-comfy update lock), so
+    a zombie holder read as alive wedges that lock for good. Linux answers
+    this in /proc/<pid>/stat; where that is unavailable (macOS, BSD) this
+    returns False and the signal-0 answer stands unchanged.
+
+    The state is the first field after ``comm``, which is parenthesised and
+    may itself contain ``)`` - so split on the LAST ``)``, never the first.
+    See test_pid_alive_is_false_for_an_unreaped_child.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return fh.read().decode("utf-8", "replace").rpartition(")")[2].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
+
+
 def pid_alive(pid: int) -> bool:
     """Best-effort: is *pid* a live process? Conservative - when we genuinely
     cannot tell (e.g. Windows without psutil), return True so reaping never
-    deletes a live instance's entry. PID reuse is handled by the /whoami
+    deletes a live instance's entry. A zombie is not that case and is
+    reported dead - see _is_zombie. PID reuse is handled by the /whoami
     handshake, not here."""
     if not isinstance(pid, int) or pid <= 0:
         return False
@@ -284,7 +310,7 @@ def pid_alive(pid: int) -> bool:
             return True   # cannot determine -> assume alive (do not reap)
     try:
         os.kill(pid, 0)
-        return True
+        return not _is_zombie(pid)
     except ProcessLookupError:
         return False
     except PermissionError:
