@@ -59,13 +59,17 @@ def copy_to_clipboard(text: str) -> bool:
 
 
 def _native_window_allowed_by_preference() -> bool:
-    """Has the user explicitly turned the app window ON (config key
-    desktop_window_mode == anything other than "browser", which is the
-    default)? Both a config dict missing the key and a read failure fall
-    back to "browser" (not allowed) - the safe default. Never raises."""
+    """Has the user explicitly turned the app window off (config key
+    desktop_window_mode == "browser")? A config dict missing the key falls
+    back to config.py's OWN default for it rather than a second copy of that
+    value here, so the two can never disagree. Returns False on a read
+    failure: the app window is opt-in precisely because it can still crash the
+    process on startup, so an unreadable config must not be what turns it on.
+    Never raises."""
     try:
-        from localm.config import load_config
-        return load_config().get("desktop_window_mode", "browser") != "browser"
+        from localm.config import DEFAULT_CONFIG, load_config
+        fallback = DEFAULT_CONFIG.get("desktop_window_mode", "browser")
+        return load_config().get("desktop_window_mode", fallback) != "browser"
     except Exception:
         logger.debug("appface: reading desktop_window_mode failed, "
                      "defaulting to browser", exc_info=True)
@@ -237,16 +241,6 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     threading.Thread(target=_watch_loaded, name="localm-webview-confirm",
                      daemon=True).start()
     _native_window = window
-    # The WinForms backend's own window creation (lazy, inside webview.start()
-    # below) can trigger outgoing COM calls (UI Automation/accessibility
-    # notifications), and a thread with no COM apartment established raises
-    # RPC_E_CANTCALLOUT_ININPUTSYNCCALL when that happens - the same fault
-    # _WinTray._run establishes an STA apartment against. This function is
-    # called on the process's actual main thread (see the docstring above),
-    # which on Windows has no COM apartment of its own by default. A no-op on
-    # non-Windows platforms (ctypes.windll does not exist there; _com_init
-    # catches the AttributeError and returns None).
-    ole32 = _com_init()
     try:
         # private_mode=False keeps the login cookie across restarts, like the
         # browser tab this replaces. Blocks until the window is destroyed.
@@ -262,7 +256,6 @@ def run_native_window(url: str, name: str = "LocaLM", *,
         return False
     finally:
         _native_window = None
-        _com_uninit(ole32)
     return loaded["v"]
 
 

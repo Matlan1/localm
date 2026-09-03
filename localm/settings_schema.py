@@ -569,7 +569,8 @@ CORE_FIELDS: list = [
                  "How `localm gui` opens when the standalone-window extra "
                  "(localm[desktop]) is installed. browser (default): always "
                  "a browser tab. auto: the app window when available, else a "
-                 "browser tab.",
+                 "browser tab - the app window is opt-in because it can still "
+                 "crash on startup.",
                  group="Desktop", options=["auto", "browser"]),
     SettingField("desktop_window_quit_on_close", Widget.TOGGLE,
                  "Quit when the app window is closed",

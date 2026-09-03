@@ -193,6 +193,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Enter can no longer silently download and load-test a GPU runtime you
   did not want; every backend, including CPU, stays available to pick
   explicitly either way.
+- **The standalone app window is now opt-in.** With the optional desktop extra
+  installed, localm used to open in its own window automatically. That window
+  can still crash on startup on some machines, so localm now opens in your
+  browser unless you ask for the window in Settings > Desktop (or by setting
+  `desktop_window_mode` to `auto`). Nothing changes if you never installed the
+  extra.
 
 ### Fixed
 - **`localm image`, `localm music` and `localm video` ignored the ComfyUI
@@ -508,6 +514,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   The session toolbar ran off the edge of its column, so on a 1280px-wide window
   everything from "memory" rightwards, including Stop, sat under the sessions
   list with no way to scroll to it. The toolbar now wraps onto a second row.
+- **localm no longer reports a crash that did not happen.** Starting the
+  standalone app window makes Windows raise and immediately handle a harmless
+  internal error. localm was treating any such record as proof that the
+  previous run had died, so after any unclean stop it announced "localm server
+  crashed - native fault captured", saved a bug report and named that harmless
+  error as the cause. It now distinguishes errors that actually end a process
+  from ones a program raises and handles, and says plainly when the cause is
+  simply unknown. Real crashes are still reported, and still name the real
+  fault.
+- **A failed launch no longer closes its window before you can read the
+  error.** Starting localm from the launcher or a shortcut opened a console
+  that vanished the instant the process stopped, so a startup refusal (for
+  example, a second copy starting in a folder that already has one) flashed
+  red and disappeared. The window now stays open when a launch fails; a normal
+  exit still closes it.
 
 ### Security
 - **A fetched web page or external tool result can no longer impersonate you or

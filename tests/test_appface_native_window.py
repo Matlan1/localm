@@ -52,31 +52,29 @@ def test_native_window_available_false_when_not_installed(monkeypatch):
 
 
 def test_desktop_window_mode_default_is_browser():
-    """Pins the product decision directly against the real config default,
-    not a mocked dict: the app window is opt-in, not opt-out. Reproduced
-    2026-09-03 as a real, reliable Windows fatal exception (0x8001010d,
-    RPC_E_CANTCALLOUT_ININPUTSYNCCALL) inside pywebview's WinForms backend
-    whenever the app window runs concurrently with the real HTTP server -
-    ruled out the model, every webview.start() kwarg individually and
-    combined, and the tray/status window, all still crashing; not resolved
-    within this fix. "auto" tried the app window by default with no opt-in
-    required beyond installing localm[desktop], so the safe default is
-    "browser" until the underlying interaction is understood."""
+    """The app window is OPT-IN. Measured 2026-09-03 on AMD/Windows 11 with
+    pywebview 6.2.1/WebView2: a fresh `localm gui` in app-window mode dies
+    with a native access violation on roughly one start in three, so it must
+    not be what an install does by default. Pinned against the real
+    DEFAULT_CONFIG rather than a mock so a well-meant flip back to "auto"
+    fails here rather than in front of a user."""
     from localm.config import DEFAULT_CONFIG
     assert DEFAULT_CONFIG["desktop_window_mode"] == "browser"
 
 
-def test_native_window_available_false_by_default_with_no_config_key(monkeypatch):
-    """A config dict that is missing the key entirely (an older config
-    written before this default changed) must resolve the SAME as an
-    explicit "browser" - not fall back to a hardcoded "auto" independent of
-    config.py's own default, which would silently re-enable the crash for
-    exactly the users a stale-but-otherwise-valid config was meant to protect."""
+def test_native_window_available_uses_config_pys_own_default_for_a_missing_key(
+        monkeypatch):
+    """A config dict missing the key entirely (an older config written before
+    the key existed) must resolve the same as config.py's OWN default, not a
+    second hardcoded copy of that value in appface - the two silently drifting
+    apart is how a default change fails to take effect where it matters."""
+    from localm.config import DEFAULT_CONFIG
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     monkeypatch.setitem(sys.modules, "webview", MagicMock())
     monkeypatch.setattr("localm.config.load_config", lambda: {})
 
-    assert appface.native_window_available() is False
+    expected = DEFAULT_CONFIG["desktop_window_mode"] != "browser"
+    assert appface.native_window_available() is expected
 
 
 def test_native_window_available_true_when_importable(monkeypatch):
@@ -98,10 +96,8 @@ def test_native_window_available_false_when_mode_is_browser(monkeypatch):
 
 
 def test_native_window_allowed_defaults_false_when_config_read_fails(monkeypatch):
-    """A config problem must never silently ENABLE a feature the user did
-    not explicitly opt into - the app window defaults off (desktop_window_mode
-    default is "browser"), so a read failure must fail toward the safe,
-    already-verified-working browser tab, not toward native."""
+    """An unreadable config must not be what ENABLES an opt-in feature that
+    can still crash the process - fail toward the browser tab."""
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     monkeypatch.setitem(sys.modules, "webview", MagicMock())
 
@@ -326,55 +322,6 @@ def test_run_native_window_returns_false_and_never_raises_when_start_fails(monke
     monkeypatch.setitem(sys.modules, "webview", fake)
 
     assert appface.run_native_window("http://127.0.0.1:8642/") is False
-
-
-def test_run_native_window_establishes_and_releases_a_com_apartment_around_start(
-        monkeypatch):
-    """appface._com_init/_com_uninit, shared with _WinTray's identical call
-    (test_appface_tray_com.py), wrap webview.start(). Real-world note: a
-    Windows fatal exception 0x8001010d was reproduced on 2026-09-03 inside
-    webview.start() and this alone did NOT resolve it (the fault is on a
-    thread pywebview creates and STA-configures internally, not the calling
-    thread this establishes an apartment on) - desktop_window_mode's default
-    was changed to "browser" instead (see test_desktop_window_mode_default_is_
-    browser). This fix is kept as a real, harmless hardening for the other
-    call site (_WinTray._run's identical need), not as the resolution."""
-    monkeypatch.delitem(sys.modules, "pytest", raising=False)
-    fake, _ = _fake_webview(loaded=True, start_sleep=0)
-    monkeypatch.setitem(sys.modules, "webview", fake)
-    monkeypatch.setattr("localm.config.load_config",
-                        lambda: {"desktop_window_mode": "auto"})
-    calls = []
-    sentinel_ole32 = object()
-    monkeypatch.setattr(appface, "_com_init",
-                        lambda: (calls.append("init"), sentinel_ole32)[1])
-    monkeypatch.setattr(appface, "_com_uninit",
-                        lambda h: calls.append(("uninit", h)))
-
-    assert appface.run_native_window("http://127.0.0.1:8642/") is True
-
-    assert calls == ["init", ("uninit", sentinel_ole32)]
-
-
-def test_run_native_window_releases_the_com_apartment_even_when_start_raises(
-        monkeypatch):
-    """Same regression shape as _WinTray._run's fires-control: the apartment
-    acquired before webview.start() must be released via the finally, not
-    only on the clean-exit path."""
-    monkeypatch.delitem(sys.modules, "pytest", raising=False)
-    fake, _ = _fake_webview(loaded=False)
-    fake.start.side_effect = RuntimeError("boom")
-    monkeypatch.setitem(sys.modules, "webview", fake)
-    monkeypatch.setattr("localm.config.load_config",
-                        lambda: {"desktop_window_mode": "auto"})
-    sentinel_ole32 = object()
-    monkeypatch.setattr(appface, "_com_init", lambda: sentinel_ole32)
-    uninit_calls = []
-    monkeypatch.setattr(appface, "_com_uninit", lambda h: uninit_calls.append(h))
-
-    assert appface.run_native_window("http://127.0.0.1:8642/") is False
-
-    assert uninit_calls == [sentinel_ole32]
 
 
 def test_show_native_window_returns_false_when_no_window_active():
