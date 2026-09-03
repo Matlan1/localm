@@ -267,6 +267,11 @@ dev = [
     # monitor], and the gpu extra pulls accelerate). Keep it here so CI exercises the
     # device-map and worker-reaping paths instead of erroring on the import.
     "psutil>=7.2.2",
+    # Static analysis of the workflow files themselves, run by the lint job.
+    # It covers ground the CodeQL `actions` analysis does not: that reports 0
+    # results on this tree, while this finds template expansion into run
+    # blocks and credential persistence through checkout.
+    "zizmor>=1.30.0",
 ]
 
 [project.scripts]
