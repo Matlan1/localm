@@ -7,6 +7,33 @@ import click
 from ._core import console, main
 
 
+def _plugin_api_url(plugin: str) -> str:
+    """The ComfyUI URL this media plugin actually uses.
+
+    The GUI and `localm plugin config` write a PER-PLUGIN comfy.api_url, whose
+    own help says it is where THIS plugin's ComfyUI listens. The command line
+    used to call default_api_url(), which only ever reads the shared key, so a
+    per-plugin target was ignored here and the CLI could talk to a different
+    ComfyUI than the GUI for the same plugin.
+
+    Resolved through the plugin's OWN backend, the same call its routes make, so
+    the two agree by construction instead of through two copies of a precedence
+    rule that already differs between the three media plugins. Falls back to the
+    shared default if that plugin is not importable."""
+    from importlib import import_module
+
+    from ..config import load_config
+    try:
+        backend = import_module(f"localm.plugins.builtin.{plugin}.backend")
+        url = backend.settings(load_config()).get("api_url")
+        if url:
+            return str(url)
+    except Exception as exc:                     # noqa: BLE001
+        from ..debuglog import logger
+        logger.debug("could not resolve the %s plugin ComfyUI url (%s); using the shared default", plugin, exc)
+    from ..media.comfy_client import default_api_url
+    return default_api_url()
+
 def _open_file(path: Path) -> None:
     """Open *path* with the OS default application (best-effort, never fatal)."""
     import os as _os
@@ -192,10 +219,10 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     from rich.markup import escape
 
     from ..audit import SessionMode, effective_mode
-    from ..image_gen.comfy import (default_api_url, free_comfy_vram,
+    from ..image_gen.comfy import (free_comfy_vram,
                                   generate_image)
 
-    api_url = default_api_url()
+    api_url = _plugin_api_url("image")
     # generate_image() calls ensure_comfy() internally, which auto-launches
     # ComfyUI from comfy_launch_cmd/comfy_workdir, or returns a clear error
     # when they are unset.
@@ -263,14 +290,13 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     from rich.console import Console
     from rich.markup import escape
     from ..audit import SessionMode, effective_mode
-    from ..media.comfy_client import default_api_url
     from ..music_gen import generate_music
     console = Console()
 
     # generate_music() calls ensure_comfy() internally: auto-launch from
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
 
-    api_url = default_api_url()
+    api_url = _plugin_api_url("music")
     out_path = Path(out) if out \
         else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}.flac")
     lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
@@ -342,14 +368,13 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     from rich.console import Console
     from rich.markup import escape
     from ..audit import SessionMode, effective_mode
-    from ..media.comfy_client import default_api_url
     from ..video_gen import generate_video
     console = Console()
 
     # generate_video() calls ensure_comfy() internally: auto-launch from
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
 
-    api_url = default_api_url()
+    api_url = _plugin_api_url("video")
     out_path = Path(out) if out \
         else Path(f"video_{_time.strftime('%Y%m%d_%H%M%S')}.mp4")
     kwargs = {k: v for k, v in

@@ -199,6 +199,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   explicitly either way.
 
 ### Fixed
+- **`localm image`, `localm music` and `localm video` ignored the ComfyUI
+  address set for that plugin.** They always used the shared one, so a plugin
+  pointed at its own ComfyUI worked in the interface and quietly went somewhere
+  else on the command line.
 - **`localm plugin setup` could never offer the browser plugin.** It ships with
   localm and the Plugins page listed it as available, but the command the
   installers themselves run could not see it, and asking for it by name failed.
