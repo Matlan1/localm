@@ -513,25 +513,22 @@ pytest_add_cli_args_test_selection = [
 packages = ["localm", "runtime/localm_llama_runtime"]
 
 [tool.hatch.build.targets.sdist]
-# These paths are excluded by NAME, not by .gitignore. hatchling drops every
-# .gitignore pattern when the build root itself matches one of them, so a build
-# run from a directory under .claude/ or home/ packages the local-only files
-# below. Naming them here makes the sdist contents the same from any root.
-exclude = [
-  "/.claude",
-  "/dev-notes",
-  "/qa",
-  "/issues",
-  "/home",
-  "/AGENTS.md",
-  "/CLAUDE.md",
-  "/RELEASE.md",
-  "/TODO.md",
-  "/CHANGELOG-FULL.md",
-  "/release-manifest.toml",
-  "/scripts/codeql",
-  "/scripts/build_release.py",
-  "/scripts/make_release.py",
-  "/scripts/sign_release.py",
-  "/scripts/check_manifest.py",
+# An ALLOWLIST, not a list of things to leave out. hatchling drops every
+# .gitignore pattern when the build root itself matches one, and the runner
+# path and any worktree under .claude/ both match, so gitignore-based selection
+# is off in those builds. A list of paths to exclude would then have to name
+# every local-only file that exists now or later - private keys, scratch dirs,
+# the maintainer's own notes - and anything unnamed ships. Naming what goes IN
+# is complete by construction, so a new local-only file is packaged only if
+# someone adds it here.
+only-include = [
+  "localm",
+  "runtime",
+  "tests",
+  "docs",
+  "pyproject.toml",
+  "README.md",
+  "LICENSE",
+  "VERSION",
+  "CHANGELOG.md",
 ]

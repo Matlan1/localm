@@ -115,9 +115,16 @@ jobs:
           PYTHONPATH= /tmp/wheelcheck/bin/python - <<'PY'
           import pathlib, localm
           root = pathlib.Path(localm.__file__).parent
+          # The three icons are the ones worth asserting on: .gitignore excludes
+          # *.png and re-includes only these by negation, so they are the packaged
+          # files that actually disappear when file selection goes wrong. Losing
+          # them costs the favicon and every manifest.webmanifest icon.
           required = [
               "plugins/gui/static/index.html",
               "plugins/builtin/tts/static/tts.js",
+              "plugins/gui/static/icon-192.png",
+              "plugins/gui/static/icon-512.png",
+              "plugins/gui/static/icon-maskable-512.png",
           ]
           missing = [r for r in required if not (root / r).is_file()]
           assert not missing, f"wheel is missing packaged assets: {missing}"
