@@ -36,8 +36,25 @@ function el(tag, cls, text) {
   return n;
 }
 
+/** Load this plugin's own stylesheet, once.
+ *
+ *  The tab builds itself into the SPA's #main, and the host stylesheet has no
+ *  rules for any browser-* class, so without this every control is unstyled and
+ *  the frame overflows its container. Resolved from the module's own URL so it
+ *  works wherever the plugin's assets are mounted. */
+function ensureStyles() {
+  const id = "browser-plugin-styles";
+  if (document.getElementById(id)) return;
+  const link = document.createElement("link");
+  link.id = id;
+  link.rel = "stylesheet";
+  link.href = new URL("./browser.css", import.meta.url).href;
+  (document.head || document.documentElement).appendChild(link);
+}
+
 export function register(ctx) {
   ctx = ctx || {};
+  ensureStyles();
   const toast = typeof ctx.toast === "function" ? ctx.toast : () => {};
   const authHeaders =
     typeof ctx.authHeaders === "function" ? ctx.authHeaders : () => ({});
@@ -70,12 +87,30 @@ export function register(ctx) {
 
   let jobId = null;
   let abort = null;
+  // "idle" nothing open, "own" this tab's own browser, "agent" watching the
+  // one the coding agent drives. Only "own" is drivable: /api/browser/navigate
+  // resolves the caller's OWN gui- session, never the agent's, so an address
+  // bar in "agent" mode would drive a browser other than the one on screen.
+  let mode = "idle";
+  // True while a request is in flight, so a second click cannot open a second
+  // browser or navigate one that has not finished opening.
+  let busy = false;
 
-  function setRunning(on) {
-    go.disabled = on;
-    stop.disabled = !on;
-    url.disabled = on;
+  function applyControls() {
+    const idle = mode === "idle";
+    const agent = mode === "agent";
+    go.textContent = idle ? "Open" : "Go";
+    go.disabled = agent || busy;
+    go.title = agent
+      ? "The coding agent drives this browser. The tab is watching it."
+      : (idle ? "Open a browser at this address"
+              : "Send this browser to another address");
+    stop.disabled = idle;
+    url.disabled = agent;
   }
+
+  function setMode(next) { mode = next; applyControls(); }
+  function setBusy(on) { busy = on; applyControls(); }
 
   function showFrame(data) {
     const src = frameSrc(data);
@@ -132,7 +167,7 @@ export function register(ctx) {
           lastLine = ev.line || ev.text;
           status.textContent = lastLine;
         } else if (ev.type === "end") {
-          setRunning(false);
+          setMode("idle");
           const failed = ev.status && ev.status !== "done" && ev.status !== "cancelled";
           if (failed) {
             status.textContent = lastLine || ("Browser stopped: " + ev.status);
@@ -146,7 +181,8 @@ export function register(ctx) {
   }
 
   async function open() {
-    setRunning(true);
+    setMode("own");
+    setBusy(true);
     status.textContent = "Starting the browser...";
     try {
       const r = await fetch(API + "/session", {
@@ -155,7 +191,7 @@ export function register(ctx) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        setRunning(false);
+        setMode("idle");
         status.textContent = data.detail || "Could not open a browser.";
         toast(status.textContent, true);
         return;
@@ -164,20 +200,76 @@ export function register(ctx) {
       stream(jobId);
       poll();
     } catch (e) {
-      setRunning(false);
+      setMode("idle");
       status.textContent = "Could not open a browser.";
+    } finally {
+      setBusy(false);
     }
   }
 
   async function close() {
     if (abort) { try { abort.abort(); } catch (e) { /* already gone */ } }
     abort = null;
-    try {
-      await fetch(API + "/stop", { method: "POST", headers: authHeaders() });
-    } catch (e) { /* the server may already have closed it */ }
-    setRunning(false);
+    const id = jobId;
+    const own = mode === "own";
+    setMode("idle");
     jobId = null;
-    status.textContent = "Browser closed.";
+    // The worker loops until it is asked to stop, and its exit is what closes
+    // the browser (own view) or hands the agent's back with its screencast off
+    // (agent view). Without this the job outlives the viewer in either mode.
+    if (id) {
+      try {
+        await fetch("/api/jobs/" + encodeURIComponent(id) + "/cancel",
+                    { method: "POST", headers: authHeaders() });
+      } catch (e) { /* it may already have ended */ }
+    }
+    if (own) {
+      try {
+        await fetch(API + "/stop", { method: "POST", headers: authHeaders() });
+      } catch (e) { /* the server may already have closed it */ }
+    }
+    status.textContent = own ? "Browser closed."
+                             : "Stopped watching the agent browser.";
+  }
+
+  /** Drive the already-open browser to another address.
+   *
+   *  Without this the tab could reach only ONE url per session: the address
+   *  field was disabled while a browser was open, and Open would POST /session
+   *  again and take that route's "already open for this key" refusal. */
+  async function navigate() {
+    const target = url.value.trim();
+    if (!target) return;
+    setBusy(true);
+    status.textContent = "Loading " + target + "...";
+    try {
+      const r = await fetch(API + "/navigate", {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ url: target }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        status.textContent = data.detail || "Could not go there.";
+        toast(status.textContent, true);
+        return;
+      }
+      if (data.ok) {
+        status.textContent = "Opened " + (data.url || target);
+      } else {
+        status.textContent = "Refused: " + (data.refused || data.error || target);
+        toast(status.textContent, true);
+      }
+    } catch (e) {
+      status.textContent = "Could not go there.";
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** The address bar's action: open the first browser, then navigate it. */
+  function submit() {
+    if (mode === "own") navigate();
+    else if (mode === "idle") open();
   }
 
   /** Refresh the refusal list, so a blocked destination is visible rather than
@@ -209,7 +301,7 @@ export function register(ctx) {
   }
 
   async function watchAgent() {
-    setRunning(true);
+    setMode("agent");
     status.textContent = "Attaching to the agent browser...";
     try {
       const r = await fetch(API + "/agent", {
@@ -217,7 +309,7 @@ export function register(ctx) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        setRunning(false);
+        setMode("idle");
         status.textContent = data.detail || "No agent browser to watch.";
         toast(status.textContent, true);
         return;
@@ -226,15 +318,16 @@ export function register(ctx) {
       stream(jobId);
       poll();
     } catch (e) {
-      setRunning(false);
+      setMode("idle");
       status.textContent = "Could not attach to the agent browser.";
     }
   }
 
-  go.onclick = open;
+  go.onclick = submit;
   stop.onclick = close;
   watch.onclick = watchAgent;
-  url.onkeydown = (e) => { if (e.key === "Enter" && !go.disabled) open(); };
+  url.onkeydown = (e) => { if (e.key === "Enter" && !go.disabled) submit(); };
+  setMode("idle");
 
   const prev = window.onViewShown;
   window.onViewShown = (name) => {
