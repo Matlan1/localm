@@ -156,7 +156,7 @@ desktop = [
 # the driver, which then refuses to launch.
 # Install with:  pip install "localm[browser]"
 browser = [
-    "playwright>=1.61,<1.62",
+    "playwright>=1.61,<1.63",
 ]
 
 # AMD RDNA2 (RX 6xxx) GPU stack - ROCm 7.13.0, Python 3.12, Windows
