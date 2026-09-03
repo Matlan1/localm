@@ -74,6 +74,8 @@ def test_com_uninit_never_raises_even_if_couninitialize_does():
     tray._com_uninit(fake_ole32)   # must not raise
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="_run reads ctypes.windll, which is Windows-only")
 def test_run_releases_the_com_apartment_even_when_the_message_loop_raises(
         monkeypatch):
     """The regression this fix exists to prevent: a resource (here, the COM
@@ -96,6 +98,8 @@ def test_run_releases_the_com_apartment_even_when_the_message_loop_raises(
     assert uninit_calls == [sentinel_ole32]
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="_run reads ctypes.windll, which is Windows-only")
 def test_run_releases_the_com_apartment_on_the_clean_exit_path(monkeypatch):
     tray = _tray()
     sentinel_ole32 = object()
