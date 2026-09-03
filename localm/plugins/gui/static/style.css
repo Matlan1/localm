@@ -1213,6 +1213,10 @@ pre:hover .canvas-btn { opacity: 1; }
 .card textarea { resize: vertical; }
 .card .row { display: flex; gap: 10px; align-items: center; }
 .card .row input { flex: 1; }
+/* A select in a card row sizes to its content instead of the 100% width above,
+   so the flex:1 inputs beside it keep the remaining space.
+   See tests-e2e/card-row-select-width.spec.mjs. */
+.card .row select { flex: 0 0 auto; width: auto; }
 .card .actions { margin-top: 14px; display: flex; gap: 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
 
