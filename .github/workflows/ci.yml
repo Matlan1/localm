@@ -157,6 +157,7 @@ jobs:
       # no CACHE bump exits 0 (silent pass); full -> the same commit correctly fails.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -281,6 +282,8 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: "22"
@@ -299,6 +302,8 @@ jobs:
     if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
@@ -312,6 +317,12 @@ jobs:
           pip install -e ".[dev,rag]"
       - name: Lint (ruff)
         run: ruff check .
+
+      # Static analysis of the workflow files themselves. --offline keeps it
+      # free of network and of any token. It exits non-zero rather than
+      # reporting success when it cannot analyze an input.
+      - name: Lint workflows (zizmor)
+        run: zizmor --offline .github/workflows/
 
   # Validate the hand-written ctypes binding against the ACTUAL upstream binary.
   # Heavy (downloads the cpu prebuilt) and checks a MOVING upstream target, so it
@@ -331,6 +342,8 @@ jobs:
     if: github.event_name == 'schedule' || inputs.run_abi || github.event_name == 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -415,6 +428,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -443,6 +458,8 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'mutation-test'))
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -494,6 +511,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:

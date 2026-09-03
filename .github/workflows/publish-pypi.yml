@@ -35,6 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
+          persist-credentials: false
           ref: ${{ inputs.ref || github.event.release.tag_name }}
           # The version guard below reads VERSION from the checked-out tree.
           fetch-depth: 1
