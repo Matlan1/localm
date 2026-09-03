@@ -55,6 +55,8 @@ def bracketed_home_runner(tmp_path, monkeypatch):
     # rich.console.Console() reads COLUMNS at construction time; without it a
     # non-tty width default of 80 hard-wraps mid-word inside the long pytest
     # basetemp paths these tests assert on.
+    import rich.console
+    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
     monkeypatch.setenv("COLUMNS", "300")
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setattr(cfg, "HOME_DIR", home)

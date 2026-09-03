@@ -28,6 +28,7 @@ interactive terminal AND a failing OS file-open call, and shares the
 
 from __future__ import annotations
 
+import pytest
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -39,6 +40,18 @@ from localm.cli import main
 # two distinct failure shapes described in the module docstring above.
 BRACKET_DROP_TEXT = "render[draft] failed"
 BRACKET_STYLE_TEXT = "render[bold red] failed"
+
+
+@pytest.fixture(autouse=True)
+def _wide_console(monkeypatch):
+    """Widen the console for every test in this module.
+
+    rich.console.Console.size returns 80x25 outright on a dumb terminal,
+    before it ever consults COLUMNS - patching is_dumb_terminal is what makes
+    the COLUMNS override below actually take effect."""
+    import rich.console
+    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
+    monkeypatch.setenv("COLUMNS", "300")
 
 
 class TestImageCmdMessageMarkupEscaping:

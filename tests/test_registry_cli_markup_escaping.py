@@ -86,6 +86,8 @@ def _wide_console(monkeypatch):
     # capture defaults to 80 columns and hard-wraps the longer paths/messages
     # used below mid-word, breaking a plain substring assertion. Same fixture
     # note as test_rag_cli_markup_escaping.py / test_models_cli_markup_escaping.py.
+    import rich.console
+    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
     monkeypatch.setenv("COLUMNS", "300")
 
 
@@ -593,6 +595,8 @@ class TestAddLocalMarkupEscaping:
         # is declined by the (forced non-interactive) dedup prompt - the
         # honest "moved/copied but not registered" outcome, not a claimed
         # success.
+        import rich.console
+        monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
         monkeypatch.setenv("COLUMNS", "1000")   # keep the long final message on one line
         store, models_dir = fake_registry
         external = tmp_path / "external" / f"new-{BRACKET_STYLE}.gguf"

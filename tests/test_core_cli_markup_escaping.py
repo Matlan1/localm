@@ -49,6 +49,8 @@ def wide_console(monkeypatch):
     COLUMNS, and returns 80x25 outright on a dumb terminal, where setting
     COLUMNS alone does not survive. At width 80 a long message hard-wraps
     mid-word and the substring assertions below fail on the newline."""
+    import rich.console
+    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
     monkeypatch.setenv("COLUMNS", "300")
     from localm.cli import _core
     monkeypatch.setattr(_core.console, "_width", 300)

@@ -85,6 +85,8 @@ def _stub_unrelated_probes(monkeypatch):
     # Pin the width of the console the CLI prints through. Console.size returns
     # _width/_height before it consults TERM or COLUMNS, and returns 80x25
     # outright on a dumb terminal, where COLUMNS alone does not survive.
+    import rich.console
+    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
     monkeypatch.setenv("COLUMNS", "400")
     from localm.cli import _core
     monkeypatch.setattr(_core.console, "_width", 400)

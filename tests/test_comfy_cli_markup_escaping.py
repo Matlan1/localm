@@ -59,6 +59,8 @@ def bracket_home_runner(tmp_path, monkeypatch):
     home.mkdir(parents=True, exist_ok=True)
     # rich.console.Console() reads COLUMNS at construction time; without it the
     # non-tty default of 80 hard-wraps mid-word inside a long basetemp path.
+    import rich.console
+    monkeypatch.setattr(rich.console.Console, "is_dumb_terminal", False)
     monkeypatch.setenv("COLUMNS", "300")
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setattr(cfg, "HOME_DIR", home)
