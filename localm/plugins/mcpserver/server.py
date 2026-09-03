@@ -56,7 +56,7 @@ from localm.pathsafe import is_unc_or_device_path
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
-SERVER_VERSION = "0.1.5"
+SERVER_VERSION = "0.2.0"
 
 
 def _log(msg: str) -> None:
