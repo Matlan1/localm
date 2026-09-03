@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ssl
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -414,11 +415,25 @@ def test_every_pinned_asset_belongs_to_a_pinned_tag():
         f"{stale}")
 
 
+def _fake_amd_detection(monkeypatch, fam):
+    """Patch BOTH hwdetect entry points the ROCm resolver calls.
+
+    ``_resolve_backend_asset`` evaluates
+    ``hwdetect.amd_gfx_family(hwdetect.detect().gpu_names)``. Under the faked
+    ``sys.platform == "win32"`` these tests need, ``detect()`` enumerates Windows
+    video controllers and raises on any other OS, so patching ``amd_gfx_family``
+    alone leaves the resolver on its gfx103X fallback and the detected family
+    never reaches the assertion. ``gpu_names`` is the only attribute read."""
+    monkeypatch.setattr(hwdetect, "detect",
+                        lambda: SimpleNamespace(gpu_names=["AMD Radeon Graphics"]))
+    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: fam)
+
+
 def test_resolve_amd_rocm_asset_warns_when_release_lookup_fails(monkeypatch, capsys):
     """A failed lemonade-sdk release lookup must be surfaced the same way the
     general (non-ROCm) fallback is, not silently skipped."""
     monkeypatch.setattr(sl.sys, "platform", "win32")
-    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: "gfx103x")
+    _fake_amd_detection(monkeypatch, "gfx103x")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
     url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
@@ -440,7 +455,7 @@ def test_resolve_amd_rocm_asset_warns_when_gfx103x_asset_missing(monkeypatch, ca
         "digest": "sha256:othergpuvariant",
     }]
     monkeypatch.setattr(sl.sys, "platform", "win32")
-    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: "gfx103x")
+    _fake_amd_detection(monkeypatch, "gfx103x")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
 
     url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
@@ -458,7 +473,7 @@ def test_resolve_amd_rocm_asset_no_warning_when_release_found(monkeypatch, capsy
         "digest": "sha256:dummyrocmsha",
     }]
     monkeypatch.setattr(sl.sys, "platform", "win32")
-    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: "gfx103x")
+    _fake_amd_detection(monkeypatch, "gfx103x")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
 
     url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
@@ -485,7 +500,7 @@ def test_resolve_amd_rocm_asset_selects_the_detected_family(monkeypatch, capsys,
          "digest": f"sha256:{fam}sha"},
     ]
     monkeypatch.setattr(sl.sys, "platform", "win32")
-    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: fam)
+    _fake_amd_detection(monkeypatch, fam)
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
 
     url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
@@ -502,7 +517,7 @@ def test_resolve_amd_rocm_asset_falls_back_to_the_detected_familys_own_pin(monke
     gfx103X constant - otherwise a gfx110X/gfx120X box would silently receive
     the wrong (RDNA2) runtime whenever the release API is unreachable."""
     monkeypatch.setattr(sl.sys, "platform", "win32")
-    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: "gfx110x")
+    _fake_amd_detection(monkeypatch, "gfx110x")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
     url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
