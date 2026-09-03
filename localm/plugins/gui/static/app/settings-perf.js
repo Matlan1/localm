@@ -1349,7 +1349,7 @@ export const NAV_ICON = { chat: "chat", code: "coder", image: "image", music: "m
 export const NAV_GROUPS = {
   studio: { label: "Studio", icon: "studio", order: ["images", "music", "video"],
             key: "localm.studioOpen" },
-  coder:  { label: "Coder",  icon: "coder",  order: ["coder", "browser"],
+  coder:  { label: "Agent",  icon: "coder",  order: ["coder", "browser"],
             key: "localm.coderOpen" },
 };
 export const NAV_TAB_ORDER = ["coder", "studio", "knowledge"];

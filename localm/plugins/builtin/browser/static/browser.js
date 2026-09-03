@@ -70,16 +70,17 @@ export function register(ctx) {
   const url = el("input", "browser-url");
   url.type = "text";
   url.placeholder = "https://example.com";
-  const go = el("button", "primary", "Open");
-  const stop = el("button", "", "Stop");
+  const go = el("button", "btn-primary", "Open");
+  const stop = el("button", "btn-secondary", "Stop");
   stop.disabled = true;
-  const watch = el("button", "", "Watch the agent");
+  const watch = el("button", "btn-secondary", "Watch the agent");
   watch.hidden = true;
   watch.title = "Show the browser the coding agent is driving";
   bar.append(url, go, stop, watch);
 
   const shot = el("img", "browser-frame");
   shot.alt = "Live view of the automated browser";
+  shot.hidden = true;
   const status = el("div", "browser-status", "No browser open.");
   const refused = el("ul", "browser-refused");
 
@@ -109,12 +110,19 @@ export function register(ctx) {
     url.disabled = agent;
   }
 
-  function setMode(next) { mode = next; applyControls(); }
+  function setMode(next) {
+    mode = next;
+    // Clearing here rather than at each call site: every path back to idle
+    // runs through this, and a frame left behind shows the last screenshot of
+    // a browser that is no longer open.
+    if (next === "idle") { shot.hidden = true; shot.removeAttribute("src"); }
+    applyControls();
+  }
   function setBusy(on) { busy = on; applyControls(); }
 
   function showFrame(data) {
     const src = frameSrc(data);
-    if (src) shot.src = src;
+    if (src) { shot.src = src; shot.hidden = false; }
   }
 
   function addRefusal(text) {
