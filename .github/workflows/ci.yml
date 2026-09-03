@@ -207,10 +207,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           ( while true; do
-              echo "DISKWATCH $(date +%H:%M:%S) free_disk_mb=$(df -m / | tail -1 | awk '{print $4}') avail_mem_mb=$(free -m | awk '/^Mem:/{print $7}')";
+              echo "DISKWATCH $(date +%H:%M:%S) free_disk_mb=$(df -m / | tail -1 | awk '{print $4}') avail_mem_mb=$(free -m | awk '/^Mem:/{print $7}') procs=$(ps -e --no-headers | wc -l)";
               sleep 15;
             done ) &
-          pytest -m "not integration" -n auto -q
+          pytest -m "not integration" -n auto -v --no-header -p no:cacheprovider
 
       - name: Tests
         if: matrix.os != 'ubuntu-latest'
