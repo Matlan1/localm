@@ -66,6 +66,20 @@ def _fake_torch_no_gpu():
     return mod
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _wide_console(monkeypatch):
+    """Widen the console for every test in this module.
+
+    Was previously folded into _stub_unrelated_probes, a plain helper
+    function each test had to remember to call manually - TestGpuDriverMarkupEscaping's
+    two tests never did, so they had no width protection at all."""
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="400")
+
+
 def _stub_unrelated_probes(monkeypatch):
     """Neutralize every doctor probe NOT under test in a given test, so the
     real `doctor` CLI command can be driven end to end without touching real
@@ -82,11 +96,6 @@ def _stub_unrelated_probes(monkeypatch):
     monkeypatch.setattr(doctor_mod, "_check_hf_backend_usable", lambda *a, **k: None)
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
-    # Pin the width of the console the CLI prints through. Console.size returns
-    # _width/_height before it consults TERM or COLUMNS, and returns 80x25
-    # outright on a dumb terminal, where COLUMNS alone does not survive.
-    from tests.conftest import make_console_wide_and_plain
-    make_console_wide_and_plain(monkeypatch, width="400")
     from localm.cli import _core
     monkeypatch.setattr(_core.console, "_width", 400)
     monkeypatch.setattr(_core.console, "_height", 25)

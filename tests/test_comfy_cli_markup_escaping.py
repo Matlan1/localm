@@ -47,6 +47,17 @@ def _write_workflow_file(tmp_path, name, content=_WF):
     return p
 
 
+@pytest.fixture(autouse=True)
+def _wide_console(monkeypatch):
+    """Widen the console for every test in this module.
+
+    Only ONE fixture in this file (bracket_home_runner) ever set this, so
+    every test using the plain `cli_runner` fixture instead - most of this
+    file - had no width protection at all."""
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
+
+
 @pytest.fixture
 def bracket_home_runner(tmp_path, monkeypatch):
     """A CliRunner whose LOCALM_HOME basename itself contains a bracket.
@@ -57,10 +68,6 @@ def bracket_home_runner(tmp_path, monkeypatch):
     import localm.config as cfg
     home = tmp_path / "home[legacy]" / ".localm"
     home.mkdir(parents=True, exist_ok=True)
-    # rich.console.Console() reads COLUMNS at construction time; without it the
-    # non-tty default of 80 hard-wraps mid-word inside a long basetemp path.
-    from tests.conftest import make_console_wide_and_plain
-    make_console_wide_and_plain(monkeypatch, width="300")
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setattr(cfg, "HOME_DIR", home)
     monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")

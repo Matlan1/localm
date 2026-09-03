@@ -36,6 +36,17 @@ BRACKET_DROP = "[draft]"
 BRACKET_STYLE = "[bold red]"
 
 
+@pytest.fixture(autouse=True)
+def _wide_console(monkeypatch):
+    """Widen the console for every test in this module.
+
+    Only ONE fixture in this file (bracketed_home_runner) ever set this, so
+    every test using the plain `runner` fixture instead - including the
+    whole of TestKeyListMarkupEscaping - had no width protection at all."""
+    from tests.conftest import make_console_wide_and_plain
+    make_console_wide_and_plain(monkeypatch, width="300")
+
+
 @pytest.fixture
 def runner(cli_runner, monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -52,11 +63,6 @@ def bracketed_home_runner(tmp_path, monkeypatch):
     home = tmp_path / f"data{BRACKET_DROP}"
     home.mkdir(parents=True, exist_ok=True)
     import localm.config as cfg
-    # rich.console.Console() reads COLUMNS at construction time; without it a
-    # non-tty width default of 80 hard-wraps mid-word inside the long pytest
-    # basetemp paths these tests assert on.
-    from tests.conftest import make_console_wide_and_plain
-    make_console_wide_and_plain(monkeypatch, width="300")
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setattr(cfg, "HOME_DIR", home)
     monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
