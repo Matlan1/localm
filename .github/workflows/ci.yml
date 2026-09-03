@@ -199,8 +199,11 @@ jobs:
       # tests/conftest.py and the few tests that bind a real socket use an
       # OS-assigned ephemeral port, so this is safe. See AGENTS.md "Test-run
       # cadence".
+      # ubuntu-latest runs 2 workers, not `auto`. On that runner (4 vCPU, 16 GB)
+      # `auto` starts 4, and the runner receives a shutdown signal partway
+      # through the suite, so the job reports `cancelled` with no failure names.
       - name: Tests
-        run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
+        run: pytest -m "not integration" -n ${{ matrix.os == 'ubuntu-latest' && '2' || 'auto' }} --cov=localm --cov-report=term-missing --cov-report=xml --cov-report=json
 
       # Per-module coverage floors for the trust boundary (pathsafe, auth,
       # netpolicy, scopes, tls, bindhost, config, portmux): a missed branch in
