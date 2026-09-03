@@ -25,13 +25,22 @@ test("the model search input keeps its width beside the source select", async ({
     .toBeGreaterThan(source * 2);
 });
 
-test("the add-a-model spec input keeps a usable width", async ({ page }) => {
+test("no visible input in a card row is collapsed by a sibling", async ({ page }) => {
   await page.goto("/?view=models");
-  await expect(page.locator("#pull-spec")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#disc-query")).toBeVisible({ timeout: 30_000 });
 
-  const spec = await widthOf(page, "pull-spec");
-  expect(spec, "the owner/repo:file input must not be squeezed below a usable width")
-    .toBeGreaterThan(180);
+  const collapsed = await page.evaluate(() => {
+    const bad = [];
+    for (const input of document.querySelectorAll(".card .row input[type='text']")) {
+      const box = input.getBoundingClientRect();
+      if (box.width === 0 && box.height === 0) continue;
+      if (box.width < 60) bad.push({ id: input.id, width: Math.round(box.width) });
+    }
+    return bad;
+  });
+
+  expect(collapsed, "an input squeezed under 60px is unusable, whatever else shares the row")
+    .toEqual([]);
 });
 
 test("every select in a card row sizes to its content", async ({ page }) => {
