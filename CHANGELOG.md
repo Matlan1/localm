@@ -24,6 +24,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   machine. Discovery now always confirms an instance on this machine,
   regardless of what address a registration entry names.
 
+### Fixed
+- **Models page: the HuggingFace search box was squeezed to a sliver.** The
+  source dropdown next to it claimed the whole row, leaving the search field a
+  few pixels wide and effectively unusable. It now takes the space the dropdown
+  is not using, and the same fix widens the owner/repo field under "Add a model".
+- **Coder: the Stop and End buttons could not be reached on a narrower window.**
+  The session toolbar ran off the edge of its column, so on a 1280px-wide window
+  everything from "memory" rightwards, including Stop, sat under the sessions
+  list with no way to scroll to it. The toolbar now wraps onto a second row.
+
 ## [0.2.0] - 2026-09-03
 
 ### Added
